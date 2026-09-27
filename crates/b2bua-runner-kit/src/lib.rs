@@ -410,6 +410,12 @@ pub struct RunnerEnv {
     /// `LIMITER_RELEASE_QUEUE_CAP` — most releases the worker's release queue
     /// holds; the oldest is dropped past it (default 100000).
     pub limiter_release_queue_cap: usize,
+    /// `LIMITER_BREAKER_FAILURES` — consecutive failed admits that open the
+    /// worker's limiter breaker (default 3).
+    pub limiter_breaker_failures: u32,
+    /// `LIMITER_BREAKER_PROBE_MS` — how often an open breaker probes the
+    /// limiter's health answer (default 1000).
+    pub limiter_breaker_probe_ms: u64,
     /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
     pub drain_grace_ms: u64,
     /// `B2BUA_DRAIN_MIN_MS` — floor a withdrawn worker's caught-up drain exit
@@ -526,6 +532,8 @@ impl RunnerEnv {
             limiter_lease_sec: limiter.lease_sec,
             limiter_release_timeout_ms: limiter.release_timeout_ms,
             limiter_release_queue_cap: limiter.queue_cap,
+            limiter_breaker_failures: limiter.breaker_failures,
+            limiter_breaker_probe_ms: limiter.breaker_probe_ms,
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
             drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
@@ -702,6 +710,8 @@ impl RunnerEnv {
             limiter_refresh_sec: self.limiter_refresh_sec,
             limiter_lease_sec: self.limiter_lease_sec,
             limiter_release_queue_cap: self.limiter_release_queue_cap,
+            limiter_breaker_failures: self.limiter_breaker_failures,
+            limiter_breaker_probe_ms: self.limiter_breaker_probe_ms,
             setup_timeout_sec: self.setup_timeout_sec,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
@@ -783,9 +793,10 @@ pub struct RunnerBase {
 
 impl RunnerBase {
     /// The default call-limiter client: `HttpCallLimiter` against `LIMITER_URL`,
-    /// or `NoopLimiter` (fail-open) when unset. A URL whose host cannot be
-    /// resolved at boot also falls back to `NoopLimiter` (the worker still
-    /// serves calls, unlimited, until restart) rather than crash-looping.
+    /// or `NoopLimiter` (fail-open) when unset. The URL's `host:port` is
+    /// resolved on the request path: a name that does not resolve yet fails
+    /// each request as a transport error, which the worker's breaker counts,
+    /// and is reached once it resolves.
     pub fn limiter_from_env(&self) -> Arc<dyn CallLimiter> {
         if self.env.limiter_url.is_empty() {
             return Arc::new(NoopLimiter);
@@ -796,36 +807,26 @@ impl RunnerBase {
             .strip_prefix("http://")
             .unwrap_or(&self.env.limiter_url)
             .trim_end_matches('/');
-        match hostport.to_socket_addrs().ok().and_then(|mut a| a.next()) {
-            Some(addr) => {
-                tracing::info!(
-                    service = %self.name,
-                    limiter = %addr,
-                    timeout_ms = self.env.limiter_timeout_ms,
-                    release_timeout_ms = self.env.limiter_release_timeout_ms,
-                    refresh_sec = self.env.limiter_refresh_sec,
-                    "call-limiter client wired"
-                );
-                Arc::new(
-                    HttpCallLimiter::new(
-                        Arc::new(RealHttpNetwork::new()),
-                        addr,
-                        std::time::Duration::from_millis(self.env.limiter_timeout_ms),
-                    )
-                    .with_release_timeout(std::time::Duration::from_millis(
-                        self.env.limiter_release_timeout_ms,
-                    )),
-                )
-            }
-            None => {
-                tracing::warn!(
-                    service = %self.name,
-                    limiter_url = %self.env.limiter_url,
-                    "LIMITER_URL did not resolve; running unlimited (NoopLimiter)"
-                );
-                Arc::new(NoopLimiter)
-            }
-        }
+        tracing::info!(
+            service = %self.name,
+            limiter = %hostport,
+            timeout_ms = self.env.limiter_timeout_ms,
+            release_timeout_ms = self.env.limiter_release_timeout_ms,
+            refresh_sec = self.env.limiter_refresh_sec,
+            breaker_failures = self.env.limiter_breaker_failures,
+            breaker_probe_ms = self.env.limiter_breaker_probe_ms,
+            "call-limiter client wired"
+        );
+        Arc::new(
+            HttpCallLimiter::named(
+                Arc::new(RealHttpNetwork::new()),
+                hostport,
+                std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+            )
+            .with_release_timeout(std::time::Duration::from_millis(
+                self.env.limiter_release_timeout_ms,
+            )),
+        )
     }
 
     /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),

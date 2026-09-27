@@ -53,21 +53,21 @@ and a lost release could not be retried.
    may have landed; by decision 3 the release frees exactly what the server
    holds for the call and nothing otherwise, and fences the key, so an admit
    landing after it re-creates nothing. An admit that sent no request (no
-   limiter configured, a local guard refusing to send) owes nothing by
-   itself. Refresh stays reserved to a set the server confirmed: a failed
-   **initial** admit leaves the call uncounted (no refresh), so a set its
-   late admit created lives until the call's release or its lease, whichever
-   comes first. A counted call whose **reroute** admit fails technically
-   stays counted: its refresh extends whichever set the server holds for the
-   key (the old one, or the new one when the admit landed) or re-registers
-   the ids the server last confirmed, and its release frees it; until a
-   refresh or a later fold states otherwise, `ids` (the decision snapshot,
-   the CDR) name the set the server last confirmed, which a landed admit may
-   have replaced. When the lost admit landed and dropped the set (an empty
-   replacement, a cap refusal), the refresh answers `dropped` and the call
-   goes uncounted, still owing its release: a set its own admit dropped is
-   never re-registered. A refresh refused by a release fence leaves the call
-   counted (see Consequences).
+   limiter configured, a local guard refusing to send, an open breaker,
+   decision 10) owes nothing by itself. Refresh stays reserved to a set the
+   server confirmed: a failed **initial** admit leaves the call uncounted (no
+   refresh), so a set its late admit created lives until the call's release
+   or its lease, whichever comes first. A counted call whose **reroute**
+   admit fails technically stays counted: its refresh extends whichever set
+   the server holds for the key (the old one, or the new one when the admit
+   landed) or re-registers the ids the server last confirmed, and its release
+   frees it; until a refresh or a later fold states otherwise, `ids` (the
+   decision snapshot, the CDR) name the set the server last confirmed, which
+   a landed admit may have replaced. When the lost admit landed and dropped
+   the set (an empty replacement, a cap refusal), the refresh answers
+   `dropped` and the call goes uncounted, still owing its release: a set its
+   own admit dropped is never re-registered. A refresh refused by a release
+   fence leaves the call counted (see Consequences).
 7. **Only a counted Active call refreshes**, and it always has its refresh
    armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
    on every turn of the call, so a refresh that never fired heals on the
@@ -108,6 +108,19 @@ and a lost release could not be retried.
    drives the queue through `hold` and `resume`: nothing is sent while it is
    held, and a resume sends every waiting key at once. The worker's lease is
    the limiter's, at most one day, and its refresh period is below it.
+10. **No call pays the timeout of a limiter that keeps failing.** Each worker
+    runs a circuit breaker in front of its limiter. Closed, it counts
+    consecutive admits that got no usable answer (a timeout, a transport
+    error, a name that does not resolve, a non-200, a bad body); any answered
+    admit, a refusal included, ends the run, and only admits count. A run of
+    3 opens it. Open, an admit sends nothing and answers at once: the call
+    runs uncounted for its life and owes no release by that admit; a refresh
+    sends nothing, so a counted call stays counted and refreshes one period
+    later (decision 4 re-registers a set that lapsed meanwhile); the release
+    queue is held. A background probe asks the limiter's health answer, which
+    reads its store, every second under the admit budget; the first answer
+    closes the breaker and resumes the queue. No call is a probe. A limiter
+    client without a health answer runs without a breaker.
 
 ## Lease, refresh and the replica TTL
 
@@ -144,8 +157,19 @@ cells that prove re-registration run the deployed relation.
   (`b2bua_limiter_refresh_dropped_total`).
 - Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
   same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
-  the lease by more than one period; `LIMITER_RELEASE_TIMEOUT_MS` and
-  `LIMITER_RELEASE_QUEUE_CAP` on the workers.
+  the lease by more than one period; `LIMITER_RELEASE_TIMEOUT_MS`,
+  `LIMITER_RELEASE_QUEUE_CAP`, `LIMITER_BREAKER_FAILURES` (3) and
+  `LIMITER_BREAKER_PROBE_MS` (1000) on the workers.
+- The breaker trades counts for latency: the calls a worker starts while
+  its breaker is open stay uncounted for their life, so after the limiter
+  comes back its counts read low by those calls until they end, and a cap
+  can be passed by them. The worker counts them as they start
+  (`b2bua_limiter_breaker_admits_not_sent_total`); the breaker's state is
+  `b2bua_limiter_breaker_open`, its transitions
+  `b2bua_limiter_breaker_transitions_total{to=open|closed}`, its skipped
+  refreshes `b2bua_limiter_breaker_refreshes_not_sent_total` and its failed
+  probes `b2bua_limiter_breaker_probe_failures_total`. The limiter's health
+  answer is `GET /v1/health`; `/healthz` answers the process alone.
 - A refresh carries the call's ids: one request per counted call per period.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the

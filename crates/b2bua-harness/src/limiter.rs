@@ -22,7 +22,9 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshOutcome, ReleaseAnswer,
+};
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -83,7 +85,9 @@ pub struct LimiterCount {
     /// answer ([`AdmitOutcome::Unavailable`]) and an admit that sent no
     /// request ([`AdmitOutcome::NotSent`], e.g. no limiter configured). The
     /// call went on as it was; its release frees whatever a request that
-    /// landed left on the store.
+    /// landed left on the store. An admit the worker's open circuit breaker
+    /// answered never reaches this seam: the worker counts it
+    /// (`limiter_breaker_admits_not_sent_total`).
     pub failed_open: i64,
     /// The registered store's live count summed over every id, if the SUT
     /// has a store (the default limiter's, or one registered by the test).
@@ -203,6 +207,10 @@ impl CallLimiter for CountingLimiter {
 
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
         self.inner.refresh(key, ids).await
+    }
+
+    fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
+        self.inner.health()
     }
 }
 

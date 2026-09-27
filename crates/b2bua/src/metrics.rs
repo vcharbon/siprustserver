@@ -237,6 +237,15 @@ struct Inner {
     limiter_release_dropped_lease_expired: AtomicU64,
     limiter_release_dropped_cap: AtomicU64,
     limiter_release_drainer_restarts: AtomicU64,
+    // The limiter circuit breaker (`limiter_breaker`): 1 while open, its
+    // transitions, the admits and refreshes it answered without a request,
+    // and the probes the limiter did not answer.
+    limiter_breaker_open: AtomicU64,
+    limiter_breaker_opened: AtomicU64,
+    limiter_breaker_closed: AtomicU64,
+    limiter_breaker_admits_not_sent: AtomicU64,
+    limiter_breaker_refreshes_not_sent: AtomicU64,
+    limiter_breaker_probe_failures: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -827,6 +836,31 @@ impl B2buaMetrics {
         limiter_release_drainer_restarts_total,
         limiter_release_drainer_restarts
     );
+    /// Set the limiter breaker's state (gauge): open or closed.
+    pub fn set_limiter_breaker_open(&self, open: bool) {
+        self.inner.limiter_breaker_open.store(open as u64, Ordering::Relaxed);
+    }
+    /// Whether the limiter breaker is open.
+    pub fn limiter_breaker_open(&self) -> bool {
+        self.inner.limiter_breaker_open.load(Ordering::Relaxed) == 1
+    }
+    counter!(bump_limiter_breaker_opened, limiter_breaker_opened_total, limiter_breaker_opened);
+    counter!(bump_limiter_breaker_closed, limiter_breaker_closed_total, limiter_breaker_closed);
+    counter!(
+        bump_limiter_breaker_admits_not_sent,
+        limiter_breaker_admits_not_sent_total,
+        limiter_breaker_admits_not_sent
+    );
+    counter!(
+        bump_limiter_breaker_refreshes_not_sent,
+        limiter_breaker_refreshes_not_sent_total,
+        limiter_breaker_refreshes_not_sent
+    );
+    counter!(
+        bump_limiter_breaker_probe_failures,
+        limiter_breaker_probe_failures_total,
+        limiter_breaker_probe_failures
+    );
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -1147,6 +1181,13 @@ impl B2buaMetrics {
         counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
         counter("b2bua_limiter_release_drainer_restarts_total", "release-queue drainers that panicked and were restarted with the queue intact — expected 0", self.limiter_release_drainer_restarts_total());
+        counter("b2bua_limiter_breaker_admits_not_sent_total", "admits the open limiter breaker answered without a request: the call runs uncounted and owes no release (ADR-0038)", self.limiter_breaker_admits_not_sent_total());
+        counter("b2bua_limiter_breaker_refreshes_not_sent_total", "refreshes of counted calls the open limiter breaker skipped: the call stays counted and refreshes on its next period (ADR-0038)", self.limiter_breaker_refreshes_not_sent_total());
+        counter(
+            "b2bua_limiter_breaker_probe_failures_total",
+            "health probes of an open limiter breaker the limiter did not answer",
+            self.limiter_breaker_probe_failures_total(),
+        );
         counter("b2bua_limiter_release_retries_total", "queued releases put back to wait after a failed send (unreachable, slow or erroring limiter), one per key per failed send", self.limiter_release_retries_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
@@ -1242,6 +1283,16 @@ impl B2buaMetrics {
         s.push_str(&format!(
             "b2bua_limiter_release_dropped_total{{reason=\"cap\"}} {}\n",
             self.limiter_release_dropped_cap_total()
+        ));
+
+        s.push_str("# HELP b2bua_limiter_breaker_transitions_total limiter circuit breaker transitions (to=open: consecutive admits with no usable answer reached the threshold; to=closed: a health probe was answered)\n# TYPE b2bua_limiter_breaker_transitions_total counter\n");
+        s.push_str(&format!(
+            "b2bua_limiter_breaker_transitions_total{{to=\"open\"}} {}\n",
+            self.limiter_breaker_opened_total()
+        ));
+        s.push_str(&format!(
+            "b2bua_limiter_breaker_transitions_total{{to=\"closed\"}} {}\n",
+            self.limiter_breaker_closed_total()
         ));
 
         s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
@@ -1398,6 +1449,12 @@ impl B2buaMetrics {
             "b2bua_limiter_release_queue_depth",
             "limiter releases waiting in this worker's release queue, in flight included (a queue that only grows means the limiter is not answering)",
             self.limiter_release_queue_depth(),
+        );
+        g(
+            &mut s,
+            "b2bua_limiter_breaker_open",
+            "1 while this worker's limiter circuit breaker is open: admits send no request and the calls run uncounted, releases wait",
+            self.limiter_breaker_open() as u64,
         );
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());

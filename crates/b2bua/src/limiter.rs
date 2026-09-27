@@ -13,11 +13,14 @@
 //! call carries when the server no longer holds it. The **call site owns the
 //! fail-open policy** ([`state_after_admit`]): a failed admit leaves the call
 //! as it was, a sent one owes the call's release, and only a confirmed set
-//! refreshes.
+//! refreshes. [`CallLimiter::health`] is the limiter's health answer, which
+//! the worker's circuit breaker ([`crate::limiter_breaker`]) probes.
 //!
 //! The HTTP client implementation lives in [`crate::limiter_http`]; this module
 //! is the trait + a no-op (used when `LIMITER_URL` is unset and in tests that
 //! don't exercise limits).
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use call::CallLimiterState;
@@ -49,8 +52,9 @@ pub enum AdmitOutcome {
     /// errored, a bad body): it may have landed. The caller decides what to
     /// do (b2bua: fail open).
     Unavailable,
-    /// No request left (no limiter configured, or a local guard refused to
-    /// send one): nothing can have landed. The caller fails open.
+    /// No request left (no limiter configured, or a local guard such as an
+    /// open circuit breaker refused to send one): nothing can have landed.
+    /// The caller fails open.
     NotSent,
 }
 
@@ -124,6 +128,19 @@ pub trait CallLimiter: Send + Sync {
     /// Extend the call's lease; `ids` is the set the server re-registers
     /// when it no longer holds one for the call.
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome;
+    /// The limiter's health answer, which the worker's circuit breaker
+    /// probes. A limiter without one runs without a breaker.
+    fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
+        None
+    }
+}
+
+/// A limiter's health answer.
+#[async_trait]
+pub trait LimiterHealth: Send + Sync {
+    /// Whether the limiter answered a request that reads its store, within
+    /// the admit budget: an admit sent now can be served.
+    async fn serving(&self) -> bool;
 }
 
 /// No limiter: every admit sends nothing ([`AdmitOutcome::NotSent`]), so no

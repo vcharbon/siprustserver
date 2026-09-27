@@ -113,6 +113,12 @@ pub struct B2buaConfig {
     /// oldest entry is dropped (its lease frees the call). Default 100 000:
     /// one lease of calls ending at 800/s.
     pub limiter_release_queue_cap: usize,
+    /// Consecutive admits with no usable answer that open the worker's
+    /// limiter circuit breaker. Default 3.
+    pub limiter_breaker_failures: u32,
+    /// How often an open limiter breaker probes the limiter's health answer,
+    /// milliseconds; the first answer closes it. Default 1000.
+    pub limiter_breaker_probe_ms: u64,
     /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
     /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
     /// many keepalive timers are past-due. Firing them all at once floods a
@@ -448,6 +454,8 @@ impl Default for B2buaConfig {
             limiter_refresh_sec: 40,
             limiter_lease_sec: 120,
             limiter_release_queue_cap: 100_000,
+            limiter_breaker_failures: 3,
+            limiter_breaker_probe_ms: 1_000,
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
             reaper_enabled: true,
@@ -553,6 +561,16 @@ impl B2buaConfig {
         if self.limiter_release_queue_cap == 0 {
             return Err("limiter_release_queue_cap=0: the release queue needs room for \
                         one release"
+                .to_string());
+        }
+        if self.limiter_breaker_failures == 0 {
+            return Err("limiter_breaker_failures=0: the limiter breaker opens after at \
+                        least one failed admit"
+                .to_string());
+        }
+        if self.limiter_breaker_probe_ms == 0 {
+            return Err("limiter_breaker_probe_ms=0: an open limiter breaker needs a \
+                        probe period"
                 .to_string());
         }
         if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
@@ -793,6 +811,10 @@ mod tests {
         assert!(e.contains("limiter_refresh_sec=120"), "{e}");
         let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
         assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
+        let e = with(|c| c.limiter_breaker_failures = 0).expect_err("zero failures");
+        assert!(e.contains("limiter_breaker_failures=0"), "{e}");
+        let e = with(|c| c.limiter_breaker_probe_ms = 0).expect_err("zero probe period");
+        assert!(e.contains("limiter_breaker_probe_ms=0"), "{e}");
         assert!(with(|c| c.limiter_lease_sec = B2buaConfig::MAX_LIMITER_LEASE_SEC).is_ok());
     }
 

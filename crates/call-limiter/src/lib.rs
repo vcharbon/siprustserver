@@ -9,7 +9,7 @@
 //!   store no longer holds; a lapsed lease drops the set.
 //! - The [`wire`] DTOs of the HTTP API: every request names its call.
 //! - [`LimiterServer`] — an [`http_net::HttpService`] routing `/v1/*` +
-//!   `/metrics` + `/healthz` onto the core.
+//!   `/metrics` + `/healthz` onto the core (`/v1/health` reads the store).
 //! - [`LimiterMetrics`] — global counters + gauges (no per-id labels).
 //!
 //! The HTTP client (and the fail-open policy) live in `b2bua`.

@@ -176,13 +176,15 @@ impl Scene {
         HOLDS.iter().map(|(id, _)| self.store.held(id)).collect()
     }
 
-    /// Advance `total` in 100 ms steps.
+    /// Advance `total` in 10 ms steps, so a limiter request in flight
+    /// (1 ms each way on the fabric) is answered well inside its budget.
     async fn run_for(&self, total: Duration) {
         let mut left = total;
-        let step = Duration::from_millis(100);
+        let step = Duration::from_millis(10);
         while !left.is_zero() {
             let d = left.min(step);
-            self.h.advance(d).await;
+            tokio::time::advance(d).await;
+            sip_clock::testkit::settle().await;
             left -= d;
         }
     }
@@ -222,8 +224,12 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
         dialogs.push(dialog);
     }
 
+    let metrics = s.b2bua.metrics();
+    assert!(metrics.limiter_breaker_open(), "three failed admits open the breaker");
+    assert_eq!(metrics.limiter_breaker_opened_total(), 1);
     let admits = s.sent_on("/v1/admit");
     let (open_call, took) = s.establish().await;
+    assert_eq!(metrics.limiter_breaker_admits_not_sent_total(), 1, "counted as not sent");
     assert_eq!(s.sent_on("/v1/admit"), admits, "the breaker is open: no admit request");
     let transit = Duration::from_millis(2 * SIMULATED_TRANSIT_DELAY_MS);
     assert!(took < transit + ADMIT_BUDGET / 2, "no admit timeout paid ({took:?})");
@@ -241,6 +247,8 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // closes, the waiting release leaves and the next call is counted.
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     s.run_for(PROBE + Duration::from_millis(200)).await;
+    assert!(!metrics.limiter_breaker_open(), "the probe closed the breaker");
+    assert_eq!(metrics.limiter_breaker_closed_total(), 1);
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "the release left on close");
     assert_eq!(s.holds(), [0, 0, 0], "the call counted before the outage drained");
     let (next, _) = s.establish().await;
@@ -281,6 +289,17 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
     s.run_for(PROBE + Duration::from_millis(200)).await;
     dialogs.push(s.establish().await.0);
     assert_eq!(s.sent_on("/v1/admit"), 4, "the breaker closed: the next call admits");
+    let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.limiter_breaker_admits_not_sent_total(), 2);
+    assert!(metrics.limiter_breaker_probe_failures_total() >= 4, "the probe failed while cut");
+    assert_eq!(
+        (metrics.limiter_breaker_opened_total(), metrics.limiter_breaker_closed_total()),
+        (1, 1)
+    );
+    let text = metrics.prometheus_text();
+    assert!(text.contains("b2bua_limiter_breaker_open 0"), "{text}");
+    assert!(text.contains("b2bua_limiter_breaker_transitions_total{to=\"open\"} 1"), "{text}");
+    assert!(text.contains("b2bua_limiter_breaker_admits_not_sent_total 2"), "{text}");
     assert_eq!(s.holds(), [1, 1, 1], "the next call is counted");
 
     for dialog in &mut dialogs {

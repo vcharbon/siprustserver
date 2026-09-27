@@ -1,7 +1,7 @@
 //! `call-limiter-runner` — the deployed limiter process.
 //!
 //! Binds the [`LimiterServer`] on the real (hyper) transport, exposing
-//! `/v1/{admit,release,refresh}` + `/metrics` + `/healthz` on one port, and
+//! `/v1/{admit,release,refresh,health}` + `/metrics` + `/healthz` on one port, and
 //! runs a periodic janitor so even a fully idle server drops the sets whose
 //! lease lapsed (the sweep-on-access path only fires on traffic).
 //!

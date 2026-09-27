@@ -2,8 +2,10 @@
 //! [`CallStore`], bumping [`LimiterMetrics`] at the edges.
 //!
 //! Routes: `POST /v1/admit`, `POST /v1/release`, `POST /v1/refresh`,
-//! `GET /metrics`, `GET /healthz`. A malformed body is `400`; an unknown route
-//! is `404`. The handler is pure compute (no real I/O), so the simulated fabric
+//! `GET /v1/health`, `GET /metrics`, `GET /healthz`. `/healthz` answers the
+//! process; `/v1/health` answers only once the store has, so a client's
+//! breaker probing it learns that a request can be served. A malformed body
+//! is `400`; an unknown route is `404`. The handler is pure compute (no real I/O), so the simulated fabric
 //! drives it deterministically under a paused clock.
 
 use std::sync::Arc;
@@ -14,7 +16,8 @@ use http_net::{HttpRequest, HttpResponse, HttpService};
 use crate::metrics::LimiterMetrics;
 use crate::store::{AdmitResult, CallStore, RefreshResult};
 use crate::wire::{
-    AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse, ReleaseRequest,
+    AdmitRequest, AdmitResponse, HealthResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
+    ReleaseRequest,
 };
 
 /// The limiter HTTP service: a call store + its metrics.
@@ -100,6 +103,7 @@ impl HttpService for LimiterServer {
                 self.metrics.on_refresh();
                 json_ok(&RefreshResponse { outcome })
             }
+            ("GET", "/v1/health") => json_ok(&HealthResponse { calls: self.store.calls() as u64 }),
             ("GET", "/metrics") => {
                 HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())
             }

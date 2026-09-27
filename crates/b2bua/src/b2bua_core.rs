@@ -379,6 +379,18 @@ impl B2buaCore {
             metrics.clone(),
         );
         tasks.push(tokio::spawn(limiter_releases.clone().run()));
+        // The worker's circuit breaker sits in front of every admit and
+        // refresh and holds the release queue while open; the queue sends
+        // through the limiter itself.
+        let (limiter, breaker) = crate::limiter_breaker::BreakerLimiter::guard(
+            limiter,
+            crate::limiter_breaker::BreakerConfig::from_config(&config),
+            limiter_releases.clone(),
+            metrics.clone(),
+        );
+        if let Some(breaker) = breaker {
+            tasks.push(tokio::spawn(breaker.run()));
+        }
         let ctx = Arc::new(RouterCtx {
             config,
             state,
