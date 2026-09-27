@@ -14,7 +14,7 @@
 //! Unset or blank takes the default; a value that is not a positive integer
 //! refuses boot. A `LIMITER_URL` that is not `host:port` over plain HTTP (an
 //! other scheme, no port, a path) refuses boot; a well-formed name that does
-//! not resolve yet is the breaker's to wait for (ADR-0038 decision 10).
+//! not resolve at boot starts the breaker open (ADR-0038 decision 10).
 
 use crate::stated;
 

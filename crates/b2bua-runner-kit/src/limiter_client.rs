@@ -42,6 +42,13 @@ pub(crate) async fn limiter_client(
         settings.timeout,
     )
     .with_release_timeout(settings.release_timeout);
+    if !client.lookup(settings.boot_lookup).await {
+        tracing::warn!(
+            limiter = %hostport,
+            "the call limiter's name does not resolve at boot: the breaker starts open and \
+             its probe looks the name up every period"
+        );
+    }
     Arc::new(client)
 }
 
@@ -70,6 +77,19 @@ mod tests {
 
     const PROBE: Duration = Duration::from_secs(1);
     const NAME: &str = "limiter:8080";
+    /// Past the probe's tick, the time its request takes on the simulated
+    /// network (1 ms per hop), in 1 ms steps.
+    const EPSILON_MS: u32 = 10;
+
+    /// Let `d` pass, then [`EPSILON_MS`] for the requests it started.
+    async fn elapse(d: Duration) {
+        tokio::time::advance(d).await;
+        settle().await;
+        for _ in 0..EPSILON_MS {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            settle().await;
+        }
+    }
 
     /// The names the test has made resolvable; counts every lookup.
     #[derive(Default)]
@@ -161,6 +181,7 @@ mod tests {
                 metrics.clone(),
             );
             tokio::spawn(breaker.expect("the HTTP client is guarded").run());
+            settle().await;
             Worker { limiter, metrics }
         }
     }
@@ -214,14 +235,12 @@ mod tests {
         assert_eq!(lab.sent(), 0, "no request");
         assert_eq!(w.metrics.limiter_breaker_admits_not_sent_total(), 1, "counted");
 
-        tokio::time::advance(PROBE + PROBE / 2).await;
-        settle().await;
+        elapse(PROBE + PROBE / 2).await;
         assert!(w.open(), "the probe at one period found no address");
         assert_eq!(w.admit("c2#k").await, AdmitOutcome::NotSent);
 
         lab.names.point(NAME, lab.a.0);
-        tokio::time::advance(PROBE).await;
-        settle().await;
+        elapse(PROBE).await;
         assert!(!w.open(), "closed within one probe period of the name resolving");
         assert_eq!(w.admit("c3#k").await, AdmitOutcome::Admitted);
         assert_eq!(held(&lab.a.1), (1, 1), "the call is counted");
@@ -257,9 +276,9 @@ mod tests {
             assert_eq!(w.admit(&format!("c{n}#k")).await, AdmitOutcome::Unavailable);
         }
         assert!(w.open());
-        lab.names.point(NAME, lab.b.0);
-        tokio::time::advance(PROBE).await;
         settle().await;
+        lab.names.point(NAME, lab.b.0);
+        elapse(PROBE).await;
         assert!(!w.open(), "the probe looks the name up again and reaches its new address");
         assert_eq!(w.admit("c5#k").await, AdmitOutcome::Admitted);
         assert_eq!(held(&lab.b.1), (1, 1), "counted on the new address");

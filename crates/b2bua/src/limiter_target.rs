@@ -6,11 +6,12 @@
 //! whose name resolves late is reached once it does. A name that parses as a
 //! socket address (`10.0.0.1:8080`, `[::1]:8080`) is one, never looked up.
 //! One lookup is in flight at a time, and every request arriving meanwhile
-//! waits for it within its own budget. The first address a name resolves to
-//! is kept for the life of the client.
+//! waits for it within its own budget. The address a name resolves to is
+//! kept until [`LimiterTarget::forget`]; the next request then looks the name
+//! up again, and a lookup started before the forget is not kept.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -48,39 +49,74 @@ type Answer = Option<Option<SocketAddr>>;
 struct Named {
     name: String,
     resolver: Arc<dyn NameResolver>,
-    resolved: OnceLock<SocketAddr>,
-    /// The lookup in flight, if any.
-    lookup: Mutex<Option<watch::Receiver<Answer>>>,
+    state: Mutex<NameState>,
+}
+
+#[derive(Default)]
+struct NameState {
+    /// The address kept.
+    addr: Option<SocketAddr>,
+    /// The lookup in flight, if any, and its generation.
+    lookup: Option<(u64, watch::Receiver<Answer>)>,
+    /// Bumped by every forget: a lookup of an older generation lands for
+    /// its waiters only.
+    generation: u64,
 }
 
 impl Named {
-    /// The lookup in flight, started when none is.
-    fn lookup(self: &Arc<Self>) -> watch::Receiver<Answer> {
-        let mut slot = self.lookup.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(waiting) = slot.as_ref() {
-            return waiting.clone();
+    /// The state. Every step leaves it whole, so a poisoned lock is taken
+    /// as it is.
+    fn lock(&self) -> MutexGuard<'_, NameState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The address kept, or the lookup in flight, started when none is.
+    fn address_or_lookup(self: &Arc<Self>) -> Result<SocketAddr, watch::Receiver<Answer>> {
+        let mut state = self.lock();
+        if let Some(addr) = state.addr {
+            return Ok(addr);
         }
+        if let Some((_, waiting)) = state.lookup.as_ref() {
+            return Err(waiting.clone());
+        }
+        let generation = state.generation;
         let (tx, rx) = watch::channel(None);
-        *slot = Some(rx.clone());
-        let done = LookupDone(self.clone());
+        state.lookup = Some((generation, rx.clone()));
+        drop(state);
+        let done = LookupDone { named: self.clone(), generation };
         tokio::spawn(async move {
-            let named = done.0.clone();
-            let found = named.resolver.resolve(&named.name).await;
-            let found = found.map(|addr| *named.resolved.get_or_init(|| addr));
+            let found = done.named.resolver.resolve(&done.named.name).await;
+            done.land(found);
             drop(done);
             let _ = tx.send(Some(found));
         });
-        rx
+        Err(rx)
     }
 }
 
-/// Frees the lookup slot when the lookup ends, a panicking one included, so
+/// The lookup of one generation. Landing keeps its address when no forget
+/// came since it started; ending, a panicking one included, frees the slot so
 /// the next request starts another.
-struct LookupDone(Arc<Named>);
+struct LookupDone {
+    named: Arc<Named>,
+    generation: u64,
+}
+
+impl LookupDone {
+    fn land(&self, found: Option<SocketAddr>) {
+        let mut state = self.named.lock();
+        if state.generation == self.generation && state.addr.is_none() {
+            state.addr = found;
+        }
+    }
+}
 
 impl Drop for LookupDone {
     fn drop(&mut self) {
-        *self.0.lookup.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut state = self.named.lock();
+        if state.lookup.as_ref().is_some_and(|(g, _)| *g == self.generation) {
+            state.lookup = None;
+        }
     }
 }
 
@@ -88,11 +124,6 @@ impl LimiterTarget {
     /// A target at `addr`.
     pub fn addr(addr: SocketAddr) -> Self {
         Self { kind: Kind::Addr(addr) }
-    }
-
-    /// A target named `host:port`, resolved by the host's resolver.
-    pub fn name(name: impl Into<String>) -> Self {
-        Self::name_with(name, Arc::new(SystemResolver))
     }
 
     /// A target named `host:port`, resolved by `resolver` on the first
@@ -107,8 +138,7 @@ impl LimiterTarget {
             kind: Kind::Name(Arc::new(Named {
                 name,
                 resolver,
-                resolved: OnceLock::new(),
-                lookup: Mutex::new(None),
+                state: Mutex::new(NameState::default()),
             })),
         }
     }
@@ -121,24 +151,33 @@ impl LimiterTarget {
             Kind::Addr(addr) => return Some(*addr),
             Kind::Name(named) => named,
         };
-        if let Some(addr) = named.resolved.get() {
-            return Some(*addr);
-        }
-        let mut lookup = named.lookup();
+        let mut lookup = match named.address_or_lookup() {
+            Ok(addr) => return Some(addr),
+            Err(lookup) => lookup,
+        };
         let answer = lookup.wait_for(Option::is_some).await.ok()?;
         answer.flatten()
     }
 
-    /// The address known now, without a lookup.
+    /// The address kept now, without a lookup.
     pub fn address(&self) -> Option<SocketAddr> {
         match &self.kind {
             Kind::Addr(addr) => Some(*addr),
-            Kind::Name(named) => named.resolved.get().copied(),
+            Kind::Name(named) => named.lock().addr,
         }
     }
 
-    /// Forget the address a name resolved to (stub).
-    pub fn forget(&self) {}
+    /// Forget the address a name resolved to and leave any lookup in flight
+    /// to its waiters: the next request looks the name up again. A socket
+    /// address is kept.
+    pub fn forget(&self) {
+        if let Kind::Name(named) = &self.kind {
+            let mut state = named.lock();
+            state.addr = None;
+            state.lookup = None;
+            state.generation = state.generation.wrapping_add(1);
+        }
+    }
 }
 
 impl std::fmt::Display for LimiterTarget {

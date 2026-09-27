@@ -131,8 +131,14 @@ and a lost release could not be retried.
     health answer runs without a breaker, and a guarded limiter is never
     guarded twice. The limiter's `host:port` is a socket address used as it
     is, or a name resolved on the request path: one lookup at a time, every
-    request meanwhile waiting for it within its own budget, the first address
-    found kept for the life of the client.
+    request meanwhile waiting for it within its own budget. The runner looks
+    the name up once at boot, waiting at most one probe period. A limiter
+    whose address is not known starts its breaker open: admits fail open at
+    once, counted, no call pays a lookup or a timeout, and the probe looks the
+    name up every period. The address found is kept until the breaker opens
+    or a probe fails; both forget it, so the probe reaches a limiter whose
+    name now leads elsewhere. No `LIMITER_URL` runs without a limiter; a
+    configured one is never replaced by none.
 
 ## Lease, refresh and the replica TTL
 
@@ -191,7 +197,7 @@ cells that prove re-registration run the deployed relation.
   limiter's health answer is `GET /v1/health`; `/healthz` answers the process
   alone. A malformed `LIMITER_URL` (another scheme, no port, a path, an
   unbracketed IPv6 address) refuses boot; a well-formed name that does not
-  resolve yet is the breaker's to wait for.
+  resolve at boot starts the breaker open.
 - A refresh carries the call's ids: one request per counted call per period.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the

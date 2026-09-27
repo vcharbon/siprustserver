@@ -15,6 +15,11 @@
 //! worker's release queue is held. Answers of admits sent before the breaker
 //! opened change nothing.
 //!
+//! A limiter whose address is not known ([`LimiterHealth::has_address`]: its
+//! name has not resolved) is guarded by a breaker that starts open. Opening
+//! and every failed probe forget the limiter's address, so the probe looks
+//! its name up again and reaches a limiter that moved.
+//!
 //! The probe ([`BreakerLimiter::run`]) asks the limiter's health answer every
 //! [`BreakerConfig::probe`] while open; the first answer closes the breaker,
 //! resumes the queue (every waiting key leaves at once) and sends the held
@@ -88,7 +93,8 @@ pub struct BreakerLimiter {
 impl BreakerLimiter {
     /// `inner` behind a breaker that holds and resumes `releases` and holds
     /// refreshes under `backlog`, and the breaker to [`run`](Self::run);
-    /// `inner` itself and no breaker when it has no health answer.
+    /// `inner` itself and no breaker when it has no health answer. The
+    /// breaker starts open when `inner`'s address is not known.
     pub fn guard(
         inner: Arc<dyn CallLimiter>,
         config: BreakerConfig,
@@ -99,7 +105,6 @@ impl BreakerLimiter {
         let Some(health) = inner.health() else {
             return (inner, None);
         };
-        metrics.set_limiter_breaker_open(false);
         let refreshes = Arc::new(RefreshBacklog::new(backlog, metrics.clone()));
         let forget = refreshes.clone();
         let hooked = releases.on_push(move |key| forget.forget(key));
@@ -114,6 +119,10 @@ impl BreakerLimiter {
             state: Mutex::new(State::default()),
             opened: Notify::new(),
         });
+        breaker.metrics.set_limiter_breaker_open(false);
+        if !breaker.health.has_address() {
+            breaker.open(breaker.lock(), "the limiter's address is not known");
+        }
         (breaker.clone(), Some(breaker))
     }
 
@@ -141,24 +150,32 @@ impl BreakerLimiter {
                 if state.failures < self.config.failures {
                     return;
                 }
-                state.open = true;
-                state.failures = 0;
-                self.releases.hold();
-                self.metrics.set_limiter_breaker_open(true);
-                self.metrics.bump_limiter_breaker_opened();
-                drop(state);
-                tracing::warn!(
-                    failures = self.config.failures,
-                    "call limiter breaker open: admits send no request until the limiter's \
-                     health answer comes back"
-                );
-                self.opened.notify_one();
+                self.open(state, "consecutive admits got no usable answer");
             }
             AdmitOutcome::NotSent => {}
             AdmitOutcome::Admitted | AdmitOutcome::Rejected { .. } | AdmitOutcome::Released => {
                 state.failures = 0;
             }
         }
+    }
+
+    /// Open the breaker for `why`: hold the queue, forget the limiter's
+    /// address and wake the probe.
+    fn open(&self, mut state: MutexGuard<'_, State>, why: &'static str) {
+        state.open = true;
+        state.failures = 0;
+        self.releases.hold();
+        self.metrics.set_limiter_breaker_open(true);
+        self.metrics.bump_limiter_breaker_opened();
+        drop(state);
+        self.health.forget_address();
+        tracing::warn!(
+            why,
+            failures = self.config.failures,
+            "call limiter breaker open: admits send no request until the limiter's health \
+             answer comes back"
+        );
+        self.opened.notify_one();
     }
 
     /// Close the breaker and send what the queue held.
@@ -210,6 +227,7 @@ impl BreakerLimiter {
                     self.flush_refreshes().await;
                 } else {
                     self.metrics.bump_limiter_breaker_probe_failures();
+                    self.health.forget_address();
                 }
             }
         }

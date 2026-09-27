@@ -9,7 +9,8 @@
 //! fail-open budget; a release runs off every call, in the worker's release
 //! queue, under its own longer budget. The health answer
 //! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
-//! store, under the admit budget.
+//! store, under the admit budget; it has an address once the target's name
+//! resolved, and forgetting it makes the next request look the name up again.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -86,16 +87,6 @@ impl HttpCallLimiter {
     /// as the release budget.
     pub fn new(transport: Arc<dyn HttpTransport>, addr: SocketAddr, timeout: Duration) -> Self {
         Self::with_target(transport, LimiterTarget::addr(addr), timeout)
-    }
-
-    /// [`new`](Self::new) for a limiter named `host:port`, resolved on the
-    /// request path by the host's resolver ([`LimiterTarget::name`]).
-    pub fn named(
-        transport: Arc<dyn HttpTransport>,
-        name: impl Into<String>,
-        timeout: Duration,
-    ) -> Self {
-        Self::with_target(transport, LimiterTarget::name(name), timeout)
     }
 
     /// [`new`](Self::new) for any [`LimiterTarget`].
@@ -188,6 +179,14 @@ impl LimiterHealth for HttpHealth {
             tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
         }
         serving
+    }
+
+    fn has_address(&self) -> bool {
+        self.endpoint.target.address().is_some()
+    }
+
+    fn forget_address(&self) {
+        self.endpoint.target.forget();
     }
 }
 
@@ -290,27 +289,6 @@ mod tests {
         assert!(health.serving().await);
     }
 
-    /// `client` behind a worker's breaker (3 failures, 1 s probe), its probe
-    /// running.
-    fn guarded(client: HttpCallLimiter) -> (Arc<dyn CallLimiter>, crate::metrics::B2buaMetrics) {
-        use crate::limiter_breaker::{BreakerConfig, BreakerLimiter};
-        use crate::limiter_refresh_backlog::RefreshBacklogConfig;
-        use crate::limiter_release::{ReleaseQueue, ReleaseQueueConfig};
-        let metrics = crate::metrics::B2buaMetrics::new();
-        let client: Arc<dyn CallLimiter> = Arc::new(client);
-        let bounds = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
-        let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
-        let (limiter, breaker) = BreakerLimiter::guard(
-            client,
-            BreakerConfig { failures: 3, probe: Duration::from_secs(1) },
-            releases,
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
-            metrics.clone(),
-        );
-        tokio::spawn(breaker.expect("guarded").run());
-        (limiter, metrics)
-    }
-
     /// Five admits of distinct calls sent at once through `limiter`.
     async fn five_at_once(limiter: &Arc<dyn CallLimiter>) -> Vec<AdmitOutcome> {
         let admits: Vec<_> = (0..5)
@@ -336,15 +314,14 @@ mod tests {
         });
         names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
         let target = LimiterTarget::name_with("limiter:8080", names.clone());
-        let (limiter, metrics) =
-            guarded(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
+        let limiter: Arc<dyn CallLimiter> =
+            Arc::new(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
         assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
-        assert!(!metrics.limiter_breaker_open(), "a healthy limiter keeps the breaker closed");
         assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn admits_during_a_lookup_slower_than_the_budget_fail_and_count() {
+    async fn admits_during_a_lookup_slower_than_the_budget_fail_and_the_lookup_still_lands() {
         let (net, _server) = served().await;
         let names = Arc::new(crate::limiter_target::tests::FakeResolver {
             delay: Some(Duration::from_millis(300)),
@@ -352,10 +329,11 @@ mod tests {
         });
         names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
         let target = LimiterTarget::name_with("limiter:8080", names.clone());
-        let (limiter, metrics) =
-            guarded(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
+        let limiter: Arc<dyn CallLimiter> =
+            Arc::new(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
         assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Unavailable; 5]);
-        assert!(metrics.limiter_breaker_open(), "the lost admits count");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
         assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
