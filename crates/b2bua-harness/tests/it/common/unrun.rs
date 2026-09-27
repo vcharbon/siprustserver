@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use b2bua::config::B2buaConfig;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
@@ -60,10 +61,19 @@ impl CallDecisionEngine for RouteFirstThenHang {
 /// its decision holds the permit, so two events fill the first call's worker
 /// and queue.
 pub async fn one_permit_one_deep(name: &str) -> B2buaScene {
+    one_permit_one_deep_with(name, |_| {}).await
+}
+
+/// [`one_permit_one_deep`] with `tune` applied on top.
+pub async fn one_permit_one_deep_with(
+    name: &str,
+    tune: impl FnOnce(&mut B2buaConfig) + 'static,
+) -> B2buaScene {
     B2buaScene::with_b2bua(name, |bob_port| {
         B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
             c.event_dispatch_concurrency = 1;
             c.per_call_queue_depth = 1;
+            tune(c);
         })
     })
     .await

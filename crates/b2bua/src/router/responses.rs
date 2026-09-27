@@ -16,6 +16,11 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
     SipHeader { name: name.to_string().into(), value: value.into().into() }
 }
 
+/// `200 OK` to `req`, a request in a dialog, under the To-tag it carries.
+pub(super) fn build_200(req: &SipRequest) -> SipResponse {
+    generate_response(req, 200, "OK", &GenerateResponseOpts::default())
+}
+
 /// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming
 /// no dialog this node holds (RFC 3261 §12.2.2), or a CANCEL matching no INVITE
 /// transaction here (§9.2). `to_tag` is the tag this node's final to the

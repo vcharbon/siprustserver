@@ -211,7 +211,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // (`super::must_run`).
     let ctx2 = ctx.clone();
     let guard = UnansweredGuard::for_event(&ctx.txn, &event);
-    let answer = DiscardAnswer::of(ctx).hook_for(&event);
+    let answer = DiscardAnswer::of(ctx).hook_for(&event, &call_ref);
     let room = Room::of(&event);
     let own = super::must_run::is_own(&event);
     let past_lifetime_cap = super::must_run::keeps_room_past_lifetime_cap(&event);

@@ -495,6 +495,12 @@ impl PerCallDispatcher {
         }
     }
 
+    /// Has `call_ref` been offered more than 80 % of its lifetime cap? It
+    /// always is before an offer crosses the cap.
+    pub fn near_lifetime_cap(&self, call_ref: &str) -> bool {
+        self.queues.lock().unwrap().get(call_ref).is_some_and(|q| q.near_cap)
+    }
+
     pub fn has_queue(&self, call_ref: &str) -> bool {
         self.queues.lock().unwrap().contains_key(call_ref)
     }

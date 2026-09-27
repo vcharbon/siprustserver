@@ -42,7 +42,9 @@ async fn a_terminating_call_flooded_past_its_lifetime_cap_ends_at_the_cap() {
     let ids = DialogIds::of(&answer);
     let mut b_dialog = uas.dialog();
 
-    // bob hangs up; alice, the flooder, never answers the B2BUA's BYE.
+    // bob hangs up; alice, the flooder, never answers the B2BUA's BYE: her
+    // silence keeps the call Terminating, where the cap, not the
+    // TerminatingTimeout, must end it.
     let mut bye = b_dialog.bye().await;
     bye.expect(200).await;
     let _unanswered = s.alice.receive("BYE").await;
@@ -101,8 +103,9 @@ async fn a_terminating_call_flooded_past_its_lifetime_cap_ends_at_the_cap() {
 /// lifetime cap of 10. The cap's teardown CANCELs him, and his 200 crosses
 /// the CANCEL. A final to a request the node sent gets in past the cap, so
 /// the 200 is ACKed and the dialog it opened is ended with a BYE
-/// (RFC 3261 §13.2.2.4, §15). alice, never answered, is sent the 503 the
-/// teardown owes her.
+/// (RFC 3261 §13.2.2.4, §15). bob repeats the 200 as though the ACK were
+/// lost: the repeat arrives unmatched, keeps its room past the cap, and is
+/// ACKed again. alice, never answered, is sent the 503 the teardown owes her.
 #[tokio::test(start_paused = true)]
 async fn a_capped_calls_callee_answering_across_the_cancel_is_acked_and_sent_bye() {
     let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-200-crosses-cancel", |bob_port| {
@@ -132,20 +135,32 @@ async fn a_capped_calls_callee_answering_across_the_cancel_is_acked_and_sent_bye
     cancel.respond(200, "OK").await;
     s.bob.try_receive("ACK").await.expect("bob's 200 that crossed the CANCEL is ACKed");
     let mut bye = s.bob.try_receive("BYE").await.expect("the dialog bob's 200 opened is ended");
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    // The harness inbox folds the re-ACK into the first ACK: the recorded
+    // trace counts it below.
+    s.h.advance(Duration::from_millis(300)).await;
     bye.respond(200, "OK").await;
     let _ = call.try_expect_final(503).await.expect("alice is answered the teardown's 503");
 
     settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
         .await;
     s.b2bua.assert_fully_reaped();
-    let _ = s.finish().await;
+    let (s_addr, bob_addr) = (s.b2bua.addr, s.bob.addr());
+    let report = s.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == s_addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 2, "bob's repeated 200 is ACKed again past the cap");
 }
 
 /// alice floods her confirmed call with INFOs while a parked call holds the
 /// only handler permit, crossing its lifetime cap of 20. bob, who did
 /// nothing wrong, then hangs up. A capped call runs no more requests, so
-/// bob's BYE is answered where it is refused, 481 through its transaction,
-/// not left to his Timer F.
+/// each is answered where it is refused, not left to its sender's Timer F:
+/// bob's BYE 200 through its transaction (the dialog still exists, RFC 3261
+/// §15.1.2), alice's later INFOs 481. The cap's teardown then ends the call.
 #[tokio::test(start_paused = true)]
 async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
     let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-bye-answered", |bob_port| {
@@ -178,7 +193,10 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
     assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 1, "the cap is crossed");
 
     let mut bye = b_dialog.bye().await;
-    bye.try_expect(481).await.expect("bob's BYE is answered at once, not left unanswered");
+    bye.try_expect(200).await.expect("bob's BYE is answered at once, not left unanswered");
+    s.h.advance(Duration::from_millis(300)).await;
+    while s.alice.take_queued().await.is_some() {}
+
     let metrics = s.b2bua.metrics();
     assert!(metrics.capped_refusals_total() > 1, "alice's later INFOs are refused too");
     assert_eq!(
@@ -186,17 +204,13 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
         metrics.capped_refusals_total(),
         "every request refused past the cap is answered"
     );
-    s.h.advance(Duration::from_millis(300)).await;
-    while s.alice.take_queued().await.is_some() {}
 
     // The permit frees: the INFO queued before the cap reaches bob, whose
-    // dialog is gone, then the cap's teardown BYE. alice never answers hers:
-    // the call ends at its TerminatingTimeout.
+    // dialog is gone, then the cap's teardown BYEs both parties.
     parked.expect(503).await;
     s.bob.receive("INFO").await.respond(481, "Call/Transaction Does Not Exist").await;
     s.bob.receive("BYE").await.respond(481, "Call/Transaction Does Not Exist").await;
-    let _unanswered = s.alice.receive("BYE").await;
-    s.h.advance(Duration::from_millis(TERMINATING_TIMEOUT_MS as u64)).await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
     settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
         .await;
     let cdrs = s.b2bua.cdr_records();

@@ -36,9 +36,9 @@ pub struct B2buaConfig {
     /// queue bound, so a stuck handler or a full queue hides none — the call
     /// ends (ADR-0020). The node's own timers and internal events do not
     /// count. A healthy call stays far below it: a 24 h call with 300 s
-    /// keepalives and session refreshes offers a few thousand. Enforced only
-    /// with the reaper on, whose verdict ends the call. Never 0, never below
-    /// `max_messages_per_call`.
+    /// keepalives and session refreshes offers a few thousand. Enforced, and
+    /// checked (never 0), only with the reaper on, whose verdict ends the
+    /// call.
     ///
     /// A call held just under `max_messages_per_call` per keepalive window
     /// reaches it after `lifetime / max_messages_per_call × keepalive
@@ -522,18 +522,10 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_messages_per_call_lifetime == 0 {
+        if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
             return Err("max_messages_per_call_lifetime=0: the per-call work bound has no \
                         off; set it far above any healthy call"
                 .to_string());
-        }
-        if self.max_messages_per_call_lifetime < self.max_messages_per_call {
-            return Err(format!(
-                "max_messages_per_call_lifetime={} < max_messages_per_call={}: the lifetime \
-                 cap would end a call inside its first keepalive window, before the per-window \
-                 guard could",
-                self.max_messages_per_call_lifetime, self.max_messages_per_call
-            ));
         }
         if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {
             return Err(format!(
@@ -969,16 +961,13 @@ mod tests {
     }
 
     #[test]
-    fn a_lifetime_message_cap_below_the_per_window_cap_is_refused() {
+    fn with_the_reaper_off_the_lifetime_message_cap_is_not_checked() {
         let c = B2buaConfig {
-            max_messages_per_call: 200,
-            max_messages_per_call_lifetime: 199,
+            reaper_enabled: false,
+            max_messages_per_call_lifetime: 0,
             ..Default::default()
         };
-        let err = c.validate().unwrap_err();
-        assert!(err.contains("max_messages_per_call_lifetime=199"), "{err}");
-        let c = B2buaConfig { max_messages_per_call_lifetime: 200, ..c };
-        assert!(c.validate().is_ok());
+        assert!(c.validate().is_ok(), "the cap is not installed without the reaper");
     }
 
     #[test]

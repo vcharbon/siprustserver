@@ -13,9 +13,9 @@ use std::sync::Arc;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_txn::{IdGen, TransactionLayer};
 
-use super::responses::{build_481, build_retry_later_500};
+use super::responses::{build_200, build_481, build_retry_later_500};
 use super::RouterCtx;
-use crate::dispatch::{Discard, DiscardHook};
+use crate::dispatch::{Discard, DiscardHook, PerCallDispatcher};
 use crate::event::CallEvent;
 use crate::metrics::{B2buaMetrics, RemovalClass};
 
@@ -41,8 +41,9 @@ struct TxnKey {
 impl UnansweredGuard {
     /// Armed for a non-INVITE request other than ACK and CANCEL: the one kind
     /// of event whose server transaction absorbs its retransmissions while it
-    /// waits on the router. An INVITE is answered instead ([`InviteAnswer`]),
-    /// ACK has no transaction, and a CANCEL reaching the router matched none.
+    /// waits on the router. An INVITE is answered instead, and so is any
+    /// request refused past the call's lifetime cap ([`DiscardAnswer`]); ACK
+    /// has no transaction, and a CANCEL reaching the router matched none.
     pub(super) fn for_event(txn: &TransactionLayer, event: &CallEvent) -> Self {
         let key = match event {
             CallEvent::Sip { message, .. } => match message.as_ref() {
@@ -88,10 +89,14 @@ impl Drop for UnansweredGuard {
 ///   with a Retry-After, whatever the site, since the call it would start was
 ///   never looked at.
 /// - Any other request but ACK (which draws no response) past the call's
-///   lifetime cap: 481, the answer the call gives once it is gone. At any
-///   other site the transaction is forgotten instead ([`UnansweredGuard`]).
+///   lifetime cap: a BYE 200, the dialog still existing while the cap's
+///   teardown ends it (RFC 3261 §15.1.2); a CANCEL matching no transaction
+///   481, sent statelessly (§9.2); anything else 481, the answer the call
+///   gives once it is gone. At any other site the transaction is forgotten
+///   instead ([`UnansweredGuard`]).
 pub(super) struct DiscardAnswer<'a> {
     pub(super) txn: &'a TransactionLayer,
+    pub(super) dispatcher: &'a PerCallDispatcher,
     pub(super) id_gen: &'a Arc<IdGen>,
     pub(super) metrics: &'a B2buaMetrics,
     pub(super) retry_after_base_sec: u32,
@@ -102,6 +107,7 @@ impl<'a> DiscardAnswer<'a> {
     pub(super) fn of(ctx: &'a RouterCtx) -> Self {
         Self {
             txn: &ctx.txn,
+            dispatcher: &ctx.dispatcher,
             id_gen: &ctx.id_gen,
             metrics: &ctx.metrics,
             retry_after_base_sec: ctx.config.retry_after_base_sec,
@@ -109,13 +115,19 @@ impl<'a> DiscardAnswer<'a> {
         }
     }
 
-    /// The discard hook for `event`: `Some` for a request other than ACK
-    /// and CANCEL (a CANCEL reaching the router matched no transaction).
-    pub(super) fn hook_for(&self, event: &CallEvent) -> Option<DiscardHook> {
+    /// The discard hook for `event`, bound for `call_ref`: `Some` for an
+    /// INVITE, and for any other request but ACK while the call is near its
+    /// lifetime cap. A call is near it before any offer crosses it, and the
+    /// router offers one event at a time, so a request the cap refuses
+    /// always carries its hook, and a call far from the cap copies no request.
+    pub(super) fn hook_for(&self, event: &CallEvent, call_ref: &str) -> Option<DiscardHook> {
         let CallEvent::Sip { message, src, .. } = event else { return None };
         let SipMessage::Request(req) = message.as_ref() else { return None };
-        if matches!(req.method(), Method::Ack | Method::Cancel) {
-            return None;
+        match req.method() {
+            Method::Invite => {}
+            Method::Ack => return None,
+            _ if !self.dispatcher.near_lifetime_cap(call_ref) => return None,
+            _ => {}
         }
         let pending = PendingRequest {
             req: req.clone(),
@@ -148,8 +160,7 @@ impl PendingRequest {
     async fn answer(self, why: Discard) {
         if self.req.method() != Method::Invite {
             if why == Discard::Capped {
-                let to_tag = self.req.to().tag().is_none().then(|| self.id_gen.new_tag());
-                let resp = build_481(&self.req, to_tag.as_deref());
+                let resp = self.capped_response();
                 let _ = self.txn.send_response(resp, self.src).await;
                 self.metrics.bump_capped_request_answered();
             }
@@ -164,6 +175,20 @@ impl PendingRequest {
                 crate::new_calls::Refusal::DispatchDiscard,
                 sip_message::emergency::is_emergency_request(&self.req),
             );
+        }
+    }
+
+    /// The answer to a non-INVITE request refused past the call's lifetime
+    /// cap.
+    fn capped_response(&self) -> SipResponse {
+        match self.req.method() {
+            Method::Bye => build_200(&self.req),
+            // The layer binds the tag of the INVITE's final, if any.
+            Method::Cancel => build_481(&self.req, None),
+            _ => {
+                let to_tag = self.req.to().tag().is_none().then(|| self.id_gen.new_tag());
+                build_481(&self.req, to_tag.as_deref())
+            }
         }
     }
 
@@ -275,16 +300,17 @@ mod tests {
             .and_then(|v| v.as_str().trim().parse().ok())
     }
 
-    /// The hook the router would attach to `event`.
+    /// The hook the router would attach to `event` for call `c`.
     fn answer_hook(rig: &Rig, event: &CallEvent) -> Option<crate::dispatch::DiscardHook> {
         DiscardAnswer {
             txn: &rig.txn,
+            dispatcher: &rig.dispatcher,
             id_gen: &rig.id_gen,
             metrics: &rig.metrics,
             retry_after_base_sec: 5,
             retry_after_jitter_sec: 5,
         }
-        .hook_for(event)
+        .hook_for(event, "c")
     }
 
     /// An INVITE from the peer, taken off the layer and dispatched behind the
@@ -366,9 +392,10 @@ mod tests {
     }
 
     /// A peer's BYE that crosses the call's release lands behind the poison
-    /// and is discarded unrun: its hook answers nothing, its transaction is
-    /// forgotten, and the peer's retransmission reaches the router again
-    /// (where the call is gone and the orphan path answers it).
+    /// and is discarded unrun: a call far from its lifetime cap gives it no
+    /// hook, its transaction is forgotten, and the peer's retransmission
+    /// reaches the router again (where the call is gone and the orphan path
+    /// answers it).
     #[tokio::test(start_paused = true)]
     async fn a_bye_queued_behind_the_release_is_readmitted_on_its_retransmission() {
         let mut rig = rig().await;
@@ -379,6 +406,7 @@ mod tests {
         let ran = Arc::new(AtomicBool::new(false));
         let guard = UnansweredGuard::for_event(&rig.txn, &event);
         let hook = answer_hook(&rig, &event);
+        assert!(hook.is_none(), "a call far from its lifetime cap copies no request");
         let r = ran.clone();
         rig.dispatcher
             .dispatch(
@@ -518,11 +546,11 @@ mod tests {
     }
 
     /// A call past its lifetime cap refuses a BYE and every retransmission
-    /// of it, so the refusal answers it: 481 through its transaction, which
-    /// the body's drop then leaves alone, and which absorbs the
-    /// retransmission.
+    /// of it, so the refusal answers it: 200 through its transaction (the
+    /// dialog still exists, RFC 3261 §15.1.2), which the body's drop then
+    /// leaves alone, and which absorbs the retransmission.
     #[tokio::test(start_paused = true)]
-    async fn a_bye_refused_past_the_lifetime_cap_is_answered_481_through_its_transaction() {
+    async fn a_bye_refused_past_the_lifetime_cap_is_answered_200_through_its_transaction() {
         let mut rig = rig().await;
         rig.dispatcher = PerCallDispatcher::new(8, 64, 1024, rig.metrics.clone())
             .with_lifetime_cap(1, Arc::new(|_: &str| {}));
@@ -538,16 +566,35 @@ mod tests {
         rig.dispatcher.dispatch("c", job).await;
         assert_eq!(rig.metrics.capped_refusals_total(), 1);
 
-        assert_eq!(statuses(&responses_at_peer(&rig, 100).await), vec![481]);
+        assert_eq!(statuses(&responses_at_peer(&rig, 100).await), vec![200]);
         assert_eq!(rig.metrics.capped_request_answered_total(), 1);
         assert_eq!(rig.txn.metrics().unanswered_forgotten(), 0);
         rig.peer.send_to(&bye("z9hG4bK-capped"), addr(LAYER)).await.unwrap();
         assert!(next_event(&mut rig, 100).await.is_none(), "the transaction absorbs it");
         assert_eq!(
             statuses(&responses_at_peer(&rig, 100).await),
-            vec![481],
-            "and re-sends its 481"
+            vec![200],
+            "and re-sends its 200"
         );
+        gate.notify_one();
+    }
+
+    /// A CANCEL matching no transaction here reaches the router; refused
+    /// past the call's lifetime cap, it is answered 481 statelessly
+    /// (RFC 3261 §9.2), as the router answers a stray CANCEL.
+    #[tokio::test(start_paused = true)]
+    async fn a_stray_cancel_refused_past_the_lifetime_cap_is_answered_481() {
+        let mut rig = rig().await;
+        rig.dispatcher = PerCallDispatcher::new(8, 64, 1024, rig.metrics.clone())
+            .with_lifetime_cap(1, Arc::new(|_: &str| {}));
+        let gate = park_with_release_of(&rig, RemovalClass::Terminated).await;
+        let cancel = String::from_utf8(bye("z9hG4bK-stray")).unwrap().replace("BYE", "CANCEL");
+        rig.peer.send_to(cancel.as_bytes(), addr(LAYER)).await.unwrap();
+        let event = next_event(&mut rig, 100).await.expect("the CANCEL reaches the router");
+        let hook = answer_hook(&rig, &event);
+        assert!(hook.is_some(), "a CANCEL to a call near its cap carries a discard answer");
+        rig.dispatcher.dispatch("c", Job::new(Box::pin(async {})).on_discard(hook)).await;
+        assert_eq!(statuses(&responses_at_peer(&rig, 100).await), vec![481]);
         gate.notify_one();
     }
 
