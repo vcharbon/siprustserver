@@ -602,16 +602,20 @@ impl ReplicatedB2buaSut {
         );
         match self.core.as_ref() {
             Some(core) => core.drain(bounds).await,
-            None => {
-                DrainOutcome { exit: DrainExit::Quiescent, residual: 0, elapsed: Duration::ZERO }
-            }
+            None => DrainOutcome {
+                exit: DrainExit::Quiescent,
+                residual: 0,
+                elapsed: Duration::ZERO,
+                release_flush: Default::default(),
+            },
         }
     }
 
     /// [`begin_drain`](Self::begin_drain) without the wait: latch `Draining`
     /// now and hand the wait back as a [`PendingDrain`] the test polls while it
-    /// drives the timeline. The wait holds only the core's owned probes and its
-    /// release queue, so the process can still be killed mid-drain.
+    /// drives the timeline. The wait holds only the core's owned probes, its
+    /// release flush included, so the process can still be killed mid-drain;
+    /// a killed incarnation's flush returns at once.
     pub fn begin_drain_detached(&self, bounds: DrainBounds) -> PendingDrain {
         self.views.record(
             &self.incarnation_key(),
@@ -624,20 +628,15 @@ impl ReplicatedB2buaSut {
             core.drain_probe()
         });
         let metrics = self.core.as_ref().map(|core| core.metrics().clone());
-        let releases = self.core.as_ref().map(|core| core.limiter_releases());
         let mut pending = PendingDrain {
             fut: Box::pin(async move {
                 match probe {
                     Some(p) => {
+                        // The core's own drain, flush included, without the
+                        // borrow of the core; it records the same exit.
                         let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
-                        // The detached wait stands in for `B2buaCore::drain`, so
-                        // it records the same exit reason the runner would and
-                        // flushes the release queue the same way.
                         if let Some(m) = metrics {
-                            m.record_drain_exit(out.exit.label(), out.elapsed);
-                        }
-                        if let Some(releases) = releases {
-                            releases.flush(bounds.release_flush).await;
+                            m.record_drain_exit(&out);
                         }
                         out
                     }
@@ -645,6 +644,7 @@ impl ReplicatedB2buaSut {
                         exit: DrainExit::Quiescent,
                         residual: 0,
                         elapsed: Duration::ZERO,
+                        release_flush: Default::default(),
                     },
                 }
             }),

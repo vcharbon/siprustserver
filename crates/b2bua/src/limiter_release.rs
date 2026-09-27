@@ -72,14 +72,28 @@ impl ReleaseQueueConfig {
     }
 }
 
-/// What a [`ReleaseQueue::flush`] left behind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a [`ReleaseQueue::flush`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReleaseFlush {
+    /// Entries waiting when the flush began.
+    pub queued: usize,
     /// Entries still queued at the bound, given up (a batch in flight
     /// included: it may still land).
     pub given_up: usize,
     /// How long the flush waited.
     pub elapsed: Duration,
+}
+
+impl ReleaseFlush {
+    /// The outcome label: `empty` (nothing was queued), `sent` (every queued
+    /// release was answered) or `given_up` (some were given up).
+    pub fn outcome(&self) -> &'static str {
+        match (self.queued, self.given_up) {
+            (_, 1..) => "given_up",
+            (0, 0) => "empty",
+            _ => "sent",
+        }
+    }
 }
 
 /// One waiting release.
@@ -103,6 +117,8 @@ struct Waiting {
     retry_at: Option<Instant>,
     /// A breaker holds the queue: nothing is sent.
     held: bool,
+    /// The worker crashed: the queue is lost, nothing is flushed.
+    stopped: bool,
     /// A release request is in flight.
     sending: bool,
 }
@@ -224,31 +240,66 @@ impl ReleaseQueue {
     }
 
     /// A planned exit's last send: every waiting key leaves now, whatever
-    /// backoff a failed send had set, and the flush returns once the queue is
-    /// empty or `within` has passed. A held queue stays held. Every entry
-    /// still queued at the bound is given up, counted and logged. A key
-    /// pushed during the flush is flushed with it.
+    /// backoff a failed send had set (a send failing during the flush backs
+    /// off from the first step), and the flush returns once the queue is
+    /// empty or `within` has passed. A held queue (an open breaker) is given
+    /// up at once. Every entry still queued at the bound is given up, counted
+    /// and logged. A key pushed during the flush is flushed with it; one
+    /// pushed after it returns is sent only if the worker lives on, and is
+    /// otherwise lost uncounted with the process. A stopped queue has
+    /// nothing to flush.
     pub async fn flush(&self, within: Duration) -> ReleaseFlush {
         let start = Instant::now();
         let deadline = start + within;
-        {
+        let (queued, held) = {
             let mut w = self.lock();
+            if w.stopped {
+                return ReleaseFlush::default();
+            }
             w.failures = 0;
             w.retry_at = None;
+            (w.entries.len(), w.held)
+        };
+        if held {
+            let given_up = self.give_up_all();
+            return ReleaseFlush { queued, given_up, elapsed: start.elapsed() };
         }
         self.wake.notify_one();
         loop {
             let emptied = self.emptied.notified();
             tokio::pin!(emptied);
             emptied.as_mut().enable();
-            if self.lock().entries.is_empty() {
-                return ReleaseFlush { given_up: 0, elapsed: start.elapsed() };
+            let (empty, stopped) = {
+                let w = self.lock();
+                (w.entries.is_empty(), w.stopped)
+            };
+            if stopped {
+                return ReleaseFlush::default();
+            }
+            if empty {
+                let elapsed = start.elapsed();
+                if queued > 0 {
+                    tracing::info!(
+                        queued,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "limiter release queue flushed"
+                    );
+                }
+                return ReleaseFlush { queued, given_up: 0, elapsed };
             }
             tokio::select! {
                 _ = emptied => {}
                 _ = tokio::time::sleep_until(deadline) => break,
             }
         }
+        let given_up = self.give_up_all();
+        ReleaseFlush { queued, given_up, elapsed: start.elapsed() }
+    }
+
+    /// Give up every waiting entry, a batch in flight included (it may still
+    /// land): a planned exit that sends no more. The entries are counted
+    /// (`reason=shutdown`) and logged; returns how many.
+    pub fn give_up_all(&self) -> usize {
         let (given_up, held) = {
             let mut w = self.lock();
             let given_up = w.entries.len();
@@ -257,17 +308,22 @@ impl ReleaseQueue {
             self.publish_depth(&w);
             (given_up, w.held)
         };
-        if given_up == 0 {
-            return ReleaseFlush { given_up, elapsed: start.elapsed() };
+        if given_up > 0 {
+            self.metrics.add_limiter_release_dropped_shutdown(given_up as u64);
+            tracing::warn!(
+                given_up,
+                held,
+                "limiter releases given up at exit; the lease frees them"
+            );
         }
-        self.metrics.add_limiter_release_dropped_shutdown(given_up as u64);
-        tracing::warn!(
-            given_up,
-            held,
-            within_ms = within.as_millis() as u64,
-            "limiter releases still queued at the exit's flush bound given up; the lease frees them"
-        );
-        ReleaseFlush { given_up, elapsed: start.elapsed() }
+        given_up
+    }
+
+    /// The worker crashed: its queue is lost as it stands, and a flush
+    /// returns at once.
+    pub fn stop(&self) {
+        self.lock().stopped = true;
+        self.emptied.notify_waiters();
     }
 
     /// The supervised drainer, until the task is aborted with the worker. A
@@ -751,43 +807,68 @@ mod tests {
         let limiter = Arc::new(Scripted::default());
         let (q, metrics) = queue(limiter.clone(), 10);
         let out = q.flush(Duration::from_secs(3)).await;
-        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::ZERO });
+        assert_eq!(out, ReleaseFlush::default());
         assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_flush_sends_at_once_whatever_the_backoff() {
-        let limiter = Arc::new(Scripted::default());
+    /// A queue whose limiter failed six sends in a row: the next send waits
+    /// the longest backoff.
+    async fn backed_off(limiter: &Arc<Scripted>) -> (Arc<ReleaseQueue>, B2buaMetrics) {
         limiter.down.store(true, Ordering::SeqCst);
         let metrics = B2buaMetrics::new();
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
         tokio::spawn(q.clone().run());
         q.push("a");
-        // Six failed sends: the next one waits the longest backoff.
         for _ in 0..6 {
             tokio::time::advance(BACKOFF_MAX).await;
             settle().await;
         }
+        (q, metrics)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_sends_at_once_whatever_the_backoff() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = backed_off(&limiter).await;
         let sends = sent(&limiter).len();
         limiter.down.store(false, Ordering::SeqCst);
         q.push("b");
         let out = q.flush(BACKOFF_MAX / 2).await;
-        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::ZERO });
+        assert_eq!(out, ReleaseFlush { queued: 2, given_up: 0, elapsed: Duration::ZERO });
         assert_eq!(sent(&limiter)[sends..], [keys(&["a", "b"])], "one send, at once");
         assert_eq!(q.waiting(), 0);
         assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_held_queue_is_given_up_at_the_flush_bound_unsent() {
+    async fn a_send_failing_during_a_flush_retries_after_the_first_backoff_step() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = backed_off(&limiter).await;
+        let sends = sent(&limiter).len();
+        let back = limiter.clone();
+        let (out, ()) = tokio::join!(q.flush(Duration::from_secs(1)), async move {
+            tokio::time::sleep(BACKOFF_INITIAL / 2).await;
+            back.down.store(false, Ordering::SeqCst);
+        });
+        assert_eq!(
+            out,
+            ReleaseFlush { queued: 1, given_up: 0, elapsed: BACKOFF_INITIAL },
+            "the flush's first failed send backs off one step, not the longest backoff"
+        );
+        assert_eq!(sent(&limiter)[sends..], [keys(&["a"]), keys(&["a"])]);
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_queue_is_given_up_at_once_by_a_flush() {
         let limiter = Arc::new(Scripted::default());
         let (q, metrics) = queue(limiter.clone(), 10);
         q.hold();
         q.push("a");
         q.push("b");
         let out = q.flush(Duration::from_secs(3)).await;
-        assert_eq!(out, ReleaseFlush { given_up: 2, elapsed: Duration::from_secs(3) });
+        assert_eq!(out, ReleaseFlush { queued: 2, given_up: 2, elapsed: Duration::ZERO });
         assert!(sent(&limiter).is_empty(), "a held queue sends nothing");
         assert_eq!(q.waiting(), 0);
         assert_eq!(metrics.limiter_release_queue_depth(), 0);
@@ -795,22 +876,6 @@ mod tests {
         q.resume();
         settle().await;
         assert!(sent(&limiter).is_empty(), "a given-up entry is never sent");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_queue_resumed_during_a_flush_ends_it_once_answered() {
-        let limiter = Arc::new(Scripted::default());
-        let (q, metrics) = queue(limiter.clone(), 10);
-        q.hold();
-        q.push("a");
-        let resumer = q.clone();
-        let (out, ()) = tokio::join!(q.flush(Duration::from_secs(3)), async move {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            resumer.resume();
-        });
-        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::from_secs(1) });
-        assert_eq!(sent(&limiter), [keys(&["a"])]);
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -824,10 +889,53 @@ mod tests {
         settle().await;
         assert!(q.sending());
         let out = q.flush(Duration::ZERO).await;
-        assert_eq!(out, ReleaseFlush { given_up: 1, elapsed: Duration::ZERO });
+        assert_eq!(out, ReleaseFlush { queued: 1, given_up: 1, elapsed: Duration::ZERO });
         assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 1);
         limiter.go.notify_one();
         settle().await;
         assert_eq!(q.waiting(), 0, "the late answer finds nothing to remove");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn giving_up_every_entry_counts_them_as_a_shutdown_drop() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.hold();
+        q.push("a");
+        q.push("b");
+        assert_eq!(q.give_up_all(), 2);
+        assert_eq!(q.waiting(), 0);
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+        assert_eq!(q.give_up_all(), 0, "nothing left to give up");
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_queue_has_nothing_to_flush() {
+        let limiter = Arc::new(Scripted::default());
+        limiter.down.store(true, Ordering::SeqCst);
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.push("a");
+        settle().await;
+        q.stop();
+        let out = q.flush(Duration::from_secs(3)).await;
+        assert_eq!(out, ReleaseFlush::default(), "a crashed worker's queue is lost, not flushed");
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0, "a crash counts nothing");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_ends_a_waiting_flush_at_once() {
+        let limiter = Arc::new(Scripted::default());
+        limiter.down.store(true, Ordering::SeqCst);
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.push("a");
+        settle().await;
+        let stopper = q.clone();
+        let (out, ()) = tokio::join!(q.flush(Duration::from_secs(3)), async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.stop();
+        });
+        assert_eq!(out, ReleaseFlush::default(), "the crash cut the flush, not its bound");
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
     }
 }

@@ -644,6 +644,8 @@ impl B2buaCore {
         // this the "crashed" node keeps answering SIP (100/200/487, cached replays,
         // retransmits) until every surviving per-call task drops its cmd_tx clone.
         self.ctx.txn.abort_owner();
+        // A crash loses the release queue; a drain still waiting flushes nothing.
+        self.ctx.limiter_releases.stop();
         if let Some(s) = &self.supervisor {
             s.shutdown();
         }
@@ -696,6 +698,7 @@ impl B2buaCore {
         let ctx = self.ctx.clone();
         let changelog = self.repl_store.as_ref().map(|r| r.changelog().clone());
         let supervisor = self.supervisor.clone();
+        let releases = self.ctx.limiter_releases.clone();
         crate::drain::DrainInputs {
             active: self.active_calls_probe(),
             backups_caught_up: Arc::new(move || match &changelog {
@@ -703,42 +706,58 @@ impl B2buaCore {
                 None => false,
             }),
             withdrawn: Arc::new(move || supervisor.as_ref().is_some_and(|s| s.is_withdrawn())),
+            flush_releases: Arc::new(move |within| {
+                let releases = releases.clone();
+                Box::pin(async move { releases.flush(within).await })
+            }),
         }
     }
 
     /// Graceful shutdown: latch `Draining` (so the proxy steers new calls away
     /// via the OPTIONS / `/ready` self-report) and then wait for the first of:
     /// the live call map clearing, a withdrawn worker's backups holding every
-    /// live call past the floor (ADR-0031 D2), or the grace. Then flush the
-    /// limiter release queue within `bounds.release_flush`
-    /// ([`flush_limiter_releases`](Self::flush_limiter_releases)). Returns the
-    /// named exit, the residual active-call count and how long the call wait
-    /// took; the cut is never silent. `Draining` is the single home for the
-    /// drain state — there is no second flag to keep in sync.
+    /// live call past the floor (ADR-0031 D2), or the grace; the limiter
+    /// release queue is flushed before the exit, a clean exit re-verified
+    /// after it ([`drain_until_quiescent`](crate::drain::drain_until_quiescent)).
+    /// Returns the named exit, the residual active-call count, how long it
+    /// waited and what the flush did; the cut is never silent. `Draining` is
+    /// the single home for the drain state — there is no second flag to keep
+    /// in sync.
     pub async fn drain(&self, bounds: crate::drain::DrainBounds) -> crate::drain::DrainOutcome {
         self.begin_draining();
         let outcome = crate::drain::drain_until_quiescent(self.drain_probe(), bounds).await;
-        self.metrics.record_drain_exit(outcome.exit.label(), outcome.elapsed);
+        self.metrics.record_drain_exit(&outcome);
+        let flush = outcome.release_flush;
         tracing::info!(
             reason = outcome.exit.label(),
             residual = outcome.residual,
             elapsed_ms = outcome.elapsed.as_millis() as u64,
             withdrawn = self.is_withdrawn(),
+            release_flush = flush.outcome(),
+            releases_queued = flush.queued,
+            releases_given_up = flush.given_up,
+            release_flush_ms = flush.elapsed.as_millis() as u64,
             "drain returned"
         );
-        self.flush_limiter_releases(bounds.release_flush).await;
         outcome
     }
 
-    /// A planned exit's last limiter send: the releases this worker still
-    /// queues leave now, and the wait for their answers lasts at most
-    /// `within`; what is still queued then is given up, counted
-    /// (`reason=shutdown`) and logged, and the lease frees it.
+    /// A planned exit's last limiter send, for an exit that waits for no
+    /// call: the releases this worker still queues leave now, and the wait
+    /// for their answers lasts at most `within`; what is still queued then
+    /// (or held by an open breaker) is given up, counted (`reason=shutdown`)
+    /// and logged, and the lease frees it.
     pub async fn flush_limiter_releases(
         &self,
         within: std::time::Duration,
     ) -> crate::limiter_release::ReleaseFlush {
         self.ctx.limiter_releases.flush(within).await
+    }
+
+    /// Give up every queued limiter release at once, counted and logged: an
+    /// exit that cuts its flush short.
+    pub fn give_up_limiter_releases(&self) -> usize {
+        self.ctx.limiter_releases.give_up_all()
     }
 
     pub fn metrics(&self) -> &B2buaMetrics {

@@ -461,7 +461,10 @@ async fn a_draining_worker_flushes_its_release_queue_before_it_exits() {
     assert_eq!(s.queued(), 0, "the drain returned with releases still queued");
     assert_eq!(s.rig.all_holds(), [0, 0, 0], "both releases landed before the drain returned");
     assert!(elapsed < RELEASE_FLUSH, "the flush returned once the queue emptied: {elapsed:?}");
+    assert_eq!((out.release_flush.queued, out.release_flush.given_up), (2, 0));
+    assert_eq!(out.elapsed, elapsed, "the drain's time includes its flush");
     let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.drain_release_flushes("sent"), 1);
     assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0, "nothing given up");
     assert_eq!(
         s.rig.store.stats().lease_expired_calls,
@@ -493,7 +496,9 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
     let elapsed = start.elapsed();
 
     assert_eq!(out.exit, DrainExit::Quiescent);
+    assert_eq!((out.release_flush.queued, out.release_flush.given_up), (1, 1));
     let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.drain_release_flushes("given_up"), 1);
     assert_eq!(
         metrics.limiter_release_dropped_shutdown_total(),
         1,
@@ -514,6 +519,41 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
     assert!(s.releases_since(before).is_empty(), "the given-up entry is never sent");
     assert_eq!(s.rig.store.stats().lease_expired_calls, 1, "the limiter's lease freed the call");
     s.rig.expect_drained("the lease freed the call").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// Breaker open at the drain's end: the release queue is held, so the drain
+/// does not wait for it; the held releases of three calls (three limiters
+/// each) are given up at once, counted, and freed by the lease.
+#[tokio::test(start_paused = true)]
+async fn a_drain_gives_up_a_queue_held_by_an_open_breaker_at_once() {
+    let s = Scene::new("release-queue-drain-breaker-open", |_| {}).await;
+    s.stall.send_replace(Stall::Everything);
+    let mut dialogs = Vec::new();
+    for _ in 0..3 {
+        dialogs.push(s.establish().await);
+    }
+    let metrics = s.b2bua.metrics();
+    assert!(metrics.limiter_breaker_open(), "three failed admits opened the breaker");
+    for dialog in &mut dialogs {
+        s.hang_up(dialog).await;
+    }
+    sip_clock::testkit::settle().await;
+    assert!(s.b2bua.calls_reaped());
+    assert_eq!(s.queued(), 3, "each call owes its release; the open breaker holds them");
+
+    let start = tokio::time::Instant::now();
+    let out = s.b2bua.drain(DRAIN).await;
+    assert_eq!(start.elapsed(), Duration::ZERO, "a held queue is not waited for");
+    assert_eq!(out.exit, DrainExit::Quiescent);
+    assert_eq!((out.release_flush.queued, out.release_flush.given_up), (3, 3));
+    assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 3);
+    assert_eq!(s.queued(), 0);
+
+    s.stall.send_replace(Stall::Nothing);
+    s.hold_for(LEASE_SEC as u64 + 5).await;
+    s.rig.expect_drained("the lease freed whatever the lost admits created").await;
     s.b2bua.assert_fully_reaped();
     let _ = s.h.finish().await;
 }

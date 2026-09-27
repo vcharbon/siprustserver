@@ -1020,10 +1020,12 @@ impl RunnerBase {
     /// OPTIONS self-reports 503 and the readiness probe flips NotReady so the
     /// proxy steers new calls away — then waits for the first of: the in-flight
     /// calls finishing, a withdrawn worker's backups holding them past
-    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`. Ctrl-C
-    /// (interactive) waits for no call. Either way the queued limiter releases
-    /// are then flushed within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0038
-    /// decision 9). Returns when the process should exit.
+    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`, the
+    /// queued limiter releases flushed before the exit within
+    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0038 decision 9). Ctrl-C
+    /// (interactive) latches Draining and waits for no call, only for the
+    /// release flush, which a second Ctrl-C cuts short. Returns when the
+    /// process should exit.
     pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
         let name = &self.name;
         let bounds = self.env.drain;
@@ -1032,8 +1034,26 @@ impl RunnerBase {
         let release_flush_ms = bounds.release_flush.as_millis() as u64;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!(service = name, signal = "SIGINT", release_flush_ms, "shutting down");
-                core.flush_limiter_releases(bounds.release_flush).await;
+                tracing::info!(
+                    service = name,
+                    signal = "SIGINT",
+                    release_flush_ms,
+                    "shutting down"
+                );
+                // Draining first, so no new call is admitted while the queued
+                // releases leave; a second Ctrl-C gives them up at once.
+                core.begin_draining();
+                tokio::select! {
+                    _ = core.flush_limiter_releases(bounds.release_flush) => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        let given_up = core.give_up_limiter_releases();
+                        tracing::warn!(
+                            service = name,
+                            given_up,
+                            "second SIGINT: release flush cut short"
+                        );
+                    }
+                }
             }
             _ = wait_sigterm(name) => {
                 tracing::info!(

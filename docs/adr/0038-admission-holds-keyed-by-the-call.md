@@ -103,11 +103,13 @@ and a lost release could not be retried.
    the call's set lapse; at the queue's cap the oldest entry is given up;
    both are counted. A given-up entry may still land if a send carrying it
    was in flight. The queue is not replicated: a worker that dies loses it
-   and the lease frees what it held. A planned exit flushes it: once the
-   drain has returned, every waiting key leaves at once whatever the backoff,
-   and the exit waits for the queue to empty within its own bound; a held
-   queue stays held, and what is still queued at the bound is given up and
-   counted (`reason=shutdown`), the lease freeing it. Its sender is supervised: one that
+   and the lease frees what it held. A planned exit flushes it before the
+   process leaves: every waiting key leaves at once whatever the backoff,
+   and the exit waits for the queue to empty within its own bound; a queue
+   held by an open breaker is not waited for. What is still queued at the
+   bound or held is given up, counted (`reason=shutdown`) and logged, and
+   the lease frees it; the drain's residual stays a count of live calls.
+   Its sender is supervised: one that
    panics is restarted with the queue intact, and counted. A circuit breaker
    drives the queue through `hold` and `resume`: nothing is sent while it is
    held, and a resume sends every waiting key at once. The worker's lease is

@@ -4,7 +4,7 @@
 //! |---|---|---|
 //! | `B2BUA_DRAIN_GRACE_MS` | the most a drain waits for the live calls | 5000 |
 //! | `B2BUA_DRAIN_MIN_MS` | the floor a withdrawn worker's caught-up exit waits out | 1000 |
-//! | `B2BUA_DRAIN_RELEASE_FLUSH_MS` | the most the exit then waits for its queued limiter releases | 3000 |
+//! | `B2BUA_DRAIN_RELEASE_FLUSH_MS` | the most one release flush waits | 3000 |
 //!
 //! Unset or blank takes the default; a value that is not a non-negative
 //! integer refuses boot. Zero is a bound like any other: no wait.

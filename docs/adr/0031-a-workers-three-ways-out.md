@@ -108,9 +108,11 @@ static membership, or SIGTERM before the slice moved) keeps quiescence-or-grace:
 reactive, so a proxied worker's calls are served on the next in-dialog request, but a
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
 *replicated crash*, deliberately: ringing calls wait for the caller's next request or its
-own timers, as after any crash. Whatever the exit, the worker then flushes its queued
-limiter releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s) before it exits (ADR-0038
-decision 9). Serves case 1. Case 2 runs the same drain for its 2 s: the
+own timers, as after any crash. Before any exit the worker flushes its queued limiter
+releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0038 decision 9); a quiescent or
+caught-up exit is taken only if it still holds once the flush is done, since the worker
+serves its calls meanwhile, and the drain never outlasts the grace plus the flush.
+Serves case 1. Case 2 runs the same drain for its 2 s: the
 peers have parked, (iii) never holds, SIGKILL ends it. Cases 3 and 4 run no drain.
 
 **D3 — A forward flush never regresses backup progress.** This rule changes the

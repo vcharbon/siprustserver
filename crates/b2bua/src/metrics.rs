@@ -55,6 +55,9 @@ struct Inner {
     drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
     drain_seconds_sum_ms: AtomicU64,
     drain_seconds_count: AtomicU64,
+    // The drains' limiter release flushes by outcome, and their time.
+    drain_release_flushes: Mutex<BTreeMap<String, u64>>,
+    drain_release_flush_ms: AtomicU64,
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
@@ -601,10 +604,24 @@ impl B2buaMetrics {
     }
 
     /// Record one completed drain: its reason label into
-    /// `b2bua_drain_exits_total{reason}` and its duration into the
-    /// `b2bua_drain_seconds` histogram (ADR-0031 D2).
-    pub fn record_drain_exit(&self, reason: &str, elapsed: std::time::Duration) {
+    /// `b2bua_drain_exits_total{reason}`, its duration into the
+    /// `b2bua_drain_seconds` histogram (ADR-0031 D2), and its release flush
+    /// into `b2bua_drain_release_flushes_total{outcome}` and
+    /// `b2bua_drain_release_flush_seconds_total` (ADR-0038 decision 9).
+    pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
+        let (reason, elapsed) = (outcome.exit.label(), outcome.elapsed);
         *self.inner.drain_exits.lock().unwrap().entry(reason.to_string()).or_insert(0) += 1;
+        let flush = outcome.release_flush;
+        *self
+            .inner
+            .drain_release_flushes
+            .lock()
+            .unwrap()
+            .entry(flush.outcome().to_string())
+            .or_insert(0) += 1;
+        self.inner
+            .drain_release_flush_ms
+            .fetch_add(flush.elapsed.as_millis() as u64, Ordering::Relaxed);
         let secs = elapsed.as_secs_f64();
         for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
             if secs <= *le {
@@ -618,6 +635,12 @@ impl B2buaMetrics {
     /// Drains that returned for `reason` (test/observability).
     pub fn drain_exits(&self, reason: &str) -> u64 {
         self.inner.drain_exits.lock().unwrap().get(reason).copied().unwrap_or(0)
+    }
+
+    /// Drains whose release flush ended with `outcome`
+    /// ([`ReleaseFlush::outcome`](crate::limiter_release::ReleaseFlush::outcome)).
+    pub fn drain_release_flushes(&self, outcome: &str) -> u64 {
+        self.inner.drain_release_flushes.lock().unwrap().get(outcome).copied().unwrap_or(0)
     }
 
     /// Count one forward flush the Backup flow refused because it would regress
@@ -1397,6 +1420,17 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"+Inf\"}} {drain_count}\n"));
         s.push_str(&format!("b2bua_drain_seconds_sum {drain_sum_s}\n"));
         s.push_str(&format!("b2bua_drain_seconds_count {drain_count}\n"));
+        s.push_str("# HELP b2bua_drain_release_flushes_total drains by what their limiter release flush did (outcome=empty: nothing was queued; sent: every queued release was answered; given_up: some were still queued at the bound or held by an open breaker, counted in b2bua_limiter_release_dropped_total{reason=\"shutdown\"})\n# TYPE b2bua_drain_release_flushes_total counter\n");
+        for (outcome, v) in self.inner.drain_release_flushes.lock().unwrap().iter() {
+            s.push_str(&format!(
+                "b2bua_drain_release_flushes_total{{outcome=\"{outcome}\"}} {v}\n"
+            ));
+        }
+        s.push_str("# HELP b2bua_drain_release_flush_seconds_total time drains spent flushing their limiter release queue\n# TYPE b2bua_drain_release_flush_seconds_total counter\n");
+        s.push_str(&format!(
+            "b2bua_drain_release_flush_seconds_total {}\n",
+            self.inner.drain_release_flush_ms.load(Ordering::Relaxed) as f64 / 1_000.0
+        ));
         s.push_str("# HELP b2bua_call_removals_by_class_total b2bua_call_removals_total by the release that tore the queue down (terminated: a call that owes its CDR; self_release: an acting backup's takeover copy; orphan: a queue that never held a call, e.g. a stateless admission shed or an event for a gone call)\n# TYPE b2bua_call_removals_by_class_total counter\n");
         for class in [RemovalClass::Terminated, RemovalClass::SelfRelease, RemovalClass::Orphan] {
             s.push_str(&format!(
@@ -2029,9 +2063,24 @@ mod tests {
 
     #[test]
     fn drain_exits_and_duration_render() {
+        use crate::drain::{DrainExit, DrainOutcome, ReleaseFlush};
         let m = B2buaMetrics::new();
-        m.record_drain_exit("caught_up", std::time::Duration::from_millis(1_200));
-        m.record_drain_exit("grace_peers_behind", std::time::Duration::from_secs(5));
+        let flush =
+            ReleaseFlush { queued: 2, given_up: 0, elapsed: std::time::Duration::from_millis(300) };
+        m.record_drain_exit(&DrainOutcome {
+            exit: DrainExit::CaughtUp,
+            residual: 1,
+            elapsed: std::time::Duration::from_millis(1_200),
+            release_flush: flush,
+        });
+        m.record_drain_exit(&DrainOutcome {
+            exit: DrainExit::GracePeersBehind,
+            residual: 1,
+            elapsed: std::time::Duration::from_secs(5),
+            release_flush: ReleaseFlush::default(),
+        });
+        assert_eq!(m.drain_release_flushes("sent"), 1);
+        assert_eq!(m.drain_release_flushes("empty"), 1);
         assert_eq!(m.drain_exits("caught_up"), 1);
         assert_eq!(m.drain_exits("grace_peers_behind"), 1);
         assert_eq!(m.drain_exits("quiescent"), 0);
@@ -2045,6 +2094,8 @@ mod tests {
         assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"+Inf\"} 2"));
         assert!(txt.contains("b2bua_drain_seconds_sum 6.2"));
         assert!(txt.contains("b2bua_drain_seconds_count 2"));
+        assert!(txt.contains("b2bua_drain_release_flushes_total{outcome=\"sent\"} 1"));
+        assert!(txt.contains("b2bua_drain_release_flush_seconds_total 0.3"));
     }
 
     #[test]
