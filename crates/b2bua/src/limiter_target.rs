@@ -6,9 +6,11 @@
 //! whose name resolves late is reached once it does. A name that parses as a
 //! socket address (`10.0.0.1:8080`, `[::1]:8080`) is one, never looked up.
 //! One lookup is in flight at a time, and every request arriving meanwhile
-//! waits for it within its own budget. The address a name resolves to is
+//! waits for it within its own budget; a lookup outlives the requests that
+//! gave up on it and lands for the next. The address a name resolves to is
 //! kept until [`LimiterTarget::forget`]; the next request then looks the name
-//! up again, and a lookup started before the forget is not kept.
+//! up again. A lookup only starts while no address is kept, so the one in
+//! flight at a forget is already a fresh one: it lands and is kept.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -56,11 +58,8 @@ struct Named {
 struct NameState {
     /// The address kept.
     addr: Option<SocketAddr>,
-    /// The lookup in flight, if any, and its generation.
-    lookup: Option<(u64, watch::Receiver<Answer>)>,
-    /// Bumped by every forget: a lookup of an older generation lands for
-    /// its waiters only.
-    generation: u64,
+    /// The lookup in flight, if any.
+    lookup: Option<watch::Receiver<Answer>>,
 }
 
 impl Named {
@@ -76,16 +75,15 @@ impl Named {
         if let Some(addr) = state.addr {
             return Ok(addr);
         }
-        if let Some((_, waiting)) = state.lookup.as_ref() {
+        if let Some(waiting) = state.lookup.as_ref() {
             return Err(waiting.clone());
         }
-        let generation = state.generation;
         let (tx, rx) = watch::channel(None);
-        state.lookup = Some((generation, rx.clone()));
+        state.lookup = Some(rx.clone());
         drop(state);
-        let done = LookupDone { named: self.clone(), generation };
+        let done = LookupDone(self.clone());
         tokio::spawn(async move {
-            let found = done.named.resolver.resolve(&done.named.name).await;
+            let found = done.0.resolver.resolve(&done.0.name).await;
             done.land(found);
             drop(done);
             let _ = tx.send(Some(found));
@@ -94,29 +92,21 @@ impl Named {
     }
 }
 
-/// The lookup of one generation. Landing keeps its address when no forget
-/// came since it started; ending, a panicking one included, frees the slot so
-/// the next request starts another.
-struct LookupDone {
-    named: Arc<Named>,
-    generation: u64,
-}
+/// The lookup in flight. Landing keeps the address it found; ending, a
+/// panicking one included, frees the slot so the next request starts another.
+struct LookupDone(Arc<Named>);
 
 impl LookupDone {
     fn land(&self, found: Option<SocketAddr>) {
-        let mut state = self.named.lock();
-        if state.generation == self.generation && state.addr.is_none() {
-            state.addr = found;
+        if let Some(addr) = found {
+            self.0.lock().addr = Some(addr);
         }
     }
 }
 
 impl Drop for LookupDone {
     fn drop(&mut self) {
-        let mut state = self.named.lock();
-        if state.lookup.as_ref().is_some_and(|(g, _)| *g == self.generation) {
-            state.lookup = None;
-        }
+        self.0.lock().lookup = None;
     }
 }
 
@@ -167,15 +157,12 @@ impl LimiterTarget {
         }
     }
 
-    /// Forget the address a name resolved to and leave any lookup in flight
-    /// to its waiters: the next request looks the name up again. A socket
-    /// address is kept.
+    /// Forget the address a name resolved to: the next request looks the
+    /// name up again. A lookup in flight lands and is kept. A socket address
+    /// is kept.
     pub fn forget(&self) {
         if let Kind::Name(named) = &self.kind {
-            let mut state = named.lock();
-            state.addr = None;
-            state.lookup = None;
-            state.generation = state.generation.wrapping_add(1);
+            named.lock().addr = None;
         }
     }
 }

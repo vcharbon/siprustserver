@@ -4,7 +4,8 @@
 //! client to its `host:port`, whose name is looked up once at boot, waiting
 //! at most one breaker probe period. A name that has not resolved by then
 //! leaves the client without an address, so the worker's breaker starts open
-//! and its probe looks the name up every period.
+//! and its probe looks the name up every period; a boot lookup that lands
+//! after the wait is kept, and the next probe closes the breaker.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,13 +43,9 @@ pub(crate) async fn limiter_client(
         settings.timeout,
     )
     .with_release_timeout(settings.release_timeout);
-    if !client.lookup(settings.boot_lookup).await {
-        tracing::warn!(
-            limiter = %hostport,
-            "the call limiter's name does not resolve at boot: the breaker starts open and \
-             its probe looks the name up every period"
-        );
-    }
+    // A name still unresolved leaves the client without an address: the
+    // breaker logs its open start.
+    client.lookup(settings.boot_lookup).await;
     Arc::new(client)
 }
 

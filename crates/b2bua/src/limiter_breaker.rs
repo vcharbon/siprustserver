@@ -70,6 +70,15 @@ impl BreakerConfig {
     }
 }
 
+/// Why the breaker opened.
+#[derive(Clone, Copy)]
+enum Opened {
+    /// It was built for a limiter whose address is not known.
+    NoAddress,
+    /// A run of admits got no usable answer.
+    Failures,
+}
+
 #[derive(Default)]
 struct State {
     open: bool,
@@ -121,7 +130,7 @@ impl BreakerLimiter {
         });
         breaker.metrics.set_limiter_breaker_open(false);
         if !breaker.health.has_address() {
-            breaker.open(breaker.lock(), "the limiter's address is not known");
+            breaker.open(breaker.lock(), Opened::NoAddress);
         }
         (breaker.clone(), Some(breaker))
     }
@@ -150,7 +159,7 @@ impl BreakerLimiter {
                 if state.failures < self.config.failures {
                     return;
                 }
-                self.open(state, "consecutive admits got no usable answer");
+                self.open(state, Opened::Failures);
             }
             AdmitOutcome::NotSent => {}
             AdmitOutcome::Admitted | AdmitOutcome::Rejected { .. } | AdmitOutcome::Released => {
@@ -159,9 +168,9 @@ impl BreakerLimiter {
         }
     }
 
-    /// Open the breaker for `why`: hold the queue, forget the limiter's
-    /// address and wake the probe.
-    fn open(&self, mut state: MutexGuard<'_, State>, why: &'static str) {
+    /// Open the breaker: hold the queue, forget the limiter's address and
+    /// wake the probe.
+    fn open(&self, mut state: MutexGuard<'_, State>, why: Opened) {
         state.open = true;
         state.failures = 0;
         self.releases.hold();
@@ -169,12 +178,17 @@ impl BreakerLimiter {
         self.metrics.bump_limiter_breaker_opened();
         drop(state);
         self.health.forget_address();
-        tracing::warn!(
-            why,
-            failures = self.config.failures,
-            "call limiter breaker open: admits send no request until the limiter's health \
-             answer comes back"
-        );
+        match why {
+            Opened::NoAddress => tracing::warn!(
+                "call limiter breaker open: limiter address not known; admits send no request \
+                 until the probe resolves it and the limiter's health answer comes back"
+            ),
+            Opened::Failures => tracing::warn!(
+                failures = self.config.failures,
+                "call limiter breaker open: admits send no request until the limiter's health \
+                 answer comes back"
+            ),
+        }
         self.opened.notify_one();
     }
 

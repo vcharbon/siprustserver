@@ -131,14 +131,19 @@ and a lost release could not be retried.
     health answer runs without a breaker, and a guarded limiter is never
     guarded twice. The limiter's `host:port` is a socket address used as it
     is, or a name resolved on the request path: one lookup at a time, every
-    request meanwhile waiting for it within its own budget. The runner looks
-    the name up once at boot, waiting at most one probe period. A limiter
-    whose address is not known starts its breaker open: admits fail open at
-    once, counted, no call pays a lookup or a timeout, and the probe looks the
-    name up every period. The address found is kept until the breaker opens
-    or a probe fails; both forget it, so the probe reaches a limiter whose
-    name now leads elsewhere. No `LIMITER_URL` runs without a limiter; a
-    configured one is never replaced by none.
+    request meanwhile waiting for it within its own budget, and a lookup
+    outlives the requests that gave up on it. The runner looks the name up
+    once at boot, waiting at most one probe period. A limiter whose address
+    is not known starts its breaker open: admits fail open at once, counted,
+    no call pays a lookup or a timeout, and the probe looks the name up every
+    period. From process start, calls can so stay uncounted for up to the
+    boot wait plus one probe period after the name resolves. The address
+    found is kept until the breaker opens or a probe fails; both forget it,
+    so the probe reaches a limiter whose name now leads elsewhere. A forget
+    leaves the lookup in flight to land and be kept, so a lookup slower than
+    the probe's budget still closes the breaker at the next probe. No
+    `LIMITER_URL` runs without a limiter; a configured one is never replaced
+    by none.
 
 ## Lease, refresh and the replica TTL
 

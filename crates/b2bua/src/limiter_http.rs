@@ -115,7 +115,8 @@ impl HttpCallLimiter {
     }
 
     /// Look the target's name up now, waiting at most `budget`: whether its
-    /// address is known.
+    /// address is known. A lookup still running past `budget` lands later
+    /// and is kept.
     pub async fn lookup(&self, budget: Duration) -> bool {
         tokio::time::timeout(budget, self.endpoint.target.resolve()).await.ok().flatten().is_some()
     }
