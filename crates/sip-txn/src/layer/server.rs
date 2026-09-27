@@ -395,11 +395,12 @@ impl Owner {
         forgotten
     }
 
-    /// Answer every INVITE server transaction of `call_ref` that has sent no
-    /// final with `status` `reason`, through the transaction: under the
-    /// To-tag it names or has bound, to the address the request came from (or,
-    /// for a seed rebuilt without one, the top Via's response target). A seed
-    /// holding no request cannot be answered and is left to its sweep.
+    /// Answer every in-dialog INVITE server transaction of `call_ref` that has
+    /// sent no final with `status` `reason`, through the transaction: under
+    /// the To-tag it names, to the address the request came from (or, for a
+    /// re-INVITE seeded at a takeover, which recorded none, the top Via's
+    /// response target). A seed holding no request cannot be answered and is
+    /// left to its sweep.
     /// Counted; returns how many.
     pub(super) async fn answer_unanswered_invites_of_call(
         &mut self,
@@ -418,7 +419,9 @@ impl Owner {
                 let open = t.role == TxnRole::Server
                     && t.kind == TxnKind::Invite
                     && matches!(t.state, TxnState::Trying | TxnState::Proceeding);
-                let req = t.original_request.clone().filter(|_| open)?;
+                // An out-of-dialog INVITE naming the call in its Request-URI
+                // (a Replaces INVITE, RFC 3891) starts another call.
+                let req = t.original_request.clone().filter(|r| open && r.to().tag().is_some())?;
                 Some((b.clone(), req, t.destination))
             })
             .collect();
@@ -679,8 +682,9 @@ fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
 }
 
-/// Where a response to `req` goes when its source is unknown: the top Via's
-/// response target (RFC 3261 §18.2.2), when it names an IP address.
+/// Where a response to `req` goes when its source is unknown (a re-INVITE
+/// seeded at a takeover): the top Via's response target (RFC 3261 §18.2.2),
+/// when it names an IP address.
 fn via_response_target(req: &SipRequest) -> Option<SocketAddr> {
     let (host, port) = req.top_via().response_target();
     let ip: std::net::IpAddr = host.trim_start_matches('[').trim_end_matches(']').parse().ok()?;

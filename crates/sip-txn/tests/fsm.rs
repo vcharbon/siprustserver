@@ -1488,8 +1488,8 @@ async fn a_released_calls_unanswered_non_invite_transactions_are_forgotten() {
 
 /// At its ended call's release, an INVITE server transaction of the call with
 /// no final is answered through the transaction, which then absorbs the ACK
-/// and stops its Timer G copies. An answered INVITE, a non-INVITE, and
-/// another call's INVITE are untouched.
+/// and stops its Timer G copies. An answered INVITE, a non-INVITE, another
+/// call's INVITE, and an out-of-dialog INVITE naming the call are untouched.
 #[tokio::test(start_paused = true)]
 async fn a_released_calls_unanswered_invites_are_answered_through_their_transactions() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -1500,6 +1500,9 @@ async fn a_released_calls_unanswered_invites_are_answered_through_their_transact
     stack.inject(&call_request("INVITE", answered, "cr1", Some("peer-tag"))).await;
     stack.inject(&call_request("INFO", "z9hG4bK-info", "cr1", Some("callee-tag"))).await;
     stack.inject(&call_request("INVITE", "z9hG4bK-other", "cr2", Some("callee-tag"))).await;
+    // An out-of-dialog INVITE naming the call in its Request-URI (a Replaces
+    // INVITE, RFC 3891) starts another call: it is not this call's to answer.
+    stack.inject(&call_request("INVITE", "z9hG4bK-replaces", "cr1", None)).await;
     elapse_ms(60).await;
     let _ = stack.drain_events();
     let resp = parse_response(&response_bytes(200, "OK", "INVITE", answered, "cr1@u", true));
@@ -1512,7 +1515,7 @@ async fn a_released_calls_unanswered_invites_are_answered_through_their_transact
         .answer_unanswered_invites_of_call("cr1", 481, "Call/Transaction Does Not Exist")
         .await
         .unwrap();
-    assert_eq!(n, 1, "only the open INVITE of cr1 is answered");
+    assert_eq!(n, 1, "only the open in-dialog INVITE of cr1 is answered");
     assert_eq!(stack.txn.metrics().released_unanswered_invites_answered(), 1);
     elapse_ms(60).await;
     let sent = stack.drain_peer();

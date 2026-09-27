@@ -154,8 +154,8 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
-    /// Answer every INVITE server transaction of `call_ref` that has sent no
-    /// final with `status` `reason`; replies with how many.
+    /// Answer every in-dialog INVITE server transaction of `call_ref` that
+    /// has sent no final with `status` `reason`; replies with how many.
     AnswerUnansweredInvitesOfCall {
         call_ref: String,
         status: u16,
@@ -354,9 +354,11 @@ impl TransactionLayer {
     /// The consumer released `call_ref` for good while an INVITE it was
     /// handed still has no final: its 100 Trying stopped the UAC's
     /// retransmissions (RFC 3261 §17.2.1), so nothing would ever answer it.
-    /// Every INVITE server transaction attributed to the call that has sent
-    /// no final is answered `status` `reason` through the transaction, under
-    /// the To-tag it names or has bound, to where the request came from. The
+    /// Every in-dialog INVITE server transaction attributed to the call that
+    /// has sent no final is answered `status` `reason` through the
+    /// transaction, under the To-tag it names, to where the request came
+    /// from. An out-of-dialog INVITE naming the call starts another call and
+    /// is left alone. The
     /// transaction then runs Timer G to its ACK, which it absorbs. Returns
     /// how many were answered.
     pub async fn answer_unanswered_invites_of_call(

@@ -1120,7 +1120,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_forget_refused_total Forget requests the full txn command queue refused; the transaction absorbs its retransmissions until the sweep. Expected 0.\n");
     s.push_str("# TYPE b2bua_txn_forget_refused_total counter\n");
     s.push_str(&format!("b2bua_txn_forget_refused_total {}\n", m.forget_refused()));
-    s.push_str("# HELP b2bua_txn_released_unanswered_invites_answered_total INVITE server transactions with no final answered 481 at their ended call's release (the handler died after the 100 Trying).\n");
+    s.push_str("# HELP b2bua_txn_released_unanswered_invites_answered_total In-dialog INVITEs left without a final at their ended call's release, answered 481 there: a handler that died after the 100 Trying, or a re-INVITE queued behind the call's last turn (whose discard answer then finds it answered).\n");
     s.push_str("# TYPE b2bua_txn_released_unanswered_invites_answered_total counter\n");
     s.push_str(&format!(
         "b2bua_txn_released_unanswered_invites_answered_total {}\n",
