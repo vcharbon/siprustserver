@@ -1195,7 +1195,7 @@ impl B2buaMetrics {
                 self.removals_of_total(class)
             ));
         }
-        s.push_str("# HELP b2bua_dispatch_past_bound_total items queued past a dispatcher bound instead of dropped (depth: the call's queue still full once its waiting items moved in; cap: the global queue cap): a call's release, a reaper verdict, or an event that must not be lost such as a Cancelled\n# TYPE b2bua_dispatch_past_bound_total counter\n");
+        s.push_str("# HELP b2bua_dispatch_past_bound_total items queued past a dispatcher bound instead of dropped (depth: the call's queue still full once its waiting items moved in; cap: the global queue cap): a call's timer fire or a client transaction's outcome most often, else a call's release, a reaper verdict or a Cancelled\n# TYPE b2bua_dispatch_past_bound_total counter\n");
         for bound in [PastBound::Depth, PastBound::Cap] {
             s.push_str(&format!(
                 "b2bua_dispatch_past_bound_total{{bound=\"{}\"}} {}\n",

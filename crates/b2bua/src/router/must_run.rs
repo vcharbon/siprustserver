@@ -130,6 +130,7 @@ mod tests {
     /// of room.
     #[test]
     fn every_timer_fire_waits_past_every_bound() {
+        let ack = call::Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "t".into(), cseq: 1 };
         for timer_type in [
             TimerType::NoAnswer,
             TimerType::SetupTimeout,
@@ -137,7 +138,11 @@ mod tests {
             TimerType::LimiterRefresh,
             TimerType::Keepalive,
             TimerType::KeepaliveTimeout,
+            TimerType::Rung { obligation: ack.clone() },
+            TimerType::RepeatGiveUp { obligation: ack },
             TimerType::TerminatingTimeout,
+            TimerType::ReferSubscriptionExpiry,
+            TimerType::ReferReinviteAnswer,
             TimerType::ReferOverallSafety,
             TimerType::service(call::MachineId::new("svc"), "key"),
         ] {
