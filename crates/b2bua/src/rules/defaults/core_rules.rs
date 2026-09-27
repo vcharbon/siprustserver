@@ -1865,6 +1865,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
         rule(
+            "reaper-overflow",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper::REAPER_TOPIC)
+                .outcome(crate::reaper::OUTCOME_OVERFLOW),
+            |ctx| reap_force_terminal(ctx, "dispatch-overflow"),
+        )
+        .runs_while_terminating(),
+        rule(
             "terminating-safety-timeout",
             &[],
             Match::timer()

@@ -16,8 +16,10 @@ it entirely:
 2. **Queue/cap drop** — a dropped event may be the BYE or timer that was
    supposed to terminate the call; nothing notices. (A dropped non-INVITE
    request is now readmitted on its retransmission and a dropped INVITE
-   answered: `router::unanswered`; a `Cancelled` is queued past the bounds.
-   A request left without a final at a Terminated release is forgotten there.)
+   answered: `router::unanswered`; a `Cancelled` is queued past the bounds,
+   up to a per-call ceiling past which the reaper tears the call down, and a
+   verdict past every bound. A non-INVITE request left without a final when
+   the call ends is forgotten at its release.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is
    itself a losable timer.
 4. **Best-effort CDR** — `BufferedCdrWriter` drops on overflow; a panic before

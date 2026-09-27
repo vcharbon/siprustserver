@@ -107,7 +107,7 @@ pub(super) async fn process_result(
         // caller's INVITE and the hop-by-hop ACK toward the callee leave from the
         // node that took the event, or the peers wedge on Timer B / Timer H.
         emit_outbound(ctx, call_ref, &result, now_ms).await;
-        release_call(ctx, call_ref, ReleaseKind::SelfRelease).await;
+        release_call(ctx, call_ref, ReleaseKind::SelfRelease { ended: true }).await;
         return;
     }
 

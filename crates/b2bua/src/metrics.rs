@@ -61,6 +61,8 @@ struct Inner {
     release_discards: AtomicU64,
     past_bound_depth: AtomicU64,
     past_bound_cap: AtomicU64,
+    overflow_refused: AtomicU64,
+    overflow_depth: std::sync::atomic::AtomicI64,
     invite_discard_answered_queue_full: AtomicU64,
     invite_discard_answered_at_cap: AtomicU64,
     invite_discard_answered_released: AtomicU64,
@@ -403,6 +405,17 @@ impl B2buaMetrics {
     counter!(bump_queue_drop, queue_drops_total, queue_drops);
     counter!(bump_cap_drop, cap_drops_total, cap_drops);
     counter!(bump_release_discard, release_discards_total, release_discards);
+    counter!(bump_overflow_refused, overflow_refused_total, overflow_refused);
+
+    /// Move the gauge of items waiting in per-call overflows by `delta`.
+    pub fn add_overflow_depth(&self, delta: i64) {
+        self.inner.overflow_depth.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Items waiting in per-call overflows, all calls (gauge).
+    pub fn overflow_depth(&self) -> i64 {
+        self.inner.overflow_depth.load(Ordering::Relaxed)
+    }
     counter!(bump_saturation, saturation_total, saturation);
     counter!(bump_creation, creations_total, creations);
     counter!(bump_removal, removals_total, removals);
@@ -1107,7 +1120,7 @@ impl B2buaMetrics {
                 self.removals_of_total(class)
             ));
         }
-        s.push_str("# HELP b2bua_dispatch_past_bound_total items queued past a dispatcher bound instead of dropped (depth: a full per-call queue; cap: the global queue cap): a call's release, or an event that must not be lost such as a Cancelled\n# TYPE b2bua_dispatch_past_bound_total counter\n");
+        s.push_str("# HELP b2bua_dispatch_past_bound_total items queued past a dispatcher bound instead of dropped (depth: the call's queue still full once its waiting items moved in; cap: the global queue cap): a call's release, a reaper verdict, or an event that must not be lost such as a Cancelled\n# TYPE b2bua_dispatch_past_bound_total counter\n");
         for bound in [PastBound::Depth, PastBound::Cap] {
             s.push_str(&format!(
                 "b2bua_dispatch_past_bound_total{{bound=\"{}\"}} {}\n",
@@ -1115,7 +1128,14 @@ impl B2buaMetrics {
                 self.past_bound_of_total(bound)
             ));
         }
-        s.push_str("# HELP b2bua_dispatch_invite_discard_answered_total INVITEs whose handler body was discarded unrun, answered at the discard site (queue_full / at_cap: 500 or 503 with Retry-After; released: 481 in a dialog, 503 otherwise)\n# TYPE b2bua_dispatch_invite_discard_answered_total counter\n");
+        s.push_str("# HELP b2bua_dispatch_overflow_refused_total past-bounds items turned away at a call's overflow ceiling (as many as its queue depth); the call is torn down through the reaper\n# TYPE b2bua_dispatch_overflow_refused_total counter\n");
+        s.push_str(&format!(
+            "b2bua_dispatch_overflow_refused_total {}\n",
+            self.overflow_refused_total()
+        ));
+        s.push_str("# HELP b2bua_dispatch_overflow_depth items waiting past a full per-call queue, all calls\n# TYPE b2bua_dispatch_overflow_depth gauge\n");
+        s.push_str(&format!("b2bua_dispatch_overflow_depth {}\n", self.overflow_depth()));
+        s.push_str("# HELP b2bua_dispatch_invite_discard_answered_total INVITEs whose handler body was discarded unrun, answered at the discard site (in a dialog: 481 behind a terminated call's release, else 500 with Retry-After — no room, a self-release, an orphan release; out of a dialog: 503 with Retry-After)\n# TYPE b2bua_dispatch_invite_discard_answered_total counter\n");
         for why in DISCARD_SITES {
             s.push_str(&format!(
                 "b2bua_dispatch_invite_discard_answered_total{{site=\"{}\"}} {}\n",

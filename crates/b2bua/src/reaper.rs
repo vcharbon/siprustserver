@@ -13,7 +13,8 @@
 //! There is **no second teardown vocabulary**: every reaper verdict is a
 //! synthetic `CallEvent::InternalEvent { topic: "reaper" }` down the existing
 //! re-entry channel, through the per-call FIFO and per-call lock, handled by
-//! two CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`). Only the
+//! three CORE_LAYER rules (`reaper-stale`, `reaper-fatal-error`,
+//! `reaper-overflow`). Only the
 //! strike-2 **discharge** bypasses the *rules* stage (rules are the thing that
 //! failed); it still runs `finalize → enforce → process_result` — the
 //! [`ObligationSet`](crate::obligations::ObligationSet) derivation, the CDR,
@@ -25,7 +26,7 @@
 //! Elements are structurally absent from the live map. The sweep adds no
 //! time-based input to HA reconciliation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::helpers::record_termination;
@@ -49,6 +50,11 @@ pub const OUTCOME_STALE: &str = "stale";
 /// Strike-1 verdict: a handler body for this call panicked. Handled by the
 /// CORE_LAYER `reaper-fatal-error` rule.
 pub const OUTCOME_FATAL: &str = "fatal-error";
+/// Overflow verdict: the call's dispatch overflow reached its ceiling — more
+/// must-run events arrive than the call consumes. Handled by the CORE_LAYER
+/// `reaper-overflow` rule, re-sent each sweep with the stale escalation
+/// until the call is gone.
+pub const OUTCOME_OVERFLOW: &str = "overflow";
 /// Strike-2 verdict: the rules path itself failed (a second panic, or stale
 /// verdicts that never took effect). Deliberately has NO rule — the router's
 /// discharge branch forces the last persisted snapshot terminal and runs it
@@ -82,6 +88,9 @@ pub struct Reaper {
     strikes: Arc<Mutex<HashMap<String, u32>>>,
     /// Sweep-verdict attempts per call_ref (the abort/discharge escalation).
     attempts: Arc<Mutex<HashMap<String, u32>>>,
+    /// Calls whose dispatch overflow reached its ceiling: swept like stale
+    /// ones until gone. Pruned against the live map each sweep.
+    condemned: Arc<Mutex<HashSet<String>>>,
     reentry_tx: mpsc::UnboundedSender<CallEvent>,
     metrics: B2buaMetrics,
 }
@@ -103,6 +112,7 @@ impl Reaper {
             idle_max_ms,
             strikes: Arc::new(Mutex::new(HashMap::new())),
             attempts: Arc::new(Mutex::new(HashMap::new())),
+            condemned: Arc::new(Mutex::new(HashSet::new())),
             reentry_tx,
             metrics,
         }
@@ -126,6 +136,19 @@ impl Reaper {
             };
             let outcome = if strike == 1 { OUTCOME_FATAL } else { OUTCOME_DISCHARGE };
             this.send_verdict(call_ref, outcome, serde_json::json!({ "strike": strike }));
+        })
+    }
+
+    /// The dispatcher-facing overflow hook: a call flooded past its overflow
+    /// ceiling is condemned — one `overflow` verdict now, then one per sweep
+    /// with the stale escalation (abort, discharge) until it is gone. Once
+    /// per call, so a flood sends one verdict, not one per refused job.
+    pub fn overflow_hook(&self) -> crate::dispatch::OverflowHook {
+        let this = self.clone();
+        Arc::new(move |call_ref: &str| {
+            if this.enabled && this.condemned.lock().unwrap().insert(call_ref.to_string()) {
+                this.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
+            }
         })
     }
 
@@ -181,10 +204,28 @@ impl Reaper {
                 serde_json::json!({ "watermark": watermark }),
             );
         }
+        let condemned: Vec<String> = self.condemned.lock().unwrap().iter().cloned().collect();
+        for call_ref in condemned.into_iter().filter(|r| state.contains(r)) {
+            let attempt = {
+                let mut attempts = self.attempts.lock().unwrap();
+                let a = attempts.entry(call_ref.clone()).or_insert(0);
+                *a += 1;
+                *a
+            };
+            if attempt > ESCALATE_DISCHARGE_AFTER {
+                self.send_verdict(&call_ref, OUTCOME_DISCHARGE, serde_json::json!({}));
+                continue;
+            }
+            if attempt > ESCALATE_ABORT_AFTER {
+                dispatcher.abort_in_flight(&call_ref);
+            }
+            self.send_verdict(&call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
+        }
         // Prune escalation state for calls no longer resident (normal
         // termination, reap completed, self-release) — bounded by live calls.
         self.strikes.lock().unwrap().retain(|r, _| state.contains(r));
         self.attempts.lock().unwrap().retain(|r, _| state.contains(r));
+        self.condemned.lock().unwrap().retain(|r| state.contains(r));
     }
 
     fn send_verdict(&self, call_ref: &str, outcome: &str, payload: serde_json::Value) {
@@ -261,6 +302,59 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::B2buaConfig;
+    use crate::initial_invite::build_initial_call;
+    use crate::router::test_support;
+    use crate::store::InMemoryCallStore;
+
+    /// The outcomes of the verdicts sent so far.
+    fn outcomes(rx: &mut mpsc::UnboundedReceiver<CallEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(CallEvent::InternalEvent { outcome, .. }) = rx.try_recv() {
+            out.push(outcome);
+        }
+        out
+    }
+
+    /// A call flooded past its dispatch overflow is condemned once however
+    /// many refusals report it, then swept every pass with the stale ladder
+    /// — the in-flight body aborted, then the discharge — until it is gone.
+    #[tokio::test]
+    async fn an_overflowing_call_is_condemned_once_and_swept_until_gone() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let metrics = B2buaMetrics::new();
+        let reaper = Reaper::new(true, 1, 3_600_000, tx, metrics.clone());
+        let state = CallState::new(Arc::new(InMemoryCallStore::new()), "w0", metrics.clone());
+        let src = "10.0.0.9:5060".parse().unwrap();
+        let invite = test_support::invite("w0", "w1", "flood");
+        let call_ref = state.create(build_initial_call(&invite, src, &B2buaConfig::default(), 0));
+        let dispatcher = PerCallDispatcher::new(1, 1, 8, metrics.clone());
+
+        let hook = reaper.overflow_hook();
+        hook(&call_ref);
+        hook(&call_ref);
+        assert_eq!(outcomes(&mut rx), vec![OUTCOME_OVERFLOW], "one verdict per condemned call");
+
+        for _ in 0..5 {
+            reaper.maybe_sweep(&state, &dispatcher, 0);
+        }
+        assert_eq!(
+            outcomes(&mut rx),
+            vec![
+                OUTCOME_OVERFLOW,
+                OUTCOME_OVERFLOW,
+                OUTCOME_OVERFLOW,
+                OUTCOME_OVERFLOW,
+                OUTCOME_DISCHARGE
+            ]
+        );
+
+        state.remove(&call_ref);
+        reaper.maybe_sweep(&state, &dispatcher, 0);
+        assert!(outcomes(&mut rx).is_empty(), "a gone call is no longer swept");
+        hook(&call_ref);
+        assert_eq!(outcomes(&mut rx), vec![OUTCOME_OVERFLOW], "its condemnation was pruned");
+    }
 
     #[test]
     fn verdict_confirm_matrix() {

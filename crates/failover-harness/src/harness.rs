@@ -36,6 +36,7 @@ use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
+use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
@@ -172,6 +173,8 @@ pub struct ReplicatedB2buaSut {
     /// of this node (initial spawn AND each reboot), so a tuned knob survives
     /// crash/reboot cycles. Default no-op.
     tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The callflow services each incarnation registers.
+    services: fn() -> Vec<ServiceDef>,
     /// The cluster's views ledger, shared with the harness: this node registers
     /// each incarnation it spawns and records its own lifecycle beliefs here.
     views: Arc<ViewLedger>,
@@ -762,9 +765,7 @@ impl ReplicatedB2buaSut {
             sip_addr: self.sip_addr,
             decision: self.decision.clone(),
             limiter: self.limiter.clone(),
-            // No callflow services on the replicating path (the plain `spawn`
-            // path before was `spawn_with_services(.., vec![])`).
-            services: Vec::new(),
+            services: (self.services)(),
             outbound_proxy: self.outbound_proxy.clone(),
             replication,
             clock: self.clock.clone(),
@@ -784,8 +785,7 @@ impl ReplicatedB2buaSut {
             overload: Some(b2bua::overload::OverloadSignal::new(Arc::new(
                 b2bua::overload::simulated().0,
             ))),
-            // The replicating failover path registers no callflow services, so
-            // no `ServiceHttpRequest` is ever fired here.
+            // No service here fires a `ServiceHttpRequest`.
             adaptation_http: None,
             // Default composition (every built-in CORE machine, incl. the
             // `refer_transfer` seed) — the failover harness does not opt out.
@@ -1002,6 +1002,10 @@ pub struct FailoverHarness {
     /// (after the parity defaults) — set via
     /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
     worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The callflow services every worker spawned after
+    /// [`with_worker_services`](Self::with_worker_services) registers, on each
+    /// of its incarnations. None by default.
+    worker_services: fn() -> Vec<ServiceDef>,
     /// The views ledger: every observer's belief about every worker, written by
     /// the cluster primitives and by the per-chunk sampler in
     /// [`advance`](Self::advance). Shared with each worker SUT.
@@ -1149,6 +1153,7 @@ impl FailoverHarness {
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
             worker_tune: Arc::new(|_| {}),
+            worker_services: Vec::new,
             views: ViewLedger::new(clock, event_seq_for_views),
             worker_specs: HashMap::new(),
             sip_cut,
@@ -1166,6 +1171,14 @@ impl FailoverHarness {
         tune: impl Fn(&mut b2bua::B2buaConfig) + Send + Sync + 'static,
     ) -> Self {
         self.worker_tune = Arc::new(tune);
+        self
+    }
+
+    /// Register the services `services` builds on every worker spawned from
+    /// now on, and on each of its incarnations (the failover twin of
+    /// `B2buaSutBuilder::services`).
+    pub fn with_worker_services(mut self, services: fn() -> Vec<ServiceDef>) -> Self {
+        self.worker_services = services;
         self
     }
 
@@ -1586,6 +1599,7 @@ impl FailoverHarness {
             decision: spec.decision.clone(),
             limiter: spec.limiter.clone(),
             tune: self.worker_tune.clone(),
+            services: self.worker_services,
             views: self.views.clone(),
             alive: Arc::new(AtomicBool::new(true)),
             system: b2bua::capacity::simulated().1,

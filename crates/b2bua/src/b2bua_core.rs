@@ -337,7 +337,8 @@ impl B2buaCore {
             config.per_call_queue_cap,
             metrics.clone(),
         )
-        .with_failure_hook(reaper.failure_hook());
+        .with_failure_hook(reaper.failure_hook())
+        .with_overflow_hook(reaper.overflow_hook());
         // Compose the registered services' state-gated rules above the core
         // defaults (ADR-0016). With an empty `services` this is exactly
         // `default_rules()` — behaviour-preserving. Note: in-tree `transfer` rides

@@ -58,18 +58,31 @@ pub enum Discard {
 /// to run in the body's place, which the discarding site awaits.
 pub type DiscardHook = Box<dyn FnOnce(Discard) -> DispatchBody + Send>;
 
+/// How far past the dispatcher's bounds a job may wait instead of being
+/// discarded for want of room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Discarded when the call's queue is full or the global cap is reached.
+    Bounded,
+    /// Waits past a full queue and past the cap, up to the call's overflow
+    /// ceiling.
+    PastBounds,
+    /// Waits past every bound, the overflow ceiling included.
+    Always,
+}
+
 /// A body offered to [`PerCallDispatcher::dispatch`], with what becomes of it
 /// if it never runs.
 pub struct Job {
     body: DispatchBody,
     on_discard: Option<DiscardHook>,
-    past_bounds: bool,
+    admission: Admission,
 }
 
 impl Job {
-    /// A body discarded silently when there is no room for it.
+    /// A body discarded when there is no room for it.
     pub fn new(body: DispatchBody) -> Self {
-        Self { body, on_discard: None, past_bounds: false }
+        Self { body, on_discard: None, admission: Admission::Bounded }
     }
 
     /// `hook` runs in place of the body if it is discarded unrun; dropped
@@ -80,10 +93,18 @@ impl Job {
     }
 
     /// Queued past a full per-call queue and past the global cap, in FIFO
-    /// order; discarded only behind the call's release. The caller bounds how
-    /// many such jobs it offers.
+    /// order, while the call's overflow holds fewer jobs than its queue
+    /// depth. Past that ceiling it is discarded as for a full queue and the
+    /// overflow hook hears the call. A release discards it like any job.
     pub fn past_bounds(mut self) -> Self {
-        self.past_bounds = true;
+        self.admission = Admission::PastBounds;
+        self
+    }
+
+    /// Queued past every bound, the overflow ceiling included; discarded only
+    /// behind the call's release. For a producer that paces itself.
+    pub fn past_all_bounds(mut self) -> Self {
+        self.admission = Admission::Always;
         self
     }
 
@@ -102,27 +123,56 @@ enum DispatchItem {
 }
 
 impl DispatchItem {
-    /// Never discarded for want of room: a release, or a past-bounds job.
-    fn is_past_bounds(&self) -> bool {
+    fn admission(&self) -> Admission {
         match self {
-            DispatchItem::Event(job) => job.past_bounds,
-            DispatchItem::Poison(_) => true,
+            DispatchItem::Event(job) => job.admission,
+            DispatchItem::Poison(_) => Admission::Always,
         }
     }
 }
 
+/// Why [`PerCallQueue::push`] turned an item away.
+enum Refusal {
+    /// No room; `ceiling` when a past-bounds job found the overflow full too.
+    Full { ceiling: bool },
+    /// The call's release is already queued; the item would be drained with
+    /// it.
+    Released(RemovalClass),
+}
+
 /// A call's queue: the bounded channel its worker reads, then the items
 /// admitted past it. Every item in `overflow` is younger than every item in
-/// the channel: while `overflow` holds anything, new items join it (or are
-/// discarded), and the worker takes from it only once the channel is empty.
+/// the channel: overflow items move to the channel oldest first as it frees,
+/// new items join the overflow only while the channel stays full, and the
+/// worker takes from the overflow only once the channel is empty.
 struct PerCallQueue {
     tx: mpsc::Sender<DispatchItem>,
     overflow: VecDeque<DispatchItem>,
+    /// The class of the release queued on this call, once one is: every later
+    /// item would be drained behind it.
+    released: Option<RemovalClass>,
 }
 
 impl PerCallQueue {
-    /// Queue `item` in FIFO order; a bounded item finding no room comes back.
-    fn push(&mut self, item: DispatchItem, metrics: &B2buaMetrics) -> Result<(), DispatchItem> {
+    fn new(tx: mpsc::Sender<DispatchItem>) -> Self {
+        Self { tx, overflow: VecDeque::new(), released: None }
+    }
+
+    /// Queue `item` in FIFO order, or hand it back with why not. `ceiling`
+    /// caps the past-bounds jobs the overflow holds.
+    fn push(
+        &mut self,
+        item: DispatchItem,
+        ceiling: usize,
+        metrics: &B2buaMetrics,
+    ) -> Result<(), (DispatchItem, Refusal)> {
+        if let Some(class) = self.released {
+            return Err((item, Refusal::Released(class)));
+        }
+        if let DispatchItem::Poison(class) = item {
+            self.released = Some(class);
+        }
+        self.refill(metrics);
         let item = if self.overflow.is_empty() {
             match self.tx.try_send(item) {
                 Ok(()) => return Ok(()),
@@ -132,12 +182,31 @@ impl PerCallQueue {
         } else {
             item
         };
-        if !item.is_past_bounds() {
-            return Err(item);
+        match item.admission() {
+            Admission::Bounded => return Err((item, Refusal::Full { ceiling: false })),
+            Admission::PastBounds if self.overflow.len() >= ceiling => {
+                return Err((item, Refusal::Full { ceiling: true }))
+            }
+            _ => {}
         }
         metrics.bump_past_bound(PastBound::Depth);
+        metrics.add_overflow_depth(1);
         self.overflow.push_back(item);
         Ok(())
+    }
+
+    /// Move overflow items into the channel's free slots, oldest first.
+    fn refill(&mut self, metrics: &B2buaMetrics) {
+        while let Some(front) = self.overflow.pop_front() {
+            match self.tx.try_send(front) {
+                Ok(()) => metrics.add_overflow_depth(-1),
+                Err(mpsc::error::TrySendError::Full(front))
+                | Err(mpsc::error::TrySendError::Closed(front)) => {
+                    self.overflow.push_front(front);
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -148,6 +217,19 @@ pub enum PastBound {
     Depth,
     /// The global queue cap was reached.
     Cap,
+}
+
+/// Hears a call whose overflow ceiling turned a past-bounds job away: more
+/// must-run events are arriving than the call ever consumes. The call reaper
+/// installs the only production hook (it tears the call down).
+pub type OverflowHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// What [`PerCallDispatcher::enqueue`] did with a job.
+enum Enqueued {
+    Queued,
+    Discarded(Discard, Job),
+    /// Discarded at the overflow ceiling.
+    Overflowed(Job),
 }
 
 type QueueMap = Arc<Mutex<HashMap<String, PerCallQueue>>>;
@@ -162,6 +244,7 @@ pub struct PerCallDispatcher {
     cap: usize,
     metrics: B2buaMetrics,
     failure_hook: Option<FailureHook>,
+    overflow_hook: Option<OverflowHook>,
     /// The currently in-flight body per call (FIFO ⇒ at most one) — the
     /// reaper's [`abort_in_flight`](Self::abort_in_flight) target.
     inflight: InflightMap,
@@ -176,6 +259,7 @@ impl PerCallDispatcher {
             cap: cap.max(1),
             metrics,
             failure_hook: None,
+            overflow_hook: None,
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -184,6 +268,13 @@ impl PerCallDispatcher {
     /// two-strike escalation — ADR-0020 X6).
     pub fn with_failure_hook(mut self, hook: FailureHook) -> Self {
         self.failure_hook = Some(hook);
+        self
+    }
+
+    /// Install the overflow-ceiling hook (builder-style; the call reaper's
+    /// teardown of a call flooded past its overflow).
+    pub fn with_overflow_hook(mut self, hook: OverflowHook) -> Self {
+        self.overflow_hook = Some(hook);
         self
     }
 
@@ -198,40 +289,57 @@ impl PerCallDispatcher {
         }
     }
 
-    /// Enqueue `job` for `call_ref`, lazily creating the queue + worker. A
-    /// bounded job finding the per-call queue full or the global cap reached
-    /// is discarded unrun and counted, and its hook is awaited here.
+    /// Enqueue `job` for `call_ref`, lazily creating the queue + worker. A job
+    /// finding no room — the per-call queue full, the global cap reached, the
+    /// call's release already queued — is discarded unrun and counted, and its
+    /// hook is awaited here.
     pub async fn dispatch(&self, call_ref: &str, job: Job) {
-        if let Some((why, job)) = self.enqueue(call_ref, job) {
-            job.discard(why).await;
+        match self.enqueue(call_ref, job) {
+            Enqueued::Queued => {}
+            Enqueued::Discarded(why, job) => job.discard(why).await,
+            Enqueued::Overflowed(job) => {
+                if let Some(hook) = &self.overflow_hook {
+                    hook(call_ref);
+                }
+                job.discard(Discard::QueueFull).await;
+            }
         }
     }
 
     /// The synchronous half of [`dispatch`](Self::dispatch), under the map
-    /// lock: the job queued, or handed back with why it was not.
-    fn enqueue(&self, call_ref: &str, job: Job) -> Option<(Discard, Job)> {
+    /// lock.
+    fn enqueue(&self, call_ref: &str, job: Job) -> Enqueued {
         let mut map = self.queues.lock().unwrap();
         if let Some(q) = map.get_mut(call_ref) {
-            return match q.push(DispatchItem::Event(job), &self.metrics) {
-                Ok(()) => None,
-                Err(DispatchItem::Event(job)) => {
+            return match q.push(DispatchItem::Event(job), self.depth, &self.metrics) {
+                Ok(()) => Enqueued::Queued,
+                Err((DispatchItem::Event(job), Refusal::Full { ceiling: false })) => {
                     self.metrics.bump_queue_drop();
-                    Some((Discard::QueueFull, job))
+                    Enqueued::Discarded(Discard::QueueFull, job)
                 }
-                Err(DispatchItem::Poison(_)) => unreachable!("an event was pushed"),
+                Err((DispatchItem::Event(job), Refusal::Full { ceiling: true })) => {
+                    self.metrics.bump_queue_drop();
+                    self.metrics.bump_overflow_refused();
+                    Enqueued::Overflowed(job)
+                }
+                Err((DispatchItem::Event(job), Refusal::Released(class))) => {
+                    self.metrics.bump_release_discard();
+                    Enqueued::Discarded(Discard::Released(class), job)
+                }
+                Err((DispatchItem::Poison(_), _)) => unreachable!("an event was pushed"),
             };
         }
         if map.len() >= self.cap {
-            if !job.past_bounds {
+            if job.admission == Admission::Bounded {
                 self.metrics.bump_cap_drop();
-                return Some((Discard::AtCap, job));
+                return Enqueued::Discarded(Discard::AtCap, job);
             }
             self.metrics.bump_past_bound(PastBound::Cap);
         }
         let (tx, rx) = mpsc::channel(self.depth);
         // Send before spawning the worker: capacity is fresh so this can't fail.
         let _ = tx.try_send(DispatchItem::Event(job));
-        map.insert(call_ref.to_string(), PerCallQueue { tx, overflow: VecDeque::new() });
+        map.insert(call_ref.to_string(), PerCallQueue::new(tx));
         self.metrics.bump_creation();
         tokio::spawn(worker(
             call_ref.to_string(),
@@ -242,17 +350,17 @@ impl PerCallDispatcher {
             self.failure_hook.clone(),
             self.inflight.clone(),
         ));
-        None
+        Enqueued::Queued
     }
 
     /// Signal the worker for `call_ref` to drain and exit (call eviction),
     /// after every item already queued — a full queue included. The first
-    /// poison the worker dequeues names the removal's class; a later one (a
-    /// release by an event queued ahead of it) is discarded with the queue.
+    /// release names the removal's class; every later item, a second release
+    /// included, is discarded as behind it.
     pub fn enqueue_poison(&self, call_ref: &str, class: RemovalClass) {
         let mut map = self.queues.lock().unwrap();
         if let Some(q) = map.get_mut(call_ref) {
-            let _ = q.push(DispatchItem::Poison(class), &self.metrics);
+            let _ = q.push(DispatchItem::Poison(class), self.depth, &self.metrics);
         }
     }
 
@@ -286,6 +394,7 @@ async fn next_item(
     call_ref: &str,
     rx: &mut mpsc::Receiver<DispatchItem>,
     queues: &QueueMap,
+    metrics: &B2buaMetrics,
 ) -> Option<DispatchItem> {
     if let Ok(item) = rx.try_recv() {
         return Some(item);
@@ -294,7 +403,9 @@ async fn next_item(
         let mut map = queues.lock().unwrap();
         match rx.try_recv() {
             Ok(item) => Some(item),
-            Err(_) => map.get_mut(call_ref).and_then(|q| q.overflow.pop_front()),
+            Err(_) => map.get_mut(call_ref).and_then(|q| q.overflow.pop_front()).inspect(|_| {
+                metrics.add_overflow_depth(-1);
+            }),
         }
     };
     match parked {
@@ -315,31 +426,18 @@ async fn worker(
 ) {
     // The map holds the only sender until the poison arm removes it, so the
     // worker exits through that arm; `rx` never closes while it loops.
-    while let Some(item) = next_item(&call_ref, &mut rx, &queues).await {
+    while let Some(item) = next_item(&call_ref, &mut rx, &queues, &metrics).await {
         match item {
             DispatchItem::Poison(c) => {
-                // The entry leaves the map first, so no `dispatch` can land in
-                // this queue after the drain: every body queued behind the
-                // release is counted and discarded unrun, its hook heard, and
-                // a later event for the call_ref starts a fresh queue.
+                // Nothing is queued behind a release: `push` turns every later
+                // item away as `Released`. The entry leaves the map, so a
+                // later event for the call_ref starts a fresh queue.
                 inflight.lock().unwrap().remove(&call_ref);
-                let overflow = queues
-                    .lock()
-                    .unwrap()
-                    .remove(&call_ref)
-                    .map(|q| q.overflow)
-                    .unwrap_or_default();
-                let mut behind = Vec::new();
-                while let Ok(item) = rx.try_recv() {
-                    behind.push(item);
-                }
-                behind.extend(overflow);
-                for item in behind {
-                    if let DispatchItem::Event(job) = item {
-                        metrics.bump_release_discard();
-                        job.discard(Discard::Released(c)).await;
-                    }
-                }
+                let left = queues.lock().unwrap().remove(&call_ref);
+                debug_assert!(
+                    left.is_none_or(|q| q.overflow.is_empty()) && rx.try_recv().is_err(),
+                    "an item queued behind a release"
+                );
                 metrics.bump_removal_of(c);
                 return;
             }
@@ -554,9 +652,23 @@ mod tests {
         panic!("the queue never drained");
     }
 
+    /// A body that records `label`, then waits for the returned gate.
+    fn gated(
+        order: &Arc<Mutex<Vec<&'static str>>>,
+        label: &'static str,
+    ) -> (DispatchBody, Arc<Notify>) {
+        let (gate, order) = (Arc::new(Notify::new()), order.clone());
+        let g = gate.clone();
+        let body: DispatchBody = Box::pin(async move {
+            order.lock().unwrap().push(label);
+            g.notified().await;
+        });
+        (body, gate)
+    }
+
     /// A past-bounds job finding the queue full waits past it and runs in
-    /// FIFO order; a bounded job offered behind it is discarded and its hook
-    /// hears why, even once the channel has room again.
+    /// FIFO order; a bounded job offered while the channel is still full is
+    /// discarded and its hook hears why.
     #[tokio::test]
     async fn a_past_bounds_job_waits_past_a_full_queue_in_order() {
         let metrics = B2buaMetrics::new();
@@ -566,6 +678,7 @@ mod tests {
         let gate = park(&d).await;
         d.dispatch("c", Job::new(record(&order, "queued"))).await;
         d.dispatch("c", Job::new(record(&order, "past")).past_bounds()).await;
+        assert_eq!(metrics.overflow_depth(), 1);
         d.dispatch("c", Job::new(record(&order, "late")).on_discard(recording_hook(&heard))).await;
         assert_eq!(metrics.past_bound_of_total(PastBound::Depth), 1);
         assert_eq!(metrics.queue_drops_total(), 1);
@@ -576,26 +689,106 @@ mod tests {
         drained(&d).await;
         assert_eq!(*order.lock().unwrap(), vec!["queued", "past"]);
         assert_eq!(metrics.release_discards_total(), 0);
+        assert_eq!(metrics.overflow_depth(), 0);
     }
 
-    /// While a job waits past the full queue, the channel frees as the worker
-    /// runs; a later past-bounds job still queues behind the first, never
-    /// ahead of it.
+    /// The worker has emptied the channel and is held on a body while a job
+    /// still waits in the overflow. A new bounded job is not refused for it:
+    /// the waiting job moves into the channel first, the new one follows,
+    /// and both run in their order.
     #[tokio::test]
-    async fn past_bounds_jobs_keep_their_order_as_the_channel_frees() {
-        let d = PerCallDispatcher::new(1, 1, 1024, B2buaMetrics::new());
+    async fn an_overflowed_job_moves_into_the_freed_channel_ahead_of_a_new_one() {
+        let metrics = B2buaMetrics::new();
+        let d = PerCallDispatcher::new(1, 2, 1024, metrics.clone());
         let order = Arc::new(Mutex::new(Vec::new()));
         let gate = park(&d).await;
-        d.dispatch("c", Job::new(record(&order, "a"))).await;
-        d.dispatch("c", Job::new(record(&order, "b")).past_bounds()).await;
+        let (held, release_held) = gated(&order, "held");
+        d.dispatch("c", Job::new(record(&order, "first"))).await;
+        d.dispatch("c", Job::new(held)).await;
+        d.dispatch("c", Job::new(record(&order, "waiting")).past_bounds()).await;
+        assert_eq!(metrics.overflow_depth(), 1);
+
         gate.notify_one();
-        tokio::task::yield_now().await;
-        d.dispatch("c", Job::new(record(&order, "c")).past_bounds()).await;
-        d.dispatch("c", Job::new(record(&order, "d"))).await;
+        while order.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        // The channel is empty, the worker is inside `held`, `waiting` is in
+        // the overflow.
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        d.dispatch("c", Job::new(record(&order, "new")).on_discard(recording_hook(&heard))).await;
+        assert!(heard.lock().unwrap().is_empty(), "a freed channel slot takes the new job");
+        assert_eq!(metrics.overflow_depth(), 0);
+
+        release_held.notify_one();
         d.enqueue_poison("c", RemovalClass::Terminated);
         drained(&d).await;
-        let order = order.lock().unwrap().clone();
-        assert_eq!(&order[..3], &["a", "b", "c"], "FIFO holds across the overflow");
+        assert_eq!(*order.lock().unwrap(), vec!["first", "held", "waiting", "new"]);
+    }
+
+    /// A release parked in the overflow: a job offered after it is turned
+    /// away as behind the release, not as for a full queue.
+    #[tokio::test]
+    async fn a_job_behind_a_parked_release_hears_the_release() {
+        let metrics = B2buaMetrics::new();
+        let d = PerCallDispatcher::new(1, 1, 1024, metrics.clone());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        d.dispatch("c", Job::new(record(&order, "queued"))).await;
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        assert_eq!(metrics.overflow_depth(), 1, "the release waits past the full channel");
+        d.dispatch("c", Job::new(record(&order, "behind")).on_discard(recording_hook(&heard)))
+            .await;
+        assert_eq!(*heard.lock().unwrap(), vec![Discard::Released(RemovalClass::Terminated)]);
+        assert_eq!(metrics.queue_drops_total(), 0);
+        assert_eq!(metrics.release_discards_total(), 1);
+
+        gate.notify_one();
+        drained(&d).await;
+        assert_eq!(*order.lock().unwrap(), vec!["queued"]);
+    }
+
+    /// A stalled call flooded with past-bounds jobs: its overflow holds at
+    /// most its queue depth of them, every one past that is discarded as
+    /// for a full queue and the overflow hook hears the call each time. A
+    /// job that waits past every bound is still queued.
+    #[tokio::test]
+    async fn a_flood_of_past_bounds_jobs_stops_at_the_overflow_ceiling() {
+        let metrics = B2buaMetrics::new();
+        let condemned = Arc::new(Mutex::new(Vec::new()));
+        let c = condemned.clone();
+        let d = PerCallDispatcher::new(1, 2, 1024, metrics.clone()).with_overflow_hook(Arc::new(
+            move |call_ref: &str| c.lock().unwrap().push(call_ref.to_string()),
+        ));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        for _ in 0..1000 {
+            d.dispatch(
+                "c",
+                Job::new(record(&order, "flood")).past_bounds().on_discard(recording_hook(&heard)),
+            )
+            .await;
+            assert!(metrics.overflow_depth() <= 2, "the overflow stays at its ceiling");
+        }
+        // Two in the channel, two in the overflow; the rest turned away.
+        assert_eq!(metrics.overflow_depth(), 2);
+        assert_eq!(metrics.overflow_refused_total(), 996);
+        assert_eq!(metrics.queue_drops_total(), 996);
+        assert_eq!(heard.lock().unwrap().len(), 996);
+        assert!(heard.lock().unwrap().iter().all(|w| *w == Discard::QueueFull));
+        assert_eq!(condemned.lock().unwrap().len(), 996);
+        assert!(condemned.lock().unwrap().iter().all(|r| r == "c"));
+
+        d.dispatch("c", Job::new(record(&order, "verdict")).past_all_bounds()).await;
+        assert_eq!(metrics.overflow_depth(), 3, "past every bound, the ceiling included");
+
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
+        assert_eq!(order.lock().unwrap().len(), 5);
+        assert_eq!(order.lock().unwrap().last(), Some(&"verdict"));
+        assert_eq!(metrics.overflow_depth(), 0);
     }
 
     /// At the global cap a bounded job for a new call is discarded (its hook
@@ -621,9 +814,9 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec!["past"]);
     }
 
-    /// Behind a release every job is discarded, a past-bounds one included,
-    /// and each hook hears the release's class; a job that ran never hears
-    /// its hook.
+    /// Every job offered after a release is discarded, a past-bounds one
+    /// included, and its hook hears the release's class; a job that ran never
+    /// hears its hook.
     #[tokio::test]
     async fn jobs_behind_a_release_hear_it() {
         let metrics = B2buaMetrics::new();

@@ -24,11 +24,16 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use b2bua::rules::{
+    Match, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef, ServiceSeed,
+    SERVICE_LAYER,
+};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
 };
 use scenario_harness::{Agent, Dialog};
+use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
@@ -428,5 +433,86 @@ async fn a_late_response_naming_a_released_takeover_copy_is_dropped() {
     }
     settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
     assert_one_hydration_then_a_refusal(&log);
+    drop(proxy);
+}
+
+fn no_init(_: &RuleCall) -> Option<ServiceSeed> {
+    None
+}
+
+/// Outranks the core INFO relay and panics: the handler dies before the INFO
+/// is answered or relayed.
+fn panic_on_info(_: &RuleContext) -> Option<RuleHandleResult> {
+    panic!("probe: handler panic on INFO");
+}
+
+fn panic_on_info_services() -> Vec<ServiceDef> {
+    fn rules() -> Vec<RuleDefinition> {
+        vec![RuleDefinition::core(
+            "probe-panic-on-info",
+            SERVICE_LAYER,
+            &[],
+            Match::request().method("INFO"),
+            panic_on_info,
+        )]
+    }
+    vec![ServiceDef { id: "probe-panic-info", init: no_init, rules }]
+}
+
+/// A **request whose handler died on the takeover copy**: the caller's INFO
+/// takes the call over on the survivor and its handler panics; the reaper
+/// forces the copy terminal and the survivor sheds it with the INFO still
+/// unanswered. The ended copy forgets that transaction, so the caller's
+/// retransmission is refused 481 like any request naming the released copy,
+/// instead of being absorbed until the caller's Timer F.
+#[tokio::test(start_paused = true)]
+async fn an_info_whose_handler_died_on_the_takeover_copy_draws_481_on_its_retransmission() {
+    let mut fh = FailoverHarness::new("released-copy-info-handler-died", &["b1", "b2"])
+        .with_worker_services(panic_on_info_services);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+
+    let (mut dialog, mut bob_dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
+    {
+        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    }
+
+    // ── The caller's INFO takes the call over; its handler dies ─────────────
+    let (mut info, info_req) = dialog
+        .send_request(InDialogMethod::Info)
+        .try_send_with_request()
+        .await
+        .expect("the INFO leaves");
+    fh.advance(Duration::from_millis(500)).await;
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert!(
+        fh.settle_terminal(async || !survivor.serves(&call_ref)).await,
+        "the reaper forces the copy terminal and the survivor sheds it",
+    );
+    assert_eq!(survivor.metrics().handler_panics_total(), 1);
+
+    // ── The caller's Timer E copy of the INFO ───────────────────────────────
+    alice.try_send_datagram(info_req.image(), proxy.addr()).await.expect("the INFO leaves");
+    fh.advance(Duration::from_millis(300)).await;
+    info.try_expect_tolerating(481, &["OPTIONS"])
+        .await
+        .expect("the retransmitted INFO is refused, not absorbed by a transaction");
+
+    // ── Both sides close the dialog the cluster no longer serves ────────────
+    let mut bye_a = dialog.bye().await;
+    bye_a.expect_tolerating(481, &["OPTIONS"]).await;
+    let mut bye_b = bob_dialog.bye().await;
+    bye_b.expect_tolerating(481, &["OPTIONS"]).await;
+
+    // ── The primary returns and discharges the deferred terminal ────────────
+    fh.advance(Duration::from_secs(60)).await;
+    {
+        let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+        reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    }
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
     drop(proxy);
 }

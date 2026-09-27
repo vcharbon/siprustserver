@@ -76,11 +76,11 @@ impl Drop for UnansweredGuard {
 
 /// Answers an INVITE whose handler body is discarded unrun, through its
 /// server transaction (which then absorbs the ACK). In a dialog: 481 behind
-/// the release of a terminated or orphan call (RFC 3261 §12.2.2), else 500
-/// with a Retry-After (§14.2) — no room, or a takeover copy shed while the
-/// call lives on at its primary. Out of a dialog: the capacity 503 with a
-/// Retry-After, whatever the site, since the call it would start was never
-/// looked at.
+/// the release of a terminated call (RFC 3261 §12.2.2), else 500 with a
+/// Retry-After (§14.2) — no room, a takeover copy shed while the call lives
+/// on at its primary, or an orphan release that looked no dialog up. Out of
+/// a dialog: the capacity 503 with a Retry-After, whatever the site, since
+/// the call it would start was never looked at.
 pub(super) struct InviteAnswer<'a> {
     pub(super) txn: &'a TransactionLayer,
     pub(super) id_gen: &'a Arc<IdGen>,
@@ -132,6 +132,9 @@ struct PendingInvite {
 }
 
 impl PendingInvite {
+    /// Hand the answer to the layer and count it. A transaction that already
+    /// holds its final — a CANCEL's 487 got there first — keeps it, and the
+    /// layer drops this one (RFC 3261 §17.2.1); it is counted all the same.
     async fn answer(self, why: Discard) {
         let resp = self.response(why);
         let _ = self.txn.send_response(resp, self.src).await;
@@ -140,10 +143,10 @@ impl PendingInvite {
 
     fn response(&self, why: Discard) -> SipResponse {
         let in_dialog = self.req.to().tag().is_some();
-        // A self-released takeover copy lives on at its primary: only a
-        // terminated or orphan call has no dialog left to answer for.
-        let gone =
-            matches!(why, Discard::Released(RemovalClass::Terminated | RemovalClass::Orphan));
+        // Only a terminated call is known to have no dialog left. A shed
+        // takeover copy lives on at its primary, and an orphan release looked
+        // nothing up: the retry meets the orphan path's lookup and its 481.
+        let gone = why == Discard::Released(RemovalClass::Terminated);
         if in_dialog && gone {
             return build_481(&self.req, None);
         }
@@ -172,7 +175,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use sip_message::header::HeaderName;
     use sip_message::parser::custom::CustomParser;
+    use sip_message::SipParser;
     use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
     use sip_txn::{TransactionConfig, TransactionEvent};
     use tokio::sync::{mpsc, Notify};
@@ -220,27 +225,27 @@ mod tests {
         .into_bytes()
     }
 
-    /// The responses `rig.peer` receives within `wait`, as text.
-    async fn responses_at_peer(rig: &Rig, wait: u64) -> Vec<String> {
+    /// The responses `rig.peer` receives within `wait`.
+    async fn responses_at_peer(rig: &Rig, wait: u64) -> Vec<SipResponse> {
         let mut out = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
         while let Ok(Some(p)) = tokio::time::timeout_at(deadline, rig.peer.recv()).await {
-            let text = String::from_utf8_lossy(&p.raw).to_string();
-            if text.starts_with("SIP/2.0 ") {
-                out.push(text);
+            if let Ok(SipMessage::Response(r)) = CustomParser::new().parse(&p.raw) {
+                out.push(r);
             }
         }
         out
     }
 
-    fn status(resp: &str) -> u16 {
-        resp["SIP/2.0 ".len()..][..3].parse().unwrap()
+    fn statuses(responses: &[SipResponse]) -> Vec<u16> {
+        responses.iter().map(SipResponse::status).collect()
     }
 
-    fn retry_after(resp: &str) -> Option<u32> {
-        resp.lines()
-            .find_map(|l| l.strip_prefix("Retry-After: "))
-            .map(|v| v.trim().parse().unwrap())
+    /// The Retry-After seconds `resp` states.
+    fn retry_after(resp: &SipResponse) -> Option<u32> {
+        resp.raw_text(HeaderName::from("Retry-After"))
+            .next()
+            .and_then(|v| v.as_str().trim().parse().ok())
     }
 
     /// The hook the router would attach to `event`.
@@ -409,8 +414,7 @@ mod tests {
     async fn a_reinvite_queued_behind_the_release_is_answered_481() {
         let mut rig = rig().await;
         invite_behind_the_release(&mut rig, RemovalClass::Terminated, "z9hG4bK-reinv", true).await;
-        let statuses: Vec<u16> =
-            responses_at_peer(&rig, 100).await.iter().map(|r| status(r)).collect();
+        let statuses = statuses(&responses_at_peer(&rig, 100).await);
         assert_eq!(statuses, vec![100, 481]);
         assert_eq!(
             rig.metrics
@@ -427,9 +431,21 @@ mod tests {
         let mut rig = rig().await;
         invite_behind_the_release(&mut rig, RemovalClass::SelfRelease, "z9hG4bK-shed", true).await;
         let responses = responses_at_peer(&rig, 100).await;
-        let statuses: Vec<u16> = responses.iter().map(|r| status(r)).collect();
+        let statuses = statuses(&responses);
         assert_eq!(statuses, vec![100, 500]);
-        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{}", responses[1]);
+        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+    }
+
+    /// An orphan release looked no dialog up — on an acting backup the
+    /// primary may still serve it — so the re-INVITE is refused for now,
+    /// 500 + Retry-After; its retry meets the orphan path's own lookup.
+    #[tokio::test(start_paused = true)]
+    async fn a_reinvite_queued_behind_an_orphan_release_is_answered_500_with_retry_after() {
+        let mut rig = rig().await;
+        invite_behind_the_release(&mut rig, RemovalClass::Orphan, "z9hG4bK-orph", true).await;
+        let responses = responses_at_peer(&rig, 100).await;
+        assert_eq!(statuses(&responses), vec![100, 500]);
+        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
     }
 
     /// An out-of-dialog INVITE behind a release — a new attempt reusing the
@@ -440,9 +456,9 @@ mod tests {
         let mut rig = rig().await;
         invite_behind_the_release(&mut rig, RemovalClass::Terminated, "z9hG4bK-anew", false).await;
         let responses = responses_at_peer(&rig, 100).await;
-        let statuses: Vec<u16> = responses.iter().map(|r| status(r)).collect();
+        let statuses = statuses(&responses);
         assert_eq!(statuses, vec![100, 503]);
-        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{}", responses[1]);
+        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
     }
 
     /// Once the body starts, its hook is dropped unheard: the body owns the
@@ -462,8 +478,7 @@ mod tests {
         .on_discard(hook);
         rig.dispatcher.dispatch("c", job).await;
         done.notified().await;
-        let statuses: Vec<u16> =
-            responses_at_peer(&rig, 100).await.iter().map(|r| status(r)).collect();
+        let statuses = statuses(&responses_at_peer(&rig, 100).await);
         assert_eq!(statuses, vec![100], "only the layer's 100 Trying");
         assert_eq!(rig.metrics.invite_discard_answered_total(), 0);
     }

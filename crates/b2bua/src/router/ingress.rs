@@ -88,7 +88,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                             ctx.state.flush(&call);
                         }
                     }
-                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease { ended: false }).await;
                 } else {
                     // A fresh in-dialog request (a second takeover during a
                     // sustained partition) re-armed a transaction since this notice
@@ -199,21 +199,29 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         return;
     }
 
-    // Nothing leaves this point unaccounted: a request discarded unrun is
-    // forgotten or answered (`super::unanswered`), and a `Cancelled` — the
-    // layer already answered 200 + 487 and the caller will not send it again —
-    // is never discarded for want of room, only behind the call's release,
-    // which ends the call it would have ended. At most one per INVITE server
-    // transaction, so the layer bounds how many wait past the queue.
+    // Nothing leaves this point unaccounted. A request discarded unrun is
+    // forgotten or answered (`super::unanswered`). A `Cancelled` — the layer
+    // already answered 200 + 487 and the caller will not send it again —
+    // waits past a full queue and the cap, up to the call's overflow ceiling;
+    // a call flooded past it is torn down by the reaper. A reaper verdict,
+    // paced by the sweep, waits past every bound, so a teardown reaches even
+    // a flooded call.
     let ctx2 = ctx.clone();
     let guard = UnansweredGuard::for_event(&ctx.txn, &event);
     let answer = InviteAnswer::of(ctx).hook_for(&event);
     let must_run = matches!(event, CallEvent::Cancelled { .. });
+    let verdict = crate::reaper::is_reaper_event(&event);
     let job = Job::new(Box::pin(async move {
         guard.disarm();
         process(&ctx2, event, res).await;
     }))
     .on_discard(answer);
-    let job = if must_run { job.past_bounds() } else { job };
+    let job = if verdict {
+        job.past_all_bounds()
+    } else if must_run {
+        job.past_bounds()
+    } else {
+        job
+    };
     ctx.dispatcher.dispatch(&call_ref, job).await;
 }

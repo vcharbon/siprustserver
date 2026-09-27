@@ -19,8 +19,12 @@ pub(super) enum ReleaseKind {
     /// once the transaction(s) the backup served for it have all reached a
     /// terminal state. Local-only — **no** store mutation, **no** delete
     /// propagation: the `bak:{primary}` replica and the reverse-flushed deltas
-    /// remain, so the call lives on at its reclaiming primary.
-    SelfRelease,
+    /// remain, so the call lives on at its reclaiming primary. `ended`: the
+    /// copy terminated here, so no request it served will be answered — as for
+    /// `Terminated`, what has no final is forgotten. A live copy shed at
+    /// quiescence forgets nothing: a request crossing the shed is still
+    /// served, and a forgotten copy of it would be served twice.
+    SelfRelease { ended: bool },
     /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
     /// the dispatch queue exist. **No** store mutation (a `remove` would
     /// reverse-propagate a spurious delete), **no** timers/txns were armed.
@@ -57,10 +61,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             // teardown site so creations/removals stay a matched pair.
             ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Terminated);
         }
-        ReleaseKind::SelfRelease => {
+        ReleaseKind::SelfRelease { ended } => {
             if ctx.state.drop_local(call_ref) {
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
+                if ended {
+                    let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
+                }
                 ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::SelfRelease);
                 ctx.metrics.bump_repl_self_release();
                 // Folded into the dead peer's takeover episode, never its own
