@@ -91,16 +91,36 @@ mod tests {
         }
     }
 
-    /// The names the test has made resolvable; counts every lookup.
+    /// Let `d` pass in 5 ms steps, every task settled after each.
+    async fn run_for(d: Duration) {
+        let step = Duration::from_millis(5);
+        let mut left = d;
+        while !left.is_zero() {
+            let now = left.min(step);
+            tokio::time::advance(now).await;
+            settle().await;
+            left -= now;
+        }
+    }
+
+    /// The names the test has made resolvable, each lookup answering after
+    /// `delay`; counts every lookup and the most in flight at once.
     #[derive(Default)]
     struct Names {
         known: Mutex<HashMap<String, SocketAddr>>,
+        delay: Mutex<Duration>,
         lookups: AtomicUsize,
+        in_flight: AtomicUsize,
+        most_in_flight: AtomicUsize,
     }
 
     impl Names {
         fn point(&self, name: &str, addr: SocketAddr) {
             self.known.lock().unwrap().insert(name.into(), addr);
+        }
+
+        fn slow(&self, delay: Duration) {
+            *self.delay.lock().unwrap() = delay;
         }
     }
 
@@ -108,6 +128,11 @@ mod tests {
     impl NameResolver for Names {
         async fn resolve(&self, name: &str) -> Option<SocketAddr> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_in_flight.fetch_max(now, Ordering::SeqCst);
+            let delay = *self.delay.lock().unwrap();
+            tokio::time::sleep(delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
             self.known.lock().unwrap().get(name).copied()
         }
     }
@@ -285,6 +310,61 @@ mod tests {
         assert_eq!(w.release("c5#k").await, ReleaseAnswer::Released);
         assert_eq!(held(&lab.b.1), (0, 0));
         assert_eq!(held(&lab.a.1), (0, 0), "the old address is drained");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_name_that_moves_after_a_failed_probe_is_looked_up_again() {
+        let lab = Lab::new().await;
+        lab.names.point(NAME, lab.a.0);
+        let w = lab.worker().await;
+        lab.net.net.apply_fault(Fault::Cut { dst: lab.a.0 });
+        for n in 1..4 {
+            assert_eq!(w.admit(&format!("c{n}#k")).await, AdmitOutcome::Unavailable);
+        }
+        assert!(w.open());
+        settle().await;
+        elapse(PROBE).await;
+        assert!(w.open(), "the name still leads to the cut limiter");
+        assert_eq!(w.metrics.limiter_breaker_probe_failures_total(), 1);
+        lab.names.point(NAME, lab.b.0);
+        elapse(PROBE).await;
+        assert!(!w.open(), "the failed probe forgot the address; the next one finds the new one");
+        assert_eq!(w.admit("c4#k").await, AdmitOutcome::Admitted);
+        assert_eq!(held(&lab.b.1), (1, 1));
+        assert_eq!(w.release("c4#k").await, ReleaseAnswer::Released);
+        assert_eq!(held(&lab.b.1), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_slower_than_the_admit_budget_still_closes_the_breaker() {
+        let lab = Lab::new().await;
+        lab.names.slow(Duration::from_millis(300));
+        let w = lab.worker().await;
+        assert!(w.open(), "unresolvable at boot");
+        lab.names.point(NAME, lab.a.0);
+        run_for(2 * PROBE + Duration::from_millis(20)).await;
+        assert!(!w.open(), "the lookup the first probe started lands, the next probe closes");
+        assert_eq!(lab.names.most_in_flight.load(Ordering::SeqCst), 1, "one lookup at a time");
+        assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
+        assert_eq!(held(&lab.a.1), (1, 1));
+        assert_eq!(w.release("c1#k").await, ReleaseAnswer::Released);
+        assert_eq!(held(&lab.a.1), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_boot_lookup_landing_after_the_boot_wait_is_kept_and_the_first_probe_closes() {
+        let lab = Lab::new().await;
+        lab.names.point(NAME, lab.a.0);
+        lab.names.slow(PROBE + PROBE / 2);
+        let w = lab.worker().await;
+        assert!(w.open(), "the boot wait ended before the lookup");
+        run_for(PROBE + Duration::from_millis(20)).await;
+        assert!(!w.open(), "the boot lookup landed and was kept; the first probe closes");
+        assert_eq!(lab.names.lookups.load(Ordering::SeqCst), 1, "the boot lookup only");
+        assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
+        assert_eq!(held(&lab.a.1), (1, 1));
+        assert_eq!(w.release("c1#k").await, ReleaseAnswer::Released);
+        assert_eq!(held(&lab.a.1), (0, 0));
     }
 
     #[tokio::test]

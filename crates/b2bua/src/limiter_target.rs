@@ -270,11 +270,13 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct ScriptedResolver {
         script: std::sync::Mutex<std::collections::VecDeque<(u64, Option<SocketAddr>)>>,
+        started: AtomicUsize,
     }
 
     #[async_trait]
     impl NameResolver for ScriptedResolver {
         async fn resolve(&self, _: &str) -> Option<SocketAddr> {
+            self.started.fetch_add(1, Ordering::SeqCst);
             let (delay, answer) = self.script.lock().unwrap().pop_front().unwrap_or((0, None));
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             answer
@@ -282,20 +284,21 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lookup_that_lands_after_a_forget_is_not_kept() {
-        let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+    async fn a_lookup_in_flight_at_a_forget_lands_and_is_kept() {
         let resolver = Arc::new(ScriptedResolver::default());
-        *resolver.script.lock().unwrap() = [(100, Some(addr())), (10, Some(moved))].into();
-        let target = Arc::new(LimiterTarget::name_with("limiter:8080", resolver));
-        let stale = tokio::spawn({
+        *resolver.script.lock().unwrap() = [(100, Some(addr()))].into();
+        let target = Arc::new(LimiterTarget::name_with("limiter:8080", resolver.clone()));
+        let first = tokio::spawn({
             let target = target.clone();
             async move { target.resolve().await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         target.forget();
-        assert_eq!(target.resolve().await, Some(moved), "a forget starts a new lookup");
-        assert_eq!(stale.await.unwrap(), Some(addr()), "its waiter hears the stale lookup");
-        assert_eq!(target.address(), Some(moved), "the stale answer is not kept");
+        assert_eq!(target.resolve().await, Some(addr()), "waits on the lookup in flight");
+        assert_eq!(first.await.unwrap(), Some(addr()));
+        assert_eq!(target.address(), Some(addr()), "kept");
+        assert!(resolver.script.lock().unwrap().is_empty());
+        assert_eq!(resolver.started.load(Ordering::SeqCst), 1, "one lookup in flight at a time");
     }
 
     #[tokio::test]
