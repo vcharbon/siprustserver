@@ -154,6 +154,14 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Answer every INVITE server transaction of `call_ref` that has sent no
+    /// final with `status` `reason`; replies with how many.
+    AnswerUnansweredInvitesOfCall {
+        call_ref: String,
+        status: u16,
+        reason: String,
+        reply: oneshot::Sender<usize>,
+    },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
     /// transactions, `CallQuiesced` is emitted at once.
@@ -338,6 +346,29 @@ impl TransactionLayer {
     ) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::ForgetUnansweredOfCall {
             call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
+    }
+
+    /// The consumer released `call_ref` for good while an INVITE it was
+    /// handed still has no final: its 100 Trying stopped the UAC's
+    /// retransmissions (RFC 3261 §17.2.1), so nothing would ever answer it.
+    /// Every INVITE server transaction attributed to the call that has sent
+    /// no final is answered `status` `reason` through the transaction, under
+    /// the To-tag it names or has bound, to where the request came from. The
+    /// transaction then runs Timer G to its ACK, which it absorbs. Returns
+    /// how many were answered.
+    pub async fn answer_unanswered_invites_of_call(
+        &self,
+        call_ref: &str,
+        status: u16,
+        reason: &str,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::AnswerUnansweredInvitesOfCall {
+            call_ref: call_ref.to_string(),
+            status,
+            reason: reason.to_string(),
             reply,
         })
         .await

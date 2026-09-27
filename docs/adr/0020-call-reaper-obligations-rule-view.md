@@ -22,7 +22,7 @@ it entirely:
    verdict, a terminating call's timeout and every client transaction's
    outcome (at most two per transaction the call sent) past every bound. A
    non-INVITE request left without a final when the call ends is forgotten at
-   its release.)
+   its release, and an in-dialog INVITE answered 481 there.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is
    itself a losable timer. (It is now admitted past every dispatch bound —
    the time bound. The work bound is `max_messages_per_call_lifetime`: the

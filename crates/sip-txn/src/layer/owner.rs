@@ -496,6 +496,12 @@ impl Owner {
             Command::ForgetUnansweredOfCall { call_ref, reply } => {
                 let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
             }
+            Command::AnswerUnansweredInvitesOfCall { call_ref, status, reason, reply } => {
+                let answered = self
+                    .answer_unanswered_invites_of_call(endpoint, &call_ref, status, &reason)
+                    .await;
+                let _ = reply.send(answered);
+            }
             Command::ActiveTxnCount { call_ref, reply } => {
                 let n = self.txn_index.get(call_ref.as_str()).map_or(0, |s| s.len());
                 let _ = reply.send(n);

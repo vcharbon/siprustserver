@@ -21,9 +21,10 @@ pub(super) enum ReleaseKind {
     /// propagation: the `bak:{primary}` replica and the reverse-flushed deltas
     /// remain, so the call lives on at its reclaiming primary. `ended`: the
     /// copy terminated here, so no request it served will be answered — as for
-    /// `Terminated`, what has no final is forgotten. A live copy shed at
-    /// quiescence forgets nothing: a request crossing the shed is still
-    /// served, and a forgotten copy of it would be served twice.
+    /// `Terminated`, what has no final is forgotten or answered. A live copy
+    /// shed at quiescence holds no open transaction, and touches none: a
+    /// request crossing the shed is still served, and a copy of it forgotten
+    /// or answered here would be served twice.
     SelfRelease { ended: bool },
     /// Orphan reject: the 481 path hydrated NO call — only the lock entry and
     /// the dispatch queue exist. **No** store mutation (a `remove` would
@@ -55,6 +56,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             // interpreted last), so what still has no final is forgotten and
             // its retransmission meets the orphan path.
             let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
+            answer_unanswered_invites(ctx, call_ref).await;
             // Poison the per-call dispatch queue; its worker exits and bumps
             // `removal` exactly once (dispatch.rs). We deliberately do NOT
             // bump here — removal is counted at the single dispatch-queue
@@ -67,6 +69,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                 let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
                 if ended {
                     let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
+                    answer_unanswered_invites(ctx, call_ref).await;
                 }
                 ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::SelfRelease);
                 ctx.metrics.bump_repl_self_release();
@@ -80,4 +83,16 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Orphan);
         }
     }
+}
+
+/// Answer 481 every in-dialog INVITE of the ended call `call_ref` that has no
+/// final (RFC 3261 §12.2.2: the dialog is gone). Its 100 Trying stopped the
+/// peer's retransmissions, so unlike a non-INVITE it is not forgotten for a
+/// retransmission to meet the orphan path. The layer answers through the
+/// transaction, which then absorbs the ACK.
+async fn answer_unanswered_invites(ctx: &RouterCtx, call_ref: &str) {
+    let _ = ctx
+        .txn
+        .answer_unanswered_invites_of_call(call_ref, 481, "Call/Transaction Does Not Exist")
+        .await;
 }

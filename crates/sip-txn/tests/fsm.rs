@@ -1483,3 +1483,45 @@ async fn a_released_calls_unanswered_non_invite_transactions_are_forgotten() {
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
     assert!(stack.drain_events().is_empty());
 }
+
+// ── answer_unanswered_invites_of_call: the consumer released an ended call ──
+
+/// At its ended call's release, an INVITE server transaction of the call with
+/// no final is answered through the transaction, which then absorbs the ACK
+/// and stops its Timer G copies. An answered INVITE, a non-INVITE, and
+/// another call's INVITE are untouched.
+#[tokio::test(start_paused = true)]
+async fn a_released_calls_unanswered_invites_are_answered_through_their_transactions() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let open = "z9hG4bK-reinv-open";
+    let answered = "z9hG4bK-reinv-done";
+    stack.inject(&call_request("INVITE", open, "cr1", Some("callee-tag"))).await;
+    // `response_bytes` answers under the To-tag `peer-tag`.
+    stack.inject(&call_request("INVITE", answered, "cr1", Some("peer-tag"))).await;
+    stack.inject(&call_request("INFO", "z9hG4bK-info", "cr1", Some("callee-tag"))).await;
+    stack.inject(&call_request("INVITE", "z9hG4bK-other", "cr2", Some("callee-tag"))).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    let resp = parse_response(&response_bytes(200, "OK", "INVITE", answered, "cr1@u", true));
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+
+    let n = stack
+        .txn
+        .answer_unanswered_invites_of_call("cr1", 481, "Call/Transaction Does Not Exist")
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "only the open INVITE of cr1 is answered");
+    assert_eq!(stack.txn.metrics().released_unanswered_invites_answered(), 1);
+    elapse_ms(60).await;
+    let sent = stack.drain_peer();
+    assert_eq!(count_responses(&sent, 481), 1);
+    assert_eq!(sent.len(), 1, "nothing else leaves");
+
+    stack.inject(&call_request("ACK", open, "cr1", Some("callee-tag"))).await;
+    elapse_ms(60).await;
+    assert!(!has_message_request(&stack.drain_events(), "ACK"), "the ACK is absorbed");
+    elapse_ms(8_000).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 481), 0, "the ACK stopped Timer G");
+}

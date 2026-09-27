@@ -293,6 +293,9 @@ pub(crate) struct MetricsInner {
     /// Non-INVITE server transactions with no final forgotten at their call's
     /// release ([`TransactionLayer::forget_unanswered_of_call`](crate::TransactionLayer::forget_unanswered_of_call)).
     pub released_unanswered_forgotten: AtomicU64,
+    /// INVITE server transactions with no final answered at their call's
+    /// release ([`TransactionLayer::answer_unanswered_invites_of_call`](crate::TransactionLayer::answer_unanswered_invites_of_call)).
+    pub released_unanswered_invites_answered: AtomicU64,
     /// Outbound `send_to` failures (logged-and-swallowed so a send error never
     /// aborts the owner). A climb here means the socket is failing (ENOBUFS/EPERM
     /// under netfilter churn) while everything else looks idle.
@@ -333,6 +336,7 @@ impl MetricsInner {
             unanswered_forgotten: AtomicU64::new(0),
             forget_refused: AtomicU64::new(0),
             released_unanswered_forgotten: AtomicU64::new(0),
+            released_unanswered_invites_answered: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
         }
     }
@@ -563,6 +567,12 @@ impl TransactionMetrics {
     /// release (counter).
     pub fn released_unanswered_forgotten(&self) -> u64 {
         self.inner.released_unanswered_forgotten.load(Ordering::Relaxed)
+    }
+
+    /// INVITE server transactions with no final answered at their call's
+    /// release (counter).
+    pub fn released_unanswered_invites_answered(&self) -> u64 {
+        self.inner.released_unanswered_invites_answered.load(Ordering::Relaxed)
     }
 
     pub(crate) fn count_forget_refused(&self) {

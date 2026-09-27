@@ -310,7 +310,10 @@ impl Owner {
             call_ref,
             leg_id: None,
             state: TxnState::Trying,
-            destination: None,
+            // An INVITE's source, where a final the layer itself owes it is
+            // sent (`answer_unanswered_invites_of_call`); the TU's final
+            // re-points it.
+            destination: is_invite.then_some(src),
         }));
 
         // For INVITE, immediately send 100 Trying and move to proceeding.
@@ -390,6 +393,52 @@ impl Owner {
             .released_unanswered_forgotten
             .fetch_add(forgotten as u64, std::sync::atomic::Ordering::Relaxed);
         forgotten
+    }
+
+    /// Answer every INVITE server transaction of `call_ref` that has sent no
+    /// final with `status` `reason`, through the transaction: under the
+    /// To-tag it names or has bound, to the address the request came from (or,
+    /// for a seed rebuilt without one, the top Via's response target). A seed
+    /// holding no request cannot be answered and is left to its sweep.
+    /// Counted; returns how many.
+    pub(super) async fn answer_unanswered_invites_of_call(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        call_ref: &str,
+        status: u16,
+        reason: &str,
+    ) -> usize {
+        let unanswered: Vec<(String, SipRequest, Option<SocketAddr>)> = self
+            .txn_index
+            .get(call_ref)
+            .into_iter()
+            .flatten()
+            .filter_map(|b| {
+                let t = self.txns.get(b.as_str())?;
+                let open = t.role == TxnRole::Server
+                    && t.kind == TxnKind::Invite
+                    && matches!(t.state, TxnState::Trying | TxnState::Proceeding);
+                let req = t.original_request.clone().filter(|_| open)?;
+                Some((b.clone(), req, t.destination))
+            })
+            .collect();
+        let mut answered = 0;
+        for (branch, req, source) in unanswered {
+            let Some(dest) = source.or_else(|| via_response_target(&req)) else { continue };
+            let to_tag = self.uas_to_tag_of(&branch);
+            let resp = generate_response(
+                &req,
+                status,
+                reason,
+                &GenerateResponseOpts { to_tag, ..Default::default() },
+            );
+            self.do_send_response(endpoint, resp, dest).await;
+            answered += 1;
+        }
+        self.metrics
+            .released_unanswered_invites_answered
+            .fetch_add(answered as u64, std::sync::atomic::Ordering::Relaxed);
+        answered
     }
 
     /// The retransmission path (RFC 3261 §17.2.1): a request whose branch
@@ -628,4 +677,12 @@ impl Owner {
 /// (ADR-0014 self-release counting).
 fn extract_ruri_call_ref(req: &SipRequest) -> Option<String> {
     req.request_uri().param("callRef").and_then(ParamValue::as_str).map(decode_param)
+}
+
+/// Where a response to `req` goes when its source is unknown: the top Via's
+/// response target (RFC 3261 §18.2.2), when it names an IP address.
+fn via_response_target(req: &SipRequest) -> Option<SocketAddr> {
+    let (host, port) = req.top_via().response_target();
+    let ip: std::net::IpAddr = host.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+    Some(SocketAddr::new(ip, port))
 }
