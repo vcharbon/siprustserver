@@ -615,7 +615,7 @@ async fn a_limiter_restart_is_healed_by_the_next_refresh() {
     b2bua.assert_fully_reaped_leaving(LimiterLeak {
         unreleased: 0,
         stored: dead.stats().current_total,
-        queued: 0,
+        queued: Vec::new(),
     });
     assert_eq!(dead.stats().current_total, 7);
     let _ = h.finish().await;

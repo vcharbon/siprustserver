@@ -761,6 +761,11 @@ impl B2buaCore {
         self.ctx.limiter_releases.waiting()
     }
 
+    /// This worker's limiter release queue (test/observability).
+    pub fn limiter_releases(&self) -> Arc<crate::limiter_release::ReleaseQueue> {
+        self.ctx.limiter_releases.clone()
+    }
+
     /// Live per-call serialization-lock count (test/observability). Should track
     /// [`active_calls`](Self::active_calls); a gap is the orphan-reject lock leak.
     pub fn lock_count(&self) -> usize {

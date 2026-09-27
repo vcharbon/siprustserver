@@ -47,21 +47,28 @@ const DEFAULT_LIMITER_ADDR: &str = "10.0.0.1:8080";
 
 /// The limiter holds a scenario leaves behind on purpose, declared to
 /// [`B2buaSut::assert_fully_reaped_leaving`](crate::B2buaSut::assert_fully_reaped_leaving).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LimiterLeak {
     /// Holds the SUT was granted and never released.
     pub unreleased: i64,
     /// Holds the registered store still counts (a release the store never
     /// applied, an increment the SUT never learned of).
     pub stored: i64,
-    /// Releases still waiting in the worker's release queue (a limiter that
-    /// never answers them before the scenario ends).
-    pub queued: usize,
+    /// The limiter keys whose release still waits in the worker's release
+    /// queue (a limiter that never answers them before the scenario ends).
+    pub queued: Vec<String>,
 }
 
 impl LimiterLeak {
     /// Nothing left behind: the reaped check's default.
-    pub const NONE: Self = Self { unreleased: 0, stored: 0, queued: 0 };
+    pub const NONE: Self = Self { unreleased: 0, stored: 0, queued: Vec::new() };
+
+    /// `queued` in a stable order, for comparison with the waiting keys.
+    pub(crate) fn queued_sorted(&self) -> Vec<String> {
+        let mut keys = self.queued.clone();
+        keys.sort();
+        keys
+    }
 }
 
 /// The SUT's limiter count at one instant.
@@ -94,7 +101,7 @@ impl LimiterCount {
     /// Panics unless the count matches `leak`: `unreleased` exactly, and
     /// `stored` exactly when a store is registered.
     #[track_caller]
-    pub fn assert_matches(&self, leak: LimiterLeak) {
+    pub fn assert_matches(&self, leak: &LimiterLeak) {
         let unreleased = self.unreleased();
         assert_eq!(
             unreleased, leak.unreleased,
@@ -268,7 +275,7 @@ impl SutLimiter {
     /// Check 6 of the reaped check: the count matches `leak`, and the default
     /// limiter never failed open (a fail-open would hide the call's holds).
     #[track_caller]
-    pub(crate) fn assert_drained(&self, leak: LimiterLeak) {
+    pub(crate) fn assert_drained(&self, leak: &LimiterLeak) {
         let count = self.count();
         if self.default_server.is_some() {
             assert_eq!(
@@ -398,14 +405,14 @@ mod tests {
     async fn a_fail_open_on_the_default_limiter_fails_the_check() {
         let (_client, sut) = SutLimiter::serve_default().await;
         one_fail_open(&sut).await;
-        sut.assert_drained(LimiterLeak::NONE);
+        sut.assert_drained(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
     async fn a_fail_open_on_a_test_s_own_limiter_passes_the_check() {
         let sut = SutLimiter::own(None);
         one_fail_open(&sut).await;
-        sut.assert_drained(LimiterLeak::NONE);
+        sut.assert_drained(&LimiterLeak::NONE);
     }
 
     fn entry(id: &str) -> LimiterEntry {
@@ -435,7 +442,7 @@ mod tests {
         limiter.admit("c1", &[entry("x"), entry("x"), entry("y")], false).await;
         limiter.refresh("c1", &["x".into()]).await;
         limiter.release(&["c1".to_string()]).await;
-        ledger.count(None).assert_matches(LimiterLeak::NONE);
+        ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
@@ -445,7 +452,7 @@ mod tests {
         limiter.admit("c1", &[entry("y"), entry("z")], true).await;
         assert_eq!((ledger.count(None).admitted, ledger.count(None).released), (4, 2));
         limiter.release(&["c1".to_string()]).await;
-        ledger.count(None).assert_matches(LimiterLeak::NONE);
+        ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
@@ -457,7 +464,7 @@ mod tests {
         refusing.admit("c1", &[entry("y")], false).await;
         assert_eq!(ledger.count(None).unreleased(), 1, "a refusal keeping the set");
         refusing.admit("c1", &[entry("y")], true).await;
-        ledger.count(None).assert_matches(LimiterLeak::NONE);
+        ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
@@ -467,7 +474,7 @@ mod tests {
         limiter.admit("c1", &[entry("x")], false).await;
         limiter.admit("c2", &[entry("y")], false).await;
         limiter.release(&["c1".to_string()]).await;
-        ledger.count(None).assert_matches(LimiterLeak::NONE);
+        ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
@@ -478,21 +485,25 @@ mod tests {
         limiter.release(&["c1".to_string()]).await;
         limiter.release(&["never-admitted".to_string()]).await;
         assert_eq!(ledger.count(None).released, 1);
-        ledger.count(None).assert_matches(LimiterLeak::NONE);
+        ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]
     async fn a_declared_unreleased_hold_matches() {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x"), entry("y")], false).await;
-        ledger.count(None).assert_matches(LimiterLeak { unreleased: 2, stored: 0, queued: 0 });
+        ledger.count(None).assert_matches(&LimiterLeak {
+            unreleased: 2,
+            stored: 0,
+            queued: Vec::new(),
+        });
     }
 
     #[test]
     #[should_panic(expected = "the store still counts 1 hold(s)")]
     fn a_hold_the_store_still_counts_is_a_leak() {
         let count = LimiterCount { admitted: 1, released: 1, failed_open: 0, stored: Some(1) };
-        count.assert_matches(LimiterLeak::NONE);
+        count.assert_matches(&LimiterLeak::NONE);
     }
 
     #[tokio::test]

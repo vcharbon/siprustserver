@@ -962,6 +962,12 @@ impl B2buaSut {
         self._core.limiter_releases_waiting()
     }
 
+    /// The worker's limiter release queue, for a check that outlives a
+    /// borrow of the SUT.
+    pub fn limiter_release_queue(&self) -> Arc<b2bua::limiter_release::ReleaseQueue> {
+        self._core.limiter_releases()
+    }
+
     /// The holds the SUT was granted and released so far, its fail-opens, and
     /// its store's count when it has one. A release counts when the worker's
     /// release queue sends it, after its call was removed.
@@ -1016,21 +1022,26 @@ impl B2buaSut {
         self.assert_calls_reaped();
         // 6. every limiter hold granted is released once, the store counts
         //    none, and the default limiter never failed open.
-        self.limiter.assert_drained(leak);
-        // 7. no release waits in the worker's release queue.
+        self.limiter.assert_drained(&leak);
+        // 7. the release queue holds exactly the releases declared queued.
         assert_eq!(
-            self.limiter_releases_waiting(),
-            leak.queued,
-            "limiter leak: {} release(s) still queued; declared {}",
-            self.limiter_releases_waiting(),
-            leak.queued
+            self.limiter_waiting_keys(),
+            leak.queued_sorted(),
+            "limiter leak: the release queue holds other releases than declared"
         );
     }
 
-    /// [`is_reaped`](Self::is_reaped) for a scenario that leaves `leak.queued`
-    /// releases in the worker's release queue on purpose.
-    pub fn is_reaped_leaving(&self, leak: LimiterLeak) -> bool {
-        self.calls_reaped() && self.limiter_releases_waiting() == leak.queued
+    /// [`is_reaped`](Self::is_reaped) for a scenario that leaves the releases
+    /// of `leak.queued` in the worker's release queue on purpose.
+    pub fn is_reaped_leaving(&self, leak: &LimiterLeak) -> bool {
+        self.calls_reaped() && self.limiter_waiting_keys() == leak.queued_sorted()
+    }
+
+    /// The keys whose release waits in the worker's release queue, sorted.
+    pub fn limiter_waiting_keys(&self) -> Vec<String> {
+        let mut keys = self._core.limiter_releases().waiting_keys();
+        keys.sort();
+        keys
     }
 
     /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
@@ -1173,7 +1184,7 @@ impl B2buaScene {
     /// [`finish`](Self::finish) for a scenario that leaves limiter holds
     /// behind on purpose: the reaped check requires exactly `leak`.
     pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
-        settle_until(|| self.b2bua.is_reaped_leaving(leak)).await;
+        settle_until(|| self.b2bua.is_reaped_leaving(&leak)).await;
         self.b2bua.assert_fully_reaped_leaving(leak);
         self.h.finish().await
     }

@@ -86,6 +86,8 @@ struct Waiting {
     retry_at: Option<Instant>,
     /// A breaker holds the queue: nothing is sent.
     held: bool,
+    /// A release request is in flight.
+    sending: bool,
 }
 
 /// What the drainer does next.
@@ -174,6 +176,11 @@ impl ReleaseQueue {
         self.lock().entries.values().map(|e| e.key.to_string()).collect()
     }
 
+    /// A release request is in flight (at most one at a time).
+    pub fn sending(&self) -> bool {
+        self.lock().sending
+    }
+
     /// Stop sending (a breaker opened): entries wait, and still expire.
     pub fn hold(&self) {
         self.lock().held = true;
@@ -192,13 +199,19 @@ impl ReleaseQueue {
     }
 
     /// The supervised drainer, until the task is aborted with the worker. A
-    /// drainer that panics is logged, counted and started again; what it was
-    /// sending is still queued and leaves with the next send.
+    /// drainer that panics is logged, counted and started again; the panic
+    /// counts as a failed send, so what it was sending is still queued and
+    /// leaves with the next send, one backoff later.
     pub async fn run(self: Arc<Self>) {
         loop {
             let mut drainer = AbortOnDrop(tokio::spawn(self.clone().drain()));
             match (&mut drainer.0).await {
                 Err(e) if e.is_panic() => {
+                    {
+                        let mut w = self.lock();
+                        w.sending = false;
+                        self.back_off(&mut w, Instant::now());
+                    }
                     self.metrics.bump_limiter_release_drainer_restarts();
                     tracing::error!(
                         waiting = self.waiting(),
@@ -245,6 +258,7 @@ impl ReleaseQueue {
         }
         let (seqs, keys) =
             w.entries.iter().take(MAX_BATCH).map(|(seq, e)| (*seq, e.key.to_string())).unzip();
+        w.sending = true;
         Step::Send(seqs, keys)
     }
 
@@ -252,6 +266,7 @@ impl ReleaseQueue {
     /// the backoff; a failed one keeps them and backs off.
     fn settle(&self, seqs: &[u64], outcome: ReleaseAnswer, now: Instant) {
         let mut w = self.lock();
+        w.sending = false;
         match outcome {
             ReleaseAnswer::Released => {
                 for seq in seqs {
@@ -263,13 +278,18 @@ impl ReleaseQueue {
                 w.retry_at = None;
             }
             ReleaseAnswer::Unavailable => {
-                w.failures = w.failures.saturating_add(1);
-                w.retry_at = Some(now + backoff(w.failures));
+                self.back_off(&mut w, now);
                 let kept = seqs.iter().filter(|seq| w.entries.contains_key(seq)).count();
                 self.metrics.add_limiter_release_retries(kept as u64);
             }
         }
         self.publish_depth(&w);
+    }
+
+    /// One more failed send: no send before the next backoff step.
+    fn back_off(&self, w: &mut Waiting, now: Instant) {
+        w.failures = w.failures.saturating_add(1);
+        w.retry_at = Some(now + backoff(w.failures));
     }
 
     /// Give up every entry that has waited one lease.
@@ -366,6 +386,45 @@ mod tests {
         assert_eq!(sent(&limiter), [keys(&["a"])]);
         assert_eq!(q.waiting(), 0);
         assert_eq!(metrics.limiter_release_queue_depth(), 0);
+    }
+
+    /// Answers a release only once the test lets it go.
+    #[derive(Default)]
+    struct Gated {
+        go: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl CallLimiter for Gated {
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
+            AdmitOutcome::NotSent
+        }
+        async fn release(&self, _: &[String]) -> ReleaseAnswer {
+            self.go.notified().await;
+            ReleaseAnswer::Released
+        }
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+            RefreshOutcome::Unavailable
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_queue_says_while_its_request_is_in_flight() {
+        let limiter = Arc::new(Gated::default());
+        let q = ReleaseQueue::new(
+            limiter.clone(),
+            ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 },
+            B2buaMetrics::new(),
+        );
+        tokio::spawn(q.clone().run());
+        assert!(!q.sending());
+        q.push("a");
+        settle().await;
+        assert!(q.sending(), "the release request is in flight");
+        limiter.go.notify_one();
+        settle().await;
+        assert!(!q.sending());
+        assert_eq!(q.waiting(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -499,11 +558,61 @@ mod tests {
         q.push("b");
         settle().await;
         assert_eq!(metrics.limiter_release_drainer_restarts_total(), 1);
+        assert_eq!(q.waiting(), 2, "the panic counts as a failed send: both wait");
+        tokio::time::advance(BACKOFF_INITIAL).await;
+        settle().await;
         assert_eq!(q.waiting(), 0, "the restarted drainer sent what the first one held");
         let calls = limiter.calls.lock().unwrap().clone();
         assert_eq!(calls.first(), Some(&keys(&["a"])), "the send that panicked");
         assert!(calls[1..].concat().contains(&"a".to_string()), "a is sent again");
         assert!(calls[1..].concat().contains(&"b".to_string()));
+    }
+
+    /// Panics on every release while `panics` is set, answers otherwise.
+    #[derive(Default)]
+    struct PanicsWhileSet {
+        panics: AtomicBool,
+        answered: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl CallLimiter for PanicsWhileSet {
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
+            AdmitOutcome::NotSent
+        }
+        async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+            assert!(!self.panics.load(Ordering::SeqCst), "the limiter client panics");
+            self.answered.lock().unwrap().push(keys.to_vec());
+            ReleaseAnswer::Released
+        }
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+            RefreshOutcome::Unavailable
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sender_that_keeps_panicking_restarts_at_the_backoff_pace() {
+        let limiter = Arc::new(PanicsWhileSet::default());
+        limiter.panics.store(true, Ordering::SeqCst);
+        let metrics = B2buaMetrics::new();
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
+        tokio::spawn(q.clone().run());
+        q.push("a");
+        for _ in 0..600 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            settle().await;
+        }
+        let restarts = metrics.limiter_release_drainer_restarts_total();
+        // 200 ms doubling to 5 s: 5 steps to the cap, then one per 5 s.
+        assert!((5..=20).contains(&restarts), "{restarts} restarts in 60 s");
+        assert_eq!(q.waiting_keys(), ["a"], "the queue is intact");
+
+        limiter.panics.store(false, Ordering::SeqCst);
+        tokio::time::advance(BACKOFF_MAX).await;
+        settle().await;
+        assert_eq!(*limiter.answered.lock().unwrap(), [keys(&["a"])]);
+        assert_eq!(q.waiting(), 0);
     }
 
     #[tokio::test(start_paused = true)]
