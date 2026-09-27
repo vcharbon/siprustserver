@@ -23,6 +23,13 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_response_time_ms         gauge   ResponseTime1(C)
   sipp_call_length_ms           gauge   CallLength(C)
   sipp_up                       gauge   1 when the stat file is readable/fresh
+  sipp_stat_file_allocated_bytes gauge  disk the stat file holds
+  sipp_stat_trim_failed         gauge   1 while the trimmer's last attempt failed
+  sipp_error_entries_total      counter entries of the error file (error_follow.py)
+  sipp_unexpected_msgs_total{action,expecting,received}
+                                counter unexpected-message entries: aborted or
+                                        continued, the scenario step expected, the
+                                        status code or method received
 
 Env:
   SIPP_STAT_FILE  (default /stats/stat.csv)
@@ -34,11 +41,14 @@ Env:
   EXPORTER_PORT   (default 9035)
   SIPP_STAT_KEEP_BYTES (default 16 MiB) -> tail kept on disk by the trimmer;
                                          0 disables it (the file needs write access)
+  SIPP_ERROR_FILE (default /stats/errors.log) -> SIPp's -error_file, followed
+                                         across rotations; empty disables it
 """
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import error_follow
 import stat_trim
 
 STAT_FILE = os.environ.get("SIPP_STAT_FILE", "/stats/stat.csv")
@@ -47,6 +57,11 @@ ROLE = os.environ.get("SIPP_ROLE", "uac")
 JOB = os.environ.get("SIPP_JOB", "")
 PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
 KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
+ERROR_FILE = os.environ.get("SIPP_ERROR_FILE", "/stats/errors.log")
+
+# Set by main() when enabled; read by every scrape.
+TRIMMER = None
+FOLLOWER = None
 
 # Longest header line read; a stat row is about 0.5 KB, its header a few KB.
 HEADER_MAX = 64 * 1024
@@ -132,8 +147,19 @@ def read_last_row(path):
     return None, None
 
 
-def render(path=STAT_FILE):
+def render(path=STAT_FILE, trimmer=None, follower=None):
     out = []
+    try:
+        out.append(fmt("sipp_stat_file_allocated_bytes", os.stat(path).st_blocks * 512))
+    except OSError:
+        pass
+    if trimmer is not None:
+        out.append(fmt("sipp_stat_trim_failed", int(trimmer.failed)))
+    if follower is not None:
+        counts = follower.snapshot()
+        out.append(fmt("sipp_error_entries_total", counts.entries))
+        for labels, n in sorted(counts.unexpected.items()):
+            out.append(fmt("sipp_unexpected_msgs_total", n, labels))
     header, row = read_last_row(path)
     if header is None:
         out.append(fmt("sipp_up", 0))
@@ -200,7 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            payload = render().encode()
+            payload = render(STAT_FILE, TRIMMER, FOLLOWER).encode()
         except Exception as exc:  # never crash the scrape
             payload = (f"sipp_up 0\n# exporter error: {exc}\n").encode()
         self.send_response(200)
@@ -217,8 +243,11 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sipp_stat_exporter: serving :{PORT}/metrics from {STAT_FILE} "
           f"(scenario={SCENARIO} role={ROLE} job={JOB or '-'})", file=sys.stderr)
+    global TRIMMER, FOLLOWER
     if KEEP_BYTES > 0:
-        stat_trim.start(STAT_FILE, KEEP_BYTES)
+        TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
+    if ERROR_FILE:
+        FOLLOWER = error_follow.start(ERROR_FILE)
     srv.serve_forever()
 
 

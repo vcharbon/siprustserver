@@ -8,8 +8,8 @@ its own offset for the whole run. The trimmer punches a hole
 blocks in between are released and read back as NUL bytes. The header and the
 recent rows stay readable, so the exporter's tail read is unaffected.
 
-Linux only; on a filesystem without hole punching `trim` raises OSError and the
-background loop stops after one line on stderr.
+Linux only; where hole punching fails (the filesystem, a read-only mount) `trim`
+raises OSError and the Trimmer retries on a backoff, exposing `failed`.
 """
 import ctypes
 import ctypes.util
@@ -17,12 +17,14 @@ import errno
 import os
 import sys
 import threading
+import time
 
 FALLOC_FL_KEEP_SIZE = 0x01
 FALLOC_FL_PUNCH_HOLE = 0x02
 
 # Seconds between two trims; a stat row a second grows the file by ~40 MB a day.
 INTERVAL_S = 60
+MAX_BACKOFF_S = 3600
 HEADER_MAX = 64 * 1024
 
 _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
@@ -65,20 +67,59 @@ def trim(path, keep_bytes):
         os.close(fd)
 
 
-def _loop(path, keep_bytes, stop):
-    while not stop.wait(INTERVAL_S):
+class Trimmer:
+    """Trims one file every `interval_s`; after a failure it retries on a doubling
+    backoff capped at `max_backoff_s`, and `failed` holds until a trim succeeds."""
+
+    def __init__(self, path, keep_bytes, interval_s=INTERVAL_S, max_backoff_s=MAX_BACKOFF_S):
+        self.path = path
+        self.keep_bytes = keep_bytes
+        self.interval_s = interval_s
+        self.max_backoff_s = max_backoff_s
+        self.failed = False
+        self._delay = interval_s
+
+    def run_once(self):
+        """One trim attempt; returns the seconds to wait before the next."""
         try:
-            trim(path, keep_bytes)
+            trim(self.path, self.keep_bytes)
         except FileNotFoundError:
-            continue
+            pass
         except OSError as exc:
-            print(f"stat_trim: {path} is not trimmed: {exc}", file=sys.stderr)
-            return
+            if not self.failed:
+                print(f"stat_trim: {self.path} is not trimmed, retrying on a backoff: {exc}",
+                      file=sys.stderr)
+            self.failed = True
+            self._delay = min(self._delay * 2, self.max_backoff_s)
+            return self._delay
+        if self.failed:
+            print(f"stat_trim: {self.path} is trimmed again", file=sys.stderr)
+        self.failed = False
+        self._delay = self.interval_s
+        return self._delay
+
+    def start(self):
+        """Run on a daemon thread, first attempt after `interval_s`."""
+        def loop():
+            delay = self.interval_s
+            while True:
+                time.sleep(delay)
+                delay = self.run_once()
+
+        threading.Thread(target=loop, daemon=True, name="stat-trim").start()
+        return self
 
 
-def start(path, keep_bytes):
-    """Trim `path` every INTERVAL_S on a daemon thread; returns its stop event."""
-    stop = threading.Event()
-    threading.Thread(target=_loop, args=(path, keep_bytes, stop), daemon=True,
-                     name="stat-trim").start()
-    return stop
+def readable_lines(fh):
+    """The lines of a (possibly trimmed) stat CSV opened in binary mode, minus
+    any line holding NUL bytes: a punched hole and the two rows it cut, which
+    share one line with it."""
+    for line in fh:
+        if b"\0" not in line:
+            yield line
+
+
+if __name__ == "__main__":
+    # `python3 stat_trim.py <file>`: the file's readable lines on stdout.
+    with open(sys.argv[1], "rb") as src:
+        sys.stdout.buffer.writelines(readable_lines(src))

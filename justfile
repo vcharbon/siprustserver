@@ -65,9 +65,10 @@ image tag='siprustserver:dev':
 sipp-check:
     deploy/k8s/sipp/checks/run.sh
 
-# The SIPp stat exporter against a large stat CSV under a memory cap, and its disk trimmer.
+# The SIPp stat exporter against a large stat CSV under a memory cap, its disk trimmer
+# and its error-file follower across SIPp's rotation (the last needs `sipp`).
 sipp-exporter-check:
-    python3 deploy/k8s/sipp/exporter-check/test_sipp_stat_exporter.py
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/k8s/sipp/exporter-check
 
 # ── environment ────────────────────────────────────────────────────────
 

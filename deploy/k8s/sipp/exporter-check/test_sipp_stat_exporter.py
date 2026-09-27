@@ -3,13 +3,15 @@
 Checks of the SIPp stat exporter (../exporter): it serves the last row of a stat
 CSV of any size with flat memory, and the trimmer bounds the disk the CSV holds.
 
-  python3 deploy/k8s/sipp/exporter-check/test_sipp_stat_exporter.py
+  python3 -m unittest discover -s deploy/k8s/sipp/exporter-check
 
 The large file is sparse (header, a hole, then dense rows): its apparent size is
 what a reader that loads the whole file pays for, and it costs no disk or tmpfs.
 The served process runs under a 64 MiB memory cgroup when `systemd-run --user`
 can make one; its peak RSS is asserted either way.
 """
+import csv
+import io
 import os
 import resource
 import shutil
@@ -67,6 +69,11 @@ def metric(text, name):
         if line.startswith(name + "{"):
             return line.rsplit(" ", 1)[1]
     return None
+
+
+def row_metrics(text):
+    """The series read off the stat row (everything but the file's disk usage)."""
+    return [ln for ln in text.splitlines() if not ln.startswith("sipp_stat_file_allocated_bytes")]
 
 
 def free_port():
@@ -173,7 +180,7 @@ class Trim(unittest.TestCase):
     def test_trim_keeps_header_and_tail_and_releases_the_rest(self):
         write_stat(self.path, 1, 12000)  # about 5.6 MiB
         size = os.path.getsize(self.path)
-        before = exporter.render(self.path)
+        before = row_metrics(exporter.render(self.path))
         try:
             released = stat_trim.trim(self.path, keep_bytes=1 * MIB)
         except OSError as exc:
@@ -184,7 +191,7 @@ class Trim(unittest.TestCase):
         self.assertLessEqual(self.allocated(), len(header()) + 1 * MIB + 2 * blk)
         with open(self.path, "rb") as fh:
             self.assertEqual(fh.readline(), header())
-        self.assertEqual(exporter.render(self.path), before)
+        self.assertEqual(row_metrics(exporter.render(self.path)), before)
 
     def test_under_the_bound_nothing_is_released(self):
         write_stat(self.path, 1, 1000)  # under 2 x keep
@@ -203,6 +210,66 @@ class Trim(unittest.TestCase):
             writer.write(row(12001))
         self.assertEqual(metric(exporter.render(self.path), "sipp_calls_created_total"),
                          "12001")
+
+
+class ReadableLines(unittest.TestCase):
+    """A trimmed file read back as CSV: the rows on each side of the hole are cut
+    mid-row and share one line with the hole; that line is dropped, never spliced."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sipp-exporter-check-")
+        self.path = os.path.join(self.dir, "stat.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_every_line_of_a_trimmed_file_is_a_whole_row(self):
+        write_stat(self.path, 1, 12000)
+        try:
+            stat_trim.trim(self.path, keep_bytes=1 * MIB)
+        except OSError as exc:
+            self.skipTest(f"no hole punching on {self.dir}: {exc}")
+        with open(self.path, "rb") as fh:
+            text = b"".join(stat_trim.readable_lines(fh)).decode()
+        rows = list(csv.DictReader(io.StringIO(text), delimiter=";"))
+        self.assertGreater(len(rows), 1000)
+        created = []
+        for r in rows:
+            self.assertNotIn(None, r)
+            self.assertNotIn(None, r.values())
+            float(r["CurrentTime"].split("\t")[-1])
+            created.append(int(r["TotalCallCreated"]))
+        self.assertEqual(created[-1], 12000)
+        self.assertEqual(created, sorted(set(created)))
+
+
+class TrimFailure(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sipp-exporter-check-")
+        self.path = os.path.join(self.dir, "stat.csv")
+        write_stat(self.path, 1, 100)
+
+    def tearDown(self):
+        os.chmod(self.path, 0o644)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes a read-only file")
+    def test_a_failed_trim_is_retried_on_a_backoff_and_exported(self):
+        trimmer = stat_trim.Trimmer(self.path, keep_bytes=1 * MIB, interval_s=60,
+                                    max_backoff_s=200)
+        os.chmod(self.path, 0o444)
+        self.assertEqual(trimmer.run_once(), 120)
+        self.assertEqual(trimmer.run_once(), 200)
+        self.assertEqual(metric(exporter.render(self.path, trimmer=trimmer),
+                                "sipp_stat_trim_failed"), "1")
+        os.chmod(self.path, 0o644)
+        self.assertEqual(trimmer.run_once(), 60)
+        self.assertEqual(metric(exporter.render(self.path, trimmer=trimmer),
+                                "sipp_stat_trim_failed"), "0")
+
+    def test_allocated_bytes_are_exported(self):
+        v = metric(exporter.render(self.path), "sipp_stat_file_allocated_bytes")
+        self.assertEqual(int(v), os.stat(self.path).st_blocks * 512)
 
 
 if __name__ == "__main__":
