@@ -1,29 +1,37 @@
 //! RFC 7315 §5.6 charging correlation on a call's messages. A call whose
-//! decision stated a charging vector
-//! ([`call::features::FeatureActivations::stated_charging_vector`]) carries it
-//! on every message the stack sends on every leg — requests and responses but
-//! `100 Trying` — in place of any relayed or minted copy. A call stating none
-//! keeps the originated-leg arm ([`minting_arm`]) and the relay of the
-//! originator's vector.
+//! decision stated its charging vector
+//! ([`call::features::FeatureActivations::stated_charging_vector`]) has every
+//! message the stack sends on every leg — requests and responses but
+//! `100 Trying` — carry exactly the stated lines, none for a stated removal, in
+//! place of any relayed or minted copy. A call stating nothing keeps the
+//! originated-leg arm ([`minting_arm`]) and the relay of the originator's
+//! vector.
 //!
-//! The stamp is idempotent: a message already carrying exactly the vector is
-//! left as it is, so a message stamped before it is retained for repetition
-//! and stamped again on its way out stays the same bytes.
+//! The stamp is idempotent: a message already carrying exactly the stated
+//! lines is left as it is, so a message stamped before it is retained for
+//! repetition and stamped again on its way out stays the same bytes.
+//! FIXME(charging-vector): a retention stamps from the working call, the turn's
+//! outbound from the end-of-turn call; a statement changed later in the same
+//! turn would split them. Stamp retained emissions at end of turn.
 
-use call::features::ChargingVectorFeature;
+use call::features::{ChargingVectorFeature, StatedChargingVector};
 use call::Call;
 use sip_message::header::{ChargingVector, HeaderName, HeaderValue};
 use sip_message::{SipRequest, SipResponse};
 
 use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect};
 
-/// The charging vector a decision stated for `call`, if any.
-pub fn stated(call: &Call) -> Option<&str> {
-    call.features.as_ref()?.stated_charging_vector.as_deref()
+/// The `P-Charging-Vector` lines every message of `call` carries, where its
+/// decision stated them: the stated lines, or none for a stated removal.
+pub fn stated(call: &Call) -> Option<&[String]> {
+    match call.features.as_ref()?.stated_charging_vector.as_ref()? {
+        StatedChargingVector::Lines(lines) => Some(lines),
+        StatedChargingVector::Removed => Some(&[]),
+    }
 }
 
 /// The arm a leg this call originates mints its own vector under: none where
-/// the call carries a stated one, which every message then states instead.
+/// the call's decision stated its vector, lines or a removal.
 pub fn minting_arm(call: &Call) -> Option<&ChargingVectorFeature> {
     let features = call.features.as_ref()?;
     match features.stated_charging_vector {
@@ -34,9 +42,9 @@ pub fn minting_arm(call: &Call) -> Option<&ChargingVectorFeature> {
 
 /// Stamp every outbound message of `result` with its call's stated vector.
 pub fn stamp_outbound(mut result: HandlerResult) -> HandlerResult {
-    if let Some(vector) = stated(&result.call).map(str::to_string) {
+    if let Some(lines) = stated(&result.call).map(<[String]>::to_vec) {
         for effect in &mut result.effects.outbound {
-            stamp_with(&vector, effect);
+            stamp_with(&lines, effect);
         }
     }
     result
@@ -44,28 +52,29 @@ pub fn stamp_outbound(mut result: HandlerResult) -> HandlerResult {
 
 /// Stamp `effect` with `call`'s stated vector, if it states one.
 pub fn stamp(call: &Call, effect: &mut OutboundSipEffect) {
-    if let Some(vector) = stated(call) {
-        stamp_with(vector, effect);
+    if let Some(lines) = stated(call) {
+        stamp_with(lines, effect);
     }
 }
 
 /// Stamp `resp` with `call`'s stated vector, if it states one.
 pub fn stamp_response(call: &Call, resp: &mut SipResponse) {
-    if let Some(stamped) = stated(call).and_then(|v| stamped_response(v, resp)) {
+    if let Some(stamped) = stated(call).and_then(|lines| stamped_response(lines, resp)) {
         *resp = stamped;
     }
 }
 
-/// A retained datagram is the bytes of a message stamped when it first left.
-fn stamp_with(vector: &str, effect: &mut OutboundSipEffect) {
+/// Stamp a request or response body with `lines`. A retained datagram is left
+/// as it is: its bytes were stamped before they were retained.
+fn stamp_with(lines: &[String], effect: &mut OutboundSipEffect) {
     match &mut effect.body {
         OutboundBody::Request(req) => {
-            if let Some(stamped) = stamped_request(vector, req) {
+            if let Some(stamped) = stamped_request(lines, req) {
                 *req = stamped;
             }
         }
         OutboundBody::Response(resp) => {
-            if let Some(stamped) = stamped_response(vector, resp) {
+            if let Some(stamped) = stamped_response(lines, resp) {
                 *resp = stamped;
             }
         }
@@ -77,27 +86,29 @@ fn name() -> HeaderName {
     ChargingVector::header_name()
 }
 
-/// Whether `lines` are exactly the one line `vector`.
-fn carries(mut lines: impl Iterator<Item = impl AsRef<str>>, vector: &str) -> bool {
-    lines.next().is_some_and(|l| l.as_ref() == vector) && lines.next().is_none()
+/// Whether `carried` are exactly `lines`, in order.
+fn carries<'a>(carried: impl Iterator<Item = &'a str>, lines: &[String]) -> bool {
+    carried.eq(lines.iter().map(String::as_str))
 }
 
-/// `req` stating `vector` as its one charging line, or `None` where it already
-/// does. The line replaces every relayed or minted copy.
-fn stamped_request(vector: &str, req: &SipRequest) -> Option<SipRequest> {
-    if carries(req.raw(name()), vector) {
+/// `req` carrying exactly `lines` as its charging lines, or `None` where it
+/// already does. The lines replace every relayed or minted copy.
+fn stamped_request(lines: &[String], req: &SipRequest) -> Option<SipRequest> {
+    if carries(req.raw(name()), lines) {
         return None;
     }
-    req.thaw().remove(&name()).push_raw(name(), vector.to_string()).freeze().ok()
+    let draft = req.thaw().remove(&name());
+    lines.iter().fold(draft, |d, line| d.push_raw(name(), line.clone())).freeze().ok()
 }
 
-/// `resp` stating `vector`, or `None` where it already does or is a `100`,
-/// which is hop-by-hop (RFC 3261 §21.1.1) and states none.
-fn stamped_response(vector: &str, resp: &SipResponse) -> Option<SipResponse> {
-    if resp.status() == 100 || carries(resp.raw(name()), vector) {
+/// `resp` carrying exactly `lines`, or `None` where it already does or is a
+/// `100`, which is hop-by-hop (RFC 3261 §21.1.1) and is left as it is.
+fn stamped_response(lines: &[String], resp: &SipResponse) -> Option<SipResponse> {
+    if resp.status() == 100 || carries(resp.raw(name()), lines) {
         return None;
     }
-    resp.thaw().remove(&name()).push_raw(name(), vector.to_string()).freeze().ok()
+    let draft = resp.thaw().remove(&name());
+    lines.iter().fold(draft, |d, line| d.push_raw(name(), line.clone())).freeze().ok()
 }
 
 #[cfg(test)]
@@ -107,6 +118,10 @@ mod tests {
     use sip_message::{SipMessage, SipParser};
 
     const VECTOR: &str = "icid-value=abc;orig-ioi=example.net";
+
+    fn one() -> Vec<String> {
+        vec![VECTOR.to_string()]
+    }
 
     fn parse(raw: &str) -> SipMessage {
         CustomParser::new().parse(raw.as_bytes()).unwrap()
@@ -144,9 +159,9 @@ Call-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
     #[test]
     fn the_stated_vector_replaces_every_copy() {
         let relayed = request("P-Charging-Vector: icid-value=one\r\np-charging-vector: two\r\n");
-        let stamped = stamped_request(VECTOR, &relayed).expect("restated");
+        let stamped = stamped_request(&one(), &relayed).expect("restated");
         assert_eq!(lines(&stamped), [VECTOR]);
-        let bare = stamped_request(VECTOR, &request("")).expect("added");
+        let bare = stamped_request(&one(), &request("")).expect("added");
         assert_eq!(lines(&bare), [VECTOR]);
     }
 
@@ -154,17 +169,29 @@ Call-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
     /// second stamp — what keeps a retained repeat equal to its original.
     #[test]
     fn a_second_stamp_changes_nothing() {
-        let once = stamped_request(VECTOR, &request("")).unwrap();
-        assert!(stamped_request(VECTOR, &once).is_none());
-        let answered = stamped_response(VECTOR, &response("200 OK")).unwrap();
-        assert!(stamped_response(VECTOR, &answered).is_none());
+        let once = stamped_request(&one(), &request("")).unwrap();
+        assert!(stamped_request(&one(), &once).is_none());
+        let answered = stamped_response(&one(), &response("200 OK")).unwrap();
+        assert!(stamped_response(&one(), &answered).is_none());
     }
 
     /// `100 Trying` is hop-by-hop and carries none; every other response does.
     #[test]
     fn a_trying_is_left_alone() {
-        assert!(stamped_response(VECTOR, &response("100 Trying")).is_none());
-        let ringing = stamped_response(VECTOR, &response("180 Ringing")).unwrap();
+        assert!(stamped_response(&one(), &response("100 Trying")).is_none());
+        let ringing = stamped_response(&one(), &response("180 Ringing")).unwrap();
         assert_eq!(ringing.raw(name()).collect::<Vec<_>>(), [VECTOR]);
+    }
+
+    /// Several stated lines ride in order; a stated removal takes every
+    /// relayed copy off, and a message carrying none is left as it is.
+    #[test]
+    fn several_lines_ride_in_order_and_a_removal_strips_every_copy() {
+        let two = vec!["icid-value=a".to_string(), "orig-ioi=b".to_string()];
+        let stamped = stamped_request(&two, &request("P-Charging-Vector: other\r\n")).unwrap();
+        assert_eq!(lines(&stamped), two);
+        let relayed = request("P-Charging-Vector: icid-value=one\r\n");
+        assert_eq!(lines(&stamped_request(&[], &relayed).unwrap()), Vec::<String>::new());
+        assert!(stamped_request(&[], &request("")).is_none());
     }
 }

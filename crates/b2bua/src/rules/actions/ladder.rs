@@ -32,13 +32,12 @@ impl ActionExecutor<'_> {
 
     /// Retain the a-leg's INITIAL answer as the datagram it leaves as — its
     /// `image()` once stamped with the call's charging vector
-    /// ([`crate::rules::charging`]), which the transaction layer sends
-    /// verbatim — and arm its
-    /// §13.3.1.4 ladder under `AckOf2xx`, keyed by the To-tag and CSeq the 2xx
-    /// itself carries — the two facts the caller's ACK echoes. The a-leg INVITE
-    /// server transaction goes `Completed` on this final, so the txn layer
-    /// neither retransmits the 2xx nor reports the missing ACK: this ladder is
-    /// the one that does.
+    /// ([`crate::rules::charging`]), which the transaction layer sends verbatim
+    /// — and arm its §13.3.1.4 ladder under `AckOf2xx`, keyed by the To-tag and
+    /// CSeq the 2xx itself carries — the two facts the caller's ACK echoes. The
+    /// a-leg INVITE server transaction goes `Completed` on this final, so the
+    /// txn layer neither retransmits the 2xx nor reports the missing ACK: this
+    /// ladder is the one that does.
     pub(super) fn retain_a_leg_answer(
         &self,
         call: &mut Call,
@@ -58,9 +57,10 @@ impl ActionExecutor<'_> {
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face), stamped as it leaves, and arm its §13.3.1.4 ladder. The marker also holds the
-    /// dialog's INVITE server transaction in RFC 6026 *Accepted* for
-    /// `reinvite-glare`, for exactly as long as the ladder's give-up stands.
+    /// either face), stamped as it leaves, and arm its §13.3.1.4 ladder. The
+    /// marker also holds the dialog's INVITE server transaction in RFC 6026
+    /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
+    /// give-up stands.
     pub(super) fn retain_reinvite_2xx(
         &self,
         call: &mut Call,
@@ -115,13 +115,12 @@ impl ActionExecutor<'_> {
 
     /// Retain the reliable provisional as its `image()`, stamped as it leaves —
     /// the datagram the transaction layer sends verbatim — and arm its first §3
-    /// rung under
-    /// `PrackOf`. The obligation is this stack's: the `RSeq` the peer must
-    /// PRACK is our own mint (`assign_a_rseq`), so the ladder under its copies
-    /// is ours — per `(a_tag, a_rseq)`, one per shown dialog (§4, errata 4603).
-    /// Idempotent: a recalled number keeps the ladder it already anchors, and
-    /// the give-up is armed once with the first rung so a re-emission cannot
-    /// push it out.
+    /// rung under `PrackOf`. The obligation is this stack's: the `RSeq` the
+    /// peer must PRACK is our own mint (`assign_a_rseq`), so the ladder under
+    /// its copies is ours — per `(a_tag, a_rseq)`, one per shown dialog (§4,
+    /// errata 4603). Idempotent: a recalled number keeps the ladder it already
+    /// anchors, and the give-up is armed once with the first rung so a
+    /// re-emission cannot push it out.
     pub(super) fn arm_reliable_provisional_ladder(
         &self,
         call: &mut Call,

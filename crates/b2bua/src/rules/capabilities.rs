@@ -282,8 +282,8 @@ mod tests {
             no_answer_timeout_sec: None,
             call_limiters: None,
             charging_vector: None,
-            stated_charging_vector: None,
             withhold_option_tags: None,
+            stated_charging_vector: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(caps),

@@ -155,8 +155,9 @@ pub struct AdvertiseCapabilitiesFeature {
 /// `P-Charging-Vector` on every leg it ORIGINATES, so the records of the two
 /// operators either side of it match on one identifier. A vector the originator
 /// sent is relayed unchanged whether or not this arm is present — an identifier
-/// re-minted mid-path breaks the correlation it exists for. A call carrying a
-/// [`FeatureActivations::stated_charging_vector`] mints none.
+/// re-minted mid-path breaks the correlation it exists for. A call whose
+/// decision stated its vector ([`FeatureActivations::stated_charging_vector`])
+/// mints none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChargingVectorFeature {
     /// The element the identifier is generated at (`icid-generated-at`).
@@ -190,14 +191,6 @@ pub struct FeatureActivations {
     /// decodes as no activation.
     #[serde(default)]
     pub charging_vector: Option<ChargingVectorFeature>,
-    /// RFC 7315 §5.6: the call's charging vector as a decision stated it — the
-    /// whole `P-Charging-Vector` value. Present, the stack states it on every
-    /// message it sends on every leg of the call, requests and responses but
-    /// `100`, in place of any relayed or minted copy. A call-lifetime latch
-    /// ([`FeatureActivations::latch_call_lifetime`]): a later route stating none
-    /// keeps it, one stating another replaces it.
-    #[serde(default)]
-    pub stated_charging_vector: Option<String>,
     /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
     /// `Supported` set would ride the originated INVITE is narrowed by these
     /// tags (an emptied set drops its line) and a relayed `Require` naming
@@ -212,12 +205,33 @@ pub struct FeatureActivations {
     /// so a body encoded before this arm decodes as no withhold.
     #[serde(default)]
     pub withhold_option_tags: Option<Vec<String>>,
+    /// RFC 7315 §5.6: what a decision stated about the call's charging vector
+    /// ([`StatedChargingVector`]); `None` — it stated nothing. A call-lifetime
+    /// latch ([`FeatureActivations::latch_call_lifetime`]): a later route
+    /// stating nothing keeps the standing statement, one stating anything
+    /// replaces it.
+    #[serde(default)]
+    pub stated_charging_vector: Option<StatedChargingVector>,
+}
+
+/// A decision's statement of the call's RFC 7315 §5.6 charging vector. Either
+/// way it binds every message the stack sends on every leg of the call,
+/// requests and responses but `100`, and the originated-leg arm
+/// ([`ChargingVectorFeature`]) mints nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatedChargingVector {
+    /// The `P-Charging-Vector` lines, in order, in place of any relayed or
+    /// minted copy.
+    Lines(Vec<String>),
+    /// No `P-Charging-Vector`: every relayed copy is removed.
+    Removed,
 }
 
 impl FeatureActivations {
     /// The call-lifetime latches, run where a route's features replace the
-    /// standing ones: the stated charging vector carries over unless this route
-    /// states its own, and the withheld option tags union (a route can widen the
+    /// standing ones: the charging vector statement carries over unless this
+    /// route states one (lines or a removal), and the withheld option tags union (a route can widen the
     /// withhold; none can restore a withheld tag). Both properties belong to the
     /// call, not to the leg the declaring route dialled.
     pub fn latch_call_lifetime(&mut self, previous: Option<&FeatureActivations>) {
@@ -258,8 +272,8 @@ mod tests {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
-            stated_charging_vector: None,
             withhold_option_tags: withheld.map(|w| w.iter().map(|t| t.to_string()).collect()),
+            stated_charging_vector: None,
         }
     }
 
@@ -290,22 +304,31 @@ mod tests {
         assert_eq!(untouched.withhold_option_tags, None);
     }
 
-    /// The stated charging vector latch: a route stating none keeps the
-    /// standing one, a route stating another replaces it, and with nothing
-    /// standing, nothing is invented.
+    /// The stated charging vector latch is three-state: a route stating
+    /// nothing keeps the standing statement, one stating lines or a removal
+    /// replaces it, and with nothing standing, nothing is invented.
     #[test]
-    fn the_stated_charging_vector_outlives_a_route_that_states_none() {
-        let stating = |v: Option<&str>| FeatureActivations {
-            stated_charging_vector: v.map(str::to_string),
+    fn the_stated_charging_vector_latch_keeps_replaces_and_clears() {
+        let lines = |v: &str| Some(StatedChargingVector::Lines(vec![v.to_string()]));
+        let stating = |v: Option<StatedChargingVector>| FeatureActivations {
+            stated_charging_vector: v,
             ..features(None)
         };
         let mut kept = stating(None);
-        kept.latch_call_lifetime(Some(&stating(Some("icid-value=first"))));
-        assert_eq!(kept.stated_charging_vector.as_deref(), Some("icid-value=first"));
+        kept.latch_call_lifetime(Some(&stating(lines("icid-value=first"))));
+        assert_eq!(kept.stated_charging_vector, lines("icid-value=first"));
 
-        let mut replaced = stating(Some("icid-value=second"));
-        replaced.latch_call_lifetime(Some(&stating(Some("icid-value=first"))));
-        assert_eq!(replaced.stated_charging_vector.as_deref(), Some("icid-value=second"));
+        let mut replaced = stating(lines("icid-value=second"));
+        replaced.latch_call_lifetime(Some(&stating(lines("icid-value=first"))));
+        assert_eq!(replaced.stated_charging_vector, lines("icid-value=second"));
+
+        let mut cleared = stating(Some(StatedChargingVector::Removed));
+        cleared.latch_call_lifetime(Some(&stating(lines("icid-value=first"))));
+        assert_eq!(cleared.stated_charging_vector, Some(StatedChargingVector::Removed));
+
+        let mut still_cleared = stating(None);
+        still_cleared.latch_call_lifetime(Some(&cleared));
+        assert_eq!(still_cleared.stated_charging_vector, Some(StatedChargingVector::Removed));
 
         let mut none = stating(None);
         none.latch_call_lifetime(None);

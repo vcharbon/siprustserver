@@ -564,6 +564,8 @@ async fn refuse_foreign_dialog(
     if req.method() == Method::Ack {
         return Some(None);
     }
+    // FIXME(charging-vector): this in-call refusal carries none of the call's
+    // stated RFC 7315 §5.6 vector; stamp it from the call it resolved to.
     let refusal = build_481(req, None);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(Some(refusal))

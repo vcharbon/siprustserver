@@ -157,6 +157,8 @@ impl PendingRequest {
     /// Hand the answer to the layer and count it. A transaction that already
     /// holds its final — a CANCEL's 487 got there first — keeps it, and the
     /// layer drops this one (RFC 3261 §17.2.1); it is counted all the same.
+    /// FIXME(charging-vector): an answer to an in-call request carries none of
+    /// the call's stated RFC 7315 §5.6 vector; the hook holds no call to read.
     async fn answer(self, why: Discard) {
         if self.req.method() != Method::Invite {
             if why == Discard::Capped {

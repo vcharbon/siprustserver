@@ -292,8 +292,8 @@ pub fn representative_call() -> Call {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
-            stated_charging_vector: None,
             withhold_option_tags: None,
+            stated_charging_vector: None,
         }),
         policy_update_headers: None,
         policy_update_body: None,
@@ -907,8 +907,8 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
-            stated_charging_vector: None,
             withhold_option_tags: None,
+            stated_charging_vector: None,
         })
 }
 

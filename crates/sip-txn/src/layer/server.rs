@@ -628,6 +628,9 @@ impl Owner {
         let uas_to_tag = self.uas_to_tag_of(&branch);
 
         // 200 OK to the CANCEL itself.
+        // FIXME(charging-vector): this 200 and the 487 below carry none of the
+        // TU's RFC 7315 §5.6 charging vector; let the TU pin a per-transaction
+        // header set the layer states on the answers it authors.
         let cancel_ok = generate_response(
             &req,
             200,
