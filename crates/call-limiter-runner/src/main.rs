@@ -46,7 +46,7 @@ async fn main() {
     // Periodic janitor: drop lapsed sets even with no traffic.
     let janitor_store = store.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(janitor_secs.max(1)));
+        let mut tick = tokio::time::interval(Duration::from_secs(janitor_secs));
         loop {
             tick.tick().await;
             let lapsed = janitor_store.sweep_now();

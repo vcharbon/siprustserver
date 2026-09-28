@@ -45,9 +45,8 @@ pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Run
     Ok(RunnerEnv {
         listen,
         lease_sec: seconds("LIMITER_LEASE_SECONDS", DEFAULT_LEASE_SEC)?,
-        janitor_sec: stated("LIMITER_JANITOR_INTERVAL_SECONDS")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_JANITOR_SEC as u64),
+        janitor_sec: seconds("LIMITER_JANITOR_INTERVAL_SECONDS", DEFAULT_JANITOR_SEC)?
+            .unsigned_abs(),
     })
 }
 
