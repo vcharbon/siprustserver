@@ -4191,6 +4191,9 @@ name = "sip-txn"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "getrandom 0.3.4",
+ "hmac",
+ "sha2",
  "sip-message",
  "sip-net",
  "sip-retransmit",

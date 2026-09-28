@@ -1,74 +1,67 @@
 //! Identifier generation seam. Mirrors the clock seam's shape: a small
 //! **injectable value** (not a trait) — `IdGen::seeded(seed)` for
-//! deterministic tests, `IdGen::from_entropy()` in production. The
-//! transaction layer needs only `new_tag` (UAS To-tag fabricated on CANCEL
-//! before any 1xx, RFC 3261 §17.2.1) and `new_branch` (fallback when an
-//! outbound request carries no Via branch).
+//! deterministic tests, `IdGen::from_entropy()` in production.
 //!
-//! Identifier generation is a rare, non-behavioural path; statistical
-//! uniqueness from a per-process xorshift is sufficient and keeps the crate
-//! free of a `rand` dependency. Determinism is the property tests care about,
-//! and that is recovered by seeding.
+//! Every identifier is HMAC-SHA256 over a counter under a secret key, so an
+//! off-path host cannot guess the branch a response is matched by: the output
+//! reveals neither the key nor the next value, and two keys give unrelated
+//! streams. Why the response's source is not checked: ADR-0007.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 /// Branch identifiers MUST start with this magic cookie (RFC 3261 §8.1.1.7).
 const MAGIC_COOKIE: &str = "z9hG4bK";
 
-/// A seedable identifier generator. Cheap to clone the `Arc`; the internal
-/// state advances atomically so concurrent callers never collide.
-#[derive(Debug)]
+/// A keyed identifier generator. Cheap to share behind an `Arc`; the counter
+/// advances atomically so concurrent callers never draw the same value.
 pub struct IdGen {
-    state: AtomicU64,
+    /// The PRF, keyed once; each draw clones it.
+    prf: Hmac<Sha256>,
+    counter: AtomicU64,
+}
+
+impl std::fmt::Debug for IdGen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdGen").finish_non_exhaustive()
+    }
 }
 
 impl IdGen {
     /// Deterministic generator — same seed yields the same id sequence. Used
-    /// by tests that assert on generated identifiers.
+    /// by tests that assert on generated identifiers. Not for production: a
+    /// 64-bit seed is a guessable key.
     pub fn seeded(seed: u64) -> Self {
-        // Avoid the xorshift fixed point at 0.
-        Self { state: AtomicU64::new(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed }) }
+        Self::keyed(&seed.to_le_bytes())
     }
 
-    /// Production generator, seeded with per-process OS entropy at construction.
+    /// Production generator, keyed with 256 bits from the OS RNG, so every
+    /// process — two pods behind one load-balancer address included — draws
+    /// its own unpredictable stream.
     ///
-    /// `RandomState` is seeded once per process from the OS RNG, so two pods that
-    /// start in the same clock-nanosecond still get DISTINCT id streams — a
-    /// `SystemTime`-nanos-only seed collides under coarse clocks (WSL2/VM),
-    /// and because all b-leg traffic is masqueraded behind one LB VIP (identical
-    /// sent-by at the peer), two workers emitting the same Via-branch / To-tag
-    /// sequence would have their transactions merged at the common UAS. The wall
-    /// clock + PID are still folded in so a single process's seed is time-varying.
+    /// # Panics
+    ///
+    /// When the OS RNG is unavailable: identifiers would be guessable.
     pub fn from_entropy() -> Self {
-        use std::hash::{BuildHasher, Hasher};
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x1234_5678_9ABC_DEF0);
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(nanos);
-        h.write_u64(std::process::id() as u64);
-        Self::seeded(h.finish() ^ 0xD1B5_4A32_D192_ED03)
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).expect("the OS RNG keys the SIP identifier generator");
+        Self::keyed(&key)
     }
 
-    /// xorshift64* — one step of state, returns a well-mixed `u64`.
+    fn keyed(key: &[u8]) -> Self {
+        let prf = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes a key of any length");
+        Self { prf, counter: AtomicU64::new(0) }
+    }
+
+    /// The next PRF output: HMAC(key, counter), its first 8 bytes.
     fn next_u64(&self) -> u64 {
-        // CAS loop so two threads stepping concurrently each get a distinct
-        // value (matters for branch uniqueness under the actor's send API).
-        loop {
-            let cur = self.state.load(Ordering::Relaxed);
-            let mut x = cur;
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            if self
-                .state
-                .compare_exchange_weak(cur, x, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-            }
-        }
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let mut mac = self.prf.clone();
+        mac.update(&n.to_le_bytes());
+        let out = mac.finalize().into_bytes();
+        u64::from_le_bytes(out[..8].try_into().expect("a SHA-256 output holds 8 bytes"))
     }
 
     /// RFC 3261 From/To tag — 8 base-36 chars.
@@ -127,6 +120,60 @@ mod tests {
         let b = IdGen::seeded(7);
         assert_eq!(a.new_tag(), b.new_tag());
         assert_eq!(a.new_branch(), b.new_branch());
+    }
+
+    /// The u64 a branch carries.
+    fn branch_value(branch: &str) -> u64 {
+        u64::from_str_radix(branch.strip_prefix(MAGIC_COOKIE).unwrap(), 16).unwrap()
+    }
+
+    /// An observer holding one branch cannot compute the next: the output
+    /// is no invertible image of the generator's state. The attack tried is
+    /// the one a xorshift64* stream falls to — undo the output multiply,
+    /// step the state, multiply again.
+    #[test]
+    fn one_branch_does_not_predict_the_next() {
+        const MUL: u64 = 0x2545_F491_4F6C_DD1D;
+        // MUL's inverse mod 2^64 by Newton iteration (MUL is odd).
+        let mut inv: u64 = MUL;
+        for _ in 0..6 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(MUL.wrapping_mul(inv)));
+        }
+        let predict = |seen: u64| {
+            let mut x = seen.wrapping_mul(inv);
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x.wrapping_mul(MUL)
+        };
+        for seed in [1, 7, 42, 0xB2B0] {
+            let g = IdGen::seeded(seed);
+            let seen = branch_value(&g.new_branch());
+            let next = branch_value(&g.new_branch());
+            assert_ne!(predict(seen), next, "seed {seed}: the next branch was predicted");
+        }
+    }
+
+    /// Two layers seeded differently draw unrelated streams: no id of one
+    /// appears anywhere in the other, the seed that a xorshift step makes of
+    /// the first included.
+    #[test]
+    fn differently_seeded_generators_share_no_ids() {
+        let step = |mut x: u64| {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x
+        };
+        for (sa, sb) in [(1, 2), (1, step(1)), (42, step(42))] {
+            let (a, b) = (IdGen::seeded(sa), IdGen::seeded(sb));
+            let first: std::collections::HashSet<String> =
+                (0..10_000).map(|_| a.new_branch()).collect();
+            assert!(
+                (0..10_000).all(|_| !first.contains(&b.new_branch())),
+                "seeds {sa} and {sb} share an id"
+            );
+        }
     }
 
     #[test]

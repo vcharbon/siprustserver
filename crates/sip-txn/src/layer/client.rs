@@ -755,7 +755,9 @@ impl Owner {
                 return false;
             }
 
-            // Snapshot what we need before mutating.
+            // Snapshot what we need before mutating. The branch alone
+            // matches: it is unguessable, and the source goes unchecked
+            // (ADR-0007).
             let client_match =
                 self.txns.get(branch).filter(|t| t.role == TxnRole::Client).map(|t| {
                     (t.kind, t.state, t.original_request.clone(), t.destination, t.orphaned)

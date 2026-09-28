@@ -103,6 +103,13 @@ the message slice) land here as `IdGen` — a small **injectable value** (not a
 trait), mirroring the clock seam: `IdGen::seeded(seed)` for deterministic tests,
 `IdGen::from_entropy()` in production.
 
+A response is matched to its client transaction by branch, so identifiers must
+be unguessable off-path: each is HMAC-SHA256 over a counter, keyed from the OS
+RNG in production (the seed is the key in tests). The response's source is not
+compared with the transaction's destination: RFC 3261 §18.1.2 does not ask it,
+a NAT, load balancer or multi-homed peer answers from another address, and the
+on-path host left able to forge can spoof the source too.
+
 ## No property / parity tests
 
 Unlike the network layer, the source `TransactionLayer` has no `propertyTest`

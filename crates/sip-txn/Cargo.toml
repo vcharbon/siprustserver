@@ -19,6 +19,10 @@ sip-retransmit = { path = "../sip-retransmit" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 tracing.workspace = true
+# Identifiers are HMAC-SHA256 over a counter, keyed from the OS RNG (`rng.rs`).
+hmac.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 # `test-util` adds the paused-clock lever (`tokio::time::pause`/`advance`) —
