@@ -184,6 +184,7 @@ pub fn build_initial_call(
         adopted: None,
         invite_final_sent: None,
         messages: Default::default(),
+        sdp_session: Default::default(),
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {

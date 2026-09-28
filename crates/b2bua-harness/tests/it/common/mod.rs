@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod sdp;
 pub mod unrun;
 
 use std::net::SocketAddr;

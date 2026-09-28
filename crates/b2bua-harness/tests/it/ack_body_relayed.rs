@@ -20,10 +20,10 @@ use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::HeaderName;
 
-const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const OFFER: &str = "v=0\r\no=alice 101 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ANSWER: &str = "v=0\r\no=bob 202 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 101 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 202 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// A body no SIP stack interprets — the point is that it still arrives whole.
 const CUSTOM: &[u8] = b"\x01\x02opaque payload\xff\x00trailing";
@@ -32,7 +32,7 @@ const CUSTOM_TYPE: &str = "application/x-custom";
 /// A media type whose PARAMETER is load-bearing: drop the boundary and the
 /// receiver cannot split the parts (RFC 3261 §7.4, RFC 5621).
 const MULTIPART_TYPE: &str = "multipart/mixed; boundary=unique-boundary-1";
-const MULTIPART: &str = "--unique-boundary-1\r\nContent-Type: application/sdp\r\n\r\nv=0\r\no=alice 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n--unique-boundary-1--\r\n";
+const MULTIPART: &str = "--unique-boundary-1\r\nContent-Type: application/sdp\r\n\r\nv=0\r\no=alice 101 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30002 RTP/AVP 0\r\n--unique-boundary-1--\r\n";
 
 /// Waive the stray-body finding on both lanes that carried it: the party that
 /// authored the body, and the relay that owes it onward.
@@ -131,12 +131,12 @@ async fn a_reinvite_ack_body_reaches_the_callee_verbatim() {
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await;
 
-    dialog.ack_for(reinvite_cseq, Some(REANSWER)).await;
+    dialog.ack_for(reinvite_cseq, Some(REOFFER)).await;
     let ack = bob.receive("ACK").await;
     let (body, ct, cl) = body_of(&ack);
-    assert_eq!(body, REANSWER.as_bytes(), "the callee's ACK carries the caller's bytes");
+    assert_eq!(body, REOFFER.as_bytes(), "the callee's ACK carries the caller's bytes");
     assert_eq!(ct.as_deref(), Some("application/sdp"));
-    assert_eq!(cl.as_deref(), Some(REANSWER.len().to_string().as_str()));
+    assert_eq!(cl.as_deref(), Some(REOFFER.len().to_string().as_str()));
     assert_eq!(ack.request().cseq().seq(), reinvite_cseq, "on the re-INVITE's CSeq");
 
     let mut bye = dialog.bye().await;

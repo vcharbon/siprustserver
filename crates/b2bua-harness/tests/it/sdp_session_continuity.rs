@@ -182,11 +182,15 @@ const BOB_AV_ANSWER: &str = "v=0\r\no=bob 202 1 IN IP4 127.0.0.2\r\ns=-\r\nc=IN 
 /// The replacement destination is offered audio only and answers so.
 const AUDIO_ONLY_OFFER: &str = "v=0\r\no=anchor 505 1 IN IP4 127.0.0.5\r\ns=-\r\nc=IN IP4 127.0.0.5\r\nt=0 0\r\nm=audio 40000 RTP/AVP 0\r\n";
 const MEDIA_ANSWER: &str = "v=0\r\no=media 404 1 IN IP4 127.0.0.4\r\ns=-\r\nc=IN IP4 127.0.0.4\r\nt=0 0\r\nm=audio 50000 RTP/AVP 0\r\n";
+const MEDIA_REOFFER: &str = "v=0\r\no=media 404 2 IN IP4 127.0.0.4\r\ns=-\r\nc=IN IP4 127.0.0.4\r\nt=0 0\r\nm=audio 50002 RTP/AVP 0\r\n";
+const ALICE_AV_ANSWER_2: &str = "v=0\r\no=alice 101 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n";
 const ALICE_AV_REANSWER: &str = "v=0\r\no=alice 101 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n";
 
 /// An established audio+video call is rerouted to a destination that
 /// describes audio only: the re-offer toward A keeps B's session and both
-/// m-lines, the video stream rejected at its position (RFC 3264 §8.2).
+/// m-lines, the video stream rejected at its position (RFC 3264 §8.2). A's
+/// answer to the destination's next re-offer reaches it with the destination's
+/// one m-line (§6), under the session this stack opened toward it.
 #[tokio::test(start_paused = true)]
 async fn a_reoffer_describing_fewer_streams_keeps_the_dropped_one_rejected() {
     let h = Harness::new("sdp-session-continuity-fewer-streams");
@@ -249,10 +253,72 @@ async fn a_reoffer_describing_fewer_streams_keeps_the_dropped_one_rejected() {
     alice.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
+    let mut media_dialog = media_uas.dialog();
+    let mut reinvite = media_dialog.request(InDialogMethod::Invite, Some(MEDIA_REOFFER)).await;
+    let mut at_alice = alice.receive("INVITE").await;
+    assert_eq!(
+        body_of(&at_alice),
+        format!(
+            "{}m=video 0 RTP/AVP 96\r\n",
+            continued(MEDIA_REOFFER, "bob 202 3 IN IP4 127.0.0.2")
+        ),
+    );
+    at_alice.respond(200, "OK").with_sdp(ALICE_AV_ANSWER_2).await;
+    let ok = reinvite.expect(200).await;
+    assert_eq!(
+        String::from_utf8_lossy(ok.body()),
+        "v=0\r\no=anchor 505 2 IN IP4 127.0.0.5\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 0\r\n",
+        "A's answer reaches the destination with its one m-line, under the session opened toward it",
+    );
+    media_dialog.ack(None).await;
+    alice.receive("ACK").await;
+
     let mut alice_bye = alice_dialog.bye().await;
     media.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let _ = h.finish().await;
+}
+
+/// An OPTIONS answer describes capabilities, not the session (RFC 3261 §11.2):
+/// its description relays as written, whatever session it names, and the
+/// dialog's session is untouched by it.
+#[tokio::test]
+async fn an_options_answer_stays_outside_the_session() {
+    const CAPABILITIES: &str = "v=0\r\no=gateway 909 1 IN IP4 127.0.0.9\r\ns=-\r\nc=IN IP4 127.0.0.9\r\nt=0 0\r\nm=audio 0 RTP/AVP 0 8\r\n";
+    let h = Harness::with_transit_delay("sdp-session-continuity-options", 1);
+    let alice = h.agent("alice", "127.0.0.1:5934").await;
+    let bob = h.agent("bob", "127.0.0.1:5944").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5944).start(&h, "b2bua", "127.0.0.1:5954").await;
+
+    let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut options = bob_dialog.send_request(InDialogMethod::Options).send().await;
+    alice.receive("OPTIONS").await.respond(200, "OK").with_sdp(CAPABILITIES).await;
+    let ok = options.expect(200).await;
+    assert_eq!(String::from_utf8_lossy(ok.body()), CAPABILITIES, "relayed as written");
+
+    let mut reinvite = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_REANSWER)).await;
+    let mut at_bob = bob.receive("INVITE").await;
+    assert_eq!(body_of(&at_bob), ALICE_REANSWER, "the caller's session continues as written");
+    at_bob.respond(200, "OK").with_sdp(BOB_REOFFER).await;
+    reinvite.expect(200).await;
+    alice_dialog.ack(None).await;
+    bob.receive("ACK").await;
+
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     settle_until(|| !b2bua.cdr_records().is_empty()).await;

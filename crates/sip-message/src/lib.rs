@@ -31,6 +31,7 @@ pub mod remote_target;
 pub mod sdp;
 pub mod sdp_diff;
 pub mod sdp_doc;
+pub mod sdp_session;
 pub mod serializer;
 pub mod sipfrag;
 pub mod sniff;
@@ -63,8 +64,10 @@ pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
     canonical_rtpmap, extract_direction, extract_format_list, extract_rtpmaps, parse_origin,
-    parse_sdp_body, reoffer_continuing, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
+    parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
+/// One party's session across a dialog whose description author changes (RFC 3264 §8).
+pub use sdp_session::{in_author_order, restate_session, Restated, StatedSession};
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};
 pub use template::{

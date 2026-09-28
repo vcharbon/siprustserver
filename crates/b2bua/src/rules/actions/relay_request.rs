@@ -36,6 +36,8 @@ impl ActionExecutor<'_> {
         content_type: Option<MediaType>,
         provenance: Provenance,
     ) {
+        let body =
+            relay::continue_on_leg(call, leg_id, &Method::Ack, true, body, content_type.as_ref());
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
         } else {
@@ -225,6 +227,15 @@ impl ActionExecutor<'_> {
         } else {
             None
         };
+        let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+        let body = relay::continue_on_leg(
+            call,
+            target_leg,
+            req.method(),
+            true,
+            req.body().to_vec(),
+            content_type.as_ref(),
+        );
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
         let target_face = capabilities::Face::of_leg(target_leg);
@@ -242,8 +253,8 @@ impl ActionExecutor<'_> {
                 target_leg,
                 call.emergency == Some(true),
             )),
-            body: req.body().to_vec(),
-            content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
+            body,
+            content_type,
             cseq: Some(outbound_cseq as u32),
             // §16.6 step 3: the relayed request continues the sender's hop
             // budget. The stack's OWN in-dialog requests (teardown BYE,

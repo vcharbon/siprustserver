@@ -44,6 +44,7 @@ pub mod leg;
 pub mod message_ring;
 pub mod obligation;
 pub mod record;
+pub mod sdp_session;
 pub mod services;
 pub mod sm;
 pub mod termination;
@@ -61,6 +62,7 @@ pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
     CallTopology, PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
 };
+pub use sdp_session::LegSdpSession;
 pub use services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase, RerouteState,
     TransferPhase, TransferState,

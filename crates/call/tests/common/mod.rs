@@ -154,6 +154,12 @@ pub fn representative_call() -> Call {
         adopted: None,
         invite_final_sent: Some(200),
         messages: Default::default(),
+        sdp_session: LegSdpSession {
+            sent_origin: Some("bob 202 3 IN IP4 203.0.113.42".into()),
+            sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
+            sent_slots: vec![Some(0), None],
+            received_session_id: Some("101".into()),
+        },
     };
     a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
         dialog_tag: "b2bua-to-tag-aleg-9876".into(),
@@ -189,6 +195,7 @@ pub fn representative_call() -> Call {
         adopted: None,
         invite_final_sent: None,
         messages: Default::default(),
+        sdp_session: LegSdpSession::default(),
     };
     b_leg.dialogs[0].ext.emitted_ack = Some(RetainedEmission::on_trigger(
         EMITTED_ACK.to_vec(),
@@ -649,6 +656,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
             proptest::option::of(200u16..700),
         ),
         arb_message_ring(),
+        arb_sdp_session(),
     )
         .prop_map(
             |(
@@ -663,6 +671,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 (local_uri, remote_uri, invite_request_uri),
                 (pending_invite_txn, ext, kind, adopted, invite_final_sent),
                 messages,
+                sdp_session,
             )| Leg {
                 leg_id,
                 call_id,
@@ -682,8 +691,24 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 adopted,
                 invite_final_sent,
                 messages,
+                sdp_session,
             },
         )
+}
+
+fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
+    (
+        proptest::option::of("[a-z0-9 .]{1,40}"),
+        proptest::collection::vec("[a-z]{1,8} [0-9]{1,5} [A-Z/]{1,8} [0-9 ]{1,12}", 0..3),
+        proptest::collection::vec(proptest::option::of(0u32..4), 0..3),
+        proptest::option::of("[0-9]{1,20}"),
+    )
+        .prop_map(|(sent_origin, sent_media, sent_slots, received_session_id)| LegSdpSession {
+            sent_origin,
+            sent_media,
+            sent_slots,
+            received_session_id,
+        })
 }
 
 fn arb_message_direction() -> impl Strategy<Value = MessageDirection> {

@@ -200,6 +200,7 @@ mod tests {
             adopted: None,
             invite_final_sent: None,
             messages: Default::default(),
+            sdp_session: Default::default(),
         }
     }
 

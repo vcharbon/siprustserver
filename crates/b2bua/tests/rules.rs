@@ -2186,6 +2186,7 @@ fn b_leg_pending() -> Leg {
         adopted: None,
         invite_final_sent: None,
         messages: Default::default(),
+        sdp_session: Default::default(),
     }
 }
 

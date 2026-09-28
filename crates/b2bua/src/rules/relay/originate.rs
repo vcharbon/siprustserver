@@ -334,6 +334,7 @@ pub fn build_b_leg(
         }
     }
 
+    let sdp_session = super::sdp_session::opened(&body, content_type.as_ref());
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
@@ -421,6 +422,7 @@ pub fn build_b_leg(
         adopted: None,
         invite_final_sent: None,
         messages: Default::default(),
+        sdp_session,
     };
 
     let effect = OutboundSipEffect {

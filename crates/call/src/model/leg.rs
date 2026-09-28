@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::dialog::Dialog;
 use super::invite_txn::InviteTxnHandle;
 use super::message_ring::MessageRing;
+use super::sdp_session::LegSdpSession;
 use super::services::ExtMap;
 
 /// Remote peer endpoint.
@@ -121,4 +122,10 @@ pub struct Leg {
     /// [`crate::helpers::record_message`].
     #[serde(default)]
     pub messages: MessageRing,
+    /// The session descriptions crossing the leg's dialog, kept so another
+    /// author's description continues the session its peer holds (RFC 3264
+    /// §8). Written only by the stack's description seam. Trailing under the
+    /// positional codec.
+    #[serde(default)]
+    pub sdp_session: LegSdpSession,
 }

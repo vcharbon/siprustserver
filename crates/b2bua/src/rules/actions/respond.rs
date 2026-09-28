@@ -63,12 +63,16 @@ impl ActionExecutor<'_> {
                 .is_none()
                 .then(|| call::helpers::b2bua_tag(call, ctx.source_leg_id))
                 .flatten();
-            let opts = GenerateResponseOpts {
-                to_tag,
-                body: body.to_vec(),
-                content_type: content_type.and_then(relay::media_type),
-                ..Default::default()
-            };
+            let content_type = content_type.and_then(relay::media_type);
+            let body = relay::continue_on_leg(
+                call,
+                ctx.source_leg_id,
+                req.method(),
+                req.to().tag().is_some(),
+                body.to_vec(),
+                content_type.as_ref(),
+            );
+            let opts = GenerateResponseOpts { to_tag, body, content_type, ..Default::default() };
             let resp = generators::generate_response(req, status, reason, &opts);
             // RFC 3261 §18.2.2 — a response goes back to the request's top-Via
             // sent-by.

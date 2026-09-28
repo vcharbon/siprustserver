@@ -269,10 +269,18 @@ impl ActionExecutor<'_> {
                         }
                     }
                 }
+                let relay_body = relay::continue_on_leg(
+                    call,
+                    target_leg,
+                    &Method::from_wire(&cseq_method),
+                    true,
+                    relay_body.clone(),
+                    relay_content_type.as_ref(),
+                );
                 let opts = snapshot_response_opts(
                     &pending,
                     &cseq_method,
-                    relay_body.clone(),
+                    relay_body,
                     relay_content_type.clone(),
                     transparent_headers,
                     contact,

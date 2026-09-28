@@ -41,7 +41,7 @@ use sip_txn::timers::{T1, TIMER_B, TIMER_D, TIMER_M};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
-const REOFFER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 
 /// alice re-INVITEs; the relayed re-INVITE sits at bob on a 100 when alice
 /// hangs up. The CANCEL and the BYE both reach bob, he answers them 200, the
@@ -96,7 +96,7 @@ async fn the_487_to_a_relayed_reinvite_after_the_bye_is_acked() {
     let _report = h.finish().await;
 }
 
-const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// The 2xx sibling: bob's 200 to the relayed re-INVITE crosses the SUT's
 /// CANCEL on the wire and lands on a reaped call. §9.1 — a UAC whose CANCEL

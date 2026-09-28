@@ -34,6 +34,32 @@ use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 
 use super::model::{RuleAction, RuleContext};
 
+/// The description the event's message carries, as its leg's peer stated it,
+/// noted before any action forwards it ([`crate::rules::relay::note_received`]).
+fn note_received_description(call: &mut Call, ctx: &RuleContext) {
+    use sip_message::header::MediaType;
+    let described = match (ctx.request(), ctx.response()) {
+        (Some(r), _) => {
+            Some((r.method().clone(), r.body(), r.header::<MediaType>().and_then(Result::ok)))
+        }
+        (None, Some(r)) => Some((
+            r.cseq().method().clone(),
+            r.body(),
+            r.header::<MediaType>().and_then(Result::ok),
+        )),
+        (None, None) => None,
+    };
+    if let Some((method, body, content_type)) = described {
+        crate::rules::relay::note_received(
+            call,
+            ctx.source_leg_id,
+            &method,
+            body,
+            content_type.as_ref(),
+        );
+    }
+}
+
 /// Executes rule actions against a working copy of the call.
 pub struct ActionExecutor<'a> {
     pub config: &'a B2buaConfig,
@@ -49,6 +75,7 @@ impl ActionExecutor<'_> {
     /// rules never hold it (ADR-0020 X8).
     pub fn execute(&self, actions: &[RuleAction], call: &Call, ctx: &RuleContext) -> HandlerResult {
         let mut call = call.clone();
+        note_received_description(&mut call, ctx);
         let mut fx = HandlerEffects::new();
         for action in actions {
             self.apply(action, ctx, &mut call, &mut fx);

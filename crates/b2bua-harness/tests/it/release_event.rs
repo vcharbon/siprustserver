@@ -33,6 +33,8 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
+
+use crate::common::sdp::apart_from_origin;
 use call::{DecisionKind, ReleaseEventKind};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -43,7 +45,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 // The announcement / MRF target's answer (the SDP the a-leg must be realigned to).
 const MRF_ANSWER: &str = "v=0\r\no=mrf 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
@@ -309,8 +311,8 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // The a-leg is re-INVITEd onto the MRF's answer SDP (the bridge).
     let mut a_realign = alice.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(a_realign.request().body()),
-        MRF_ANSWER,
+        apart_from_origin(&String::from_utf8_lossy(a_realign.request().body())),
+        apart_from_origin(MRF_ANSWER),
         "a-leg realign re-INVITE offers the replacement leg's answer SDP",
     );
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;

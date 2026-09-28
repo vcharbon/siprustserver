@@ -16,6 +16,8 @@
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
+
+use crate::common::sdp::apart_from_origin;
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -27,7 +29,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 // a-realign re-INVITE toward A must carry *this* body (the one-way-audio guard).
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // A's answer to the a-realign re-INVITE (A accepts C's media).
-const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 const CHARLIE_PORT: u16 = 5667;
 
@@ -61,9 +63,9 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert_eq!(
-        String::from_utf8_lossy(req.body()),
-        body,
-        "re-INVITE body should equal expected SDP"
+        apart_from_origin(&String::from_utf8_lossy(req.body())),
+        apart_from_origin(body),
+        "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
     assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");

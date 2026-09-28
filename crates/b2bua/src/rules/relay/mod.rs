@@ -18,6 +18,7 @@
 //! - [`dialog`] — reading the `call` crate's text-typed dialog state back
 //! - [`body`] — the media type describing a body this stack emits
 //! - [`failure_ext`] — the relayed-failure-headers `Call.ext` slot
+//! - [`sdp_session`] — each dialog's one session across description authors
 //!
 //! Header/message *extraction* does NOT live here — see `sip-message`.
 
@@ -33,6 +34,7 @@ mod identity;
 mod originate;
 mod passthrough;
 mod repeat;
+mod sdp_session;
 
 #[cfg(test)]
 mod originate_tests;
@@ -44,6 +46,9 @@ pub(crate) use ack::{acked_invite_carries_offer, acked_invite_cseq};
 pub(crate) use originate::clamp_no_answer;
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};
+
+// One session per dialog, whoever authored the description (RFC 3264 §8).
+pub use sdp_session::{continue_on_leg, note_received, opened};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};

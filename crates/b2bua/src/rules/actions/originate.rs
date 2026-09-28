@@ -266,8 +266,15 @@ impl ActionExecutor<'_> {
                 leg_id,
                 call.emergency == Some(true),
             )),
-            body: body.to_vec(),
             content_type: (!body.is_empty()).then(relay::sdp),
+            body: relay::continue_on_leg(
+                call,
+                leg_id,
+                &Method::Invite,
+                true,
+                body.to_vec(),
+                (!body.is_empty()).then(relay::sdp).as_ref(),
+            ),
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
             // A re-INVITE this stack originates states only a DECLARED set;
@@ -417,7 +424,14 @@ impl ActionExecutor<'_> {
                 call.emergency == Some(true),
             )),
             cseq: Some(outbound_cseq as u32),
-            body: body.to_vec(),
+            body: relay::continue_on_leg(
+                call,
+                leg_id,
+                &Method::from_wire(method),
+                true,
+                body.to_vec(),
+                content_type.as_ref(),
+            ),
             content_type,
             extra_headers,
             ..Default::default()

@@ -38,7 +38,7 @@ pub use model::{
 // Leg + dialog state.
 pub use model::{
     B2buaDialogExt, ByeDisposition, Dialog, Direction, HostPort, InviteTxnHandle, LegDisposition,
-    LegKind, LegState, PendingRequest, RemoteInfo, StackDialog, Unacked2xx,
+    LegKind, LegSdpSession, LegState, PendingRequest, RemoteInfo, StackDialog, Unacked2xx,
 };
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).

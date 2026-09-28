@@ -53,6 +53,15 @@ pub fn response_to_a_leg(
     } else if provisional_after_final(call, fx, status) {
         return None;
     }
+    let a_leg = call.a_leg.leg_id.clone();
+    let body = super::sdp_session::continue_on_leg(
+        call,
+        &a_leg,
+        &Method::Invite,
+        false,
+        body,
+        content_type.as_ref(),
+    );
     let opts = GenerateResponseOpts {
         to_tag,
         contact: contact.filter(|_| response_states_contact(&Method::Invite, status)),
