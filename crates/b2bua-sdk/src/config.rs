@@ -101,14 +101,12 @@ pub struct B2buaConfig {
     /// floors. The non-replicating path ignores this (TTL stays `CALL_TTL_MS`).
     pub reboot_budget_sec: i64,
     /// Limiter-refresh cadence, seconds — how often a counted call extends its
-    /// lease on the limiter. Below the limiter service's `LIMITER_LEASE_SECONDS`
-    /// (120) by a margin that survives a missed refresh: default 40. The test
+    /// lease on the limiter. The lease is the limiter's own, stated in its
+    /// answers; this period plus one refresh tick must stay below it by a
+    /// margin that survives a missed refresh (the worker counts a learnt lease
+    /// that it reaches): default 40 under the limiter's default 120. The test
     /// harness lowers this for fast paused-clock tests.
     pub limiter_refresh_sec: i64,
-    /// The limiter's lease, seconds (its `LIMITER_LEASE_SECONDS`). A release
-    /// queued longer than one lease is given up: the limiter already let
-    /// the call's set lapse. Default 120.
-    pub limiter_lease_sec: i64,
     /// Most releases the worker's limiter release queue holds; at the cap the
     /// oldest entry is dropped (its lease frees the call). Default 100 000:
     /// one lease of calls ending at 800/s.
@@ -459,7 +457,6 @@ impl Default for B2buaConfig {
             keepalive_timeout_sec: 32,
             reboot_budget_sec: 600,
             limiter_refresh_sec: 40,
-            limiter_lease_sec: 120,
             limiter_release_queue_cap: 100_000,
             limiter_breaker_failures: 3,
             limiter_breaker_probe_ms: 1_000,
@@ -508,9 +505,6 @@ impl Default for B2buaConfig {
 }
 
 impl B2buaConfig {
-    /// Longest limiter lease (s) the worker accepts: one day.
-    pub const MAX_LIMITER_LEASE_SEC: i64 = 86_400;
-
     /// Absolute minimum OPTIONS keepalive (s). Below 2 min a mid-dialog OPTIONS
     /// poke breaks long-hold traffic (see [`keepalive_interval_sec`] doc). A
     /// **production** floor only — the paused-clock test harness builds configs
@@ -552,19 +546,10 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=Self::MAX_LIMITER_LEASE_SEC).contains(&self.limiter_lease_sec) {
+        if self.limiter_refresh_sec <= 0 {
             return Err(format!(
-                "limiter_lease_sec={} outside 1..={} s: the limiter's lease bounds how \
-                 long a queued release is worth sending",
-                self.limiter_lease_sec,
-                Self::MAX_LIMITER_LEASE_SEC
-            ));
-        }
-        if self.limiter_refresh_sec <= 0 || self.limiter_refresh_sec >= self.limiter_lease_sec {
-            return Err(format!(
-                "limiter_refresh_sec={} not in 1..{} (limiter_lease_sec): a counted call \
-                 must refresh inside its lease",
-                self.limiter_refresh_sec, self.limiter_lease_sec
+                "limiter_refresh_sec={}: a counted call refreshes at a positive period",
+                self.limiter_refresh_sec
             ));
         }
         let refresh_ms = self.limiter_refresh_sec.saturating_mul(1000);
@@ -574,15 +559,6 @@ impl B2buaConfig {
                 "limiter_refresh_batch_ms={} not in 1..{refresh_ms} (limiter_refresh_sec): a \
                  refresh falling due must leave within one refresh period",
                 self.limiter_refresh_batch_ms
-            ));
-        }
-        let lease_ms = self.limiter_lease_sec.saturating_mul(1000);
-        if refresh_ms.saturating_add(self.limiter_refresh_batch_ms as i64) >= lease_ms {
-            return Err(format!(
-                "limiter_refresh_sec={} with limiter_refresh_batch_ms={} reaches \
-                 limiter_lease_sec={}: a refresh leaves up to one tick after it falls due, \
-                 inside the lease",
-                self.limiter_refresh_sec, self.limiter_refresh_batch_ms, self.limiter_lease_sec
             ));
         }
         if self.limiter_refresh_batch_max == 0 {
@@ -829,32 +805,22 @@ mod tests {
     }
 
     #[test]
-    fn the_limiter_lease_refresh_and_release_queue_bounds_are_checked() {
+    fn the_limiter_refresh_and_release_queue_bounds_are_checked() {
         let with = |f: fn(&mut B2buaConfig)| {
             let mut c = B2buaConfig::default();
             f(&mut c);
             c.validate()
         };
-        let e = with(|c| c.limiter_lease_sec = 0).expect_err("zero lease");
-        assert!(e.contains("limiter_lease_sec=0"), "{e}");
-        let e = with(|c| c.limiter_lease_sec = i64::MAX).expect_err("lease past the bound");
-        assert!(e.contains("limiter_lease_sec="), "{e}");
-        let e = with(|c| c.limiter_refresh_sec = 120).expect_err("refresh at the lease");
-        assert!(e.contains("limiter_refresh_sec=120"), "{e}");
+        let e = with(|c| c.limiter_refresh_sec = 0).expect_err("zero refresh period");
+        assert!(e.contains("limiter_refresh_sec=0"), "{e}");
         let e = with(|c| c.limiter_refresh_batch_ms = 0).expect_err("zero tick");
         assert!(e.contains("limiter_refresh_batch_ms=0"), "{e}");
         let e = with(|c| c.limiter_refresh_batch_ms = 40_000).expect_err("tick at the period");
         assert!(e.contains("limiter_refresh_batch_ms=40000"), "{e}");
-        let e =
-            with(|c| c.limiter_refresh_sec = 119).expect_err("refresh plus tick past the lease");
-        assert!(e.contains("limiter_refresh_sec=119"), "{e}");
-        let e = with(|c| {
-            c.limiter_refresh_sec = 110;
-            c.limiter_refresh_batch_ms = 10_000;
-        })
-        .expect_err("refresh plus tick at the lease");
-        assert!(e.contains("limiter_lease_sec=120"), "{e}");
-        assert!(with(|c| c.limiter_refresh_sec = 118).is_ok(), "118 s + 1 s tick < 120 s");
+        assert!(
+            with(|c| c.limiter_refresh_sec = 600).is_ok(),
+            "the lease is the limiter's: boot does not know it"
+        );
         let e = with(|c| c.limiter_refresh_batch_max = 0).expect_err("zero batch");
         assert!(e.contains("limiter_refresh_batch_max=0"), "{e}");
         let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
@@ -863,7 +829,6 @@ mod tests {
         assert!(e.contains("limiter_breaker_failures=0"), "{e}");
         let e = with(|c| c.limiter_breaker_probe_ms = 0).expect_err("zero probe period");
         assert!(e.contains("limiter_breaker_probe_ms=0"), "{e}");
-        assert!(with(|c| c.limiter_lease_sec = B2buaConfig::MAX_LIMITER_LEASE_SEC).is_ok());
     }
 
     #[test]

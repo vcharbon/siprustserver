@@ -578,6 +578,45 @@ async fn the_wire_carries_the_call_key() {
     assert_eq!(store.held("x"), 0);
 }
 
+/// Every admit and refresh answer states the store's lease, whatever its
+/// outcome.
+#[tokio::test(start_paused = true)]
+async fn every_admit_and_refresh_answer_states_the_lease() {
+    let store = Arc::new(store());
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let net = SimulatedHttpNetwork::new();
+    let _h = net.serve(addr(), server).await.unwrap();
+    let lease_ms = LEASE.as_millis() as u64;
+
+    let admit = |key: &str, cap: i64| {
+        let entries = entries(&[("x", cap), ("y", 10)]);
+        serde_json::to_vec(&AdmitRequest { key: key.into(), entries, release_on_refusal: false })
+            .unwrap()
+    };
+    let admitted = call(&net, HttpRequest::post("/v1/admit", admit("c1", 1))).await;
+    let refused = call(&net, HttpRequest::post("/v1/admit", admit("c2", 1))).await;
+    let release = serde_json::to_vec(&ReleaseRequest { keys: vec!["c1".into()] }).unwrap();
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", release)).await.status, 200);
+    let fenced = call(&net, HttpRequest::post("/v1/admit", admit("c1", 10))).await;
+    for (why, resp) in [("admitted", admitted), ("cap refusal", refused), ("fence", fenced)] {
+        let body: AdmitResponse = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body.lease_ms, lease_ms, "{why}: {body:?}");
+    }
+
+    let calls = ["c1", "c3"]
+        .map(|key| RefreshCall { key: key.into(), ids: vec!["x".into(), "y".into()] })
+        .to_vec();
+    let body = serde_json::to_vec(&RefreshRequest { calls }).unwrap();
+    let resp = call(&net, HttpRequest::post("/v1/refresh", body)).await;
+    let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(body.outcomes, [RefreshAnswer::Released, RefreshAnswer::Reregistered]);
+    assert_eq!(body.lease_ms, lease_ms);
+
+    let release = serde_json::to_vec(&ReleaseRequest { keys: vec!["c3".into()] }).unwrap();
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", release)).await.status, 200);
+    assert_eq!([store.held("x"), store.held("y")], [0, 0]);
+}
+
 /// One refresh request names many calls and answers each one as its own
 /// refresh would, in the order named: a known call is extended, a lapsed one
 /// re-registered, a released or dropped one refused with its fence, a call

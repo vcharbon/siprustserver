@@ -8,7 +8,9 @@
 //!
 //! Every request names the call by the client's per-call limiter `key`, unique
 //! over time; the server keeps the call's set and its lease, so the client
-//! stores nothing but whether the call is counted.
+//! stores nothing but whether the call is counted. Every admit and refresh
+//! answer states the server's lease (`lease_ms`), so a client bounds what it
+//! keeps for the server by the lease the server runs.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +46,9 @@ pub struct AdmitResponse {
     pub rejected_id: Option<String>,
     /// The call was released within the last lease: nothing is held for it.
     pub released: bool,
+    /// The server's lease, milliseconds: how long a set lives without a
+    /// refresh, and a released key stays fenced.
+    pub lease_ms: u64,
 }
 
 /// `POST /v1/release` body: drop the set of every call named, in one step.
@@ -94,6 +99,9 @@ pub enum RefreshAnswer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
     pub outcomes: Vec<RefreshAnswer>,
+    /// The server's lease, milliseconds: how long a set lives without a
+    /// refresh, and a released key stays fenced.
+    pub lease_ms: u64,
 }
 
 /// `GET /v1/health` response: the store answered, holding `calls` sets.

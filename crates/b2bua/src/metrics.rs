@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::dispatch::{Discard, PastBound};
 use crate::tier1_brake::Tier1BrakeCounters;
@@ -250,6 +251,11 @@ struct Inner {
     limiter_breaker_admits_not_sent: AtomicU64,
     limiter_breaker_probe_failures: AtomicU64,
     limiter_breaker_probe_restarts: AtomicU64,
+    // The limiter's lease as the worker last learnt it (`limiter_lease`), in
+    // milliseconds, and the learnt leases its refresh period plus a tick
+    // reaches.
+    limiter_lease_ms: AtomicU64,
+    limiter_lease_too_short: AtomicU64,
     // The limiter refresh batch (`limiter_refresh_batch`): keys due, requests
     // by result, keys sent, keys a failed request put back, entries given up
     // (past the lease, at the cap, the call released), sender restarts, and
@@ -909,6 +915,16 @@ impl B2buaMetrics {
         limiter_breaker_probe_restarts_total,
         limiter_breaker_probe_restarts
     );
+    /// Set the limiter's lease as the worker last learnt it (gauge).
+    pub fn set_limiter_lease(&self, lease: Duration) {
+        let ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
+        self.inner.limiter_lease_ms.store(ms, Ordering::Relaxed);
+    }
+    /// The limiter's lease as the worker last learnt it.
+    pub fn limiter_lease(&self) -> Duration {
+        Duration::from_millis(self.inner.limiter_lease_ms.load(Ordering::Relaxed))
+    }
+    counter!(bump_limiter_lease_too_short, limiter_lease_too_short_total, limiter_lease_too_short);
     /// Set the number of limiter keys due in the refresh batch, the request
     /// in flight included (gauge).
     pub fn set_limiter_refresh_due(&self, n: u64) {
@@ -1313,6 +1329,7 @@ impl B2buaMetrics {
         counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
         counter("b2bua_limiter_release_drainer_restarts_total", "release-queue drainers that panicked and were restarted with the queue intact — expected 0", self.limiter_release_drainer_restarts_total());
+        counter("b2bua_limiter_lease_too_short_total", "limiter leases learnt from the limiter's answers that this worker's refresh period plus one refresh tick reaches, counted once per change of the learnt lease: a counted call's set lapses between two refreshes and is re-registered at each (ADR-0038)", self.limiter_lease_too_short_total());
         counter("b2bua_limiter_breaker_admits_not_sent_total", "admits the open limiter breaker answered without a request: the call owes no release by that admit; an initial admit leaves the call uncounted, a reroute admit leaves it as it was (ADR-0038)", self.limiter_breaker_admits_not_sent_total());
         counter("b2bua_limiter_refresh_keys_sent_total", "limiter keys the refresh requests named, summed over every request: over b2bua_limiter_refresh_requests_total, the mean batch size (ADR-0038)", self.limiter_refresh_keys_sent_total());
         counter("b2bua_limiter_refresh_retries_total", "limiter keys a refresh request with no usable answer put back, sent again at the next tick", self.limiter_refresh_retries_total());
@@ -1644,6 +1661,11 @@ impl B2buaMetrics {
             "1 while this worker's limiter circuit breaker is open: admits send no request and the calls run uncounted, releases wait",
             self.limiter_breaker_open() as u64,
         );
+        s.push_str("# HELP b2bua_limiter_lease_seconds the limiter's lease as this worker last learnt it from an admit or refresh answer (the default lease before any answer): a queued release and a refresh due are given up once they have waited it\n# TYPE b2bua_limiter_lease_seconds gauge\n");
+        s.push_str(&format!(
+            "b2bua_limiter_lease_seconds {}\n",
+            self.limiter_lease().as_millis() as f64 / 1000.0
+        ));
         g(
             &mut s,
             "b2bua_limiter_refresh_due",

@@ -807,11 +807,15 @@ mod tests {
 
     use super::*;
     use crate::limiter::NoopLimiter;
+    use crate::limiter_lease::LimiterLease;
     use crate::limiter_release::ReleaseQueueConfig;
 
     /// A release queue nobody drains: what a fold queued stays readable.
     fn releases() -> Arc<ReleaseQueue> {
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 16 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 16,
+        };
         ReleaseQueue::new(Arc::new(NoopLimiter), config, crate::metrics::B2buaMetrics::new())
     }
 

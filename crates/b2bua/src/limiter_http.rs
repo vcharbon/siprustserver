@@ -12,9 +12,12 @@
 //! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
 //! store, under the admit budget; it has an address once the target's name
 //! resolved, and forgetting it makes the next request look the name up again.
+//! Every admit and refresh answer states the limiter's lease, which the client
+//! hands to every [`LimiterLease`] registered with
+//! [`CallLimiter::report_lease`]; an answer without it is a bad body.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,6 +31,7 @@ use crate::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
     RefreshOutcome, ReleaseAnswer,
 };
+use crate::limiter_lease::LimiterLease;
 use crate::limiter_target::LimiterTarget;
 
 /// The release budget a client runs with unless told otherwise.
@@ -64,6 +68,8 @@ struct Endpoint {
     /// The target rendered once — the episode key, so an outage costs no
     /// per-request allocation.
     addr_key: String,
+    /// Told every lease an answer states.
+    leases: RwLock<Vec<Arc<LimiterLease>>>,
 }
 
 impl Endpoint {
@@ -85,6 +91,14 @@ impl Endpoint {
     /// One failure of kind `counter` in the episode.
     fn failed(&self, counter: &'static str) {
         self.fail_open.record(&self.addr_key, counter, 1);
+    }
+
+    /// An answer stated the limiter's lease, `lease_ms`.
+    fn stated_lease(&self, lease_ms: u64) {
+        let lease = Duration::from_millis(lease_ms);
+        for to in self.leases.read().unwrap_or_else(PoisonError::into_inner).iter() {
+            to.learn(lease);
+        }
     }
 }
 
@@ -109,6 +123,7 @@ impl HttpCallLimiter {
                 target,
                 fail_open: crate::lifecycle::backend_waves("call-limiter"),
                 addr_key,
+                leases: RwLock::default(),
             }),
             timeout,
             refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
@@ -224,7 +239,11 @@ impl CallLimiter for HttpCallLimiter {
         let Some(resp) = self.post("/v1/admit", &body, self.timeout).await else {
             return AdmitOutcome::Unavailable;
         };
-        match serde_json::from_slice::<AdmitResponse>(&resp.body) {
+        let answer = serde_json::from_slice::<AdmitResponse>(&resp.body);
+        if let Ok(AdmitResponse { lease_ms, .. }) = &answer {
+            self.endpoint.stated_lease(*lease_ms);
+        }
+        match answer {
             Ok(AdmitResponse { admitted: true, .. }) => AdmitOutcome::Admitted,
             Ok(AdmitResponse { admitted: false, released: true, .. }) => AdmitOutcome::Released,
             Ok(AdmitResponse { admitted: false, rejected_id: Some(limiter_id), .. }) => {
@@ -255,7 +274,8 @@ impl CallLimiter for HttpCallLimiter {
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {
             // An answer that does not name one outcome per call is a bad body.
-            Ok(RefreshResponse { outcomes }) if outcomes.len() == calls.len() => {
+            Ok(RefreshResponse { outcomes, lease_ms }) if outcomes.len() == calls.len() => {
+                self.endpoint.stated_lease(lease_ms);
                 RefreshAnswer::Answered(
                     outcomes
                         .into_iter()
@@ -274,6 +294,10 @@ impl CallLimiter for HttpCallLimiter {
 
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
         Some(Arc::new(HttpHealth { endpoint: self.endpoint.clone(), timeout: self.timeout }))
+    }
+
+    fn report_lease(&self, to: Arc<LimiterLease>) {
+        self.endpoint.leases.write().unwrap_or_else(PoisonError::into_inner).push(to);
     }
 }
 
@@ -406,7 +430,8 @@ mod tests {
     #[async_trait]
     impl http_net::HttpService for OneOutcome {
         async fn handle(&self, _: HttpRequest) -> HttpResponse {
-            let body = RefreshResponse { outcomes: vec![wire::RefreshAnswer::Extended] };
+            let body =
+                RefreshResponse { outcomes: vec![wire::RefreshAnswer::Extended], lease_ms: 1_000 };
             HttpResponse::ok(serde_json::to_vec(&body).unwrap())
         }
     }
@@ -436,6 +461,48 @@ mod tests {
         let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
         let call = |key: &str| RefreshCall { key: key.into(), ids: vec!["x".into()] };
         assert_eq!(client.refresh(&[call("a#k"), call("b#k")]).await, RefreshAnswer::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_admit_and_refresh_answer_hands_its_lease_to_every_registered_lease() {
+        let (net, _server) = served().await;
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        let (a, b) = (
+            LimiterLease::starting_at(Duration::from_secs(20)),
+            LimiterLease::starting_at(Duration::from_secs(30)),
+        );
+        client.report_lease(a.clone());
+        client.report_lease(b.clone());
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Admitted);
+        assert_eq!([a.current(), b.current()], [Duration::from_secs(120); 2], "the store's lease");
+        a.learn(Duration::from_secs(5));
+        let calls = [RefreshCall { key: "c#k".into(), ids: vec!["x".into(), "y".into()] }];
+        assert_eq!(
+            client.refresh(&calls).await,
+            RefreshAnswer::Answered(vec![RefreshOutcome::Extended])
+        );
+        assert_eq!(a.current(), Duration::from_secs(120), "a refresh answer states it too");
+    }
+
+    /// A limiter answering every admit with a body that states no lease.
+    struct NoLease;
+
+    #[async_trait]
+    impl http_net::HttpService for NoLease {
+        async fn handle(&self, _: HttpRequest) -> HttpResponse {
+            HttpResponse::ok(br#"{"admitted":true,"released":false}"#.to_vec())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admit_answer_stating_no_lease_is_unavailable() {
+        let net = SimulatedHttpNetwork::new();
+        let _server = net.serve(laddr(), Arc::new(NoLease)).await.unwrap();
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        client.report_lease(lease.clone());
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
+        assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
     }
 
     #[tokio::test(start_paused = true)]

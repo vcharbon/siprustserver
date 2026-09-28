@@ -10,10 +10,12 @@
 //! queue's, not the entry's, and the keys stay in one batch. A drainer that
 //! panics is restarted with the queue intact, and counted.
 //!
-//! Bounds: an entry that has waited one lease (at most [`MAX_LEASE`]) is
-//! given up (the limiter already let the call's set lapse), and a push onto a
-//! full queue gives up the oldest entry; both are counted. An entry is a key
-//! and its lease expiry, nothing of the call. The queue is not replicated: a
+//! Bounds: an entry that has waited one lease is given up (the limiter
+//! already let the call's set lapse), and a push onto a full queue gives up
+//! the oldest entry; both are counted. The lease is the limiter's as the
+//! worker last learnt it ([`LimiterLease`]), read each time the queue looks:
+//! a lease learnt later moves every waiting entry's deadline. An entry is a
+//! key and the instant it was queued, nothing of the call. The queue is not replicated: a
 //! worker that dies loses it, and the lease frees what it held; a release is
 //! idempotent per key, so a key another node also releases frees nothing
 //! twice.
@@ -39,6 +41,7 @@ use tokio::time::Instant;
 
 use crate::config::B2buaConfig;
 use crate::limiter::{CallLimiter, ReleaseAnswer};
+use crate::limiter_lease::LimiterLease;
 use crate::metrics::B2buaMetrics;
 
 /// Most keys one release request carries.
@@ -50,25 +53,20 @@ pub const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// The longest wait between two sends while the limiter keeps failing.
 pub const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
-/// The longest lease the queue honours.
-pub const MAX_LEASE: Duration = Duration::from_secs(B2buaConfig::MAX_LIMITER_LEASE_SEC as u64);
-
 /// The queue's bounds.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct ReleaseQueueConfig {
-    /// How long an entry is worth sending: the limiter's lease.
-    pub lease: Duration,
+    /// How long an entry is worth sending: the limiter's lease as last
+    /// learnt.
+    pub lease: Arc<LimiterLease>,
     /// Most entries the queue holds.
     pub cap: usize,
 }
 
 impl ReleaseQueueConfig {
-    /// The bounds `config` states, the lease clamped to [`MAX_LEASE`].
-    pub fn from_config(config: &B2buaConfig) -> Self {
-        Self {
-            lease: Duration::from_secs(config.limiter_lease_sec.max(0) as u64).min(MAX_LEASE),
-            cap: config.limiter_release_queue_cap.max(1),
-        }
+    /// The cap `config` states, and the worker's learnt `lease`.
+    pub fn from_config(config: &B2buaConfig, lease: Arc<LimiterLease>) -> Self {
+        Self { lease, cap: config.limiter_release_queue_cap.max(1) }
     }
 }
 
@@ -100,8 +98,9 @@ impl ReleaseFlush {
 struct Entry {
     /// The key, shared with [`Waiting::by_key`].
     key: Arc<str>,
-    /// Past this instant the limiter has let the call's set lapse.
-    lease_expires_at: Instant,
+    /// When it was queued: one lease later the limiter has let the call's
+    /// set lapse.
+    queued_at: Instant,
 }
 
 #[derive(Default)]
@@ -199,8 +198,7 @@ impl ReleaseQueue {
         let seq = w.next_seq;
         w.next_seq += 1;
         let key: Arc<str> = Arc::from(key);
-        let lease_expires_at = now + self.config.lease;
-        w.entries.insert(seq, Entry { key: key.clone(), lease_expires_at });
+        w.entries.insert(seq, Entry { key: key.clone(), queued_at: now });
         w.by_key.insert(key, seq);
         self.publish_depth(&w);
         drop(w);
@@ -393,7 +391,8 @@ impl ReleaseQueue {
     fn step(&self, now: Instant) -> Step {
         let mut w = self.lock();
         self.expire(&mut w, now);
-        let Some(oldest) = w.entries.first_key_value().map(|(_, e)| e.lease_expires_at) else {
+        let lease = self.config.lease.current();
+        let Some(oldest) = w.entries.first_key_value().map(|(_, e)| e.queued_at + lease) else {
             return Step::Wait(None);
         };
         if w.held {
@@ -438,11 +437,13 @@ impl ReleaseQueue {
         w.retry_at = Some(now + backoff(w.failures));
     }
 
-    /// Give up every entry that has waited one lease.
+    /// Give up every entry that has waited one lease. Entries are in queue
+    /// order, so the first is the first to expire.
     fn expire(&self, w: &mut Waiting, now: Instant) {
+        let lease = self.config.lease.current();
         let mut dropped = false;
         while let Some(entry) = w.entries.first_entry() {
-            if entry.get().lease_expires_at > now {
+            if entry.get().queued_at + lease > now {
                 break;
             }
             let entry = entry.remove();
@@ -507,7 +508,8 @@ mod tests {
 
     fn queue(limiter: Arc<Scripted>, cap: usize) -> (Arc<ReleaseQueue>, B2buaMetrics) {
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap };
+        let config =
+            ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(20)), cap };
         let q = ReleaseQueue::new(limiter, config, metrics.clone());
         tokio::spawn(q.clone().run());
         (q, metrics)
@@ -563,7 +565,10 @@ mod tests {
         let limiter = Arc::new(Gated::default());
         let q = ReleaseQueue::new(
             limiter.clone(),
-            ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 },
+            ReleaseQueueConfig {
+                lease: LimiterLease::starting_at(Duration::from_secs(20)),
+                cap: 10,
+            },
             B2buaMetrics::new(),
         );
         tokio::spawn(q.clone().run());
@@ -700,7 +705,10 @@ mod tests {
     async fn a_panicking_drainer_is_restarted_with_the_queue_intact() {
         let limiter = Arc::new(PanicsOnce::default());
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(20)),
+            cap: 10,
+        };
         let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
         tokio::spawn(q.clone().run());
         q.push("a");
@@ -745,7 +753,10 @@ mod tests {
         let limiter = Arc::new(PanicsWhileSet::default());
         limiter.panics.store(true, Ordering::SeqCst);
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
         tokio::spawn(q.clone().run());
         q.push("a");
@@ -783,21 +794,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lease_past_the_bound_is_clamped() {
-        let config = B2buaConfig { limiter_lease_sec: i64::MAX, ..Default::default() };
-        let bounds = ReleaseQueueConfig::from_config(&config);
-        assert_eq!(bounds.lease, MAX_LEASE);
+    async fn a_lease_learnt_after_a_push_moves_its_deadline() {
         let limiter = Arc::new(Scripted::default());
-        let q = ReleaseQueue::new(limiter.clone(), bounds, B2buaMetrics::new());
+        let metrics = B2buaMetrics::new();
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        let config = ReleaseQueueConfig { lease: lease.clone(), cap: 10 };
+        let q = ReleaseQueue::new(limiter, config, metrics.clone());
+        q.hold();
         q.push("a");
-        assert_eq!(q.waiting(), 1);
+        lease.learn(Duration::from_secs(60));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        q.push("b");
+        assert_eq!(q.waiting_keys(), ["a", "b"], "a longer lease keeps the entry");
+        lease.learn(Duration::from_secs(10));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        q.push("c");
+        assert_eq!(q.waiting_keys(), ["c"], "a shorter lease gives up both at once");
+        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 2);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_push_expires_what_waited_one_lease_without_the_drainer() {
         let limiter = Arc::new(Scripted::default());
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(20)),
+            cap: 10,
+        };
         let q = ReleaseQueue::new(limiter, config, metrics.clone());
         q.push("a");
         tokio::time::advance(Duration::from_secs(20)).await;
@@ -834,7 +857,10 @@ mod tests {
     async fn backed_off(limiter: &Arc<Scripted>) -> (Arc<ReleaseQueue>, B2buaMetrics) {
         limiter.down.store(true, Ordering::SeqCst);
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
         tokio::spawn(q.clone().run());
         q.push("a");
@@ -900,7 +926,10 @@ mod tests {
     async fn a_batch_unanswered_at_the_flush_bound_is_given_up() {
         let limiter = Arc::new(Gated::default());
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(20)),
+            cap: 10,
+        };
         let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
         tokio::spawn(q.clone().run());
         q.push("a");

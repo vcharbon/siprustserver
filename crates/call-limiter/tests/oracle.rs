@@ -77,7 +77,7 @@ async fn http_server_matches_direct_core() {
         match (&http, &direct) {
             (AdmitResponse { admitted: true, .. }, AdmitResult::Admitted) => {}
             (
-                AdmitResponse { admitted: false, rejected_id: Some(hid), released: false },
+                AdmitResponse { admitted: false, rejected_id: Some(hid), released: false, .. },
                 AdmitResult::Rejected { limiter_id: oid },
             ) => assert_eq!(hid, oid, "refused ids agree"),
             _ => panic!("HTTP {http:?} disagrees with core {direct:?}"),

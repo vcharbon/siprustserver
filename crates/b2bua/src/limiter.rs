@@ -16,7 +16,9 @@
 //! fail-open policy** ([`state_after_admit`]): a failed admit leaves the call
 //! as it was, a sent one owes the call's release, and only a confirmed set
 //! refreshes. [`CallLimiter::health`] is the limiter's health answer, which
-//! the worker's circuit breaker ([`crate::limiter_breaker`]) probes.
+//! the worker's circuit breaker ([`crate::limiter_breaker`]) probes;
+//! [`CallLimiter::report_lease`] hands every lease the limiter's answers
+//! state to the worker's [`LimiterLease`].
 //!
 //! The HTTP client implementation lives in [`crate::limiter_http`]; this module
 //! is the trait + a no-op (used when `LIMITER_URL` is unset and in tests that
@@ -26,6 +28,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use call::CallLimiterState;
+
+use crate::limiter_lease::LimiterLease;
 
 /// One limiter entry to admit: an id and its concurrent-call cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +158,12 @@ pub trait CallLimiter: Send + Sync {
     /// probes. A limiter without one runs without a breaker.
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
         None
+    }
+    /// From now on, hand `to` every lease an answer of the limiter states.
+    /// A limiter whose answers state none hands nothing, and `to` keeps the
+    /// lease it has.
+    fn report_lease(&self, to: Arc<LimiterLease>) {
+        let _ = to;
     }
 }
 

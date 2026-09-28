@@ -39,6 +39,7 @@ use crate::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
     ReleaseAnswer,
 };
+use crate::limiter_lease::LimiterLease;
 use crate::limiter_refresh_batch::RefreshBatch;
 use crate::limiter_release::ReleaseQueue;
 use crate::metrics::B2buaMetrics;
@@ -265,6 +266,10 @@ impl CallLimiter for BreakerLimiter {
         }
         self.inner.refresh(calls).await
     }
+
+    fn report_lease(&self, to: Arc<LimiterLease>) {
+        self.inner.report_lease(to);
+    }
 }
 
 #[cfg(test)]
@@ -345,8 +350,12 @@ mod tests {
         releases: &ReleaseQueue,
         metrics: &B2buaMetrics,
     ) -> Arc<RefreshBatch> {
-        let config =
-            RefreshBatchConfig { tick: PROBE, max: 100, lease: Duration::from_secs(120), cap: 10 };
+        let config = RefreshBatchConfig {
+            tick: PROBE,
+            max: 100,
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let refreshes = RefreshBatch::new(inner, config, metrics.clone(), |_| {});
         let forget = refreshes.clone();
         assert!(releases.on_push(move |key| forget.forget(key)));
@@ -364,7 +373,10 @@ mod tests {
         let scripted = Arc::new(scripted);
         *scripted.admits.lock().unwrap() = script.into();
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
         tokio::spawn(releases.clone().run());
         let refreshes = batch(scripted.clone(), &releases, &metrics);
@@ -633,7 +645,10 @@ mod tests {
     /// `inner` behind a breaker opening on one lost admit, its probe running.
     fn guard_one(inner: Arc<dyn CallLimiter>) -> (Arc<dyn CallLimiter>, B2buaMetrics) {
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let releases = ReleaseQueue::new(inner.clone(), config, metrics.clone());
         let refreshes = batch(inner.clone(), &releases, &metrics);
         let (limiter, breaker) = BreakerLimiter::guard(
@@ -697,7 +712,10 @@ mod tests {
         let scripted = Arc::new(Scripted::default());
         *scripted.admits.lock().unwrap() = lost(3).into();
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
         let refreshes = batch(scripted.clone(), &releases, &metrics);
         let inner: Arc<dyn CallLimiter> =
@@ -747,7 +765,10 @@ mod tests {
     async fn a_guarded_limiter_is_not_guarded_again() {
         let r = rig(Vec::new());
         let metrics = B2buaMetrics::new();
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let releases = ReleaseQueue::new(r.limiter.clone(), config, metrics.clone());
         let refreshes = batch(r.limiter.clone(), &releases, &metrics);
         let (_, again) = BreakerLimiter::guard(
@@ -764,7 +785,10 @@ mod tests {
     async fn a_limiter_without_a_health_answer_runs_without_a_breaker() {
         let metrics = B2buaMetrics::new();
         let noop: Arc<dyn CallLimiter> = Arc::new(crate::limiter::NoopLimiter);
-        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let config = ReleaseQueueConfig {
+            lease: LimiterLease::starting_at(Duration::from_secs(120)),
+            cap: 10,
+        };
         let releases = ReleaseQueue::new(noop.clone(), config, metrics.clone());
         let refreshes = batch(noop.clone(), &releases, &metrics);
         let (_, breaker) = BreakerLimiter::guard(

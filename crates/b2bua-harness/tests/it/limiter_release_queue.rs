@@ -36,8 +36,8 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 /// The production admit budget.
 const ADMIT_BUDGET: Duration = Duration::from_millis(150);
-/// A short lease, so the paused clock crosses it cheaply; the SUT is told
-/// the same lease.
+/// A short lease, so the paused clock crosses it cheaply; the SUT learns it
+/// from the limiter's answers.
 const LEASE_SEC: i64 = 20;
 /// The refresh period the SUT runs.
 const REFRESH_SEC: i64 = 5;
@@ -153,7 +153,6 @@ impl Scene {
             .tune(move |c| {
                 c.keepalive_interval_sec = 3_600;
                 c.limiter_refresh_sec = REFRESH_SEC;
-                c.limiter_lease_sec = LEASE_SEC;
                 tune(c);
             })
             .start(&h, "b2bua", "127.0.0.1:5080")

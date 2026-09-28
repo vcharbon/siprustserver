@@ -8,11 +8,14 @@
 //! | `LIMITER_REFRESH_SECONDS` | how often a counted call extends its lease | 40 |
 //! | `LIMITER_REFRESH_BATCH_MS` | the refresh tick: a refresh due leaves within it, batched | 1000 |
 //! | `LIMITER_REFRESH_BATCH_MAX` | most keys one refresh request carries | 1000 |
-//! | `LIMITER_LEASE_SECONDS` | the limiter's lease: a release queued longer is given up | 120 |
 //! | `LIMITER_RELEASE_TIMEOUT_MS` | the budget of one release request | 2000 |
 //! | `LIMITER_RELEASE_QUEUE_CAP` | most releases the queue holds | 100000 |
 //! | `LIMITER_BREAKER_FAILURES` | consecutive failed admits that open the breaker | 3 |
 //! | `LIMITER_BREAKER_PROBE_MS` | how often an open breaker probes the limiter | 1000 |
+//!
+//! The lease is the limiter's own: its answers state it, and the worker
+//! gives up a queued release or a refresh due by the lease it last learnt
+//! (the limiter's default, 120 s, before any answer).
 //!
 //! Unset or blank takes the default; a value that is not a positive integer
 //! refuses boot. A `LIMITER_URL` that is not `host:port` over plain HTTP (an
@@ -29,7 +32,6 @@ pub(crate) struct LimiterEnv {
     pub refresh_sec: i64,
     pub refresh_batch_ms: u64,
     pub refresh_batch_max: usize,
-    pub lease_sec: i64,
     pub release_timeout_ms: u64,
     pub queue_cap: usize,
     pub breaker_failures: u32,
@@ -94,7 +96,6 @@ pub(crate) fn limiter_from_lookup(
         refresh_sec: seconds("LIMITER_REFRESH_SECONDS", 40)?,
         refresh_batch_ms: positive("LIMITER_REFRESH_BATCH_MS", 1_000)?,
         refresh_batch_max: positive("LIMITER_REFRESH_BATCH_MAX", 1_000)? as usize,
-        lease_sec: seconds("LIMITER_LEASE_SECONDS", 120)?,
         release_timeout_ms: positive("LIMITER_RELEASE_TIMEOUT_MS", 2_000)?,
         queue_cap: positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)? as usize,
         breaker_failures: {
@@ -109,13 +110,12 @@ pub(crate) fn limiter_from_lookup(
 mod tests {
     use super::*;
 
-    const KEYS: [&str; 10] = [
+    const KEYS: [&str; 9] = [
         "LIMITER_TIMEOUT_MS",
         "LIMITER_REFRESH_TIMEOUT_MS",
         "LIMITER_REFRESH_SECONDS",
         "LIMITER_REFRESH_BATCH_MS",
         "LIMITER_REFRESH_BATCH_MAX",
-        "LIMITER_LEASE_SECONDS",
         "LIMITER_RELEASE_TIMEOUT_MS",
         "LIMITER_RELEASE_QUEUE_CAP",
         "LIMITER_BREAKER_FAILURES",
@@ -139,7 +139,6 @@ mod tests {
                 refresh_sec: 40,
                 refresh_batch_ms: 1_000,
                 refresh_batch_max: 1_000,
-                lease_sec: 120,
                 release_timeout_ms: 2_000,
                 queue_cap: 100_000,
                 breaker_failures: 3,
@@ -156,7 +155,6 @@ mod tests {
             ("LIMITER_REFRESH_SECONDS", "20"),
             ("LIMITER_REFRESH_BATCH_MS", "500"),
             ("LIMITER_REFRESH_BATCH_MAX", "50"),
-            ("LIMITER_LEASE_SECONDS", "60"),
             ("LIMITER_RELEASE_TIMEOUT_MS", "500"),
             ("LIMITER_RELEASE_QUEUE_CAP", "10"),
             ("LIMITER_BREAKER_FAILURES", "5"),
@@ -171,7 +169,6 @@ mod tests {
                 refresh_sec: 20,
                 refresh_batch_ms: 500,
                 refresh_batch_max: 50,
-                lease_sec: 60,
                 release_timeout_ms: 500,
                 queue_cap: 10,
                 breaker_failures: 5,

@@ -15,7 +15,9 @@
 //! an answered request ends it. The limiter is one endpoint, so the backoff
 //! is the batch's, not the entry's. Bounds: an entry due for one lease from
 //! its first mark is given up (the call's own refresh marks it again every
-//! period), a mark onto a full batch gives up the oldest entry waiting, and
+//! period), the lease being the limiter's as the worker last learnt it
+//! ([`LimiterLease`]), read each time the batch looks; a mark onto a full
+//! batch gives up the oldest entry waiting, and
 //! the release of a call forgets its entry, so an ended call's set is never
 //! refreshed after its release was queued; all three are counted. An entry is
 //! a key, its call, its ids and its generation. The batch is not replicated:
@@ -38,7 +40,7 @@ use crate::abort_on_drop::AbortOnDrop;
 use crate::config::B2buaConfig;
 use crate::event::CallEvent;
 use crate::limiter::{CallLimiter, RefreshAnswer, RefreshCall, RefreshOutcome};
-use crate::limiter_release::MAX_LEASE;
+use crate::limiter_lease::LimiterLease;
 use crate::metrics::B2buaMetrics;
 
 /// The backoff after the first unanswered request (a tick when shorter).
@@ -48,27 +50,27 @@ pub const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// The batch's pace and bounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RefreshBatchConfig {
     /// How long the batch collects after a key fell due before it sends.
     pub tick: Duration,
     /// Most keys one request carries.
     pub max: usize,
     /// How long an entry is worth sending after its first mark: the
-    /// limiter's lease.
-    pub lease: Duration,
+    /// limiter's lease as last learnt.
+    pub lease: Arc<LimiterLease>,
     /// Most entries the batch holds, the request in flight included.
     pub cap: usize,
 }
 
 impl RefreshBatchConfig {
-    /// The pace and bounds `config` states: its tick and batch size, the
-    /// limiter's lease clamped to [`MAX_LEASE`], and the release queue's cap.
-    pub fn from_config(config: &B2buaConfig) -> Self {
+    /// The pace and bounds `config` states: its tick and batch size, and
+    /// the release queue's cap; and the worker's learnt `lease`.
+    pub fn from_config(config: &B2buaConfig, lease: Arc<LimiterLease>) -> Self {
         Self {
             tick: Duration::from_millis(config.limiter_refresh_batch_ms.max(1)),
             max: config.limiter_refresh_batch_max.max(1),
-            lease: Duration::from_secs(config.limiter_lease_sec.max(0) as u64).min(MAX_LEASE),
+            lease,
             cap: config.limiter_release_queue_cap.max(1),
         }
     }
@@ -147,21 +149,21 @@ struct Entry {
     generation: u32,
     /// The mark that placed the entry: its tie-break in [`Due::order`].
     seq: u64,
-    /// Past this instant the entry is given up.
-    expires_at: Instant,
+    /// The key's first mark: one lease later the entry is given up.
+    first_marked_at: Instant,
 }
 
 impl Entry {
     /// The entry's place in [`Due::order`].
     fn place(&self) -> (Instant, u64) {
-        (self.expires_at, self.seq)
+        (self.first_marked_at, self.seq)
     }
 }
 
 #[derive(Default)]
 struct Due {
     by_key: HashMap<String, Entry>,
-    /// Keys by expiry, then by mark: the first expires first, and is the
+    /// Keys by first mark, then by mark: the first expires first, and is the
     /// oldest.
     order: BTreeMap<(Instant, u64), String>,
     next_seq: u64,
@@ -252,14 +254,14 @@ impl RefreshBatch {
         }
         let seq = due.next_seq;
         due.next_seq += 1;
-        // A key in flight keeps the expiry of its first mark.
-        let expires_at = due.in_flight.get(key).map_or(now + self.config.lease, |e| e.expires_at);
+        // A key in flight keeps its first mark.
+        let first_marked_at = due.in_flight.get(key).map_or(now, |e| e.first_marked_at);
         let entry = Entry {
             call_ref: call_ref.to_string(),
             ids: ids.to_vec(),
             generation,
             seq,
-            expires_at,
+            first_marked_at,
         };
         due.insert(key.to_string(), entry);
         self.publish(&due);
@@ -458,9 +460,10 @@ impl RefreshBatch {
 
     /// Give up every entry due for one lease.
     fn expire(&self, due: &mut Due, now: Instant) {
+        let lease = self.config.lease.current();
         let mut expired = false;
         while let Some(first) = due.order.first_entry() {
-            if first.key().0 > now {
+            if first.key().0 + lease > now {
                 break;
             }
             let key = first.remove();
@@ -553,10 +556,10 @@ mod tests {
     }
 
     fn rig(script: Vec<Script>, max: usize, cap: usize) -> Rig {
-        rig_leased(script, max, cap, Duration::from_secs(20))
+        rig_leased(script, max, cap, LimiterLease::starting_at(Duration::from_secs(20)))
     }
 
-    fn rig_leased(script: Vec<Script>, max: usize, cap: usize, lease: Duration) -> Rig {
+    fn rig_leased(script: Vec<Script>, max: usize, cap: usize, lease: Arc<LimiterLease>) -> Rig {
         let limiter = Arc::new(Scripted::default());
         *limiter.script.lock().unwrap() = script.into();
         let metrics = B2buaMetrics::new();
@@ -788,7 +791,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unanswered_requests_back_off_and_an_answer_ends_the_backoff() {
         let script = (0..9).map(|_| Script::Unavailable).collect();
-        let r = rig_leased(script, 100, 100, Duration::from_secs(120));
+        let r = rig_leased(script, 100, 100, LimiterLease::starting_at(Duration::from_secs(120)));
         let start = Instant::now();
         mark(&r.batch, "a");
         let at = |secs: f64| start + Duration::from_secs_f64(secs);
@@ -812,7 +815,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_resume_ends_the_backoff() {
         let script = (0..12).map(|_| Script::Unavailable).collect();
-        let r = rig_leased(script, 100, 100, Duration::from_secs(120));
+        let r = rig_leased(script, 100, 100, LimiterLease::starting_at(Duration::from_secs(120)));
         mark(&r.batch, "a");
         for _ in 0..200 {
             advance(TICK / 10).await;
@@ -863,14 +866,27 @@ mod tests {
     #[test]
     fn the_config_states_the_pace_and_bounds() {
         let config = B2buaConfig::default();
-        assert_eq!(
-            RefreshBatchConfig::from_config(&config),
-            RefreshBatchConfig {
-                tick: Duration::from_secs(1),
-                max: 1_000,
-                lease: Duration::from_secs(120),
-                cap: 100_000,
-            }
-        );
+        let lease = LimiterLease::starting_at(Duration::from_secs(120));
+        let bounds = RefreshBatchConfig::from_config(&config, lease.clone());
+        assert_eq!(bounds.tick, Duration::from_secs(1));
+        assert_eq!(bounds.max, 1_000);
+        assert_eq!(bounds.cap, 100_000);
+        assert!(Arc::ptr_eq(&bounds.lease, &lease), "the worker's learnt lease");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_learnt_after_a_first_mark_moves_its_deadline() {
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        let r = rig_leased(Vec::new(), 100, 10, lease.clone());
+        r.batch.hold();
+        mark(&r.batch, "a");
+        lease.learn(Duration::from_secs(60));
+        advance(Duration::from_secs(30)).await;
+        mark(&r.batch, "b");
+        assert_eq!(r.batch.due(), 2, "a longer lease keeps the entry");
+        lease.learn(Duration::from_secs(10));
+        advance(Duration::from_secs(10)).await;
+        assert_eq!(r.batch.due(), 0, "a shorter lease gives up both");
+        assert_eq!(r.metrics.limiter_refresh_forgotten_lease_expired_total(), 2);
     }
 }

@@ -120,8 +120,8 @@ and a lost release could not be retried.
    Its sender is supervised: one that
    panics is restarted with the queue intact, and counted. A circuit breaker
    drives the queue through `hold` and `resume`: nothing is sent while it is
-   held, and a resume sends every waiting key at once. The worker's lease is
-   the limiter's, at most one day, and its refresh period is below it.
+   held, and a resume sends every waiting key at once. The lease an entry
+   waits is the limiter's as the worker last learnt it (decision 12).
 10. **No call pays the timeout of a limiter that keeps failing.** Each worker
     runs a circuit breaker in front of its limiter. Closed, it counts
     consecutive admits that got no usable answer: a timeout, a transport error
@@ -169,9 +169,9 @@ and a lost release could not be retried.
     doubles from 200 ms with each consecutive unanswered request, never
     below a tick nor above 5 s; an answer or the breaker's close ends it.
     Refreshes never trip the breaker, so a dead limiter behind a closed one
-    draws a request every 5 s. An entry is given up
-    one lease after its first mark, at the release queue's cap (the oldest),
-    or when its call's release is queued, so an ended call's set is never
+    draws a request every 5 s. An entry is given up one lease (decision 12)
+    after its first mark, at the release queue's cap (the oldest), or when
+    its call's release is queued, so an ended call's set is never
     refreshed after its release; all three are counted. The batch is not
     replicated. Each answer but `Extended` goes back to its call as an
     internal event and is applied on the call's own turn, to the resident
@@ -183,6 +183,16 @@ and a lost release could not be retried.
     drives the batch like the release queue (decision 10). A drain does not
     flush the batch: a call live at the exit is refreshed by the timer its
     successor re-arms.
+12. **The worker learns the lease from the limiter.** Every admit and
+    refresh answer states the limiter's lease (`lease_ms`); an answer without
+    it is a bad body. The worker keeps the last lease it learnt, at most one
+    day, and before any answer assumes the limiter's default (120 s); it
+    configures none of its own. The release queue and the refresh batch read
+    it each time they look, so a lease learnt later moves the deadline of
+    every entry waiting. A refresh leaves up to one tick after it falls due,
+    so the lease must outlast the refresh period plus a tick: each change of
+    the learnt lease that does not is warned about and counted once, and the
+    counted calls then lapse between refreshes and are re-registered at each.
 
 ## Lease, refresh and the replica TTL
 
@@ -217,10 +227,11 @@ cells that prove re-registration run the deployed relation.
   re-registered, were refused by a release fence
   (`b2bua_limiter_refresh_released_total`) or learnt their set was dropped
   (`b2bua_limiter_refresh_dropped_total`).
-- Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
-  same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
-  the lease by more than one period; `LIMITER_REFRESH_BATCH_MS` (1000, below
-  the refresh period, the refresh period plus a tick below the lease),
+- Config: `LIMITER_LEASE_SECONDS` on the limiter only (1 s to one day, boot
+  refuses anything else), stated in its answers; `LIMITER_REFRESH_SECONDS`
+  on the workers, the refresh below the lease by more than one period;
+  `LIMITER_REFRESH_BATCH_MS` (1000, below the refresh period, the refresh
+  period plus a tick below the lease),
   `LIMITER_REFRESH_BATCH_MAX` (1000), `LIMITER_REFRESH_TIMEOUT_MS` (2000),
   `LIMITER_RELEASE_TIMEOUT_MS`, `LIMITER_RELEASE_QUEUE_CAP`,
   `LIMITER_BREAKER_FAILURES` (3), `LIMITER_BREAKER_PROBE_MS` (1000) and the
@@ -257,9 +268,11 @@ cells that prove re-registration run the deployed relation.
   (`b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`)
   and sender restarts (`b2bua_limiter_refresh_sender_restarts_total`). A
   refresh is sent within one tick of falling due, so the lease must outlast
-  the refresh period plus a tick; boot refuses a configuration where it
-  does not. A call's trace shows its refresh falling due and every answer
-  but `Extended`: an extended lease leaves no per-call evidence.
+  the refresh period plus a tick; the worker counts each learnt lease where
+  it does not (`b2bua_limiter_lease_too_short_total`), and exposes the lease
+  it learnt (`b2bua_limiter_lease_seconds`). A call's trace shows its
+  refresh falling due and every answer but `Extended`: an extended lease
+  leaves no per-call evidence.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the
   flush and reboots later than one lease) re-registers a set until the

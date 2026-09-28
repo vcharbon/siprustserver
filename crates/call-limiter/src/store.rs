@@ -39,9 +39,16 @@ use sip_clock::Clock;
 
 use crate::wire::AdmitEntry;
 
-/// The store's lease. The default is the deployed value; the workers refresh
-/// below it by more than one period, and how the lease relates to the
-/// replica TTL and a reactive takeover is stated in ADR-0038.
+/// The lease a store runs unless configured otherwise (seconds).
+pub const DEFAULT_LEASE_SEC: i64 = 120;
+
+/// The longest lease a store runs (seconds): one day.
+pub const MAX_LEASE_SEC: i64 = 86_400;
+
+/// The store's lease. The default is the deployed value; every admit and
+/// refresh answer states it, the workers refresh below it by more than one
+/// period, and how the lease relates to the replica TTL and a reactive
+/// takeover is stated in ADR-0038.
 #[derive(Clone, Copy, Debug)]
 pub struct LimiterConfig {
     /// How long a call's set lives without a refresh, and how long a key
@@ -51,7 +58,7 @@ pub struct LimiterConfig {
 
 impl Default for LimiterConfig {
     fn default() -> Self {
-        Self { lease_sec: 120 }
+        Self { lease_sec: DEFAULT_LEASE_SEC }
     }
 }
 
@@ -157,8 +164,9 @@ impl CallStore {
         self.clock.now_ms()
     }
 
-    fn lease_ms(&self) -> i64 {
-        self.cfg.lease_sec * 1000
+    /// The store's lease, milliseconds.
+    pub fn lease_ms(&self) -> i64 {
+        self.cfg.lease_sec.saturating_mul(1000)
     }
 
     /// Replace the call's set with `entries`, checked net of its current set.

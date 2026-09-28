@@ -373,9 +373,14 @@ impl B2buaCore {
         // included) bypasses it. `<= 0` disables (the reaper-wedge escape hatch).
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout_ms);
+        // The limiter's lease as its answers state it: the release queue and
+        // the refresh batch give their entries up by it.
+        let limiter_lease =
+            crate::limiter_lease::LimiterLease::from_config(&config, metrics.clone());
+        limiter.report_lease(limiter_lease.clone());
         let limiter_releases = crate::limiter_release::ReleaseQueue::new(
             limiter.clone(),
-            crate::limiter_release::ReleaseQueueConfig::from_config(&config),
+            crate::limiter_release::ReleaseQueueConfig::from_config(&config, limiter_lease.clone()),
             metrics.clone(),
         );
         tasks.push(tokio::spawn(limiter_releases.clone().run()));
@@ -386,7 +391,10 @@ impl B2buaCore {
             let answers = reentry_tx.clone();
             crate::limiter_refresh_batch::RefreshBatch::new(
                 limiter.clone(),
-                crate::limiter_refresh_batch::RefreshBatchConfig::from_config(&config),
+                crate::limiter_refresh_batch::RefreshBatchConfig::from_config(
+                    &config,
+                    limiter_lease,
+                ),
                 metrics.clone(),
                 move |answer| {
                     let _ = answers.send(answer.into_event());

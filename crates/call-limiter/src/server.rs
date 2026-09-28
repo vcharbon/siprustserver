@@ -2,7 +2,8 @@
 //! [`CallStore`], bumping [`LimiterMetrics`] at the edges.
 //!
 //! Routes: `POST /v1/admit`, `POST /v1/release`, `POST /v1/refresh`,
-//! `GET /v1/health`, `GET /metrics`, `GET /healthz`. `/healthz` answers the
+//! `GET /v1/health`, `GET /metrics`, `GET /healthz`. Every admit and refresh
+//! answer states the store's lease. `/healthz` answers the
 //! process; `/v1/health` answers only once the store has, so a client's
 //! breaker probing it learns that a request can be served. A malformed body
 //! is `400`; an unknown route is `404`. The handler is pure compute (no real
@@ -42,6 +43,11 @@ impl LimiterServer {
     pub fn metrics(&self) -> LimiterMetrics {
         self.metrics.clone()
     }
+
+    /// The lease every admit and refresh answer states.
+    fn lease_ms(&self) -> u64 {
+        self.store.lease_ms().max(0) as u64
+    }
 }
 
 fn json_ok<T: serde::Serialize>(value: &T) -> HttpResponse {
@@ -67,18 +73,26 @@ impl HttpService for LimiterServer {
                 let outcome =
                     self.store.admit(&parsed.key, &parsed.entries, parsed.release_on_refusal);
                 self.metrics.on_admit(&outcome);
+                let lease_ms = self.lease_ms();
                 let resp = match outcome {
-                    AdmitResult::Admitted => {
-                        AdmitResponse { admitted: true, rejected_id: None, released: false }
-                    }
+                    AdmitResult::Admitted => AdmitResponse {
+                        admitted: true,
+                        rejected_id: None,
+                        released: false,
+                        lease_ms,
+                    },
                     AdmitResult::Rejected { limiter_id } => AdmitResponse {
                         admitted: false,
                         rejected_id: Some(limiter_id),
                         released: false,
+                        lease_ms,
                     },
-                    AdmitResult::Released => {
-                        AdmitResponse { admitted: false, rejected_id: None, released: true }
-                    }
+                    AdmitResult::Released => AdmitResponse {
+                        admitted: false,
+                        rejected_id: None,
+                        released: true,
+                        lease_ms,
+                    },
                 };
                 json_ok(&resp)
             }
@@ -108,7 +122,7 @@ impl HttpService for LimiterServer {
                     })
                     .collect();
                 self.metrics.on_refresh(parsed.calls.len());
-                json_ok(&RefreshResponse { outcomes })
+                json_ok(&RefreshResponse { outcomes, lease_ms: self.lease_ms() })
             }
             ("GET", "/v1/health") => json_ok(&HealthResponse { calls: self.store.calls() as u64 }),
             ("GET", "/metrics") => {

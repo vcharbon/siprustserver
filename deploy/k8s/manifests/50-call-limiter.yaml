@@ -44,6 +44,8 @@ spec:
               add: ["NET_ADMIN"]
           env:
             - { name: LIMITER_LISTEN,           value: "0.0.0.0:8080" }
+            # Every admit and refresh answer states the lease; the workers give
+            # their queued releases and refreshes up by it.
             - { name: LIMITER_LEASE_SECONDS,    value: "120" }
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }

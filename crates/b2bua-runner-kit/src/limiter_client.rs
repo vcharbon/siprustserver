@@ -62,6 +62,7 @@ mod tests {
     use async_trait::async_trait;
     use b2bua::limiter::{AdmitOutcome, LimiterEntry, ReleaseAnswer};
     use b2bua::limiter_breaker::{BreakerConfig, BreakerLimiter};
+    use b2bua::limiter_lease::LimiterLease;
     use b2bua::limiter_refresh_batch::{RefreshBatch, RefreshBatchConfig};
     use b2bua::limiter_release::{ReleaseQueue, ReleaseQueueConfig};
     use b2bua::metrics::B2buaMetrics;
@@ -196,13 +197,16 @@ mod tests {
             };
             let client = limiter_client(&settings, self.net.clone(), self.names.clone()).await;
             let metrics = B2buaMetrics::new();
-            let bounds = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+            let bounds = ReleaseQueueConfig {
+                lease: LimiterLease::starting_at(Duration::from_secs(120)),
+                cap: 10,
+            };
             let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
             tokio::spawn(releases.clone().run());
             let bounds = RefreshBatchConfig {
                 tick: PROBE,
                 max: 100,
-                lease: Duration::from_secs(120),
+                lease: LimiterLease::starting_at(Duration::from_secs(120)),
                 cap: 10,
             };
             let refreshes = RefreshBatch::new(client.clone(), bounds, metrics.clone(), |_| {});

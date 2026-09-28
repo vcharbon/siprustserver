@@ -21,4 +21,7 @@ pub mod wire;
 
 pub use metrics::LimiterMetrics;
 pub use server::LimiterServer;
-pub use store::{AdmitResult, CallStore, LimiterConfig, RefreshResult, StoreStats};
+pub use store::{
+    AdmitResult, CallStore, LimiterConfig, RefreshResult, StoreStats, DEFAULT_LEASE_SEC,
+    MAX_LEASE_SEC,
+};

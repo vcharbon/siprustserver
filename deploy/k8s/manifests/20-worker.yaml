@@ -152,13 +152,15 @@ spec:
             # full admit/release/refresh chain is exercised on all traffic; a call
             # that also carries an X-Api-Call `call_limiter` entry (the endurance
             # limiter stream) is additionally capped by it. LIMITER_REFRESH_SECONDS
-            # is the lease refresh cadence, below the service's LIMITER_LEASE_SECONDS.
+            # is the lease refresh cadence; with one refresh tick it stays below
+            # the service's LIMITER_LEASE_SECONDS, which the worker learns from
+            # the service's answers (b2bua_limiter_lease_too_short_total counts a
+            # lease it reaches).
             - { name: LIMITER_URL,            value: "call-limiter.sip-test.svc.cluster.local:8080" }
             - { name: LIMITER_REFRESH_SECONDS, value: "40" }
             - { name: LIMITER_TIMEOUT_MS,     value: "150" }
-            # The worker's release queue: the service's lease (a release queued
-            # longer is dropped unsent) and the release budget.
-            - { name: LIMITER_LEASE_SECONDS,      value: "120" }
+            # The worker's release queue gives a release up once it has waited
+            # the service's lease; this is the release budget.
             - { name: LIMITER_RELEASE_TIMEOUT_MS, value: "2000" }
             # Always-on high-cap "stress" entry: never rejects (cap 999999) but
             # makes every call traverse the limiter so the chain is load-tested
