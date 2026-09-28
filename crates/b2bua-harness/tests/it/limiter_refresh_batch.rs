@@ -425,3 +425,71 @@ async fn a_dropped_answer_reaching_an_ended_call_is_harmless() {
     );
     let _ = s.h.finish().await;
 }
+
+/// The limiter answers refreshes in 300 ms, past the admit budget: no call
+/// waits on a refresh, so the refresh runs under its own longer budget, and a
+/// `dropped` answer reaches its call, which refreshes no more.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
+    let setup = Setup { refresh_delay: Some(Duration::from_millis(300)), ..Setup::default() };
+    let s = Scene::new("refresh-batch-slow-limiter", setup).await;
+    let mut dialog = s.establish().await;
+    let key = s.admitted_keys()[0].clone();
+
+    s.advance_to(REFRESH - Duration::from_millis(100)).await;
+    let no_entries: &[AdmitEntry] = &[];
+    assert_eq!(s.store.admit(&key, no_entries, false), AdmitResult::Admitted);
+    s.advance_to(REFRESH + TICK + Duration::from_secs(1)).await;
+    let metrics = s.b2bua.metrics();
+    assert_eq!(
+        metrics.limiter_refresh_requests_unavailable_total(),
+        0,
+        "the slow answer came back"
+    );
+    assert_eq!(
+        metrics.limiter_refresh_answers_applied_total("dropped"),
+        1,
+        "the dropped answer reached its call"
+    );
+    let refreshes = s.sent_on("/v1/refresh");
+    s.advance_to(2 * REFRESH + TICK + Duration::from_secs(1)).await;
+    assert_eq!(s.sent_on("/v1/refresh"), refreshes, "an uncounted call refreshes no more");
+
+    s.hang_up(&mut dialog).await;
+    s.assert_drained().await;
+    assert_eq!(s.released_keys(), [key], "the uncounted call still releases its key");
+    let _ = s.h.finish().await;
+}
+
+/// The limiter is cut while the breaker stays closed (no admit is sent, and
+/// only admits trip it): the batch backs off on consecutive unanswered
+/// requests instead of resending every tick. Once the limiter is back, the
+/// next retry is answered and the backoff is gone: the next refresh leaves
+/// within one tick of falling due.
+#[tokio::test(start_paused = true)]
+async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
+    let s = Scene::new("refresh-batch-backoff", Setup::default()).await;
+    let mut dialog = s.establish().await;
+
+    s.advance_to(REFRESH - Duration::from_millis(100)).await;
+    s.net.apply_fault(Fault::Cut { dst: laddr() });
+    s.advance_to(REFRESH + Duration::from_secs(30)).await;
+    let sent = s.sent_on("/v1/refresh");
+    assert!(sent <= 10, "{sent} refresh requests in 30 s of a dead limiter (one per tick: 30)");
+    assert!(!s.b2bua.metrics().limiter_breaker_open(), "refreshes never trip the breaker");
+
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    let resumed = s.start.elapsed();
+    s.advance_to(resumed + Duration::from_secs(5) + TICK + Duration::from_millis(200)).await;
+    let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.limiter_refresh_requests_answered_total(), 1, "the retry is answered");
+    assert_eq!(s.holds(), [1, 1, 1], "the call stays counted");
+
+    // The next refresh falls due at 45 s and leaves within one tick.
+    s.advance_to(9 * REFRESH + TICK + Duration::from_millis(200)).await;
+    assert_eq!(metrics.limiter_refresh_requests_answered_total(), 2, "no backoff left");
+
+    s.hang_up(&mut dialog).await;
+    s.assert_drained().await;
+    let _ = s.h.finish().await;
+}

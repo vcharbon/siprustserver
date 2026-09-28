@@ -836,6 +836,16 @@ mod tests {
         assert!(e.contains("limiter_refresh_batch_ms=0"), "{e}");
         let e = with(|c| c.limiter_refresh_batch_ms = 40_000).expect_err("tick at the period");
         assert!(e.contains("limiter_refresh_batch_ms=40000"), "{e}");
+        let e =
+            with(|c| c.limiter_refresh_sec = 119).expect_err("refresh plus tick past the lease");
+        assert!(e.contains("limiter_refresh_sec=119"), "{e}");
+        let e = with(|c| {
+            c.limiter_refresh_sec = 110;
+            c.limiter_refresh_batch_ms = 10_000;
+        })
+        .expect_err("refresh plus tick at the lease");
+        assert!(e.contains("limiter_lease_sec=120"), "{e}");
+        assert!(with(|c| c.limiter_refresh_sec = 118).is_ok(), "118 s + 1 s tick < 120 s");
         let e = with(|c| c.limiter_refresh_batch_max = 0).expect_err("zero batch");
         assert!(e.contains("limiter_refresh_batch_max=0"), "{e}");
         let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
