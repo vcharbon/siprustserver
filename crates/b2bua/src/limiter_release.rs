@@ -84,13 +84,38 @@ pub struct ReleaseFlush {
 }
 
 impl ReleaseFlush {
-    /// The outcome label: `empty` (nothing was queued), `sent` (every queued
-    /// release was answered) or `given_up` (some were given up).
-    pub fn outcome(&self) -> &'static str {
+    /// What the flush did, from its counts.
+    pub fn outcome(&self) -> ReleaseFlushOutcome {
         match (self.queued, self.given_up) {
-            (_, 1..) => "given_up",
-            (0, 0) => "empty",
-            _ => "sent",
+            (_, 1..) => ReleaseFlushOutcome::GivenUp,
+            (0, 0) => ReleaseFlushOutcome::Empty,
+            _ => ReleaseFlushOutcome::Sent,
+        }
+    }
+}
+
+/// What a [`ReleaseQueue::flush`] did, as the `outcome` label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseFlushOutcome {
+    /// Nothing was queued.
+    Empty,
+    /// Every queued release was answered.
+    Sent,
+    /// Some queued releases were given up at the bound.
+    GivenUp,
+}
+
+impl ReleaseFlushOutcome {
+    /// Every outcome, in label order.
+    pub const ALL: [ReleaseFlushOutcome; 3] =
+        [ReleaseFlushOutcome::Empty, ReleaseFlushOutcome::Sent, ReleaseFlushOutcome::GivenUp];
+
+    /// The metric and log label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReleaseFlushOutcome::Empty => "empty",
+            ReleaseFlushOutcome::Sent => "sent",
+            ReleaseFlushOutcome::GivenUp => "given_up",
         }
     }
 }

@@ -84,8 +84,8 @@ and a lost release could not be retried.
    route fold (or a refresh answer) restates the set. `fail_open` marks an
    uncounted call whose route names ids the limiter does not count for it
    (its admit got no usable answer or was not sent, a release fence refused
-   it, a refresh answered `dropped`); any answered admit clears it, and a
-   route naming no id asks for nothing. `counted` is refresh eligibility and
+   it, a refresh answered `dropped`); any other answered admit clears it,
+   and a route naming no id asks for nothing. `counted` is refresh eligibility and
    implies `release_owed`, which the first admit request sets and nothing
    clears; every end path reads it
    to send the release: the terminal settle, the primary's discharge of a
@@ -231,7 +231,8 @@ cells that prove re-registration run the deployed relation.
 
 ## Consequences
 
-- Metrics, one list. Counters end in `_total` and carry one closed label.
+- Metrics, one list. Counters end in `_total` and carry one closed label
+  set; only `b2bua_limiter_failures_total` carries two labels (`op`, `cause`).
   The limiter (`limiter_*`): `limiter_admits_total{outcome=admitted|rejected|released}`,
   `limiter_refresh_requests_total`,
   `limiter_refresh_calls_total{outcome=extended|reregistered|released|dropped}`,
@@ -244,12 +245,15 @@ cells that prove re-registration run the deployed relation.
   `b2bua_limiter_requests_total{op=admit|refresh|release|health}`;
   `b2bua_limiter_failures_total{op,cause}`, the requests with no usable answer
   by cause (`timeout`, `transport`, `status`, `bad_answer`; `breaker_open` for
-  an admit the open breaker answered without a request), every `op=admit`
-  one a call that failed open; `b2bua_limiter_admit_released_total{site=initial|fold}`;
+  an admit the open breaker answered without a request); an `op=admit` one
+  on an initial admit, or on an uncounted call, runs the call uncounted, one
+  on a reroute of a counted call leaves it counted;
+  `b2bua_limiter_admit_released_total{site=initial|fold}`;
   the gauge `b2bua_limiter_uncounted_calls`, the resident calls running
   `fail_open` (decision 8), moved by every write of the worker's call map so it
-  is exact on every node that holds the call, taken over or reclaimed;
-  `b2bua_limiter_refresh_answers_total{outcome}`,
+  is exact on every node that holds the call, taken over or reclaimed (a
+  fleet-wide sum counts a call twice while two nodes hold it);
+  `b2bua_limiter_refresh_answers_total{outcome=extended|reregistered|released|dropped}`,
   `b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`,
   `b2bua_limiter_refresh_keys_sent_total` (over the refresh requests, the mean
   batch size), `b2bua_limiter_refresh_retries_total`,

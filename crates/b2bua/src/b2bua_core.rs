@@ -765,7 +765,7 @@ impl B2buaCore {
             residual = outcome.residual,
             elapsed_ms = outcome.elapsed.as_millis() as u64,
             withdrawn = self.is_withdrawn(),
-            release_flush = flush.outcome(),
+            release_flush = flush.outcome().label(),
             releases_queued = flush.queued,
             releases_given_up = flush.given_up,
             release_flush_ms = flush.elapsed.as_millis() as u64,

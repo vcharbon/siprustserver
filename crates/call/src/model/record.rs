@@ -125,8 +125,9 @@ pub struct PrackedProvisional {
 /// `fail_open` marks a call that runs uncounted although its route names
 /// limiter ids: its admit got no usable answer or was not sent while the call
 /// was uncounted, the limiter refused it on a release fence, or a refresh
-/// learnt that an admit of the key dropped its set. Any answered admit that
-/// restates the set, a cap refusal included, clears it; it implies `!counted`.
+/// learnt that an admit of the key dropped its set. Any other answered admit
+/// that restates the set, a cap refusal included, clears it; it implies
+/// `!counted`.
 /// `generation` counts the restatements of the set after the call's first
 /// admit ([`set`](Self::set)): a refresh answer applies to the call only under
 /// the generation its refresh was sent for.

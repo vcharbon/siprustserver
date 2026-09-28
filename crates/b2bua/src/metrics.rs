@@ -1820,8 +1820,14 @@ mod tests {
             elapsed: std::time::Duration::from_secs(5),
             release_flush: ReleaseFlush::default(),
         });
-        assert_eq!(m.limiter().release_flushes_total("sent"), 1);
-        assert_eq!(m.limiter().release_flushes_total("empty"), 1);
+        assert_eq!(
+            m.limiter().release_flushes_total(crate::limiter_release::ReleaseFlushOutcome::Sent),
+            1
+        );
+        assert_eq!(
+            m.limiter().release_flushes_total(crate::limiter_release::ReleaseFlushOutcome::Empty),
+            1
+        );
         assert_eq!(m.drain_exits("caught_up"), 1);
         assert_eq!(m.drain_exits("grace_peers_behind"), 1);
         assert_eq!(m.drain_exits("quiescent"), 0);

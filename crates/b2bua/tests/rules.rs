@@ -3966,13 +3966,14 @@ mod enforce_equivalence {
         (
             any::<bool>(),
             any::<bool>(),
+            any::<bool>(),
             proptest::collection::vec(prop_oneof![Just("l1"), Just("l2")], 0..3),
         )
-            .prop_map(|(counted, sent, ids)| CallLimiterState {
+            .prop_map(|(counted, sent, fail_open, ids)| CallLimiterState {
                 key: "call#k".into(),
                 counted,
                 release_owed: counted || sent,
-                fail_open: false,
+                fail_open: fail_open && !counted,
                 ids: ids.into_iter().map(str::to_string).collect(),
                 generation: 0,
             })

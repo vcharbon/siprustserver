@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::limiter::RefreshOutcome;
 use crate::limiter_refresh_batch::outcome_label;
-use crate::limiter_release::ReleaseFlush;
+use crate::limiter_release::{ReleaseFlush, ReleaseFlushOutcome};
 
 /// A limiter request, as the `op` label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,9 +139,6 @@ const REFRESH_OUTCOMES: [RefreshOutcome; 4] = [
     RefreshOutcome::Dropped,
 ];
 
-/// Every release-flush outcome ([`ReleaseFlush::outcome`]).
-const FLUSH_OUTCOMES: [&str; 3] = ["empty", "sent", "given_up"];
-
 /// The worker's limiter counters and gauges. Lives in
 /// [`B2buaMetrics`](super::B2buaMetrics), reached through
 /// [`limiter`](super::B2buaMetrics::limiter).
@@ -180,7 +177,12 @@ fn get(a: &AtomicU64) -> u64 {
 }
 
 fn outcome_slot(outcome: RefreshOutcome) -> usize {
-    REFRESH_OUTCOMES.iter().position(|o| *o == outcome).unwrap_or(0)
+    match outcome {
+        RefreshOutcome::Extended => 0,
+        RefreshOutcome::Reregistered => 1,
+        RefreshOutcome::Released => 2,
+        RefreshOutcome::Dropped => 3,
+    }
 }
 
 impl LimiterCounters {
@@ -321,17 +323,13 @@ impl LimiterCounters {
 
     /// One planned exit flushed the release queue.
     pub fn count_release_flush(&self, flush: &ReleaseFlush) {
-        let slot = FLUSH_OUTCOMES.iter().position(|o| *o == flush.outcome()).unwrap_or(0);
-        add(&self.release_flushes[slot], 1);
+        add(&self.release_flushes[flush.outcome() as usize], 1);
         add(&self.release_flush_ms, flush.elapsed.as_millis() as u64);
     }
 
-    /// Release flushes that ended `outcome` ([`ReleaseFlush::outcome`]).
-    pub fn release_flushes_total(&self, outcome: &str) -> u64 {
-        FLUSH_OUTCOMES
-            .iter()
-            .position(|o| *o == outcome)
-            .map_or(0, |slot| get(&self.release_flushes[slot]))
+    /// Release flushes that ended `outcome`.
+    pub fn release_flushes_total(&self, outcome: ReleaseFlushOutcome) -> u64 {
+        get(&self.release_flushes[outcome as usize])
     }
 
     /// Time the release flushes took.
@@ -436,7 +434,7 @@ impl LimiterCounters {
                 self.requests_total(op)
             );
         }
-        head(s, "b2bua_limiter_failures_total", "counter", "limiter requests with no usable answer, by request and cause (timeout: past the request's budget; transport: refused, reset, or a name that does not resolve; status: an answer other than 200; bad_answer: a 200 whose body could not be read, a limiter older than its workers shows here; breaker_open: an admit the open breaker answered without a request, which owes no release). Every op=admit failure is a call that failed open (ADR-0038)");
+        head(s, "b2bua_limiter_failures_total", "counter", "limiter requests with no usable answer, by request and cause (timeout: past the request's budget; transport: refused, reset, or a name that does not resolve; status: an answer other than 200; bad_answer: a 200 whose body could not be read, a limiter older than its workers shows here; breaker_open: an admit the open breaker answered without a request, which owes no release). An op=admit failure on an initial admit, or on an uncounted call, runs the call uncounted; one on a reroute of a counted call leaves it counted (ADR-0038)");
         for op in LimiterOp::ALL {
             for cause in op.causes() {
                 let _ = writeln!(
@@ -456,7 +454,7 @@ impl LimiterCounters {
                 self.admit_released_total(site)
             );
         }
-        one(s, "b2bua_limiter_uncounted_calls", "gauge", "calls resident on this worker that run uncounted although their route names limiter ids: their admit failed open (no usable answer or the breaker open, on a call not counted), the limiter refused it on a release fence, or a refresh answered dropped (ADR-0038)", self.uncounted_calls().to_string());
+        one(s, "b2bua_limiter_uncounted_calls", "gauge", "calls resident on this worker that run uncounted although their route names limiter ids: their admit failed open (no usable answer, the breaker open, or no limiter configured, on a call not counted), the limiter refused it on a release fence, or a refresh answered dropped (ADR-0038). Every call with limiter ids is here on a worker with no limiter configured. A counted call whose refresh is answered released stays counted and is not here: the next refresh re-registers it. A call held by two nodes at once counts on each, so a fleet-wide sum can count it twice", self.uncounted_calls().to_string());
 
         head(s, "b2bua_limiter_refresh_answers_total", "counter", "calls the refresh requests named, by the limiter's answer (extended; reregistered: a set the limiter no longer held re-created; released: refused by a release fence, the call stays counted; dropped: an admit of the key dropped its set, the call goes uncounted and still releases its key at its end)");
         for outcome in REFRESH_OUTCOMES {
@@ -514,10 +512,11 @@ impl LimiterCounters {
         }
         one(s, "b2bua_limiter_release_queue_depth", "gauge", "limiter releases waiting in this worker's release queue, in flight included (a queue that only grows means the limiter is not answering)", self.release_queue_depth().to_string());
         head(s, "b2bua_limiter_release_flushes_total", "counter", "planned exits by what their release-queue flush did (outcome=empty: nothing was queued; sent: every queued release was answered; given_up: some were given up, counted in b2bua_limiter_release_given_up_total{reason=\"shutdown\"})");
-        for outcome in FLUSH_OUTCOMES {
+        for outcome in ReleaseFlushOutcome::ALL {
             let _ = writeln!(
                 s,
-                "b2bua_limiter_release_flushes_total{{outcome=\"{outcome}\"}} {}",
+                "b2bua_limiter_release_flushes_total{{outcome=\"{}\"}} {}",
+                outcome.label(),
                 self.release_flushes_total(outcome)
             );
         }

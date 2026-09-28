@@ -477,7 +477,10 @@ async fn a_draining_worker_flushes_its_release_queue_before_it_exits() {
     assert_eq!((out.release_flush.queued, out.release_flush.given_up), (2, 0));
     assert_eq!(out.elapsed, elapsed, "the drain's time includes its flush");
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter().release_flushes_total("sent"), 1);
+    assert_eq!(
+        metrics.limiter().release_flushes_total(b2bua::limiter_release::ReleaseFlushOutcome::Sent),
+        1
+    );
     assert_eq!(
         metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown),
         0,
@@ -515,7 +518,12 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
     assert_eq!(out.exit, DrainExit::Quiescent);
     assert_eq!((out.release_flush.queued, out.release_flush.given_up), (1, 1));
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter().release_flushes_total("given_up"), 1);
+    assert_eq!(
+        metrics
+            .limiter()
+            .release_flushes_total(b2bua::limiter_release::ReleaseFlushOutcome::GivenUp),
+        1
+    );
     assert_eq!(
         metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown),
         1,

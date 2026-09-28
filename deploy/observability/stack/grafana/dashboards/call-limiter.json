@@ -143,7 +143,7 @@
     },
     {
       "id": 15, "type": "timeseries", "title": "Limiter requests with no usable answer (per s)",
-      "description": "`b2bua_limiter_failures_total` by request and cause. Every op=admit series is a call that failed open; cause=breaker_open sent no request.",
+      "description": "`b2bua_limiter_failures_total` by request and cause. An op=admit failure on an initial admit, or on an uncounted call, runs the call uncounted; on a reroute of a counted call it stays counted. cause=breaker_open sent no request.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
