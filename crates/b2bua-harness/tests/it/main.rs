@@ -31,6 +31,7 @@ mod decision_lands_on_cancelled_call;
 mod decision_log;
 mod discarded_invite_and_cancel;
 mod discarded_request_readmitted;
+mod ended_leg_txn_timeout;
 mod failure;
 mod failure_header_relay;
 mod fake_prack;

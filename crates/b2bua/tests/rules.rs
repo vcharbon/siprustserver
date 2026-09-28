@@ -373,6 +373,30 @@ fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
     );
 }
 
+/// A leg a BYE already resolved keeps its disposition when a later request's
+/// transaction on it times out (a NOTIFY on a subscription usage that outlived
+/// the dialog, RFC 5057 §5.2); a leg whose CANCEL is still in flight is not
+/// resolved and is still settled by the timeout.
+#[test]
+fn a_timeout_on_a_resolved_leg_changes_nothing() {
+    for disposition in [call::ByeDisposition::ByeReceived, call::ByeDisposition::ByeConfirmed] {
+        let mut call = test_call();
+        call.a_leg.state = LegState::Terminated;
+        call.a_leg.bye_disposition = Some(disposition);
+        let actions = a_leg_timeout_result(&call, "NOTIFY");
+        assert!(actions.is_empty(), "{disposition:?}: nothing to resolve, got {actions:?}");
+    }
+    let mut call = test_call();
+    call.a_leg.state = LegState::Terminated;
+    call.a_leg.bye_disposition = Some(call::ByeDisposition::Cancelled);
+    call.a_leg.disposition = LegDisposition::Cancelling;
+    let actions = a_leg_timeout_result(&call, "INVITE");
+    assert!(
+        matches!(actions.as_slice(), [RuleAction::TerminateLeg { .. }]),
+        "a CANCEL in flight is still settled by the timeout, got {actions:?}",
+    );
+}
+
 #[test]
 fn invite_timeout_on_a_live_pending_leg_still_consults() {
     // The going-away guard is narrow: a live pending b-leg's transaction

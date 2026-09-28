@@ -1453,9 +1453,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     // BYE's own timeout only: an earlier request's dead
                     // transaction (the liveness OPTIONS that opened the
                     // teardown, Timer F still running) says nothing about
-                    // the BYE, which may yet be answered.
+                    // the BYE, which may yet be answered. A leg already
+                    // resolved (terminal disposition, no CANCEL in flight)
+                    // keeps it: a request sent after its dialog ended (a
+                    // NOTIFY on a surviving subscription usage, RFC 5057 §5.2)
+                    // timing out changes nothing.
                     let timed_out_bye =
                         ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("BYE"));
+                    if call::helpers::leg_is_resolved(leg)
+                        && leg.bye_disposition.is_some_and(ByeDisposition::is_terminal)
+                    {
+                        return ok(vec![]);
+                    }
                     let bye_disposition = match leg.bye_disposition {
                         Some(ByeDisposition::ByeSent) if timed_out_bye => {
                             ByeDisposition::ByeTimeout
