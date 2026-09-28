@@ -57,29 +57,36 @@ kills it, and a kill drops every call it serves.
    that is judged afresh, as at the ingress brake. The ceiling counts every
    critical event, so a takeover burst of `CallQuiesced` events can refuse
    new calls until the router catches up.
-7. **A margin, not tiers: nothing is refused to an admitted call.** The
-   new-call ceilings sit far enough below the worker's hard limit (the
-   process's memory limit) that all an admitted call can still cost fits
-   above them: its in-dialog transactions, the backup replicas that turn
-   live when a peer dies, and every call's teardown. With `C` the emergency
-   call ceiling, `B` the backup replicas held, `N` the emergency
-   transaction ceiling, `r` a generous in-dialog request rate per call (two
-   transactions per request, the one it opens here and the one it is relayed
-   on, each held 64·T1), two transactions for a teardown, the measured
-   per-call and per-transaction costs and base (ADR-0038) and a slack `s`
-   for RSS lag and allocator retention:
+7. **An admitted call's requests are never refused, but by item 6.** This is
+   the operator's sizing rule; the process does not compute it. The new-call
+   ceilings sit far enough below the process's memory limit that all an
+   admitted call can still cost fits above them: its in-dialog transactions,
+   the backup replicas that turn live when a peer dies, every call's
+   teardown, and the transactions refused INVITEs and given-up client
+   INVITEs hold. With `C` the emergency call ceiling, `B` the backup count
+   ceiling, `N` the emergency transaction ceiling, `r` a generous in-dialog
+   request rate per call beyond setup and teardown (two transactions per
+   request, the one it opens here and the one it is relayed on, each held
+   64·T1), two transactions for a teardown, `q` the rate of INVITEs answered
+   through a transaction and left held (a refusal until its ACK and Timer I,
+   64·T1 without one; a client INVITE given up, 64·T1), `h` that hold, the
+   per-call and per-transaction costs and the base measured on the
+   deployment under a held peak (its allocator footprint report), and a
+   slack `s` for RSS lag and allocator retention:
 
    ```text
-   reserve  = (C + B) · (2 · r · 64·T1 + 2)                 transactions
+   reserve  = (C + B) · (2 · r · 64·T1 + 2) + q · h          transactions
    limit · (1 − s) ≥ base + (C + B) · call + (N + reserve) · txn
    RSS ceiling     ≤ limit · (1 − s) − B · call − reserve · txn
    ```
 
-   Under overload the only refusal is a new call's 503; an admitted call's
-   in-dialog requests are refused only by item 6.
-8. **The teardown reserve.** No table, queue or dispatch limit refuses the
-   node's own BYE, CANCEL or ACK, or their answers: the transaction table has
-   no cap, a final matched to a client transaction and a `Timeout` are
+   Setup and teardown churn at the admission rate is part of `N`, which
+   counts every transaction. `q` is bounded only by the stateless brakes
+   ahead of the router: a refused flood past what the margin holds must be
+   shed there. Under overload the only refusal is a new call's 503.
+8. **Teardown is never refused.** No table, queue or dispatch limit refuses
+   the node's own BYE, CANCEL or ACK, or their answers: the transaction table
+   has no cap, a final matched to a client transaction and a `Timeout` are
    critical events the layer never drops, the router admits transaction
    outcomes past every per-call bound, and the brakes shed initial INVITEs
    only. The kernel's socket buffers can lose them; the retransmission
