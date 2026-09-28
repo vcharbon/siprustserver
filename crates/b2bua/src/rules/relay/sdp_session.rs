@@ -26,7 +26,8 @@ use crate::effects::{OutboundBody, OutboundSipEffect};
 use sip_message::header::MediaType;
 use sip_message::multipart::sdp_range;
 use sip_message::{
-    in_author_order, parse_origin, restate_session, restate_session_again, Method, StatedSession,
+    in_author_order, parse_origin, restate_session, restate_session_again, Method, SipRequest,
+    StatedSession,
 };
 
 /// Who wrote a description the stack sends.
@@ -184,17 +185,14 @@ pub fn continue_on_leg(
     [&body[..range.start], &out, &body[range.end..]].concat()
 }
 
-/// Count an offer/answer exchange `leg_id`'s peer opens: a `method` request
-/// carrying a session description in `body` (typed `content_type`).
-pub fn note_request(
-    call: &mut Call,
-    leg_id: &str,
-    method: &Method,
-    body: &[u8],
-    content_type: Option<&MediaType>,
-) {
-    let opens = matches!(method, Method::Invite | Method::Update | Method::Prack)
-        && content_type.and_then(|ct| sdp_range(ct, body)).is_some();
+/// Count the offer/answer exchange `req`, received from `leg_id`'s peer,
+/// opens: an INVITE or UPDATE carrying a description, which is always an
+/// offer (RFC 3264 §4, RFC 3311 §5.1). A PRACK's description may answer the
+/// stack's own offer (RFC 3262 §5) and is not counted: an answer it carries
+/// opens nothing, and a new offer it carries is answered under a new author
+/// version anyway.
+pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest) {
+    let opens = matches!(req.method(), Method::Invite | Method::Update) && req.sdp().is_some();
     if let (true, Some(leg)) = (opens, leg_mut(call, leg_id)) {
         leg.sdp_session.offers_received = leg.sdp_session.offers_received.saturating_add(1);
     }

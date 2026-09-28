@@ -3,7 +3,8 @@
 
 use call::{Call, LegState};
 use sip_message::header::MediaType;
-use sip_message::{Method, SipStr};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{Method, SipMessage, SipParser, SipStr};
 
 use super::{continue_on_leg, Author, Carried};
 use crate::config::B2buaConfig;
@@ -226,16 +227,29 @@ fn the_slot_map_only_serves_the_restated_author() {
     );
 }
 
+/// The peer of `leg` sends a `method` request, with or without a
+/// description, as the router receives it.
+fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
+    let body = if with_sdp { sdp("x 1 1 IN IP4 192.0.2.9", 1) } else { String::new() };
+    let content_type = if with_sdp { "Content-Type: application/sdp\r\n" } else { "" };
+    let raw = format!(
+        "{method} sip:b2bua@192.0.2.100 SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}\r\n\
+         From: <sip:a@192.0.2.1>;tag=a\r\nTo: <sip:b@192.0.2.100>;tag=b\r\n\
+         Call-ID: c\r\nCSeq: 7 {method}\r\nMax-Forwards: 70\r\n\
+         {content_type}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let SipMessage::Request(req) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
+        panic!("a request")
+    };
+    super::note_request(call, leg, &req);
+}
+
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a
 /// description.
 fn peer_offers(call: &mut Call, leg: &str, method: Method) {
-    super::note_request(
-        call,
-        leg,
-        &method,
-        sdp("x 1 1 IN IP4 192.0.2.9", 1).as_bytes(),
-        Some(&ct()),
-    );
+    peer_sends(call, leg, method.as_str(), true);
 }
 
 /// A splice of `b-2` onto `a`, the dialog carrying `b-1`'s session.
@@ -315,4 +329,20 @@ fn an_identical_answer_to_a_new_offer_is_a_new_version() {
         );
         assert_eq!(o_line(&out), format!("o=bob 202 {version} IN IP4 192.0.2.2"));
     }
+}
+
+/// An offerless re-INVITE's reliable 183 carries the offer, and the PRACK
+/// carries the peer's answer to it — no offer of the peer's: the 200 repeating
+/// the 183's description is the 183's bytes (RFC 6337 §3.1.1).
+#[test]
+fn a_prack_answer_opens_no_exchange() {
+    let mut c = spliced();
+    peer_sends(&mut c, "a", "INVITE", false);
+    let offer = sdp("carol 303 5 IN IP4 192.0.2.3", 30002);
+    let early =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 183), &offer);
+    peer_sends(&mut c, "a", "PRACK", true);
+    let fin =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+    assert_eq!(fin, early, "the 200 repeats the 183 byte for byte");
 }

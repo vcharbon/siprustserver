@@ -708,6 +708,13 @@ fn rule_chain_turn(
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), now_ms);
     }
+    // An offer the leg's peer sends opens an exchange on that leg, counted once
+    // as it is received, before the rules read it.
+    if let CallEvent::Sip { message, .. } = event {
+        if let SipMessage::Request(req) = message.as_ref() {
+            crate::rules::relay::note_request(&mut call, &res.source_leg_id, req);
+        }
+    }
     // A decision folding back is marked before the rules apply it, whichever
     // rule claims the fold.
     call = crate::decision_log::fold_decided(call, event, now_ms);

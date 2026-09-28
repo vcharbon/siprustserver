@@ -25,8 +25,9 @@ pub struct LegSdpSession {
     /// from. The same author's same version answering no newer offer is a
     /// repeat, restated at the same version.
     pub restated_from: Option<String>,
-    /// How many requests carrying a session description (INVITE, UPDATE,
-    /// PRACK) the leg's peer has sent: each opens a new offer/answer exchange.
+    /// How many offers the leg's peer has sent in requests (an INVITE or
+    /// UPDATE carrying a description), counted as each is received: each opens
+    /// a new offer/answer exchange.
     #[serde(default)]
     pub offers_received: u32,
     /// The leg whose peer's own session the dialog carries; `None` when it is

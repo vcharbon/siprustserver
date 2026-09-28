@@ -49,16 +49,6 @@ impl ActionExecutor<'_> {
     /// rules never hold it (ADR-0020 X8).
     pub fn execute(&self, actions: &[RuleAction], call: &Call, ctx: &RuleContext) -> HandlerResult {
         let mut call = call.clone();
-        if let Some(req) = ctx.request() {
-            let content_type = req.header::<sip_message::header::MediaType>().and_then(Result::ok);
-            crate::rules::relay::note_request(
-                &mut call,
-                ctx.source_leg_id,
-                req.method(),
-                req.body(),
-                content_type.as_ref(),
-            );
-        }
         let mut fx = HandlerEffects::new();
         for action in actions {
             self.apply(action, ctx, &mut call, &mut fx);
