@@ -40,7 +40,8 @@ pub(super) enum TxnState {
 }
 
 impl TxnState {
-    /// Still timing/retransmitting — Timer B/F and retransmits act only here.
+    /// No final yet: Timer B/F and retransmits act only here, and a client
+    /// INVITE that gave up stays here, held, with both stopped.
     pub(super) fn is_active(self) -> bool {
         matches!(self, TxnState::Trying | TxnState::Proceeding)
     }
@@ -239,9 +240,11 @@ pub(super) struct Transaction {
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
     pub(super) timeout_kind: TimeoutKind,
-    /// This INVITE client txn gave up: its `Timeout` is delivered and it
-    /// waits 64·T1 for the final a CANCEL provokes (RFC 3261 §9.1), which it
-    /// ACKs and hands up (§17.1.1.3). It never times out again.
+    /// This INVITE client txn gave up: its `Timeout` is delivered and it is
+    /// held 64·T1 (from its CANCEL's first send, RFC 3261 §9.1, else from the
+    /// give-up) for a late final, which it ACKs and hands up (§17.1.1.3). It
+    /// never times out again, and a CANCEL on it before any provisional stays
+    /// held.
     pub(super) gave_up: bool,
     /// The call this transaction served has been released while it was still
     /// open (`cancel_txns_for_call`). The layer then closes the transaction's

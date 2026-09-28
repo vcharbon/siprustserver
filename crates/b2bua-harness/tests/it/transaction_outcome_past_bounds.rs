@@ -124,8 +124,8 @@ async fn a_relayed_reinvite_timeout_on_a_full_per_call_queue_reaches_the_call() 
     s.h.advance(Duration::from_secs(6)).await;
 
     // The permit frees: the INFOs are relayed, then the Timeout, which fails
-    // the re-INVITE to alice, CANCELs bob's and ends the dialog whose peer
-    // went silent.
+    // the re-INVITE to alice and ends the dialog whose peer went silent. bob
+    // answered nothing on the re-INVITE, so no CANCEL goes to him (§9.1).
     parked.expect(503).await;
     for _ in 0..2 {
         s.bob.receive("INFO").await.respond(200, "OK").await;
@@ -135,10 +135,6 @@ async fn a_relayed_reinvite_timeout_on_a_full_per_call_queue_reaches_the_call() 
     s.alice.receive("BYE").await.respond(200, "OK").await;
     info1.expect(200).await;
     info2.expect(200).await;
-    // bob answered nothing on the re-INVITE: its CANCEL waits out the §9.1
-    // grace (ADR-0028) on the given-up transaction.
-    let mut cancel = s.bob.receive("CANCEL").await;
-    cancel.respond(200, "OK").await;
 
     settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();

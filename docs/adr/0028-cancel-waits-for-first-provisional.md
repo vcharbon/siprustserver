@@ -60,16 +60,23 @@ matches a Client/Invite txn:
     *first*: neither path may swallow a CANCEL still inside its grace window
     (a tight custom config can let the bound outrun the grace). Neither
     deletes the txn: the evict orphans it (ADR-0034), and an INVITE that
-    gives up is held 64·T1 past its `Timeout` (§9.1's wait for the final a
-    CANCEL provokes), so the flushed CANCEL rides its Timer-E ladder from
-    there, and a CANCEL the TU sends on the `Timeout` still meets this gate
-    and its final is ACKed (§17.1.1.3).
+    gives up is held 64·T1 past its `Timeout`. The timeout flush is one
+    datagram, no ladder: the branch answered nothing.
+- sent on an INVITE that **gave up**:
+  - **in Proceeding** — passes the gate and rides its ladder; the hold
+    restarts at 64·T1 from this first send (§9.1's wait for the final the
+    CANCEL provokes), and that final is ACKed (§17.1.1.3) and handed up.
+  - **in Calling** — held with no grace timer, under either policy, and not
+    flushed at an evict: the branch answered nothing and its hop is presumed
+    dead, so §9.1's MUST NOT stands. A late provisional still flushes it. The
+    hold here is a robustness hold: a late final is ACKed.
   - **final** — cleared unsent; the callee answered, cancellation is moot
     (§9.2, and the crossing-2xx reap owns the late answer).
   - Residual unsent-death paths, all pathological and counted in
     `held_cancels_dropped`: a same-branch txn displacement and the safety-net
     sweep (both indicate a bug elsewhere), and the end of a given-up INVITE's
-    hold under the strict policy.
+    hold with its CANCEL still held (a strict-policy txn, or one that gave up
+    in Calling).
 
 A CANCEL matching **no txn** is still sent raw: an absent txn is not proof the
 INVITE ended — a takeover-restored call (ADR-0014) CANCELs a b-leg whose

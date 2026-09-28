@@ -119,8 +119,10 @@ impl Owner {
                         // first provisional never comes, the grace expiry
                         // sends the CANCEL anyway. Strict §9.1 policy
                         // (`cancel_hold_grace_ms: None`) arms nothing — the
-                        // hold lasts until a provisional or txn death.
-                        if let Some(grace) = grace_ms {
+                        // hold lasts until a provisional or txn death — and
+                        // neither does an INVITE that gave up unanswered: its
+                        // peer is presumed dead, and §9.1 forbids the CANCEL.
+                        if let Some(grace) = grace_ms.filter(|_| !txn.gave_up) {
                             if txn.cancel_grace_key.is_none() {
                                 txn.cancel_grace_key = Some(
                                     self.timers
@@ -156,7 +158,10 @@ impl Owner {
                         None
                     };
                     let arm = park.map(str::to_string);
+                    let mut first_on_given_up = false;
                     if let Some(t) = park.and_then(|b| self.txns.get_mut(b)) {
+                        first_on_given_up = t.gave_up
+                            && t.held_cancel.as_ref().is_none_or(|h| h.wire == CancelWire::Held);
                         match t.held_cancel.as_mut() {
                             Some(h) => {
                                 h.buf = buf.clone();
@@ -171,6 +176,9 @@ impl Owner {
                     self.send_buffer(endpoint, &buf, dest).await;
                     if let Some(branch) = arm {
                         self.arm_cancel_retransmit(&branch);
+                        if first_on_given_up {
+                            self.hold_for(&branch, TIMER_B);
+                        }
                     }
                 }
             }
@@ -234,21 +242,28 @@ impl Owner {
     /// more here — the UAS that 481'd the pre-1xx copy has built its server
     /// transaction by now, so this is the matchable send — counted as a
     /// re-flush, not a fresh flush, and it neither resets nor restarts the
-    /// ladder (an exhausted ceiling is final).
+    /// ladder (an exhausted ceiling is final). A first send on an INVITE that
+    /// gave up restarts its hold: §9.1's 64·T1 runs from the CANCEL.
     pub(super) async fn flush_cancel_on_provisional(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         branch: &str,
     ) {
-        let send = match self.txns.get_mut(branch).and_then(|t| t.held_cancel.as_mut()) {
-            Some(h) if h.wire != CancelWire::Sent => {
-                let fresh = h.wire == CancelWire::Held;
-                h.wire = CancelWire::Sent;
-                Some((h.buf.clone(), h.dest, fresh))
-            }
-            _ => None,
+        let send = match self.txns.get_mut(branch) {
+            Some(t) => match t.held_cancel.as_mut() {
+                Some(h) if h.wire != CancelWire::Sent => {
+                    let fresh = h.wire == CancelWire::Held;
+                    h.wire = CancelWire::Sent;
+                    Some((h.buf.clone(), h.dest, fresh, fresh && t.gave_up))
+                }
+                _ => None,
+            },
+            None => None,
         };
-        if let Some((buf, dest, fresh)) = send {
+        if let Some((buf, dest, fresh, first_on_given_up)) = send {
+            if first_on_given_up {
+                self.hold_for(branch, TIMER_B);
+            }
             self.send_buffer(endpoint, &buf, dest).await;
             let counter = if fresh {
                 &self.metrics.held_cancels_flushed
@@ -265,8 +280,8 @@ impl Owner {
     /// Arms the Timer-E ladder for the on-wire CANCEL parked on `branch`,
     /// resetting the pacing to T1. No-op while a ladder is already running —
     /// a re-send never resets the pacing. Callers: the first-send sites
-    /// (direct pass-through, grace expiry, first-provisional flush, the
-    /// give-up and evict flushes) plus the
+    /// (direct pass-through, grace expiry, first-provisional flush, the evict
+    /// flush) plus the
     /// pass-through of a superseding CANCEL (a fresh TU datagram earns a fresh
     /// ladder even after a ceiling).
     fn arm_cancel_retransmit(&mut self, branch: &str) {
@@ -460,7 +475,6 @@ impl Owner {
             self.metrics
                 .held_cancels_flushed_pre1xx
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.arm_cancel_retransmit(branch);
         }
         // Critical: the give-up fires once, so nothing re-fires — a dropped
         // Timeout would strand the leg until the 1 h GlobalDuration.
@@ -475,9 +489,12 @@ impl Owner {
     }
 
     /// End the client txn at `branch` on its give-up. A non-INVITE is deleted.
-    /// An INVITE stops retransmitting and is held 64·T1 (RFC 3261 §9.1): the
-    /// TU abandons it with a CANCEL, which still matches it, and the final
-    /// that CANCEL provokes is ACKed (§17.1.1.3) and handed up.
+    /// An INVITE stops retransmitting and is held 64·T1. In Proceeding that is
+    /// RFC 3261 §9.1's wait: the TU abandons it with a CANCEL, which still
+    /// matches it (and restarts the hold), and the final that CANCEL provokes
+    /// is ACKed (§17.1.1.3) and handed up. In Calling it is a robustness hold:
+    /// its CANCEL stays held unless a late provisional arrives, and a late
+    /// final is ACKed.
     fn give_up(&mut self, branch: &str) {
         let retransmit = match self.txns.get_mut(branch) {
             Some(t) if t.kind == TxnKind::Invite => {
@@ -582,10 +599,7 @@ impl Owner {
         self.cancel_timer(keys.1);
         self.cancel_timer(keys.2);
         self.cancel_timer(keys.3);
-        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_M));
-        if let Some(txn) = self.txns.get_mut(branch) {
-            txn.cleanup_key = Some(key);
-        }
+        self.hold_for(branch, TIMER_M);
     }
 
     /// Re-pass the retained ACK of an Accepted txn to a repeat of its 2xx
@@ -620,9 +634,12 @@ impl Owner {
                 Some(t) if t.role == TxnRole::Client => {
                     t.orphaned = true;
                     match t.held_cancel.as_mut() {
+                        // An INVITE that gave up unanswered keeps its CANCEL
+                        // held (§9.1): only a late provisional sends it.
                         Some(h)
                             if h.wire == CancelWire::Held
-                                && self.cancel_hold_grace_ms.is_some() =>
+                                && self.cancel_hold_grace_ms.is_some()
+                                && !t.gave_up =>
                         {
                             h.wire = CancelWire::SentPre1xx;
                             Some((h.buf.clone(), h.dest))

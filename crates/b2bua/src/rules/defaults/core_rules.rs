@@ -1424,9 +1424,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // decision backend must get a shot at — the dead-gateway reroute is
             // the classic failover case. Mirror the
             // `no-answer` shape: record the timeout, destroy the failed leg
-            // (its CANCEL meets the given-up transaction, which waits §9.1's
-            // 64·T1 for the final it provokes and ACKs it), and let
-            // `call-failure-result` drive the outcome.
+            // (its CANCEL meets the given-up transaction: sent and awaited
+            // §9.1's 64·T1 if the callee answered a provisional, held
+            // otherwise), and let `call-failure-result` drive the outcome.
             // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
             // timeouts, no callback context) keeps the unconditional
             // termination below.

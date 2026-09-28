@@ -377,11 +377,11 @@ async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
         "Timer B timeout still surfaces to the caller"
     );
 
-    // The flushed CANCEL rides its Timer-E ladder, and the given-up INVITE
-    // is forgotten 64·T1 after its Timeout.
-    elapse_ms(1_000).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the ladder's first re-send");
-    elapse_ms(32_000).await;
+    // The flush is one datagram toward a branch that answered nothing (no
+    // ladder: §9.1), and the given-up INVITE is forgotten 64·T1 after its
+    // Timeout.
+    elapse_ms(33_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no re-send");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
 }
 

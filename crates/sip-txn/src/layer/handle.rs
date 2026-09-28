@@ -131,7 +131,8 @@ pub(super) enum Command {
     /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
     /// serving a takeover event: when it reaches **0** the backup's served
     /// transaction(s) have met their obligation to the call (final response +
-    /// ACK for an INVITE, Timer J/H for a non-INVITE, or Timer B/F on failure),
+    /// ACK for an INVITE, Timer J/H for a non-INVITE, or on failure Timer F,
+    /// or an INVITE's give-up plus its 64·T1 hold),
     /// so the acting-backup may shed its live takeover copy. Attribution — not
     /// `is_active()` — is deliberate: an INVITE server txn lingers in
     /// `Completed` until its ACK, and shedding before the ACK would strand the

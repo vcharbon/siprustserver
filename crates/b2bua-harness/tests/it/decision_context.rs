@@ -298,8 +298,7 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    // The dead leg is cleared with a CANCEL carol never answers.
-    let _cancel = carol.receive("CANCEL").await;
+    // carol answered nothing, so no CANCEL goes to her (RFC 3261 §9.1).
 
     {
         let reqs = captured.lock().unwrap();
@@ -314,8 +313,9 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     }
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    // carol never answers her CANCEL, so the call rides the terminating
-    // backstop out: advance exactly past it, then assert release.
+    // carol's leg awaits the final a CANCEL would have provoked, so the call
+    // rides the terminating backstop out: advance exactly past it, then assert
+    // release.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
@@ -325,6 +325,10 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
         invites_delivered_to(&report, carol_addr),
         4,
         "original send + the three rungs a 5 s bound buys (0.5 / 1.5 / 3.5 s), none past it"
+    );
+    assert!(
+        !report.entries().iter().any(|e| e.to == carol_addr && e.raw.starts_with(b"CANCEL ")),
+        "no CANCEL to a hop that answered nothing"
     );
 }
 
