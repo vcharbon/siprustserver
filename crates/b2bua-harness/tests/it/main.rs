@@ -49,6 +49,7 @@ mod lifetime_message_cap;
 mod limit_cases;
 mod limiter;
 mod limiter_breaker;
+mod limiter_fault_call_latency;
 mod limiter_refresh;
 mod limiter_refresh_batch;
 mod limiter_release_queue;
