@@ -60,7 +60,7 @@ pub enum Carried {
     /// version as the last restatement, with no newer offer of that peer (a
     /// repeated provisional, the final repeating what a reliable provisional
     /// or a nested UPDATE/PRACK exchange already carried), is the same
-    /// description. A request always opens a new exchange, so a new version.
+    /// description. A description in a request is always a new version.
     Answering,
     /// Outside any exchange (RFC 3264 §4 / RFC 3262 §5 / RFC 3311 §5 name
     /// INVITE, ACK, PRACK and UPDATE; a response of 300 or more describes

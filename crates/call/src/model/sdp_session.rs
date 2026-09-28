@@ -23,7 +23,7 @@ pub struct LegSdpSession {
     /// For that restatement: the count of the peer's offers at the time and
     /// the `o=` value of the description it was made from. The same author's
     /// same version with no newer peer offer is a repeat, restated at the same
-    /// version.
+    /// version; only a response by that author can repeat the recorded key.
     pub restated_from: Option<String>,
     /// How many in-dialog offers the leg's peer has sent (an INVITE or UPDATE
     /// carrying a description), counted as each is received once the call
