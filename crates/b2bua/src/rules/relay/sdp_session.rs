@@ -17,10 +17,17 @@
 //! the author's stream order, without the slots the author never described
 //! ([`sip_message::in_author_order`]). Before confirmation (the initial
 //! INVITE, its provisionals and final) a description opens the session.
+//! A description of the stack's own that already states the next version of
+//! the session the dialog carries (an answer it composed as that session's
+//! author would) leaves as written and counts as a version the stack stated;
+//! inside an early dialog, the author's later descriptions are then restated
+//! above it as on a confirmed one. Each early dialog of a leg the stack opened keeps its
+//! own session state until one of them confirms (RFC 3261 §12.1.2).
 
 use std::borrow::Cow;
 
 use call::{Call, Leg, LegSdpSession, LegState};
+use sip_message::SdpOrigin;
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
 use sip_message::header::MediaType;
@@ -136,8 +143,16 @@ pub fn continue_on_leg(
         .then(|| parse_origin(sdp))
         .flatten()
         .map(|o| format!("{} {}", leg.sdp_session.offers_received, o.value()));
+    let already_stated = author == Author::Stack
+        && carried.in_dialog()
+        && stated(leg).is_some_and(|s| states_next_version(sdp, &s.origin));
     let restated = (carried.in_dialog()
-        && leg.state == LegState::Confirmed
+        && match leg.state {
+            LegState::Confirmed => true,
+            LegState::Trying | LegState::Early => leg.sdp_session.restated,
+            LegState::Terminated => false,
+        }
+        && !already_stated
         && !continues_itself(&leg.sdp_session, author, &session_id))
     .then(|| stated(leg))
     .flatten()
@@ -165,7 +180,10 @@ pub fn continue_on_leg(
             state.sent_slots = Vec::new();
             state.sent_slots_author = None;
             state.restated_from = None;
-            if carried == Carried::Opening || state.sent_origin.is_none() || !state.restated {
+            if already_stated {
+                state.restated = true;
+            } else if carried == Carried::Opening || state.sent_origin.is_none() || !state.restated
+            {
                 state.session_author = match author {
                     Author::Leg(from) => Some(from.to_string()),
                     Author::Stack => None,
@@ -184,6 +202,76 @@ pub fn continue_on_leg(
         return body;
     }
     [&body[..range.start], &out, &body[range.end..]].concat()
+}
+
+/// [`continue_on_leg`] for a description inside `leg_id`'s dialog whose remote
+/// tag is `remote_tag`. While that leg is an unconfirmed leg this stack
+/// opened, the description continues the session that early dialog carries
+/// (its own once the stack has described something inside it, else what the
+/// opening INVITE stated), and the leg keeps the opening state for the other
+/// early dialogs; [`adopt_confirmed_dialog`] hands the confirming dialog's to
+/// the leg.
+#[allow(clippy::too_many_arguments)]
+pub fn continue_in_dialog(
+    call: &mut Call,
+    leg_id: &str,
+    remote_tag: &str,
+    author: Author<'_>,
+    carried: Carried,
+    body: Vec<u8>,
+    content_type: Option<&MediaType>,
+) -> Vec<u8> {
+    let early = |call: &mut Call| {
+        let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
+        let dialog = (leg.state != LegState::Confirmed)
+            .then(|| leg.dialogs.iter_mut().position(|d| d.sip.remote_tag == remote_tag))
+            .flatten()?;
+        let mut own = leg.dialogs[dialog].ext.sdp_session.take();
+        if let Some(own) = own.as_mut() {
+            own.offers_received = leg.sdp_session.offers_received;
+        }
+        let opening = match own {
+            Some(own) => std::mem::replace(&mut leg.sdp_session, own),
+            None => leg.sdp_session.clone(),
+        };
+        Some(opening)
+    };
+    let Some(opening) = early(call) else {
+        return continue_on_leg(call, leg_id, author, carried, body, content_type);
+    };
+    let out = continue_on_leg(call, leg_id, author, carried, body, content_type);
+    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+        let offers_received = leg.sdp_session.offers_received;
+        let own =
+            std::mem::replace(&mut leg.sdp_session, LegSdpSession { offers_received, ..opening });
+        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == remote_tag) {
+            d.ext.sdp_session = Some(own);
+        }
+    }
+    out
+}
+
+/// The session state the early dialog at `dialog` carries, handed to `leg` as
+/// that dialog confirms it; nothing where the dialog carries the opening state.
+pub fn adopt_confirmed_dialog(leg: &mut Leg, dialog: usize) {
+    if let Some(mut own) = leg.dialogs.get_mut(dialog).and_then(|d| d.ext.sdp_session.take()) {
+        own.offers_received = leg.sdp_session.offers_received;
+        leg.sdp_session = own;
+    }
+}
+
+/// The `o=` value of the next version of the session `leg`'s dialog whose
+/// remote tag is `remote_tag` carries: the last one this stack stated there,
+/// one up. `None` where the stack stated none there, or the version has no
+/// next one.
+pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
+    let early = (leg.state != LegState::Confirmed)
+        .then(|| leg.dialogs.iter().find(|d| d.sip.remote_tag == remote_tag))
+        .flatten()
+        .and_then(|d| d.ext.sdp_session.as_ref());
+    let stated = early.unwrap_or(&leg.sdp_session).sent_origin.as_deref()?;
+    let line = origin_of(stated)?.next_version_line()?;
+    Some(line["o=".len()..].to_string())
 }
 
 /// Count the offer/answer exchange `req`, received from `leg_id`'s peer,
@@ -221,6 +309,23 @@ pub fn opened(invite: &OutboundSipEffect, author: Author<'_>) -> LegSdpSession {
         session_id: Some(origin.session_id),
         ..LegSdpSession::default()
     }
+}
+
+/// Whether `sdp` states the version after `stated` of the session `stated`
+/// names: the same five identity fields, the version one up.
+fn states_next_version(sdp: &[u8], stated: &str) -> bool {
+    match (parse_origin(sdp), origin_of(stated)) {
+        (Some(now), Some(before)) => {
+            now.identifies_same_session(&before)
+                && before.session_version.checked_add(1) == Some(now.session_version)
+        }
+        _ => false,
+    }
+}
+
+/// The origin an `o=` value states.
+fn origin_of(value: &str) -> Option<SdpOrigin> {
+    parse_origin(format!("v=0\r\no={value}\r\n").as_bytes())
 }
 
 /// Whether a description by `author` stating `session_id` continues, by its

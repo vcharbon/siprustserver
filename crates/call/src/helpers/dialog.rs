@@ -230,6 +230,7 @@ pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }
@@ -254,6 +255,7 @@ pub fn make_dialog_from_incoming(
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }

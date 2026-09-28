@@ -622,7 +622,7 @@ async fn fake_prack_confirmed_bodyless_update_from_b_relays_to_alice() {
 
 /// Same window, SDP arm: a b-leg UPDATE carrying a re-offer on the confirmed
 /// dialog must relay to alice and bring back HER answer. Answering it locally
-/// with a skeleton-fit body (the early-window behaviour) would leave alice's
+/// with a built body (the early-window behaviour) would leave alice's
 /// media view stale while bob believes the session was renegotiated.
 #[tokio::test]
 async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {

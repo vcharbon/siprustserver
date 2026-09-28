@@ -29,6 +29,7 @@ pub mod preparse;
 pub mod projection;
 pub mod remote_target;
 pub mod sdp;
+pub mod sdp_answer;
 pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod sdp_session;
@@ -56,15 +57,17 @@ pub use parser::custom::{hydrate_request, CustomParser};
 pub use parser::{Framing, SipParser, SipParserLimits};
 pub use projection::HeaderProjection;
 pub use sdp::{
-    build_answer_from_offer, build_held_sdp_from_profile, extract_codec_profile,
-    rewrite_connection_and_ports, validate_sdp_body, BuildAnswerOptions, BuildHeldSdpOptions,
-    CodecProfile, SdpBuildResult, SdpValidationError,
+    build_held_sdp_from_profile, extract_codec_profile, rewrite_connection_and_ports,
+    sdp_origin_address, sdp_session_id, validate_sdp_body, BuildHeldSdpOptions, CodecProfile,
+    SdpValidationError,
 };
+/// Answers composed on a party's behalf out of its own earlier description (RFC 3264 §6).
+pub use sdp_answer::{answer_direction, answer_from_own, reject_offer, FormatPreference};
 pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
-    canonical_rtpmap, extract_direction, extract_format_list, extract_rtpmaps, media_line,
-    parse_origin, parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
+    canonical_rtpmap, direction_of, extract_direction, extract_format_list, extract_rtpmaps,
+    media_line, parse_origin, parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
 /// One party's session across a dialog whose description author changes (RFC 3264 §8):
 /// it cuts a description at its `m=` lines byte for byte and reads every value

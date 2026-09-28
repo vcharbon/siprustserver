@@ -96,6 +96,7 @@ fn call_with_early_a_dialog(a1: &str) -> call::Call {
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }];
@@ -2164,6 +2165,7 @@ fn b_leg_pending() -> Leg {
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     };
@@ -2534,6 +2536,7 @@ mod media_primitives {
                 pending_reinvite_2xx: None,
                 answered_2xx: None,
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         }];
@@ -4777,6 +4780,7 @@ fn call_with_retained_answered_2xx() -> call::Call {
                 .0,
             }),
             emitted_ack: None,
+            sdp_session: None,
         },
     });
     let obligation = answered_obligation();
@@ -4947,6 +4951,7 @@ mod ladder_give_up {
                 pending_reinvite_2xx: None,
                 answered_2xx: Some(retained_2xx(A_TAG, 1, 5060)),
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         }];

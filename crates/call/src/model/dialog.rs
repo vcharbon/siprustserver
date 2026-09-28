@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
+use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +140,14 @@ pub struct B2buaDialogExt {
     /// exactly one INVITE's ACK.
     #[serde(default)]
     pub emitted_ack: Option<RetainedEmission>,
+    /// The session this early dialog carries where the stack has described
+    /// something inside it before its leg is confirmed: each early dialog of a
+    /// fork is its own offer/answer exchange (RFC 3261 §12.1.2, RFC 3264 §4),
+    /// and the one that confirms hands this state to its leg. `None` while the
+    /// dialog carries what the leg's opening INVITE stated. Trailing under the
+    /// positional codec.
+    #[serde(default)]
+    pub sdp_session: Option<LegSdpSession>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.

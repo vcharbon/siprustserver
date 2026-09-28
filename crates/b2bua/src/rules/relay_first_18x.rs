@@ -47,7 +47,7 @@ use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::{build_answer_from_offer, BuildAnswerOptions, Method, SdpBuildResult};
+use sip_message::{answer_from_own, parse_origin, FormatPreference, Method};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
@@ -300,14 +300,17 @@ define_service! {
                     });
                 }
 
-                if is_fake_prack(ctx) {
+                // fake-prack: a 2xx with no description gives alice the one
+                // this dialog's exchange left for her; a 2xx with its own is
+                // relayed as it is.
+                if is_fake_prack(ctx) && resp.sdp().is_none() {
                     let cached = ctx.call.cached_sdp_for_leg_dialog(&leg, &b_tag)
                         .map(|b| b.to_vec());
                     match cached {
                         Some(b) if !b.is_empty() => {
                             actions.push(RuleAction::SetPolicyUpdateBody { body: b });
                         }
-                        _ if resp.body().is_empty() => {
+                        _ => {
                             // No cache AND bob's 200 has no body — surface a CDR
                             // marker (alice's call may break: no SDP at confirm).
                             actions.push(RuleAction::AddCdrEvent {
@@ -317,7 +320,6 @@ define_service! {
                                 reason: Some("fake-prack:200-ok-no-sdp".to_string()),
                             });
                         }
-                        _ => {} // bob repeated SDP in 200 → relay as-is.
                     }
                 }
 
@@ -357,9 +359,12 @@ define_service! {
         // ── fake-prack: locally answer a b-leg UPDATE under the mask (wins
         // over `relay-update`) ──────────────────────────────────────────────
         // Under the mask alice has no committed bob-SDP to negotiate against, so
-        // the B2BUA answers bob's UPDATE itself: a skeleton-fit answer derived
-        // from alice's INVITE offer (488 on no codec intersection), advancing the
-        // cached SDP to bob's offer; a bodyless refresh is answered 200 bare.
+        // the B2BUA answers bob's offer itself, as alice would: her INVITE
+        // description answering it (RFC 3264 §6, bob's preferred common format
+        // per stream, the next version of her session in that early dialog);
+        // and caches, for a 2xx without a description, alice's offer answered
+        // from bob's (his preferred format, his origin). 488 only where either
+        // is not a description; a bodyless refresh is answered 200 bare.
         // `is_fake_prack_masking` scopes this to that window — once the a-leg is
         // confirmed a b-leg UPDATE is an ordinary in-dialog request and falls
         // through to CORE `relay-update`. The FromA sibling's `leg_states` gate
@@ -371,8 +376,8 @@ define_service! {
             active: [ Phase::Masking, Phase::Suppressing ],
             transitions: [],
             effects: [
-                Effect::Respond { status: 200, label: "200 OK → B (local skeleton-fit answer)" },
-                Effect::Respond { status: 488, label: "488 → B (no codec intersection)" },
+                Effect::Respond { status: 200, label: "200 OK → B (alice's offer answering bob's)" },
+                Effect::Respond { status: 488, label: "488 → B (no description to answer from)" },
             ],
             matcher: Match::request()
                 .method("UPDATE")
@@ -394,25 +399,36 @@ define_service! {
                 };
 
                 let a_invite = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-                let options = BuildAnswerOptions {
-                    local_ip: ctx.config.sip_local_ip.clone(),
-                    now_ms: ctx.now_ms,
-                };
-                match build_answer_from_offer(offer, a_invite.sdp(), &options) {
-                    SdpBuildResult::Ok(body) => ok(vec![
+                let own = a_invite.sdp().unwrap_or_default();
+                // The next version of alice's session as bob holds it in this
+                // early dialog (RFC 3264 §8).
+                let origin = ctx
+                    .call
+                    .b_legs()
+                    .iter()
+                    .find(|l| l.leg_id == leg)
+                    .and_then(|l| relay::next_origin_in_dialog(l, &b_tag))
+                    .or_else(|| {
+                        let line = parse_origin(own)?.next_version_line()?;
+                        Some(line["o=".len()..].to_string())
+                    });
+                let to_bob = answer_from_own(offer, own, FormatPreference::Offerer, origin.as_deref());
+                let to_alice = answer_from_own(own, offer, FormatPreference::Answerer, None);
+                match to_bob.zip(to_alice) {
+                    Some((to_bob, to_alice)) => ok(vec![
                         RuleAction::Respond {
                             status: 200,
                             reason: "OK".to_string(),
-                            body,
+                            body: to_bob,
                             content_type: Some("application/sdp".to_string()),
                         },
                         RuleAction::CacheSdpOnLegDialog {
                             leg_id: leg,
                             b_tag: b_tag.to_string(),
-                            body: offer.to_vec(),
+                            body: to_alice,
                         },
                     ]),
-                    _ => ok(vec![RuleAction::Respond {
+                    None => ok(vec![RuleAction::Respond {
                         status: 488,
                         reason: "Not Acceptable Here".to_string(),
                         body: vec![],

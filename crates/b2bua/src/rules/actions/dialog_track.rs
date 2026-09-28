@@ -190,6 +190,8 @@ impl ActionExecutor<'_> {
                 }
                 // One dialog survives confirmation (model: "one survives after
                 // confirmed") — drop the losing forks so per-call state is bounded.
+                // The session it carries becomes the leg's.
+                relay::adopt_confirmed_dialog(leg, idx);
                 let winner = leg.dialogs.remove(idx);
                 leg.dialogs = vec![winner];
             }
@@ -334,6 +336,7 @@ impl ActionExecutor<'_> {
                 pending_reinvite_2xx: None,
                 answered_2xx: None,
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         };

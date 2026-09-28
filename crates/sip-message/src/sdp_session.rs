@@ -13,7 +13,7 @@
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
-use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine};
+use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine, Section, Sections};
 
 /// What one party has stated about its session on a dialog: the value of the
 /// `o=` line it last sent and the value of each of its `m=` lines, in order.
@@ -158,49 +158,6 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
         out.truncate(out.len().saturating_sub(eol.len()));
     }
     Some(out.into_bytes())
-}
-
-/// A description cut at its `m=` lines, byte for byte: the session-level text,
-/// then each media section (its `m=` line and every line up to the next one),
-/// with line endings as written. The sections are in `parse_sdp_body`'s media
-/// order; the values in them are read there.
-struct Sections<'a> {
-    session: &'a str,
-    media: Vec<Section<'a>>,
-}
-
-struct Section<'a> {
-    text: &'a str,
-}
-
-impl<'a> Sections<'a> {
-    fn of(text: &'a str) -> Self {
-        let mut starts: Vec<usize> = Vec::new();
-        let mut offset = 0usize;
-        for line in text.split_inclusive('\n') {
-            if line.starts_with("m=") {
-                starts.push(offset);
-            }
-            offset += line.len();
-        }
-        let session_end = starts.first().copied().unwrap_or(text.len());
-        let media = starts
-            .iter()
-            .enumerate()
-            .map(|(k, &at)| Section {
-                text: &text[at..starts.get(k + 1).copied().unwrap_or(text.len())],
-            })
-            .collect();
-        Self { session: &text[..session_end], media }
-    }
-}
-
-impl Section<'_> {
-    /// The `m=` line's value.
-    fn value(&self) -> &str {
-        let line = self.text.split('\n').next().unwrap_or_default();
-        line.strip_suffix('\r').unwrap_or(line).get(2..).unwrap_or_default()
-    }
 }
 
 /// A stated stream's `m=` value with its port set to 0 — the stream rejected

@@ -237,9 +237,10 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
-        let body = relay::continue_on_leg(
+        let body = relay::continue_in_dialog(
             call,
             target_leg,
+            &target_dialog.sip.remote_tag,
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),

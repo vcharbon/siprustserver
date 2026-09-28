@@ -5,8 +5,8 @@
 //! own behalf, whatever alice advertised — it acknowledges bob's reliable 1xx
 //! itself), downgrades the first 18x to a bare 180 for alice, **originates**
 //! the PRACK toward bob itself, caches bob's reliable-1xx SDP per dialog, and
-//! substitutes the cached SDP into the 200 OK toward alice. Locally answers
-//! in-dialog UPDATE (skeleton-fit SDP from alice's offer, else 488).
+//! substitutes the cached SDP into a 200 OK without one toward alice. Locally
+//! answers an early UPDATE offer from alice's own offer (`fake_prack_answer`).
 //!
 //! The `forking` / `failover` cases ride the `/call/failure` b-leg failover path:
 //! bob1 goes reliable (183/100rel + PRACK + cached SDP) then 503s; the B2BUA fails
@@ -213,11 +213,11 @@ async fn multiple_18x() {
     let _ = h.finish().await;
 }
 
-const OPUS_ONLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n";
+const OPUS_ONLY: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n";
 
 /// Bob's UPDATE offers only a codec alice never offered → no intersection →
-/// B2BUA replies 488; the call proceeds on the original cached SDP from the 183.
-/// (TS `fakePrackUpdateCodecMismatch`.)
+/// the B2BUA answers with the stream rejected (port 0, RFC 3264 §6) and bob's
+/// bodyless 200 gives alice her stream rejected too.
 #[tokio::test]
 async fn update_codec_mismatch() {
     let h = Harness::with_transit_delay("fake-prack-update-codec-mismatch", 0);
@@ -242,15 +242,21 @@ async fn update_codec_mismatch() {
     call.expect(180).await;
     bob.receive("PRACK").await.respond(200, "OK").await;
 
-    // UPDATE with no codec overlap → 488.
+    // UPDATE with no codec overlap → 200 rejecting the stream.
     let mut bob_dialog = uas.dialog();
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(OPUS_ONLY)).await;
-    update.expect(488).await;
+    let answer = update.expect(200).await;
+    assert!(
+        String::from_utf8_lossy(answer.body()).contains("\r\nm=audio 0 RTP/AVP 96\r\n"),
+        "the offered stream is answered rejected",
+    );
 
-    // Call still proceeds on the original cached SDP from the 183.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body().is_empty(), "alice 200 carries the original cached SDP");
+    assert!(
+        String::from_utf8_lossy(ok.body()).contains("\r\nm=audio 0 RTP/AVP 8 18 101\r\n"),
+        "alice's 200 rejects her stream",
+    );
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -361,9 +367,9 @@ async fn delayed_offer_fallback() {
     let _ = h.finish().await;
 }
 
-/// Bob's early-dialog UPDATE(offer) is answered locally by the B2BUA with a
-/// skeleton-fit SDP (codec ∩ alice's INVITE), and the cache advances to bob's
-/// UPDATE offer (alice's 200 carries it). (TS `fakePrackUpdateHappy`.)
+/// Bob's early-dialog UPDATE(offer) is answered locally by the B2BUA out of
+/// alice's INVITE offer, and alice's 200 carries her offer answered from bob's
+/// (`fake_prack_answer` pins the bytes). (TS `fakePrackUpdateHappy`.)
 #[tokio::test]
 async fn update_happy() {
     let h = Harness::with_transit_delay("fake-prack-update-happy", 0);
@@ -391,15 +397,15 @@ async fn update_happy() {
     // Bob sends an UPDATE with a new offer on his early dialog.
     let mut bob_dialog = uas.dialog();
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(ANSWER)).await;
-    // B2BUA answers locally: 200 with a skeleton-fit SDP body.
+    // B2BUA answers locally: 200 with alice's offer answering bob's.
     let upd_resp = update.expect(200).await;
-    assert!(!upd_resp.body().is_empty(), "skeleton-fit answer has a body");
+    assert!(!upd_resp.body().is_empty(), "the local answer has a body");
     assert!(
         is_sdp(upd_resp.header::<MediaType>()),
         "Content-Type application/sdp on the local UPDATE answer",
     );
 
-    // 200 OK INVITE (no body) → alice gets the latest cached SDP (UPDATE offer).
+    // 200 OK INVITE (no body) → alice gets her offer answered from bob's UPDATE.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");

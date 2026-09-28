@@ -6,7 +6,10 @@ use sip_message::header::MediaType;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipStr};
 
-use super::{continue_on_leg, Author, Carried};
+use super::{
+    adopt_confirmed_dialog, continue_in_dialog, continue_on_leg, next_origin_in_dialog, Author,
+    Carried,
+};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, src};
@@ -366,4 +369,104 @@ fn a_final_repeating_the_authors_nested_offer_repeats_its_restatement() {
     let fin =
         send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
     assert_eq!(fin, update, "the same description, the same version");
+}
+
+/// Leg `b-1` unconfirmed, opened by the caller's INVITE (`alice 1 1`), with
+/// the early dialogs `f1` and `f2`.
+fn forked() -> Call {
+    let mut c = call();
+    let leg = &mut c.b_legs[0];
+    leg.state = LegState::Early;
+    leg.dialogs = ["f1", "f2"]
+        .into_iter()
+        .map(|tag| {
+            let ctx = call::helpers::MakeDialogLegCtx {
+                call_id: "b-1",
+                local_uri: "sip:alice@192.0.2.1",
+                remote_uri: "sip:bob@192.0.2.2",
+                local_tag: "as",
+                remote_tag: tag,
+            };
+            call::helpers::make_empty_dialog(&ctx, 1)
+        })
+        .collect();
+    send(
+        &mut c,
+        "b-1",
+        Author::Leg("a"),
+        Carried::Opening,
+        &sdp("alice 1 1 IN IP4 192.0.2.1", 10000),
+    );
+    c
+}
+
+/// The stack's own answer inside `f1` of `b-1`, stating `origin`.
+fn answer_in_f1(c: &mut Call, origin: &str) -> String {
+    let body = sdp(origin, 10000);
+    let out = continue_in_dialog(
+        c,
+        "b-1",
+        "f1",
+        Author::Stack,
+        Carried::InDialog,
+        body.as_bytes().to_vec(),
+        Some(&ct()),
+    );
+    String::from_utf8(out).unwrap()
+}
+
+/// A description of the stack's own that already states the next version of
+/// the dialog's session leaves as written, and the author's next description
+/// is restated above it, early dialog or not.
+#[test]
+fn a_stack_description_stating_the_next_version_leaves_as_written() {
+    let mut c = forked();
+    let answer = answer_in_f1(&mut c, "alice 1 2 IN IP4 192.0.2.1");
+    assert_eq!(answer, sdp("alice 1 2 IN IP4 192.0.2.1", 10000), "not restated a second time");
+    assert_eq!(
+        answer_in_f1(&mut c, "alice 1 3 IN IP4 192.0.2.1"),
+        sdp("alice 1 3 IN IP4 192.0.2.1", 10000)
+    );
+    let relayed = continue_in_dialog(
+        &mut c,
+        "b-1",
+        "f1",
+        Author::Leg("a"),
+        Carried::InDialog,
+        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
+        Some(&ct()),
+    );
+    assert_eq!(o_line(&String::from_utf8(relayed).unwrap()), "o=alice 1 4 IN IP4 192.0.2.1");
+}
+
+/// What the stack states inside one early dialog is that dialog's: the leg and
+/// the other early dialogs keep the opening state, and the dialog that
+/// confirms hands its own to the leg.
+#[test]
+fn each_early_dialog_keeps_its_own_session() {
+    let mut c = forked();
+    answer_in_f1(&mut c, "alice 1 2 IN IP4 192.0.2.1");
+    let leg = &c.b_legs[0];
+    assert_eq!(leg.sdp_session.sent_origin.as_deref(), Some("alice 1 1 IN IP4 192.0.2.1"));
+    assert_eq!(next_origin_in_dialog(leg, "f1").as_deref(), Some("alice 1 3 IN IP4 192.0.2.1"));
+    assert_eq!(next_origin_in_dialog(leg, "f2").as_deref(), Some("alice 1 2 IN IP4 192.0.2.1"));
+
+    let mut other = c.clone();
+    adopt_confirmed_dialog(&mut other.b_legs[0], 1);
+    other.b_legs[0].state = LegState::Confirmed;
+    let reoffer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
+    assert_eq!(
+        send(&mut other, "b-1", Author::Leg("a"), Carried::InDialog, &reoffer),
+        reoffer,
+        "f2 never saw a version of the stack's: the caller's own continues",
+    );
+
+    adopt_confirmed_dialog(&mut c.b_legs[0], 0);
+    c.b_legs[0].state = LegState::Confirmed;
+    let restated = send(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, &reoffer);
+    assert_eq!(
+        o_line(&restated),
+        "o=alice 1 3 IN IP4 192.0.2.1",
+        "above the stack's version in f1"
+    );
 }

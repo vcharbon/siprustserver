@@ -75,6 +75,7 @@ fn dialog(
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }
@@ -551,6 +552,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
         proptest::option::of(arb_unacked_2xx()),
         proptest::option::of(arb_retained_emission()),
         proptest::option::of(any::<i64>()),
+        proptest::option::of(arb_sdp_session()),
     )
         .prop_map(
             |(
@@ -563,6 +565,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
                 answered_2xx,
                 emitted_ack,
                 awaited_ack_cseq,
+                sdp_session,
             )| {
                 B2buaDialogExt {
                     remote_cseq,
@@ -574,6 +577,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
                     answered_2xx,
                     emitted_ack,
                     awaited_ack_cseq,
+                    sdp_session,
                 }
             },
         );

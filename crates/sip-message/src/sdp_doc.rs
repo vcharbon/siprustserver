@@ -272,16 +272,19 @@ pub fn extract_format_list(m_line: &str) -> Vec<String> {
 /// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
 /// (RFC 3264 §6.1).
 pub fn extract_direction(media: &MediaLine) -> SdpDirection {
-    for attr in &media.attributes {
-        match attr.trim().to_ascii_lowercase().as_str() {
-            "sendrecv" => return SdpDirection::SendRecv,
-            "sendonly" => return SdpDirection::SendOnly,
-            "recvonly" => return SdpDirection::RecvOnly,
-            "inactive" => return SdpDirection::Inactive,
-            _ => {}
-        }
+    media.attributes.iter().find_map(|a| direction_of(a)).unwrap_or(SdpDirection::SendRecv)
+}
+
+/// The direction an attribute value (without the leading `a=`) states, or
+/// `None` where it is not one of the four direction attributes (RFC 3264 §6.1).
+pub fn direction_of(attr: &str) -> Option<SdpDirection> {
+    match attr.trim().to_ascii_lowercase().as_str() {
+        "sendrecv" => Some(SdpDirection::SendRecv),
+        "sendonly" => Some(SdpDirection::SendOnly),
+        "recvonly" => Some(SdpDirection::RecvOnly),
+        "inactive" => Some(SdpDirection::Inactive),
+        _ => None,
     }
-    SdpDirection::SendRecv
 }
 
 /// Every `a=rtpmap:<pt> <encoding>[/<rate>[/<channels>]]` in `media` as ordered
@@ -397,6 +400,49 @@ impl SdpOrigin {
             self.addrtype,
             self.unicast_address
         ))
+    }
+}
+
+/// A description cut at its `m=` lines, byte for byte: the session-level text,
+/// then each media section (its `m=` line and every line up to the next one),
+/// with line endings as written. The sections are in `parse_sdp_body`'s media
+/// order; the values in them are read there.
+pub(crate) struct Sections<'a> {
+    pub(crate) session: &'a str,
+    pub(crate) media: Vec<Section<'a>>,
+}
+
+pub(crate) struct Section<'a> {
+    pub(crate) text: &'a str,
+}
+
+impl<'a> Sections<'a> {
+    pub(crate) fn of(text: &'a str) -> Self {
+        let mut starts: Vec<usize> = Vec::new();
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            if line.starts_with("m=") {
+                starts.push(offset);
+            }
+            offset += line.len();
+        }
+        let session_end = starts.first().copied().unwrap_or(text.len());
+        let media = starts
+            .iter()
+            .enumerate()
+            .map(|(k, &at)| Section {
+                text: &text[at..starts.get(k + 1).copied().unwrap_or(text.len())],
+            })
+            .collect();
+        Self { session: &text[..session_end], media }
+    }
+}
+
+impl Section<'_> {
+    /// The `m=` line's value.
+    pub(crate) fn value(&self) -> &str {
+        let line = self.text.split('\n').next().unwrap_or_default();
+        line.strip_suffix('\r').unwrap_or(line).get(2..).unwrap_or_default()
     }
 }
 

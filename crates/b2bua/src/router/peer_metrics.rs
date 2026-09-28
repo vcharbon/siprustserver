@@ -175,6 +175,7 @@ mod tests {
                 pending_reinvite_2xx: None,
                 answered_2xx: None,
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         }
