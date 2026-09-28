@@ -37,6 +37,7 @@ pub fn response_to_a_leg(
     incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
     provenance: Provenance,
+    author: super::sdp_session::Author<'_>,
 ) -> Option<OutboundSipEffect> {
     if status >= 200 {
         if let Some(carried) = call.a_leg.invite_final_sent {
@@ -57,8 +58,8 @@ pub fn response_to_a_leg(
     let body = super::sdp_session::continue_on_leg(
         call,
         &a_leg,
-        &Method::Invite,
-        false,
+        author,
+        super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
         body,
         content_type.as_ref(),
     );

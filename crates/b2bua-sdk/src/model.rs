@@ -564,6 +564,10 @@ pub enum RuleAction {
         leg_id: String,
         body: Vec<u8>,
         content_type: Option<String>,
+        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
+        /// session description from another author than the one whose session
+        /// the dialog carries is restated under it (RFC 3264 §8).
+        author: Option<String>,
     },
     ConfirmDialog {
         leg_id: String,
@@ -744,6 +748,10 @@ pub enum RuleAction {
         body: Vec<u8>,
         content_type: Option<String>,
         headers: Vec<(String, String)>,
+        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
+        /// session description from another author than the one whose session
+        /// the dialog carries is restated under it (RFC 3264 §8).
+        author: Option<String>,
     },
     /// Broker an unadopted leg's SDP onto the a-leg as an **unreliable** `1xx`
     /// (RFC 3262 §3 early media — no `Require: 100rel`/`RSeq`). Only the a-leg has
@@ -814,6 +822,10 @@ pub enum RuleAction {
         leg_id: String,
         body: Vec<u8>,
         add_headers: Vec<Entry>,
+        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
+        /// session description from another author than the one whose session
+        /// the dialog carries is restated under it (RFC 3264 §8).
+        author: Option<String>,
     },
     /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
     SetPromotePem {

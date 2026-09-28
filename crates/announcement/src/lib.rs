@@ -94,7 +94,12 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ok(vec![
         // Establish the media dialog so the MSCML INFO can ride it.
         RuleAction::ConfirmDialog { leg_id: media.clone() },
-        RuleAction::AckLeg { leg_id: media.clone(), body: Vec::new(), content_type: None },
+        RuleAction::AckLeg {
+            author: None,
+            leg_id: media.clone(),
+            body: Vec::new(),
+            content_type: None,
+        },
         // Early media: the MRF's SDP onto the caller as an unreliable 183.
         RuleAction::SendProvisionalToLeg {
             leg_id: "a".to_string(),
@@ -107,6 +112,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
         },
         // Open the MSCML control channel: play the clip.
         RuleAction::SendRequestToLeg {
+            author: None,
             leg_id: media,
             method: "INFO".to_string(),
             body: mscml::build_play(&data.clip_id),

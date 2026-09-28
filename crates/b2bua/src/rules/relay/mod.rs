@@ -48,7 +48,7 @@ pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).
-pub use sdp_session::{continue_on_leg, note_received, opened};
+pub use sdp_session::{continue_on_leg, opened, Author, Carried};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};

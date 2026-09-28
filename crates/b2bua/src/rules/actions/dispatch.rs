@@ -38,7 +38,7 @@ impl ActionExecutor<'_> {
             RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref());
             }
-            RuleAction::AckLeg { leg_id, body, content_type } => {
+            RuleAction::AckLeg { leg_id, body, content_type, author } => {
                 // A body-bearing ACK carries a delayed-offer answer (RFC 3261
                 // §13.2.2.4); default its type to `application/sdp` when none is
                 // given. An empty ACK stays a bare ACK — no body, no Content-Type.
@@ -50,7 +50,15 @@ impl ActionExecutor<'_> {
                         .and_then(relay::media_type)
                         .or_else(|| Some(relay::sdp()))
                 };
-                self.ack_leg(call, fx, leg_id, body.clone(), ct, Provenance::Authored);
+                self.ack_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    body.clone(),
+                    ct,
+                    Provenance::Authored,
+                    relay::Author::named(author.as_deref()),
+                );
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
@@ -179,7 +187,14 @@ impl ActionExecutor<'_> {
                 // realising the transition to the terminal `[*]`. Idempotent.
                 call.sm_cursors.remove(machine);
             }
-            RuleAction::SendRequestToLeg { leg_id, method, body, content_type, headers } => {
+            RuleAction::SendRequestToLeg {
+                leg_id,
+                method,
+                body,
+                content_type,
+                headers,
+                author,
+            } => {
                 self.send_request_to_leg(
                     call,
                     fx,
@@ -188,6 +203,7 @@ impl ActionExecutor<'_> {
                     body,
                     content_type.as_deref(),
                     headers,
+                    relay::Author::named(author.as_deref()),
                 );
             }
             RuleAction::SendProvisionalToLeg {
@@ -209,6 +225,7 @@ impl ActionExecutor<'_> {
                     content_type.as_deref(),
                     to_tag.as_deref(),
                     p_early_media.as_deref(),
+                    event_author(ctx, body),
                 );
             }
             RuleAction::SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag } => {
@@ -240,8 +257,15 @@ impl ActionExecutor<'_> {
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);
             }
-            RuleAction::SendReinvite { leg_id, body, add_headers } => {
-                self.send_reinvite(call, fx, leg_id, body, add_headers);
+            RuleAction::SendReinvite { leg_id, body, add_headers, author } => {
+                self.send_reinvite(
+                    call,
+                    fx,
+                    leg_id,
+                    body,
+                    add_headers,
+                    relay::Author::named(author.as_deref()),
+                );
             }
             RuleAction::SetPromotePem { state } => {
                 *call = call::helpers::set_promote_pem(call.clone(), state.clone());
@@ -363,6 +387,7 @@ impl ActionExecutor<'_> {
                     to_tag.as_deref(),
                     header_updates,
                     relayed,
+                    event_author(ctx, body),
                 );
             }
         }
@@ -387,5 +412,16 @@ impl ActionExecutor<'_> {
         if let Some(req) = ctx.request() {
             self.relay_request(call, fx, ctx, target_leg, req, target_to_tag);
         }
+    }
+}
+
+/// Who wrote `body`, a description a rule forwards without naming its author:
+/// the peer of the event's leg when it is the event's own body, else this
+/// stack.
+fn event_author<'a>(ctx: &'a RuleContext, body: &[u8]) -> relay::Author<'a> {
+    let carried = ctx.request().map(|r| r.body()).or_else(|| ctx.response().map(|r| r.body()));
+    match carried {
+        Some(b) if !body.is_empty() && b.as_ref() == body => relay::Author::Leg(ctx.source_leg_id),
+        _ => relay::Author::Stack,
     }
 }

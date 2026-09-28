@@ -254,12 +254,14 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     },
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
                     RuleAction::AckLeg {
+                        author: None,
                         leg_id: new_leg.clone(),
                         body: Vec::new(),
                         content_type: None,
                     },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
+                        author: Some(new_leg.clone()),
                         leg_id: "a".to_string(),
                         body: resp.body().to_vec(),
                         add_headers: vec![],
@@ -348,6 +350,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 let st = ctx.call.reroute_state()?.clone();
                 let mut actions = vec![
                     RuleAction::AckLeg {
+                        author: None,
                         leg_id: "a".to_string(),
                         body: Vec::new(),
                         content_type: None,

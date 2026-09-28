@@ -70,7 +70,12 @@ pub(crate) fn unacked_2xx_give_up_actions(
         ("reinvite_ack_timeout", "reinvite-ack-timeout")
     };
     let mut actions: Vec<RuleAction> = still_owed_bare_ack(call)
-        .map(|leg_id| RuleAction::AckLeg { leg_id, body: Vec::new(), content_type: None })
+        .map(|leg_id| RuleAction::AckLeg {
+            author: None,
+            leg_id,
+            body: Vec::new(),
+            content_type: None,
+        })
         .collect();
     actions.extend([
         RuleAction::AddCdrEvent {
@@ -272,7 +277,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let b = ctx.source_leg_id.to_string();
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
-                    RuleAction::AckLeg { leg_id: b.clone(), body: Vec::new(), content_type: None },
+                    RuleAction::AckLeg {
+                        author: None,
+                        leg_id: b.clone(),
+                        body: Vec::new(),
+                        content_type: None,
+                    },
                     // The crossing 200 answered the callee's dialog and the
                     // DestroyLeg below BYEs it: the CDR records both, so a
                     // b-leg reading `Confirmed`/`Bridged` at a cancelled call's
@@ -440,6 +450,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let mut actions = Vec::new();
                 if (200..300).contains(&resp.status()) {
                     actions.push(RuleAction::AckLeg {
+                        author: None,
                         leg_id: leg.clone(),
                         body: Vec::new(),
                         content_type: None,
@@ -518,6 +529,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg {
+                    author: None,
                     leg_id: ctx.source_leg_id.to_string(),
                     body: Vec::new(),
                     content_type: None,
@@ -1737,6 +1749,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let mut actions = Vec::new();
                 for leg_id in ctx.call.all_peered_legs() {
                     actions.push(RuleAction::SendRequestToLeg {
+                        author: None,
                         leg_id: leg_id.clone(),
                         method: "OPTIONS".into(),
                         body: vec![],

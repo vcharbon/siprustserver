@@ -230,6 +230,7 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         body: &[u8],
         add_headers: &[sip_message::draft::Entry],
+        author: relay::Author<'_>,
     ) {
         let idx = match leg_index(call, leg_id) {
             Some(i) => i,
@@ -270,8 +271,8 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                &Method::Invite,
-                true,
+                author,
+                relay::Carried::InDialog,
                 body.to_vec(),
                 (!body.is_empty()).then(relay::sdp).as_ref(),
             ),
@@ -331,6 +332,7 @@ impl ActionExecutor<'_> {
         body: &[u8],
         content_type: Option<&str>,
         headers: &[(String, String)],
+        author: relay::Author<'_>,
     ) {
         let m = match in_dialog_method(&Method::from_wire(method)) {
             Some(m) => m,
@@ -427,8 +429,8 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                &Method::from_wire(method),
-                true,
+                author,
+                relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),
                 content_type.as_ref(),
             ),

@@ -461,6 +461,7 @@ pub(crate) fn reject_call(
         None,
         extra_headers,
         crate::effects::Provenance::Authored,
+        crate::rules::relay::Author::Stack,
     ) {
         effects.outbound.push(effect);
         call = add_cdr_event(

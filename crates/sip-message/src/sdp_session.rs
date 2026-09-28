@@ -13,7 +13,7 @@
 //!
 //! Pure and deterministic: no clocks, no randomness, no I/O.
 
-use crate::sdp_doc::parse_origin;
+use crate::sdp_doc::{media_line, parse_origin, parse_sdp_body, MediaLine};
 
 /// What one party has stated about its session on a dialog: the value of the
 /// `o=` line it last sent and the value of each of its `m=` lines, in order.
@@ -48,9 +48,9 @@ pub struct Restated {
 }
 
 /// `sdp` restated as the next description of the session `stated` names
-/// (RFC 3264 §8), or `None` where it leaves as written: it carries the stated
-/// sess-id — its author continues that session itself — or either side has no
-/// readable `o=` line.
+/// (RFC 3264 §8), or `None` where it cannot be: either side has no readable
+/// `o=` line, or the stated version has no next one. Whether a description is
+/// restated at all is the caller's: this states how.
 ///
 /// Session-level lines are the author's with the stated `o=` identity, the
 /// version one above the stated one (every restatement is a new version, an
@@ -65,46 +65,41 @@ pub struct Restated {
 pub fn restate_session(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
     let current = parse_origin(sdp)?;
     let previous = parse_origin(format!("v=0\r\no={}\r\n", stated.origin).as_bytes())?;
-    if current.session_id == previous.session_id {
-        return None;
-    }
+    let next_origin = previous.next_version_line()?;
     let text = String::from_utf8_lossy(sdp);
     let authored = Sections::of(&text);
+    let described = parse_sdp_body(sdp).map(|d| d.media).unwrap_or_default();
+    let stated_media: Vec<MediaLine> = stated.media.iter().map(|m| media_line(m)).collect();
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
 
-    let mut slots: Vec<Option<u32>> = vec![None; stated.media.len()];
-    for (j, stream) in authored.media.iter().enumerate() {
+    let mut slots: Vec<Option<u32>> = vec![None; stated_media.len()];
+    for (j, stream) in described.iter().enumerate() {
         let free = |i: &usize| slots[*i].is_none();
-        let kind = stream.media_type();
-        let slot = (0..stated.media.len())
+        let same_kind = |i: &usize| stated_media[*i].r#type == stream.r#type;
+        let rejected = |i: &usize| stated_media[*i].port == Some(0);
+        let slot = (0..stated_media.len())
             .filter(free)
-            .find(|&i| media_type(&stated.media[i]) == kind && port(&stated.media[i]) != Some(0))
-            .or_else(|| {
-                (0..stated.media.len()).filter(free).find(|&i| media_type(&stated.media[i]) == kind)
-            })
-            .or_else(|| {
-                (0..stated.media.len()).filter(free).find(|&i| port(&stated.media[i]) == Some(0))
-            });
+            .find(|i| same_kind(i) && !rejected(i))
+            .or_else(|| (0..stated_media.len()).filter(free).find(same_kind))
+            .or_else(|| (0..stated_media.len()).filter(free).find(rejected));
         match slot {
             Some(i) => slots[i] = Some(j as u32),
             None => slots.push(Some(j as u32)),
         }
     }
 
-    let mut out = with_line_end(
-        &authored.session.replacen(&current.raw_origin_line, &previous.next_version_line(), 1),
-        eol,
-    );
-    let stub_c = (!authored.has_session_c())
-        .then(|| authored.media.iter().find_map(|s| s.c_line()))
-        .flatten();
+    let mut out =
+        with_line_end(&authored.session.replacen(&current.raw_origin_line, &next_origin, 1), eol);
+    let session_c = parse_sdp_body(sdp).and_then(|d| d.c_line);
+    let stub_c =
+        session_c.is_none().then(|| described.iter().find_map(|m| m.c_line.clone())).flatten();
     for (i, slot) in slots.iter().enumerate() {
         match slot {
             Some(j) => out.push_str(&with_line_end(authored.media[*j as usize].text, eol)),
             None => {
-                out.push_str(&format!("m={}{eol}", rejected(&stated.media[i])));
-                if let Some(c) = stub_c {
-                    out.push_str(&format!("{c}{eol}"));
+                out.push_str(&format!("m={}{eol}", rejected(&stated_media[i])));
+                if let Some(c) = &stub_c {
+                    out.push_str(&format!("c={c}{eol}"));
                 }
             }
         }
@@ -124,12 +119,14 @@ pub fn restate_session(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
 pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     let text = String::from_utf8_lossy(sdp);
     let described = Sections::of(&text);
+    let ports: Vec<Option<i64>> =
+        parse_sdp_body(sdp).map(|d| d.media.iter().map(|m| m.port).collect()).unwrap_or_default();
     let mut ordered: Vec<(u32, &Section<'_>)> = Vec::new();
     let mut added: Vec<&Section<'_>> = Vec::new();
     for (i, stream) in described.media.iter().enumerate() {
         match slots.get(i).copied().flatten() {
             Some(j) => ordered.push((j, stream)),
-            None if stream.port() == Some(0) => {}
+            None if ports.get(i).copied().flatten() == Some(0) => {}
             None => added.push(stream),
         }
     }
@@ -151,9 +148,10 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     Some(out.into_bytes())
 }
 
-/// A description cut at its `m=` lines: the session-level text, then each
-/// media section (its `m=` line and every line up to the next one), each piece
-/// with its line endings as written.
+/// A description cut at its `m=` lines, byte for byte: the session-level text,
+/// then each media section (its `m=` line and every line up to the next one),
+/// with line endings as written. The sections are in `parse_sdp_body`'s media
+/// order; the values in them are read there.
 struct Sections<'a> {
     session: &'a str,
     media: Vec<Section<'a>>,
@@ -183,10 +181,6 @@ impl<'a> Sections<'a> {
             .collect();
         Self { session: &text[..session_end], media }
     }
-
-    fn has_session_c(&self) -> bool {
-        self.session.split('\n').any(|l| l.starts_with("c="))
-    }
 }
 
 impl Section<'_> {
@@ -195,46 +189,17 @@ impl Section<'_> {
         let line = self.text.split('\n').next().unwrap_or_default();
         line.strip_suffix('\r').unwrap_or(line).get(2..).unwrap_or_default()
     }
-
-    fn media_type(&self) -> &str {
-        media_type(self.value())
-    }
-
-    fn port(&self) -> Option<u32> {
-        port(self.value())
-    }
-
-    /// The section's first `c=` line, as written.
-    fn c_line(&self) -> Option<&str> {
-        self.text
-            .split('\n')
-            .skip(1)
-            .map(|l| l.strip_suffix('\r').unwrap_or(l))
-            .find(|l| l.starts_with("c="))
-    }
 }
 
-/// An `m=` value's media type.
-fn media_type(m_value: &str) -> &str {
-    m_value.split_whitespace().next().unwrap_or_default()
-}
-
-/// An `m=` value's port (the part before any `/<number of ports>`).
-fn port(m_value: &str) -> Option<u32> {
-    m_value.split_whitespace().nth(1)?.split('/').next()?.parse().ok()
-}
-
-/// An `m=` value with its port set to 0 — the stream rejected (RFC 3264 §6),
-/// transport and formats as stated.
-fn rejected(m_value: &str) -> String {
-    let mut tokens = m_value.split_whitespace();
-    let kind = tokens.next().unwrap_or_default();
-    let _port = tokens.next();
-    tokens.fold(format!("{kind} 0"), |mut out, t| {
-        out.push(' ');
-        out.push_str(t);
-        out
-    })
+/// A stated stream's `m=` value with its port set to 0 — the stream rejected
+/// (RFC 3264 §6), transport and formats as stated.
+fn rejected(m: &MediaLine) -> String {
+    let mut value = format!("{} 0 {}", m.r#type, m.transport);
+    for f in &m.formats {
+        value.push(' ');
+        value.push_str(f);
+    }
+    value
 }
 
 /// `piece` ending with `eol` — a last line written without one gets it.
@@ -317,18 +282,18 @@ mod tests {
         assert_eq!(again.slots, vec![Some(0), None]);
     }
 
-    /// The same sess-id is the same session, whatever else of `o=` moved: the
-    /// author continues it itself and the description leaves as written.
+    /// Nothing is restated from an unreadable origin, and a stated version with
+    /// no next one is never wrapped back (RFC 3264 §8: versions only rise).
     #[test]
-    fn the_stated_session_id_leaves_the_description_as_written() {
-        let same =
-            b"v=0\r\no=other 700 12 IN IP4 203.0.113.1\r\ns=-\r\nt=0 0\r\nm=audio 5 RTP/AVP 0\r\n";
-        assert_eq!(restate_session(same, &stated(HELD)), None);
+    fn no_restatement_without_a_next_version() {
         assert_eq!(restate_session(b"v=0\r\ns=-\r\n", &stated(HELD)), None, "no o= to restate");
+        let top = StatedSession {
+            origin: format!("b2b 700 {} IN IP4 192.0.2.10", u64::MAX),
+            media: vec!["audio 20000 RTP/AVP 0".into()],
+        };
+        assert_eq!(restate_session(NEW_AUTHOR, &top), None);
     }
 
-    /// A rejected slot needs a connection address when the description states
-    /// none at session level (RFC 4566 §5.7): it takes the author's first.
     #[test]
     fn a_rejected_slot_takes_a_connection_line_where_the_session_has_none() {
         let media_c = b"v=0\r\no=carol 900 3 IN IP4 198.51.100.7\r\ns=-\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\nc=IN IP4 198.51.100.7\r\n";

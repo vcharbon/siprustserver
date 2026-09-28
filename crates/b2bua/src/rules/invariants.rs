@@ -197,6 +197,7 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         None,
         vec![],
         crate::effects::Provenance::Authored,
+        super::relay::Author::Stack,
     ) else {
         return;
     };

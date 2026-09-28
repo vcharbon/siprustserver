@@ -67,8 +67,8 @@ impl ActionExecutor<'_> {
             let body = relay::continue_on_leg(
                 call,
                 ctx.source_leg_id,
-                req.method(),
-                req.to().tag().is_some(),
+                relay::Author::Stack,
+                relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),
                 content_type.as_ref(),
             );
@@ -132,6 +132,7 @@ impl ActionExecutor<'_> {
             None,
             extra,
             Provenance::Relayed,
+            relay::Author::Stack,
         ) {
             fx.outbound.push(effect);
         }
@@ -201,6 +202,7 @@ impl ActionExecutor<'_> {
             None,
             extra,
             Provenance::Authored,
+            relay::Author::Stack,
         ) {
             fx.outbound.push(effect);
         }
@@ -249,6 +251,7 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         to_tag: Option<&str>,
         p_early_media: Option<&str>,
+        author: relay::Author<'_>,
     ) {
         if !(100..200).contains(&status) || leg_id != call.a_leg.leg_id {
             return;
@@ -303,6 +306,7 @@ impl ActionExecutor<'_> {
             None,
             extra_headers,
             Provenance::Authored,
+            author,
         ) {
             fx.outbound.push(effect);
         }
@@ -349,6 +353,7 @@ impl ActionExecutor<'_> {
         to_tag: Option<&str>,
         header_updates: &[(String, Option<String>)],
         relayed: &RelayedFinal,
+        author: relay::Author<'_>,
     ) {
         // Only a 2xx establishes the new a-dialog (RFC 3261 §12.1). A non-2xx
         // final does not create a dialog and is not this primitive's job.
@@ -414,6 +419,7 @@ impl ActionExecutor<'_> {
             None,
             extra_headers,
             Provenance::Authored,
+            author,
         ) else {
             return;
         };

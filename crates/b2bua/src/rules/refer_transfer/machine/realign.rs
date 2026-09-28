@@ -49,7 +49,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
             new_state.phase = TransferPhase::ARealigning;
 
             ok(vec![
-                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { author: None, leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
                 RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
                 },
@@ -58,7 +58,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                     delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some("a".to_string()),
                 },
-                RuleAction::SendReinvite {
+                RuleAction::SendReinvite { author: Some(c_leg_id.clone()),
                     leg_id: "a".to_string(),
                     body: c_realign_sdp.to_vec(),
                     add_headers: vec![],
@@ -187,7 +187,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
             ok(vec![
-                RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { author: None, leg_id: "a".to_string(), body: Vec::new(), content_type: None },
                 RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
                 },

@@ -334,7 +334,11 @@ pub fn build_b_leg(
         }
     }
 
-    let sdp_session = super::sdp_session::opened(&body, content_type.as_ref());
+    let author = match body_override {
+        Some(_) => super::sdp_session::Author::Stack,
+        None => super::sdp_session::Author::Leg("a"),
+    };
+    let sdp_session = super::sdp_session::opened(&body, content_type.as_ref(), author);
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),

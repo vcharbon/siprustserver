@@ -324,3 +324,46 @@ async fn an_options_answer_stays_outside_the_session() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let _ = h.finish().await;
 }
+
+/// A failure final's description states capabilities, not the session (RFC
+/// 3261 §13.2.1, §21.4.26): it reaches the offerer as written, and the next
+/// description of the dialog's author still relays as written.
+#[tokio::test]
+async fn a_failure_answer_body_stays_outside_the_session() {
+    const CAPABILITIES: &str = "v=0\r\no=gateway 909 1 IN IP4 127.0.0.9\r\ns=-\r\nc=IN IP4 127.0.0.9\r\nt=0 0\r\nm=audio 0 RTP/AVP 0 8\r\n";
+    let h = Harness::with_transit_delay("sdp-session-continuity-488", 1);
+    let alice = h.agent("alice", "127.0.0.1:5935").await;
+    let bob = h.agent("bob", "127.0.0.1:5945").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5945).start(&h, "b2bua", "127.0.0.1:5955").await;
+
+    let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refused = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_REANSWER)).await;
+    bob.receive("INVITE").await.respond(488, "Not Acceptable Here").with_sdp(CAPABILITIES).await;
+    let nak = refused.expect(488).await;
+    assert_eq!(String::from_utf8_lossy(nak.body()), CAPABILITIES, "relayed as written");
+    bob.receive("ACK").await;
+
+    let mut reinvite = bob_dialog.request(InDialogMethod::Invite, Some(BOB_REOFFER)).await;
+    let mut at_alice = alice.receive("INVITE").await;
+    assert_eq!(body_of(&at_alice), BOB_REOFFER, "the callee's session continues as written");
+    at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
+    reinvite.expect(200).await;
+    bob_dialog.ack(None).await;
+    alice.receive("ACK").await;
+
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let _ = h.finish().await;
+}

@@ -1237,6 +1237,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         None,
         vec![],
         b2bua::effects::Provenance::Authored,
+        b2bua::rules::relay::Author::Stack,
     )
     .expect("the transaction's first final is admitted");
     result.effects.outbound.push(effect);
@@ -2661,6 +2662,7 @@ mod media_primitives {
             &config,
             &id_gen,
             &[RuleAction::SendRequestToLeg {
+                author: None,
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
                 body: mscml.clone(),
@@ -2709,6 +2711,7 @@ mod media_primitives {
             &config,
             &id_gen,
             &[RuleAction::SendRequestToLeg {
+                author: None,
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
                 body: body.clone(),
@@ -3401,7 +3404,7 @@ mod ack_leg_body {
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         let result = exec.execute(
-            &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
+            &[RuleAction::AckLeg { author: None, leg_id: "b-1".into(), body, content_type }],
             &call,
             &ctx,
         );
@@ -3494,7 +3497,11 @@ mod ack_leg_body {
             now_ms: 0,
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
-        exec.execute(&[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }], call, &ctx)
+        exec.execute(
+            &[RuleAction::AckLeg { author: None, leg_id: "b-1".into(), body, content_type }],
+            call,
+            &ctx,
+        )
     }
 
     /// The one emitted ACK effect in `result`.

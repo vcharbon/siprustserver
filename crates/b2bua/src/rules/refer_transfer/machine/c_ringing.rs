@@ -103,7 +103,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     disposition: Some(call::LegDisposition::Bridged),
                 },
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
-                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { author: None, leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
             ];
             actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
@@ -114,7 +114,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some(c_leg_id.clone()),
                 },
-                RuleAction::SendReinvite {
+                RuleAction::SendReinvite { author: Some(ctx.call.a_leg().leg_id.to_string()),
                     leg_id: c_leg_id.clone(),
                     body: a_sdp.to_vec(),
                     add_headers: vec![],

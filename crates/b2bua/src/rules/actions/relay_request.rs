@@ -26,7 +26,8 @@ impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog, carrying `body`/`content_type` through
     /// (a delayed-offer answer rides the ACK, RFC 3261 §13.2.2.4 / RFC 3264 §4).
     /// `provenance` says whose ACK it is: the peer's, relayed, or one this
-    /// stack composes on its own account.
+    /// stack composes on its own account; `author` whose description `body` is.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ack_leg(
         &self,
         call: &mut Call,
@@ -35,9 +36,16 @@ impl ActionExecutor<'_> {
         body: Vec<u8>,
         content_type: Option<MediaType>,
         provenance: Provenance,
+        author: relay::Author<'_>,
     ) {
-        let body =
-            relay::continue_on_leg(call, leg_id, &Method::Ack, true, body, content_type.as_ref());
+        let body = relay::continue_on_leg(
+            call,
+            leg_id,
+            author,
+            relay::Carried::InDialog,
+            body,
+            content_type.as_ref(),
+        );
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
         } else {
@@ -147,6 +155,7 @@ impl ActionExecutor<'_> {
                 req.body().to_vec(),
                 content_type,
                 Provenance::Relayed,
+                relay::Author::Leg(ctx.source_leg_id),
             );
             return;
         }
@@ -231,8 +240,8 @@ impl ActionExecutor<'_> {
         let body = relay::continue_on_leg(
             call,
             target_leg,
-            req.method(),
-            true,
+            relay::Author::Leg(ctx.source_leg_id),
+            relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
             content_type.as_ref(),
         );

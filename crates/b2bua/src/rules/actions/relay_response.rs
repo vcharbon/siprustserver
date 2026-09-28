@@ -272,8 +272,8 @@ impl ActionExecutor<'_> {
                 let relay_body = relay::continue_on_leg(
                     call,
                     target_leg,
-                    &Method::from_wire(&cseq_method),
-                    true,
+                    relay::Author::Leg(&source_leg_id),
+                    relay::Carried::of(&Method::from_wire(&cseq_method), Some(status), true),
                     relay_body.clone(),
                     relay_content_type.as_ref(),
                 );
@@ -493,6 +493,7 @@ impl ActionExecutor<'_> {
                 None,
                 passthrough,
                 Provenance::Relayed,
+                relay::Author::Leg(&source_leg_id),
             ) else {
                 return;
             };
@@ -566,6 +567,7 @@ impl ActionExecutor<'_> {
             None,
             passthrough,
             Provenance::Relayed,
+            relay::Author::Leg(&source_leg_id),
         ) else {
             return;
         };

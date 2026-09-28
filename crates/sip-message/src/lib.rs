@@ -63,10 +63,12 @@ pub use sdp::{
 pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
-    canonical_rtpmap, extract_direction, extract_format_list, extract_rtpmaps, parse_origin,
-    parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
+    canonical_rtpmap, extract_direction, extract_format_list, extract_rtpmaps, media_line,
+    parse_origin, parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
-/// One party's session across a dialog whose description author changes (RFC 3264 §8).
+/// One party's session across a dialog whose description author changes (RFC 3264 §8):
+/// it cuts a description at its `m=` lines byte for byte and reads every value
+/// through `sdp_doc`.
 pub use sdp_session::{in_author_order, restate_session, Restated, StatedSession};
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};

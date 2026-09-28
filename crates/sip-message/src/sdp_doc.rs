@@ -158,6 +158,21 @@ fn new_media(raw_m_line: &str) -> MutableMedia {
     }
 }
 
+/// One `m=` line's value (no leading `m=`) read as a media block with no
+/// media-level line: type, port, transport and formats.
+pub fn media_line(m_value: &str) -> MediaLine {
+    let m = new_media(m_value);
+    MediaLine {
+        r#type: m.r#type,
+        port: m.port,
+        transport: m.transport,
+        formats: m.formats,
+        attributes: m.attributes,
+        c_line: m.c_line,
+        ptime: m.ptime,
+    }
+}
+
 /// The description a body carries, or `None` where the bytes do not open with
 /// the canonical `v=` token — which is what makes them a session description at
 /// all.
@@ -364,17 +379,19 @@ impl SdpOrigin {
     }
 
     /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
-    /// identity fields unchanged, the version one above this one.
-    pub fn next_version_line(&self) -> String {
-        format!(
+    /// identity fields unchanged, the version one above this one. `None` where
+    /// the version is already the largest one this reader holds: no next
+    /// version can be stated, and a wrapped one would run backwards.
+    pub fn next_version_line(&self) -> Option<String> {
+        Some(format!(
             "o={} {} {} {} {} {}",
             self.username,
             self.session_id,
-            self.session_version + 1,
+            self.session_version.checked_add(1)?,
             self.nettype,
             self.addrtype,
             self.unicast_address
-        )
+        ))
     }
 }
 
@@ -538,5 +555,13 @@ a=inactive\r\n";
         let moved = parse_origin(b"v=0\r\no=alice 1 1 IN IP4 10.0.0.2\r\n").expect("c");
         assert!(a.identifies_same_session(&bumped), "only the version rose");
         assert!(!a.identifies_same_session(&moved), "the address is part of the identity");
+    }
+
+    #[test]
+    fn the_next_version_never_wraps() {
+        let a = parse_origin(b"v=0\r\no=alice 1 7 IN IP4 10.0.0.1\r\n").expect("a");
+        assert_eq!(a.next_version_line().as_deref(), Some("o=alice 1 8 IN IP4 10.0.0.1"));
+        let top = format!("v=0\r\no=alice 1 {} IN IP4 10.0.0.1\r\n", u64::MAX);
+        assert_eq!(parse_origin(top.as_bytes()).expect("top").next_version_line(), None);
     }
 }
