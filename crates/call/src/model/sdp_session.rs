@@ -20,14 +20,16 @@ pub struct LegSdpSession {
     /// The leg whose peer wrote the description `sent_slots` restated: only a
     /// description going back to that leg is put in its stream order.
     pub sent_slots_author: Option<String>,
-    /// Where that restatement answered the peer: the count of the peer's
-    /// offers it answered and the `o=` value of the description it was made
-    /// from. The same author's same version answering no newer offer is a
-    /// repeat, restated at the same version.
+    /// For that restatement: the count of the peer's offers at the time and
+    /// the `o=` value of the description it was made from. The same author's
+    /// same version with no newer peer offer is a repeat, restated at the same
+    /// version.
     pub restated_from: Option<String>,
-    /// How many offers the leg's peer has sent in requests (an INVITE or
-    /// UPDATE carrying a description), counted as each is received: each opens
-    /// a new offer/answer exchange.
+    /// How many in-dialog offers the leg's peer has sent (an INVITE or UPDATE
+    /// carrying a description), counted as each is received once the call
+    /// exists — the a-leg's initial INVITE is never counted. An offer the rules
+    /// then refuse (491, 500) counts too: its only effect is that the next
+    /// unchanged description is a new version, which RFC 3264 §8 permits.
     #[serde(default)]
     pub offers_received: u32,
     /// The leg whose peer's own session the dialog carries; `None` when it is

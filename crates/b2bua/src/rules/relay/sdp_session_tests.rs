@@ -346,3 +346,24 @@ fn a_prack_answer_opens_no_exchange() {
         send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
     assert_eq!(fin, early, "the 200 repeats the 183 byte for byte");
 }
+
+/// The final to the peer's re-INVITE repeating the description the author
+/// already offered in a nested UPDATE is that description again: the stored
+/// bytes, the same version (RFC 6337 §3.1).
+#[test]
+fn a_final_repeating_the_authors_nested_offer_repeats_its_restatement() {
+    let mut c = spliced();
+    peer_offers(&mut c, "a", Method::Invite);
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::answering(&Method::Invite, 183),
+        &sdp("carol 303 4 IN IP4 192.0.2.3", 30002),
+    );
+    let offer = sdp("carol 303 5 IN IP4 192.0.2.3", 30004);
+    let update = send(&mut c, "a", Author::Leg("b-2"), Carried::InDialog, &offer);
+    let fin =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+    assert_eq!(fin, update, "the same description, the same version");
+}

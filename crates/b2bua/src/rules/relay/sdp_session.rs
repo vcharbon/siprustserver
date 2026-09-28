@@ -57,9 +57,10 @@ pub enum Carried {
     /// In a later request of the dialog, or the initial ACK.
     InDialog,
     /// In a response of the dialog to the leg's peer: the same author's same
-    /// version answering no newer offer of that peer (a repeated provisional,
-    /// the final repeating the answer a reliable provisional or a nested
-    /// UPDATE/PRACK exchange already gave) is the same description.
+    /// version as the last restatement, with no newer offer of that peer (a
+    /// repeated provisional, the final repeating what a reliable provisional
+    /// or a nested UPDATE/PRACK exchange already carried), is the same
+    /// description. A request always opens a new exchange, so a new version.
     Answering,
     /// Outside any exchange (RFC 3264 §4 / RFC 3262 §5 / RFC 3311 §5 name
     /// INVITE, ACK, PRACK and UPDATE; a response of 300 or more describes
@@ -130,19 +131,19 @@ pub fn continue_on_leg(
     let Some(leg) = leg_mut(call, leg_id) else {
         return body;
     };
-    let repeat_key = match carried {
-        Carried::Answering => {
-            parse_origin(sdp).map(|o| format!("{} {}", leg.sdp_session.offers_received, o.value()))
-        }
-        _ => None,
-    };
+    let repeat_key = carried
+        .in_dialog()
+        .then(|| parse_origin(sdp))
+        .flatten()
+        .map(|o| format!("{} {}", leg.sdp_session.offers_received, o.value()));
     let restated = (carried.in_dialog()
         && leg.state == LegState::Confirmed
         && !continues_itself(&leg.sdp_session, author, &session_id))
     .then(|| stated(leg))
     .flatten()
     .and_then(|stated| {
-        if repeats(&leg.sdp_session, author, repeat_key.as_deref()) {
+        if carried == Carried::Answering && repeats(&leg.sdp_session, author, repeat_key.as_deref())
+        {
             restate_session_again(sdp, &stated)
         } else {
             restate_session(sdp, &stated)
@@ -188,9 +189,9 @@ pub fn continue_on_leg(
 /// Count the offer/answer exchange `req`, received from `leg_id`'s peer,
 /// opens: an INVITE or UPDATE carrying a description, which is always an
 /// offer (RFC 3264 §4, RFC 3311 §5.1). A PRACK's description may answer the
-/// stack's own offer (RFC 3262 §5) and is not counted: an answer it carries
-/// opens nothing, and a new offer it carries is answered under a new author
-/// version anyway.
+/// stack's own offer (RFC 3262 §5) and is not counted; a new offer it carries
+/// is answered by a description that is the same, at the same version, only
+/// when its author repeats it unchanged.
 pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest) {
     let opens = matches!(req.method(), Method::Invite | Method::Update) && req.sdp().is_some();
     if let (true, Some(leg)) = (opens, leg_mut(call, leg_id)) {
@@ -248,8 +249,9 @@ fn in_restated_author_order(call: &Call, from: &str, to: &str, sdp: &[u8]) -> Op
 }
 
 /// Whether a description by `author` under `key` (the count of the peer's
-/// offers it answers and its `o=` value) repeats the one the stack last
-/// restated on the leg.
+/// offers so far and its `o=` value) repeats the one the stack last restated
+/// on the leg — whether that one left in a response or in a request (the
+/// author's nested offer repeated by its final).
 fn repeats(state: &LegSdpSession, author: Author<'_>, key: Option<&str>) -> bool {
     let Author::Leg(from) = author else { return false };
     state.sent_slots_author.as_deref() == Some(from)
