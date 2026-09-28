@@ -12,10 +12,11 @@
 use std::sync::Arc;
 
 use b2bua::capacity::{simulated, Bound, CapacityGate, Level, SimulatedSystemControl};
-use b2bua::config::Ceilings;
+use b2bua::config::{CapacityConfig, Ceilings};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::callflow;
 use scenario_harness::{Agent, Dialog};
+use sip_message::generators::InDialogMethod;
 use sip_message::header::{Reason, RetryAfter};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -181,6 +182,52 @@ async fn a_capacity_reject_spends_no_cps_token() {
 
     assert_eq!(s.b2bua.capacity().rejected_total(Bound::Calls, false), 1);
     assert_eq!(s.b2bua.metrics().overload_rejected_total(), 0, "the bucket never ran dry");
+    assert_all_released(&s.b2bua, 2).await;
+    s.finish().await;
+}
+
+/// Past the new-call transaction ceiling, admitted calls keep all they are
+/// owed (ADR-0037 item 7): while their in-dialog traffic holds the table
+/// above it, a new call is refused 503, and the admitted calls' INFOs,
+/// re-INVITEs and BYEs still complete, each call ending with its CDR.
+#[tokio::test]
+async fn past_the_new_call_ceiling_only_new_calls_are_refused() {
+    let s = B2buaScene::with_b2bua("b2bua-capacity-margin", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| c.keepalive_interval_sec = 300)
+    })
+    .await;
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut dialogs =
+        vec![establish(&s, false).await, callflow::establish(&carol, &s.bob, s.b2bua.addr).await];
+
+    let txns = || s.b2bua.txn_metrics().active_transactions() as u64;
+    let ceiling = txns() + 4;
+    s.b2bua.capacity().configure(&CapacityConfig {
+        transactions: Ceilings { normal: Some(ceiling), emergency: None },
+        ..Default::default()
+    });
+
+    // The admitted calls' INFOs take the table past the ceiling, and on.
+    for round in 0..12 {
+        let dialog = &mut dialogs[round % 2];
+        let mut info = dialog.send_request(InDialogMethod::Info).send().await;
+        s.bob.receive("INFO").await.respond(200, "OK").await;
+        info.expect(200).await;
+    }
+    assert!(txns() > ceiling, "in-dialog traffic past the new-call ceiling");
+    expect_refused(&s.alice, &s.bob, &s.b2bua, false).await;
+
+    // A re-INVITE of an admitted call is relayed and answered.
+    let mut reinvite = dialogs[1].request(InDialogMethod::Invite, Some(OFFER)).await;
+    s.bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    reinvite.expect(200).await;
+    dialogs[1].ack(None).await;
+    s.bob.receive("ACK").await;
+
+    for dialog in &mut dialogs {
+        s.hangup(dialog).await;
+    }
+    assert_eq!(s.b2bua.capacity().rejected_total(Bound::Transactions, false), 1);
     assert_all_released(&s.b2bua, 2).await;
     s.finish().await;
 }
