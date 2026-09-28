@@ -875,6 +875,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_held_batch_gives_up_its_entries_at_their_deadline_without_a_look() {
+        let lease = LimiterLease::starting_at(Duration::from_secs(120));
+        let r = rig_leased(Vec::new(), 100, 10, lease.clone());
+        r.batch.hold();
+        mark(&r.batch, "a");
+        settle().await;
+        advance(Duration::from_secs(10)).await;
+        lease.learn(Duration::from_secs(30));
+        settle().await;
+        assert_eq!(r.metrics.limiter_refresh_due(), 1, "inside the new lease");
+        advance(Duration::from_secs(21)).await;
+        assert_eq!(
+            r.metrics.limiter_refresh_forgotten_lease_expired_total(),
+            1,
+            "given up at 30 s by the sender, not at 120 s nor at the next look"
+        );
+        assert_eq!(r.metrics.limiter_refresh_due(), 0);
+        mark(&r.batch, "b");
+        settle().await;
+        advance(Duration::from_secs(2)).await;
+        lease.learn(Duration::from_secs(1));
+        settle().await;
+        assert_eq!(
+            r.metrics.limiter_refresh_forgotten_lease_expired_total(),
+            2,
+            "a lease learnt shorter than an entry has waited gives it up at once"
+        );
+        assert!(r.requests().is_empty(), "a held batch sends nothing");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_lease_learnt_after_a_first_mark_moves_its_deadline() {
         let lease = LimiterLease::starting_at(Duration::from_secs(20));
         let r = rig_leased(Vec::new(), 100, 10, lease.clone());

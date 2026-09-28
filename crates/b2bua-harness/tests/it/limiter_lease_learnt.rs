@@ -301,3 +301,53 @@ async fn a_limiter_lease_the_refresh_reaches_is_counted_once_per_change() {
     s.b2bua.assert_fully_reaped();
     let _ = s.h.finish().await;
 }
+
+/// A limiter at the default lease (120 s) that the worker's refresh period
+/// (120 s) plus a tick reaches: the first lease stated is checked even when
+/// it equals the lease the worker assumed before any answer.
+#[tokio::test(start_paused = true)]
+async fn a_first_stated_lease_equal_to_the_assumed_one_is_checked() {
+    let s = Scene::new("lease-learnt-first-default", 120, |c| c.limiter_refresh_sec = 120).await;
+    let mut dialog = s.establish().await;
+    s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
+    assert_eq!(
+        s.exposed("b2bua_limiter_lease_too_short_total").as_deref(),
+        Some("1"),
+        "the first stated lease is checked"
+    );
+    s.hang_up(&mut dialog).await;
+    s.hold_for(2).await;
+    s.rig.expect_drained("the release freed the call").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// A limiter whose lease (6 s) is below three of the worker's refresh
+/// periods (40 s): the worker refreshes every third of the lease instead, so
+/// the call's set never lapses, and counts the clamp.
+#[tokio::test(start_paused = true)]
+async fn a_short_lease_shortens_the_refresh_period_to_a_third_of_it() {
+    const LEASE_SEC: i64 = 6;
+    let s =
+        Scene::new("lease-learnt-refresh-clamped", LEASE_SEC, |c| c.limiter_refresh_sec = 40).await;
+    let mut dialog = s.establish().await;
+    s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
+
+    for second in 0..30 {
+        s.hold_for(1).await;
+        assert_eq!(s.rig.all_holds(), [1, 1, 1], "the call's set never lapses ({second} s)");
+    }
+    assert_eq!(s.rig.store.stats().lease_expired_calls, 0, "no set lapsed");
+    assert_eq!(
+        s.exposed("b2bua_limiter_refresh_period_clamped_total").as_deref(),
+        Some("1"),
+        "the clamp is counted once"
+    );
+    assert_eq!(s.exposed("b2bua_limiter_refresh_period_seconds").as_deref(), Some("2"));
+
+    s.hang_up(&mut dialog).await;
+    s.hold_for(2).await;
+    s.rig.expect_drained("the release freed the call").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}

@@ -505,6 +505,53 @@ mod tests {
         assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
     }
 
+    /// A limiter answering every request with one fixed body.
+    struct Answers(&'static str);
+
+    #[async_trait]
+    impl http_net::HttpService for Answers {
+        async fn handle(&self, _: HttpRequest) -> HttpResponse {
+            HttpResponse::ok(self.0.as_bytes().to_vec())
+        }
+    }
+
+    async fn answering(
+        body: &'static str,
+    ) -> (HttpCallLimiter, Box<dyn http_net::HttpServerHandle>) {
+        let net = SimulatedHttpNetwork::new();
+        let server = net.serve(laddr(), Arc::new(Answers(body))).await.unwrap();
+        (HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET), server)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_below_one_second_is_a_bad_body() {
+        let admitted = r#"{"admitted":true,"released":false,"lease_ms":999}"#;
+        let (client, _server) = answering(admitted).await;
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        client.report_lease(lease.clone());
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
+        assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
+
+        let (client, _server) = answering(r#"{"outcomes":["extended"],"lease_ms":0}"#).await;
+        let calls = [RefreshCall { key: "c#k".into(), ids: vec!["x".into()] }];
+        assert_eq!(client.refresh(&calls).await, RefreshAnswer::Unavailable);
+
+        for body in [r#"{"calls":0,"lease_ms":999}"#, r#"{"calls":0}"#] {
+            let (client, _server) = answering(body).await;
+            assert!(!client.health().unwrap().serving().await, "{body}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admit_answer_contradicting_itself_teaches_no_lease() {
+        let (client, _server) =
+            answering(r#"{"admitted":false,"released":false,"lease_ms":5000}"#).await;
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        client.report_lease(lease.clone());
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
+        assert_eq!(lease.current(), Duration::from_secs(20), "learnt only from a valid body");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_client_at_an_address_always_has_it() {
         let (net, _server) = served().await;

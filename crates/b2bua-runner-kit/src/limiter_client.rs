@@ -197,18 +197,13 @@ mod tests {
             };
             let client = limiter_client(&settings, self.net.clone(), self.names.clone()).await;
             let metrics = B2buaMetrics::new();
-            let bounds = ReleaseQueueConfig {
-                lease: LimiterLease::starting_at(Duration::from_secs(120)),
-                cap: 10,
-            };
+            let lease = LimiterLease::starting_at(Duration::from_secs(120));
+            client.report_lease(lease.clone());
+            let bounds = ReleaseQueueConfig { lease: lease.clone(), cap: 10 };
             let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
             tokio::spawn(releases.clone().run());
-            let bounds = RefreshBatchConfig {
-                tick: PROBE,
-                max: 100,
-                lease: LimiterLease::starting_at(Duration::from_secs(120)),
-                cap: 10,
-            };
+            let bounds =
+                RefreshBatchConfig { tick: PROBE, max: 100, lease: lease.clone(), cap: 10 };
             let refreshes = RefreshBatch::new(client.clone(), bounds, metrics.clone(), |_| {});
             tokio::spawn(refreshes.clone().run());
             let (limiter, breaker) = BreakerLimiter::guard(
@@ -220,13 +215,15 @@ mod tests {
             );
             tokio::spawn(breaker.expect("the HTTP client is guarded").run());
             settle().await;
-            Worker { limiter, metrics }
+            Worker { limiter, metrics, lease }
         }
     }
 
     struct Worker {
         limiter: Arc<dyn CallLimiter>,
         metrics: B2buaMetrics,
+        /// The lease the worker learnt from the limiter's answers.
+        lease: Arc<LimiterLease>,
     }
 
     impl Worker {
@@ -253,8 +250,17 @@ mod tests {
         net: &Counting,
         addr: &str,
     ) -> ((SocketAddr, Arc<CallStore>), Box<dyn HttpServerHandle>) {
+        limiter_leased(net, addr, LimiterConfig::default()).await
+    }
+
+    /// [`limiter_at`] under `cfg`.
+    async fn limiter_leased(
+        net: &Counting,
+        addr: &str,
+        cfg: LimiterConfig,
+    ) -> ((SocketAddr, Arc<CallStore>), Box<dyn HttpServerHandle>) {
         let addr: SocketAddr = addr.parse().unwrap();
-        let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
+        let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
         let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
         ((addr, store), net.serve(addr, server).await.unwrap())
     }
@@ -284,6 +290,24 @@ mod tests {
         assert_eq!(held(&lab.a.1), (1, 1), "the call is counted");
         assert_eq!(w.release("c3#k").await, ReleaseAnswer::Released);
         assert_eq!(held(&lab.a.1), (0, 0));
+    }
+
+    /// A worker booting open learns the limiter's lease from the health
+    /// answer that closes its breaker, before any admit.
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_booting_open_learns_the_lease_from_the_probe_that_closes_it() {
+        let lab = Lab::new().await;
+        let (c, _served) =
+            limiter_leased(&lab.net, "10.0.0.3:8080", LimiterConfig { lease_sec: 200 }).await;
+        let w = lab.worker().await;
+        assert!(w.open(), "boots open");
+        lab.names.point(NAME, c.0);
+        elapse(PROBE).await;
+        assert!(!w.open(), "the probe closed the breaker");
+        assert_eq!(w.lease.current(), Duration::from_secs(200), "learnt from the health answer");
+        assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
+        assert_eq!(w.release("c1#k").await, ReleaseAnswer::Released);
+        assert_eq!(held(&c.1), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]

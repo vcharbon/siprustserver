@@ -814,6 +814,39 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_held_queue_gives_up_its_entries_at_a_shorter_lease_learnt_while_held() {
+        let limiter = Arc::new(Scripted::default());
+        let metrics = B2buaMetrics::new();
+        let lease = LimiterLease::starting_at(Duration::from_secs(120));
+        let config = ReleaseQueueConfig { lease: lease.clone(), cap: 10 };
+        let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
+        tokio::spawn(q.clone().run());
+        q.hold();
+        q.push("a");
+        settle().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        lease.learn(Duration::from_secs(30));
+        settle().await;
+        assert_eq!(metrics.limiter_release_queue_depth(), 1, "inside the new lease");
+        tokio::time::advance(Duration::from_secs(20)).await;
+        settle().await;
+        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1, "at 30 s, not 120 s");
+        assert_eq!(metrics.limiter_release_queue_depth(), 0);
+        lease.learn(Duration::from_secs(5));
+        q.push("b");
+        settle().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        lease.learn(Duration::from_secs(1));
+        settle().await;
+        assert_eq!(
+            metrics.limiter_release_dropped_lease_expired_total(),
+            2,
+            "a lease learnt shorter than an entry has waited gives it up at once"
+        );
+        assert!(sent(&limiter).is_empty(), "a held queue sends nothing");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_push_expires_what_waited_one_lease_without_the_drainer() {
         let limiter = Arc::new(Scripted::default());
         let metrics = B2buaMetrics::new();
