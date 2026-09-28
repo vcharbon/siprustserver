@@ -798,5 +798,9 @@ fn limiter_state_release_obligation_only_grows() {
     assert!(state.counted && state.release_owed, "a counted call owes its release");
     state.set(false, false, Vec::new());
     assert!(!state.counted && state.release_owed, "the obligation is never cleared");
-    assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()));
+    assert_eq!(
+        state,
+        CallLimiterState { generation: 2, ..CallLimiterState::unconfirmed("c#k".into()) },
+        "each restatement moves the generation on"
+    );
 }

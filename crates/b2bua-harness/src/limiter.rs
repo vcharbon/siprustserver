@@ -23,7 +23,8 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
 use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshOutcome, ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
+    ReleaseAnswer,
 };
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -205,8 +206,8 @@ impl CallLimiter for CountingLimiter {
         self.inner.release(keys).await
     }
 
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        self.inner.refresh(key, ids).await
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        self.inner.refresh(calls).await
     }
 
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
@@ -351,6 +352,8 @@ impl CallDecisionEngine for DefaultLimiterDecision {
 
 #[cfg(test)]
 mod tests {
+    use b2bua::limiter::RefreshOutcome;
+
     use super::*;
 
     /// Grants every set and ignores releases.
@@ -364,8 +367,8 @@ mod tests {
         async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Extended
+        async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Answered(vec![RefreshOutcome::Extended; calls.len()])
         }
     }
 
@@ -380,8 +383,8 @@ mod tests {
         async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Unavailable
+        async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Unavailable
         }
     }
 
@@ -396,8 +399,8 @@ mod tests {
         async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Released
+        async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
         }
     }
 
@@ -448,7 +451,7 @@ mod tests {
     async fn every_granted_set_released_once_matches_no_leak() {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x"), entry("x"), entry("y")], false).await;
-        limiter.refresh("c1", &["x".into()]).await;
+        limiter.refresh(&[RefreshCall { key: "c1".into(), ids: vec!["x".into()] }]).await;
         limiter.release(&["c1".to_string()]).await;
         ledger.count(None).assert_matches(&LimiterLeak::NONE);
     }

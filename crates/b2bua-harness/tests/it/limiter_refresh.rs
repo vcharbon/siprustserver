@@ -2,7 +2,8 @@
 //! lease every `limiter_refresh_sec`, so the limiter never drops its set
 //! while the call lives.
 //!
-//! The limiter runs a 2 s lease and the call refreshes every second. Past the
+//! The limiter runs a 2 s lease and the call refreshes every second, each
+//! refresh leaving within a 100 ms tick. Past the
 //! lease the set would have lapsed UNLESS the refresh extended it. We cross
 //! the lease, sweep, then prove a second call is still refused — which can
 //! only happen if the refresh kept the call counted.
@@ -55,12 +56,13 @@ async fn refresh_keeps_a_long_call_counted_across_its_lease() {
             .build(),
     );
 
-    // Refresh once per second, inside the lease.
+    // Refresh once per second, sent within a 100 ms tick, inside the lease.
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter)
         .limiter_store(store.clone())
         .tune(|c| {
             c.limiter_refresh_sec = 1;
+            c.limiter_refresh_batch_ms = 100;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;

@@ -29,7 +29,9 @@ use async_trait::async_trait;
 use b2bua::decision::{
     test_adapter::route_to, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
@@ -59,9 +61,9 @@ impl CallLimiter for SpyLimiter {
         self.touched.store(true, Ordering::SeqCst);
         ReleaseAnswer::Released
     }
-    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
         self.touched.store(true, Ordering::SeqCst);
-        RefreshOutcome::Unavailable
+        RefreshAnswer::Unavailable
     }
 }
 

@@ -309,10 +309,11 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
     let _ = s.h.finish().await;
 }
 
-/// Limiter stalled past the lease: a counted call's refreshes are held while
-/// the breaker is open, and its set lapses on the limiter. The breaker's
-/// close sends the held refresh at once, which re-registers the set within
-/// one probe period of the limiter's return, not one refresh period later.
+/// Limiter stalled past the lease: a counted call's refresh stays due in the
+/// held refresh batch while the breaker is open, and its set lapses on the
+/// limiter. The breaker's close sends the batch at once, which re-registers
+/// the set within one probe period of the limiter's return, not one refresh
+/// period later.
 #[tokio::test(start_paused = true)]
 async fn a_refresh_held_while_open_re_registers_a_lapsed_set_on_close() {
     let s = Scene::new("limiter-breaker-held-refresh").await;
@@ -331,10 +332,8 @@ async fn a_refresh_held_while_open_re_registers_a_lapsed_set_on_close() {
 
     advance(Duration::from_secs(130)).await;
     assert!(s.b2bua.metrics().limiter_breaker_open(), "still open while stalled");
-    assert!(
-        s.b2bua.metrics().limiter_breaker_refreshes_not_sent_total() >= 3,
-        "the counted call's refreshes were held"
-    );
+    assert_eq!(s.sent_on("/v1/refresh"), 0, "no refresh request while open");
+    assert_eq!(s.b2bua.metrics().limiter_refresh_due(), 1, "the counted call's refresh is held");
     assert_eq!(s.holds(), [0, 0, 0], "the call's set lapsed on the limiter");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });

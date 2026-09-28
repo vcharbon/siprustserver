@@ -379,14 +379,32 @@ impl B2buaCore {
             metrics.clone(),
         );
         tasks.push(tokio::spawn(limiter_releases.clone().run()));
-        // The worker's circuit breaker sits in front of every admit and
-        // refresh and holds the release queue while open; the queue sends
+        // Every counted call's refresh goes through the refresh batch, whose
+        // answers come back to their calls as re-entrant events; a call whose
+        // release is queued is forgotten by the batch.
+        let limiter_refreshes = {
+            let answers = reentry_tx.clone();
+            crate::limiter_refresh_batch::RefreshBatch::new(
+                limiter.clone(),
+                crate::limiter_refresh_batch::RefreshBatchConfig::from_config(&config),
+                metrics.clone(),
+                move |answer| {
+                    let _ = answers.send(answer.into_event());
+                },
+            )
+        };
+        let forget = limiter_refreshes.clone();
+        let hooked = limiter_releases.on_push(move |key| forget.forget(key));
+        debug_assert!(hooked, "one refresh batch per release queue");
+        tasks.push(tokio::spawn(limiter_refreshes.clone().run()));
+        // The worker's circuit breaker sits in front of every admit and holds
+        // the release queue and the refresh batch while open; both send
         // through the limiter itself.
         let (limiter, breaker) = crate::limiter_breaker::BreakerLimiter::guard(
             limiter,
             crate::limiter_breaker::BreakerConfig::from_config(&config),
             limiter_releases.clone(),
-            crate::limiter_refresh_backlog::RefreshBacklogConfig::from_config(&config),
+            limiter_refreshes.clone(),
             metrics.clone(),
         );
         if let Some(breaker) = breaker {
@@ -403,6 +421,7 @@ impl B2buaCore {
             decision,
             limiter,
             limiter_releases,
+            limiter_refreshes,
             cdr: cdr.clone(),
             id_gen,
             clock,

@@ -3,7 +3,7 @@
 //! Endpoints:
 //! - `POST /v1/admit`   [`AdmitRequest`]  -> [`AdmitResponse`]
 //! - `POST /v1/release` [`ReleaseRequest`] -> `200 {}`
-//! - `POST /v1/refresh` [`RefreshRequest`] -> [`RefreshResponse`]
+//! - `POST /v1/refresh` [`RefreshRequest`] -> [`RefreshResponse`] (many calls)
 //! - `GET /v1/health` -> [`HealthResponse`]
 //!
 //! Every request names the call by the client's per-call limiter `key`, unique
@@ -55,14 +55,22 @@ pub struct ReleaseRequest {
     pub keys: Vec<String>,
 }
 
-/// `POST /v1/refresh` body: extend the call's lease, or re-create its set from
+/// One call a refresh names: extend its lease, or re-create its set from
 /// `ids` when the store no longer holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RefreshRequest {
+pub struct RefreshCall {
     /// The call to keep alive.
     pub key: String,
     /// The ids the call holds, re-registered when the store holds no set.
     pub ids: Vec<String>,
+}
+
+/// `POST /v1/refresh` body: every call to refresh, each on its own terms,
+/// in one step.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    /// The calls, in the order the answer states their outcomes.
+    pub calls: Vec<RefreshCall>,
 }
 
 /// `POST /v1/refresh` response: the outcome.
@@ -81,10 +89,11 @@ pub enum RefreshAnswer {
     Dropped,
 }
 
-/// `POST /v1/refresh` response.
+/// `POST /v1/refresh` response: one outcome per call named, in the order of
+/// the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
-    pub outcome: RefreshAnswer,
+    pub outcomes: Vec<RefreshAnswer>,
 }
 
 /// `GET /v1/health` response: the store answered, holding `calls` sets.

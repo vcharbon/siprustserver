@@ -21,6 +21,7 @@ struct Inner {
     admitted: AtomicU64,
     rejected: AtomicU64,
     refresh: AtomicU64,
+    refresh_calls: AtomicU64,
 }
 
 impl LimiterMetrics {
@@ -40,9 +41,10 @@ impl LimiterMetrics {
         };
     }
 
-    /// One refresh request arrived.
-    pub fn on_refresh(&self) {
+    /// One refresh request naming `calls` calls arrived.
+    pub fn on_refresh(&self, calls: usize) {
         self.inner.refresh.fetch_add(1, Ordering::Relaxed);
+        self.inner.refresh_calls.fetch_add(calls as u64, Ordering::Relaxed);
     }
 
     /// Render the full Prometheus exposition: the request counters here and
@@ -88,6 +90,12 @@ impl LimiterMetrics {
             "counter",
             "refresh requests received",
             g(&self.inner.refresh).to_string(),
+        );
+        metric(
+            "limiter_refresh_calls_total",
+            "counter",
+            "calls named by the refresh requests received",
+            g(&self.inner.refresh_calls).to_string(),
         );
         metric(
             "limiter_reregistered_calls_total",

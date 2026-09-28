@@ -14,7 +14,10 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallLimiterEntry, CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
+    ReleaseAnswer,
+};
 use b2bua_harness::{
     settle_until, B2buaScene, B2buaSut, LimiterLeak, BOB_PORT, DEFAULT_LIMITER_ID,
 };
@@ -61,13 +64,15 @@ impl CallLimiter for DropsReleases {
             ReleaseAnswer::Unavailable
         }
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        match self.store.refresh(key, ids) {
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        let named = calls.iter().map(|c| (c.key.as_str(), c.ids.as_slice()));
+        let outcomes = self.store.refresh_all(named).into_iter().map(|outcome| match outcome {
             RefreshResult::Extended => RefreshOutcome::Extended,
             RefreshResult::Reregistered => RefreshOutcome::Reregistered,
             RefreshResult::Released => RefreshOutcome::Released,
             RefreshResult::Dropped => RefreshOutcome::Dropped,
-        }
+        });
+        RefreshAnswer::Answered(outcomes.collect())
     }
 }
 

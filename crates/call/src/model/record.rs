@@ -122,31 +122,35 @@ pub struct PrackedProvisional {
 /// refresh its lease. `release_owed` is set once an admit request left for the
 /// key, whatever its answer, and is never cleared: the request may have landed,
 /// so the call releases its key once at its end. `counted` implies it.
+/// `generation` counts the restatements of the set after the call's first
+/// admit ([`set`](Self::set)): a refresh answer applies to the call only under
+/// the generation its refresh was sent for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
     pub key: String,
     pub counted: bool,
     pub release_owed: bool,
     pub ids: Vec<String>,
+    pub generation: u32,
 }
 
 impl CallLimiterState {
     /// The state of a call under `key` that sent no admit request.
     pub fn uncounted(key: String) -> Self {
-        Self { key, counted: false, release_owed: false, ids: Vec::new() }
+        Self { key, counted: false, release_owed: false, ids: Vec::new(), generation: 0 }
     }
 
     /// The state under `key` after an admitted set: counted iff the set is
     /// not empty; the release is owed either way.
     pub fn admitted(key: String, ids: Vec<String>) -> Self {
-        Self { key, counted: !ids.is_empty(), release_owed: true, ids }
+        Self { key, counted: !ids.is_empty(), release_owed: true, ids, generation: 0 }
     }
 
     /// The state under `key` after an admit request the limiter answered
     /// with no set for the call (a cap refusal that dropped or never had
     /// one, a release fence): uncounted, the release owed.
     pub fn unconfirmed(key: String) -> Self {
-        Self { key, counted: false, release_owed: true, ids: Vec::new() }
+        Self { key, counted: false, release_owed: true, ids: Vec::new(), generation: 0 }
     }
 
     /// This state after an admit request whose answer is lost: the set it
@@ -157,11 +161,12 @@ impl CallLimiterState {
 
     /// State the outcome of a replaced set, the key kept: `counted` and `ids`
     /// are replaced, the release obligation only grows (a counted call owes
-    /// it).
+    /// it), and the generation moves on.
     pub fn set(&mut self, counted: bool, release_owed: bool, ids: Vec<String>) {
         self.counted = counted;
         self.release_owed |= release_owed || counted;
         self.ids = ids;
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 

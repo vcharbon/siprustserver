@@ -23,7 +23,10 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallFailureResponse, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
+    ReleaseAnswer,
+};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaSut};
 use observe::{RateDraw, SampleAdmission, TokenBucket};
@@ -47,8 +50,8 @@ impl CallLimiter for FullLimiter {
     async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
         ReleaseAnswer::Released
     }
-    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-        RefreshOutcome::Released
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
     }
 }
 

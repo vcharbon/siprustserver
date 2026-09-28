@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, NoopLimiter, RefreshOutcome, ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, NoopLimiter, RefreshAnswer, RefreshCall, ReleaseAnswer,
 };
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
@@ -326,9 +326,9 @@ impl CallLimiter for CountedNoop {
         self.0.releases.fetch_add(keys.len(), Ordering::SeqCst);
         NoopLimiter.release(keys).await
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
         self.0.refreshes.fetch_add(1, Ordering::SeqCst);
-        NoopLimiter.refresh(key, ids).await
+        NoopLimiter.refresh(calls).await
     }
 }
 

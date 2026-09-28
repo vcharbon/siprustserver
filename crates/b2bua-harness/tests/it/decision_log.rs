@@ -19,7 +19,9 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision,
     RejectDecision, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+};
 use b2bua::rules::ServiceDef;
 use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry};
@@ -622,8 +624,8 @@ impl CallLimiter for RefusingLimiter {
     async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
         ReleaseAnswer::Released
     }
-    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-        RefreshOutcome::Unavailable
+    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+        RefreshAnswer::Unavailable
     }
 }
 

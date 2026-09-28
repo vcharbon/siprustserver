@@ -76,7 +76,7 @@ impl HttpTransport for Recording {
     }
 }
 
-/// The limiter answering every refresh `delay` after it arrived.
+/// The limiter answering every refresh `delay` after it applied it.
 struct SlowRefresh {
     inner: Arc<LimiterServer>,
     delay: Duration,
@@ -85,17 +85,19 @@ struct SlowRefresh {
 #[async_trait]
 impl HttpService for SlowRefresh {
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
-        if req.path == "/v1/refresh" {
+        let refresh = req.path == "/v1/refresh";
+        let resp = self.inner.handle(req).await;
+        if refresh {
             tokio::time::sleep(self.delay).await;
         }
-        self.inner.handle(req).await
+        resp
     }
 }
 
 /// How a scene's limiter and worker run.
 struct Setup {
     lease_sec: i64,
-    /// The limiter answers every refresh this long after it arrived.
+    /// The limiter answers every refresh this long after it applied it.
     refresh_delay: Option<Duration>,
 }
 
@@ -390,8 +392,8 @@ async fn a_lapsed_set_is_re_registered_within_one_tick_of_its_refresh() {
 
 /// An admit of the call's key dropped its set on the limiter behind the
 /// call's back, so its refresh answers `dropped`; the limiter answers late,
-/// and the call ends while the answer is on its way. The answer finds no
-/// call and changes nothing: one release, one CDR, nothing left behind.
+/// and the call ends while the answer is on its way. The answer changes
+/// nothing: one release, one CDR, nothing left behind.
 #[tokio::test(start_paused = true)]
 async fn a_dropped_answer_reaching_an_ended_call_is_harmless() {
     let setup = Setup { refresh_delay: Some(Duration::from_millis(100)), ..Setup::default() };
@@ -409,6 +411,17 @@ async fn a_dropped_answer_reaching_an_ended_call_is_harmless() {
 
     s.assert_drained().await;
     assert_eq!(s.released_keys(), [key]);
-    assert_eq!(s.b2bua.metrics().limiter_refresh_dropped_total(), 1, "the answer was counted");
+    let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.limiter_refresh_dropped_total(), 1, "the answer was counted");
+    assert_eq!(
+        metrics.limiter_refresh_answers_applied_total("dropped"),
+        0,
+        "and applied to nothing"
+    );
+    assert_eq!(
+        metrics.limiter_refresh_forgotten_released_total(),
+        1,
+        "the call's release forgot it"
+    );
     let _ = s.h.finish().await;
 }

@@ -209,6 +209,10 @@ async fn a_bulk_reclaim_refreshes_its_counted_calls_in_batches() {
         fh.advance(Duration::from_millis(100)).await;
     }
     assert_eq!(call_refs.len(), reclaimed, "the backup holds every call of {primary_ord}");
+    let other_ord = if primary_ord == "b1" { "b2" } else { "b1" };
+    let mut all_refs = call_refs.clone();
+    all_refs.extend(primary.scan_backed_up(other_ord));
+    assert_eq!(all_refs.len(), CALLS, "every call is replicated");
 
     // ── the primary crashes; its calls stay silent past their refresh ────
     primary.crash();
@@ -252,12 +256,18 @@ async fn a_bulk_reclaim_refreshes_its_counted_calls_in_batches() {
     }
     let drained = fh
         .settle_terminal(async || {
+            let mut traces = false;
+            for call_ref in &all_refs {
+                traces |=
+                    w_b1.holds_any_trace(call_ref).await || w_b2.holds_any_trace(call_ref).await;
+            }
             store.stats().current_total == 0
                 && w_b1.cdr_records().len() + w_b2.cdr_records().len() == CALLS
+                && !traces
         })
         .await;
     assert!(drained, "every call ended and drained; store {}", store.stats().current_total);
-    for call_ref in &call_refs {
+    for call_ref in &all_refs {
         assert_call_fully_over(&[&w_b1, &w_b2], call_ref, &store).await;
     }
 }

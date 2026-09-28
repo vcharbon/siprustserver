@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
-    ReleaseRequest,
+    AdmitEntry, AdmitRequest, AdmitResponse, RefreshAnswer, RefreshCall, RefreshRequest,
+    RefreshResponse, ReleaseRequest,
 };
 use call_limiter::{
     AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
@@ -537,17 +537,18 @@ async fn the_wire_carries_the_call_key() {
     assert!(!body.released, "a cap refusal is not a released-call refusal");
 
     let refresh = |key: &str| {
-        serde_json::to_vec(&RefreshRequest { key: key.into(), ids: vec!["x".into()] }).unwrap()
+        let calls = vec![RefreshCall { key: key.into(), ids: vec!["x".into()] }];
+        serde_json::to_vec(&RefreshRequest { calls }).unwrap()
     };
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c1"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(body.outcome, RefreshAnswer::Extended);
+    assert_eq!(body.outcomes, [RefreshAnswer::Extended]);
 
     let release =
         |key: &str| serde_json::to_vec(&ReleaseRequest { keys: vec![key.into()] }).unwrap();
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c3"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(body.outcome, RefreshAnswer::Reregistered, "an unknown call is re-registered");
+    assert_eq!(body.outcomes, [RefreshAnswer::Reregistered], "an unknown call is re-registered");
     assert_eq!(store.held("x"), 2);
     assert_eq!(call(&net, HttpRequest::post("/v1/release", release("c3"))).await.status, 200);
     assert_eq!(call(&net, HttpRequest::post("/v1/release", release("c1"))).await.status, 200);
@@ -557,7 +558,7 @@ async fn the_wire_carries_the_call_key() {
 
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c1"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(body.outcome, RefreshAnswer::Released, "a released call is refused by refresh");
+    assert_eq!(body.outcomes, [RefreshAnswer::Released], "a released call is refused by refresh");
 
     let resp =
         call(&net, HttpRequest::post("/v1/admit", admit("c1", entries(&[("x", 1)]), false))).await;
@@ -573,6 +574,64 @@ async fn the_wire_carries_the_call_key() {
     assert!(body.admitted);
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c4"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(body.outcome, RefreshAnswer::Dropped, "a dropped set is refused with its reason");
+    assert_eq!(body.outcomes, [RefreshAnswer::Dropped], "a dropped set is refused with its reason");
     assert_eq!(store.held("x"), 0);
+}
+
+/// One refresh request names many calls and answers each one as its own
+/// refresh would, in the order named: a known call is extended, a lapsed one
+/// re-registered, a released or dropped one refused with its fence, a call
+/// named twice answered twice. The limiter counts the request once and every
+/// call it names.
+#[tokio::test(start_paused = true)]
+async fn one_refresh_request_answers_every_call_it_names_in_order() {
+    let store = Arc::new(store());
+    let metrics = LimiterMetrics::new();
+    let server = Arc::new(LimiterServer::new(store.clone(), metrics.clone()));
+    let net = SimulatedHttpNetwork::new();
+    let _h = net.serve(addr(), server).await.unwrap();
+    assert_eq!(
+        store.admit("known", &entries(&[("x", 10), ("y", 10)]), false),
+        AdmitResult::Admitted
+    );
+    assert_eq!(store.admit("released", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
+    store.release(&["released"]);
+    assert_eq!(store.admit("dropped", &[], false), AdmitResult::Admitted);
+
+    let named = [
+        ("known", vec!["x", "y"]),
+        ("lapsed", vec!["x", "x"]),
+        ("released", vec!["x"]),
+        ("dropped", vec!["y"]),
+        ("known", vec!["x", "y"]),
+    ];
+    let calls = named
+        .iter()
+        .map(|(key, ids)| RefreshCall {
+            key: (*key).into(),
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+        })
+        .collect();
+    let body = serde_json::to_vec(&RefreshRequest { calls }).unwrap();
+    let resp = call(&net, HttpRequest::post("/v1/refresh", body)).await;
+    assert_eq!(resp.status, 200);
+    let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(
+        body.outcomes,
+        [
+            RefreshAnswer::Extended,
+            RefreshAnswer::Reregistered,
+            RefreshAnswer::Released,
+            RefreshAnswer::Dropped,
+            RefreshAnswer::Extended,
+        ]
+    );
+    assert_eq!([store.held("x"), store.held("y")], [3, 1], "known [x, y] and lapsed [x, x]");
+    assert_eq!(store.stats().reregistered_calls, 1);
+    let text = metrics.prometheus_text(store.stats());
+    assert!(text.contains("limiter_refresh_total 1\n"), "{text}");
+    assert!(text.contains("limiter_refresh_calls_total 5\n"), "{text}");
+
+    let direct = store.refresh_all([("known", &["x".to_string()][..]), ("gone", &[][..])]);
+    assert_eq!(direct, [RefreshResult::Extended, RefreshResult::Released]);
 }

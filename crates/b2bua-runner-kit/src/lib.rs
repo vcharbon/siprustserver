@@ -405,6 +405,12 @@ pub struct RunnerEnv {
     /// `LIMITER_REFRESH_SECONDS` — how often a counted call extends its lease;
     /// below the limiter service's `LIMITER_LEASE_SECONDS` (default 40).
     pub limiter_refresh_sec: i64,
+    /// `LIMITER_REFRESH_BATCH_MS` — the worker's refresh tick: a refresh due
+    /// leaves within it, with every other key due (default 1000).
+    pub limiter_refresh_batch_ms: u64,
+    /// `LIMITER_REFRESH_BATCH_MAX` — most keys one refresh request carries
+    /// (default 1000).
+    pub limiter_refresh_batch_max: usize,
     /// `LIMITER_LEASE_SECONDS` — the limiter service's lease; a release queued
     /// longer is given up (default 120).
     pub limiter_lease_sec: i64,
@@ -533,6 +539,8 @@ impl RunnerEnv {
                 .unwrap_or_default(),
             limiter_timeout_ms: limiter.timeout_ms,
             limiter_refresh_sec: limiter.refresh_sec,
+            limiter_refresh_batch_ms: limiter.refresh_batch_ms,
+            limiter_refresh_batch_max: limiter.refresh_batch_max,
             limiter_lease_sec: limiter.lease_sec,
             limiter_release_timeout_ms: limiter.release_timeout_ms,
             limiter_release_queue_cap: limiter.queue_cap,
@@ -712,6 +720,8 @@ impl RunnerEnv {
             keepalive_timeout_sec: self.keepalive_timeout_sec,
             reboot_budget_sec: self.reboot_budget_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
+            limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
+            limiter_refresh_batch_max: self.limiter_refresh_batch_max,
             limiter_lease_sec: self.limiter_lease_sec,
             limiter_release_queue_cap: self.limiter_release_queue_cap,
             limiter_breaker_failures: self.limiter_breaker_failures,

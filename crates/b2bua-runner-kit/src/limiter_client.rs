@@ -59,7 +59,7 @@ mod tests {
     use async_trait::async_trait;
     use b2bua::limiter::{AdmitOutcome, LimiterEntry, ReleaseAnswer};
     use b2bua::limiter_breaker::{BreakerConfig, BreakerLimiter};
-    use b2bua::limiter_refresh_backlog::RefreshBacklogConfig;
+    use b2bua::limiter_refresh_batch::{RefreshBatch, RefreshBatchConfig};
     use b2bua::limiter_release::{ReleaseQueue, ReleaseQueueConfig};
     use b2bua::metrics::B2buaMetrics;
     use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -195,11 +195,19 @@ mod tests {
             let bounds = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
             let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
             tokio::spawn(releases.clone().run());
+            let bounds = RefreshBatchConfig {
+                tick: PROBE,
+                max: 100,
+                lease: Duration::from_secs(120),
+                cap: 10,
+            };
+            let refreshes = RefreshBatch::new(client.clone(), bounds, metrics.clone(), |_| {});
+            tokio::spawn(refreshes.clone().run());
             let (limiter, breaker) = BreakerLimiter::guard(
                 client,
                 BreakerConfig { failures: 3, probe: PROBE },
                 releases,
-                RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+                refreshes,
                 metrics.clone(),
             );
             tokio::spawn(breaker.expect("the HTTP client is guarded").run());

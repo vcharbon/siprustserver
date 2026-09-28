@@ -826,6 +826,7 @@ mod tests {
             counted,
             release_owed,
             ids: if counted { vec!["x".into(), "y".into()] } else { vec![] },
+            generation: 0,
         };
         let payload = route_result_payload(route, admitted, Some("b-1".into()));
         internal_event("call-1".into(), "call-failure-result", "failover", payload, Vec::new())

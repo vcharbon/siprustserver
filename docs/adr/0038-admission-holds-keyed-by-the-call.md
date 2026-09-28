@@ -40,11 +40,12 @@ and a lost release could not be retried.
    that left before the drop and lands after it re-creates nothing. A
    refused refresh names its fence: `released` (the call was released) or
    `dropped` (an admit of the key dropped the set).
-4. **`refresh(key, ids)` extends the lease** of a known call. For a call the
-   server does not know and has not fenced it **re-creates the set from
-   the ids the refresh carries, with no cap check**: the call exists and was
-   admitted; its set lapsed while nobody refreshed it, or the server restarted
-   empty. A fenced call stays refused.
+4. **`refresh` extends the lease** of every call it names, each `(key, ids)`
+   answered on its own terms, in order. For a call the server knows it
+   extends the lease. For a call the server does not know and has not fenced
+   it **re-creates the set from the ids the refresh carries, with no cap
+   check**: the call exists and was admitted; its set lapsed while nobody
+   refreshed it, or the server restarted empty. A fenced call stays refused.
 5. **A set whose lease lapses is dropped and counted.** The lease is the
    backstop for every release the server never received.
 6. **A call that sent an admit request releases its key at its end**,
@@ -68,17 +69,21 @@ and a lost release could not be retried.
    `dropped` and the call goes uncounted, still owing its release: a set its
    own admit dropped is never re-registered. A refresh refused by a release
    fence leaves the call counted (see Consequences).
-7. **Only a counted Active call refreshes**, and it always has its refresh
-   armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
-   on every turn of the call, so a refresh that never fired heals on the
+7. **Only a counted Active call refreshes**, never waiting on the limiter
+   in its turn: its `LimiterRefresh` turn marks the key due on the worker's
+   refresh batch (decision 11). It always has its refresh armed: the
+   invariant layer re-arms a missing or past-due `LimiterRefresh` on every
+   turn of the call, so a refresh that never fired heals on the
    call's next turn. For an idle established call that turn is its
    keepalive, so the call may run uncounted for up to the keepalive interval
    plus one refresh period. A Terminating call stops refreshing: a teardown
    may outlast the lease (a release consult, then the sliding 32 s backstop),
    in which case the set lapses early and the terminal release is a no-op.
-8. **The call state is `{key, counted, release_owed, ids}`**, one replicated
-   field. `counted` is refresh eligibility and implies `release_owed`, which
-   the first admit request sets and nothing clears; every end path reads it
+8. **The call state is `{key, counted, release_owed, ids, generation}`**, one
+   replicated field; `generation` moves on each time a route fold (or a
+   refresh answer) restates the set. `counted` is refresh eligibility and
+   implies `release_owed`, which the first admit request sets and nothing
+   clears; every end path reads it
    to send the release: the terminal settle, the primary's discharge of a
    takeover copy's terminal, a reclaim, the lossy reap of a deferred
    terminal, a fold landing on a gone call. A route fold's
@@ -125,18 +130,15 @@ and a lost release could not be retried.
     included, ends the run, and only admits count. A run of 3 opens it. Open,
     an admit sends nothing and answers at once: the call owes no release by
     that admit and stays as it was (an initial admit leaves it uncounted for
-    its life, a reroute admit leaves a counted call counted on its old set). A
-    refresh sends nothing; the breaker holds the latest refresh of each key
-    for one lease from the first one held, within the release queue's cap, and
-    forgets it when the call's release is queued, so an ended call's set is
-    never refreshed. The release queue is held. A background probe asks the
+    its life, a reroute admit leaves a counted call counted on its old set).
+    The release queue and the refresh batch are held: nothing is sent, and
+    every refresh due stays due (decision 11). A background probe asks the
     limiter's health answer, which reads its store, every second under the
     admit budget; answers of admits sent before the breaker opened change
-    nothing. The first answer closes the breaker, resumes the queue and sends
-    the held refreshes, at most 32 in flight: a counted call whose set lapsed
-    during the outage is re-registered at the close (decision 4), not one
-    refresh period later. Their answers are counted apart; the call learns its
-    state at its next refresh. No call is a probe. A limiter client without a
+    nothing. The first answer closes the breaker and resumes the queue and the
+    batch, which send at once: a counted call whose set lapsed during the
+    outage is re-registered at the close (decision 4), not one refresh period
+    later, and each answer reaches its call. No call is a probe. A limiter client without a
     health answer runs without a breaker, and a guarded limiter is never
     guarded twice. The limiter's `host:port` is a socket address used as it
     is, or a name resolved on the request path: one lookup at a time, every
@@ -153,6 +155,27 @@ and a lost release could not be retried.
     the probe's budget still closes the breaker at the next probe. No
     `LIMITER_URL` runs without a limiter; a configured one is never replaced
     by none.
+11. **A refresh is one request per worker per tick, and no call waits on
+    it.** A counted call's `LimiterRefresh` turn marks its key, ids and
+    generation due on the worker's refresh batch and goes on. One tick
+    (1 s) after a key falls due, the batch sends every key due, at most
+    `LIMITER_REFRESH_BATCH_MAX` keys per request, one request at a time,
+    under the admit budget: the request rate is one per tick whatever the
+    number of counted calls, and the calls one node reclaims at once, whose
+    refreshes are all past due, leave in `ceil(calls / max)` requests. A key
+    marked again while due is sent once with its latest ids. A request with
+    no usable answer keeps its keys for the next tick. An entry is given up
+    one lease after its first mark, at the release queue's cap (the oldest),
+    or when its call's release is queued, so an ended call's set is never
+    refreshed after its release; all three are counted. The batch is not
+    replicated. Each answer but `Extended` goes back to its call as an
+    internal event and is applied on the call's own turn, to the resident
+    call only (none is materialised for it), and only under the generation
+    it was marked with: an answer for an ended call, another key, an
+    uncounted call or an older generation (a fold restated the set since)
+    changes nothing. `Dropped` makes the call uncounted, still owing its
+    release; `Released` and `Reregistered` leave it as it is. The breaker
+    drives the batch like the release queue (decision 10).
 
 ## Lease, refresh and the replica TTL
 
@@ -189,10 +212,12 @@ cells that prove re-registration run the deployed relation.
   (`b2bua_limiter_refresh_dropped_total`).
 - Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
   same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
-  the lease by more than one period; `LIMITER_RELEASE_TIMEOUT_MS`,
-  `LIMITER_RELEASE_QUEUE_CAP`, `LIMITER_BREAKER_FAILURES` (3),
-  `LIMITER_BREAKER_PROBE_MS` (1000) and the exit's release flush bound
-  `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the workers.
+  the lease by more than one period; `LIMITER_REFRESH_BATCH_MS` (1000, below
+  the refresh period) and `LIMITER_REFRESH_BATCH_MAX` (1000),
+  `LIMITER_RELEASE_TIMEOUT_MS`, `LIMITER_RELEASE_QUEUE_CAP`,
+  `LIMITER_BREAKER_FAILURES` (3), `LIMITER_BREAKER_PROBE_MS` (1000) and the
+  exit's release flush bound `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the
+  workers.
 - The breaker trades counts for latency: the calls a worker starts while its
   breaker is open stay uncounted for their life, so after the limiter comes
   back its counts read low by those calls until they end, and a cap can be
@@ -202,10 +227,7 @@ cells that prove re-registration run the deployed relation.
   leaves the call as it was). A gauge of the live calls left uncounted is
   future work. The breaker's state is `b2bua_limiter_breaker_open`, its
   transitions `b2bua_limiter_breaker_transitions_total{to=open|closed}`, its
-  held refreshes `b2bua_limiter_breaker_refreshes_not_sent_total`,
-  `b2bua_limiter_breaker_refreshes_held`,
-  `b2bua_limiter_breaker_refreshes_dropped_total{reason=lease_expired|cap|released}`
-  and `b2bua_limiter_breaker_refreshes_flushed_total{outcome}`, its probes
+  probes
   `b2bua_limiter_breaker_probe_failures_total` and
   `b2bua_limiter_breaker_probe_restarts_total`; a failed probe also counts in
   the limiter's fail-open episode, which so lasts as long as the outage. The
@@ -213,7 +235,21 @@ cells that prove re-registration run the deployed relation.
   alone. A malformed `LIMITER_URL` (another scheme, no port, a path, an
   unbracketed IPv6 address) refuses boot; a well-formed name that does not
   resolve at boot starts the breaker open.
-- A refresh carries the call's ids: one request per counted call per period.
+- A refresh request carries every key due with its ids: one request per
+  worker per tick. The limiter counts requests (`limiter_refresh_total`) and
+  the calls they name (`limiter_refresh_calls_total`); the worker counts
+  `b2bua_limiter_refresh_requests_total{result=answered|unavailable}`, the
+  keys sent (`b2bua_limiter_refresh_keys_sent_total`, over the requests the
+  mean batch size), the keys put back (`b2bua_limiter_refresh_retries_total`),
+  the keys due (`b2bua_limiter_refresh_due`, held while the breaker is
+  open), the entries given up
+  (`b2bua_limiter_refresh_forgotten_total{reason=lease_expired|cap|released}`),
+  the answers applied to their call
+  (`b2bua_limiter_refresh_answers_applied_total{outcome}`) or discarded
+  (`b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`)
+  and sender restarts (`b2bua_limiter_refresh_sender_restarts_total`). A
+  refresh is sent within one tick of falling due, so the lease must outlast
+  the refresh period plus a tick.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the
   flush and reboots later than one lease) re-registers a set until the
@@ -224,8 +260,9 @@ cells that prove re-registration run the deployed relation.
   partitioned backup's reap of a primary it believes dead fences the key of a
   call the primary still serves; that call's refreshes are refused for one
   lease, then re-register. A refresh sent before a fold's refusal dropped the
-  call's set lands on the drop fence and answers `dropped`; the fold then
-  states the call uncounted and only its terminal release is sent.
+  call's set lands on the drop fence and answers `dropped`; the answer and
+  the fold reach the call in either order, and either way the call ends
+  uncounted and only its terminal release is sent.
 - No call waits on its release: a stalled or unreachable limiter delays
   no CDR and no removal, those of calls whose admit failed open included.
   What waits is the release queue, at most one lease of ending calls per
@@ -236,9 +273,8 @@ cells that prove re-registration run the deployed relation.
   worker or given up by the queue is freed by the lease, so the limiter's
   counts read high by those calls for up to one lease.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
-  calls one node reclaims refresh together (batching is follow-up work).
+  calls one node reclaims fall due together and the batch absorbs them.
 - Replica bodies decode strictly: a body without the limiter key is dropped at
   reclaim and at the reap (no upgrade compatibility, by policy).
-- Out of scope here: what a batched per-node refresh changes about the
-  request rate; per-leg keys for a transfer, which extend the key without
-  changing this contract.
+- Out of scope here: per-leg keys for a transfer, which extend the key
+  without changing this contract.

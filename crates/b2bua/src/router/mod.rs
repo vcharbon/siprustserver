@@ -19,6 +19,7 @@
 mod callouts;
 mod ingress;
 mod interpret;
+mod limiter_refresh;
 mod materialise;
 mod must_run;
 mod peer_metrics;
@@ -98,6 +99,8 @@ pub struct RouterCtx {
     pub limiter: Arc<dyn CallLimiter>,
     /// Where every release of a call's limiter key goes: no call waits on it.
     pub limiter_releases: Arc<crate::limiter_release::ReleaseQueue>,
+    /// Where every counted call's refresh goes: no call waits on it.
+    pub limiter_refreshes: Arc<crate::limiter_refresh_batch::RefreshBatch>,
     pub cdr: Arc<dyn CdrWriter>,
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,

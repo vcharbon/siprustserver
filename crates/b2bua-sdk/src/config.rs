@@ -567,6 +567,20 @@ impl B2buaConfig {
                 self.limiter_refresh_sec, self.limiter_lease_sec
             ));
         }
+        let refresh_ms = self.limiter_refresh_sec.saturating_mul(1000);
+        if self.limiter_refresh_batch_ms == 0 || self.limiter_refresh_batch_ms as i64 >= refresh_ms
+        {
+            return Err(format!(
+                "limiter_refresh_batch_ms={} not in 1..{refresh_ms} (limiter_refresh_sec): a \
+                 refresh falling due must leave within one refresh period",
+                self.limiter_refresh_batch_ms
+            ));
+        }
+        if self.limiter_refresh_batch_max == 0 {
+            return Err("limiter_refresh_batch_max=0: a refresh request carries at least one \
+                        key"
+            .to_string());
+        }
         if self.limiter_release_queue_cap == 0 {
             return Err("limiter_release_queue_cap=0: the release queue needs room for \
                         one release"
@@ -818,6 +832,12 @@ mod tests {
         assert!(e.contains("limiter_lease_sec="), "{e}");
         let e = with(|c| c.limiter_refresh_sec = 120).expect_err("refresh at the lease");
         assert!(e.contains("limiter_refresh_sec=120"), "{e}");
+        let e = with(|c| c.limiter_refresh_batch_ms = 0).expect_err("zero tick");
+        assert!(e.contains("limiter_refresh_batch_ms=0"), "{e}");
+        let e = with(|c| c.limiter_refresh_batch_ms = 40_000).expect_err("tick at the period");
+        assert!(e.contains("limiter_refresh_batch_ms=40000"), "{e}");
+        let e = with(|c| c.limiter_refresh_batch_max = 0).expect_err("zero batch");
+        assert!(e.contains("limiter_refresh_batch_max=0"), "{e}");
         let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
         assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
         let e = with(|c| c.limiter_breaker_failures = 0).expect_err("zero failures");

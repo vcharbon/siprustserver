@@ -5,9 +5,10 @@
 //! [`LimiterTarget`]. The **timeout budgets live here**: every request is
 //! wrapped in `tokio::time::timeout`, and a timeout *or* any transport error
 //! (a target name that does not resolve included) *or* a non-200 status maps
-//! to `Unavailable`. An admit or a refresh runs on a call's turn under the
-//! fail-open budget; a release runs off every call, in the worker's release
-//! queue, under its own longer budget. The health answer
+//! to `Unavailable`. An admit runs on a call's turn under the fail-open
+//! budget; a refresh runs off every call, in the worker's refresh batch,
+//! under the same budget; a release runs off every call, in the worker's
+//! release queue, under its own longer budget. The health answer
 //! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
 //! store, under the admit budget; it has an address once the target's name
 //! resolved, and forgetting it makes the next request look the name up again.
@@ -18,13 +19,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, RefreshAnswer, RefreshRequest,
-    RefreshResponse, ReleaseRequest,
+    self, AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, RefreshRequest, RefreshResponse,
+    ReleaseRequest,
 };
 use http_net::{HttpRequest, HttpResponse, HttpTransport};
 
 use crate::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshOutcome, ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
+    RefreshOutcome, ReleaseAnswer,
 };
 use crate::limiter_target::LimiterTarget;
 
@@ -229,19 +231,32 @@ impl CallLimiter for HttpCallLimiter {
         }
     }
 
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        let body = RefreshRequest { key: key.to_string(), ids: ids.to_vec() };
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        let body = RefreshRequest {
+            calls: calls
+                .iter()
+                .map(|c| wire::RefreshCall { key: c.key.clone(), ids: c.ids.clone() })
+                .collect(),
+        };
         let Some(resp) = self.post("/v1/refresh", &body, self.timeout).await else {
-            return RefreshOutcome::Unavailable;
+            return RefreshAnswer::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {
-            Ok(RefreshResponse { outcome: RefreshAnswer::Extended }) => RefreshOutcome::Extended,
-            Ok(RefreshResponse { outcome: RefreshAnswer::Reregistered }) => {
-                RefreshOutcome::Reregistered
+            // An answer that does not name one outcome per call is a bad body.
+            Ok(RefreshResponse { outcomes }) if outcomes.len() == calls.len() => {
+                RefreshAnswer::Answered(
+                    outcomes
+                        .into_iter()
+                        .map(|outcome| match outcome {
+                            wire::RefreshAnswer::Extended => RefreshOutcome::Extended,
+                            wire::RefreshAnswer::Reregistered => RefreshOutcome::Reregistered,
+                            wire::RefreshAnswer::Released => RefreshOutcome::Released,
+                            wire::RefreshAnswer::Dropped => RefreshOutcome::Dropped,
+                        })
+                        .collect(),
+                )
             }
-            Ok(RefreshResponse { outcome: RefreshAnswer::Released }) => RefreshOutcome::Released,
-            Ok(RefreshResponse { outcome: RefreshAnswer::Dropped }) => RefreshOutcome::Dropped,
-            Err(_) => RefreshOutcome::Unavailable,
+            _ => RefreshAnswer::Unavailable,
         }
     }
 
@@ -348,7 +363,8 @@ mod tests {
         let target = LimiterTarget::name_with("limiter:8080", resolver());
         let client = HttpCallLimiter::with_target(Arc::new(net), target, BUDGET);
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
-        assert_eq!(client.refresh("c#k", &["x".into()]).await, RefreshOutcome::Unavailable);
+        let calls = [RefreshCall { key: "c#k".into(), ids: vec!["x".into()] }];
+        assert_eq!(client.refresh(&calls).await, RefreshAnswer::Unavailable);
         assert_eq!(client.release(&["c#k".into()]).await, ReleaseAnswer::Unavailable);
         assert!(!client.health().unwrap().serving().await);
     }
@@ -370,6 +386,44 @@ mod tests {
         assert!(!health.has_address(), "forgotten");
         assert!(health.serving().await, "the probe looks it up again");
         assert!(health.has_address());
+    }
+
+    /// A limiter answering every refresh with one outcome whatever it names.
+    struct OneOutcome;
+
+    #[async_trait]
+    impl http_net::HttpService for OneOutcome {
+        async fn handle(&self, _: HttpRequest) -> HttpResponse {
+            let body = RefreshResponse { outcomes: vec![wire::RefreshAnswer::Extended] };
+            HttpResponse::ok(serde_json::to_vec(&body).unwrap())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_refresh_request_answers_each_call_it_names() {
+        let (net, _server) = served().await;
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        assert_eq!(client.admit("known#k", &entries(), false).await, AdmitOutcome::Admitted);
+        client.release(&["gone#k".into()]).await;
+        let call = |key: &str| RefreshCall { key: key.into(), ids: vec!["x".into()] };
+        let answer = client.refresh(&[call("known#k"), call("lapsed#k"), call("gone#k")]).await;
+        assert_eq!(
+            answer,
+            RefreshAnswer::Answered(vec![
+                RefreshOutcome::Extended,
+                RefreshOutcome::Reregistered,
+                RefreshOutcome::Released,
+            ])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_naming_fewer_outcomes_than_calls_is_unavailable() {
+        let net = SimulatedHttpNetwork::new();
+        let _server = net.serve(laddr(), Arc::new(OneOutcome)).await.unwrap();
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        let call = |key: &str| RefreshCall { key: key.into(), ids: vec!["x".into()] };
+        assert_eq!(client.refresh(&[call("a#k"), call("b#k")]).await, RefreshAnswer::Unavailable);
     }
 
     #[tokio::test(start_paused = true)]

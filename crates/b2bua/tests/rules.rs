@@ -640,7 +640,7 @@ fn decision_folds_on_a_live_call_still_apply() {
 /// counting the call on `x` + `y`.
 fn route_fold_payload_with_holds() -> serde_json::Value {
     let mut payload = route_fold_payload();
-    payload["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": true, "release_owed": true, "ids": ["x", "y"] });
+    payload["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": true, "release_owed": true, "ids": ["x", "y"], "generation": 0 });
     payload
 }
 
@@ -678,8 +678,7 @@ fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
     // failure chain's reject, redirect or terminate, a release whose reroute
     // was refused) states the call uncounted, owing its release, first, live
     // or going away.
-    let uncounted =
-        serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [] });
+    let uncounted = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [], "generation": 0 });
     let mut live = test_call();
     live.limiter = call::CallLimiterState::admitted("call#k".into(), vec!["x".into()]);
     live.callback_context = Some("cb".into());
@@ -767,7 +766,7 @@ fn a_live_route_fold_hands_the_call_holds_to_its_route() {
         );
 
         let mut uncounted = route_fold_payload();
-        uncounted["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [] });
+        uncounted["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [], "generation": 0 });
         let actions = fold_result(&call, rule_id, topic, outcome, uncounted);
         assert!(
             actions.iter().any(|a| matches!(
@@ -3973,6 +3972,7 @@ mod enforce_equivalence {
                 counted,
                 release_owed: counted || sent,
                 ids: ids.into_iter().map(str::to_string).collect(),
+                generation: 0,
             })
     }
 
@@ -4151,7 +4151,11 @@ mod limiter_settle {
         );
         assert_eq!(
             result.call.limiter,
-            CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()])
+            CallLimiterState {
+                generation: 1,
+                ..CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()])
+            },
+            "the set is restated under the next generation"
         );
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
 
@@ -4166,7 +4170,13 @@ mod limiter_settle {
                 ids: vec![],
             }],
         );
-        assert_eq!(result.call.limiter, CallLimiterState::unconfirmed(call.limiter.key.clone()));
+        assert_eq!(
+            result.call.limiter,
+            CallLimiterState {
+                generation: 1,
+                ..CallLimiterState::unconfirmed(call.limiter.key.clone())
+            }
+        );
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
     }
 

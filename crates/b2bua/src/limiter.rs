@@ -9,8 +9,10 @@
 //! call it names (idempotent per key, a no-op for a key the server holds
 //! nothing for), and is reached only through the worker's release queue
 //! ([`crate::limiter_release`]);
-//! [`CallLimiter::refresh`] extends its lease, or re-registers the set the
-//! call carries when the server no longer holds it. The **call site owns the
+//! [`CallLimiter::refresh`] extends the lease of every call it names, or
+//! re-registers the set a call carries when the server no longer holds it,
+//! and is reached only through the worker's refresh batch
+//! ([`crate::limiter_refresh_batch`]). The **call site owns the
 //! fail-open policy** ([`state_after_admit`]): a failed admit leaves the call
 //! as it was, a sent one owes the call's release, and only a confirmed set
 //! refreshes. [`CallLimiter::health`] is the limiter's health answer, which
@@ -82,8 +84,18 @@ pub fn state_after_admit(
     }
 }
 
-/// The honest outcome of one refresh.
+/// One call a refresh names: its key and the ids the server re-registers
+/// when it no longer holds a set for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshCall {
+    /// The call's limiter key.
+    pub key: String,
+    /// The ids the server last confirmed for the call.
+    pub ids: Vec<String>,
+}
+
+/// The server's answer for one call a refresh named.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// The call's lease was extended.
     Extended,
@@ -96,7 +108,16 @@ pub enum RefreshOutcome {
     /// The server holds nothing for the call and re-creates nothing: an admit
     /// of the call's key dropped its set, and no admit since replaced it.
     Dropped,
-    /// The backend was unreachable / slow / errored.
+}
+
+/// The honest outcome of one refresh request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshAnswer {
+    /// The limiter answered: one outcome per call named, in order.
+    Answered(Vec<RefreshOutcome>),
+    /// The request left and no usable answer came back (unreachable, slow,
+    /// errored, a bad body): it may have landed. The caller sends the calls
+    /// again; a refresh is idempotent per call.
     Unavailable,
 }
 
@@ -125,9 +146,10 @@ pub trait CallLimiter: Send + Sync {
     /// Drop the set of every call of `keys` in one request. Idempotent per
     /// key on the server. The implementation bounds the wait.
     async fn release(&self, keys: &[String]) -> ReleaseAnswer;
-    /// Extend the call's lease; `ids` is the set the server re-registers
-    /// when it no longer holds one for the call.
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome;
+    /// Extend the lease of every call of `calls` in one request; a call's
+    /// `ids` is the set the server re-registers when it no longer holds one
+    /// for it. The implementation bounds the wait.
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer;
     /// The limiter's health answer, which the worker's circuit breaker
     /// probes. A limiter without one runs without a breaker.
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
@@ -165,8 +187,8 @@ impl CallLimiter for NoopLimiter {
     async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
         ReleaseAnswer::Released
     }
-    async fn refresh(&self, _key: &str, _ids: &[String]) -> RefreshOutcome {
-        RefreshOutcome::Unavailable
+    async fn refresh(&self, _calls: &[RefreshCall]) -> RefreshAnswer {
+        RefreshAnswer::Unavailable
     }
 }
 

@@ -22,7 +22,9 @@ use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::drain::{DrainBounds, DrainExit};
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+};
 use b2bua_harness::{settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -404,8 +406,8 @@ impl CallLimiter for FirstReleasePanics {
         assert!(self.released.swap(true, Ordering::SeqCst), "the first release panics");
         self.inner.release(keys).await
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        self.inner.refresh(key, ids).await
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        self.inner.refresh(calls).await
     }
 }
 

@@ -844,14 +844,20 @@ fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
         })
 }
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
-    (arb_tag(), any::<bool>(), any::<bool>(), proptest::collection::vec(arb_tag(), 0..3)).prop_map(
-        |(key, counted, sent, ids)| CallLimiterState {
+    (
+        arb_tag(),
+        any::<bool>(),
+        any::<bool>(),
+        proptest::collection::vec(arb_tag(), 0..3),
+        any::<u32>(),
+    )
+        .prop_map(|(key, counted, sent, ids, generation)| CallLimiterState {
             key,
             counted,
             release_owed: counted || sent,
             ids,
-        },
-    )
+            generation,
+        })
 }
 fn arb_tagmap() -> impl Strategy<Value = TagMapping> {
     (arb_tag(), arb_tag(), arb_tag()).prop_map(|(a_tag, b_leg_id, b_tag)| TagMapping {

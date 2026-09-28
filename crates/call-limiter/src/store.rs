@@ -17,7 +17,8 @@
 //!   its `key` for one lease against admit and refresh, so an admit or a
 //!   refresh landing after the call ended re-creates nothing. A release of an
 //!   unknown or released call changes no count and creates no set.
-//! - **refresh** extends the lease of a known call. For a call the store does
+//! - **refresh** names one or more calls, each answered on its own terms.
+//!   It extends the lease of a known call. For a call the store does
 //!   not know and has not fenced it re-creates the set from the ids the
 //!   refresh carries, with no cap check: the call exists and was admitted, and
 //!   its set lapsed (a lease missed across a takeover or a restart of the
@@ -240,24 +241,23 @@ impl CallStore {
     /// Extend the call's lease, or re-create its set from `ids` (no cap check)
     /// when the store holds none and the key is not fenced.
     pub fn refresh(&self, key: &str, ids: &[String]) -> RefreshResult {
+        self.refresh_all([(key, ids)]).pop().expect("one call, one outcome")
+    }
+
+    /// [`refresh`](Self::refresh) every call of `calls` in one step: one
+    /// outcome per call, in order, each exactly what its own refresh answers.
+    pub fn refresh_all<'a>(
+        &self,
+        calls: impl IntoIterator<Item = (&'a str, &'a [String])>,
+    ) -> Vec<RefreshResult> {
         let now_ms = self.now_ms();
+        let lease_expires_at_ms = now_ms + self.lease_ms();
         let mut inner = self.inner.lock().unwrap();
         sweep(&mut inner, now_ms);
-        let lease_expires_at_ms = now_ms + self.lease_ms();
-        if let Some(set) = inner.calls.get_mut(key) {
-            set.lease_expires_at_ms = lease_expires_at_ms;
-            inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
-            return RefreshResult::Extended;
-        }
-        match inner.fences.get(key) {
-            Some((Fence::Dropped, _)) => return RefreshResult::Dropped,
-            Some((Fence::Released, _)) => return RefreshResult::Released,
-            None if ids.is_empty() => return RefreshResult::Released,
-            None => {}
-        }
-        insert_set(&mut inner, key, ids.to_vec(), lease_expires_at_ms);
-        inner.reregistered_calls += 1;
-        RefreshResult::Reregistered
+        calls
+            .into_iter()
+            .map(|(key, ids)| refresh(&mut inner, key, ids, lease_expires_at_ms))
+            .collect()
     }
 
     /// Drop every lapsed set and fence now (the janitor entry point).
@@ -329,6 +329,30 @@ pub struct StoreStats {
     pub releases_total: u64,
     /// Cumulative admits refused because the call was released.
     pub admits_refused_released: u64,
+}
+
+/// Refresh one call: extend its lease to `lease_expires_at_ms`, or re-create
+/// its set from `ids` when the store holds none and the key is not fenced.
+fn refresh(
+    inner: &mut Inner,
+    key: &str,
+    ids: &[String],
+    lease_expires_at_ms: i64,
+) -> RefreshResult {
+    if let Some(set) = inner.calls.get_mut(key) {
+        set.lease_expires_at_ms = lease_expires_at_ms;
+        inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
+        return RefreshResult::Extended;
+    }
+    match inner.fences.get(key) {
+        Some((Fence::Dropped, _)) => return RefreshResult::Dropped,
+        Some((Fence::Released, _)) => return RefreshResult::Released,
+        None if ids.is_empty() => return RefreshResult::Released,
+        None => {}
+    }
+    insert_set(inner, key, ids.to_vec(), lease_expires_at_ms);
+    inner.reregistered_calls += 1;
+    RefreshResult::Reregistered
 }
 
 /// Fence `key` against refresh as `why`, until `lapses_at_ms`.

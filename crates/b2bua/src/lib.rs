@@ -36,7 +36,7 @@ pub mod lifecycle;
 pub mod limiter;
 pub mod limiter_breaker;
 pub mod limiter_http;
-pub mod limiter_refresh_backlog;
+pub mod limiter_refresh_batch;
 pub mod limiter_release;
 pub mod limiter_target;
 pub(crate) mod message_ring;

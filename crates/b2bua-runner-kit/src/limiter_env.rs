@@ -5,6 +5,8 @@
 //! | `LIMITER_URL` | the limiter, `[http://]host:port[/]` | unset: no limiter |
 //! | `LIMITER_TIMEOUT_MS` | the budget of one admit or refresh (fail-open past it) | 150 |
 //! | `LIMITER_REFRESH_SECONDS` | how often a counted call extends its lease | 40 |
+//! | `LIMITER_REFRESH_BATCH_MS` | the refresh tick: a refresh due leaves within it, batched | 1000 |
+//! | `LIMITER_REFRESH_BATCH_MAX` | most keys one refresh request carries | 1000 |
 //! | `LIMITER_LEASE_SECONDS` | the limiter's lease: a release queued longer is given up | 120 |
 //! | `LIMITER_RELEASE_TIMEOUT_MS` | the budget of one release request | 2000 |
 //! | `LIMITER_RELEASE_QUEUE_CAP` | most releases the queue holds | 100000 |
@@ -23,6 +25,8 @@ use crate::stated;
 pub(crate) struct LimiterEnv {
     pub timeout_ms: u64,
     pub refresh_sec: i64,
+    pub refresh_batch_ms: u64,
+    pub refresh_batch_max: usize,
     pub lease_sec: i64,
     pub release_timeout_ms: u64,
     pub queue_cap: usize,
@@ -85,6 +89,8 @@ pub(crate) fn limiter_from_lookup(
     Ok(LimiterEnv {
         timeout_ms: positive("LIMITER_TIMEOUT_MS", 150)?,
         refresh_sec: seconds("LIMITER_REFRESH_SECONDS", 40)?,
+        refresh_batch_ms: positive("LIMITER_REFRESH_BATCH_MS", 1_000)?,
+        refresh_batch_max: positive("LIMITER_REFRESH_BATCH_MAX", 1_000)? as usize,
         lease_sec: seconds("LIMITER_LEASE_SECONDS", 120)?,
         release_timeout_ms: positive("LIMITER_RELEASE_TIMEOUT_MS", 2_000)?,
         queue_cap: positive("LIMITER_RELEASE_QUEUE_CAP", 100_000)? as usize,
@@ -100,9 +106,11 @@ pub(crate) fn limiter_from_lookup(
 mod tests {
     use super::*;
 
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 9] = [
         "LIMITER_TIMEOUT_MS",
         "LIMITER_REFRESH_SECONDS",
+        "LIMITER_REFRESH_BATCH_MS",
+        "LIMITER_REFRESH_BATCH_MAX",
         "LIMITER_LEASE_SECONDS",
         "LIMITER_RELEASE_TIMEOUT_MS",
         "LIMITER_RELEASE_QUEUE_CAP",
@@ -124,6 +132,8 @@ mod tests {
             LimiterEnv {
                 timeout_ms: 150,
                 refresh_sec: 40,
+                refresh_batch_ms: 1_000,
+                refresh_batch_max: 1_000,
                 lease_sec: 120,
                 release_timeout_ms: 2_000,
                 queue_cap: 100_000,
@@ -138,6 +148,8 @@ mod tests {
         let env = from(&[
             ("LIMITER_TIMEOUT_MS", "100"),
             ("LIMITER_REFRESH_SECONDS", "20"),
+            ("LIMITER_REFRESH_BATCH_MS", "500"),
+            ("LIMITER_REFRESH_BATCH_MAX", "50"),
             ("LIMITER_LEASE_SECONDS", "60"),
             ("LIMITER_RELEASE_TIMEOUT_MS", "500"),
             ("LIMITER_RELEASE_QUEUE_CAP", "10"),
@@ -150,6 +162,8 @@ mod tests {
             LimiterEnv {
                 timeout_ms: 100,
                 refresh_sec: 20,
+                refresh_batch_ms: 500,
+                refresh_batch_max: 50,
                 lease_sec: 60,
                 release_timeout_ms: 500,
                 queue_cap: 10,

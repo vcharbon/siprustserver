@@ -21,7 +21,7 @@
 //! [`ReleaseQueue::hold`] and [`ReleaseQueue::resume`] are the seam a circuit
 //! breaker drives: while held nothing is sent (leases still expire), and a
 //! resume sends every waiting key at once. [`ReleaseQueue::on_push`] tells
-//! the breaker which calls ended, so it forgets their held refreshes.
+//! the refresh batch which calls ended, so it forgets their refreshes.
 //!
 //! [`ReleaseQueue::flush`] is a planned exit's last send: every waiting key
 //! leaves at once and the exit waits, within a bound, for the queue to
@@ -477,7 +477,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::limiter::{AdmitOutcome, LimiterEntry, RefreshOutcome};
+    use crate::limiter::{AdmitOutcome, LimiterEntry, RefreshAnswer, RefreshCall};
 
     /// A limiter whose releases answer or fail at the test's say, logging
     /// the keys of every release request.
@@ -500,8 +500,8 @@ mod tests {
                 ReleaseAnswer::Released
             }
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Unavailable
+        async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Unavailable
         }
     }
 
@@ -553,8 +553,8 @@ mod tests {
             self.go.notified().await;
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Unavailable
+        async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Unavailable
         }
     }
 
@@ -691,8 +691,8 @@ mod tests {
             assert!(!first, "the drainer's first send panics");
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Unavailable
+        async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Unavailable
         }
     }
 
@@ -735,8 +735,8 @@ mod tests {
             self.answered.lock().unwrap().push(keys.to_vec());
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Unavailable
+        async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Unavailable
         }
     }
 

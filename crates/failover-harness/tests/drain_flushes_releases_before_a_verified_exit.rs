@@ -28,7 +28,9 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+};
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -85,8 +87,8 @@ impl CallLimiter for HeldReleases {
         let _ = open.wait_for(|open| *open).await;
         self.inner.release(keys).await
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        self.inner.refresh(key, ids).await
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        self.inner.refresh(calls).await
     }
 }
 

@@ -95,14 +95,20 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let outcome = match self.store.refresh(&parsed.key, &parsed.ids) {
-                    RefreshResult::Extended => RefreshAnswer::Extended,
-                    RefreshResult::Reregistered => RefreshAnswer::Reregistered,
-                    RefreshResult::Released => RefreshAnswer::Released,
-                    RefreshResult::Dropped => RefreshAnswer::Dropped,
-                };
-                self.metrics.on_refresh();
-                json_ok(&RefreshResponse { outcome })
+                let calls = parsed.calls.iter().map(|c| (c.key.as_str(), c.ids.as_slice()));
+                let outcomes = self
+                    .store
+                    .refresh_all(calls)
+                    .into_iter()
+                    .map(|outcome| match outcome {
+                        RefreshResult::Extended => RefreshAnswer::Extended,
+                        RefreshResult::Reregistered => RefreshAnswer::Reregistered,
+                        RefreshResult::Released => RefreshAnswer::Released,
+                        RefreshResult::Dropped => RefreshAnswer::Dropped,
+                    })
+                    .collect();
+                self.metrics.on_refresh(parsed.calls.len());
+                json_ok(&RefreshResponse { outcomes })
             }
             ("GET", "/v1/health") => json_ok(&HealthResponse { calls: self.store.calls() as u64 }),
             ("GET", "/metrics") => {

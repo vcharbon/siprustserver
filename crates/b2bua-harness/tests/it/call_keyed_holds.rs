@@ -25,7 +25,10 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
+    ReleaseAnswer,
+};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
@@ -825,7 +828,8 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
     let key = b2bua.live_call(&call_ref).expect("the call is live").limiter.key;
     rig.store.release(&[&key]);
     assert_eq!(rig.all_holds(), [0, 0, 0]);
-    for _ in 0..6 {
+    // The refresh falls due at 5 s and leaves within one tick.
+    for _ in 0..7 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
     }
@@ -1019,8 +1023,8 @@ impl CallLimiter for AnswersReleased {
         self.releases.fetch_add(keys.len(), Ordering::SeqCst);
         ReleaseAnswer::Released
     }
-    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-        RefreshOutcome::Released
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
     }
 }
 

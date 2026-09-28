@@ -28,7 +28,9 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+use b2bua::limiter::{
+    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+};
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, WitnessRig, WITNESS_IDS};
 use call::ReleaseEventKind;
 use call_limiter::LimiterConfig;
@@ -85,8 +87,8 @@ impl CallLimiter for UnavailableOnAdmit {
     async fn release(&self, keys: &[String]) -> ReleaseAnswer {
         self.inner.release(keys).await
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        self.inner.refresh(key, ids).await
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        self.inner.refresh(calls).await
     }
 }
 
@@ -822,8 +824,8 @@ impl CallLimiter for CountReplacingAdmits {
     async fn release(&self, keys: &[String]) -> ReleaseAnswer {
         self.inner.release(keys).await
     }
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        self.inner.refresh(key, ids).await
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+        self.inner.refresh(calls).await
     }
 }
 

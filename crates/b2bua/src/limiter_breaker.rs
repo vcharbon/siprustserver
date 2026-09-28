@@ -10,10 +10,9 @@
 //! **Open**, an admit sends nothing and answers [`AdmitOutcome::NotSent`] at
 //! once: the call owes no release by that admit, and stays as it was (an
 //! initial admit leaves it uncounted, a reroute admit of a counted call
-//! leaves it counted on its old set). A refresh sends nothing and answers
-//! [`RefreshOutcome::Unavailable`]; it is held in the [`RefreshBacklog`]. The
-//! worker's release queue is held. Answers of admits sent before the breaker
-//! opened change nothing.
+//! leaves it counted on its old set). The worker's refresh batch and release
+//! queue are held: a refresh sends nothing, the batch keeps it due. Answers
+//! of admits sent before the breaker opened change nothing.
 //!
 //! A limiter whose address is not known ([`LimiterHealth::has_address`]: its
 //! name has not resolved) is guarded by a breaker that starts open. Opening
@@ -21,35 +20,28 @@
 //! its name up again and reaches a limiter that moved.
 //!
 //! The probe ([`BreakerLimiter::run`]) asks the limiter's health answer every
-//! [`BreakerConfig::probe`] while open; the first answer closes the breaker,
-//! resumes the queue (every waiting key leaves at once) and sends the held
-//! refreshes, [`FLUSH_CONCURRENCY`] at a time. A call whose release is
-//! pushed has its held refresh forgotten, so an ended call's set is never
-//! refreshed after its release. The flushed refreshes' answers are counted
-//! apart from the calls' own refreshes: the call learns its state at its
-//! next refresh. No call is a probe. A limiter without a health answer
-//! runs without a breaker, and a guarded limiter has none: it is never
-//! guarded twice.
+//! [`BreakerConfig::probe`] while open; the first answer closes the breaker
+//! and resumes the queue and the batch: every waiting release and every
+//! refresh due leave at once, and each refresh's answer reaches its call. No
+//! call is a probe. A limiter without a health answer runs without a breaker,
+//! and a guarded limiter has none: it is never guarded twice.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::abort_on_drop::AbortOnDrop;
 use crate::config::B2buaConfig;
 use crate::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshOutcome, ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
+    ReleaseAnswer,
 };
-use crate::limiter_refresh_backlog::{RefreshBacklog, RefreshBacklogConfig};
+use crate::limiter_refresh_batch::RefreshBatch;
 use crate::limiter_release::ReleaseQueue;
 use crate::metrics::B2buaMetrics;
-
-/// Most held refreshes in flight at once when the breaker closes.
-pub const FLUSH_CONCURRENCY: usize = 32;
 
 /// When the breaker opens and how often it probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +84,7 @@ pub struct BreakerLimiter {
     health: Arc<dyn LimiterHealth>,
     config: BreakerConfig,
     releases: Arc<ReleaseQueue>,
-    refreshes: Arc<RefreshBacklog>,
+    refreshes: Arc<RefreshBatch>,
     metrics: B2buaMetrics,
     state: Mutex<State>,
     /// Wakes the probe when the breaker opens.
@@ -100,24 +92,20 @@ pub struct BreakerLimiter {
 }
 
 impl BreakerLimiter {
-    /// `inner` behind a breaker that holds and resumes `releases` and holds
-    /// refreshes under `backlog`, and the breaker to [`run`](Self::run);
-    /// `inner` itself and no breaker when it has no health answer. The
-    /// breaker starts open when `inner`'s address is not known.
+    /// `inner` behind a breaker that holds and resumes `releases` and
+    /// `refreshes`, and the breaker to [`run`](Self::run); `inner` itself and
+    /// no breaker when it has no health answer. The breaker starts open when
+    /// `inner`'s address is not known.
     pub fn guard(
         inner: Arc<dyn CallLimiter>,
         config: BreakerConfig,
         releases: Arc<ReleaseQueue>,
-        backlog: RefreshBacklogConfig,
+        refreshes: Arc<RefreshBatch>,
         metrics: B2buaMetrics,
     ) -> (Arc<dyn CallLimiter>, Option<Arc<Self>>) {
         let Some(health) = inner.health() else {
             return (inner, None);
         };
-        let refreshes = Arc::new(RefreshBacklog::new(backlog, metrics.clone()));
-        let forget = refreshes.clone();
-        let hooked = releases.on_push(move |key| forget.forget(key));
-        debug_assert!(hooked, "one breaker per release queue");
         let breaker = Arc::new(Self {
             inner,
             health,
@@ -168,12 +156,13 @@ impl BreakerLimiter {
         }
     }
 
-    /// Open the breaker: hold the queue, forget the limiter's address and
-    /// wake the probe.
+    /// Open the breaker: hold the queue and the batch, forget the limiter's
+    /// address and wake the probe.
     fn open(&self, mut state: MutexGuard<'_, State>, why: Opened) {
         state.open = true;
         state.failures = 0;
         self.releases.hold();
+        self.refreshes.hold();
         self.metrics.set_limiter_breaker_open(true);
         self.metrics.bump_limiter_breaker_opened();
         drop(state);
@@ -192,7 +181,7 @@ impl BreakerLimiter {
         self.opened.notify_one();
     }
 
-    /// Close the breaker and send what the queue held.
+    /// Close the breaker and send what the queue and the batch held.
     fn close(&self) {
         let mut state = self.lock();
         if !state.open {
@@ -201,6 +190,7 @@ impl BreakerLimiter {
         state.open = false;
         state.failures = 0;
         self.releases.resume();
+        self.refreshes.resume();
         self.metrics.set_limiter_breaker_open(false);
         self.metrics.bump_limiter_breaker_closed();
         drop(state);
@@ -238,39 +228,10 @@ impl BreakerLimiter {
                 tick.tick().await;
                 if self.health.serving().await {
                     self.close();
-                    self.flush_refreshes().await;
                 } else {
                     self.metrics.bump_limiter_breaker_probe_failures();
                     self.health.forget_address();
                 }
-            }
-        }
-    }
-
-    /// Send the refreshes held while open, [`FLUSH_CONCURRENCY`] at a time.
-    /// A refresh the breaker reopened before is held again.
-    async fn flush_refreshes(&self) {
-        let mut held = self.refreshes.take().into_iter();
-        let mut in_flight = JoinSet::new();
-        loop {
-            while in_flight.len() < FLUSH_CONCURRENCY {
-                let Some((key, ids)) = held.next() else { break };
-                if self.is_open() {
-                    self.refreshes.hold(&key, &ids);
-                    continue;
-                }
-                let inner = self.inner.clone();
-                in_flight.spawn(async move { inner.refresh(&key, &ids).await });
-            }
-            let Some(done) = in_flight.join_next().await else { break };
-            if let Ok(outcome) = done {
-                self.metrics.record_limiter_breaker_refresh_flushed(match outcome {
-                    RefreshOutcome::Extended => "extended",
-                    RefreshOutcome::Reregistered => "reregistered",
-                    RefreshOutcome::Released => "released",
-                    RefreshOutcome::Dropped => "dropped",
-                    RefreshOutcome::Unavailable => "unavailable",
-                });
             }
         }
     }
@@ -297,13 +258,12 @@ impl CallLimiter for BreakerLimiter {
         self.inner.release(keys).await
     }
 
-    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+    /// Open, nothing is sent: the batch keeps the calls due until the close.
+    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
         if self.is_open() {
-            self.refreshes.hold(key, ids);
-            self.metrics.bump_limiter_breaker_refreshes_not_sent();
-            return RefreshOutcome::Unavailable;
+            return RefreshAnswer::Unavailable;
         }
-        self.inner.refresh(key, ids).await
+        self.inner.refresh(calls).await
     }
 }
 
@@ -313,6 +273,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
+    use crate::limiter::RefreshOutcome;
+    use crate::limiter_refresh_batch::RefreshBatchConfig;
     use crate::limiter_release::ReleaseQueueConfig;
 
     /// A limiter answering admits from a script (then `Admitted`), logging
@@ -321,9 +283,7 @@ mod tests {
     struct Scripted {
         admits: Mutex<VecDeque<AdmitOutcome>>,
         admits_sent: AtomicUsize,
-        refreshes_sent: AtomicUsize,
-        refreshed: Mutex<Vec<(String, Vec<String>)>>,
-        refresh_answer: Mutex<Option<RefreshOutcome>>,
+        refreshed: Mutex<Vec<Vec<RefreshCall>>>,
         released: Mutex<Vec<Vec<String>>>,
         serving: Arc<Serving>,
     }
@@ -361,10 +321,9 @@ mod tests {
             self.released.lock().unwrap().push(keys.to_vec());
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-            self.refreshes_sent.fetch_add(1, Ordering::SeqCst);
-            self.refreshed.lock().unwrap().push((key.to_string(), ids.to_vec()));
-            self.refresh_answer.lock().unwrap().clone().unwrap_or(RefreshOutcome::Extended)
+        async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+            self.refreshed.lock().unwrap().push(calls.to_vec());
+            RefreshAnswer::Answered(vec![RefreshOutcome::Extended; calls.len()])
         }
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.serving.clone())
@@ -375,7 +334,24 @@ mod tests {
         scripted: Arc<Scripted>,
         limiter: Arc<dyn CallLimiter>,
         releases: Arc<ReleaseQueue>,
+        refreshes: Arc<RefreshBatch>,
         metrics: B2buaMetrics,
+    }
+
+    /// The worker's refresh batch over `inner`, forgetting what `releases`
+    /// is told, its sender running.
+    fn batch(
+        inner: Arc<dyn CallLimiter>,
+        releases: &ReleaseQueue,
+        metrics: &B2buaMetrics,
+    ) -> Arc<RefreshBatch> {
+        let config =
+            RefreshBatchConfig { tick: PROBE, max: 100, lease: Duration::from_secs(120), cap: 10 };
+        let refreshes = RefreshBatch::new(inner, config, metrics.clone(), |_| {});
+        let forget = refreshes.clone();
+        assert!(releases.on_push(move |key| forget.forget(key)));
+        tokio::spawn(refreshes.clone().run());
+        refreshes
     }
 
     const PROBE: Duration = Duration::from_secs(1);
@@ -391,15 +367,16 @@ mod tests {
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
         tokio::spawn(releases.clone().run());
+        let refreshes = batch(scripted.clone(), &releases, &metrics);
         let (limiter, breaker) = BreakerLimiter::guard(
             scripted.clone(),
             BreakerConfig { failures: 3, probe: PROBE },
             releases.clone(),
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            refreshes.clone(),
             metrics.clone(),
         );
         tokio::spawn(breaker.expect("a limiter with a health answer is guarded").run());
-        Rig { scripted, limiter, releases, metrics }
+        Rig { scripted, limiter, releases, refreshes, metrics }
     }
 
     async fn admit(limiter: &Arc<dyn CallLimiter>) -> AdmitOutcome {
@@ -463,42 +440,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn open_it_holds_refreshes_and_sends_the_latest_of_each_on_close() {
+    async fn open_it_holds_the_refresh_batch_and_its_close_sends_every_key_due_at_once() {
         let r = rig(lost(3));
         trip(&r.limiter).await;
-        for ids in [vec!["x".to_string()], vec!["x".to_string(), "y".to_string()]] {
-            assert_eq!(r.limiter.refresh("k", &ids).await, RefreshOutcome::Unavailable);
-        }
-        r.limiter.refresh("ended", &["x".into()]).await;
+        r.refreshes.mark("k", "c-k", &["x".into()], 0);
+        r.refreshes.mark("k", "c-k", &["x".into(), "y".into()], 1);
+        r.refreshes.mark("other", "c-other", &["z".into()], 0);
+        r.refreshes.mark("ended", "c-ended", &["x".into()], 0);
         r.releases.push("ended");
-        assert_eq!(r.scripted.refreshes_sent.load(Ordering::SeqCst), 0, "nothing sent open");
-        assert_eq!(r.metrics.limiter_breaker_refreshes_not_sent_total(), 3);
-        assert_eq!(r.metrics.limiter_breaker_refreshes_held(), 1, "the ended call's is forgotten");
-        assert_eq!(r.metrics.limiter_breaker_refreshes_dropped_released_total(), 1);
+        for _ in 0..3 {
+            tokio::time::advance(PROBE).await;
+            settle().await;
+        }
+        assert!(r.scripted.refreshed.lock().unwrap().is_empty(), "nothing sent open");
+        assert_eq!(r.metrics.limiter_refresh_due(), 2, "the ended call's is forgotten");
+        assert_eq!(r.metrics.limiter_refresh_forgotten_released_total(), 1);
 
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
+        let key = |key: &str, ids: &[&str]| RefreshCall {
+            key: key.into(),
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+        };
         assert_eq!(
             *r.scripted.refreshed.lock().unwrap(),
-            [("k".to_string(), vec!["x".to_string(), "y".to_string()])],
-            "the latest refresh of k, none of a call whose release waited"
+            [vec![key("k", &["x", "y"]), key("other", &["z"])]],
+            "one request at the close: the latest refresh of k, none of a call whose release \
+             waited"
         );
-        assert_eq!(r.metrics.limiter_breaker_refreshes_held(), 0);
-        assert_eq!(r.metrics.limiter_breaker_refreshes_flushed_total("extended"), 1);
+        assert_eq!(r.metrics.limiter_refresh_due(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_flushed_refresh_counts_apart_from_the_calls_own() {
+    async fn a_refresh_sent_while_open_sends_nothing() {
         let r = rig(lost(3));
-        *r.scripted.refresh_answer.lock().unwrap() = Some(RefreshOutcome::Released);
         trip(&r.limiter).await;
-        r.limiter.refresh("k", &["x".into()]).await;
-        r.scripted.serving.up.store(true, Ordering::SeqCst);
-        tokio::time::advance(PROBE).await;
-        settle().await;
-        assert_eq!(r.metrics.limiter_breaker_refreshes_flushed_total("released"), 1);
-        assert_eq!(r.metrics.limiter_refresh_released_total(), 0, "not a peer's reap");
+        let calls = [RefreshCall { key: "k".into(), ids: vec!["x".into()] }];
+        assert_eq!(r.limiter.refresh(&calls).await, RefreshAnswer::Unavailable);
+        assert!(r.scripted.refreshed.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -528,7 +508,7 @@ mod tests {
     async fn a_release_given_up_at_the_cap_leaves_no_refresh_to_send_on_close() {
         let r = rig(lost(3));
         trip(&r.limiter).await;
-        r.limiter.refresh("ended", &["x".into()]).await;
+        r.refreshes.mark("ended", "c-ended", &["x".into()], 0);
         r.releases.push("ended");
         for n in 0..10 {
             r.releases.push(&format!("other-{n}"));
@@ -642,8 +622,8 @@ mod tests {
         async fn release(&self, _: &[String]) -> ReleaseAnswer {
             ReleaseAnswer::Released
         }
-        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
-            RefreshOutcome::Extended
+        async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+            RefreshAnswer::Answered(vec![RefreshOutcome::Extended; calls.len()])
         }
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.serving.clone())
@@ -655,11 +635,12 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let releases = ReleaseQueue::new(inner.clone(), config, metrics.clone());
+        let refreshes = batch(inner.clone(), &releases, &metrics);
         let (limiter, breaker) = BreakerLimiter::guard(
             inner,
             BreakerConfig { failures: 1, probe: PROBE },
             releases,
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            refreshes,
             metrics.clone(),
         );
         tokio::spawn(breaker.expect("guarded").run());
@@ -718,13 +699,14 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
+        let refreshes = batch(scripted.clone(), &releases, &metrics);
         let inner: Arc<dyn CallLimiter> =
             Arc::new(WithHealth { inner: scripted, health: health.clone() });
         let (limiter, breaker) = BreakerLimiter::guard(
             inner,
             BreakerConfig { failures: 3, probe: PROBE },
             releases,
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            refreshes,
             metrics.clone(),
         );
         tokio::spawn(breaker.unwrap().run());
@@ -753,8 +735,8 @@ mod tests {
         async fn release(&self, keys: &[String]) -> ReleaseAnswer {
             self.inner.release(keys).await
         }
-        async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-            self.inner.refresh(key, ids).await
+        async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
+            self.inner.refresh(calls).await
         }
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.health.clone())
@@ -767,11 +749,12 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let releases = ReleaseQueue::new(r.limiter.clone(), config, metrics.clone());
+        let refreshes = batch(r.limiter.clone(), &releases, &metrics);
         let (_, again) = BreakerLimiter::guard(
             r.limiter.clone(),
             BreakerConfig { failures: 3, probe: PROBE },
             releases,
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            refreshes,
             metrics,
         );
         assert!(again.is_none(), "one breaker per limiter");
@@ -783,11 +766,12 @@ mod tests {
         let noop: Arc<dyn CallLimiter> = Arc::new(crate::limiter::NoopLimiter);
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
         let releases = ReleaseQueue::new(noop.clone(), config, metrics.clone());
+        let refreshes = batch(noop.clone(), &releases, &metrics);
         let (_, breaker) = BreakerLimiter::guard(
             noop,
             BreakerConfig { failures: 3, probe: PROBE },
             releases,
-            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            refreshes,
             metrics,
         );
         assert!(breaker.is_none());

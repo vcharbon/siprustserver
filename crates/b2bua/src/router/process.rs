@@ -23,9 +23,10 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::responses::{build_481, build_store_fault_500};
 use super::RouterCtx;
-use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult, QuietTurn};
+use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
+use crate::limiter_refresh_batch::RefreshAnswered;
 use crate::new_calls::Refusal;
 use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
@@ -70,6 +71,27 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             }
             Turn::Result(r) => r,
         }
+    } else if let Some(answer) = RefreshAnswered::of(&event) {
+        // A refresh answer applies to the resident call and never
+        // materialises one: an ended call (or one that left this worker)
+        // takes no answer, and the dispatch's per-call ephemera go.
+        let Some(call) = ctx.state.peek(&call_ref) else {
+            ctx.metrics.bump_limiter_refresh_answer_discarded_call_gone();
+            drop(_guard);
+            release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
+            return;
+        };
+        let before = call.clone();
+        let Some(res) = super::limiter_refresh::apply_answer(ctx, call, &answer, now_ms) else {
+            return;
+        };
+        crate::rules::invariants::enforce(
+            &ctx.obligations,
+            &before,
+            crate::rules::invariants::finalize(res),
+            now_ms,
+            true,
+        )
     } else {
         if in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await {
             return;
@@ -128,11 +150,11 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
-        // The limiter-refresh timer is async (an HTTP call to extend the lease), so
-        // it is handled outside the synchronous rule chain — like initial-INVITE.
+        // The limiter-refresh timer marks the call due on the worker's refresh
+        // batch outside the rule chain; the call never waits on the limiter.
         if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
             let before = call.clone();
-            let res = handle_limiter_refresh(ctx, call, now_ms).await;
+            let res = super::limiter_refresh::on_refresh_due(ctx, call, &call_ref, now_ms);
             crate::rules::invariants::enforce(
                 &ctx.obligations,
                 &before,
@@ -810,57 +832,6 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
             }
         }
     }
-}
-
-/// Handle a `LimiterRefresh` timer: extend a counted call's lease (an async
-/// `/v1/refresh` call carrying the call's ids, which the server re-registers
-/// when it no longer holds them) and re-arm the timer while the call is
-/// Active. A Terminating call stops refreshing: its teardown is bounded by
-/// the 32 s backstop, inside the lease. A refresh answered `Dropped` (an
-/// admit of the call's key dropped its set, e.g. a reroute whose answer was
-/// lost) leaves the call uncounted, still owing its release. A failed or
-/// release-fenced refresh changes nothing here: the next cycle retries, and
-/// the terminal release names a call the server may already have forgotten,
-/// as a no-op.
-async fn handle_limiter_refresh(
-    ctx: &Arc<RouterCtx>,
-    mut call: Call,
-    now_ms: i64,
-) -> HandlerResult {
-    let mut fx = HandlerEffects::new();
-    if !call.limiter.counted {
-        return HandlerResult { call, effects: fx };
-    }
-
-    let outcome = ctx.limiter.refresh(&call.limiter.key, &call.limiter.ids).await;
-    match outcome {
-        crate::limiter::RefreshOutcome::Reregistered => {
-            ctx.metrics.bump_limiter_refresh_reregistered()
-        }
-        crate::limiter::RefreshOutcome::Released => ctx.metrics.bump_limiter_refresh_released(),
-        crate::limiter::RefreshOutcome::Dropped => {
-            ctx.metrics.bump_limiter_refresh_dropped();
-            call.limiter.set(false, false, Vec::new());
-        }
-        _ => {}
-    }
-    if crate::trace::sampled(&call) {
-        crate::trace::emit::limiter(&call, now_ms, "refresh", &format!("{outcome:?}"));
-    }
-
-    if call.state == CallModelState::Active && call.limiter.counted {
-        let entry = TimerEntry {
-            id: format!("{:?}", TimerType::LimiterRefresh),
-            timer_type: TimerType::LimiterRefresh,
-            fire_at: now_ms + ctx.config.limiter_refresh_sec * 1000,
-            leg_id: None,
-        };
-        call.timers =
-            call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), entry.clone());
-        fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
-    }
-
-    HandlerResult { call, effects: fx }
 }
 
 /// A request for a vanished call draws the answer a request naming no call is
