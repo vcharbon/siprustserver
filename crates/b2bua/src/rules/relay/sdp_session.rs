@@ -55,10 +55,11 @@ pub enum Carried {
     Opening,
     /// In a later request of the dialog, or the initial ACK.
     InDialog,
-    /// In a response of the dialog to the request of the given CSeq: the same
-    /// author's same version in another response to it (a repeated
-    /// provisional, the final repeating it) is the same description.
-    Answering(i64),
+    /// In a response of the dialog to the leg's peer: the same author's same
+    /// version answering no newer offer of that peer (a repeated provisional,
+    /// the final repeating the answer a reliable provisional or a nested
+    /// UPDATE/PRACK exchange already gave) is the same description.
+    Answering,
     /// Outside any exchange (RFC 3264 §4 / RFC 3262 §5 / RFC 3311 §5 name
     /// INVITE, ACK, PRACK and UPDATE; a response of 300 or more describes
     /// capabilities, RFC 3261 §13.2.1 / §21.4.26): left as written, recorded
@@ -80,17 +81,17 @@ impl Carried {
         }
     }
 
-    /// A description in a response of `status` to the `method` request of
-    /// CSeq `cseq` in the dialog.
-    pub fn answering(method: &Method, status: u16, cseq: i64) -> Self {
+    /// A description in a response of `status` to a `method` request of the
+    /// dialog.
+    pub fn answering(method: &Method, status: u16) -> Self {
         match Self::of(method, Some(status), true) {
-            Self::InDialog => Self::Answering(cseq),
+            Self::InDialog => Self::Answering,
             other => other,
         }
     }
 
     fn in_dialog(self) -> bool {
-        matches!(self, Self::InDialog | Self::Answering(_))
+        matches!(self, Self::InDialog | Self::Answering)
     }
 }
 
@@ -129,8 +130,8 @@ pub fn continue_on_leg(
         return body;
     };
     let repeat_key = match carried {
-        Carried::Answering(cseq) => {
-            parse_origin(sdp).map(|o| format!("{cseq} {}", &o.raw_origin_line[2..]))
+        Carried::Answering => {
+            parse_origin(sdp).map(|o| format!("{} {}", leg.sdp_session.offers_received, o.value()))
         }
         _ => None,
     };
@@ -183,6 +184,22 @@ pub fn continue_on_leg(
     [&body[..range.start], &out, &body[range.end..]].concat()
 }
 
+/// Count an offer/answer exchange `leg_id`'s peer opens: a `method` request
+/// carrying a session description in `body` (typed `content_type`).
+pub fn note_request(
+    call: &mut Call,
+    leg_id: &str,
+    method: &Method,
+    body: &[u8],
+    content_type: Option<&MediaType>,
+) {
+    let opens = matches!(method, Method::Invite | Method::Update | Method::Prack)
+        && content_type.and_then(|ct| sdp_range(ct, body)).is_some();
+    if let (true, Some(leg)) = (opens, leg_mut(call, leg_id)) {
+        leg.sdp_session.offers_received = leg.sdp_session.offers_received.saturating_add(1);
+    }
+}
+
 /// The session state of a leg this stack opens with `invite`, its initial
 /// INVITE, whose description `author` wrote.
 pub fn opened(invite: &OutboundSipEffect, author: Author<'_>) -> LegSdpSession {
@@ -232,8 +249,9 @@ fn in_restated_author_order(call: &Call, from: &str, to: &str, sdp: &[u8]) -> Op
         .flatten()
 }
 
-/// Whether a description by `author` under `key` (the request it answers and
-/// its `o=` value) repeats the one the stack last restated on the leg.
+/// Whether a description by `author` under `key` (the count of the peer's
+/// offers it answers and its `o=` value) repeats the one the stack last
+/// restated on the leg.
 fn repeats(state: &LegSdpSession, author: Author<'_>, key: Option<&str>) -> bool {
     let Author::Leg(from) = author else { return false };
     state.sent_slots_author.as_deref() == Some(from)

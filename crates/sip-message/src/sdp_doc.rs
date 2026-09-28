@@ -378,6 +378,11 @@ impl SdpOrigin {
             && self.unicast_address == other.unicast_address
     }
 
+    /// The `o=` line's value — everything after `o=`.
+    pub fn value(&self) -> &str {
+        &self.raw_origin_line[2..]
+    }
+
     /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
     /// identity fields unchanged, the version one above this one. `None` where
     /// the version is already the largest one this reader holds: no next

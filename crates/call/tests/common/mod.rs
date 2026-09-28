@@ -159,7 +159,8 @@ pub fn representative_call() -> Call {
             sent_media: vec!["audio 20000 RTP/AVP 8".into(), "video 0 RTP/AVP 96".into()],
             sent_slots: vec![Some(0), None],
             sent_slots_author: Some("b-3".into()),
-            restated_from: Some("carol 303 1 IN IP4 192.0.2.3".into()),
+            restated_from: Some("1 carol 303 1 IN IP4 192.0.2.3".into()),
+            offers_received: 1,
             session_author: Some("b-2".into()),
             session_id: Some("202".into()),
             restated: true,
@@ -708,7 +709,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
         (proptest::option::of("(a|b-[0-9]{1,2})"), proptest::option::of("[a-z0-9 .]{1,40}")),
         proptest::option::of("(a|b-[0-9]{1,2})"),
         proptest::option::of("[0-9]{1,20}"),
-        any::<bool>(),
+        (any::<bool>(), any::<u32>()),
     )
         .prop_map(
             |(
@@ -718,7 +719,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
                 (sent_slots_author, restated_from),
                 session_author,
                 session_id,
-                restated,
+                (restated, offers_received),
             )| {
                 LegSdpSession {
                     sent_origin,
@@ -729,6 +730,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
                     session_author,
                     session_id,
                     restated,
+                    offers_received,
                 }
             },
         )

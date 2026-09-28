@@ -20,11 +20,15 @@ pub struct LegSdpSession {
     /// The leg whose peer wrote the description `sent_slots` restated: only a
     /// description going back to that leg is put in its stream order.
     pub sent_slots_author: Option<String>,
-    /// Where that restatement answered a request: its CSeq and the `o=` value
-    /// of the description it was made from. The same author's same version
-    /// answering the same request again is a repeat, restated at the same
-    /// version.
+    /// Where that restatement answered the peer: the count of the peer's
+    /// offers it answered and the `o=` value of the description it was made
+    /// from. The same author's same version answering no newer offer is a
+    /// repeat, restated at the same version.
     pub restated_from: Option<String>,
+    /// How many requests carrying a session description (INVITE, UPDATE,
+    /// PRACK) the leg's peer has sent: each opens a new offer/answer exchange.
+    #[serde(default)]
+    pub offers_received: u32,
     /// The leg whose peer's own session the dialog carries; `None` when it is
     /// a session this stack opened (or none yet).
     pub session_author: Option<String>,

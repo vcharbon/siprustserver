@@ -210,7 +210,7 @@ fn the_slot_map_only_serves_the_restated_author() {
         "a",
         Author::Leg("b-2"),
         Carried::InDialog,
-        &sdp("mrf 404 1 IN IP4 192.0.2.4", 40000),
+        &sdp("media 404 1 IN IP4 192.0.2.4", 40000),
     );
     let alice = "v=0\r\no=alice 101 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n";
     send(&mut c, "b-1", Author::Leg("a"), Carried::Opening, alice);
@@ -224,4 +224,95 @@ fn the_slot_map_only_serves_the_restated_author() {
             .ends_with("m=audio 10002 RTP/AVP 0\r\n"),
         "to the media server: its one stream"
     );
+}
+
+/// The peer of `leg` opens an offer/answer exchange with a request carrying a
+/// description.
+fn peer_offers(call: &mut Call, leg: &str, method: Method) {
+    super::note_request(
+        call,
+        leg,
+        &method,
+        sdp("x 1 1 IN IP4 192.0.2.9", 1).as_bytes(),
+        Some(&ct()),
+    );
+}
+
+/// A splice of `b-2` onto `a`, the dialog carrying `b-1`'s session.
+fn spliced() -> Call {
+    let mut c = call();
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-1"),
+        Carried::Opening,
+        &sdp("bob 202 1 IN IP4 192.0.2.2", 20000),
+    );
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::InDialog,
+        &sdp("carol 303 1 IN IP4 192.0.2.3", 30000),
+    );
+    c
+}
+
+/// A 2xx repeating the answer a nested UPDATE exchange already gave answers no
+/// new offer (RFC 6337 §3.1): the last restatement, unchanged.
+#[test]
+fn the_final_after_a_nested_exchange_repeats_its_answer() {
+    let mut c = spliced();
+    let answering = Carried::answering(&Method::Invite, 183);
+    peer_offers(&mut c, "a", Method::Invite);
+    let early = send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        answering,
+        &sdp("carol 303 4 IN IP4 192.0.2.3", 30002),
+    );
+    assert_eq!(o_line(&early), "o=bob 202 3 IN IP4 192.0.2.2");
+    peer_offers(&mut c, "a", Method::Update);
+    let update = Carried::answering(&Method::Update, 200);
+    let nested =
+        send(&mut c, "a", Author::Leg("b-2"), update, &sdp("carol 303 5 IN IP4 192.0.2.3", 30004));
+    assert_eq!(o_line(&nested), "o=bob 202 4 IN IP4 192.0.2.2");
+    let fin = Carried::answering(&Method::Invite, 200);
+    let final_ =
+        send(&mut c, "a", Author::Leg("b-2"), fin, &sdp("carol 303 5 IN IP4 192.0.2.3", 30004));
+    assert_eq!(final_, nested, "the same answer, the same version");
+}
+
+/// Within one exchange, an author that raised its version described something
+/// new: the next version.
+#[test]
+fn a_raised_version_in_the_final_is_a_new_version() {
+    let mut c = spliced();
+    peer_offers(&mut c, "a", Method::Invite);
+    let early = Carried::answering(&Method::Invite, 183);
+    send(&mut c, "a", Author::Leg("b-2"), early, &sdp("carol 303 4 IN IP4 192.0.2.3", 30002));
+    let fin = Carried::answering(&Method::Invite, 200);
+    let final_ =
+        send(&mut c, "a", Author::Leg("b-2"), fin, &sdp("carol 303 5 IN IP4 192.0.2.3", 30004));
+    assert_eq!(o_line(&final_), "o=bob 202 4 IN IP4 192.0.2.2");
+}
+
+/// Each new offer of the peer opens a new exchange: an identical answer to it
+/// is a new version still.
+#[test]
+fn an_identical_answer_to_a_new_offer_is_a_new_version() {
+    let mut c = spliced();
+    let answer = sdp("carol 303 4 IN IP4 192.0.2.3", 30002);
+    for version in 3..6 {
+        peer_offers(&mut c, "a", Method::Invite);
+        let out = send(
+            &mut c,
+            "a",
+            Author::Leg("b-2"),
+            Carried::answering(&Method::Invite, 200),
+            &answer,
+        );
+        assert_eq!(o_line(&out), format!("o=bob 202 {version} IN IP4 192.0.2.2"));
+    }
 }

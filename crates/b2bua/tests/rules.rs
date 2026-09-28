@@ -2904,7 +2904,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: Some(Body::new(sdp_b.clone(), None, BodyAuthor::Stack)),
+                body: Some(Body::from_leg(sdp_b.clone(), "b-1")),
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::none(),
@@ -3254,7 +3254,7 @@ Content-Length: 4\r\n\r\nv=0\n";
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: Some(Body::new(delivered.body().to_vec(), None, BodyAuthor::Stack)),
+                body: Some(Body::from_leg(delivered.body().to_vec(), "b-1")),
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::of(&delivered, SourceBody::Verbatim),
@@ -3310,7 +3310,7 @@ Content-Length: 4\r\n\r\nv=0\n";
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: Some(Body::new(delivered.body().to_vec(), None, BodyAuthor::Stack)),
+                body: Some(Body::from_leg(delivered.body().to_vec(), "b-1")),
                 to_tag: None,
                 header_updates: vec![
                     ("X-Vendor-Thing".into(), Some("service-owned".into())),

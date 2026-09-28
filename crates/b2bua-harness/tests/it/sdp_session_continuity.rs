@@ -381,3 +381,53 @@ async fn a_failure_answer_body_stays_outside_the_session() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let _ = h.finish().await;
 }
+
+/// The route decision replaces the caller's offer with one of its own: the
+/// callee's dialog carries that session, the stack's, so the caller's later
+/// re-offer reaches the callee restated under it — even where the two share a
+/// sess-id.
+#[tokio::test]
+async fn a_replaced_initial_offer_opens_a_session_of_the_stacks_own() {
+    const REPLACEMENT: &str = "v=0\r\no=anchor 101 7 IN IP4 127.0.0.5\r\ns=-\r\nc=IN IP4 127.0.0.5\r\nt=0 0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    let h = Harness::with_transit_delay("sdp-session-continuity-replaced-offer", 1);
+    let alice = h.agent("alice", "127.0.0.1:5936").await;
+    let bob = h.agent("bob", "127.0.0.1:5946").await;
+    let decision = std::sync::Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| {
+                let mut r = route_to("127.0.0.1", 5946);
+                r.update_body = BodyUpdate::Replace(REPLACEMENT.to_string());
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5956").await;
+
+    let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    assert_eq!(body_of(&bob_uas), REPLACEMENT);
+    bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut reinvite = alice_dialog.request(InDialogMethod::Invite, Some(ALICE_REANSWER)).await;
+    let mut at_bob = bob.receive("INVITE").await;
+    assert_eq!(
+        body_of(&at_bob),
+        continued(ALICE_REANSWER, "anchor 101 8 IN IP4 127.0.0.5"),
+        "the caller's re-offer continues the session the decision's offer opened",
+    );
+    at_bob.respond(200, "OK").with_sdp(BOB_REOFFER).await;
+    reinvite.expect(200).await;
+    alice_dialog.ack(None).await;
+    bob.receive("ACK").await;
+
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let _ = h.finish().await;
+}

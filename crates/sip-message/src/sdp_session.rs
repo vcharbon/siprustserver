@@ -32,7 +32,7 @@ impl StatedSession {
         let origin = parse_origin(sdp)?;
         let text = String::from_utf8_lossy(sdp);
         let media = Sections::of(&text).media.iter().map(|s| s.value().to_string()).collect();
-        Some(Self { origin: origin.raw_origin_line[2..].to_string(), media })
+        Some(Self { origin: origin.value().to_string(), media })
     }
 }
 

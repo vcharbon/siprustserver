@@ -34,11 +34,6 @@ impl Body {
         Self::new(bytes, None, BodyAuthor::Leg(leg.into()))
     }
 
-    /// The bytes `body` sends: none for no body.
-    pub fn bytes_of(body: &Option<Body>) -> &[u8] {
-        body.as_ref().map_or(&[], |b| &b.bytes)
-    }
-
     /// A body of this stack's own, typed `content_type` (`None`: SDP).
     pub fn own(bytes: Vec<u8>, content_type: Option<String>) -> Self {
         Self::new(bytes, content_type, BodyAuthor::Stack)
