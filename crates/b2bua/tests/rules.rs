@@ -380,7 +380,14 @@ fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
 /// or a going-away leg with no disposition yet, is still settled `Cancelled`.
 #[test]
 fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
-    for disposition in [call::ByeDisposition::ByeReceived, call::ByeDisposition::ByeConfirmed] {
+    for disposition in [
+        call::ByeDisposition::ByeReceived,
+        call::ByeDisposition::ByeConfirmed,
+        call::ByeDisposition::ByeTimeout,
+        call::ByeDisposition::Cancelled,
+        call::ByeDisposition::Rejected,
+        call::ByeDisposition::None,
+    ] {
         let mut call = test_call();
         call.a_leg.state = LegState::Terminated;
         call.a_leg.bye_disposition = Some(disposition);

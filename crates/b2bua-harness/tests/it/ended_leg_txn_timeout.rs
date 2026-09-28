@@ -90,7 +90,7 @@ fn decision() -> Arc<ScriptedDecisionEngine> {
 /// Timer F the leg is still `ByeReceived` and the call still up; the caller's
 /// BYE then ends it normally.
 #[tokio::test(start_paused = true)]
-async fn a_transaction_timing_out_on_an_ended_leg_changes_nothing() {
+async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     let h = Harness::new("ended-leg-txn-timeout");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
