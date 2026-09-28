@@ -176,6 +176,24 @@ mod tests {
         }
     }
 
+    /// Production keys come from the OS RNG: two generators draw different
+    /// first ids, and neither draws the all-zero key's stream (HMAC pads a
+    /// key with zeros, so `seeded(0)` is that stream).
+    #[test]
+    fn entropy_keys_are_neither_shared_nor_zero() {
+        let zero = IdGen::seeded(0);
+        let (zero_branch, zero_tag) = (zero.new_branch(), zero.new_tag());
+        let (a, b) = (IdGen::from_entropy(), IdGen::from_entropy());
+        let (a_branch, a_tag) = (a.new_branch(), a.new_tag());
+        let (b_branch, b_tag) = (b.new_branch(), b.new_tag());
+        assert_ne!(a_branch, b_branch);
+        assert_ne!(a_tag, b_tag);
+        for (branch, tag) in [(&a_branch, &a_tag), (&b_branch, &b_tag)] {
+            assert_ne!(branch, &zero_branch, "a zero key");
+            assert_ne!(tag, &zero_tag, "a zero key");
+        }
+    }
+
     #[test]
     fn tag_is_eight_base36_chars() {
         let t = IdGen::seeded(1).new_tag();
