@@ -103,7 +103,9 @@ pub struct B2buaDialogExt {
     pub ack_branch: Option<String>,
     /// In-flight re-INVITE client transaction handle on this dialog.
     pub pending_invite_txn: Option<InviteTxnHandle>,
-    /// SDP cached from a reliable 18x / UPDATE under the `fake-prack` strategy.
+    /// Under the `fake-prack` strategy, the description a 2xx without one gives
+    /// the caller: the reliable 18x's answer, or her offer answered from the
+    /// latest early UPDATE offer.
     #[serde(with = "serde_bytes")]
     pub cached_sdp: Option<Vec<u8>>,
     /// RFC 3261 §13.3.1.4 (in-dialog) — a re-INVITE 2xx this side sent that
