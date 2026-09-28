@@ -8,7 +8,7 @@ use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use crate::rules::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
@@ -103,7 +103,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     disposition: Some(call::LegDisposition::Bridged),
                 },
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
-                RuleAction::AckLeg { author: None, leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
             ];
             actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
@@ -114,9 +114,9 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some(c_leg_id.clone()),
                 },
-                RuleAction::SendReinvite { author: Some(ctx.call.a_leg().leg_id.to_string()),
+                RuleAction::SendReinvite {
                     leg_id: c_leg_id.clone(),
-                    body: a_sdp.to_vec(),
+                    body: Some(Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string())),
                     add_headers: vec![],
                 },
                 RuleAction::AddCdrEvent {

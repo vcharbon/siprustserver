@@ -17,6 +17,14 @@ pub struct LegSdpSession {
     /// m-lines, the position of the author's stream it carries (`None` for a
     /// slot kept rejected). Empty when it left as its author wrote it.
     pub sent_slots: Vec<Option<u32>>,
+    /// The leg whose peer wrote the description `sent_slots` restated: only a
+    /// description going back to that leg is put in its stream order.
+    pub sent_slots_author: Option<String>,
+    /// Where that restatement answered a request: its CSeq and the `o=` value
+    /// of the description it was made from. The same author's same version
+    /// answering the same request again is a repeat, restated at the same
+    /// version.
+    pub restated_from: Option<String>,
     /// The leg whose peer's own session the dialog carries; `None` when it is
     /// a session this stack opened (or none yet).
     pub session_author: Option<String>,

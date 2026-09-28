@@ -19,8 +19,8 @@ use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
 use super::model::{
-    Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
-    SERVICE_LAYER,
+    Body, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
+    TimerDelay, SERVICE_LAYER,
 };
 use super::relay;
 use b2bua_sdk::provisional::originator_final_sent;
@@ -249,12 +249,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     disposition: Some(LegDisposition::Bridged),
                 });
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                actions.push(RuleAction::AckLeg {
-                    author: None,
-                    leg_id: b.clone(),
-                    body: Vec::new(),
-                    content_type: None,
-                });
+                actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: None });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
@@ -291,9 +286,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     ctx.call.a_leg().dialogs.first().map(|d| d.sip.local_cseq).unwrap_or(0);
                 let next_cseq = a_dialog_cseq + 1;
                 actions.push(RuleAction::SendReinvite {
-                    author: Some(ctx.source_leg_id.to_string()),
                     leg_id: a,
-                    body: final_sdp.to_vec(),
+                    body: Some(Body::from_leg(final_sdp.to_vec(), ctx.source_leg_id.to_string())),
                     add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
                 });
                 actions.push(RuleAction::AddCdrEvent {
@@ -330,12 +324,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }
                 if resp.status() < 300 {
                     return ok(vec![
-                        RuleAction::AckLeg {
-                            author: None,
-                            leg_id: "a".to_string(),
-                            body: Vec::new(),
-                            content_type: None,
-                        },
+                        RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Answer,
                             leg_id: "a".to_string(),

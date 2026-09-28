@@ -8,7 +8,7 @@ use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, Tra
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use crate::rules::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
 
@@ -49,7 +49,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
             new_state.phase = TransferPhase::ARealigning;
 
             ok(vec![
-                RuleAction::AckLeg { author: None, leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
                 RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
                 },
@@ -58,9 +58,9 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                     delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some("a".to_string()),
                 },
-                RuleAction::SendReinvite { author: Some(c_leg_id.clone()),
+                RuleAction::SendReinvite {
                     leg_id: "a".to_string(),
-                    body: c_realign_sdp.to_vec(),
+                    body: Some(Body::from_leg(c_realign_sdp.to_vec(), c_leg_id.clone())),
                     add_headers: vec![],
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },
@@ -187,7 +187,7 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let c_leg_id = st.c_leg_id.clone()?;
             ok(vec![
-                RuleAction::AckLeg { author: None, leg_id: "a".to_string(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
                 RuleAction::CancelTimer {
                     id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
                 },

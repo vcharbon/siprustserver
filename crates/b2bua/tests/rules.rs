@@ -8,6 +8,7 @@ use b2bua::config::B2buaConfig;
 use b2bua::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
+use b2bua::rules::model::{Body, BodyAuthor};
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
     RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
@@ -1408,8 +1409,7 @@ fn a_provisional_is_not_refused_by_the_final_guard() {
             leg_id: "a".into(),
             status: 183,
             reason: "Session Progress".into(),
-            body: vec![],
-            content_type: None,
+            body: None,
             to_tag: None,
             p_early_media: None,
         }],
@@ -1471,8 +1471,7 @@ fn a_provisional_after_the_final_is_refused() {
             leg_id: "a".into(),
             status: 183,
             reason: "Session Progress".into(),
-            body: vec![],
-            content_type: None,
+            body: None,
             to_tag: Some("late-tag".into()),
             p_early_media: None,
         }],
@@ -2662,11 +2661,13 @@ mod media_primitives {
             &config,
             &id_gen,
             &[RuleAction::SendRequestToLeg {
-                author: None,
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
-                body: mscml.clone(),
-                content_type: Some("application/mediaservercontrol+xml".into()),
+                body: Some(Body::new(
+                    mscml.clone(),
+                    Some("application/mediaservercontrol+xml".into()),
+                    BodyAuthor::Stack,
+                )),
                 headers: vec![],
             }],
         );
@@ -2711,11 +2712,13 @@ mod media_primitives {
             &config,
             &id_gen,
             &[RuleAction::SendRequestToLeg {
-                author: None,
                 leg_id: "b-1".into(),
                 method: "INFO".into(),
-                body: body.clone(),
-                content_type: Some("application/example-binary".into()),
+                body: Some(Body::new(
+                    body.clone(),
+                    Some("application/example-binary".into()),
+                    BodyAuthor::Stack,
+                )),
                 headers: vec![
                     ("User-To-User".into(), uui.into()),
                     ("X-Example-Trace".into(), "abc-123".into()),
@@ -2771,8 +2774,7 @@ mod media_primitives {
                 leg_id: "a".into(),
                 status: 183,
                 reason: "Session Progress".into(),
-                body: sdp.clone(),
-                content_type: None,
+                body: Some(Body::new(sdp.clone(), None, BodyAuthor::Stack)),
                 to_tag: None,
                 p_early_media: Some("sendrecv".into()),
             }],
@@ -2823,8 +2825,7 @@ mod media_primitives {
                 leg_id: "a".into(),
                 status: 200,
                 reason: "OK".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: None,
                 p_early_media: None,
             }],
@@ -2903,8 +2904,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: sdp_b.clone(),
-                content_type: None,
+                body: Some(Body::new(sdp_b.clone(), None, BodyAuthor::Stack)),
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::none(),
@@ -3001,8 +3001,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::none(),
@@ -3075,8 +3074,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: Some("A2explicit".into()),
                 header_updates: vec![("X-Served-By".into(), Some("mrf".into()))],
                 relayed: RelayedFinal::none(),
@@ -3113,8 +3111,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 486,
                 reason: "Busy Here".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::none(),
@@ -3146,8 +3143,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::none(),
@@ -3186,8 +3182,7 @@ mod answer_a_leg_new_dialog {
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: vec![],
-                content_type: None,
+                body: None,
                 to_tag: None,
                 header_updates: vec![
                     ("Supported".into(), Some("timer".into())),
@@ -3259,8 +3254,7 @@ Content-Length: 4\r\n\r\nv=0\n";
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: delivered.body().to_vec(),
-                content_type: None,
+                body: Some(Body::new(delivered.body().to_vec(), None, BodyAuthor::Stack)),
                 to_tag: None,
                 header_updates: vec![],
                 relayed: RelayedFinal::of(&delivered, SourceBody::Verbatim),
@@ -3316,8 +3310,7 @@ Content-Length: 4\r\n\r\nv=0\n";
             &[RuleAction::AnswerALegNewDialog {
                 status: 200,
                 reason: "OK".into(),
-                body: delivered.body().to_vec(),
-                content_type: None,
+                body: Some(Body::new(delivered.body().to_vec(), None, BodyAuthor::Stack)),
                 to_tag: None,
                 header_updates: vec![
                     ("X-Vendor-Thing".into(), Some("service-owned".into())),
@@ -3404,7 +3397,10 @@ mod ack_leg_body {
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         let result = exec.execute(
-            &[RuleAction::AckLeg { author: None, leg_id: "b-1".into(), body, content_type }],
+            &[RuleAction::AckLeg {
+                leg_id: "b-1".into(),
+                body: Some(Body::new(body, content_type, BodyAuthor::Stack)),
+            }],
             &call,
             &ctx,
         );
@@ -3498,7 +3494,10 @@ mod ack_leg_body {
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         exec.execute(
-            &[RuleAction::AckLeg { author: None, leg_id: "b-1".into(), body, content_type }],
+            &[RuleAction::AckLeg {
+                leg_id: "b-1".into(),
+                body: Some(Body::new(body, content_type, BodyAuthor::Stack)),
+            }],
             call,
             &ctx,
         )
@@ -3810,7 +3809,7 @@ mod default_sdp_create_leg {
             new_to: None,
             no_answer_timeout_sec: None,
             callback_context: None,
-            body_override: config.default_sdp.clone(),
+            body_override: config.default_sdp.clone().map(|sdp| Body::own(sdp, None)),
             header_updates: vec![],
             kind: None,
         };
@@ -5829,4 +5828,67 @@ fn a_message_cap_verdict_on_a_terminating_call_forces_it_terminal() {
         Some(TerminationCause::RemoteBye),
         "the first termination names who ended the call"
     );
+}
+
+// A re-INVITE's body names its author: the peer whose session the dialog
+// carries continues it as written, the same bytes from this stack are restated
+// under that session (RFC 3264 §8).
+mod sdp_body_author {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+
+    const BOB_V5: &str =
+        "v=0\r\no=bob 202 5 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
+
+    fn reinvite_body(author: BodyAuthor) -> String {
+        let config = B2buaConfig::default();
+        let mut call = call_with_retained_answered_2xx();
+        call.a_leg.sdp_session = call::LegSdpSession {
+            sent_origin: Some("bob 202 1 IN IP4 192.0.2.2".into()),
+            sent_media: vec!["audio 20000 RTP/AVP 0".into()],
+            session_author: Some("b-1".into()),
+            session_id: Some("202".into()),
+            ..Default::default()
+        };
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(invite())),
+            src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "b-1",
+            direction: Direction::FromB,
+            now_ms: 0,
+            config: &config,
+            discharged: None,
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
+        let reinvite = RuleAction::SendReinvite {
+            leg_id: "a".into(),
+            body: Some(Body::new(BOB_V5.as_bytes().to_vec(), None, author)),
+            add_headers: vec![],
+        };
+        let result = exec.execute(&[reinvite], &call, &ctx);
+        let effect = result.effects.outbound.first().expect("the re-INVITE leaves");
+        let OutboundBody::Request(req) = &effect.body else { panic!("a request") };
+        String::from_utf8_lossy(req.body()).into_owned()
+    }
+
+    #[test]
+    fn the_sessions_own_author_is_sent_as_written_and_the_stack_is_restated() {
+        assert_eq!(reinvite_body(BodyAuthor::Leg("b-1".into())), BOB_V5);
+        assert!(
+            reinvite_body(BodyAuthor::Stack).contains("o=bob 202 2 IN IP4 192.0.2.2\r\n"),
+            "the stack's description continues the session one version up"
+        );
+    }
 }

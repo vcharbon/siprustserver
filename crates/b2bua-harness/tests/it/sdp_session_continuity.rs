@@ -166,6 +166,20 @@ async fn a_spliced_peer_continues_each_dialog_session() {
         alice.receive("ACK").await;
     }
 
+    // A answers C's next re-offer with a 183 and then the 200, both with the same
+    // description: C is given it once, one version, twice (RFC 3264 §8).
+    let mut reinvite = charlie_dialog.request(InDialogMethod::Invite, Some(CHARLIE_REOFFER)).await;
+    let mut at_alice = alice.receive("INVITE").await;
+    at_alice.respond(183, "Session Progress").with_sdp(ALICE_ANSWERS_CHARLIE).await;
+    let early = reinvite.expect(183).await;
+    at_alice.respond(200, "OK").with_sdp(ALICE_ANSWERS_CHARLIE).await;
+    let ok = reinvite.expect(200).await;
+    let same = continued(ALICE_ANSWERS_CHARLIE, &c_session(held_version + 4));
+    assert_eq!(String::from_utf8_lossy(early.body()), same, "the 183 under C's session");
+    assert_eq!(String::from_utf8_lossy(ok.body()), same, "the 200 repeats it at the same version");
+    charlie_dialog.ack(None).await;
+    alice.receive("ACK").await;
+
     let mut alice_bye = alice_dialog.bye().await;
     charlie.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;

@@ -179,3 +179,49 @@ fn the_answer_goes_back_through_the_leg_it_came_from() {
     let to_author = send(&mut c, "b-2", Author::Leg("a"), Carried::InDialog, answer);
     assert!(to_author.ends_with("m=audio 10002 RTP/AVP 0\r\n"), "{to_author}");
 }
+
+/// A stated version at the top of its range has no next one: the description
+/// leaves as written — opening the session anew where the stack had stated no
+/// version of its own, keeping the dialog's session where it had.
+#[test]
+fn a_version_with_no_next_one_leaves_the_description_as_written() {
+    let top = format!("bob 202 {} IN IP4 192.0.2.2", u64::MAX);
+    for restated in [false, true] {
+        let mut c = call();
+        send(&mut c, "a", Author::Leg("b-1"), Carried::Opening, &sdp(&top, 20000));
+        c.a_leg.sdp_session.restated = restated;
+        let carol = sdp("carol 303 1 IN IP4 192.0.2.3", 30000);
+        assert_eq!(send(&mut c, "a", Author::Leg("b-2"), Carried::InDialog, &carol), carol);
+        let author = c.a_leg.sdp_session.session_author.as_deref();
+        assert_eq!(author, Some(if restated { "b-1" } else { "b-2" }), "restated={restated}");
+    }
+}
+
+/// The slot map of a restatement only reorders what goes back to the author
+/// it was made from: during a hold on a media server, the caller's own
+/// re-offer relayed to another leg leaves in the caller's order.
+#[test]
+fn the_slot_map_only_serves_the_restated_author() {
+    let mut c = call();
+    let av = "v=0\r\no=bob 202 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\nm=video 20002 RTP/AVP 96\r\n";
+    send(&mut c, "a", Author::Leg("b-1"), Carried::Opening, av);
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::InDialog,
+        &sdp("mrf 404 1 IN IP4 192.0.2.4", 40000),
+    );
+    let alice = "v=0\r\no=alice 101 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n";
+    send(&mut c, "b-1", Author::Leg("a"), Carried::Opening, alice);
+    assert_eq!(
+        send(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, alice),
+        alice,
+        "to Bob: as written"
+    );
+    assert!(
+        send(&mut c, "b-2", Author::Leg("a"), Carried::InDialog, alice)
+            .ends_with("m=audio 10002 RTP/AVP 0\r\n"),
+        "to the media server: its one stream"
+    );
+}

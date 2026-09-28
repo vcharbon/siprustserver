@@ -17,6 +17,7 @@ use sip_message::header::HeaderName;
 use sip_message::{Method, SipRequest, SipResponse};
 use sip_txn::TimeoutKind;
 
+pub use crate::body::{Body, BodyAuthor};
 use crate::config::B2buaConfig;
 use crate::event::CallEvent;
 use crate::relayed_final::RelayedFinal;
@@ -557,17 +558,11 @@ pub enum RuleAction {
         content_type: Option<String>,
     },
     /// ACK a leg's confirmed dialog. `body` rides the ACK (delayed-offer answer,
-    /// RFC 3261 §13.2.2.4 / RFC 3264 §4) — empty for the ordinary bare ACK.
-    /// `content_type` defaults to `application/sdp` when a body is present and
-    /// none is given; an empty ACK carries no body and no Content-Type.
+    /// RFC 3261 §13.2.2.4 / RFC 3264 §4) — `None` for the ordinary bare ACK,
+    /// which carries no body and no Content-Type.
     AckLeg {
         leg_id: String,
-        body: Vec<u8>,
-        content_type: Option<String>,
-        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
-        /// session description from another author than the one whose session
-        /// the dialog carries is restated under it (RFC 3264 §8).
-        author: Option<String>,
+        body: Option<Body>,
     },
     ConfirmDialog {
         leg_id: String,
@@ -607,8 +602,9 @@ pub enum RuleAction {
         no_answer_timeout_sec: Option<i64>,
         callback_context: Option<String>,
         /// Body override for the C INVITE (REFER transfer held SDP). `None`
-        /// keeps A's INVITE body; `Some(bytes)` replaces it (empty = drop).
-        body_override: Option<Vec<u8>>,
+        /// keeps A's INVITE body (its peer's); `Some(body)` replaces it, empty
+        /// bytes dropping it.
+        body_override: Option<Body>,
         /// Header overrides applied to the C INVITE (`update_headers` from the
         /// /call/refer allow). `(name, Some(value))` sets, `(name, None)` removes.
         header_updates: Vec<(String, Option<String>)>,
@@ -730,8 +726,7 @@ pub enum RuleAction {
     /// restricted to the body-bearing/keepalive subset (OPTIONS / INFO / UPDATE /
     /// MESSAGE — plus BYE/INVITE/PRACK/NOTIFY for internal callers). `body` is an
     /// **opaque** payload (MSCML rides here as `application/mediaservercontrol+xml`);
-    /// `content_type` defaults to `application/sdp` when a body is present and no
-    /// type is given.
+    /// its `content_type` defaults to `application/sdp` when none is given.
     ///
     /// `headers` forwards arbitrary application headers verbatim onto the
     /// re-originated request (mirrors [`RuleAction::ServiceHttpRequest`]'s header
@@ -741,17 +736,12 @@ pub enum RuleAction {
     /// `headers: [("User-To-User", value)]`. The B2BUA rebuilds
     /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
     /// only application headers belong here. `Content-Type`/`Content-Length` are
-    /// owned by `body`/`content_type` and are ignored if listed (never duplicated).
+    /// owned by `body` and are ignored if listed (never duplicated).
     SendRequestToLeg {
         leg_id: String,
         method: String,
-        body: Vec<u8>,
-        content_type: Option<String>,
+        body: Option<Body>,
         headers: Vec<(String, String)>,
-        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
-        /// session description from another author than the one whose session
-        /// the dialog carries is restated under it (RFC 3264 §8).
-        author: Option<String>,
     },
     /// Broker an unadopted leg's SDP onto the a-leg as an **unreliable** `1xx`
     /// (RFC 3262 §3 early media — no `Require: 100rel`/`RSeq`). Only the a-leg has
@@ -763,8 +753,7 @@ pub enum RuleAction {
         leg_id: String,
         status: u16,
         reason: String,
-        body: Vec<u8>,
-        content_type: Option<String>,
+        body: Option<Body>,
         to_tag: Option<String>,
         p_early_media: Option<String>,
     },
@@ -820,12 +809,8 @@ pub enum RuleAction {
     /// from the early-media SDP that was promoted into the synthetic 200 OK.
     SendReinvite {
         leg_id: String,
-        body: Vec<u8>,
+        body: Option<Body>,
         add_headers: Vec<Entry>,
-        /// The leg whose peer wrote `body`; `None` when this stack writes it. A
-        /// session description from another author than the one whose session
-        /// the dialog carries is restated under it (RFC 3264 §8).
-        author: Option<String>,
     },
     /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
     SetPromotePem {
@@ -1001,7 +986,7 @@ pub enum RuleAction {
     /// confirms the a-leg, and (iii) relays the final/SDP under A2. Only a `2xx`
     /// establishes a dialog — a non-2xx status is a no-op (the abandoned early
     /// dialog / the ADR-0022 unanswered-a-leg funnel own the failure paths).
-    /// `content_type` defaults to `application/sdp` when a `body` is present;
+    /// The body's `content_type` defaults to `application/sdp`;
     /// `header_updates` follow the non-structural set/remove discipline of
     /// [`Self::RespondToALeg`]; `relayed` is the delivered callee final's lines
     /// that ride onto this answer (RFC 3261 §16.6), exactly as the plain relay
@@ -1013,8 +998,7 @@ pub enum RuleAction {
     AnswerALegNewDialog {
         status: u16,
         reason: String,
-        body: Vec<u8>,
-        content_type: Option<String>,
+        body: Option<Body>,
         /// Explicit a-facing To-tag A2. `None` ⇒ mint a fresh one (guaranteed
         /// distinct from any prior early-media tag).
         to_tag: Option<String>,

@@ -5,22 +5,29 @@
 //! A dialog carries the session of the author whose description opened it.
 //! That author's own later descriptions leave as written while the stack has
 //! stated no version of its own in that session, so a plain relay stays
-//! byte-transparent. Once the dialog is confirmed, any other description is
+//! byte-transparent. Once the leg is confirmed (its dialog answered), any
+//! other description is
 //! restated under the session the dialog carries
 //! ([`sip_message::restate_session`]): another leg's (a transfer target, a
 //! rerouted destination, a media server), one of the stack's own, the
 //! author's under a new sess-id, and the author's own once the stack has
-//! restated. What the peer then describes travels on in the order of the
-//! restated author's streams, without the slots that author never described
+//! restated. The same author's same version again (a repeated provisional,
+//! the final repeating it) is the same description: restated at the version
+//! already given. What the peer then describes travels back to that author in
+//! the author's stream order, without the slots the author never described
 //! ([`sip_message::in_author_order`]). Before confirmation (the initial
 //! INVITE, its provisionals and final) a description opens the session.
 
 use std::borrow::Cow;
 
 use call::{Call, Leg, LegSdpSession, LegState};
+
+use crate::effects::{OutboundBody, OutboundSipEffect};
 use sip_message::header::MediaType;
 use sip_message::multipart::sdp_range;
-use sip_message::{in_author_order, parse_origin, restate_session, Method, StatedSession};
+use sip_message::{
+    in_author_order, parse_origin, restate_session, restate_session_again, Method, StatedSession,
+};
 
 /// Who wrote a description the stack sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,10 +38,12 @@ pub enum Author<'a> {
     Stack,
 }
 
-impl<'a> Author<'a> {
-    /// The author a rule action names: a leg, or this stack where none.
-    pub fn named(leg: Option<&'a str>) -> Self {
-        leg.map_or(Self::Stack, Self::Leg)
+impl<'a> From<&'a b2bua_sdk::model::BodyAuthor> for Author<'a> {
+    fn from(author: &'a b2bua_sdk::model::BodyAuthor) -> Self {
+        match author {
+            b2bua_sdk::model::BodyAuthor::Stack => Self::Stack,
+            b2bua_sdk::model::BodyAuthor::Leg(leg) => Self::Leg(leg),
+        }
     }
 }
 
@@ -44,8 +53,12 @@ pub enum Carried {
     /// In the initial INVITE or its provisionals and final: it opens the
     /// session.
     Opening,
-    /// In a later request or response of the dialog, or the initial ACK.
+    /// In a later request of the dialog, or the initial ACK.
     InDialog,
+    /// In a response of the dialog to the request of the given CSeq: the same
+    /// author's same version in another response to it (a repeated
+    /// provisional, the final repeating it) is the same description.
+    Answering(i64),
     /// Outside any exchange (RFC 3264 §4 / RFC 3262 §5 / RFC 3311 §5 name
     /// INVITE, ACK, PRACK and UPDATE; a response of 300 or more describes
     /// capabilities, RFC 3261 §13.2.1 / §21.4.26): left as written, recorded
@@ -66,11 +79,27 @@ impl Carried {
             (true, _) => Self::Opening,
         }
     }
+
+    /// A description in a response of `status` to the `method` request of
+    /// CSeq `cseq` in the dialog.
+    pub fn answering(method: &Method, status: u16, cseq: i64) -> Self {
+        match Self::of(method, Some(status), true) {
+            Self::InDialog => Self::Answering(cseq),
+            other => other,
+        }
+    }
+
+    fn in_dialog(self) -> bool {
+        matches!(self, Self::InDialog | Self::Answering(_))
+    }
 }
 
 /// `body`, typed `content_type` and written by `author`, as it leaves on
 /// `leg_id` where it stands `carried`, with the leg's session state updated to
 /// what it says. A body that carries no session description leaves as it is.
+/// A version at the top of its range has no next one: a description that would
+/// be restated above it leaves as written, and opens the session anew where the
+/// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
 pub fn continue_on_leg(
     call: &mut Call,
     leg_id: &str,
@@ -90,8 +119,8 @@ pub fn continue_on_leg(
         return body;
     };
     let reordered = match author {
-        Author::Leg(from) if carried == Carried::InDialog => {
-            in_restated_author_order(call, from, sdp)
+        Author::Leg(from) if carried.in_dialog() => {
+            in_restated_author_order(call, from, leg_id, sdp)
         }
         _ => None,
     };
@@ -99,21 +128,40 @@ pub fn continue_on_leg(
     let Some(leg) = leg_mut(call, leg_id) else {
         return body;
     };
-    let restated = (carried == Carried::InDialog
+    let repeat_key = match carried {
+        Carried::Answering(cseq) => {
+            parse_origin(sdp).map(|o| format!("{cseq} {}", &o.raw_origin_line[2..]))
+        }
+        _ => None,
+    };
+    let restated = (carried.in_dialog()
         && leg.state == LegState::Confirmed
         && !continues_itself(&leg.sdp_session, author, &session_id))
     .then(|| stated(leg))
     .flatten()
-    .and_then(|stated| restate_session(sdp, &stated));
+    .and_then(|stated| {
+        if repeats(&leg.sdp_session, author, repeat_key.as_deref()) {
+            restate_session_again(sdp, &stated)
+        } else {
+            restate_session(sdp, &stated)
+        }
+    });
     let state = &mut leg.sdp_session;
     let out = match restated {
         Some(r) => {
             state.sent_slots = r.slots;
+            state.sent_slots_author = match author {
+                Author::Leg(from) => Some(from.to_string()),
+                Author::Stack => None,
+            };
+            state.restated_from = repeat_key;
             state.restated = true;
             Cow::Owned(r.sdp)
         }
         None => {
             state.sent_slots = Vec::new();
+            state.sent_slots_author = None;
+            state.restated_from = None;
             if carried == Carried::Opening || state.sent_origin.is_none() || !state.restated {
                 state.session_author = match author {
                     Author::Leg(from) => Some(from.to_string()),
@@ -135,10 +183,13 @@ pub fn continue_on_leg(
     [&body[..range.start], &out, &body[range.end..]].concat()
 }
 
-/// The session state of a leg this stack opens with `body` (typed
-/// `content_type`, written by `author`): the session its initial INVITE opens.
-pub fn opened(body: &[u8], content_type: Option<&MediaType>, author: Author<'_>) -> LegSdpSession {
-    let Some(sdp) = content_type.and_then(|ct| sdp_range(ct, body)).map(|r| &body[r]) else {
+/// The session state of a leg this stack opens with `invite`, its initial
+/// INVITE, whose description `author` wrote.
+pub fn opened(invite: &OutboundSipEffect, author: Author<'_>) -> LegSdpSession {
+    let OutboundBody::Request(req) = &invite.body else {
+        return LegSdpSession::default();
+    };
+    let Some(sdp) = req.sdp() else {
         return LegSdpSession::default();
     };
     let (Some(stated), Some(origin)) = (StatedSession::of(sdp), parse_origin(sdp)) else {
@@ -170,16 +221,24 @@ fn continues_itself(state: &LegSdpSession, author: Author<'_>, session_id: &str)
     }
 }
 
-/// `sdp`, written by the peer of `from`, in the stream order of the author
-/// the stack last restated toward `from`, or `None` where the last
-/// description `from` received was its author's own.
-fn in_restated_author_order(call: &Call, from: &str, sdp: &[u8]) -> Option<Vec<u8>> {
-    let slots = &std::iter::once(&call.a_leg)
-        .chain(&call.b_legs)
-        .find(|l| l.leg_id == from)?
-        .sdp_session
-        .sent_slots;
-    (!slots.is_empty()).then(|| in_author_order(sdp, slots)).flatten()
+/// `sdp`, written by the peer of `from` and going to `to`, in the stream order
+/// of `to`'s description the stack last restated toward `from`, or `None`
+/// where that description was not `to`'s (or not restated at all).
+fn in_restated_author_order(call: &Call, from: &str, to: &str, sdp: &[u8]) -> Option<Vec<u8>> {
+    let state =
+        &std::iter::once(&call.a_leg).chain(&call.b_legs).find(|l| l.leg_id == from)?.sdp_session;
+    (state.sent_slots_author.as_deref() == Some(to) && !state.sent_slots.is_empty())
+        .then(|| in_author_order(sdp, &state.sent_slots))
+        .flatten()
+}
+
+/// Whether a description by `author` under `key` (the request it answers and
+/// its `o=` value) repeats the one the stack last restated on the leg.
+fn repeats(state: &LegSdpSession, author: Author<'_>, key: Option<&str>) -> bool {
+    let Author::Leg(from) = author else { return false };
+    state.sent_slots_author.as_deref() == Some(from)
+        && key.is_some()
+        && state.restated_from.as_deref() == key
 }
 
 /// What the stack last stated on `leg`, as the next restatement continues it.

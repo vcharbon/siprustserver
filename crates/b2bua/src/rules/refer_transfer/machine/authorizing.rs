@@ -9,7 +9,7 @@ use sip_message::{Method, SipStr};
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
 use crate::rules::defaults::parse_header_updates;
 use crate::rules::model::{
-    Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
+    Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
 };
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
@@ -171,7 +171,7 @@ pub(super) fn http_allow() -> RuleDefinition {
             });
             // `Some(bytes)` set / `Some(empty)` drop. The C INVITE never
             // carries A's real SDP until the c-realign re-INVITE.
-            let body_override = Some(held.unwrap_or_default());
+            let body_override = Some(Body::own(held.unwrap_or_default(), None));
 
             let raw_refer_to = new_refer_to.unwrap_or_else(|| st.refer_to_uri.clone());
             let effective = match to_bare_uri(&raw_refer_to) {

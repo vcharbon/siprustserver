@@ -22,6 +22,7 @@
 //! less glue) rather than a distinct mapped SDK type; the validation is slice 8,
 //! whose `announcement` crate must compile against this surface alone.
 
+pub mod body;
 pub mod config;
 pub mod event;
 pub mod fold_payload;
@@ -36,6 +37,7 @@ pub mod service;
 /// reference through `$crate::rules::…`, and the curated surface a service crate
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
+    pub use crate::body::{Body, BodyAuthor};
     pub use crate::model::{
         Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
         RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER, SERVICE_LAYER,

@@ -18,8 +18,8 @@ use sip_txn::TimeoutKind as TxnTimeoutKind;
 use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
 
 use crate::rules::model::{
-    Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
-    TimerDelay, CORE_LAYER,
+    Body, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
+    RuleHandleResult, TimerDelay, CORE_LAYER,
 };
 
 use super::route_fold::{
@@ -69,14 +69,8 @@ pub(crate) fn unacked_2xx_give_up_actions(
     } else {
         ("reinvite_ack_timeout", "reinvite-ack-timeout")
     };
-    let mut actions: Vec<RuleAction> = still_owed_bare_ack(call)
-        .map(|leg_id| RuleAction::AckLeg {
-            author: None,
-            leg_id,
-            body: Vec::new(),
-            content_type: None,
-        })
-        .collect();
+    let mut actions: Vec<RuleAction> =
+        still_owed_bare_ack(call).map(|leg_id| RuleAction::AckLeg { leg_id, body: None }).collect();
     actions.extend([
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
@@ -277,12 +271,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let b = ctx.source_leg_id.to_string();
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
-                    RuleAction::AckLeg {
-                        author: None,
-                        leg_id: b.clone(),
-                        body: Vec::new(),
-                        content_type: None,
-                    },
+                    RuleAction::AckLeg { leg_id: b.clone(), body: None },
                     // The crossing 200 answered the callee's dialog and the
                     // DestroyLeg below BYEs it: the CDR records both, so a
                     // b-leg reading `Confirmed`/`Bridged` at a cancelled call's
@@ -449,12 +438,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let outbound_cseq = resp.cseq().seq() as i64;
                 let mut actions = Vec::new();
                 if (200..300).contains(&resp.status()) {
-                    actions.push(RuleAction::AckLeg {
-                        author: None,
-                        leg_id: leg.clone(),
-                        body: Vec::new(),
-                        content_type: None,
-                    });
+                    actions.push(RuleAction::AckLeg { leg_id: leg.clone(), body: None });
                 }
                 actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
                 ok(actions)
@@ -528,12 +512,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     d.ext.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
                 }),
             |ctx| {
-                ok(vec![RuleAction::AckLeg {
-                    author: None,
-                    leg_id: ctx.source_leg_id.to_string(),
-                    body: Vec::new(),
-                    content_type: None,
-                }])
+                ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
             },
         ),
         // ── dialog ──────────────────────────────────────────────────────────
@@ -820,7 +799,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     new_to: fold.new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context: fold.callback_context,
-                    body_override: fold.body_override,
+                    body_override: fold.body_override.map(|b| Body::own(b, None)),
                     header_updates: fold.header_updates,
                     kind: None,
                 });
@@ -1749,11 +1728,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let mut actions = Vec::new();
                 for leg_id in ctx.call.all_peered_legs() {
                     actions.push(RuleAction::SendRequestToLeg {
-                        author: None,
                         leg_id: leg_id.clone(),
                         method: "OPTIONS".into(),
-                        body: vec![],
-                        content_type: None,
+                        body: None,
                         headers: vec![],
                     });
                     actions.push(RuleAction::ScheduleTimer {

@@ -14,7 +14,7 @@ use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities;
-use crate::rules::model::RuleContext;
+use crate::rules::model::{Body, RuleContext};
 use crate::rules::relay;
 
 use super::select::{dialog_identity_tag, in_dialog_method, leg_at, leg_index};
@@ -42,7 +42,7 @@ impl ActionExecutor<'_> {
         new_to: Option<&str>,
         no_answer_timeout_sec: Option<i64>,
         callback_context: Option<&str>,
-        body_override: Option<&[u8]>,
+        body_override: Option<&Body>,
         header_updates: &[(String, Option<String>)],
         kind: Option<LegKind>,
     ) {
@@ -78,14 +78,14 @@ impl ActionExecutor<'_> {
         // Whether the INVITE this leg is minted with carries an offer: the
         // override's body where one is given (empty = none), else the a-leg's.
         let offers_sdp = match body_override {
-            Some(body) => !body.is_empty(),
+            Some(body) => !body.bytes.is_empty(),
             None => relay::carries_sdp(&a_invite),
         };
         // Same refusal as the admission reject above, for the other way a
         // decision can name no destination: an address field that does not read
         // (055). The leg is not created and no INVITE goes out — originating on
         // a fabricated target would dial an address the decision never stated.
-        let (leg, effect) = match relay::build_b_leg(
+        let (mut leg, effect) = match relay::build_b_leg(
             &call.call_ref,
             &leg_id,
             call.emergency == Some(true),
@@ -97,7 +97,7 @@ impl ActionExecutor<'_> {
             no_answer_timeout_sec,
             self.config,
             self.id_gen,
-            body_override,
+            body_override.map(|b| b.bytes.as_slice()),
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             crate::rules::charging::minting_arm(call),
@@ -128,6 +128,11 @@ impl ActionExecutor<'_> {
                 return;
             }
         };
+        let author = match body_override {
+            Some(body) => relay::Author::from(&body.author),
+            None => relay::Author::Leg(&call.a_leg.leg_id),
+        };
+        leg.sdp_session = relay::opened(&effect, author);
         if let Some(ctx_str) = callback_context {
             call.callback_context = Some(ctx_str.to_string());
         }

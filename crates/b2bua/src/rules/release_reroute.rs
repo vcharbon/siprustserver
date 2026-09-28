@@ -46,7 +46,7 @@ use call::{
 };
 
 use super::model::{
-    Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
+    Body, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
 };
 
 /// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
@@ -203,7 +203,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     new_to: fold.new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context: fold.callback_context,
-                    body_override: fold.body_override,
+                    body_override: fold.body_override.map(|b| Body::own(b, None)),
                     header_updates: fold.header_updates,
                     kind: None,
                 });
@@ -253,17 +253,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         disposition: Some(LegDisposition::Bridged),
                     },
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
-                    RuleAction::AckLeg {
-                        author: None,
-                        leg_id: new_leg.clone(),
-                        body: Vec::new(),
-                        content_type: None,
-                    },
+                    RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
-                        author: Some(new_leg.clone()),
                         leg_id: "a".to_string(),
-                        body: resp.body().to_vec(),
+                        body: Some(Body::from_leg(resp.body().to_vec(), new_leg.clone())),
                         add_headers: vec![],
                     },
                     RuleAction::AddCdrEvent {
@@ -349,12 +343,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let st = ctx.call.reroute_state()?.clone();
                 let mut actions = vec![
-                    RuleAction::AckLeg {
-                        author: None,
-                        leg_id: "a".to_string(),
-                        body: Vec::new(),
-                        content_type: None,
-                    },
+                    RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
                     RuleAction::cancel_timer(&guard_timer(), None),
                     RuleAction::Merge { leg_a: "a".to_string(), leg_b: st.new_leg_id.clone() },
                 ];

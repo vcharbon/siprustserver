@@ -69,7 +69,9 @@ pub use sdp_doc::{
 /// One party's session across a dialog whose description author changes (RFC 3264 §8):
 /// it cuts a description at its `m=` lines byte for byte and reads every value
 /// through `sdp_doc`.
-pub use sdp_session::{in_author_order, restate_session, Restated, StatedSession};
+pub use sdp_session::{
+    in_author_order, restate_session, restate_session_again, Restated, StatedSession,
+};
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};
 pub use template::{

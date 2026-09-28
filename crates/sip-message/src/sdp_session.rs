@@ -63,9 +63,21 @@ pub struct Restated {
 /// stream-level `c=` where the description states no session-level one
 /// (RFC 4566 §5.7).
 pub fn restate_session(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
-    let current = parse_origin(sdp)?;
     let previous = parse_origin(format!("v=0\r\no={}\r\n", stated.origin).as_bytes())?;
-    let next_origin = previous.next_version_line()?;
+    restate_under(sdp, stated, previous.next_version_line()?)
+}
+
+/// `sdp` restated again as the version `stated` already names: the repeat of a
+/// description the far party was already given under that version (a
+/// retransmitted provisional, the final repeating it), which RFC 3264 §8 keeps
+/// at its version. `None` where either side has no readable `o=` line.
+pub fn restate_session_again(sdp: &[u8], stated: &StatedSession) -> Option<Restated> {
+    parse_origin(format!("v=0\r\no={}\r\n", stated.origin).as_bytes())?;
+    restate_under(sdp, stated, format!("o={}", stated.origin))
+}
+
+fn restate_under(sdp: &[u8], stated: &StatedSession, next_origin: String) -> Option<Restated> {
+    let current = parse_origin(sdp)?;
     let text = String::from_utf8_lossy(sdp);
     let authored = Sections::of(&text);
     let described = parse_sdp_body(sdp).map(|d| d.media).unwrap_or_default();
@@ -280,6 +292,14 @@ mod tests {
         let again = restate_session(NEW_AUTHOR, &stated(&first.sdp)).unwrap();
         assert!(text(again.sdp).contains("o=b2b 700 9 IN IP4 192.0.2.10\r\n"));
         assert_eq!(again.slots, vec![Some(0), None]);
+    }
+
+    /// A repeat of what the far party already holds keeps the stated version.
+    #[test]
+    fn a_repeat_keeps_the_stated_version() {
+        let first = restate_session(NEW_AUTHOR, &stated(HELD)).unwrap();
+        let again = restate_session_again(NEW_AUTHOR, &stated(&first.sdp)).unwrap();
+        assert_eq!(again, first, "the same bytes, the same version");
     }
 
     /// Nothing is restated from an unreadable origin, and a stated version with

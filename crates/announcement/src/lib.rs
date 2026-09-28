@@ -35,7 +35,7 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
+    Body, Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState, TerminationCause};
@@ -94,29 +94,24 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ok(vec![
         // Establish the media dialog so the MSCML INFO can ride it.
         RuleAction::ConfirmDialog { leg_id: media.clone() },
-        RuleAction::AckLeg {
-            author: None,
-            leg_id: media.clone(),
-            body: Vec::new(),
-            content_type: None,
-        },
+        RuleAction::AckLeg { leg_id: media.clone(), body: None },
         // Early media: the MRF's SDP onto the caller as an unreliable 183.
         RuleAction::SendProvisionalToLeg {
             leg_id: "a".to_string(),
             status: 183,
             reason: "Session Progress".to_string(),
-            body: mrf_sdp.to_vec(),
-            content_type: None,
+            body: Some(Body::from_leg(mrf_sdp.to_vec(), media.clone())),
             to_tag: None,
             p_early_media: Some("sendrecv".to_string()),
         },
         // Open the MSCML control channel: play the clip.
         RuleAction::SendRequestToLeg {
-            author: None,
             leg_id: media,
             method: "INFO".to_string(),
-            body: mscml::build_play(&data.clip_id),
-            content_type: Some(mscml::CONTENT_TYPE.to_string()),
+            body: Some(Body::own(
+                mscml::build_play(&data.clip_id),
+                Some(mscml::CONTENT_TYPE.to_string()),
+            )),
             headers: vec![],
         },
         RuleAction::SetState { machine: MACHINE, to: State::Announcing.label() },

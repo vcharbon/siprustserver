@@ -10,7 +10,7 @@ use call::helpers::{
 use call::{Call, CdrEvent, TagMapping};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance, SoftBoundedEffect};
-use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
+use crate::rules::model::{Body, MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
 
 use super::select::{find_pending_dialog, resolve_peer};
@@ -38,27 +38,14 @@ impl ActionExecutor<'_> {
             RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref());
             }
-            RuleAction::AckLeg { leg_id, body, content_type, author } => {
+            RuleAction::AckLeg { leg_id, body } => {
                 // A body-bearing ACK carries a delayed-offer answer (RFC 3261
                 // §13.2.2.4); default its type to `application/sdp` when none is
                 // given. An empty ACK stays a bare ACK — no body, no Content-Type.
-                let ct = if body.is_empty() {
-                    None
-                } else {
-                    content_type
-                        .as_deref()
-                        .and_then(relay::media_type)
-                        .or_else(|| Some(relay::sdp()))
-                };
-                self.ack_leg(
-                    call,
-                    fx,
-                    leg_id,
-                    body.clone(),
-                    ct,
-                    Provenance::Authored,
-                    relay::Author::named(author.as_deref()),
-                );
+                let (bytes, content_type, author) = parts(body);
+                let ct = (!bytes.is_empty())
+                    .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
+                self.ack_leg(call, fx, leg_id, bytes.to_vec(), ct, Provenance::Authored, author);
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
@@ -109,7 +96,7 @@ impl ActionExecutor<'_> {
                     new_to.as_deref(),
                     *no_answer_timeout_sec,
                     callback_context.as_deref(),
-                    body_override.as_deref(),
+                    body_override.as_ref(),
                     header_updates,
                     *kind,
                 );
@@ -187,23 +174,17 @@ impl ActionExecutor<'_> {
                 // realising the transition to the terminal `[*]`. Idempotent.
                 call.sm_cursors.remove(machine);
             }
-            RuleAction::SendRequestToLeg {
-                leg_id,
-                method,
-                body,
-                content_type,
-                headers,
-                author,
-            } => {
+            RuleAction::SendRequestToLeg { leg_id, method, body, headers } => {
+                let (bytes, content_type, author) = parts(body);
                 self.send_request_to_leg(
                     call,
                     fx,
                     leg_id,
                     method,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
                     headers,
-                    relay::Author::named(author.as_deref()),
+                    author,
                 );
             }
             RuleAction::SendProvisionalToLeg {
@@ -211,21 +192,21 @@ impl ActionExecutor<'_> {
                 status,
                 reason,
                 body,
-                content_type,
                 to_tag,
                 p_early_media,
             } => {
+                let (bytes, content_type, author) = parts(body);
                 self.send_provisional_to_leg(
                     call,
                     fx,
                     leg_id,
                     *status,
                     reason,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
                     to_tag.as_deref(),
                     p_early_media.as_deref(),
-                    event_author(ctx, body),
+                    author,
                 );
             }
             RuleAction::SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag } => {
@@ -257,15 +238,9 @@ impl ActionExecutor<'_> {
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);
             }
-            RuleAction::SendReinvite { leg_id, body, add_headers, author } => {
-                self.send_reinvite(
-                    call,
-                    fx,
-                    leg_id,
-                    body,
-                    add_headers,
-                    relay::Author::named(author.as_deref()),
-                );
+            RuleAction::SendReinvite { leg_id, body, add_headers } => {
+                let (bytes, _, author) = parts(body);
+                self.send_reinvite(call, fx, leg_id, bytes, add_headers, author);
             }
             RuleAction::SetPromotePem { state } => {
                 *call = call::helpers::set_promote_pem(call.clone(), state.clone());
@@ -372,22 +347,22 @@ impl ActionExecutor<'_> {
                 status,
                 reason,
                 body,
-                content_type,
                 to_tag,
                 header_updates,
                 relayed,
             } => {
+                let (bytes, content_type, author) = parts(body);
                 self.answer_a_leg_new_dialog(
                     call,
                     fx,
                     *status,
                     reason,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
                     to_tag.as_deref(),
                     header_updates,
                     relayed,
-                    event_author(ctx, body),
+                    author,
                 );
             }
         }
@@ -415,13 +390,11 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// Who wrote `body`, a description a rule forwards without naming its author:
-/// the peer of the event's leg when it is the event's own body, else this
-/// stack.
-fn event_author<'a>(ctx: &'a RuleContext, body: &[u8]) -> relay::Author<'a> {
-    let carried = ctx.request().map(|r| r.body()).or_else(|| ctx.response().map(|r| r.body()));
-    match carried {
-        Some(b) if !body.is_empty() && b.as_ref() == body => relay::Author::Leg(ctx.source_leg_id),
-        _ => relay::Author::Stack,
+/// A rule action's body as the executor sends it: bytes (empty for none), the
+/// stated media type, and its author.
+fn parts(body: &Option<Body>) -> (&[u8], Option<&str>, relay::Author<'_>) {
+    match body {
+        Some(b) => (&b.bytes, b.content_type.as_deref(), relay::Author::from(&b.author)),
+        None => (&[], None, relay::Author::Stack),
     }
 }

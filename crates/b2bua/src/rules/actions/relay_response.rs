@@ -273,7 +273,11 @@ impl ActionExecutor<'_> {
                     call,
                     target_leg,
                     relay::Author::Leg(&source_leg_id),
-                    relay::Carried::of(&Method::from_wire(&cseq_method), Some(status), true),
+                    relay::Carried::answering(
+                        &Method::from_wire(&cseq_method),
+                        status,
+                        pending.inbound_cseq,
+                    ),
                     relay_body.clone(),
                     relay_content_type.as_ref(),
                 );

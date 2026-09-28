@@ -82,8 +82,10 @@ mod fork {
                     RuleAction::AnswerALegNewDialog {
                         status: 200,
                         reason: "OK".into(),
-                        body: callee_final.body().to_vec(),
-                        content_type: None,
+                        body: Some(b2bua::rules::model::Body::from_leg(
+                            callee_final.body().to_vec(),
+                            b.clone(),
+                        )),
                         to_tag: None,
                         header_updates: vec![],
                         relayed: RelayedFinal::of(callee_final, SourceBody::Verbatim),

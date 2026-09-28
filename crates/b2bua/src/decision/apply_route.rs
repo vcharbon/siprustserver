@@ -313,6 +313,13 @@ pub async fn apply_route(
         }
     }
 
+    leg.sdp_session = relay::opened(
+        &effect,
+        match &route.update_body {
+            BodyUpdate::Keep => relay::Author::Leg(&call.a_leg.leg_id),
+            BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
+        },
+    );
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
 
