@@ -17,12 +17,13 @@
 //! the author's stream order, without the slots the author never described
 //! ([`sip_message::in_author_order`]). Before confirmation (the initial
 //! INVITE, its provisionals and final) a description opens the session.
-//! A description of the stack's own that already states the next version of
-//! the session the dialog carries (an answer it composed as that session's
-//! author would) leaves as written and counts as a version the stack stated;
-//! inside an early dialog, the author's later descriptions are then restated
-//! above it as on a confirmed one. Each early dialog of a leg the stack opened keeps its
-//! own session state until one of them confirms (RFC 3261 §12.1.2).
+//! Inside an early dialog, a description of the stack's own that already
+//! states the next version of the session the dialog carries (an answer it
+//! composed as that session's author would) leaves as written and counts as a
+//! version the stack stated; the author's later descriptions in that dialog
+//! are then restated above it as on a confirmed one. Each early dialog of a
+//! leg the stack opened keeps its own session state until one of them
+//! confirms (RFC 3261 §12.1.2).
 
 use std::borrow::Cow;
 
@@ -105,12 +106,61 @@ impl Carried {
 }
 
 /// `body`, typed `content_type` and written by `author`, as it leaves on
-/// `leg_id` where it stands `carried`, with the leg's session state updated to
-/// what it says. A body that carries no session description leaves as it is.
+/// `leg_id` inside its dialog whose remote tag is `dialog` (`None`: the leg's
+/// one dialog, or none yet) where it stands `carried`, with that dialog's
+/// session state updated to what it says. While `leg_id` is an unconfirmed leg
+/// this stack opened, each of its early dialogs carries its own state, the
+/// opening INVITE's until something crosses it; the leg keeps the opening state
+/// and [`adopt_confirmed_dialog`] hands it the confirming dialog's. A body that carries no session description leaves as it is.
 /// A version at the top of its range has no next one: a description that would
 /// be restated above it leaves as written, and opens the session anew where the
 /// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
+#[allow(clippy::too_many_arguments)]
 pub fn continue_on_leg(
+    call: &mut Call,
+    leg_id: &str,
+    dialog: Option<&str>,
+    author: Author<'_>,
+    carried: Carried,
+    body: Vec<u8>,
+    content_type: Option<&MediaType>,
+) -> Vec<u8> {
+    let Some(opening) = dialog.and_then(|tag| enter_early_dialog(call, leg_id, tag)) else {
+        return continue_session(call, leg_id, author, carried, body, content_type);
+    };
+    let out = continue_session(call, leg_id, author, carried, body, content_type);
+    if let (Some(tag), Some(leg)) = (dialog, call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)) {
+        let offers_received = leg.sdp_session.offers_received;
+        let own =
+            std::mem::replace(&mut leg.sdp_session, LegSdpSession { offers_received, ..opening });
+        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == tag) {
+            d.ext.sdp_session = Some(own);
+        }
+    }
+    out
+}
+
+/// Puts the state early dialog `tag` of the unconfirmed leg `leg_id` carries in
+/// the leg's place and returns the leg's own (the opening state), or `None`
+/// where `leg_id` is not an unconfirmed leg this stack opened with such a
+/// dialog.
+fn enter_early_dialog(call: &mut Call, leg_id: &str, tag: &str) -> Option<LegSdpSession> {
+    let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
+    let dialog = (leg.state != LegState::Confirmed)
+        .then(|| leg.dialogs.iter_mut().position(|d| d.sip.remote_tag == tag))
+        .flatten()?;
+    let mut own = leg.dialogs[dialog].ext.sdp_session.take();
+    if let Some(own) = own.as_mut() {
+        own.offers_received = leg.sdp_session.offers_received;
+    }
+    Some(match own {
+        Some(own) => std::mem::replace(&mut leg.sdp_session, own),
+        None => leg.sdp_session.clone(),
+    })
+}
+
+/// [`continue_on_leg`] on the session state in the leg's place.
+fn continue_session(
     call: &mut Call,
     leg_id: &str,
     author: Author<'_>,
@@ -145,6 +195,7 @@ pub fn continue_on_leg(
         .map(|o| format!("{} {}", leg.sdp_session.offers_received, o.value()));
     let already_stated = author == Author::Stack
         && carried.in_dialog()
+        && matches!(leg.state, LegState::Trying | LegState::Early)
         && stated(leg).is_some_and(|s| states_next_version(sdp, &s.origin));
     let restated = (carried.in_dialog()
         && match leg.state {
@@ -202,53 +253,6 @@ pub fn continue_on_leg(
         return body;
     }
     [&body[..range.start], &out, &body[range.end..]].concat()
-}
-
-/// [`continue_on_leg`] for a description inside `leg_id`'s dialog whose remote
-/// tag is `remote_tag`. While that leg is an unconfirmed leg this stack
-/// opened, the description continues the session that early dialog carries
-/// (its own once the stack has described something inside it, else what the
-/// opening INVITE stated), and the leg keeps the opening state for the other
-/// early dialogs; [`adopt_confirmed_dialog`] hands the confirming dialog's to
-/// the leg.
-#[allow(clippy::too_many_arguments)]
-pub fn continue_in_dialog(
-    call: &mut Call,
-    leg_id: &str,
-    remote_tag: &str,
-    author: Author<'_>,
-    carried: Carried,
-    body: Vec<u8>,
-    content_type: Option<&MediaType>,
-) -> Vec<u8> {
-    let early = |call: &mut Call| {
-        let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
-        let dialog = (leg.state != LegState::Confirmed)
-            .then(|| leg.dialogs.iter_mut().position(|d| d.sip.remote_tag == remote_tag))
-            .flatten()?;
-        let mut own = leg.dialogs[dialog].ext.sdp_session.take();
-        if let Some(own) = own.as_mut() {
-            own.offers_received = leg.sdp_session.offers_received;
-        }
-        let opening = match own {
-            Some(own) => std::mem::replace(&mut leg.sdp_session, own),
-            None => leg.sdp_session.clone(),
-        };
-        Some(opening)
-    };
-    let Some(opening) = early(call) else {
-        return continue_on_leg(call, leg_id, author, carried, body, content_type);
-    };
-    let out = continue_on_leg(call, leg_id, author, carried, body, content_type);
-    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-        let offers_received = leg.sdp_session.offers_received;
-        let own =
-            std::mem::replace(&mut leg.sdp_session, LegSdpSession { offers_received, ..opening });
-        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == remote_tag) {
-            d.ext.sdp_session = Some(own);
-        }
-    }
-    out
 }
 
 /// The session state the early dialog at `dialog` carries, handed to `leg` as

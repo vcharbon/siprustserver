@@ -47,7 +47,7 @@ use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::{answer_from_own, parse_origin, FormatPreference, Method};
+use sip_message::{answer_from_own, FormatPreference, Method};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
@@ -398,22 +398,25 @@ define_service! {
                     }]);
                 };
 
-                let a_invite = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-                let own = a_invite.sdp().unwrap_or_default();
-                // The next version of alice's session as bob holds it in this
-                // early dialog (RFC 3264 §8).
-                let origin = ctx
-                    .call
-                    .b_legs()
-                    .iter()
-                    .find(|l| l.leg_id == leg)
-                    .and_then(|l| relay::next_origin_in_dialog(l, &b_tag))
-                    .or_else(|| {
-                        let line = parse_origin(own)?.next_version_line()?;
-                        Some(line["o=".len()..].to_string())
-                    });
-                let to_bob = answer_from_own(offer, own, FormatPreference::Offerer, origin.as_deref());
-                let to_alice = answer_from_own(own, offer, FormatPreference::Answerer, None);
+                // Bob is answered out of the offer HE was sent, under the next
+                // version of that session in this early dialog (RFC 3264 §8);
+                // alice's 200 answers the offer SHE made.
+                let b_leg = ctx.call.b_legs().iter().find(|l| l.leg_id == leg);
+                let sent = b_leg.and_then(|l| {
+                    l.dialogs
+                        .iter()
+                        .filter(|d| d.sip.remote_tag == b_tag)
+                        .chain(&l.dialogs)
+                        .find_map(relay::acked_invite)
+                });
+                let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));
+                let to_bob = sent.as_ref().and_then(|r| r.sdp()).zip(origin).and_then(|(own, o)| {
+                    answer_from_own(offer, own, FormatPreference::Offerer, Some(&o))
+                });
+                let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+                let to_alice = caller
+                    .sdp()
+                    .and_then(|own| answer_from_own(own, offer, FormatPreference::Answerer, None));
                 match to_bob.zip(to_alice) {
                     Some((to_bob, to_alice)) => ok(vec![
                         RuleAction::Respond {

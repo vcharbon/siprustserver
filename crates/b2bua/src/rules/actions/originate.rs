@@ -276,6 +276,7 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
+                Some(&dialog.sip.remote_tag),
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
@@ -431,10 +432,10 @@ impl ActionExecutor<'_> {
                 call.emergency == Some(true),
             )),
             cseq: Some(outbound_cseq as u32),
-            body: relay::continue_in_dialog(
+            body: relay::continue_on_leg(
                 call,
                 leg_id,
-                &dialog.sip.remote_tag,
+                Some(&dialog.sip.remote_tag),
                 author,
                 relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),

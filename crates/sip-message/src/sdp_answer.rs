@@ -12,9 +12,10 @@
 //! are carried byte for byte except the ones an answer must change. Pure and
 //! deterministic: no clocks, no randomness, no I/O.
 
+use crate::sdp::{sdp_origin_address, sdp_session_id, BuildHeldSdpOptions};
 use crate::sdp_doc::{
-    canonical_rtpmap, direction_of, extract_direction, extract_rtpmaps, parse_sdp_body, MediaLine,
-    SdpDirection, Sections,
+    canonical_rtpmap, direction_of, extract_cryptos, extract_direction, extract_fmtps,
+    extract_rtpmaps, parse_sdp_body, MediaLine, SdpDirection, Sections,
 };
 
 /// Whose order of preference picks the one format an answered stream keeps.
@@ -35,19 +36,28 @@ pub enum FormatPreference {
 ///
 /// - an offered stream with port 0 is answered with its own m-line;
 /// - one `own` does not describe at that rank, or describes with another media
-///   type, or with no format in common, is answered rejected: its m-line with
-///   port 0;
+///   type or transport profile, or with no format in common, or offers SDES
+///   keys (RFC 4568) for no suite `own` holds, is answered rejected: its
+///   m-line with port 0;
 /// - one `own` describes with port 0 is answered with `own`'s m-line;
 /// - otherwise `own`'s media section answers it with `own`'s port and
-///   transport and the formats [`FormatPreference`] keeps, `own`'s
-///   `rtpmap`/`fmtp` lines for those formats only, its other lines as written,
-///   and the direction [`answer_direction`] gives, written in place of `own`'s
-///   media-level one or added where it differs from what the stream inherits.
+///   transport and the formats [`FormatPreference`] keeps, under the offer's
+///   numbers (RFC 3264 §6.1); `own`'s per-format attributes (`rtpmap`, `fmtp`,
+///   `rtcp-fb`) for those formats only, renumbered, an `rtpmap` spelled as the
+///   offer spells it; ONE `crypto` line, `own`'s key for the first offered
+///   suite it holds under the offer's tag, where the offer carries SDES; its
+///   other lines as written (ICE and `mid` attributes included: the answer
+///   speaks for `own`'s transport); and the direction [`answer_direction`]
+///   gives, written in place of `own`'s media-level one or added where it
+///   differs from what the stream inherits.
 ///
-/// A format is common when both streams list it and, where both bind it to an
-/// encoding (an `rtpmap`, or the RFC 3551 static assignment), the encodings are
-/// equal. A rejected m-line carries no attribute, and `own`'s first media-level
-/// `c=` line where `own` states no session-level one (RFC 4566 §5.7).
+/// A static format (below 96) is common by number; a dynamic one by encoding
+/// (name, clock rate, channels, RFC 4566 §6), whatever number each side gives
+/// it; any other format token by equality. AMR and AMR-WB formats are common
+/// only in the same `octet-align` mode (RFC 4867 §8.3.1); other `fmtp`
+/// parameters are not compared. A rejected m-line carries no attribute, and
+/// `own`'s first media-level `c=` line where `own` states no session-level one
+/// (RFC 4566 §5.7).
 pub fn answer_from_own(
     offer: &[u8],
     own: &[u8],
@@ -97,7 +107,10 @@ pub fn answer_from_own(
             reject(&mut out, owned.media[i].value().to_string());
             continue;
         }
-        let Some(kept) = kept_formats(stream, mine, preference) else {
+        let answerable = mine.transport == stream.transport;
+        let kept = answerable.then(|| kept_formats(stream, mine, preference)).flatten();
+        let crypto = sdes_answer(stream, mine);
+        let (Some(kept), Some(crypto)) = (kept, crypto) else {
             reject(&mut out, with_port_zero(offered_value));
             continue;
         };
@@ -106,7 +119,8 @@ pub fn answer_from_own(
         let offered_dir =
             media_direction(stream).or(offer_session_dir).unwrap_or(SdpDirection::SendRecv);
         let dir = answer_direction(own_dir, offered_dir);
-        answered_section(&mut out, owned.media[i].text, mine, &kept, dir, inherited, eol);
+        let answer = Answered { stream, own: mine, kept: &kept, crypto, dir, inherited };
+        answered_section(&mut out, owned.media[i].text, &answer, eol);
     }
     Some(out.into_bytes())
 }
@@ -126,18 +140,25 @@ pub fn answer_direction(own: SdpDirection, offered: SdpDirection) -> SdpDirectio
 }
 
 /// The answer to `offer` rejecting each of its streams (RFC 3264 §6): every
-/// offered m-line with port 0, its formats and `a=inactive`, under `origin`
-/// (the `o=` value) and a session-level `c=` naming `address`. `None` where
-/// `offer` is not a session description.
-pub fn reject_offer(offer: &[u8], origin: &str, address: &str) -> Option<Vec<u8>> {
+/// offered m-line with port 0, its formats and `a=inactive`, under an origin
+/// and a session-level `c=` of the answerer's own (`options`' address, a
+/// session id from its clock). `None` where `offer` is not a session
+/// description.
+pub fn reject_offer(offer: &[u8], options: &BuildHeldSdpOptions) -> Option<Vec<u8>> {
     let doc = parse_sdp_body(offer)?;
     let text = String::from_utf8_lossy(offer);
     let sections = Sections::of(&text);
+    let address = sdp_origin_address(&options.local_ip);
     let addrtype = if address.contains(':') { "IP6" } else { "IP4" };
+    let sess = sdp_session_id(options.now_ms);
     let mut out = String::new();
-    for line in
-        ["v=0", &format!("o={origin}"), "s=-", &format!("c=IN {addrtype} {address}"), "t=0 0"]
-    {
+    for line in [
+        "v=0",
+        &format!("o=b2bua {sess} {sess} IN {addrtype} {address}"),
+        "s=-",
+        &format!("c=IN {addrtype} {address}"),
+        "t=0 0",
+    ] {
         push_line(&mut out, line, "\r\n");
     }
     for (stream, section) in doc.media.iter().zip(&sections.media) {
@@ -151,6 +172,58 @@ pub fn reject_offer(offer: &[u8], origin: &str, address: &str) -> Option<Vec<u8>
     Some(out.into_bytes())
 }
 
+/// One kept format: the number the offer gives it and the one `own` gives it.
+struct Kept {
+    offered: String,
+    own: String,
+}
+
+/// The encoding a format of `media` names, lower-cased and canonical (RFC 4566
+/// §6): its `rtpmap`, else the RFC 3551 static assignment.
+fn encoding(format: &str, media: &MediaLine) -> Option<String> {
+    extract_rtpmaps(media)
+        .into_iter()
+        .find(|(pt, _)| pt == format)
+        .map(|(_, enc)| canonical_rtpmap(&media.r#type, &enc))
+        .or_else(|| static_encoding(format).map(|enc| canonical_rtpmap(&media.r#type, enc)))
+        .map(|enc| enc.to_ascii_lowercase())
+}
+
+/// Whether `format` is a dynamic RTP payload type (RFC 3551 §3: 96–127).
+fn is_dynamic(format: &str) -> bool {
+    format.parse::<u8>().is_ok_and(|pt| pt >= 96)
+}
+
+/// The `octet-align` mode an AMR or AMR-WB format states (RFC 4867 §8.1: absent
+/// is 0), or `None` for any other encoding.
+fn amr_alignment(format: &str, media: &MediaLine, enc: &str) -> Option<String> {
+    let name = enc.split('/').next()?;
+    if name != "amr" && name != "amr-wb" {
+        return None;
+    }
+    let params = extract_fmtps(media).into_iter().find(|(f, _)| f == format).map(|(_, p)| p);
+    let aligned = params.as_deref().unwrap_or_default().split(';').find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        k.trim().eq_ignore_ascii_case("octet-align").then(|| v.trim().to_string())
+    });
+    Some(aligned.unwrap_or_else(|| "0".to_string()))
+}
+
+/// The format of `other` that is the same payload format as `format` of
+/// `media`, if any.
+fn counterpart(format: &str, media: &MediaLine, other: &MediaLine) -> Option<String> {
+    let enc = encoding(format, media);
+    let same = |f: &String| {
+        if is_dynamic(format) || is_dynamic(f) {
+            let (Some(a), Some(b)) = (&enc, encoding(f, other)) else { return false };
+            *a == b && amr_alignment(format, media, a) == amr_alignment(f, other, &b)
+        } else {
+            f == format
+        }
+    };
+    other.formats.iter().find(|f| same(f)).cloned()
+}
+
 /// The formats an answered stream keeps: the first common format in the
 /// preferred order that is not `telephone-event`, then, on audio, the first
 /// common `telephone-event` in that order. `None` where no such first format
@@ -159,83 +232,132 @@ fn kept_formats(
     offered: &MediaLine,
     own: &MediaLine,
     preference: FormatPreference,
-) -> Option<Vec<String>> {
-    let offered_maps = extract_rtpmaps(offered);
-    let own_maps = extract_rtpmaps(own);
-    let encoding = |f: &str, m: &MediaLine, maps: &[(String, String)]| {
-        maps.iter()
-            .find(|(pt, _)| pt == f)
-            .map(|(_, enc)| canonical_rtpmap(&m.r#type, enc))
-            .or_else(|| static_encoding(f).map(|enc| canonical_rtpmap(&m.r#type, enc)))
-            .map(|enc| enc.to_ascii_lowercase())
+) -> Option<Vec<Kept>> {
+    let common: Vec<Kept> = match preference {
+        FormatPreference::Offerer => offered
+            .formats
+            .iter()
+            .filter_map(|f| Some(Kept { own: counterpart(f, offered, own)?, offered: f.clone() }))
+            .collect(),
+        FormatPreference::Answerer => own
+            .formats
+            .iter()
+            .filter_map(|f| Some(Kept { offered: counterpart(f, own, offered)?, own: f.clone() }))
+            .collect(),
     };
-    let common = |f: &str| {
-        offered.formats.iter().any(|o| o == f)
-            && own.formats.iter().any(|o| o == f)
-            && match (encoding(f, offered, &offered_maps), encoding(f, own, &own_maps)) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
-            }
+    let events = |k: &Kept| {
+        encoding(&k.offered, offered)
+            .is_some_and(|enc| enc.split('/').next() == Some("telephone-event"))
     };
-    let events = |f: &str| {
-        [encoding(f, offered, &offered_maps), encoding(f, own, &own_maps)]
+    let codec = common.iter().position(|k| !events(k))?;
+    let te = offered
+        .r#type
+        .eq_ignore_ascii_case("audio")
+        .then(|| common.iter().position(events))
+        .flatten();
+    Some(
+        common
             .into_iter()
-            .flatten()
-            .any(|enc| enc.split('/').next() == Some("telephone-event"))
-    };
-    let ranked = match preference {
-        FormatPreference::Offerer => &offered.formats,
-        FormatPreference::Answerer => &own.formats,
-    };
-    let codec = ranked.iter().find(|f| common(f) && !events(f))?;
-    let mut kept = vec![codec.clone()];
-    if offered.r#type.eq_ignore_ascii_case("audio") {
-        if let Some(te) = ranked.iter().find(|f| common(f) && events(f)) {
-            kept.push(te.clone());
-        }
-    }
-    Some(kept)
+            .enumerate()
+            .filter(|(i, _)| *i == codec || Some(*i) == te)
+            .map(|(_, k)| k)
+            .collect(),
+    )
 }
 
-/// `own`'s media section `text` answering with `kept` formats and `dir`: the
-/// m-line's format list replaced, `rtpmap`/`fmtp` lines kept for `kept` only,
-/// the first direction attribute written as `dir` and any other dropped, `dir`
-/// added at the end where the section states none and `inherited` differs.
-fn answered_section(
-    out: &mut String,
-    text: &str,
-    own: &MediaLine,
-    kept: &[String],
+/// The one `crypto` line answering the SDES keys `offered` carries (RFC 4568
+/// §5.1.2): `own`'s key for the first offered suite it holds, under the
+/// offer's tag. `Some(None)` where the offer carries no SDES; `None` where it
+/// does and `own` holds none of its suites.
+fn sdes_answer(offered: &MediaLine, own: &MediaLine) -> Option<Option<String>> {
+    let offered_keys = extract_cryptos(offered);
+    if offered_keys.is_empty() {
+        return Some(None);
+    }
+    let own_keys = extract_cryptos(own);
+    offered_keys.iter().find_map(|(tag, suite, _)| {
+        let (_, _, rest) = own_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
+        Some(Some(format!("a=crypto:{tag} {suite} {rest}")))
+    })
+}
+
+/// What one answered stream states.
+struct Answered<'a> {
+    stream: &'a MediaLine,
+    own: &'a MediaLine,
+    kept: &'a [Kept],
+    crypto: Option<String>,
     dir: SdpDirection,
     inherited: SdpDirection,
-    eol: &str,
-) {
+}
+
+/// The attributes bound to one format by their first token (RFC 4566 §6, RFC
+/// 4585 §4.2).
+const PER_FORMAT: [&str; 3] = ["rtpmap:", "fmtp:", "rtcp-fb:"];
+
+/// `own`'s media section `text` answering as `answer` states: the m-line's
+/// format list replaced, each per-format attribute kept for a kept format only
+/// and renumbered (an `rtpmap` spelled as the offer spells it), the first
+/// `crypto` line written as the answer's one and any other dropped, the first
+/// direction attribute written as the answer's and any other dropped, the
+/// direction added at the end where the section states none and the inherited
+/// one differs.
+fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &str) {
     let mut section = lines(text);
     let m_value = section.next().and_then(|l| l.get(2..)).unwrap_or_default();
     let port_field = m_value.split_whitespace().nth(1).unwrap_or("0");
+    let formats: Vec<&str> = answer.kept.iter().map(|k| k.offered.as_str()).collect();
     push_line(
         out,
-        &format!("m={} {port_field} {} {}", own.r#type, own.transport, kept.join(" ")),
+        &format!(
+            "m={} {port_field} {} {}",
+            answer.own.r#type,
+            answer.own.transport,
+            formats.join(" ")
+        ),
         eol,
     );
-    let mut dir_written = false;
+    let offered_maps = extract_rtpmaps(answer.stream);
+    let (mut dir_written, mut crypto_written) = (false, false);
     for line in section {
         let attr = line.strip_prefix("a=");
-        let bound_pt = attr
-            .and_then(|a| a.strip_prefix("rtpmap:").or_else(|| a.strip_prefix("fmtp:")))
-            .map(|rest| rest.split_whitespace().next().unwrap_or_default());
-        match (bound_pt, attr.and_then(direction_of)) {
-            (Some(pt), _) if !kept.iter().any(|k| k == pt) => {}
-            (_, Some(_)) if dir_written => {}
-            (_, Some(_)) => {
-                push_line(out, &format!("a={}", dir.token()), eol);
+        let bound = attr.and_then(|a| {
+            let name = PER_FORMAT.iter().find(|p| a.starts_with(**p))?;
+            let rest = &a[name.len()..];
+            let (format, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+            Some((*name, format, tail))
+        });
+        if let Some((name, format, tail)) = bound {
+            if format == "*" {
+                push_line(out, line, eol);
+                continue;
+            }
+            let Some(kept) = answer.kept.iter().find(|k| k.own == format) else { continue };
+            let tail = match offered_maps.iter().find(|(pt, _)| *pt == kept.offered) {
+                Some((_, enc)) if name == "rtpmap:" => enc.as_str(),
+                _ => tail,
+            };
+            push_line(out, &format!("a={name}{} {tail}", kept.offered).trim_end().to_string(), eol);
+            continue;
+        }
+        if attr.is_some_and(|a| a.starts_with("crypto:")) {
+            if let (Some(crypto), false) = (&answer.crypto, crypto_written) {
+                push_line(out, crypto, eol);
+            }
+            crypto_written = true;
+            continue;
+        }
+        match attr.and_then(direction_of) {
+            Some(_) if dir_written => {}
+            Some(_) => {
+                push_line(out, &format!("a={}", answer.dir.token()), eol);
                 dir_written = true;
             }
-            _ => push_line(out, line, eol),
+            None => push_line(out, line, eol),
         }
     }
-    if !dir_written && dir != inherited {
-        push_line(out, &format!("a={}", dir.token()), eol);
+    if !dir_written && answer.dir != answer.inherited {
+        push_line(out, &format!("a={}", answer.dir.token()), eol);
     }
 }
 

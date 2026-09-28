@@ -64,10 +64,10 @@ impl ActionExecutor<'_> {
                 .then(|| call::helpers::b2bua_tag(call, ctx.source_leg_id))
                 .flatten();
             let content_type = content_type.and_then(relay::media_type);
-            let body = relay::continue_in_dialog(
+            let body = relay::continue_on_leg(
                 call,
                 ctx.source_leg_id,
-                req.from().tag().unwrap_or_default(),
+                req.from().tag(),
                 relay::Author::Stack,
                 relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),

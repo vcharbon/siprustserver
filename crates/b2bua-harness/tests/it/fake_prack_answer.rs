@@ -237,7 +237,10 @@ async fn a_final_with_its_own_description_is_relayed_as_written() {
     let update = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8 9\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\n";
     reoffer(&mut uas.dialog(), update).await;
 
-    let own = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    // The 183's transport plan (RFC 3261 §13.2.1) under a new version of bob's
+    // session (RFC 3264 §8), unlike what the B2BUA would build (`o=bob 1 2`,
+    // no `ptime`).
+    let own = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\n";
     uas.respond(200, "OK").with_sdp(own).await;
     let ok = call.expect(200).await;
     assert_eq!(String::from_utf8_lossy(ok.body()), own, "the callee's own final description");
@@ -299,6 +302,54 @@ async fn a_stated_version_belongs_to_its_early_dialog() {
     assert_eq!(at_bob, reoffer, "the answering dialog never saw a version of the B2BUA's");
     assert_eq!(at_alice, reanswer);
 
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}
+
+/// The route replaced the offer the callee was sent: the answer to his
+/// re-offer speaks for THAT offer (its origin, port and formats), and the
+/// caller's 200 still answers her own.
+#[tokio::test]
+async fn the_answer_speaks_for_the_offer_the_callee_was_sent() {
+    use b2bua::decision::test_adapter::route_to_with_18x;
+    use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
+    use std::sync::Arc;
+
+    const SENT: &str = "v=0\r\no=media 5 1 IN IP4 192.0.2.50\r\ns=-\r\nc=IN IP4 192.0.2.50\r\nt=0 0\r\nm=audio 11000 RTP/AVP 18 8\r\na=rtpmap:18 G729/8000\r\na=rtpmap:8 PCMA/8000\r\n";
+    let h = Harness::with_transit_delay("fake-prack-answer-replaced-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5861").await;
+    let bob = h.agent("bob", "127.0.0.1:5862").await;
+    let b2bua = B2buaSut::builder(Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to_with_18x("127.0.0.1", 5862, RelayFirst18xStrategy::FakePrack);
+                r.update_body = BodyUpdate::Replace(SENT.into());
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    ))
+    .start(&h, "b2bua", "127.0.0.1:5863")
+    .await;
+
+    let (mut call, mut uas) = ringing(&alice, &bob, &b2bua).await;
+    assert_eq!(
+        String::from_utf8_lossy(uas.request().body()),
+        SENT,
+        "the callee got the route's offer"
+    );
+    let update = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    assert_eq!(
+        reoffer(&mut uas.dialog(), update).await,
+        "v=0\r\no=media 5 2 IN IP4 192.0.2.50\r\ns=-\r\nc=IN IP4 192.0.2.50\r\nt=0 0\r\nm=audio 11000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+    );
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert_eq!(
+        String::from_utf8_lossy(ok.body()),
+        "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+    );
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
     hang_up(&mut dialog, &bob, &b2bua).await;
     let _ = h.finish().await;
 }

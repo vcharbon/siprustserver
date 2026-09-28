@@ -108,7 +108,7 @@ pub(crate) fn acked_invite_carries_offer(dialog: &Dialog) -> bool {
 
 /// The INVITE last sent on this dialog, re-parsed from its cached
 /// client-transaction handle.
-fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
+pub(crate) fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
     parse_request(&dialog.ext.pending_invite_txn.as_ref()?.original_invite)
 }
 

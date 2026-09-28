@@ -311,6 +311,39 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
     out
 }
 
+/// Every `a=fmtp:<format> <parameters>` in `media` as ordered
+/// `(format, parameters)` pairs, the parameters verbatim. The FIRST occurrence
+/// of a format wins.
+pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for attr in &media.attributes {
+        let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
+        let tail = tail.trim();
+        let (format, params) = tail.split_once(' ').unwrap_or((tail, ""));
+        if !format.is_empty() && !out.iter().any(|(f, _)| f == format) {
+            out.push((format.to_string(), params.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Every `a=crypto:<tag> <crypto-suite> <key-params> [<session-params>]` in
+/// `media` (RFC 4568 §9.1) as ordered `(tag, suite, rest)` triples, `rest`
+/// being everything after the suite, verbatim.
+pub fn extract_cryptos(media: &MediaLine) -> Vec<(String, String, String)> {
+    media
+        .attributes
+        .iter()
+        .filter_map(|attr| {
+            let tail = strip_prefix_ci(attr, "crypto:")?.trim();
+            let (tag, tail) = tail.split_once(' ')?;
+            let tail = tail.trim_start();
+            let (suite, rest) = tail.split_once(' ').unwrap_or((tail, ""));
+            Some((tag.to_string(), suite.to_string(), rest.trim().to_string()))
+        })
+        .collect()
+}
+
 /// The rtpmap value RFC 4566 §6 makes an encoding EQUAL to, for a comparison
 /// that asks whether two descriptions bind a payload type the same way. On an
 /// AUDIO stream the third subfield is the channel count and its absence means

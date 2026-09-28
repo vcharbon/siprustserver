@@ -38,9 +38,14 @@ impl ActionExecutor<'_> {
         provenance: Provenance,
         author: relay::Author<'_>,
     ) {
+        // The ACK rides the leg's dialog: the one a 2xx confirmed.
+        let dialog = call::helpers::find_leg(call, leg_id)
+            .and_then(|l| l.dialogs.first())
+            .map(|d| d.sip.remote_tag.clone());
         let body = relay::continue_on_leg(
             call,
             leg_id,
+            dialog.as_deref(),
             author,
             relay::Carried::InDialog,
             body,
@@ -237,10 +242,10 @@ impl ActionExecutor<'_> {
             None
         };
         let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
-        let body = relay::continue_in_dialog(
+        let body = relay::continue_on_leg(
             call,
             target_leg,
-            &target_dialog.sip.remote_tag,
+            Some(&target_dialog.sip.remote_tag),
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),

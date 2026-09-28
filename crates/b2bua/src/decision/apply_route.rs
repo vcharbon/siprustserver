@@ -311,6 +311,14 @@ pub async fn apply_route(
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
+        // The client-transaction handles hold the INVITE as it leaves.
+        let image = req.image().to_vec();
+        for handle in leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()) {
+            handle.original_invite = image.clone();
+        }
+        if let Some(handle) = leg.pending_invite_txn.as_mut() {
+            handle.original_invite = image;
+        }
     }
 
     leg.sdp_session = relay::opened(

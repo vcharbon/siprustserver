@@ -58,6 +58,7 @@ pub fn response_to_a_leg(
     let body = super::sdp_session::continue_on_leg(
         call,
         &a_leg,
+        None,
         author,
         super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
         body,

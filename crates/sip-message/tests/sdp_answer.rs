@@ -6,7 +6,8 @@
 //! from the re-offer.
 
 use sip_message::{
-    answer_direction, answer_from_own, reject_offer, FormatPreference, SdpDirection,
+    answer_direction, answer_from_own, reject_offer, BuildHeldSdpOptions, FormatPreference,
+    SdpDirection,
 };
 
 /// The first offer: two audio streams, the first inactive, the second receive-only.
@@ -257,17 +258,115 @@ fn a_rejected_stream_carries_a_connection_where_the_session_has_none() {
 fn nothing_is_built_from_what_is_not_a_description() {
     assert_eq!(answer_from_own(b"", FIRST_OFFER.as_bytes(), FormatPreference::Offerer, None), None);
     assert_eq!(answer_from_own(REOFFER.as_bytes(), b"x", FormatPreference::Offerer, None), None);
-    assert_eq!(reject_offer(b"not sdp", "a 1 1 IN IP4 192.0.2.1", "192.0.2.1"), None);
+    assert_eq!(reject_offer(b"not sdp", &at("192.0.2.1")), None);
 }
 
-/// Every offered stream rejected, in order, with its formats and inactive;
-/// one already rejected is answered with its own line.
+fn at(ip: &str) -> BuildHeldSdpOptions {
+    BuildHeldSdpOptions { local_ip: ip.into(), now_ms: 7_000 }
+}
+
+/// Every offered stream rejected, in order, with its formats and inactive,
+/// under the answerer's own origin and address; one already rejected is
+/// answered with its own line.
 #[test]
 fn an_offer_rejected_whole() {
     assert_eq!(
-        text(reject_offer(REOFFER.replace("12345", "0").as_bytes(), "as 7 7 IN IP4 192.0.2.9", "192.0.2.9")),
-        "v=0\r\no=as 7 7 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\nt=0 0\r\nm=audio 0 RTP/AVP 0 4\r\na=inactive\r\nm=audio 0 RTP/AVP 3 110\r\na=inactive\r\nm=video 0 RTP/AVP 32\r\na=inactive\r\n",
+        text(reject_offer(REOFFER.replace("12345", "0").as_bytes(), &at("192.0.2.9"))),
+        "v=0\r\no=b2bua 7 7 IN IP4 192.0.2.9\r\ns=-\r\nc=IN IP4 192.0.2.9\r\nt=0 0\r\nm=audio 0 RTP/AVP 0 4\r\na=inactive\r\nm=audio 0 RTP/AVP 3 110\r\na=inactive\r\nm=video 0 RTP/AVP 32\r\na=inactive\r\n",
     );
-    let v6 = text(reject_offer(REOFFER.as_bytes(), "as 7 7 IN IP6 ::1", "::1"));
-    assert!(v6.contains("c=IN IP6 ::1\r\n"), "{v6}");
+    let v6 = text(reject_offer(REOFFER.as_bytes(), &at("::1")));
+    assert!(v6.contains("o=b2bua 7 7 IN IP6 ::1\r\n") && v6.contains("c=IN IP6 ::1\r\n"), "{v6}");
+}
+
+fn stream_of(answer: &str) -> String {
+    answer[answer.find("m=").expect("a stream")..].to_string()
+}
+
+/// A dynamic format is the same codec under another number when its encoding
+/// (name, clock, channels) is (RFC 3264 §6.1): the answer uses the OFFERER's
+/// number and rtpmap, telephone-event included; the answerer's fmtp follows
+/// the renumbered format.
+#[test]
+fn dynamic_formats_match_by_encoding_under_the_offerers_number() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 96 101\r\na=rtpmap:96 AMR-WB/16000\r\na=fmtp:96 mode-change-capability=2\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 97 100\r\na=rtpmap:97 amr-wb/16000/1\r\na=rtpmap:100 telephone-event/8000\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 4000 RTP/AVP 97 100\r\na=rtpmap:97 amr-wb/16000/1\r\na=fmtp:97 mode-change-capability=2\r\na=rtpmap:100 telephone-event/8000\r\na=fmtp:100 0-15\r\n",
+    );
+    let other_clock = offer.replace("telephone-event/8000", "telephone-event/16000");
+    let answer = text(answer_from_own(
+        other_clock.as_bytes(),
+        own.as_bytes(),
+        FormatPreference::Offerer,
+        None,
+    ));
+    assert!(stream_of(&answer).starts_with("m=audio 4000 RTP/AVP 97\r\n"), "{answer}");
+}
+
+/// Per-format attributes ride only for the formats kept, whatever the
+/// attribute (RFC 4585 rtcp-fb included); a wildcard one rides as written.
+#[test]
+fn every_per_format_attribute_follows_its_format() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=video 4000 RTP/AVPF 96 97\r\na=rtpmap:96 H264/90000\r\na=rtpmap:97 VP8/90000\r\na=rtcp-fb:96 nack\r\na=rtcp-fb:97 nack pli\r\na=rtcp-fb:* ccm fir\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=video 5000 RTP/AVPF 97\r\na=rtpmap:97 VP8/90000\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=video 4000 RTP/AVPF 97\r\na=rtpmap:97 VP8/90000\r\na=rtcp-fb:97 nack pli\r\na=rtcp-fb:* ccm fir\r\n",
+    );
+}
+
+/// A stream offered under another transport profile is rejected: an RTP/AVP
+/// answer to an RTP/SAVP offer is no answer (RFC 3264 §6).
+#[test]
+fn another_transport_profile_rejects_the_stream() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/SAVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIz\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 0 RTP/SAVP 8\r\n");
+}
+
+/// SDES (RFC 4568 §5.1.2): the answer carries ONE crypto line, the answerer's
+/// key for the first offered suite it holds, under the OFFER's tag; no suite
+/// in common rejects the stream.
+#[test]
+fn an_sdes_offer_is_answered_with_one_crypto_line_under_the_offers_tag() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/SAVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAA\r\na=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:BBBB\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/SAVP 8\r\na=crypto:5 AES_CM_128_HMAC_SHA1_32 inline:CCCC\r\na=crypto:6 AES_CM_128_HMAC_SHA1_80 inline:DDDD\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 4000 RTP/SAVP 8\r\na=crypto:5 AES_CM_128_HMAC_SHA1_32 inline:BBBB\r\n"
+    );
+    let none = offer
+        .replace("AES_CM_128_HMAC_SHA1_32", "F8_128_HMAC_SHA1_80")
+        .replace("crypto:6 AES_CM_128_HMAC_SHA1_80", "crypto:6 AEAD_AES_256_GCM");
+    let answer =
+        text(answer_from_own(none.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 0 RTP/SAVP 8\r\n");
+}
+
+/// AMR / AMR-WB in octet-aligned and bandwidth-efficient mode are two payload
+/// formats (RFC 4867 §8.3.1): not common.
+#[test]
+fn amr_octet_alignment_must_agree() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 96 8\r\na=rtpmap:96 AMR/8000\r\na=fmtp:96 octet-align=1\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 98 8\r\na=rtpmap:98 AMR/8000\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 4000 RTP/AVP 8\r\n");
+    let aligned =
+        offer.replace("AMR/8000\r\n", "AMR/8000\r\na=fmtp:98 octet-align=1; mode-set=0,2\r\n");
+    let answer =
+        text(answer_from_own(aligned.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 4000 RTP/AVP 98\r\na=rtpmap:98 AMR/8000\r\na=fmtp:98 octet-align=1\r\n"
+    );
 }

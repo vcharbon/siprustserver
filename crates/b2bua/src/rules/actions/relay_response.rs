@@ -10,7 +10,7 @@ use call::helpers::{
 use call::{Call, LegState, PendingRequest, TagMapping};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateRelayedResponseOpts, SourceBody};
-use sip_message::header::{HeaderName, HeaderValue, MediaType, To, Via};
+use sip_message::header::{From, HeaderName, HeaderValue, MediaType, To, Via};
 use sip_message::{Method, SipHeader, SipStr};
 
 use crate::effects::{
@@ -269,9 +269,14 @@ impl ActionExecutor<'_> {
                         }
                     }
                 }
+                // The dialog the answered request came in on: its sender's tag.
+                let dialog = From::parse(&SipStr::owned(&pending.source_from))
+                    .ok()
+                    .and_then(|from| from.tag().map(str::to_string));
                 let relay_body = relay::continue_on_leg(
                     call,
                     target_leg,
+                    dialog.as_deref(),
                     relay::Author::Leg(&source_leg_id),
                     relay::Carried::answering(&Method::from_wire(&cseq_method), status),
                     relay_body.clone(),

@@ -6,10 +6,7 @@ use sip_message::header::MediaType;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipStr};
 
-use super::{
-    adopt_confirmed_dialog, continue_in_dialog, continue_on_leg, next_origin_in_dialog, Author,
-    Carried,
-};
+use super::{adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, Author, Carried};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, src};
@@ -45,7 +42,8 @@ fn ct() -> MediaType {
 
 /// What reaches leg `to` of `body` written by `author`, `carried` as stated.
 fn send(call: &mut Call, to: &str, author: Author<'_>, carried: Carried, body: &str) -> String {
-    let out = continue_on_leg(call, to, author, carried, body.as_bytes().to_vec(), Some(&ct()));
+    let out =
+        continue_on_leg(call, to, None, author, carried, body.as_bytes().to_vec(), Some(&ct()));
     String::from_utf8(out).unwrap()
 }
 
@@ -403,10 +401,10 @@ fn forked() -> Call {
 /// The stack's own answer inside `f1` of `b-1`, stating `origin`.
 fn answer_in_f1(c: &mut Call, origin: &str) -> String {
     let body = sdp(origin, 10000);
-    let out = continue_in_dialog(
+    let out = continue_on_leg(
         c,
         "b-1",
-        "f1",
+        Some("f1"),
         Author::Stack,
         Carried::InDialog,
         body.as_bytes().to_vec(),
@@ -427,10 +425,10 @@ fn a_stack_description_stating_the_next_version_leaves_as_written() {
         answer_in_f1(&mut c, "alice 1 3 IN IP4 192.0.2.1"),
         sdp("alice 1 3 IN IP4 192.0.2.1", 10000)
     );
-    let relayed = continue_in_dialog(
+    let relayed = continue_on_leg(
         &mut c,
         "b-1",
-        "f1",
+        Some("f1"),
         Author::Leg("a"),
         Carried::InDialog,
         sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
@@ -468,5 +466,53 @@ fn each_early_dialog_keeps_its_own_session() {
         o_line(&restated),
         "o=alice 1 3 IN IP4 192.0.2.1",
         "above the stack's version in f1"
+    );
+}
+
+/// A relayed early-dialog exchange keeps the dialog's state current: the
+/// caller's bodiless PRACK and her 200 answering the callee's UPDATE both
+/// cross `f1`, and `f1` confirming leaves the leg on what she last stated.
+#[test]
+fn a_relayed_early_exchange_survives_confirmation() {
+    let mut c = forked();
+    continue_on_leg(&mut c, "b-1", Some("f1"), Author::Leg("a"), Carried::InDialog, vec![], None);
+    let answer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
+    let out = continue_on_leg(
+        &mut c,
+        "b-1",
+        Some("f1"),
+        Author::Leg("a"),
+        Carried::answering(&Method::Update, 200),
+        answer.clone().into_bytes(),
+        Some(&ct()),
+    );
+    assert_eq!(String::from_utf8(out).unwrap(), answer);
+    adopt_confirmed_dialog(&mut c.b_legs[0], 0);
+    assert_eq!(
+        c.b_legs[0].sdp_session.sent_origin.as_deref(),
+        Some("alice 1 2 IN IP4 192.0.2.1"),
+        "the leg holds what the caller last stated in f1",
+    );
+}
+
+/// What crosses one early dialog stays that dialog's: the caller's answer
+/// relayed into `f1` is not what `f2` confirms with.
+#[test]
+fn a_relayed_description_does_not_leak_into_another_fork() {
+    let mut c = forked();
+    continue_on_leg(
+        &mut c,
+        "b-1",
+        Some("f1"),
+        Author::Leg("a"),
+        Carried::answering(&Method::Update, 200),
+        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
+        Some(&ct()),
+    );
+    adopt_confirmed_dialog(&mut c.b_legs[0], 1);
+    assert_eq!(
+        c.b_legs[0].sdp_session.sent_origin.as_deref(),
+        Some("alice 1 1 IN IP4 192.0.2.1"),
+        "f2 only ever saw the opening INVITE",
     );
 }

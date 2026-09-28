@@ -66,8 +66,9 @@ pub use sdp_answer::{answer_direction, answer_from_own, reject_offer, FormatPref
 pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
-    canonical_rtpmap, direction_of, extract_direction, extract_format_list, extract_rtpmaps,
-    media_line, parse_origin, parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
+    canonical_rtpmap, direction_of, extract_cryptos, extract_direction, extract_fmtps,
+    extract_format_list, extract_rtpmaps, media_line, parse_origin, parse_sdp_body, MediaLine,
+    SdpDirection, SdpDoc, SdpOrigin,
 };
 /// One party's session across a dialog whose description author changes (RFC 3264 §8):
 /// it cuts a description at its `m=` lines byte for byte and reads every value
