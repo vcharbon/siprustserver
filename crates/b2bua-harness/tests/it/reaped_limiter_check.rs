@@ -74,6 +74,7 @@ impl CallLimiter for DropsReleases {
         });
         RefreshAnswer::Answered(outcomes.collect())
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 fn limiters(ids: &[(&str, i64)]) -> Vec<CallLimiterEntry> {

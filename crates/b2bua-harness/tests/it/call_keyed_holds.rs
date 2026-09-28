@@ -1026,6 +1026,7 @@ impl CallLimiter for AnswersReleased {
     async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
         RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 /// An initial admit refused by a release fence runs the call uncounted, counts

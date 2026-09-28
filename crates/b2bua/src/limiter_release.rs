@@ -13,12 +13,13 @@
 //! Bounds: an entry that has waited one lease is given up (the limiter
 //! already let the call's set lapse), and a push onto a full queue gives up
 //! the oldest entry; both are counted. The lease is the limiter's as the
-//! worker last learnt it ([`LimiterLease`]), read each time the queue looks:
-//! a lease learnt later moves every waiting entry's deadline. An entry is a
-//! key and the instant it was queued, nothing of the call. The queue is not replicated: a
-//! worker that dies loses it, and the lease frees what it held; a release is
-//! idempotent per key, so a key another node also releases frees nothing
-//! twice.
+//! worker last learnt it ([`LimiterLease`]): a lease learnt later moves every
+//! waiting entry's deadline, and the drainer wakes on it, so an entry is given
+//! up at its deadline under the lease of the moment, held queue included. An
+//! entry is a key and the instant it was queued, nothing of the call. The
+//! queue is not replicated: a worker that dies loses it, and the lease frees
+//! what it held; a release is idempotent per key, so a key another node also
+//! releases frees nothing twice.
 //!
 //! [`ReleaseQueue::hold`] and [`ReleaseQueue::resume`] are the seam a circuit
 //! breaker drives: while held nothing is sent (leases still expire), and a
@@ -368,7 +369,10 @@ impl ReleaseQueue {
     }
 
     /// Send what is due, then wait for the next due instant or a push.
+    /// A change of the lease moves every deadline: the wait is looked at
+    /// again.
     async fn drain(self: Arc<Self>) {
+        let mut lease = self.config.lease.changes();
         loop {
             match self.step(Instant::now()) {
                 Step::Send(seqs, keys) => {
@@ -379,6 +383,7 @@ impl ReleaseQueue {
                     tokio::select! {
                         _ = self.wake.notified() => {}
                         _ = tokio::time::sleep_until(at) => {}
+                        _ = lease_changed(&mut lease) => {}
                     }
                 }
                 Step::Wait(None) => self.wake.notified().await,
@@ -465,6 +470,13 @@ impl ReleaseQueue {
     }
 }
 
+/// Resolves on the next change of the lease; never once its sender is gone.
+pub(crate) async fn lease_changed(lease: &mut tokio::sync::watch::Receiver<Duration>) {
+    if lease.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// The wait after `failures` consecutive failed sends.
 fn backoff(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(16);
@@ -504,6 +516,7 @@ mod tests {
         async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Unavailable
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     fn queue(limiter: Arc<Scripted>, cap: usize) -> (Arc<ReleaseQueue>, B2buaMetrics) {
@@ -558,6 +571,7 @@ mod tests {
         async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Unavailable
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     #[tokio::test(start_paused = true)]
@@ -699,6 +713,7 @@ mod tests {
         async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Unavailable
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     #[tokio::test(start_paused = true)]
@@ -746,6 +761,7 @@ mod tests {
         async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Unavailable
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     #[tokio::test(start_paused = true)]

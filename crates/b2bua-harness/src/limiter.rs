@@ -23,11 +23,10 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
 use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
-    ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, LimiterReports, RefreshAnswer,
+    RefreshCall, ReleaseAnswer,
 };
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua::limiter_lease::LimiterLease;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
@@ -215,8 +214,8 @@ impl CallLimiter for CountingLimiter {
         self.inner.health()
     }
 
-    fn report_lease(&self, to: Arc<LimiterLease>) {
-        self.inner.report_lease(to);
+    fn report_to(&self, reports: LimiterReports) {
+        self.inner.report_to(reports);
     }
 }
 
@@ -376,6 +375,7 @@ mod tests {
         async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Answered(vec![RefreshOutcome::Extended; calls.len()])
         }
+        fn report_to(&self, _: LimiterReports) {}
     }
 
     /// Every admit fails open.
@@ -392,6 +392,7 @@ mod tests {
         async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Unavailable
         }
+        fn report_to(&self, _: LimiterReports) {}
     }
 
     /// Refuses every set on its first entry.
@@ -408,6 +409,7 @@ mod tests {
         async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
             RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
         }
+        fn report_to(&self, _: LimiterReports) {}
     }
 
     /// One admit through `sut`'s ledger over a limiter that fails open.

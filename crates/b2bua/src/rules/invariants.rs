@@ -52,29 +52,33 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     result
 }
 
-/// A counted Active call carries a live `LimiterRefresh` timer: one whose
-/// deadline is still ahead. A missing or past-due entry (a fire the per-call
-/// queue dropped, a copy materialised with a stale ledger) is re-armed at
-/// `now_ms + refresh_sec`, on the record and as a `ScheduleTimer`. The
-/// refresh turn itself re-arms ahead, so it is left alone.
+/// A counted Active call carries a live `LimiterRefresh` timer due within one
+/// refresh period (`period_ms`, which the learnt lease may have shortened
+/// since the entry was armed). A missing or past-due entry (a fire the
+/// per-call queue dropped, a copy materialised with a stale ledger) and one
+/// due later than `now_ms + period_ms` are re-armed at `now_ms + period_ms`,
+/// on the record and as a `ScheduleTimer`. The refresh turn itself re-arms
+/// ahead, so it is left alone.
 pub fn arm_limiter_refresh(
     mut result: HandlerResult,
     now_ms: i64,
-    refresh_sec: i64,
+    period_ms: i64,
 ) -> HandlerResult {
     let call = &result.call;
     if !call.limiter.counted || call.state != CallModelState::Active {
         return result;
     }
-    let armed =
-        call.timers.iter().any(|t| t.timer_type == TimerType::LimiterRefresh && t.fire_at > now_ms);
-    if armed {
+    let due_by = now_ms + period_ms;
+    let live = call.timers.iter().any(|t| {
+        t.timer_type == TimerType::LimiterRefresh && t.fire_at > now_ms && t.fire_at <= due_by
+    });
+    if live {
         return result;
     }
     let entry = TimerEntry {
         id: format!("{:?}", TimerType::LimiterRefresh),
         timer_type: TimerType::LimiterRefresh,
-        fire_at: now_ms + refresh_sec * 1000,
+        fire_at: due_by,
         leg_id: None,
     };
     result.call.timers =

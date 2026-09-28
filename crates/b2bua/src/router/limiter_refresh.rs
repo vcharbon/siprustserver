@@ -33,7 +33,7 @@ pub(super) fn on_refresh_due(
         let entry = TimerEntry {
             id: format!("{:?}", TimerType::LimiterRefresh),
             timer_type: TimerType::LimiterRefresh,
-            fire_at: now_ms + ctx.config.limiter_refresh_sec * 1000,
+            fire_at: now_ms + ctx.limiter_lease.refresh_period().as_millis() as i64,
             leg_id: None,
         };
         call.timers =
@@ -154,7 +154,7 @@ mod tests {
         let ctx = n.core.router_ctx();
         let result = on_refresh_due(ctx, counted_call(), "c", 1_000);
         assert_eq!(ctx.limiter_refreshes.due(), 1, "marked due on the batch");
-        let refresh = ctx.config.limiter_refresh_sec * 1000;
+        let refresh = ctx.limiter_lease.refresh_period().as_millis() as i64;
         assert!(result
             .call
             .timers

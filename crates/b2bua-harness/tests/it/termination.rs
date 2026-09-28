@@ -537,6 +537,7 @@ impl CallLimiter for RefusingLimiter {
     async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
         RefreshAnswer::Unavailable
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 /// A route to bob ringing at most `no_answer_sec`, consulted on failure when

@@ -14,18 +14,20 @@
 //! the doubling from [`BACKOFF_INITIAL`] passes it, up to [`BACKOFF_MAX`];
 //! an answered request ends it. The limiter is one endpoint, so the backoff
 //! is the batch's, not the entry's. Bounds: an entry due for one lease from
-//! its first mark is given up (the call's own refresh marks it again every
-//! period), the lease being the limiter's as the worker last learnt it
-//! ([`LimiterLease`]), read each time the batch looks; a mark onto a full
-//! batch gives up the oldest entry waiting, and
+//! its first mark (never less than two ticks, so it gets its round) is given
+//! up (the call's own refresh marks it again every period), the lease being the limiter's as the worker last learnt it
+//! ([`LimiterLease`]); a mark onto a full batch gives up the oldest entry
+//! waiting, and
 //! the release of a call forgets its entry, so an ended call's set is never
 //! refreshed after its release was queued; all three are counted. An entry is
 //! a key, its call, its ids and its generation. The batch is not replicated:
 //! a worker that dies loses it, and a call a peer materialises marks itself.
 //!
 //! [`RefreshBatch::hold`] and [`RefreshBatch::resume`] are the seam the
-//! worker's circuit breaker drives: while held nothing is sent (entries still
-//! expire), and a resume sends every key due at once, whatever the backoff.
+//! worker's circuit breaker drives: while held nothing is sent, entries are
+//! still given up at their deadline (the sender wakes on it and on each change
+//! of the lease), and a resume sends every key due at once, whatever the
+//! backoff.
 //! The sender is supervised: one that panics is restarted with the batch
 //! intact, and counted.
 
@@ -41,6 +43,7 @@ use crate::config::B2buaConfig;
 use crate::event::CallEvent;
 use crate::limiter::{CallLimiter, RefreshAnswer, RefreshCall, RefreshOutcome};
 use crate::limiter_lease::LimiterLease;
+use crate::limiter_release::lease_changed;
 use crate::metrics::B2buaMetrics;
 
 /// The backoff after the first unanswered request (a tick when shorter).
@@ -333,9 +336,17 @@ impl RefreshBatch {
     /// a resume), then send every key due; a request with no usable answer
     /// ends the round and backs off, and its keys wait for the next.
     async fn send(self: Arc<Self>) {
+        let mut lease = self.config.lease.changes();
         loop {
             while !self.sendable() {
-                self.wake.notified().await;
+                // Nothing to send: wait for a key, a resume, the first
+                // entry's deadline or a change of the lease that moves it.
+                let deadline = self.first_deadline();
+                tokio::select! {
+                    _ = self.wake.notified() => {}
+                    _ = sleep_until(deadline) => {}
+                    _ = lease_changed(&mut lease) => {}
+                }
             }
             self.wait_round().await;
             self.lock().send_now = false;
@@ -377,6 +388,20 @@ impl RefreshBatch {
         due.failures = due.failures.saturating_add(1);
         let wait = backoff(due.failures).max(self.config.tick);
         due.retry_at = Some(Instant::now() + wait);
+    }
+
+    /// When the first entry waiting is given up under the current lease.
+    fn first_deadline(&self) -> Option<Instant> {
+        let due = self.lock();
+        let kept = self.kept_for();
+        due.order.first_key_value().map(|((first_marked_at, _), _)| *first_marked_at + kept)
+    }
+
+    /// How long an entry is kept after its first mark: one lease, and never
+    /// less than two ticks, so an entry gets its round under a lease shorter
+    /// than a tick.
+    fn kept_for(&self) -> Duration {
+        self.config.lease.current().max(self.config.tick * 2)
     }
 
     /// Whether a key is due and the batch not held.
@@ -458,12 +483,12 @@ impl RefreshBatch {
         self.publish(&due);
     }
 
-    /// Give up every entry due for one lease.
+    /// Give up every entry due for one lease (at least two ticks).
     fn expire(&self, due: &mut Due, now: Instant) {
-        let lease = self.config.lease.current();
+        let kept = self.kept_for();
         let mut expired = false;
         while let Some(first) = due.order.first_entry() {
-            if first.key().0 + lease > now {
+            if first.key().0 + kept > now {
                 break;
             }
             let key = first.remove();
@@ -479,6 +504,14 @@ impl RefreshBatch {
 
     fn publish(&self, due: &Due) {
         self.metrics.set_limiter_refresh_due(due.len() as u64);
+    }
+}
+
+/// Sleep until `deadline`; never without one.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -546,6 +579,7 @@ mod tests {
                 None => RefreshAnswer::Answered(vec![RefreshOutcome::Extended; calls.len()]),
             }
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     struct Rig {

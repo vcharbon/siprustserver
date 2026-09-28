@@ -65,6 +65,7 @@ impl CallLimiter for SpyLimiter {
         self.touched.store(true, Ordering::SeqCst);
         RefreshAnswer::Unavailable
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 #[tokio::test]

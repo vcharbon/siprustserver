@@ -408,6 +408,9 @@ impl CallLimiter for FirstReleasePanics {
     async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
         self.inner.refresh(calls).await
     }
+    fn report_to(&self, reports: b2bua::limiter::LimiterReports) {
+        self.inner.report_to(reports);
+    }
 }
 
 /// The release queue's sender panics on the call's release: it is restarted,

@@ -183,16 +183,25 @@ and a lost release could not be retried.
     drives the batch like the release queue (decision 10). A drain does not
     flush the batch: a call live at the exit is refreshed by the timer its
     successor re-arms.
-12. **The worker learns the lease from the limiter.** Every admit and
-    refresh answer states the limiter's lease (`lease_ms`); an answer without
-    it is a bad body. The worker keeps the last lease it learnt, at most one
-    day, and before any answer assumes the limiter's default (120 s); it
-    configures none of its own. The release queue and the refresh batch read
-    it each time they look, so a lease learnt later moves the deadline of
-    every entry waiting. A refresh leaves up to one tick after it falls due,
-    so the lease must outlast the refresh period plus a tick: each change of
-    the learnt lease that does not is warned about and counted once, and the
-    counted calls then lapse between refreshes and are re-registered at each.
+12. **The worker learns the lease from the limiter.** Every admit, refresh
+    and health answer states the limiter's lease (`lease_ms`, at least 1 s);
+    an answer without it, or with less, is a bad answer: handled as no
+    answer and counted per request as its own cause. So the limiter ships
+    before its workers: a worker newer than its limiter reads every answer
+    as bad. The worker keeps the last lease it learnt, at most one day, and
+    before any answer assumes the limiter's default (120 s); it configures
+    none of its own. A worker whose breaker boots open learns it from the
+    probe that closes it. The release queue and the refresh batch wake on
+    each change, so an entry waiting, held or not, is given up at its
+    deadline under the lease of the moment (a refresh entry never before two
+    ticks, so it gets its round). A counted call refreshes every
+    `LIMITER_REFRESH_SECONDS`, or every third of the lease when that is
+    shorter: each armed refresh is brought within one period on the call's
+    next turn, so a short lease never lets a set lapse between refreshes
+    (only a lease below one and a half ticks does). The first lease stated
+    and each change after it are checked: one the configured period plus a
+    tick reaches is warned about and counted, and one that shortens the
+    period is counted.
 
 ## Lease, refresh and the replica TTL
 
@@ -229,7 +238,8 @@ cells that prove re-registration run the deployed relation.
   (`b2bua_limiter_refresh_dropped_total`).
 - Config: `LIMITER_LEASE_SECONDS` on the limiter only (1 s to one day, boot
   refuses anything else), stated in its answers; `LIMITER_REFRESH_SECONDS`
-  on the workers, the refresh below the lease by more than one period;
+  on the workers, the refresh below the lease by more than one period (a
+  third of the lease rules when shorter);
   `LIMITER_REFRESH_BATCH_MS` (1000, below the refresh period, the refresh
   period plus a tick below the lease),
   `LIMITER_REFRESH_BATCH_MAX` (1000), `LIMITER_REFRESH_TIMEOUT_MS` (2000),
@@ -269,8 +279,12 @@ cells that prove re-registration run the deployed relation.
   and sender restarts (`b2bua_limiter_refresh_sender_restarts_total`). A
   refresh is sent within one tick of falling due, so the lease must outlast
   the refresh period plus a tick; the worker counts each learnt lease where
-  it does not (`b2bua_limiter_lease_too_short_total`), and exposes the lease
-  it learnt (`b2bua_limiter_lease_seconds`). A call's trace shows its
+  the configured period does not (`b2bua_limiter_lease_too_short_total`) and
+  each that shortens its period (`b2bua_limiter_refresh_period_clamped_total`),
+  and exposes the lease it learnt (`b2bua_limiter_lease_seconds`), the period
+  it refreshes at (`b2bua_limiter_refresh_period_seconds`) and the limiter
+  answers it could not read (`b2bua_limiter_bad_answers_total{op}`). A call's
+  trace shows its
   refresh falling due and every answer but `Extended`: an extended lease
   leaves no per-call evidence.
 - Re-registration knows no cap: a stale counted copy materialised after its

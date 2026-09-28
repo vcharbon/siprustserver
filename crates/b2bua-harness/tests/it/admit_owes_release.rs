@@ -330,6 +330,7 @@ impl CallLimiter for CountedNoop {
         self.0.refreshes.fetch_add(1, Ordering::SeqCst);
         NoopLimiter.refresh(calls).await
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 /// An admit that sent no request (no limiter is configured) owes nothing:

@@ -5571,7 +5571,7 @@ mod limiter_refresh_armed {
         // has nothing: the turn re-arms one refresh ahead, on the record too.
         let mut call = counted_active();
         call.timers = vec![refresh_timer(9_000)];
-        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40_000);
         assert_eq!(scheduled(&result), vec![50_000]);
         let armed: Vec<i64> = result
             .call
@@ -5583,7 +5583,7 @@ mod limiter_refresh_armed {
         assert_eq!(armed, vec![50_000], "one entry, replaced");
 
         // No entry at all: armed as well.
-        let result = arm_limiter_refresh(HandlerResult::new(counted_active()), 10_000, 40);
+        let result = arm_limiter_refresh(HandlerResult::new(counted_active()), 10_000, 40_000);
         assert_eq!(scheduled(&result), vec![50_000]);
     }
 
@@ -5591,19 +5591,34 @@ mod limiter_refresh_armed {
     fn a_live_refresh_is_left_alone() {
         let mut call = counted_active();
         call.timers = vec![refresh_timer(30_000)];
-        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40_000);
         assert!(scheduled(&result).is_empty(), "{:?}", result.effects.critical);
+    }
+
+    #[test]
+    fn a_refresh_armed_past_one_period_is_brought_forward() {
+        // Armed 40 s ahead, the learnt lease now sets a 2 s period: brought
+        // to now + 2 s.
+        let mut call = counted_active();
+        call.timers = vec![refresh_timer(50_000)];
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 2_000);
+        assert_eq!(scheduled(&result), vec![12_000]);
+        let mut call = counted_active();
+        call.state = CallModelState::Terminating;
+        call.timers = vec![refresh_timer(50_000)];
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 2_000);
+        assert!(scheduled(&result).is_empty(), "an ending call is left alone");
     }
 
     #[test]
     fn an_uncounted_or_ending_call_arms_nothing() {
         let mut call = counted_active();
         call.limiter = CallLimiterState::uncounted(call.limiter.key.clone());
-        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40_000);
         assert!(scheduled(&result).is_empty());
         let mut call = counted_active();
         call.state = CallModelState::Terminating;
-        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40_000);
         assert!(scheduled(&result).is_empty());
     }
 }

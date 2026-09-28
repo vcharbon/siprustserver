@@ -36,10 +36,9 @@ use tokio::time::MissedTickBehavior;
 use crate::abort_on_drop::AbortOnDrop;
 use crate::config::B2buaConfig;
 use crate::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
-    ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, LimiterReports, RefreshAnswer,
+    RefreshCall, ReleaseAnswer,
 };
-use crate::limiter_lease::LimiterLease;
 use crate::limiter_refresh_batch::RefreshBatch;
 use crate::limiter_release::ReleaseQueue;
 use crate::metrics::B2buaMetrics;
@@ -267,8 +266,8 @@ impl CallLimiter for BreakerLimiter {
         self.inner.refresh(calls).await
     }
 
-    fn report_lease(&self, to: Arc<LimiterLease>) {
-        self.inner.report_lease(to);
+    fn report_to(&self, reports: LimiterReports) {
+        self.inner.report_to(reports);
     }
 }
 
@@ -279,6 +278,7 @@ mod tests {
 
     use super::*;
     use crate::limiter::RefreshOutcome;
+    use crate::limiter_lease::LimiterLease;
     use crate::limiter_refresh_batch::RefreshBatchConfig;
     use crate::limiter_release::ReleaseQueueConfig;
 
@@ -333,6 +333,7 @@ mod tests {
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.serving.clone())
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     struct Rig {
@@ -640,6 +641,7 @@ mod tests {
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.serving.clone())
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     /// `inner` behind a breaker opening on one lost admit, its probe running.
@@ -759,6 +761,7 @@ mod tests {
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.health.clone())
         }
+        fn report_to(&self, _: crate::limiter::LimiterReports) {}
     }
 
     #[tokio::test(start_paused = true)]

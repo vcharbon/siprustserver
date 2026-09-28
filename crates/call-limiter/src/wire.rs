@@ -8,9 +8,9 @@
 //!
 //! Every request names the call by the client's per-call limiter `key`, unique
 //! over time; the server keeps the call's set and its lease, so the client
-//! stores nothing but whether the call is counted. Every admit and refresh
-//! answer states the server's lease (`lease_ms`), so a client bounds what it
-//! keeps for the server by the lease the server runs.
+//! stores nothing but whether the call is counted. Every admit, refresh and
+//! health answer states the server's lease (`lease_ms`), so a client bounds
+//! what it keeps for the server by the lease the server runs.
 
 use serde::{Deserialize, Serialize};
 
@@ -109,4 +109,6 @@ pub struct RefreshResponse {
 pub struct HealthResponse {
     /// Calls holding a set when the store answered.
     pub calls: u64,
+    /// The server's lease, milliseconds.
+    pub lease_ms: u64,
 }

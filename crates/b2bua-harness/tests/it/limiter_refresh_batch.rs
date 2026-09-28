@@ -368,19 +368,23 @@ async fn a_refresh_the_limiter_did_not_answer_is_sent_again_at_the_next_tick() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter's lease is shorter than the refresh period: the call's set
-/// lapses before each refresh, and the refresh re-registers it within one
-/// tick of falling due.
+/// The limiter's lease (1 s) is shorter than a refresh tick: even at a third
+/// of the lease, a refresh leaves up to one tick after it falls due, so the
+/// call's set lapses before each refresh and the refresh re-registers it
+/// within one tick of falling due.
 #[tokio::test(start_paused = true)]
 async fn a_lapsed_set_is_re_registered_within_one_tick_of_its_refresh() {
-    let setup = Setup { lease_sec: 3, ..Setup::default() };
+    let setup = Setup { lease_sec: 1, ..Setup::default() };
     let s = Scene::new("refresh-batch-reregister", setup).await;
     let mut dialog = s.establish().await;
     assert_eq!(s.holds(), [1, 1, 1]);
 
-    s.advance_to(REFRESH - Duration::from_millis(100)).await;
+    // The refresh falls due a third of the lease after the admit and leaves
+    // one tick later; the set lapsed at one lease.
+    let due = Duration::from_millis(1_000 / 3);
+    s.advance_to(Duration::from_millis(1_100)).await;
     assert_eq!(s.holds(), [0, 0, 0], "the set lapsed with its lease");
-    s.advance_to(REFRESH + TICK + Duration::from_millis(200)).await;
+    s.advance_to(due + TICK + Duration::from_millis(200)).await;
     assert_eq!(s.holds(), [1, 1, 1], "the refresh re-registered the set within one tick");
     assert_eq!(s.store.stats().reregistered_calls, 1);
     assert_eq!(s.b2bua.metrics().limiter_refresh_reregistered_total(), 1);

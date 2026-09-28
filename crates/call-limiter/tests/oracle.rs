@@ -140,7 +140,7 @@ async fn metrics_and_health_endpoints() {
     let health = call(&net, HttpRequest::get("/v1/health")).await;
     assert_eq!(health.status, 200, "the store-touching health answer");
     let answer: HealthResponse = serde_json::from_slice(&health.body).expect("a health body");
-    assert_eq!(answer, HealthResponse { calls: 1 });
+    assert_eq!(answer, HealthResponse { calls: 1, lease_ms: 10_000 }, "and states the lease");
 
     let metrics = call(&net, HttpRequest::get("/metrics")).await;
     assert_eq!(metrics.status, 200);

@@ -60,7 +60,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use b2bua::limiter::{AdmitOutcome, LimiterEntry, ReleaseAnswer};
+    use b2bua::limiter::{AdmitOutcome, LimiterEntry, LimiterReports, ReleaseAnswer};
     use b2bua::limiter_breaker::{BreakerConfig, BreakerLimiter};
     use b2bua::limiter_lease::LimiterLease;
     use b2bua::limiter_refresh_batch::{RefreshBatch, RefreshBatchConfig};
@@ -198,7 +198,7 @@ mod tests {
             let client = limiter_client(&settings, self.net.clone(), self.names.clone()).await;
             let metrics = B2buaMetrics::new();
             let lease = LimiterLease::starting_at(Duration::from_secs(120));
-            client.report_lease(lease.clone());
+            client.report_to(LimiterReports::new(&lease, metrics.clone()));
             let bounds = ReleaseQueueConfig { lease: lease.clone(), cap: 10 };
             let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
             tokio::spawn(releases.clone().run());

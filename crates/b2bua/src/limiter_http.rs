@@ -12,9 +12,13 @@
 //! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
 //! store, under the admit budget; it has an address once the target's name
 //! resolved, and forgetting it makes the next request look the name up again.
-//! Every admit and refresh answer states the limiter's lease, which the client
-//! hands to every [`LimiterLease`] registered with
-//! [`CallLimiter::report_lease`]; an answer without it is a bad body.
+//! Every admit, refresh and health answer states the limiter's lease, which
+//! the client reports to every [`LimiterReports`] registered with
+//! [`CallLimiter::report_to`]; a lease is learnt only from a body judged
+//! valid. A 200 whose body cannot be read (unknown shape, no lease or one
+//! below [`MIN_LEASE_MS`], a contradiction, a refresh answer not naming one
+//! outcome per call) is a bad answer: handled as no answer, reported, and
+//! counted in the fail-open episode as its own cause.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -28,11 +32,14 @@ use call_limiter::wire::{
 use http_net::{HttpRequest, HttpResponse, HttpTransport};
 
 use crate::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, RefreshAnswer, RefreshCall,
-    RefreshOutcome, ReleaseAnswer,
+    AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, LimiterReports, RefreshAnswer,
+    RefreshCall, RefreshOutcome, ReleaseAnswer,
 };
-use crate::limiter_lease::LimiterLease;
 use crate::limiter_target::LimiterTarget;
+use crate::metrics::LimiterOp;
+
+/// The shortest lease an answer may state: the limiter's own floor.
+pub const MIN_LEASE_MS: u64 = 1_000;
 
 /// The release budget a client runs with unless told otherwise.
 pub const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -68,8 +75,8 @@ struct Endpoint {
     /// The target rendered once — the episode key, so an outage costs no
     /// per-request allocation.
     addr_key: String,
-    /// Told every lease an answer states.
-    leases: RwLock<Vec<Arc<LimiterLease>>>,
+    /// Where the answers are reported.
+    reports: RwLock<Vec<LimiterReports>>,
 }
 
 impl Endpoint {
@@ -93,11 +100,19 @@ impl Endpoint {
         self.fail_open.record(&self.addr_key, counter, 1);
     }
 
-    /// An answer stated the limiter's lease, `lease_ms`.
+    /// A valid answer stated the limiter's lease, `lease_ms`.
     fn stated_lease(&self, lease_ms: u64) {
         let lease = Duration::from_millis(lease_ms);
-        for to in self.leases.read().unwrap_or_else(PoisonError::into_inner).iter() {
-            to.learn(lease);
+        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+            to.lease_stated(lease);
+        }
+    }
+
+    /// An answer to `op` came back with a body that could not be read.
+    fn bad_answer(&self, op: LimiterOp) {
+        self.failed("bad_answers");
+        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+            to.bad_answer(op);
         }
     }
 }
@@ -123,7 +138,7 @@ impl HttpCallLimiter {
                 target,
                 fail_open: crate::lifecycle::backend_waves("call-limiter"),
                 addr_key,
-                leases: RwLock::default(),
+                reports: RwLock::default(),
             }),
             timeout,
             refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
@@ -196,19 +211,24 @@ impl LimiterHealth for HttpHealth {
         let answer =
             tokio::time::timeout(self.timeout, self.endpoint.send(HttpRequest::get("/v1/health")))
                 .await;
-        let serving = match answer {
-            Ok(Ok(resp)) if resp.status == 200 => {
-                serde_json::from_slice::<HealthResponse>(&resp.body).is_ok()
+        match answer {
+            Ok(Ok(resp)) if resp.status == 200 => match read_health(&resp.body) {
+                Some(lease_ms) => {
+                    self.endpoint.answered();
+                    self.endpoint.stated_lease(lease_ms);
+                    true
+                }
+                None => {
+                    self.endpoint.bad_answer(LimiterOp::Health);
+                    false
+                }
+            },
+            _ => {
+                self.endpoint.failed("probe");
+                tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
+                false
             }
-            _ => false,
-        };
-        if serving {
-            self.endpoint.answered();
-        } else {
-            self.endpoint.failed("probe");
-            tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
         }
-        serving
     }
 
     fn has_address(&self) -> bool {
@@ -239,18 +259,16 @@ impl CallLimiter for HttpCallLimiter {
         let Some(resp) = self.post("/v1/admit", &body, self.timeout).await else {
             return AdmitOutcome::Unavailable;
         };
-        let answer = serde_json::from_slice::<AdmitResponse>(&resp.body);
-        if let Ok(AdmitResponse { lease_ms, .. }) = &answer {
-            self.endpoint.stated_lease(*lease_ms);
-        }
-        match answer {
-            Ok(AdmitResponse { admitted: true, .. }) => AdmitOutcome::Admitted,
-            Ok(AdmitResponse { admitted: false, released: true, .. }) => AdmitOutcome::Released,
-            Ok(AdmitResponse { admitted: false, rejected_id: Some(limiter_id), .. }) => {
-                AdmitOutcome::Rejected { limiter_id }
+        match read_admit(&resp.body) {
+            Some((outcome, lease_ms)) => {
+                self.endpoint.stated_lease(lease_ms);
+                outcome
             }
-            // A malformed/contradictory body is treated as unavailable (fail-open).
-            _ => AdmitOutcome::Unavailable,
+            // A bad answer is no answer: the call fails open.
+            None => {
+                self.endpoint.bad_answer(LimiterOp::Admit);
+                AdmitOutcome::Unavailable
+            }
         }
     }
 
@@ -272,23 +290,15 @@ impl CallLimiter for HttpCallLimiter {
         let Some(resp) = self.post("/v1/refresh", &body, self.refresh_timeout).await else {
             return RefreshAnswer::Unavailable;
         };
-        match serde_json::from_slice::<RefreshResponse>(&resp.body) {
-            // An answer that does not name one outcome per call is a bad body.
-            Ok(RefreshResponse { outcomes, lease_ms }) if outcomes.len() == calls.len() => {
+        match read_refresh(&resp.body, calls.len()) {
+            Some((outcomes, lease_ms)) => {
                 self.endpoint.stated_lease(lease_ms);
-                RefreshAnswer::Answered(
-                    outcomes
-                        .into_iter()
-                        .map(|outcome| match outcome {
-                            wire::RefreshAnswer::Extended => RefreshOutcome::Extended,
-                            wire::RefreshAnswer::Reregistered => RefreshOutcome::Reregistered,
-                            wire::RefreshAnswer::Released => RefreshOutcome::Released,
-                            wire::RefreshAnswer::Dropped => RefreshOutcome::Dropped,
-                        })
-                        .collect(),
-                )
+                RefreshAnswer::Answered(outcomes)
             }
-            _ => RefreshAnswer::Unavailable,
+            None => {
+                self.endpoint.bad_answer(LimiterOp::Refresh);
+                RefreshAnswer::Unavailable
+            }
         }
     }
 
@@ -296,14 +306,62 @@ impl CallLimiter for HttpCallLimiter {
         Some(Arc::new(HttpHealth { endpoint: self.endpoint.clone(), timeout: self.timeout }))
     }
 
-    fn report_lease(&self, to: Arc<LimiterLease>) {
-        self.endpoint.leases.write().unwrap_or_else(PoisonError::into_inner).push(to);
+    fn report_to(&self, reports: LimiterReports) {
+        let mut all = self.endpoint.reports.write().unwrap_or_else(PoisonError::into_inner);
+        all.retain(LimiterReports::is_live);
+        all.push(reports);
     }
+}
+
+/// The outcome and the lease a valid admit answer states; `None` for a bad
+/// answer (unreadable, no lease or one below [`MIN_LEASE_MS`], or refused
+/// with neither a cap nor a fence named).
+fn read_admit(body: &[u8]) -> Option<(AdmitOutcome, u64)> {
+    let answer = serde_json::from_slice::<AdmitResponse>(body).ok()?;
+    let lease_ms = answer.lease_ms;
+    let outcome = match answer {
+        AdmitResponse { admitted: true, .. } => AdmitOutcome::Admitted,
+        AdmitResponse { admitted: false, released: true, .. } => AdmitOutcome::Released,
+        AdmitResponse { admitted: false, rejected_id: Some(limiter_id), .. } => {
+            AdmitOutcome::Rejected { limiter_id }
+        }
+        AdmitResponse { .. } => return None,
+    };
+    (lease_ms >= MIN_LEASE_MS).then_some((outcome, lease_ms))
+}
+
+/// The outcomes and the lease a valid refresh answer for `calls` calls
+/// states; `None` for a bad answer (unreadable, no lease or one below
+/// [`MIN_LEASE_MS`], or not one outcome per call).
+fn read_refresh(body: &[u8], calls: usize) -> Option<(Vec<RefreshOutcome>, u64)> {
+    let RefreshResponse { outcomes, lease_ms } = serde_json::from_slice(body).ok()?;
+    if outcomes.len() != calls || lease_ms < MIN_LEASE_MS {
+        return None;
+    }
+    let outcomes = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            wire::RefreshAnswer::Extended => RefreshOutcome::Extended,
+            wire::RefreshAnswer::Reregistered => RefreshOutcome::Reregistered,
+            wire::RefreshAnswer::Released => RefreshOutcome::Released,
+            wire::RefreshAnswer::Dropped => RefreshOutcome::Dropped,
+        })
+        .collect();
+    Some((outcomes, lease_ms))
+}
+
+/// The lease a valid health answer states; `None` for a bad answer.
+fn read_health(body: &[u8]) -> Option<u64> {
+    let HealthResponse { lease_ms, .. } = serde_json::from_slice(body).ok()?;
+    (lease_ms >= MIN_LEASE_MS).then_some(lease_ms)
 }
 
 #[cfg(test)]
 mod tests {
     use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+
+    use crate::limiter_lease::LimiterLease;
+    use crate::metrics::B2buaMetrics;
     use http_net::{Fault, SimulatedHttpNetwork};
     use sip_clock::Clock;
 
@@ -471,8 +529,8 @@ mod tests {
             LimiterLease::starting_at(Duration::from_secs(20)),
             LimiterLease::starting_at(Duration::from_secs(30)),
         );
-        client.report_lease(a.clone());
-        client.report_lease(b.clone());
+        client.report_to(LimiterReports::new(&a, B2buaMetrics::new()));
+        client.report_to(LimiterReports::new(&b, B2buaMetrics::new()));
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Admitted);
         assert_eq!([a.current(), b.current()], [Duration::from_secs(120); 2], "the store's lease");
         a.learn(Duration::from_secs(5));
@@ -500,7 +558,7 @@ mod tests {
         let _server = net.serve(laddr(), Arc::new(NoLease)).await.unwrap();
         let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
         let lease = LimiterLease::starting_at(Duration::from_secs(20));
-        client.report_lease(lease.clone());
+        client.report_to(LimiterReports::new(&lease, B2buaMetrics::new()));
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
         assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
     }
@@ -528,18 +586,49 @@ mod tests {
         let admitted = r#"{"admitted":true,"released":false,"lease_ms":999}"#;
         let (client, _server) = answering(admitted).await;
         let lease = LimiterLease::starting_at(Duration::from_secs(20));
-        client.report_lease(lease.clone());
+        let metrics = B2buaMetrics::new();
+        client.report_to(LimiterReports::new(&lease, metrics.clone()));
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
         assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
+        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Admit), 1, "a bad answer");
 
         let (client, _server) = answering(r#"{"outcomes":["extended"],"lease_ms":0}"#).await;
+        client.report_to(LimiterReports::new(&lease, metrics.clone()));
         let calls = [RefreshCall { key: "c#k".into(), ids: vec!["x".into()] }];
         assert_eq!(client.refresh(&calls).await, RefreshAnswer::Unavailable);
+        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Refresh), 1);
 
         for body in [r#"{"calls":0,"lease_ms":999}"#, r#"{"calls":0}"#] {
             let (client, _server) = answering(body).await;
+            client.report_to(LimiterReports::new(&lease, metrics.clone()));
             assert!(!client.health().unwrap().serving().await, "{body}");
         }
+        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Health), 2);
+        assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_health_answer_states_the_lease() {
+        let (client, _server) = answering(r#"{"calls":0,"lease_ms":200000}"#).await;
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        client.report_to(LimiterReports::new(&lease, B2buaMetrics::new()));
+        assert!(client.health().unwrap().serving().await);
+        assert_eq!(lease.current(), Duration::from_secs(200));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_registration_whose_worker_is_gone_is_dropped() {
+        let (net, _server) = served().await;
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        for _ in 0..3 {
+            let gone = LimiterLease::starting_at(Duration::from_secs(20));
+            client.report_to(LimiterReports::new(&gone, B2buaMetrics::new()));
+        }
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        client.report_to(LimiterReports::new(&lease, B2buaMetrics::new()));
+        assert_eq!(client.endpoint.reports.read().unwrap().len(), 1, "only the live worker");
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Admitted);
+        assert_eq!(lease.current(), Duration::from_secs(120));
     }
 
     #[tokio::test(start_paused = true)]
@@ -547,7 +636,7 @@ mod tests {
         let (client, _server) =
             answering(r#"{"admitted":false,"released":false,"lease_ms":5000}"#).await;
         let lease = LimiterLease::starting_at(Duration::from_secs(20));
-        client.report_lease(lease.clone());
+        client.report_to(LimiterReports::new(&lease, B2buaMetrics::new()));
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
         assert_eq!(lease.current(), Duration::from_secs(20), "learnt only from a valid body");
     }

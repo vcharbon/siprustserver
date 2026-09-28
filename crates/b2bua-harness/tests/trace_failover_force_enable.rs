@@ -53,6 +53,7 @@ impl CallLimiter for FullLimiter {
     async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
         RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 /// A gate whose configured rate is zero: no draw ever wins, so only a

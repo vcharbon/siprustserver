@@ -256,6 +256,15 @@ struct Inner {
     // reaches.
     limiter_lease_ms: AtomicU64,
     limiter_lease_too_short: AtomicU64,
+    // The refresh period the learnt lease sets (milliseconds), and the learnt
+    // leases that shortened it below the configured period.
+    limiter_refresh_period_ms: AtomicU64,
+    limiter_refresh_period_clamped: AtomicU64,
+    // Limiter answers with a 200 and a body the client could not read, by
+    // request.
+    limiter_bad_answers_admit: AtomicU64,
+    limiter_bad_answers_refresh: AtomicU64,
+    limiter_bad_answers_health: AtomicU64,
     // The limiter refresh batch (`limiter_refresh_batch`): keys due, requests
     // by result, keys sent, keys a failed request put back, entries given up
     // (past the lease, at the cap, the call released), sender restarts, and
@@ -449,6 +458,25 @@ fn past_bound_label(bound: PastBound) -> &'static str {
     match bound {
         PastBound::Depth => "depth",
         PastBound::Cap => "cap",
+    }
+}
+
+/// A limiter request, as a metric label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimiterOp {
+    Admit,
+    Refresh,
+    Health,
+}
+
+impl LimiterOp {
+    /// The metric label.
+    pub fn label(self) -> &'static str {
+        match self {
+            LimiterOp::Admit => "admit",
+            LimiterOp::Refresh => "refresh",
+            LimiterOp::Health => "health",
+        }
     }
 }
 
@@ -925,6 +953,35 @@ impl B2buaMetrics {
         Duration::from_millis(self.inner.limiter_lease_ms.load(Ordering::Relaxed))
     }
     counter!(bump_limiter_lease_too_short, limiter_lease_too_short_total, limiter_lease_too_short);
+    /// Set the refresh period the learnt lease sets (gauge).
+    pub fn set_limiter_refresh_period(&self, period: Duration) {
+        let ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
+        self.inner.limiter_refresh_period_ms.store(ms, Ordering::Relaxed);
+    }
+    /// The refresh period the learnt lease sets.
+    pub fn limiter_refresh_period(&self) -> Duration {
+        Duration::from_millis(self.inner.limiter_refresh_period_ms.load(Ordering::Relaxed))
+    }
+    counter!(
+        bump_limiter_refresh_period_clamped,
+        limiter_refresh_period_clamped_total,
+        limiter_refresh_period_clamped
+    );
+    /// Count one limiter answer to `op` whose body could not be read.
+    pub fn bump_limiter_bad_answer(&self, op: LimiterOp) {
+        self.bad_answers(op).fetch_add(1, Ordering::Relaxed);
+    }
+    /// Limiter answers to `op` whose body could not be read.
+    pub fn limiter_bad_answers_total(&self, op: LimiterOp) -> u64 {
+        self.bad_answers(op).load(Ordering::Relaxed)
+    }
+    fn bad_answers(&self, op: LimiterOp) -> &AtomicU64 {
+        match op {
+            LimiterOp::Admit => &self.inner.limiter_bad_answers_admit,
+            LimiterOp::Refresh => &self.inner.limiter_bad_answers_refresh,
+            LimiterOp::Health => &self.inner.limiter_bad_answers_health,
+        }
+    }
     /// Set the number of limiter keys due in the refresh batch, the request
     /// in flight included (gauge).
     pub fn set_limiter_refresh_due(&self, n: u64) {
@@ -1329,7 +1386,8 @@ impl B2buaMetrics {
         counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
         counter("b2bua_limiter_release_drainer_restarts_total", "release-queue drainers that panicked and were restarted with the queue intact — expected 0", self.limiter_release_drainer_restarts_total());
-        counter("b2bua_limiter_lease_too_short_total", "limiter leases learnt from the limiter's answers that this worker's refresh period plus one refresh tick reaches, counted once per change of the learnt lease: a counted call's set lapses between two refreshes and is re-registered at each (ADR-0038)", self.limiter_lease_too_short_total());
+        counter("b2bua_limiter_lease_too_short_total", "limiter leases learnt from the limiter's answers that this worker's configured refresh period plus one refresh tick reaches, the first one stated and each change after it: the worker refreshes every third of the lease instead (ADR-0038)", self.limiter_lease_too_short_total());
+        counter("b2bua_limiter_refresh_period_clamped_total", "limiter leases learnt that set a refresh period (a third of the lease) shorter than the configured one, the first one stated and each change after it (ADR-0038)", self.limiter_refresh_period_clamped_total());
         counter("b2bua_limiter_breaker_admits_not_sent_total", "admits the open limiter breaker answered without a request: the call owes no release by that admit; an initial admit leaves the call uncounted, a reroute admit leaves it as it was (ADR-0038)", self.limiter_breaker_admits_not_sent_total());
         counter("b2bua_limiter_refresh_keys_sent_total", "limiter keys the refresh requests named, summed over every request: over b2bua_limiter_refresh_requests_total, the mean batch size (ADR-0038)", self.limiter_refresh_keys_sent_total());
         counter("b2bua_limiter_refresh_retries_total", "limiter keys a refresh request with no usable answer put back, sent again at the next tick", self.limiter_refresh_retries_total());
@@ -1661,7 +1719,20 @@ impl B2buaMetrics {
             "1 while this worker's limiter circuit breaker is open: admits send no request and the calls run uncounted, releases wait",
             self.limiter_breaker_open() as u64,
         );
-        s.push_str("# HELP b2bua_limiter_lease_seconds the limiter's lease as this worker last learnt it from an admit or refresh answer (the default lease before any answer): a queued release and a refresh due are given up once they have waited it\n# TYPE b2bua_limiter_lease_seconds gauge\n");
+        s.push_str("# HELP b2bua_limiter_bad_answers_total limiter answers with a 200 whose body this worker could not read (a missing or sub-second lease, a contradiction, an unknown shape), by request, each handled as no answer: a limiter older than its workers shows here\n# TYPE b2bua_limiter_bad_answers_total counter\n");
+        for op in [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Health] {
+            s.push_str(&format!(
+                "b2bua_limiter_bad_answers_total{{op=\"{}\"}} {}\n",
+                op.label(),
+                self.limiter_bad_answers_total(op)
+            ));
+        }
+        s.push_str("# HELP b2bua_limiter_refresh_period_seconds how often a counted call refreshes its limiter lease: the configured period, or a third of the learnt lease when shorter\n# TYPE b2bua_limiter_refresh_period_seconds gauge\n");
+        s.push_str(&format!(
+            "b2bua_limiter_refresh_period_seconds {}\n",
+            self.limiter_refresh_period().as_millis() as f64 / 1000.0
+        ));
+        s.push_str("# HELP b2bua_limiter_lease_seconds the limiter's lease as this worker last learnt it from an admit, refresh or health answer (the default lease before any answer): a queued release and a refresh due are given up once they have waited it\n# TYPE b2bua_limiter_lease_seconds gauge\n");
         s.push_str(&format!(
             "b2bua_limiter_lease_seconds {}\n",
             self.limiter_lease().as_millis() as f64 / 1000.0

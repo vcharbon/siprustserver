@@ -17,19 +17,22 @@
 //! as it was, a sent one owes the call's release, and only a confirmed set
 //! refreshes. [`CallLimiter::health`] is the limiter's health answer, which
 //! the worker's circuit breaker ([`crate::limiter_breaker`]) probes;
-//! [`CallLimiter::report_lease`] hands every lease the limiter's answers
-//! state to the worker's [`LimiterLease`].
+//! [`CallLimiter::report_to`] registers where a client reports what the
+//! limiter's answers say beyond each outcome ([`LimiterReports`]): the lease
+//! they state, and the answers it could not read.
 //!
 //! The HTTP client implementation lives in [`crate::limiter_http`]; this module
 //! is the trait + a no-op (used when `LIMITER_URL` is unset and in tests that
 //! don't exercise limits).
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use call::CallLimiterState;
 
 use crate::limiter_lease::LimiterLease;
+use crate::metrics::{B2buaMetrics, LimiterOp};
 
 /// One limiter entry to admit: an id and its concurrent-call cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,11 +162,47 @@ pub trait CallLimiter: Send + Sync {
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
         None
     }
-    /// From now on, hand `to` every lease an answer of the limiter states.
-    /// A limiter whose answers state none hands nothing, and `to` keeps the
-    /// lease it has.
-    fn report_lease(&self, to: Arc<LimiterLease>) {
-        let _ = to;
+    /// From now on, report to `reports` what the limiter's answers say: a
+    /// limiter reached over a wire reports every lease stated and every
+    /// answer it could not read; a wrapper forwards to what it wraps; a
+    /// limiter with neither reports nothing.
+    fn report_to(&self, reports: LimiterReports);
+}
+
+/// Where a limiter client reports what the limiter's answers say beyond each
+/// request's outcome: the lease they state, to the worker's [`LimiterLease`],
+/// and the answers it could not read, on the worker's metrics. It holds the
+/// lease weakly: once the worker is gone its reports go nowhere and the
+/// client drops the registration.
+#[derive(Clone)]
+pub struct LimiterReports {
+    lease: Weak<LimiterLease>,
+    metrics: B2buaMetrics,
+}
+
+impl LimiterReports {
+    /// Reports to `lease` and `metrics`.
+    pub fn new(lease: &Arc<LimiterLease>, metrics: B2buaMetrics) -> Self {
+        Self { lease: Arc::downgrade(lease), metrics }
+    }
+
+    /// Whether the worker the reports go to is still there.
+    pub fn is_live(&self) -> bool {
+        self.lease.strong_count() > 0
+    }
+
+    /// An answer stated the limiter's lease.
+    pub fn lease_stated(&self, lease: Duration) {
+        if let Some(to) = self.lease.upgrade() {
+            to.learn(lease);
+        }
+    }
+
+    /// An answer to `op` came back with a body that could not be read.
+    pub fn bad_answer(&self, op: LimiterOp) {
+        if self.is_live() {
+            self.metrics.bump_limiter_bad_answer(op);
+        }
     }
 }
 
@@ -200,6 +239,7 @@ impl CallLimiter for NoopLimiter {
     async fn refresh(&self, _calls: &[RefreshCall]) -> RefreshAnswer {
         RefreshAnswer::Unavailable
     }
+    fn report_to(&self, _: LimiterReports) {}
 }
 
 #[cfg(test)]

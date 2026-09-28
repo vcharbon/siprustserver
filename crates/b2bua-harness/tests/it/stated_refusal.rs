@@ -123,6 +123,7 @@ impl CallLimiter for RefusingLimiter {
     async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
         RefreshAnswer::Unavailable
     }
+    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
 }
 
 /// The SUT under `engine`, keeping every terminated `Call` whole; a capped

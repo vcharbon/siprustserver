@@ -101,6 +101,8 @@ pub struct RouterCtx {
     pub limiter_releases: Arc<crate::limiter_release::ReleaseQueue>,
     /// Where every counted call's refresh goes: no call waits on it.
     pub limiter_refreshes: Arc<crate::limiter_refresh_batch::RefreshBatch>,
+    /// The limiter's lease as learnt, and the refresh period it sets.
+    pub limiter_lease: Arc<crate::limiter_lease::LimiterLease>,
     pub cdr: Arc<dyn CdrWriter>,
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,

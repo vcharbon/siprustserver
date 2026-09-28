@@ -55,12 +55,13 @@ pub(super) async fn process_result(
     result: HandlerResult,
     now_ms: i64,
 ) {
-    // A counted live call always has its refresh armed: a fire the per-call
-    // queue dropped is re-armed by the next turn, before the record lands.
+    // A counted live call always has its refresh armed within one refresh
+    // period of the learnt lease: a fire the per-call queue dropped is re-armed
+    // by the next turn, before the record lands.
     let result = crate::rules::invariants::arm_limiter_refresh(
         result,
         now_ms,
-        ctx.config.limiter_refresh_sec,
+        ctx.limiter_lease.refresh_period().as_millis() as i64,
     );
     // What the turn sends is on the record before the record lands, and a
     // termination this turn began is cut after it: every ring entry with
