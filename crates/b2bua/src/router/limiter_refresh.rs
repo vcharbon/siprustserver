@@ -8,7 +8,8 @@ use call::{Call, CallModelState, TimerEntry, TimerType};
 use super::RouterCtx;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::RefreshOutcome;
-use crate::limiter_refresh_batch::{outcome_label, RefreshAnswered};
+use crate::limiter_refresh_batch::RefreshAnswered;
+use crate::metrics::RefreshDiscard;
 
 /// A `LimiterRefresh` fire: a counted call marks its key and ids due on the
 /// refresh batch under its limiter generation, and re-arms the timer while
@@ -48,8 +49,8 @@ pub(super) fn on_refresh_due(
 /// another key (an earlier call under the same `call_ref`), for a call no
 /// longer counted, or marked under an older limiter generation (a route fold
 /// restated the set since) is discarded as stale. `Dropped` (an admit of the
-/// key dropped the set) leaves the call uncounted, still owing its release,
-/// so it refreshes no more. `Released` and `Reregistered` leave the call as
+/// key dropped the set) leaves the call uncounted and `fail_open`, still
+/// owing its release, so it refreshes no more. `Released` and `Reregistered` leave the call as
 /// it is: a release fence refuses one lease, then the refresh re-registers.
 pub(super) fn apply_answer(
     ctx: &RouterCtx,
@@ -59,17 +60,16 @@ pub(super) fn apply_answer(
 ) -> Option<HandlerResult> {
     let limiter = &call.limiter;
     if answer.key != limiter.key || !limiter.counted || answer.generation != limiter.generation {
-        ctx.metrics.bump_limiter_refresh_answer_discarded_stale();
+        ctx.metrics.limiter().count_refresh_discarded(RefreshDiscard::Stale);
         return None;
     }
-    ctx.metrics.record_limiter_refresh_answer_applied(outcome_label(answer.outcome));
     if crate::trace::sampled(&call) {
         crate::trace::emit::limiter(&call, now_ms, "refresh", &format!("{:?}", answer.outcome));
     }
     if answer.outcome != RefreshOutcome::Dropped {
         return None;
     }
-    call.limiter.set(false, false, Vec::new());
+    call.limiter.set(false, false, true, Vec::new());
     Some(HandlerResult { call, effects: HandlerEffects::new() })
 }
 
@@ -108,7 +108,7 @@ mod tests {
             .expect("the call changes");
         assert!(!result.call.limiter.counted, "refreshes no more");
         assert!(result.call.limiter.release_owed, "still releases its key");
-        assert_eq!(ctx.metrics.limiter_refresh_answers_applied_total("dropped"), 1);
+        assert!(result.call.limiter.fail_open, "runs uncounted on a route naming ids");
     }
 
     #[tokio::test(start_paused = true)]
@@ -118,8 +118,7 @@ mod tests {
         for outcome in [RefreshOutcome::Released, RefreshOutcome::Reregistered] {
             assert!(apply_answer(ctx, counted_call(), &answer(outcome, 0), 0).is_none());
         }
-        assert_eq!(ctx.metrics.limiter_refresh_answers_applied_total("released"), 1);
-        assert_eq!(ctx.metrics.limiter_refresh_answers_applied_total("reregistered"), 1);
+        assert_eq!(ctx.metrics.limiter().refresh_discarded_total(RefreshDiscard::Stale), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -127,13 +126,12 @@ mod tests {
         let n = node("w0").await;
         let ctx = n.core.router_ctx();
         let mut call = counted_call();
-        call.limiter.set(true, true, vec!["y".into(), "z".into()]);
+        call.limiter.set(true, true, false, vec!["y".into(), "z".into()]);
         assert!(apply_answer(ctx, call, &answer(RefreshOutcome::Dropped, 0), 0).is_none());
         let mut other_key = answer(RefreshOutcome::Dropped, 0);
         other_key.key = "c#earlier".into();
         assert!(apply_answer(ctx, counted_call(), &other_key, 0).is_none());
-        assert_eq!(ctx.metrics.limiter_refresh_answers_discarded_stale_total(), 2);
-        assert_eq!(ctx.metrics.limiter_refresh_answers_applied_total("dropped"), 0);
+        assert_eq!(ctx.metrics.limiter().refresh_discarded_total(RefreshDiscard::Stale), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -142,7 +140,7 @@ mod tests {
         let ctx = n.core.router_ctx();
         ctx.reentry_tx.send(answer(RefreshOutcome::Dropped, 0).into_event()).unwrap();
         sip_clock::testkit::settle().await;
-        assert_eq!(ctx.metrics.limiter_refresh_answers_discarded_call_gone_total(), 1);
+        assert_eq!(ctx.metrics.limiter().refresh_discarded_total(RefreshDiscard::CallGone), 1);
         assert_eq!(n.core.active_calls(), 0, "no call materialised");
         assert_eq!(n.core.lock_count(), 0, "no per-call lock left");
         assert_eq!(ctx.dispatcher.queue_count(), 0, "no per-call queue left");

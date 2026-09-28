@@ -794,13 +794,29 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
 #[test]
 fn limiter_state_release_obligation_only_grows() {
     let mut state = CallLimiterState::uncounted("c#k".into());
-    state.set(true, false, vec!["x".into()]);
+    state.set(true, false, false, vec!["x".into()]);
     assert!(state.counted && state.release_owed, "a counted call owes its release");
-    state.set(false, false, Vec::new());
+    state.set(false, false, false, Vec::new());
     assert!(!state.counted && state.release_owed, "the obligation is never cleared");
     assert_eq!(
         state,
         CallLimiterState { generation: 2, ..CallLimiterState::unconfirmed("c#k".into()) },
         "each restatement moves the generation on"
     );
+}
+
+#[test]
+fn limiter_state_fails_open_only_while_uncounted() {
+    let fresh = CallLimiterState::uncounted("c#k".into());
+    assert!(fresh.failed_open(true).fail_open, "an uncounted call asking for ids");
+    assert!(!fresh.failed_open(false).fail_open, "a route naming no id asks for nothing");
+    let counted = CallLimiterState::admitted("c#k".into(), vec!["x".into()]);
+    assert!(!counted.failed_open(true).fail_open, "a counted call stays counted");
+    let mut state = fresh.failed_open(true);
+    state.set(true, true, true, vec!["x".into()]);
+    assert!(state.counted && !state.fail_open, "fail_open implies not counted");
+    state.set(false, true, true, Vec::new());
+    assert!(state.fail_open, "a dropped set leaves the call uncounted and failing open");
+    state.set(false, true, false, Vec::new());
+    assert!(!state.fail_open, "a cap refusal clears it");
 }

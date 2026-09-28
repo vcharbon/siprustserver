@@ -848,13 +848,15 @@ fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
         arb_tag(),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
         proptest::collection::vec(arb_tag(), 0..3),
         any::<u32>(),
     )
-        .prop_map(|(key, counted, sent, ids, generation)| CallLimiterState {
+        .prop_map(|(key, counted, sent, fail_open, ids, generation)| CallLimiterState {
             key,
             counted,
             release_owed: counted || sent,
+            fail_open: fail_open && !counted,
             ids,
             generation,
         })

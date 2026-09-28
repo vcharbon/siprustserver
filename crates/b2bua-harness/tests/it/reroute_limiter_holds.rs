@@ -28,6 +28,7 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
+use b2bua::limiter::RefreshOutcome;
 use b2bua::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
 };
@@ -311,6 +312,7 @@ async fn failover_admit_fails_and_the_call_outlives_the_lease(
     let mut dialog = call.ack().await;
     carol.receive("ACK").await;
     rig.expect_holds(held, "the set the limiter holds for the call").await;
+    assert_eq!(b2bua.metrics().limiter().uncounted_calls(), 0, "the call stays counted");
 
     // ── the call outlives two leases: its refresh keeps the set alive ─────
     for _ in 0..2 * SHORT_LEASE_SEC + 5 {
@@ -358,6 +360,78 @@ async fn failover_admit_that_lands_but_times_out_keeps_the_call_counted() {
         "reroute-holds-failover-admit-answer-lost",
         true,
         [0, 1, 1],
+    )
+    .await;
+}
+
+/// The initial admit of `[x]` gets no answer (it never lands): the call runs
+/// uncounted while bob is dialed. Bob busies out and the failover route
+/// `failover` is admitted: the call is counted on it, or asks for nothing on
+/// a route naming no id; either way it no longer fails open. The call's end
+/// releases its key and leaves nothing behind.
+async fn a_call_failing_open_then_failing_over(
+    name: &str,
+    failover: &'static [&'static str],
+    after: [i64; 3],
+) {
+    let h = Harness::new(name);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig().await;
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(UnavailableOnAdmit::new(1, false, rig.client.clone()));
+    let b2bua = B2buaSut::builder(one_failover(&["x"], failover))
+        .limiter(limiter)
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let gauge = || b2bua.metrics().limiter().uncounted_calls();
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([0, 0, 0], "the initial admit never landed").await;
+    assert_eq!(gauge(), 1, "the call runs uncounted on a route naming x");
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+    rig.expect_holds(after, "the failover route's set").await;
+    assert_eq!(gauge(), 0, "the failover route ends the fail-open");
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    rig.expect_drained("the hangup's release frees the failover set").await;
+    assert_eq!(gauge(), 0);
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![200]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failover_route_counts_a_call_that_failed_open() {
+    a_call_failing_open_then_failing_over(
+        "reroute-holds-fail-open-then-counted",
+        &["y", "z"],
+        [0, 1, 1],
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failover_route_naming_no_limiter_ends_the_fail_open() {
+    a_call_failing_open_then_failing_over(
+        "reroute-holds-fail-open-then-no-limiter",
+        &[],
+        [0, 0, 0],
     )
     .await;
 }
@@ -718,7 +792,7 @@ async fn release_reroute_admit_answer_lost(
     assert_eq!(rig.all_holds(), held, "the limiter holds the same set two leases on");
     assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
     let reregistered = rig.store.stats().reregistered_calls;
-    let refresh_dropped = b2bua.metrics().limiter_refresh_dropped_total();
+    let refresh_dropped = b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Dropped);
 
     let mut bye = dialog.bye().await;
     media.receive("BYE").await.respond(200, "OK").await;

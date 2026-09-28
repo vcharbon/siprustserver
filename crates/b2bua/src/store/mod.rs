@@ -102,6 +102,10 @@ struct Inner {
     /// lands on a cancelled call. Node-local, never serialized; cleared on
     /// `remove`/`drop_local`/`discard_orphan`.
     setup_cancelled: HashSet<String>,
+    /// Resident calls that run `fail_open` (`CallLimiterState::fail_open`):
+    /// moved by every insertion, replacement and removal of `calls`, so it is
+    /// exact at every write, and published as `b2bua_limiter_uncounted_calls`.
+    uncounted: u64,
 }
 
 /// Below this many buckets a table is never shrunk: the saving is noise and a
@@ -119,6 +123,17 @@ fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
 }
 
 impl Inner {
+    /// Account one call slot of `calls` going from a resident call that ran
+    /// `fail_open` (`was`) to one that does (`is`); an absent call runs
+    /// nothing.
+    fn restate_uncounted(&mut self, was: bool, is: bool) {
+        match (was, is) {
+            (false, true) => self.uncounted += 1,
+            (true, false) => self.uncounted = self.uncounted.saturating_sub(1),
+            _ => {}
+        }
+    }
+
     /// Shrink the per-call maps after a removal (see [`shrink_idle`]); the
     /// membership sets hold pointer-sized buckets and are left as they are.
     fn shrink_idle(&mut self) {
@@ -258,8 +273,11 @@ impl CallState {
         let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
         Self::reindex(&mut inner, &call);
-        inner.calls.insert(call_ref.clone(), Box::new(call));
+        let is = call.limiter.fail_open;
+        let was = inner.calls.insert(call_ref.clone(), Box::new(call));
+        inner.restate_uncounted(was.is_some_and(|c| c.limiter.fail_open), is);
         inner.touched.insert(call_ref.clone(), now_ms);
+        self.publish_uncounted(&inner);
         call_ref
     }
 
@@ -387,9 +405,19 @@ impl CallState {
             return;
         }
         Self::reindex(&mut inner, &call);
+        let was = inner.calls.get(&call.call_ref).is_some_and(|c| c.limiter.fail_open);
+        if was != call.limiter.fail_open {
+            inner.restate_uncounted(was, call.limiter.fail_open);
+            self.publish_uncounted(&inner);
+        }
         if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
             **slot = call;
         }
+    }
+
+    /// Publish the resident calls that run `fail_open`.
+    fn publish_uncounted(&self, inner: &Inner) {
+        self.metrics.limiter().set_uncounted_calls(inner.uncounted);
     }
 
     /// Raise the resident copy's `(p,b)` to at least `(gen, bak_gen)` and return
@@ -464,7 +492,10 @@ impl CallState {
         for k in &keys {
             inner.sip_index.remove(k);
         }
-        inner.calls.remove(call_ref);
+        if let Some(was) = inner.calls.remove(call_ref) {
+            inner.restate_uncounted(was.limiter.fail_open, false);
+            self.publish_uncounted(&inner);
+        }
         inner.locks.remove(call_ref);
         inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
@@ -488,7 +519,12 @@ impl CallState {
     /// live copy was actually dropped (so the caller meters the self-release once).
     pub fn drop_local(&self, call_ref: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        let present = inner.calls.remove(call_ref).is_some();
+        let was = inner.calls.remove(call_ref);
+        let present = was.is_some();
+        if let Some(was) = was {
+            inner.restate_uncounted(was.limiter.fail_open, false);
+            self.publish_uncounted(&inner);
+        }
         if let Some(keys) = inner.indexed.remove(call_ref) {
             for k in &keys {
                 inner.sip_index.remove(k);
@@ -712,6 +748,8 @@ impl CallState {
             crate::trace::adopt_replicated(&mut call, now_ms);
             Self::reindex(&mut inner, &call);
             inner.touched.insert(call.call_ref.clone(), now_ms);
+            inner.restate_uncounted(false, call.limiter.fail_open);
+            self.publish_uncounted(&inner);
             inner.calls.insert(call.call_ref.clone(), Box::new(call));
         }
         if origin == MaterialiseOrigin::Reclaim {

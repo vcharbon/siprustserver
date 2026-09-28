@@ -44,7 +44,7 @@ use crate::event::CallEvent;
 use crate::limiter::{CallLimiter, RefreshAnswer, RefreshCall, RefreshOutcome};
 use crate::limiter_lease::LimiterLease;
 use crate::limiter_release::lease_changed;
-use crate::metrics::B2buaMetrics;
+use crate::metrics::{B2buaMetrics, LimiterTask, RefreshGiveUp};
 
 /// The backoff after the first unanswered request (a tick when shorter).
 pub const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
@@ -249,11 +249,11 @@ impl RefreshBatch {
         while due.len() >= self.config.cap {
             let Some((_, oldest)) = due.order.pop_first() else {
                 // Every entry is in flight: this mark is the one given up.
-                self.metrics.bump_limiter_refresh_forgotten_cap();
+                self.metrics.limiter().count_refresh_given_up(RefreshGiveUp::Cap);
                 return;
             };
             due.by_key.remove(&oldest);
-            self.metrics.bump_limiter_refresh_forgotten_cap();
+            self.metrics.limiter().count_refresh_given_up(RefreshGiveUp::Cap);
         }
         let seq = due.next_seq;
         due.next_seq += 1;
@@ -280,7 +280,7 @@ impl RefreshBatch {
         let waiting = due.by_key.remove(key).map(|entry| due.order.remove(&entry.place()));
         let in_flight = due.in_flight.remove(key);
         if waiting.is_some() || in_flight.is_some() {
-            self.metrics.bump_limiter_refresh_forgotten_released();
+            self.metrics.limiter().count_refresh_given_up(RefreshGiveUp::Released);
             self.publish(&due);
         }
     }
@@ -321,7 +321,7 @@ impl RefreshBatch {
             match (&mut sender.0).await {
                 Err(e) if e.is_panic() => {
                     self.put_back();
-                    self.metrics.bump_limiter_refresh_sender_restarts();
+                    self.metrics.limiter().count_task_restart(LimiterTask::RefreshSender);
                     tracing::error!(
                         due = self.due(),
                         "limiter refresh sender panicked; restarting it"
@@ -352,8 +352,7 @@ impl RefreshBatch {
             self.lock().send_now = false;
             while let Some(calls) = self.take() {
                 let answer = self.limiter.refresh(&calls).await;
-                let answered = matches!(answer, RefreshAnswer::Answered(_));
-                self.metrics.record_limiter_refresh_request(calls.len(), answered);
+                self.metrics.limiter().count_refresh_keys_sent(calls.len() as u64);
                 match answer {
                     RefreshAnswer::Answered(outcomes) => self.settle(&calls, outcomes),
                     RefreshAnswer::Unavailable => {
@@ -429,8 +428,8 @@ impl RefreshBatch {
         Some(calls)
     }
 
-    /// Apply an answered request: every key leaves the batch, and each
-    /// answer that is not `Extended` is counted and handed to its call.
+    /// Apply an answered request: every key leaves the batch, each answer is
+    /// counted, and each one that is not `Extended` is handed to its call.
     fn settle(&self, calls: &[RefreshCall], outcomes: Vec<RefreshOutcome>) {
         debug_assert_eq!(calls.len(), outcomes.len(), "one outcome per call");
         let mut handed = Vec::new();
@@ -440,13 +439,9 @@ impl RefreshBatch {
             due.retry_at = None;
             for (call, outcome) in calls.iter().zip(outcomes) {
                 let entry = due.in_flight.remove(&call.key);
-                match outcome {
-                    RefreshOutcome::Extended => continue,
-                    RefreshOutcome::Reregistered => {
-                        self.metrics.bump_limiter_refresh_reregistered()
-                    }
-                    RefreshOutcome::Released => self.metrics.bump_limiter_refresh_released(),
-                    RefreshOutcome::Dropped => self.metrics.bump_limiter_refresh_dropped(),
+                self.metrics.limiter().count_refresh_answer(outcome);
+                if outcome == RefreshOutcome::Extended {
+                    continue;
                 }
                 // A forgotten key's call ended: nothing to hand back.
                 if let Some(entry) = entry {
@@ -479,7 +474,7 @@ impl RefreshBatch {
             due.insert(key, entry);
             kept += 1;
         }
-        self.metrics.add_limiter_refresh_retries(kept);
+        self.metrics.limiter().count_refresh_retries(kept);
         self.publish(&due);
     }
 
@@ -493,7 +488,7 @@ impl RefreshBatch {
             }
             let key = first.remove();
             if due.by_key.remove(&key).is_some() {
-                self.metrics.bump_limiter_refresh_forgotten_lease_expired();
+                self.metrics.limiter().count_refresh_given_up(RefreshGiveUp::LeaseExpired);
                 expired = true;
             }
         }
@@ -503,7 +498,7 @@ impl RefreshBatch {
     }
 
     fn publish(&self, due: &Due) {
-        self.metrics.set_limiter_refresh_due(due.len() as u64);
+        self.metrics.limiter().set_refresh_due(due.len() as u64);
     }
 }
 
@@ -640,8 +635,8 @@ mod tests {
         advance(TICK).await;
         assert_eq!(r.requests(), [ids(&["a", "b", "c"])]);
         assert_eq!(r.batch.due(), 0);
-        assert_eq!(r.metrics.limiter_refresh_requests_answered_total(), 1);
-        assert_eq!(r.metrics.limiter_refresh_keys_sent_total(), 3);
+        assert_eq!(r.metrics.limiter().refresh_keys_sent_total(), 3);
+        assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Extended), 3);
         assert!(r.answers.lock().unwrap().is_empty(), "an extended answer is not handed back");
     }
 
@@ -691,9 +686,9 @@ mod tests {
             outcome,
         });
         assert_eq!(answers, expected);
-        assert_eq!(r.metrics.limiter_refresh_reregistered_total(), 1);
-        assert_eq!(r.metrics.limiter_refresh_released_total(), 1);
-        assert_eq!(r.metrics.limiter_refresh_dropped_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
+        assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Released), 1);
+        assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Dropped), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -722,13 +717,17 @@ mod tests {
         advance(TICK).await;
         assert_eq!(r.requests(), [ids(&["a", "b"])], "the round ends on a failed request");
         assert_eq!(r.batch.due(), 3);
-        assert_eq!(r.metrics.limiter_refresh_retries_total(), 2);
+        assert_eq!(r.metrics.limiter().refresh_retries_total(), 2);
         advance(TICK).await;
         assert_eq!(r.requests()[1], ids(&["a", "b"]), "the oldest keys first, again");
         advance(TICK).await;
         assert_eq!(r.requests()[2..], [ids(&["a", "b"]), ids(&["c"])]);
         assert_eq!(r.batch.due(), 0);
-        assert_eq!(r.metrics.limiter_refresh_requests_unavailable_total(), 2);
+        assert_eq!(
+            r.metrics.limiter().refresh_keys_sent_total(),
+            7,
+            "two unanswered requests of two, then all three"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -740,9 +739,9 @@ mod tests {
         advance(TICK).await;
         assert_eq!(r.requests(), [ids(&["in-flight"])]);
         r.batch.forget("in-flight");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_released_total(), 2);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Released), 2);
         r.batch.forget("never-marked");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_released_total(), 2);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Released), 2);
         r.limiter.go.notify_one();
         advance(TICK).await;
         assert_eq!(r.batch.due(), 0);
@@ -760,7 +759,7 @@ mod tests {
         r.limiter.go.notify_one();
         settle().await;
         assert_eq!(r.batch.due(), 1, "only b waits for the next tick");
-        assert_eq!(r.metrics.limiter_refresh_retries_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_retries_total(), 1);
         advance(TICK).await;
         assert_eq!(r.requests()[1], ids(&["b"]));
     }
@@ -787,10 +786,10 @@ mod tests {
         mark(&r.batch, "b");
         mark(&r.batch, "c");
         assert_eq!(r.batch.due(), 2);
-        assert_eq!(r.metrics.limiter_refresh_forgotten_cap_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Cap), 1);
         advance(Duration::from_secs(21)).await;
         assert_eq!(r.batch.due(), 0, "given up one lease after the first mark");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_lease_expired_total(), 2);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired), 2);
         r.batch.resume();
         advance(TICK).await;
         assert!(r.requests().is_empty());
@@ -803,7 +802,7 @@ mod tests {
         mark(&r.batch, "a");
         advance(10 * TICK).await;
         assert!(r.requests().is_empty(), "held: nothing sent");
-        assert_eq!(r.metrics.limiter_refresh_due(), 1);
+        assert_eq!(r.metrics.limiter().refresh_due(), 1);
         mark(&r.batch, "b");
         r.batch.resume();
         advance(Duration::from_millis(1)).await;
@@ -815,7 +814,7 @@ mod tests {
         let r = rig(vec![Script::Panic], 100, 100);
         mark(&r.batch, "a");
         advance(TICK).await;
-        assert_eq!(r.metrics.limiter_refresh_sender_restarts_total(), 1);
+        assert_eq!(r.metrics.limiter().task_restarts_total(LimiterTask::RefreshSender), 1);
         assert_eq!(r.batch.due(), 1, "the key the panicking request carried is put back");
         advance(TICK).await;
         assert_eq!(r.requests(), [ids(&["a"]), ids(&["a"])]);
@@ -839,7 +838,7 @@ mod tests {
         tokio::time::sleep_until(at(28.9)).await;
         settle().await;
         assert_eq!(r.requests().len(), 10);
-        assert_eq!(r.metrics.limiter_refresh_requests_answered_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_answers_total(RefreshOutcome::Extended), 1);
         assert_eq!(r.batch.due(), 0);
         mark(&r.batch, "b");
         advance(TICK + Duration::from_millis(10)).await;
@@ -872,7 +871,7 @@ mod tests {
         assert_eq!(r.requests(), [ids(&["a", "b"])]);
         mark(&r.batch, "c");
         assert_eq!(r.batch.due(), 2, "a full batch takes no mark while its entries are in flight");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_cap_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Cap), 1);
         r.limiter.go.notify_one();
         settle().await;
         assert_eq!(r.batch.due(), 0);
@@ -894,7 +893,7 @@ mod tests {
         // a was first marked at 0 s, b at 1.5 s; the lease is 20 s.
         advance(Duration::from_millis(18_500)).await;
         assert_eq!(r.batch.due(), 1, "a is given up at 20 s, behind the later mark of b");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_lease_expired_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired), 1);
     }
 
     #[test]
@@ -918,21 +917,21 @@ mod tests {
         advance(Duration::from_secs(10)).await;
         lease.learn(Duration::from_secs(30));
         settle().await;
-        assert_eq!(r.metrics.limiter_refresh_due(), 1, "inside the new lease");
+        assert_eq!(r.metrics.limiter().refresh_due(), 1, "inside the new lease");
         advance(Duration::from_secs(21)).await;
         assert_eq!(
-            r.metrics.limiter_refresh_forgotten_lease_expired_total(),
+            r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired),
             1,
             "given up at 30 s by the sender, not at 120 s nor at the next look"
         );
-        assert_eq!(r.metrics.limiter_refresh_due(), 0);
+        assert_eq!(r.metrics.limiter().refresh_due(), 0);
         mark(&r.batch, "b");
         settle().await;
         advance(Duration::from_secs(2)).await;
         lease.learn(Duration::from_secs(1));
         settle().await;
         assert_eq!(
-            r.metrics.limiter_refresh_forgotten_lease_expired_total(),
+            r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired),
             2,
             "a lease learnt shorter than an entry has waited gives it up at once"
         );
@@ -952,6 +951,6 @@ mod tests {
         lease.learn(Duration::from_secs(10));
         advance(Duration::from_secs(10)).await;
         assert_eq!(r.batch.due(), 0, "a shorter lease gives up both");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_lease_expired_total(), 2);
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired), 2);
     }
 }

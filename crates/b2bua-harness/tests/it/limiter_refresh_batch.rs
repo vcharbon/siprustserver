@@ -19,7 +19,9 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::CallLimiter;
+use b2bua::limiter::RefreshOutcome;
 use b2bua::limiter_http::HttpCallLimiter;
+use b2bua::metrics::{LimiterOp, RefreshGiveUp};
 use b2bua::B2buaConfig;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::wire::AdmitEntry;
@@ -387,7 +389,7 @@ async fn a_lapsed_set_is_re_registered_within_one_tick_of_its_refresh() {
     s.advance_to(due + TICK + Duration::from_millis(200)).await;
     assert_eq!(s.holds(), [1, 1, 1], "the refresh re-registered the set within one tick");
     assert_eq!(s.store.stats().reregistered_calls, 1);
-    assert_eq!(s.b2bua.metrics().limiter_refresh_reregistered_total(), 1);
+    assert_eq!(s.b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
 
     s.hang_up(&mut dialog).await;
     s.assert_drained().await;
@@ -416,14 +418,14 @@ async fn a_dropped_answer_reaching_an_ended_call_is_harmless() {
     s.assert_drained().await;
     assert_eq!(s.released_keys(), [key]);
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_refresh_dropped_total(), 1, "the answer was counted");
     assert_eq!(
-        metrics.limiter_refresh_answers_applied_total("dropped"),
-        0,
-        "and applied to nothing"
+        metrics.limiter().refresh_answers_total(RefreshOutcome::Dropped),
+        1,
+        "the answer was counted"
     );
+    assert_eq!(metrics.limiter().uncounted_calls(), 0, "and applied to nothing");
     assert_eq!(
-        metrics.limiter_refresh_forgotten_released_total(),
+        metrics.limiter().refresh_given_up_total(RefreshGiveUp::Released),
         1,
         "the call's release forgot it"
     );
@@ -445,15 +447,11 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
     assert_eq!(s.store.admit(&key, no_entries, false), AdmitResult::Admitted);
     s.advance_to(REFRESH + TICK + Duration::from_secs(1)).await;
     let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.limiter().failures_of(LimiterOp::Refresh), 0, "the slow answer came back");
     assert_eq!(
-        metrics.limiter_refresh_requests_unavailable_total(),
-        0,
-        "the slow answer came back"
-    );
-    assert_eq!(
-        metrics.limiter_refresh_answers_applied_total("dropped"),
+        metrics.limiter().uncounted_calls(),
         1,
-        "the dropped answer reached its call"
+        "the dropped answer reached its call, which runs uncounted"
     );
     let refreshes = s.sent_on("/v1/refresh");
     s.advance_to(2 * REFRESH + TICK + Duration::from_secs(1)).await;
@@ -462,6 +460,7 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
     s.hang_up(&mut dialog).await;
     s.assert_drained().await;
     assert_eq!(s.released_keys(), [key], "the uncounted call still releases its key");
+    assert_eq!(metrics.limiter().uncounted_calls(), 0, "the call's end leaves the gauge");
     let _ = s.h.finish().await;
 }
 
@@ -480,21 +479,27 @@ async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     s.advance_to(REFRESH + Duration::from_secs(30)).await;
     let sent = s.sent_on("/v1/refresh");
     assert!(sent <= 10, "{sent} refresh requests in 30 s of a dead limiter (one per tick: 30)");
-    assert!(!s.b2bua.metrics().limiter_breaker_open(), "refreshes never trip the breaker");
+    assert!(!s.b2bua.metrics().limiter().breaker_open(), "refreshes never trip the breaker");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     let resumed = s.start.elapsed();
     // The backoff waits 5 s at most; the call's own refresh is due at 40 s.
     s.advance_to(resumed + Duration::from_secs(5) + Duration::from_millis(100)).await;
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_refresh_requests_answered_total(), 1, "the retry is answered");
+    assert_eq!(answered_refreshes(metrics), 1, "the retry is answered");
     assert_eq!(s.holds(), [1, 1, 1], "the call stays counted");
 
     // The next refresh falls due at 40 s and leaves within one tick.
     s.advance_to(8 * REFRESH + TICK + Duration::from_millis(200)).await;
-    assert_eq!(metrics.limiter_refresh_requests_answered_total(), 2, "no backoff left");
+    assert_eq!(answered_refreshes(metrics), 2, "no backoff left");
 
     s.hang_up(&mut dialog).await;
     s.assert_drained().await;
     let _ = s.h.finish().await;
+}
+
+/// Refresh requests the limiter answered.
+fn answered_refreshes(metrics: &b2bua::metrics::B2buaMetrics) -> u64 {
+    let m = metrics.limiter();
+    m.requests_total(LimiterOp::Refresh) - m.failures_of(LimiterOp::Refresh)
 }

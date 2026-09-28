@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::metrics::{RefreshGiveUp, ReleaseGiveUp};
 use b2bua_harness::{B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -148,7 +149,7 @@ impl Scene {
     }
 
     fn queued(&self) -> u64 {
-        self.b2bua.metrics().limiter_release_queue_depth()
+        self.b2bua.metrics().limiter().release_queue_depth()
     }
 
     /// How many requests on `path` the limiter received.
@@ -183,12 +184,16 @@ async fn a_queued_release_is_given_up_one_limiter_lease_after_it_was_queued() {
 
     s.hold_for(LEASE_SEC as u64 - 2).await;
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 0, "inside the lease");
+    assert_eq!(
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
+        0,
+        "inside the lease"
+    );
     assert_eq!(s.queued(), 1);
 
     s.hold_for(4).await;
     assert_eq!(
-        metrics.limiter_release_dropped_lease_expired_total(),
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
         1,
         "given up one limiter lease ({LEASE_SEC} s) after it was queued, not after the \
          worker's default {WORKER_DEFAULT_LEASE_SEC} s"
@@ -220,7 +225,7 @@ async fn a_queued_release_is_kept_as_long_as_the_limiters_longer_lease() {
     s.hold_for(WORKER_DEFAULT_LEASE_SEC + 10).await;
     let metrics = s.b2bua.metrics();
     assert_eq!(
-        metrics.limiter_release_dropped_lease_expired_total(),
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
         0,
         "the limiter still counts the call: its release is kept"
     );
@@ -252,7 +257,7 @@ async fn a_refresh_due_is_given_up_one_limiter_lease_after_its_first_mark() {
     let metrics = s.b2bua.metrics();
     assert!(s.received("/v1/refresh") > 0, "the batch kept trying");
     assert_eq!(
-        metrics.limiter_refresh_forgotten_lease_expired_total(),
+        metrics.limiter().refresh_given_up_total(RefreshGiveUp::LeaseExpired),
         1,
         "given up one limiter lease ({LEASE_SEC} s) after its first mark, not after the \
          worker's default {WORKER_DEFAULT_LEASE_SEC} s"

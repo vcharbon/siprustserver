@@ -183,7 +183,7 @@ pub(super) async fn process_result(
         match eff {
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(&result.call, now_ms).await,
             BufferedObservabilityEffect::LimiterAdmitReleased => {
-                ctx.metrics.bump_limiter_admit_released_initial()
+                ctx.metrics.limiter().count_admit_released(crate::metrics::AdmitSite::Initial)
             }
             BufferedObservabilityEffect::SecondFinalRefused { .. } => {
                 ctx.metrics.bump_second_final_refused()

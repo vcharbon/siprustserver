@@ -79,9 +79,13 @@ and a lost release could not be retried.
    plus one refresh period. A Terminating call stops refreshing: a teardown
    may outlast the lease (a release consult, then the sliding 32 s backstop),
    in which case the set lapses early and the terminal release is a no-op.
-8. **The call state is `{key, counted, release_owed, ids, generation}`**, one
-   replicated field; `generation` moves on each time a route fold (or a
-   refresh answer) restates the set. `counted` is refresh eligibility and
+8. **The call state is `{key, counted, release_owed, fail_open, ids,
+   generation}`**, one replicated field; `generation` moves on each time a
+   route fold (or a refresh answer) restates the set. `fail_open` marks an
+   uncounted call whose route names ids the limiter does not count for it
+   (its admit got no usable answer or was not sent, a release fence refused
+   it, a refresh answered `dropped`); any answered admit clears it, and a
+   route naming no id asks for nothing. `counted` is refresh eligibility and
    implies `release_owed`, which the first admit request sets and nothing
    clears; every end path reads it
    to send the release: the terminal settle, the primary's discharge of a
@@ -227,15 +231,41 @@ cells that prove re-registration run the deployed relation.
 
 ## Consequences
 
-- Counters: `limiter_lease_expired_{calls,holds}_total`,
-  `limiter_reregistered_calls_total`, `limiter_admit_released_total`, the
-  gauges `limiter_calls`, `limiter_fences`, `limiter_current_total`,
-  `limiter_admission_max` (the largest live count of one id: what an admit
-  compares with its cap). The b2bua counts admits refused on a fence per site
-  (`b2bua_limiter_admit_released_{initial,fold}_total`) and refreshes that
-  re-registered, were refused by a release fence
-  (`b2bua_limiter_refresh_released_total`) or learnt their set was dropped
-  (`b2bua_limiter_refresh_dropped_total`).
+- Metrics, one list. Counters end in `_total` and carry one closed label.
+  The limiter (`limiter_*`): `limiter_admits_total{outcome=admitted|rejected|released}`,
+  `limiter_refresh_requests_total`,
+  `limiter_refresh_calls_total{outcome=extended|reregistered|released|dropped}`,
+  `limiter_release_requests_total`, `limiter_release_calls_total`,
+  `limiter_lease_expired_calls_total` and `limiter_lease_expired_holds_total`
+  (the holds no release freed: a lane that loses no release treats any as a
+  failure), and the gauges `limiter_calls`, `limiter_holds` (every live count),
+  `limiter_fences` and `limiter_admission_max` (the largest live count of one
+  id: what an admit compares with its cap). Each worker (`b2bua_limiter_*`):
+  `b2bua_limiter_requests_total{op=admit|refresh|release|health}`;
+  `b2bua_limiter_failures_total{op,cause}`, the requests with no usable answer
+  by cause (`timeout`, `transport`, `status`, `bad_answer`; `breaker_open` for
+  an admit the open breaker answered without a request), every `op=admit`
+  one a call that failed open; `b2bua_limiter_admit_released_total{site=initial|fold}`;
+  the gauge `b2bua_limiter_uncounted_calls`, the resident calls running
+  `fail_open` (decision 8), moved by every write of the worker's call map so it
+  is exact on every node that holds the call, taken over or reclaimed;
+  `b2bua_limiter_refresh_answers_total{outcome}`,
+  `b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`,
+  `b2bua_limiter_refresh_keys_sent_total` (over the refresh requests, the mean
+  batch size), `b2bua_limiter_refresh_retries_total`,
+  `b2bua_limiter_refresh_given_up_total{reason=lease_expired|cap|released}`,
+  the gauge `b2bua_limiter_refresh_due`;
+  `b2bua_limiter_release_retries_total`,
+  `b2bua_limiter_release_given_up_total{reason=lease_expired|cap|shutdown}`,
+  the gauge `b2bua_limiter_release_queue_depth`,
+  `b2bua_limiter_release_flushes_total{outcome=empty|sent|given_up}` and
+  `b2bua_limiter_release_flush_seconds_total` (a planned exit's flush);
+  `b2bua_limiter_task_restarts_total{task=release_sender|refresh_sender|breaker_probe}`;
+  the gauge `b2bua_limiter_breaker_open` and
+  `b2bua_limiter_breaker_transitions_total{to=open|closed}`; the gauges
+  `b2bua_limiter_lease_seconds` and `b2bua_limiter_refresh_period_seconds`,
+  `b2bua_limiter_lease_too_short_total` and
+  `b2bua_limiter_refresh_period_clamped_total`.
 - Config: `LIMITER_LEASE_SECONDS` on the limiter only (1 s to one day, boot
   refuses anything else), stated in its answers; `LIMITER_REFRESH_SECONDS`
   on the workers, the refresh below the lease by more than one period (a
@@ -250,50 +280,30 @@ cells that prove re-registration run the deployed relation.
 - The breaker trades counts for latency: the calls a worker starts while its
   breaker is open stay uncounted for their life, so after the limiter comes
   back its counts read low by those calls until they end, and a cap can be
-  passed by them. The worker counts the admits it did not send
-  (`b2bua_limiter_breaker_admits_not_sent_total`: each owes no release by
-  that admit; an initial admit leaves its call uncounted, a reroute admit
-  leaves the call as it was). A gauge of the live calls left uncounted is
-  future work. The breaker's state is `b2bua_limiter_breaker_open`, its
-  transitions `b2bua_limiter_breaker_transitions_total{to=open|closed}`, its
-  probes
-  `b2bua_limiter_breaker_probe_failures_total` and
-  `b2bua_limiter_breaker_probe_restarts_total`; a failed probe also counts in
-  the limiter's fail-open episode, which so lasts as long as the outage. The
+  passed by them: an admit the breaker did not send counts as a failure with
+  `cause=breaker_open` and owes no release by that admit; an initial one
+  leaves its call in `b2bua_limiter_uncounted_calls` until it ends, a reroute
+  one leaves the call as it was. A failed probe counts as a health request
+  with no usable answer, and in the limiter's fail-open episode, which so
+  lasts as long as the outage. The
   limiter's health answer is `GET /v1/health`; `/healthz` answers the process
   alone. A malformed `LIMITER_URL` (another scheme, no port, a path, an
   unbracketed IPv6 address) refuses boot; a well-formed name that does not
   resolve at boot starts the breaker open.
 - A refresh request carries every key due with its ids: one request per
-  worker per tick. The limiter counts requests (`limiter_refresh_total`) and
-  the calls they name (`limiter_refresh_calls_total`); the worker counts
-  `b2bua_limiter_refresh_requests_total{result=answered|unavailable}`, the
-  keys sent (`b2bua_limiter_refresh_keys_sent_total`, over the requests the
-  mean batch size), the keys put back (`b2bua_limiter_refresh_retries_total`),
-  the keys due (`b2bua_limiter_refresh_due`, held while the breaker is
-  open), the entries given up
-  (`b2bua_limiter_refresh_forgotten_total{reason=lease_expired|cap|released}`),
-  the answers applied to their call
-  (`b2bua_limiter_refresh_answers_applied_total{outcome}`) or discarded
-  (`b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`)
-  and sender restarts (`b2bua_limiter_refresh_sender_restarts_total`). A
-  refresh is sent within one tick of falling due, so the lease must outlast
-  the refresh period plus a tick; the worker counts each learnt lease where
-  the configured period does not (`b2bua_limiter_lease_too_short_total`) and
-  each that shortens its period (`b2bua_limiter_refresh_period_clamped_total`),
-  and exposes the lease it learnt (`b2bua_limiter_lease_seconds`), the period
-  it refreshes at (`b2bua_limiter_refresh_period_seconds`) and the limiter
-  answers it could not read (`b2bua_limiter_bad_answers_total{op}`). A call's
-  trace shows its
-  refresh falling due and every answer but `Extended`: an extended lease
-  leaves no per-call evidence.
+  worker per tick, the keys due held while the breaker is open. A refresh is
+  sent within one tick of falling due, so the lease must outlast the refresh
+  period plus a tick; the worker counts each learnt lease where the
+  configured period does not and each that shortens its period. A call's
+  trace shows its refresh falling due and every answer but `Extended`: an
+  extended lease leaves no per-call evidence.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the
   flush and reboots later than one lease) re-registers a set until the
   keepalive reaps that zombie; and after a limiter restart the sets
   re-registered beside admits made in the gap can read above the cap on
   `limiter_admission_max` for the life of the calls that outlived the restart.
-- `b2bua_limiter_refresh_released_total` is not always a fault. A
+- A refresh answered `released` is not always a fault. A
   partitioned backup's reap of a primary it believes dead fences the key of a
   call the primary still serves; that call's refreshes are refused for one
   lease, then re-register. A refresh sent before a fold's refusal dropped the
@@ -303,12 +313,10 @@ cells that prove re-registration run the deployed relation.
 - No call waits on its release: a stalled or unreachable limiter delays
   no CDR and no removal, those of calls whose admit failed open included.
   What waits is the release queue, at most one lease of ending calls per
-  worker and never more than its cap, read on
-  `b2bua_limiter_release_queue_depth`, `b2bua_limiter_release_retries_total`,
-  `b2bua_limiter_release_dropped_total{reason=lease_expired|cap}` and
-  `b2bua_limiter_release_drainer_restarts_total`. A release lost with its
-  worker or given up by the queue is freed by the lease, so the limiter's
-  counts read high by those calls for up to one lease.
+  worker and never more than its cap. A release lost with its worker or
+  given up by the queue is freed by the lease, so the limiter's counts read
+  high by those calls for up to one lease, and each such hold is counted on
+  `limiter_lease_expired_holds_total`.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
   calls one node reclaims fall due together and the batch absorbs them.
 - Replica bodies decode strictly: a body without the limiter key is dropped at

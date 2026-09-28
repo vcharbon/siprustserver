@@ -25,6 +25,7 @@ use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
 };
+use b2bua::metrics::{LimiterTask, ReleaseGiveUp};
 use b2bua_harness::{settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -216,7 +217,7 @@ impl Scene {
     }
 
     fn queued(&self) -> u64 {
-        self.b2bua.metrics().limiter_release_queue_depth()
+        self.b2bua.metrics().limiter().release_queue_depth()
     }
 }
 
@@ -280,7 +281,7 @@ async fn the_limiter_back_drains_the_queue_in_one_batched_request() {
     expected.sort();
     assert_eq!(keys, expected, "the request names every queued call");
     assert_eq!(s.queued(), 0, "the queue drained");
-    assert!(s.b2bua.metrics().limiter_release_retries_total() >= 3, "each key was retried");
+    assert!(s.b2bua.metrics().limiter().release_retries_total() >= 3, "each key was retried");
     s.rig.expect_drained("the batched release freed every call").await;
     assert_eq!(s.rig.store.stats().lease_expired_calls, 0, "the release freed them, not the lease");
     s.b2bua.assert_fully_reaped();
@@ -302,8 +303,12 @@ async fn a_release_queued_past_the_lease_is_given_up() {
     s.hold_for(LEASE_SEC as u64 + 5).await;
 
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1, "dropped past the lease");
-    assert_eq!(metrics.limiter_release_dropped_cap_total(), 0);
+    assert_eq!(
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
+        1,
+        "dropped past the lease"
+    );
+    assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Cap), 0);
     assert_eq!(s.queued(), 0, "the queue is empty");
     assert_eq!(s.rig.store.stats().lease_expired_calls, 1, "the limiter's lease freed the call");
     assert_eq!(s.rig.all_holds(), [0, 0, 0], "the server reads 0");
@@ -337,8 +342,12 @@ async fn a_full_queue_drops_its_oldest_entry() {
     sip_clock::testkit::settle().await;
     assert!(s.b2bua.calls_reaped());
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_release_dropped_cap_total(), 1, "the oldest entry dropped");
-    assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 0);
+    assert_eq!(
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::Cap),
+        1,
+        "the oldest entry dropped"
+    );
+    assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 0);
     assert_eq!(s.queued(), 2, "the queue holds its cap");
 
     let before = s.received();
@@ -427,7 +436,7 @@ async fn a_release_sender_that_panics_is_restarted_and_the_release_lands() {
     s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
     s.hang_up(&mut dialog).await;
     settle_until(|| s.b2bua.is_reaped()).await;
-    assert_eq!(s.b2bua.metrics().limiter_release_drainer_restarts_total(), 1);
+    assert_eq!(s.b2bua.metrics().limiter().task_restarts_total(LimiterTask::ReleaseSender), 1);
     assert_eq!(s.queued(), 0, "the restarted sender sent the release");
     s.rig.expect_drained("the release landed after the restart").await;
     s.b2bua.assert_fully_reaped();
@@ -468,8 +477,12 @@ async fn a_draining_worker_flushes_its_release_queue_before_it_exits() {
     assert_eq!((out.release_flush.queued, out.release_flush.given_up), (2, 0));
     assert_eq!(out.elapsed, elapsed, "the drain's time includes its flush");
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.drain_release_flushes("sent"), 1);
-    assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0, "nothing given up");
+    assert_eq!(metrics.limiter().release_flushes_total("sent"), 1);
+    assert_eq!(
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown),
+        0,
+        "nothing given up"
+    );
     assert_eq!(
         s.rig.store.stats().lease_expired_calls,
         0,
@@ -502,9 +515,9 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
     assert_eq!(out.exit, DrainExit::Quiescent);
     assert_eq!((out.release_flush.queued, out.release_flush.given_up), (1, 1));
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.drain_release_flushes("given_up"), 1);
+    assert_eq!(metrics.limiter().release_flushes_total("given_up"), 1);
     assert_eq!(
-        metrics.limiter_release_dropped_shutdown_total(),
+        metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown),
         1,
         "the release left queued at the flush bound is counted"
     );
@@ -513,8 +526,8 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
         "the drain waits the flush bound and no longer: {elapsed:?}"
     );
     assert_eq!(s.queued(), 0, "the given-up entry left the queue");
-    assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 0);
-    assert_eq!(metrics.limiter_release_dropped_cap_total(), 0);
+    assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 0);
+    assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Cap), 0);
     assert_eq!(s.rig.all_holds(), [1, 1, 1], "the limiter applied nothing");
 
     let before = s.received();
@@ -539,7 +552,7 @@ async fn a_drain_gives_up_a_queue_held_by_an_open_breaker_at_once() {
         dialogs.push(s.establish().await);
     }
     let metrics = s.b2bua.metrics();
-    assert!(metrics.limiter_breaker_open(), "three failed admits opened the breaker");
+    assert!(metrics.limiter().breaker_open(), "three failed admits opened the breaker");
     for dialog in &mut dialogs {
         s.hang_up(dialog).await;
     }
@@ -552,7 +565,7 @@ async fn a_drain_gives_up_a_queue_held_by_an_open_breaker_at_once() {
     assert_eq!(start.elapsed(), Duration::ZERO, "a held queue is not waited for");
     assert_eq!(out.exit, DrainExit::Quiescent);
     assert_eq!((out.release_flush.queued, out.release_flush.given_up), (3, 3));
-    assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 3);
+    assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 3);
     assert_eq!(s.queued(), 0);
 
     s.stall.send_replace(Stall::Nothing);

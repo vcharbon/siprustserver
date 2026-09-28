@@ -17,8 +17,9 @@
 //! [`CallLimiter::report_to`]; a lease is learnt only from a body judged
 //! valid. A 200 whose body cannot be read (unknown shape, no lease or one
 //! below [`MIN_LEASE_MS`], a contradiction, a refresh answer not naming one
-//! outcome per call) is a bad answer: handled as no answer, reported, and
-//! counted in the fail-open episode as its own cause.
+//! outcome per call) is a bad answer: handled as no answer. Every request and
+//! every request with no usable answer is reported by its cause
+//! ([`LimiterFailure`]) and counted in the fail-open episode under it.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -36,7 +37,7 @@ use crate::limiter::{
     RefreshCall, RefreshOutcome, ReleaseAnswer,
 };
 use crate::limiter_target::LimiterTarget;
-use crate::metrics::LimiterOp;
+use crate::metrics::{LimiterFailure, LimiterOp};
 
 /// The shortest lease an answer may state: the limiter's own floor.
 pub const MIN_LEASE_MS: u64 = 1_000;
@@ -95,9 +96,20 @@ impl Endpoint {
         }
     }
 
-    /// One failure of kind `counter` in the episode.
-    fn failed(&self, counter: &'static str) {
-        self.fail_open.record(&self.addr_key, counter, 1);
+    /// A request of `op` left.
+    fn sent(&self, op: LimiterOp) {
+        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+            to.sent(op);
+        }
+    }
+
+    /// A request of `op` got no usable answer for `cause`: one failure in the
+    /// episode, reported.
+    fn failed(&self, op: LimiterOp, cause: LimiterFailure) {
+        self.fail_open.record(&self.addr_key, cause.label(), 1);
+        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
+            to.failed(op, cause);
+        }
     }
 
     /// A valid answer stated the limiter's lease, `lease_ms`.
@@ -108,11 +120,28 @@ impl Endpoint {
         }
     }
 
-    /// An answer to `op` came back with a body that could not be read.
-    fn bad_answer(&self, op: LimiterOp) {
-        self.failed("bad_answers");
-        for to in self.reports.read().unwrap_or_else(PoisonError::into_inner).iter() {
-            to.bad_answer(op);
+    /// Send `req` for `op` under `budget`: the 200 answer, or `None` after
+    /// counting why none came back.
+    async fn call(
+        &self,
+        op: LimiterOp,
+        req: HttpRequest,
+        budget: Duration,
+    ) -> Option<HttpResponse> {
+        self.sent(op);
+        match tokio::time::timeout(budget, self.send(req)).await {
+            Ok(Ok(resp)) if resp.status == 200 => Some(resp),
+            other => {
+                self.failed(
+                    op,
+                    match other {
+                        Err(_) => LimiterFailure::Timeout,
+                        Ok(Err(_)) => LimiterFailure::Transport,
+                        Ok(Ok(_)) => LimiterFailure::Status,
+                    },
+                );
+                None
+            }
         }
     }
 }
@@ -165,37 +194,22 @@ impl HttpCallLimiter {
         tokio::time::timeout(budget, self.endpoint.target.resolve()).await.ok().flatten().is_some()
     }
 
-    /// Fire one request under `budget`. `None` on timeout / transport error /
-    /// non-200 — the caller treats all three as "backend unavailable".
-    async fn call(&self, req: HttpRequest, budget: Duration) -> Option<HttpResponse> {
-        match tokio::time::timeout(budget, self.endpoint.send(req)).await {
-            Ok(Ok(resp)) if resp.status == 200 => {
-                // The episode ends once the limiter stops failing, so a
-                // limiter answering every other request stays one episode.
-                self.endpoint.answered();
-                Some(resp)
-            }
-            other => {
-                self.endpoint.failed(match other {
-                    Err(_) => "timeouts",
-                    Ok(Err(_)) => "transport_errors",
-                    Ok(Ok(_)) => "non_200",
-                });
-                None
-            }
-        }
-    }
-
-    /// One request whose body serializes `body`, under `budget`; `None` when
-    /// the limiter is unavailable.
+    /// One request of `op` whose body serializes `body`, under `budget`;
+    /// `None` when the limiter is unavailable (a timeout, a transport error,
+    /// a non-200 answer).
     async fn post<T: serde::Serialize>(
         &self,
+        op: LimiterOp,
         path: &str,
         body: &T,
         budget: Duration,
     ) -> Option<HttpResponse> {
         let bytes = serde_json::to_vec(body).ok()?;
-        self.call(HttpRequest::post(path, bytes), budget).await
+        let resp = self.endpoint.call(op, HttpRequest::post(path, bytes), budget).await?;
+        // The episode ends once the limiter stops failing, so a limiter
+        // answering every other request stays one episode.
+        self.endpoint.answered();
+        Some(resp)
     }
 }
 
@@ -208,24 +222,19 @@ struct HttpHealth {
 #[async_trait]
 impl LimiterHealth for HttpHealth {
     async fn serving(&self) -> bool {
-        let answer =
-            tokio::time::timeout(self.timeout, self.endpoint.send(HttpRequest::get("/v1/health")))
-                .await;
-        match answer {
-            Ok(Ok(resp)) if resp.status == 200 => match read_health(&resp.body) {
-                Some(lease_ms) => {
-                    self.endpoint.answered();
-                    self.endpoint.stated_lease(lease_ms);
-                    true
-                }
-                None => {
-                    self.endpoint.bad_answer(LimiterOp::Health);
-                    false
-                }
-            },
-            _ => {
-                self.endpoint.failed("probe");
-                tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
+        let health = HttpRequest::get("/v1/health");
+        let Some(resp) = self.endpoint.call(LimiterOp::Health, health, self.timeout).await else {
+            tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
+            return false;
+        };
+        match read_health(&resp.body) {
+            Some(lease_ms) => {
+                self.endpoint.answered();
+                self.endpoint.stated_lease(lease_ms);
+                true
+            }
+            None => {
+                self.endpoint.failed(LimiterOp::Health, LimiterFailure::BadAnswer);
                 false
             }
         }
@@ -256,7 +265,7 @@ impl CallLimiter for HttpCallLimiter {
                 .collect(),
             release_on_refusal,
         };
-        let Some(resp) = self.post("/v1/admit", &body, self.timeout).await else {
+        let Some(resp) = self.post(LimiterOp::Admit, "/v1/admit", &body, self.timeout).await else {
             return AdmitOutcome::Unavailable;
         };
         match read_admit(&resp.body) {
@@ -266,7 +275,7 @@ impl CallLimiter for HttpCallLimiter {
             }
             // A bad answer is no answer: the call fails open.
             None => {
-                self.endpoint.bad_answer(LimiterOp::Admit);
+                self.endpoint.failed(LimiterOp::Admit, LimiterFailure::BadAnswer);
                 AdmitOutcome::Unavailable
             }
         }
@@ -274,7 +283,7 @@ impl CallLimiter for HttpCallLimiter {
 
     async fn release(&self, keys: &[String]) -> ReleaseAnswer {
         let body = ReleaseRequest { keys: keys.to_vec() };
-        match self.post("/v1/release", &body, self.release_timeout).await {
+        match self.post(LimiterOp::Release, "/v1/release", &body, self.release_timeout).await {
             Some(_) => ReleaseAnswer::Released,
             None => ReleaseAnswer::Unavailable,
         }
@@ -287,7 +296,9 @@ impl CallLimiter for HttpCallLimiter {
                 .map(|c| wire::RefreshCall { key: c.key.clone(), ids: c.ids.clone() })
                 .collect(),
         };
-        let Some(resp) = self.post("/v1/refresh", &body, self.refresh_timeout).await else {
+        let Some(resp) =
+            self.post(LimiterOp::Refresh, "/v1/refresh", &body, self.refresh_timeout).await
+        else {
             return RefreshAnswer::Unavailable;
         };
         match read_refresh(&resp.body, calls.len()) {
@@ -296,7 +307,7 @@ impl CallLimiter for HttpCallLimiter {
                 RefreshAnswer::Answered(outcomes)
             }
             None => {
-                self.endpoint.bad_answer(LimiterOp::Refresh);
+                self.endpoint.failed(LimiterOp::Refresh, LimiterFailure::BadAnswer);
                 RefreshAnswer::Unavailable
             }
         }
@@ -590,21 +601,76 @@ mod tests {
         client.report_to(LimiterReports::new(&lease, metrics.clone()));
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
         assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
-        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Admit), 1, "a bad answer");
+        let bad = |op| metrics.limiter().failures_total(op, LimiterFailure::BadAnswer);
+        assert_eq!(bad(LimiterOp::Admit), 1, "a bad answer");
 
         let (client, _server) = answering(r#"{"outcomes":["extended"],"lease_ms":0}"#).await;
         client.report_to(LimiterReports::new(&lease, metrics.clone()));
         let calls = [RefreshCall { key: "c#k".into(), ids: vec!["x".into()] }];
         assert_eq!(client.refresh(&calls).await, RefreshAnswer::Unavailable);
-        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Refresh), 1);
+        assert_eq!(bad(LimiterOp::Refresh), 1);
 
         for body in [r#"{"calls":0,"lease_ms":999}"#, r#"{"calls":0}"#] {
             let (client, _server) = answering(body).await;
             client.report_to(LimiterReports::new(&lease, metrics.clone()));
             assert!(!client.health().unwrap().serving().await, "{body}");
         }
-        assert_eq!(metrics.limiter_bad_answers_total(LimiterOp::Health), 2);
+        assert_eq!(bad(LimiterOp::Health), 2);
         assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
+    }
+
+    /// Every request of `client`, one of each kind.
+    async fn one_of_each(client: &HttpCallLimiter) {
+        client.admit("c#k", &entries(), false).await;
+        client.refresh(&[RefreshCall { key: "c#k".into(), ids: vec!["x".into()] }]).await;
+        client.release(&["c#k".into()]).await;
+        client.health().unwrap().serving().await;
+    }
+
+    /// A limiter answering every request with `status`.
+    struct Status(u16);
+
+    #[async_trait]
+    impl http_net::HttpService for Status {
+        async fn handle(&self, _: HttpRequest) -> HttpResponse {
+            HttpResponse::status(self.0)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_request_and_every_failure_is_counted_by_its_cause() {
+        let ops = [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Release, LimiterOp::Health];
+        let (net, _server) = served().await;
+        let client = HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET);
+        let lease = LimiterLease::starting_at(Duration::from_secs(20));
+        let metrics = B2buaMetrics::new();
+        client.report_to(LimiterReports::new(&lease, metrics.clone()));
+        let m = metrics.limiter();
+
+        one_of_each(&client).await;
+        for op in ops {
+            assert_eq!((m.requests_total(op), m.failures_of(op)), (1, 0), "{op:?} answered");
+        }
+        net.apply_fault(Fault::Stall { dst: laddr() });
+        one_of_each(&client).await;
+        net.apply_fault(Fault::Cut { dst: laddr() });
+        one_of_each(&client).await;
+        for op in ops {
+            assert_eq!(m.requests_total(op), 3, "{op:?}");
+            assert_eq!(m.failures_total(op, LimiterFailure::Timeout), 1, "{op:?} stalled");
+            assert_eq!(m.failures_total(op, LimiterFailure::Transport), 1, "{op:?} cut");
+        }
+
+        let net = SimulatedHttpNetwork::new();
+        let _refusing = net.serve(laddr(), Arc::new(Status(503))).await.unwrap();
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        client.report_to(LimiterReports::new(&lease, metrics.clone()));
+        one_of_each(&client).await;
+        for op in ops {
+            assert_eq!(m.failures_total(op, LimiterFailure::Status), 1, "{op:?} not 200");
+            assert_eq!(m.failures_of(op), 3, "{op:?}");
+        }
+        assert_eq!(m.failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen), 0);
     }
 
     #[tokio::test(start_paused = true)]

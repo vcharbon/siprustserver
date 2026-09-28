@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use call::CallLimiterState;
 
 use crate::limiter_lease::LimiterLease;
-use crate::metrics::{B2buaMetrics, LimiterOp};
+use crate::metrics::{B2buaMetrics, LimiterFailure, LimiterOp};
 
 /// One limiter entry to admit: an id and its concurrent-call cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +72,9 @@ pub enum AdmitOutcome {
 /// release; a cap refusal leaves the call uncounted when the limiter dropped
 /// its set (`release_on_refusal`, or a call that held none) and as it was
 /// otherwise; a lost answer and an unsent request leave the call counted as
-/// it was, refreshing whatever set the limiter holds for its key.
+/// it was, refreshing whatever set the limiter holds for its key. A lost
+/// answer, an unsent request and a release fence leave an uncounted call
+/// `fail_open` when `ids` is not empty.
 pub fn state_after_admit(
     prior: &CallLimiterState,
     outcome: &AdmitOutcome,
@@ -80,14 +82,16 @@ pub fn state_after_admit(
     ids: Vec<String>,
 ) -> CallLimiterState {
     let key = prior.key.clone();
+    let wanted = !ids.is_empty();
     match outcome {
         AdmitOutcome::Admitted => CallLimiterState::admitted(key, ids),
         AdmitOutcome::Rejected { .. } if release_on_refusal || !prior.counted => {
             CallLimiterState::unconfirmed(key)
         }
-        AdmitOutcome::Rejected { .. } | AdmitOutcome::Unavailable => prior.with_release_owed(),
-        AdmitOutcome::Released => CallLimiterState::unconfirmed(key),
-        AdmitOutcome::NotSent => prior.clone(),
+        AdmitOutcome::Rejected { .. } => prior.with_release_owed(),
+        AdmitOutcome::Unavailable => prior.with_release_owed().failed_open(wanted),
+        AdmitOutcome::Released => CallLimiterState::unconfirmed(key).failed_open(wanted),
+        AdmitOutcome::NotSent => prior.failed_open(wanted),
     }
 }
 
@@ -163,15 +167,16 @@ pub trait CallLimiter: Send + Sync {
         None
     }
     /// From now on, report to `reports` what the limiter's answers say: a
-    /// limiter reached over a wire reports every lease stated and every
-    /// answer it could not read; a wrapper forwards to what it wraps; a
-    /// limiter with neither reports nothing.
+    /// limiter reached over a wire reports every lease stated, every request
+    /// sent and every request that got no usable answer; a wrapper forwards
+    /// to what it wraps; a limiter with neither reports nothing.
     fn report_to(&self, reports: LimiterReports);
 }
 
 /// Where a limiter client reports what the limiter's answers say beyond each
 /// request's outcome: the lease they state, to the worker's [`LimiterLease`],
-/// and the answers it could not read, on the worker's metrics. It holds the
+/// and every request it sent and each one that got no usable answer, by
+/// cause, on the worker's metrics. It holds the
 /// lease weakly: once the worker is gone its reports go nowhere and the
 /// client drops the registration.
 #[derive(Clone)]
@@ -198,10 +203,17 @@ impl LimiterReports {
         }
     }
 
-    /// An answer to `op` came back with a body that could not be read.
-    pub fn bad_answer(&self, op: LimiterOp) {
+    /// A request of `op` left for the limiter.
+    pub fn sent(&self, op: LimiterOp) {
         if self.is_live() {
-            self.metrics.bump_limiter_bad_answer(op);
+            self.metrics.limiter().count_request(op);
+        }
+    }
+
+    /// A request of `op` got no usable answer for `cause`.
+    pub fn failed(&self, op: LimiterOp, cause: LimiterFailure) {
+        if self.is_live() {
+            self.metrics.limiter().count_failure(op, cause);
         }
     }
 }
@@ -262,11 +274,18 @@ mod tests {
         AdmitOutcome::Rejected { limiter_id: "y".into() }
     }
 
+    /// The unconfirmed state of an uncounted call whose route names ids.
+    fn failing_open() -> CallLimiterState {
+        CallLimiterState { fail_open: true, ..CallLimiterState::unconfirmed("c#k".into()) }
+    }
+
     #[test]
     fn a_sent_initial_admit_owes_the_release_whatever_its_answer() {
-        for outcome in [refused(), AdmitOutcome::Released, AdmitOutcome::Unavailable] {
+        let state = state_after_admit(&fresh(), &refused(), false, ids(&["x", "y"]));
+        assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()), "a cap refusal");
+        for outcome in [AdmitOutcome::Released, AdmitOutcome::Unavailable] {
             let state = state_after_admit(&fresh(), &outcome, false, ids(&["x", "y"]));
-            assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()), "{outcome:?}");
+            assert_eq!(state, failing_open(), "{outcome:?}");
         }
         let state = state_after_admit(&fresh(), &AdmitOutcome::Admitted, false, ids(&["x", "y"]));
         assert_eq!(state, CallLimiterState::admitted("c#k".into(), ids(&["x", "y"])));
@@ -275,7 +294,11 @@ mod tests {
     #[test]
     fn an_unsent_admit_leaves_the_call_as_it_was() {
         let state = state_after_admit(&fresh(), &AdmitOutcome::NotSent, false, ids(&["x"]));
-        assert_eq!(state, fresh(), "an unsent initial admit owes nothing");
+        assert_eq!(
+            state,
+            CallLimiterState { fail_open: true, ..fresh() },
+            "an unsent initial admit owes nothing and runs uncounted"
+        );
         let state = state_after_admit(&counted(), &AdmitOutcome::NotSent, true, ids(&["y"]));
         assert_eq!(state, counted(), "a counted call stays counted on its set");
     }
@@ -294,6 +317,22 @@ mod tests {
         let state = state_after_admit(&counted(), &refused(), false, ids(&["y"]));
         assert_eq!(state, counted(), "the old set stays");
         let state = state_after_admit(&counted(), &AdmitOutcome::Released, true, ids(&["y"]));
-        assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()));
+        assert_eq!(state, failing_open(), "the call was released under it");
+    }
+
+    #[test]
+    fn a_failed_admit_runs_uncounted_only_when_its_route_names_ids() {
+        for outcome in [AdmitOutcome::Unavailable, AdmitOutcome::NotSent, AdmitOutcome::Released] {
+            let state = state_after_admit(&fresh(), &outcome, true, Vec::new());
+            assert!(!state.fail_open, "{outcome:?} of an empty route asks for nothing");
+            let state = state_after_admit(&failing_open(), &outcome, true, Vec::new());
+            assert!(!state.fail_open, "{outcome:?}: the new route asks for nothing");
+            let state = state_after_admit(&failing_open(), &outcome, true, ids(&["y"]));
+            assert!(state.fail_open, "{outcome:?}: still uncounted");
+        }
+        let state = state_after_admit(&failing_open(), &AdmitOutcome::Admitted, true, ids(&["y"]));
+        assert!(state.counted && !state.fail_open, "an admitted route counts the call");
+        let state = state_after_admit(&failing_open(), &refused(), true, ids(&["y"]));
+        assert!(!state.fail_open, "a cap refusal ends the fail-open");
     }
 }

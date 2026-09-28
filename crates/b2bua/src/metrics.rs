@@ -5,10 +5,16 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::dispatch::{Discard, PastBound};
 use crate::tier1_brake::Tier1BrakeCounters;
+
+mod limiter;
+
+pub use limiter::{
+    AdmitSite, LimiterCounters, LimiterFailure, LimiterOp, LimiterTask, RefreshDiscard,
+    RefreshGiveUp, ReleaseGiveUp,
+};
 
 /// Upper bounds (seconds) of the `b2bua_drain_seconds` buckets, ascending; the
 /// implicit `+Inf` bucket is the observation count.
@@ -56,9 +62,8 @@ struct Inner {
     drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
     drain_seconds_sum_ms: AtomicU64,
     drain_seconds_count: AtomicU64,
-    // The drains' limiter release flushes by outcome, and their time.
-    drain_release_flushes: Mutex<BTreeMap<String, u64>>,
-    drain_release_flush_ms: AtomicU64,
+    // The worker's view of its call limiter (ADR-0038).
+    limiter: LimiterCounters,
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
@@ -224,63 +229,6 @@ struct Inner {
     // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
     // and only climbs when a primary is permanently lost mid-call.
     repl_terminal_lost: AtomicU64,
-    // The call limiter's degraded paths, seen from the b2bua: an admit refused
-    // because the limiter had released the key (initial route / route fold),
-    // a refresh that re-registered a set the limiter no longer held, a
-    // refresh refused on a fenced key.
-    limiter_admit_released_initial: AtomicU64,
-    limiter_admit_released_fold: AtomicU64,
-    limiter_refresh_reregistered: AtomicU64,
-    limiter_refresh_released: AtomicU64,
-    limiter_refresh_dropped: AtomicU64,
-    // The limiter release queue (`limiter_release`): entries waiting, sends of
-    // a key after its first, and entries given up (past the lease, at
-    // the cap, at a planned exit's flush bound).
-    limiter_release_queue_depth: AtomicU64,
-    limiter_release_retries: AtomicU64,
-    limiter_release_dropped_lease_expired: AtomicU64,
-    limiter_release_dropped_cap: AtomicU64,
-    limiter_release_dropped_shutdown: AtomicU64,
-    limiter_release_drainer_restarts: AtomicU64,
-    // The limiter circuit breaker (`limiter_breaker`): 1 while open, its
-    // transitions, the admits it answered without a request, and the probes
-    // the limiter did not answer.
-    limiter_breaker_open: AtomicU64,
-    limiter_breaker_opened: AtomicU64,
-    limiter_breaker_closed: AtomicU64,
-    limiter_breaker_admits_not_sent: AtomicU64,
-    limiter_breaker_probe_failures: AtomicU64,
-    limiter_breaker_probe_restarts: AtomicU64,
-    // The limiter's lease as the worker last learnt it (`limiter_lease`), in
-    // milliseconds, and the learnt leases its refresh period plus a tick
-    // reaches.
-    limiter_lease_ms: AtomicU64,
-    limiter_lease_too_short: AtomicU64,
-    // The refresh period the learnt lease sets (milliseconds), and the learnt
-    // leases that shortened it below the configured period.
-    limiter_refresh_period_ms: AtomicU64,
-    limiter_refresh_period_clamped: AtomicU64,
-    // Limiter answers with a 200 and a body the client could not read, by
-    // request.
-    limiter_bad_answers_admit: AtomicU64,
-    limiter_bad_answers_refresh: AtomicU64,
-    limiter_bad_answers_health: AtomicU64,
-    // The limiter refresh batch (`limiter_refresh_batch`): keys due, requests
-    // by result, keys sent, keys a failed request put back, entries given up
-    // (past the lease, at the cap, the call released), sender restarts, and
-    // the answers handed back to calls, applied or discarded.
-    limiter_refresh_due: AtomicU64,
-    limiter_refresh_requests_answered: AtomicU64,
-    limiter_refresh_requests_unavailable: AtomicU64,
-    limiter_refresh_keys_sent: AtomicU64,
-    limiter_refresh_retries: AtomicU64,
-    limiter_refresh_forgotten_lease_expired: AtomicU64,
-    limiter_refresh_forgotten_cap: AtomicU64,
-    limiter_refresh_forgotten_released: AtomicU64,
-    limiter_refresh_sender_restarts: AtomicU64,
-    limiter_refresh_answers_applied: Mutex<BTreeMap<&'static str, u64>>,
-    limiter_refresh_answers_discarded_call_gone: AtomicU64,
-    limiter_refresh_answers_discarded_stale: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -461,25 +409,6 @@ fn past_bound_label(bound: PastBound) -> &'static str {
     }
 }
 
-/// A limiter request, as a metric label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LimiterOp {
-    Admit,
-    Refresh,
-    Health,
-}
-
-impl LimiterOp {
-    /// The metric label.
-    pub fn label(self) -> &'static str {
-        match self {
-            LimiterOp::Admit => "admit",
-            LimiterOp::Refresh => "refresh",
-            LimiterOp::Health => "health",
-        }
-    }
-}
-
 macro_rules! counter {
     ($bump:ident, $get:ident, $field:ident) => {
         pub fn $bump(&self) {
@@ -494,6 +423,11 @@ macro_rules! counter {
 impl B2buaMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The worker's limiter counters and gauges (`b2bua_limiter_*`).
+    pub fn limiter(&self) -> &LimiterCounters {
+        &self.inner.limiter
     }
 
     /// The router's new-call admission outcomes; `b2bua_new_calls_total`
@@ -650,22 +584,12 @@ impl B2buaMetrics {
     /// Record one completed drain: its reason label into
     /// `b2bua_drain_exits_total{reason}`, its duration into the
     /// `b2bua_drain_seconds` histogram (ADR-0031 D2), and its release flush
-    /// into `b2bua_drain_release_flushes_total{outcome}` and
-    /// `b2bua_drain_release_flush_seconds_total` (ADR-0038 decision 9).
+    /// into `b2bua_limiter_release_flushes_total{outcome}` and
+    /// `b2bua_limiter_release_flush_seconds_total` (ADR-0038 decision 9).
     pub fn record_drain_exit(&self, outcome: &crate::drain::DrainOutcome) {
         let (reason, elapsed) = (outcome.exit.label(), outcome.elapsed);
         *self.inner.drain_exits.lock().unwrap().entry(reason.to_string()).or_insert(0) += 1;
-        let flush = outcome.release_flush;
-        *self
-            .inner
-            .drain_release_flushes
-            .lock()
-            .unwrap()
-            .entry(flush.outcome().to_string())
-            .or_insert(0) += 1;
-        self.inner
-            .drain_release_flush_ms
-            .fetch_add(flush.elapsed.as_millis() as u64, Ordering::Relaxed);
+        self.inner.limiter.count_release_flush(&outcome.release_flush);
         let secs = elapsed.as_secs_f64();
         for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
             if secs <= *le {
@@ -679,12 +603,6 @@ impl B2buaMetrics {
     /// Drains that returned for `reason` (test/observability).
     pub fn drain_exits(&self, reason: &str) -> u64 {
         self.inner.drain_exits.lock().unwrap().get(reason).copied().unwrap_or(0)
-    }
-
-    /// Drains whose release flush ended with `outcome`
-    /// ([`ReleaseFlush::outcome`](crate::limiter_release::ReleaseFlush::outcome)).
-    pub fn drain_release_flushes(&self, outcome: &str) -> u64 {
-        self.inner.drain_release_flushes.lock().unwrap().get(outcome).copied().unwrap_or(0)
     }
 
     /// Count one forward flush the Backup flow refused because it would regress
@@ -857,215 +775,6 @@ impl B2buaMetrics {
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
     counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
-    counter!(
-        bump_limiter_admit_released_initial,
-        limiter_admit_released_initial_total,
-        limiter_admit_released_initial
-    );
-    counter!(
-        bump_limiter_admit_released_fold,
-        limiter_admit_released_fold_total,
-        limiter_admit_released_fold
-    );
-    counter!(
-        bump_limiter_refresh_reregistered,
-        limiter_refresh_reregistered_total,
-        limiter_refresh_reregistered
-    );
-    counter!(
-        bump_limiter_refresh_released,
-        limiter_refresh_released_total,
-        limiter_refresh_released
-    );
-    counter!(bump_limiter_refresh_dropped, limiter_refresh_dropped_total, limiter_refresh_dropped);
-
-    /// Set the number of releases waiting in the limiter release queue (gauge).
-    pub fn set_limiter_release_queue_depth(&self, n: u64) {
-        self.inner.limiter_release_queue_depth.store(n, Ordering::Relaxed);
-    }
-    /// Releases waiting in the limiter release queue, in flight included.
-    pub fn limiter_release_queue_depth(&self) -> u64 {
-        self.inner.limiter_release_queue_depth.load(Ordering::Relaxed)
-    }
-    /// Count `n` sends of queued keys that a failed send put back to wait.
-    pub fn add_limiter_release_retries(&self, n: u64) {
-        self.inner.limiter_release_retries.fetch_add(n, Ordering::Relaxed);
-    }
-    /// Keys put back to wait after a failed send, summed over every send.
-    pub fn limiter_release_retries_total(&self) -> u64 {
-        self.inner.limiter_release_retries.load(Ordering::Relaxed)
-    }
-    counter!(
-        bump_limiter_release_dropped_lease_expired,
-        limiter_release_dropped_lease_expired_total,
-        limiter_release_dropped_lease_expired
-    );
-    counter!(
-        bump_limiter_release_dropped_cap,
-        limiter_release_dropped_cap_total,
-        limiter_release_dropped_cap
-    );
-    /// Count `n` queued releases a planned exit gave up on.
-    pub fn add_limiter_release_dropped_shutdown(&self, n: u64) {
-        self.inner.limiter_release_dropped_shutdown.fetch_add(n, Ordering::Relaxed);
-    }
-    /// Queued releases planned exits gave up on.
-    pub fn limiter_release_dropped_shutdown_total(&self) -> u64 {
-        self.inner.limiter_release_dropped_shutdown.load(Ordering::Relaxed)
-    }
-    counter!(
-        bump_limiter_release_drainer_restarts,
-        limiter_release_drainer_restarts_total,
-        limiter_release_drainer_restarts
-    );
-    /// Set the limiter breaker's state (gauge): open or closed.
-    pub fn set_limiter_breaker_open(&self, open: bool) {
-        self.inner.limiter_breaker_open.store(open as u64, Ordering::Relaxed);
-    }
-    /// Whether the limiter breaker is open.
-    pub fn limiter_breaker_open(&self) -> bool {
-        self.inner.limiter_breaker_open.load(Ordering::Relaxed) == 1
-    }
-    counter!(bump_limiter_breaker_opened, limiter_breaker_opened_total, limiter_breaker_opened);
-    counter!(bump_limiter_breaker_closed, limiter_breaker_closed_total, limiter_breaker_closed);
-    counter!(
-        bump_limiter_breaker_admits_not_sent,
-        limiter_breaker_admits_not_sent_total,
-        limiter_breaker_admits_not_sent
-    );
-    counter!(
-        bump_limiter_breaker_probe_failures,
-        limiter_breaker_probe_failures_total,
-        limiter_breaker_probe_failures
-    );
-    counter!(
-        bump_limiter_breaker_probe_restarts,
-        limiter_breaker_probe_restarts_total,
-        limiter_breaker_probe_restarts
-    );
-    /// Set the limiter's lease as the worker last learnt it (gauge).
-    pub fn set_limiter_lease(&self, lease: Duration) {
-        let ms = u64::try_from(lease.as_millis()).unwrap_or(u64::MAX);
-        self.inner.limiter_lease_ms.store(ms, Ordering::Relaxed);
-    }
-    /// The limiter's lease as the worker last learnt it.
-    pub fn limiter_lease(&self) -> Duration {
-        Duration::from_millis(self.inner.limiter_lease_ms.load(Ordering::Relaxed))
-    }
-    counter!(bump_limiter_lease_too_short, limiter_lease_too_short_total, limiter_lease_too_short);
-    /// Set the refresh period the learnt lease sets (gauge).
-    pub fn set_limiter_refresh_period(&self, period: Duration) {
-        let ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        self.inner.limiter_refresh_period_ms.store(ms, Ordering::Relaxed);
-    }
-    /// The refresh period the learnt lease sets.
-    pub fn limiter_refresh_period(&self) -> Duration {
-        Duration::from_millis(self.inner.limiter_refresh_period_ms.load(Ordering::Relaxed))
-    }
-    counter!(
-        bump_limiter_refresh_period_clamped,
-        limiter_refresh_period_clamped_total,
-        limiter_refresh_period_clamped
-    );
-    /// Count one limiter answer to `op` whose body could not be read.
-    pub fn bump_limiter_bad_answer(&self, op: LimiterOp) {
-        self.bad_answers(op).fetch_add(1, Ordering::Relaxed);
-    }
-    /// Limiter answers to `op` whose body could not be read.
-    pub fn limiter_bad_answers_total(&self, op: LimiterOp) -> u64 {
-        self.bad_answers(op).load(Ordering::Relaxed)
-    }
-    fn bad_answers(&self, op: LimiterOp) -> &AtomicU64 {
-        match op {
-            LimiterOp::Admit => &self.inner.limiter_bad_answers_admit,
-            LimiterOp::Refresh => &self.inner.limiter_bad_answers_refresh,
-            LimiterOp::Health => &self.inner.limiter_bad_answers_health,
-        }
-    }
-    /// Set the number of limiter keys due in the refresh batch, the request
-    /// in flight included (gauge).
-    pub fn set_limiter_refresh_due(&self, n: u64) {
-        self.inner.limiter_refresh_due.store(n, Ordering::Relaxed);
-    }
-    /// Limiter keys due in the refresh batch, the request in flight included.
-    pub fn limiter_refresh_due(&self) -> u64 {
-        self.inner.limiter_refresh_due.load(Ordering::Relaxed)
-    }
-    /// Count one refresh request sent with `keys` keys, answered or not.
-    pub fn record_limiter_refresh_request(&self, keys: usize, answered: bool) {
-        let requests = if answered {
-            &self.inner.limiter_refresh_requests_answered
-        } else {
-            &self.inner.limiter_refresh_requests_unavailable
-        };
-        requests.fetch_add(1, Ordering::Relaxed);
-        self.inner.limiter_refresh_keys_sent.fetch_add(keys as u64, Ordering::Relaxed);
-    }
-    /// Refresh requests the limiter answered.
-    pub fn limiter_refresh_requests_answered_total(&self) -> u64 {
-        self.inner.limiter_refresh_requests_answered.load(Ordering::Relaxed)
-    }
-    /// Refresh requests that got no usable answer.
-    pub fn limiter_refresh_requests_unavailable_total(&self) -> u64 {
-        self.inner.limiter_refresh_requests_unavailable.load(Ordering::Relaxed)
-    }
-    /// Keys the refresh requests named, summed over every request.
-    pub fn limiter_refresh_keys_sent_total(&self) -> u64 {
-        self.inner.limiter_refresh_keys_sent.load(Ordering::Relaxed)
-    }
-    /// Count `n` keys a failed refresh request put back to be sent again.
-    pub fn add_limiter_refresh_retries(&self, n: u64) {
-        self.inner.limiter_refresh_retries.fetch_add(n, Ordering::Relaxed);
-    }
-    /// Keys put back after a failed refresh request, summed over every one.
-    pub fn limiter_refresh_retries_total(&self) -> u64 {
-        self.inner.limiter_refresh_retries.load(Ordering::Relaxed)
-    }
-    counter!(
-        bump_limiter_refresh_forgotten_lease_expired,
-        limiter_refresh_forgotten_lease_expired_total,
-        limiter_refresh_forgotten_lease_expired
-    );
-    counter!(
-        bump_limiter_refresh_forgotten_cap,
-        limiter_refresh_forgotten_cap_total,
-        limiter_refresh_forgotten_cap
-    );
-    counter!(
-        bump_limiter_refresh_forgotten_released,
-        limiter_refresh_forgotten_released_total,
-        limiter_refresh_forgotten_released
-    );
-    counter!(
-        bump_limiter_refresh_sender_restarts,
-        limiter_refresh_sender_restarts_total,
-        limiter_refresh_sender_restarts
-    );
-    /// Count one refresh answer applied to its call, by outcome.
-    pub fn record_limiter_refresh_answer_applied(&self, outcome: &'static str) {
-        *self.inner.limiter_refresh_answers_applied.lock().unwrap().entry(outcome).or_insert(0) +=
-            1;
-    }
-    /// Refresh answers `outcome` applied to their call.
-    pub fn limiter_refresh_answers_applied_total(&self, outcome: &str) -> u64 {
-        self.inner
-            .limiter_refresh_answers_applied
-            .lock()
-            .unwrap()
-            .get(outcome)
-            .copied()
-            .unwrap_or(0)
-    }
-    counter!(
-        bump_limiter_refresh_answer_discarded_call_gone,
-        limiter_refresh_answers_discarded_call_gone_total,
-        limiter_refresh_answers_discarded_call_gone
-    );
-    counter!(
-        bump_limiter_refresh_answer_discarded_stale,
-        limiter_refresh_answers_discarded_stale_total,
-        limiter_refresh_answers_discarded_stale
-    );
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -1380,25 +1089,6 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_refused_terminated_total", "backup-replica lookups refused because the body is Terminated (a released takeover copy): the message falls to the orphan 481/drop instead of re-serving a call that already ended", self.repl_takeover_refused_terminated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
-        counter("b2bua_limiter_admit_released_initial_total", "initial-route admits refused because the limiter had released the call's key (the call runs uncounted) — expected 0", self.limiter_admit_released_initial_total());
-        counter("b2bua_limiter_admit_released_fold_total", "route-fold admits refused because the call was released while the consult was in flight (the fold counts nothing)", self.limiter_admit_released_fold_total());
-        counter("b2bua_limiter_refresh_reregistered_total", "refreshes that re-registered a counted call's set the limiter no longer held (a lapsed lease across a takeover, a limiter restart)", self.limiter_refresh_reregistered_total());
-        counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
-        counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
-        counter("b2bua_limiter_release_drainer_restarts_total", "release-queue drainers that panicked and were restarted with the queue intact — expected 0", self.limiter_release_drainer_restarts_total());
-        counter("b2bua_limiter_lease_too_short_total", "limiter leases learnt from the limiter's answers that this worker's configured refresh period plus one refresh tick reaches, the first one stated and each change after it: the worker refreshes every third of the lease instead (ADR-0038)", self.limiter_lease_too_short_total());
-        counter("b2bua_limiter_refresh_period_clamped_total", "limiter leases learnt that set a refresh period (a third of the lease) shorter than the configured one, the first one stated and each change after it (ADR-0038)", self.limiter_refresh_period_clamped_total());
-        counter("b2bua_limiter_breaker_admits_not_sent_total", "admits the open limiter breaker answered without a request: the call owes no release by that admit; an initial admit leaves the call uncounted, a reroute admit leaves it as it was (ADR-0038)", self.limiter_breaker_admits_not_sent_total());
-        counter("b2bua_limiter_refresh_keys_sent_total", "limiter keys the refresh requests named, summed over every request: over b2bua_limiter_refresh_requests_total, the mean batch size (ADR-0038)", self.limiter_refresh_keys_sent_total());
-        counter("b2bua_limiter_refresh_retries_total", "limiter keys a refresh request with no usable answer put back, sent again at the next tick", self.limiter_refresh_retries_total());
-        counter("b2bua_limiter_refresh_sender_restarts_total", "limiter refresh senders that panicked and were restarted with the batch intact — expected 0", self.limiter_refresh_sender_restarts_total());
-        counter("b2bua_limiter_breaker_probe_restarts_total", "limiter breaker probes that panicked and were restarted, one period later — expected 0", self.limiter_breaker_probe_restarts_total());
-        counter(
-            "b2bua_limiter_breaker_probe_failures_total",
-            "health probes of an open limiter breaker the limiter did not answer",
-            self.limiter_breaker_probe_failures_total(),
-        );
-        counter("b2bua_limiter_release_retries_total", "queued releases put back to wait after a failed send (unreachable, slow or erroring limiter), one per key per failed send", self.limiter_release_retries_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
         counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());
@@ -1485,68 +1175,6 @@ impl B2buaMetrics {
             s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
 
-        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases given up on before the limiter answered them (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease unless a send already in flight lands; reason=shutdown: still queued when a planned exit's release flush reached its bound, freed by the lease)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
-        s.push_str(&format!(
-            "b2bua_limiter_release_dropped_total{{reason=\"lease_expired\"}} {}\n",
-            self.limiter_release_dropped_lease_expired_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_release_dropped_total{{reason=\"cap\"}} {}\n",
-            self.limiter_release_dropped_cap_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_release_dropped_total{{reason=\"shutdown\"}} {}\n",
-            self.limiter_release_dropped_shutdown_total()
-        ));
-
-        s.push_str("# HELP b2bua_limiter_breaker_transitions_total limiter circuit breaker transitions (to=open: consecutive admits with no usable answer reached the threshold; to=closed: a health probe was answered)\n# TYPE b2bua_limiter_breaker_transitions_total counter\n");
-        s.push_str(&format!(
-            "b2bua_limiter_breaker_transitions_total{{to=\"open\"}} {}\n",
-            self.limiter_breaker_opened_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_breaker_transitions_total{{to=\"closed\"}} {}\n",
-            self.limiter_breaker_closed_total()
-        ));
-
-        s.push_str("# HELP b2bua_limiter_refresh_requests_total limiter refresh requests this worker's refresh batch sent, one per tick per batch of keys due (result=answered; result=unavailable: no usable answer, the keys are sent again at the next tick)\n# TYPE b2bua_limiter_refresh_requests_total counter\n");
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_requests_total{{result=\"answered\"}} {}\n",
-            self.limiter_refresh_requests_answered_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_requests_total{{result=\"unavailable\"}} {}\n",
-            self.limiter_refresh_requests_unavailable_total()
-        ));
-        s.push_str("# HELP b2bua_limiter_refresh_forgotten_total limiter refreshes the refresh batch gave up before the limiter answered them (reason=lease_expired: due for one lease, the call's own refresh marks it again; reason=cap: the oldest entry of a full batch; reason=released: the call's release was queued)\n# TYPE b2bua_limiter_refresh_forgotten_total counter\n");
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_forgotten_total{{reason=\"lease_expired\"}} {}\n",
-            self.limiter_refresh_forgotten_lease_expired_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_forgotten_total{{reason=\"cap\"}} {}\n",
-            self.limiter_refresh_forgotten_cap_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_forgotten_total{{reason=\"released\"}} {}\n",
-            self.limiter_refresh_forgotten_released_total()
-        ));
-        s.push_str("# HELP b2bua_limiter_refresh_answers_applied_total limiter refresh answers applied to their call on its own turn, by outcome (dropped: the call goes uncounted; released, reregistered: the call is unchanged); an extended answer is not handed back\n# TYPE b2bua_limiter_refresh_answers_applied_total counter\n");
-        for (outcome, v) in self.inner.limiter_refresh_answers_applied.lock().unwrap().iter() {
-            s.push_str(&format!(
-                "b2bua_limiter_refresh_answers_applied_total{{outcome=\"{outcome}\"}} {v}\n"
-            ));
-        }
-        s.push_str("# HELP b2bua_limiter_refresh_answers_discarded_total limiter refresh answers that found nothing to apply to (reason=call_gone: the call ended or left this worker; reason=stale: a route fold restated the call's set since the refresh left)\n# TYPE b2bua_limiter_refresh_answers_discarded_total counter\n");
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_answers_discarded_total{{reason=\"call_gone\"}} {}\n",
-            self.limiter_refresh_answers_discarded_call_gone_total()
-        ));
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_answers_discarded_total{{reason=\"stale\"}} {}\n",
-            self.limiter_refresh_answers_discarded_stale_total()
-        ));
-
         s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
         for (reason, v) in self.inner.drain_exits.lock().unwrap().iter() {
             s.push_str(&format!("b2bua_drain_exits_total{{reason=\"{reason}\"}} {v}\n"));
@@ -1561,17 +1189,7 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"+Inf\"}} {drain_count}\n"));
         s.push_str(&format!("b2bua_drain_seconds_sum {drain_sum_s}\n"));
         s.push_str(&format!("b2bua_drain_seconds_count {drain_count}\n"));
-        s.push_str("# HELP b2bua_drain_release_flushes_total drains by what their limiter release flush did (outcome=empty: nothing was queued; sent: every queued release was answered; given_up: some were still queued at the bound or held by an open breaker, counted in b2bua_limiter_release_dropped_total{reason=\"shutdown\"})\n# TYPE b2bua_drain_release_flushes_total counter\n");
-        for (outcome, v) in self.inner.drain_release_flushes.lock().unwrap().iter() {
-            s.push_str(&format!(
-                "b2bua_drain_release_flushes_total{{outcome=\"{outcome}\"}} {v}\n"
-            ));
-        }
-        s.push_str("# HELP b2bua_drain_release_flush_seconds_total time drains spent flushing their limiter release queue\n# TYPE b2bua_drain_release_flush_seconds_total counter\n");
-        s.push_str(&format!(
-            "b2bua_drain_release_flush_seconds_total {}\n",
-            self.inner.drain_release_flush_ms.load(Ordering::Relaxed) as f64 / 1_000.0
-        ));
+        self.inner.limiter.render(&mut s);
         s.push_str("# HELP b2bua_call_removals_by_class_total b2bua_call_removals_total by the release that tore the queue down (terminated: a call that owes its CDR; self_release: an acting backup's takeover copy; orphan: a queue that never held a call, e.g. a stateless admission shed or an event for a gone call)\n# TYPE b2bua_call_removals_by_class_total counter\n");
         for class in [RemovalClass::Terminated, RemovalClass::SelfRelease, RemovalClass::Orphan] {
             s.push_str(&format!(
@@ -1706,42 +1324,6 @@ impl B2buaMetrics {
             "b2bua_repl_peers_pulled_not_ready",
             "replication peers pulled while their endpoint is not ready (present in membership only; ADR-0031 D1)",
             self.repl_peers_pulled_not_ready(),
-        );
-        g(
-            &mut s,
-            "b2bua_limiter_release_queue_depth",
-            "limiter releases waiting in this worker's release queue, in flight included (a queue that only grows means the limiter is not answering)",
-            self.limiter_release_queue_depth(),
-        );
-        g(
-            &mut s,
-            "b2bua_limiter_breaker_open",
-            "1 while this worker's limiter circuit breaker is open: admits send no request and the calls run uncounted, releases wait",
-            self.limiter_breaker_open() as u64,
-        );
-        s.push_str("# HELP b2bua_limiter_bad_answers_total limiter answers with a 200 whose body this worker could not read (a missing or sub-second lease, a contradiction, an unknown shape), by request, each handled as no answer: a limiter older than its workers shows here\n# TYPE b2bua_limiter_bad_answers_total counter\n");
-        for op in [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Health] {
-            s.push_str(&format!(
-                "b2bua_limiter_bad_answers_total{{op=\"{}\"}} {}\n",
-                op.label(),
-                self.limiter_bad_answers_total(op)
-            ));
-        }
-        s.push_str("# HELP b2bua_limiter_refresh_period_seconds how often a counted call refreshes its limiter lease: the configured period, or a third of the learnt lease when shorter\n# TYPE b2bua_limiter_refresh_period_seconds gauge\n");
-        s.push_str(&format!(
-            "b2bua_limiter_refresh_period_seconds {}\n",
-            self.limiter_refresh_period().as_millis() as f64 / 1000.0
-        ));
-        s.push_str("# HELP b2bua_limiter_lease_seconds the limiter's lease as this worker last learnt it from an admit, refresh or health answer (the default lease before any answer): a queued release and a refresh due are given up once they have waited it\n# TYPE b2bua_limiter_lease_seconds gauge\n");
-        s.push_str(&format!(
-            "b2bua_limiter_lease_seconds {}\n",
-            self.limiter_lease().as_millis() as f64 / 1000.0
-        ));
-        g(
-            &mut s,
-            "b2bua_limiter_refresh_due",
-            "limiter keys due in this worker's refresh batch, the request in flight included: one per counted call whose refresh fell due and is not answered yet (held while the limiter breaker is open)",
-            self.limiter_refresh_due(),
         );
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
@@ -2238,8 +1820,8 @@ mod tests {
             elapsed: std::time::Duration::from_secs(5),
             release_flush: ReleaseFlush::default(),
         });
-        assert_eq!(m.drain_release_flushes("sent"), 1);
-        assert_eq!(m.drain_release_flushes("empty"), 1);
+        assert_eq!(m.limiter().release_flushes_total("sent"), 1);
+        assert_eq!(m.limiter().release_flushes_total("empty"), 1);
         assert_eq!(m.drain_exits("caught_up"), 1);
         assert_eq!(m.drain_exits("grace_peers_behind"), 1);
         assert_eq!(m.drain_exits("quiescent"), 0);
@@ -2253,8 +1835,8 @@ mod tests {
         assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"+Inf\"} 2"));
         assert!(txt.contains("b2bua_drain_seconds_sum 6.2"));
         assert!(txt.contains("b2bua_drain_seconds_count 2"));
-        assert!(txt.contains("b2bua_drain_release_flushes_total{outcome=\"sent\"} 1"));
-        assert!(txt.contains("b2bua_drain_release_flush_seconds_total 0.3"));
+        assert!(txt.contains("b2bua_limiter_release_flushes_total{outcome=\"sent\"} 1"));
+        assert!(txt.contains("b2bua_limiter_release_flush_seconds_total 0.3"));
     }
 
     #[test]

@@ -51,8 +51,9 @@ async fn real_http_admit_reject_release_metrics() {
     let m = net.request(dst, HttpRequest::get("/metrics")).await.unwrap();
     assert_eq!(m.status, 200);
     let text = String::from_utf8(m.body).unwrap();
-    assert!(text.contains("limiter_admit_total 3"), "{text}");
-    assert!(text.contains("limiter_rejected_total 1"), "{text}");
+    assert!(text.contains("limiter_admits_total{outcome=\"admitted\"} 2"), "{text}");
+    assert!(text.contains("limiter_admits_total{outcome=\"rejected\"} 1"), "{text}");
+    assert!(text.contains("limiter_release_calls_total 1"), "{text}");
 
     let h = net.request(dst, HttpRequest::get("/healthz")).await.unwrap();
     assert_eq!(h.status, 200);

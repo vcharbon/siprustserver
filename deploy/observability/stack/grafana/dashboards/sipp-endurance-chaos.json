@@ -1444,17 +1444,17 @@
       },
       "targets": [
         {
-          "expr": "rate(limiter_admit_total[1m])",
+          "expr": "sum(rate(limiter_admits_total[1m]))",
           "refId": "A",
           "legendFormat": "admit/s"
         },
         {
-          "expr": "rate(limiter_admitted_total[1m])",
+          "expr": "rate(limiter_admits_total{outcome=\"admitted\"}[1m])",
           "refId": "B",
           "legendFormat": "admitted/s"
         },
         {
-          "expr": "rate(limiter_rejected_total[1m])",
+          "expr": "rate(limiter_admits_total{outcome=\"rejected\"}[1m])",
           "refId": "C",
           "legendFormat": "rejected/s"
         }

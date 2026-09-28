@@ -29,6 +29,7 @@ use b2bua::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
     ReleaseAnswer,
 };
+use b2bua::metrics::AdmitSite;
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
@@ -480,7 +481,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
         "the fold's admit was refused by the release fence",
     );
     rig.expect_drained("the fold's set was never counted; the witnesses are intact").await;
-    assert_eq!(b2bua.metrics().limiter_admit_released_fold_total(), 1);
+    assert_eq!(b2bua.metrics().limiter().admit_released_total(AdmitSite::Fold), 1);
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -603,7 +604,7 @@ async fn a_limiter_restart_is_healed_by_the_next_refresh() {
     h.advance(Duration::from_secs(6)).await;
     rig.expect_holds([2, 2, 0], "each call's refresh re-registered its set").await;
     assert_eq!(rig.store.stats().reregistered_calls, 2);
-    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 2);
+    assert_eq!(b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 2);
 
     for mut dialog in dialogs {
         let mut bye = dialog.bye().await;
@@ -776,7 +777,7 @@ async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
     }
     rig.expect_holds([1, 0, 0], "the re-armed refresh re-registered the set").await;
     assert_eq!(rig.store.stats().reregistered_calls, 1);
-    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 1);
+    assert_eq!(b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -834,7 +835,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
         rig.refresh_witnesses();
     }
     assert_eq!(rig.all_holds(), [0, 0, 0], "the release fence refuses the refresh");
-    assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 1);
+    assert_eq!(b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Released), 1);
 
     // ── past the fence's lease the refresh re-registers ────────────────────
     for _ in 0..LEASE_SEC + 5 {
@@ -842,7 +843,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
         rig.refresh_witnesses();
     }
     rig.expect_holds([1, 0, 0], "the set is re-registered once the fence lapsed").await;
-    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 1);
+    assert_eq!(b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -953,7 +954,7 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
         "the refused reroute left the call uncounted: no refresh, one release after it",
     );
     assert_eq!(rig.store.stats().releases_total, 1, "one terminal release");
-    assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 0);
+    assert_eq!(b2bua.metrics().limiter().refresh_answers_total(RefreshOutcome::Released), 0);
     rig.expect_drained("the refusal dropped the call's set").await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
@@ -1030,7 +1031,7 @@ impl CallLimiter for AnswersReleased {
 }
 
 /// An initial admit refused by a release fence runs the call uncounted, counts
-/// it as `limiter_admit_released_initial`, and releases the call's key once at
+/// it as `b2bua_limiter_admit_released_total{site="initial"}`, and releases the call's key once at
 /// its end: the admit was answered, so it was sent.
 #[tokio::test(start_paused = true)]
 async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
@@ -1048,7 +1049,7 @@ async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    assert_eq!(b2bua.metrics().limiter_admit_released_initial_total(), 1);
+    assert_eq!(b2bua.metrics().limiter().admit_released_total(AdmitSite::Initial), 1);
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;

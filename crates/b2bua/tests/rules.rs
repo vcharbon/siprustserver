@@ -640,7 +640,7 @@ fn decision_folds_on_a_live_call_still_apply() {
 /// counting the call on `x` + `y`.
 fn route_fold_payload_with_holds() -> serde_json::Value {
     let mut payload = route_fold_payload();
-    payload["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": true, "release_owed": true, "ids": ["x", "y"], "generation": 0 });
+    payload["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": true, "release_owed": true, "fail_open": false, "ids": ["x", "y"], "generation": 0 });
     payload
 }
 
@@ -663,7 +663,8 @@ fn a_terminating_call_takes_the_route_fold_limiter_state() {
             panic!("one teardown rule takes the {topic}/{outcome} holds, got {candidates:?}");
         };
         let actions = fold_result(&call, rule_id, topic, outcome, payload);
-        let [RuleAction::SetLimiterState { key, counted, release_owed, ids }] = &actions[..] else {
+        let [RuleAction::SetLimiterState { key, counted, release_owed, ids, .. }] = &actions[..]
+        else {
             panic!("{rule_id} states the call's limiter state and nothing else, got {actions:?}");
         };
         assert!(*counted && *release_owed);
@@ -678,7 +679,7 @@ fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
     // failure chain's reject, redirect or terminate, a release whose reroute
     // was refused) states the call uncounted, owing its release, first, live
     // or going away.
-    let uncounted = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [], "generation": 0 });
+    let uncounted = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "fail_open": false, "ids": [], "generation": 0 });
     let mut live = test_call();
     live.limiter = call::CallLimiterState::admitted("call#k".into(), vec!["x".into()]);
     live.callback_context = Some("cb".into());
@@ -766,7 +767,7 @@ fn a_live_route_fold_hands_the_call_holds_to_its_route() {
         );
 
         let mut uncounted = route_fold_payload();
-        uncounted["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [], "generation": 0 });
+        uncounted["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "fail_open": false, "ids": [], "generation": 0 });
         let actions = fold_result(&call, rule_id, topic, outcome, uncounted);
         assert!(
             actions.iter().any(|a| matches!(
@@ -3971,6 +3972,7 @@ mod enforce_equivalence {
                 key: "call#k".into(),
                 counted,
                 release_owed: counted || sent,
+                fail_open: false,
                 ids: ids.into_iter().map(str::to_string).collect(),
                 generation: 0,
             })
@@ -4146,6 +4148,7 @@ mod limiter_settle {
                 key: call.limiter.key.clone(),
                 counted: true,
                 release_owed: true,
+                fail_open: false,
                 ids: vec!["x".into()],
             }],
         );
@@ -4167,6 +4170,7 @@ mod limiter_settle {
                 key: call.limiter.key.clone(),
                 counted: false,
                 release_owed: false,
+                fail_open: false,
                 ids: vec![],
             }],
         );
@@ -4193,6 +4197,7 @@ mod limiter_settle {
                 key: "earlier#k".into(),
                 counted: false,
                 release_owed: true,
+                fail_open: false,
                 ids: vec![],
             }],
         );
@@ -4212,6 +4217,7 @@ mod limiter_settle {
                 key: "earlier#k".into(),
                 counted: false,
                 release_owed: false,
+                fail_open: false,
                 ids: vec![],
             }],
         );
@@ -4232,6 +4238,7 @@ mod limiter_settle {
                     key: call.limiter.key.clone(),
                     counted: true,
                     release_owed: true,
+                    fail_open: false,
                     ids: vec!["x".into()],
                 },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
@@ -4249,6 +4256,7 @@ mod limiter_settle {
                     key: call.limiter.key.clone(),
                     counted: false,
                     release_owed: true,
+                    fail_open: false,
                     ids: vec![],
                 },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },

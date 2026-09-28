@@ -145,11 +145,21 @@ async fn metrics_and_health_endpoints() {
     let metrics = call(&net, HttpRequest::get("/metrics")).await;
     assert_eq!(metrics.status, 200);
     let text = String::from_utf8(metrics.body).unwrap();
-    assert!(text.contains("limiter_admit_total 2"), "{text}");
-    assert!(text.contains("limiter_admitted_total 1"), "{text}");
-    assert!(text.contains("limiter_rejected_total 1"), "{text}");
+    assert!(text.contains("limiter_admits_total{outcome=\"admitted\"} 1"), "{text}");
+    assert!(text.contains("limiter_admits_total{outcome=\"rejected\"} 1"), "{text}");
+    assert!(text.contains("limiter_admits_total{outcome=\"released\"} 0"), "{text}");
     assert!(text.contains("limiter_calls 1"), "{text}");
-    assert!(text.contains("limiter_current_total 1"), "{text}");
+    assert!(text.contains("limiter_holds 1"), "{text}");
+
+    // A release, then an admit of the released key, which its fence refuses.
+    let release = serde_json::to_vec(&ReleaseRequest { keys: vec!["c1".into()] }).unwrap();
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", release)).await.status, 200);
+    let _ = call(&net, HttpRequest::post("/v1/admit", admit("c1"))).await;
+    let text = String::from_utf8(call(&net, HttpRequest::get("/metrics")).await.body).unwrap();
+    assert!(text.contains("limiter_admits_total{outcome=\"released\"} 1"), "{text}");
+    assert!(text.contains("limiter_release_requests_total 1\n"), "{text}");
+    assert!(text.contains("limiter_release_calls_total 1\n"), "{text}");
+    assert!(text.contains("limiter_holds 0\n"), "{text}");
 
     let missing = call(&net, HttpRequest::get("/nope")).await;
     assert_eq!(missing.status, 404);

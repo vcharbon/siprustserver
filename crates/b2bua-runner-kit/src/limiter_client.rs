@@ -55,6 +55,8 @@ pub(crate) async fn limiter_client(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use b2bua::metrics::{LimiterFailure, LimiterOp};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -241,7 +243,7 @@ mod tests {
         }
 
         fn open(&self) -> bool {
-            self.metrics.limiter_breaker_open()
+            self.metrics.limiter().breaker_open()
         }
     }
 
@@ -277,7 +279,11 @@ mod tests {
         assert!(w.open(), "boots open");
         assert_eq!(w.admit("c1#k").await, AdmitOutcome::NotSent, "fails open at once");
         assert_eq!(lab.sent(), 0, "no request");
-        assert_eq!(w.metrics.limiter_breaker_admits_not_sent_total(), 1, "counted");
+        assert_eq!(
+            w.metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
+            1,
+            "counted"
+        );
 
         elapse(PROBE + PROBE / 2).await;
         assert!(w.open(), "the probe at one period found no address");
@@ -316,7 +322,7 @@ mod tests {
         lab.names.point(NAME, lab.a.0);
         let w = lab.worker().await;
         assert!(!w.open());
-        assert_eq!(w.metrics.limiter_breaker_opened_total(), 0);
+        assert_eq!(w.metrics.limiter().breaker_transitions_total(true), 0);
         assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
         assert_eq!(held(&lab.a.1), (1, 1));
         assert_eq!(lab.names.lookups.load(Ordering::SeqCst), 1, "looked up once, at boot");
@@ -362,7 +368,7 @@ mod tests {
         settle().await;
         elapse(PROBE).await;
         assert!(w.open(), "the name still leads to the cut limiter");
-        assert_eq!(w.metrics.limiter_breaker_probe_failures_total(), 1);
+        assert_eq!(w.metrics.limiter().failures_of(LimiterOp::Health), 1);
         lab.names.point(NAME, lab.b.0);
         elapse(PROBE).await;
         assert!(!w.open(), "the failed probe forgot the address; the next one finds the new one");

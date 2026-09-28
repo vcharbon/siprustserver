@@ -137,6 +137,7 @@ pub(crate) fn set_limiter_state(limiter: call::CallLimiterState) -> RuleAction {
         key: limiter.key,
         counted: limiter.counted,
         release_owed: limiter.release_owed,
+        fail_open: limiter.fail_open,
         ids: limiter.ids,
     }
 }

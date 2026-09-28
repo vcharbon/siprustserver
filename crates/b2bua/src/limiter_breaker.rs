@@ -41,7 +41,7 @@ use crate::limiter::{
 };
 use crate::limiter_refresh_batch::RefreshBatch;
 use crate::limiter_release::ReleaseQueue;
-use crate::metrics::B2buaMetrics;
+use crate::metrics::{B2buaMetrics, LimiterFailure, LimiterOp, LimiterTask};
 
 /// When the breaker opens and how often it probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,7 +116,7 @@ impl BreakerLimiter {
             state: Mutex::new(State::default()),
             opened: Notify::new(),
         });
-        breaker.metrics.set_limiter_breaker_open(false);
+        breaker.metrics.limiter().set_breaker_open(false);
         if !breaker.health.has_address() {
             breaker.open(breaker.lock(), Opened::NoAddress);
         }
@@ -163,8 +163,7 @@ impl BreakerLimiter {
         state.failures = 0;
         self.releases.hold();
         self.refreshes.hold();
-        self.metrics.set_limiter_breaker_open(true);
-        self.metrics.bump_limiter_breaker_opened();
+        self.metrics.limiter().count_breaker_transition(true);
         drop(state);
         self.health.forget_address();
         match why {
@@ -191,8 +190,7 @@ impl BreakerLimiter {
         state.failures = 0;
         self.releases.resume();
         self.refreshes.resume();
-        self.metrics.set_limiter_breaker_open(false);
-        self.metrics.bump_limiter_breaker_closed();
+        self.metrics.limiter().count_breaker_transition(false);
         drop(state);
         tracing::info!("call limiter breaker closed: the limiter's health answer is back");
     }
@@ -206,7 +204,7 @@ impl BreakerLimiter {
             let mut probe = AbortOnDrop(tokio::spawn(self.clone().probe()));
             match (&mut probe.0).await {
                 Err(e) if e.is_panic() => {
-                    self.metrics.bump_limiter_breaker_probe_restarts();
+                    self.metrics.limiter().count_task_restart(LimiterTask::BreakerProbe);
                     tracing::error!("call limiter breaker probe panicked; restarting it");
                 }
                 _ => return,
@@ -229,7 +227,6 @@ impl BreakerLimiter {
                 if self.health.serving().await {
                     self.close();
                 } else {
-                    self.metrics.bump_limiter_breaker_probe_failures();
                     self.health.forget_address();
                 }
             }
@@ -246,7 +243,7 @@ impl CallLimiter for BreakerLimiter {
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         if self.is_open() {
-            self.metrics.bump_limiter_breaker_admits_not_sent();
+            self.metrics.limiter().count_failure(LimiterOp::Admit, LimiterFailure::BreakerOpen);
             return AdmitOutcome::NotSent;
         }
         let outcome = self.inner.admit(key, entries, release_on_refusal).await;
@@ -281,6 +278,7 @@ mod tests {
     use crate::limiter_lease::LimiterLease;
     use crate::limiter_refresh_batch::RefreshBatchConfig;
     use crate::limiter_release::ReleaseQueueConfig;
+    use crate::metrics::RefreshGiveUp;
 
     /// A limiter answering admits from a script (then `Admitted`), logging
     /// every request, with a health answer at the test's say.
@@ -416,11 +414,14 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(admit(&r.limiter).await, AdmitOutcome::Unavailable);
         }
-        assert!(r.metrics.limiter_breaker_open());
+        assert!(r.metrics.limiter().breaker_open());
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::NotSent, "open: nothing sent");
         assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 3);
-        assert_eq!(r.metrics.limiter_breaker_admits_not_sent_total(), 1);
-        assert_eq!(r.metrics.limiter_breaker_opened_total(), 1);
+        assert_eq!(
+            r.metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
+            1
+        );
+        assert_eq!(r.metrics.limiter().breaker_transitions_total(true), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -436,7 +437,7 @@ mod tests {
         for _ in 0..11 {
             assert_ne!(admit(&r.limiter).await, AdmitOutcome::NotSent);
         }
-        assert!(!r.metrics.limiter_breaker_open(), "no run reached three");
+        assert!(!r.metrics.limiter().breaker_open(), "no run reached three");
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
     }
 
@@ -449,7 +450,7 @@ mod tests {
         for _ in 0..4 {
             admit(&r.limiter).await;
         }
-        assert!(r.metrics.limiter_breaker_open(), "two lost, one unsent, one lost");
+        assert!(r.metrics.limiter().breaker_open(), "two lost, one unsent, one lost");
     }
 
     #[tokio::test(start_paused = true)]
@@ -466,8 +467,8 @@ mod tests {
             settle().await;
         }
         assert!(r.scripted.refreshed.lock().unwrap().is_empty(), "nothing sent open");
-        assert_eq!(r.metrics.limiter_refresh_due(), 2, "the ended call's is forgotten");
-        assert_eq!(r.metrics.limiter_refresh_forgotten_released_total(), 1);
+        assert_eq!(r.metrics.limiter().refresh_due(), 2, "the ended call's is forgotten");
+        assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Released), 1);
 
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
@@ -482,7 +483,7 @@ mod tests {
             "one request at the close: the latest refresh of k, none of a call whose release \
              waited"
         );
-        assert_eq!(r.metrics.limiter_refresh_due(), 0);
+        assert_eq!(r.metrics.limiter().refresh_due(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -505,13 +506,12 @@ mod tests {
         }
         assert!(r.scripted.released.lock().unwrap().is_empty(), "nothing sent while open");
         assert_eq!(r.scripted.serving.asked.load(Ordering::SeqCst), 3, "probed every period");
-        assert_eq!(r.metrics.limiter_breaker_probe_failures_total(), 3);
 
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(!r.metrics.limiter_breaker_open(), "the first answer closes it");
-        assert_eq!(r.metrics.limiter_breaker_closed_total(), 1);
+        assert!(!r.metrics.limiter().breaker_open(), "the first answer closes it");
+        assert_eq!(r.metrics.limiter().breaker_transitions_total(false), 1);
         assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted, "admits are sent again");
         assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 4);
@@ -531,7 +531,7 @@ mod tests {
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(!r.metrics.limiter_breaker_open());
+        assert!(!r.metrics.limiter().breaker_open());
         assert!(
             r.scripted.refreshed.lock().unwrap().is_empty(),
             "an ended call's set is never refreshed after its release"
@@ -545,15 +545,18 @@ mod tests {
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(!r.metrics.limiter_breaker_open());
+        assert!(!r.metrics.limiter().breaker_open());
         r.scripted.serving.up.store(false, Ordering::SeqCst);
         trip(&r.limiter).await;
-        assert!(r.metrics.limiter_breaker_open(), "a new run opens it again");
+        assert!(r.metrics.limiter().breaker_open(), "a new run opens it again");
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
         assert_eq!(
-            (r.metrics.limiter_breaker_opened_total(), r.metrics.limiter_breaker_closed_total()),
+            (
+                r.metrics.limiter().breaker_transitions_total(true),
+                r.metrics.limiter().breaker_transitions_total(false)
+            ),
             (2, 2)
         );
     }
@@ -563,23 +566,26 @@ mod tests {
         let scripted = Scripted::default();
         scripted.serving.unaddressed.store(true, Ordering::SeqCst);
         let r = rig_with(Vec::new(), scripted);
-        assert!(r.metrics.limiter_breaker_open(), "starts open");
-        assert_eq!(r.metrics.limiter_breaker_opened_total(), 1);
+        assert!(r.metrics.limiter().breaker_open(), "starts open");
+        assert_eq!(r.metrics.limiter().breaker_transitions_total(true), 1);
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::NotSent, "fails open at once");
         assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 0, "nothing sent");
-        assert_eq!(r.metrics.limiter_breaker_admits_not_sent_total(), 1);
+        assert_eq!(
+            r.metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
+            1
+        );
         r.releases.push("a");
         settle().await;
         assert!(r.scripted.released.lock().unwrap().is_empty(), "the queue is held");
 
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(r.metrics.limiter_breaker_open(), "no answer yet");
+        assert!(r.metrics.limiter().breaker_open(), "no answer yet");
         r.scripted.serving.unaddressed.store(false, Ordering::SeqCst);
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(!r.metrics.limiter_breaker_open(), "the first answer closes it");
+        assert!(!r.metrics.limiter().breaker_open(), "the first answer closes it");
         assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
     }
@@ -603,7 +609,7 @@ mod tests {
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
         settle().await;
-        assert!(!r.metrics.limiter_breaker_open());
+        assert!(!r.metrics.limiter().breaker_open());
         assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 4, "kept once answered");
     }
 
@@ -681,12 +687,12 @@ mod tests {
             });
             settle().await;
             assert_eq!(admit(&limiter).await, AdmitOutcome::Unavailable, "this one opens it");
-            assert!(metrics.limiter_breaker_open());
+            assert!(metrics.limiter().breaker_open());
             inner.go.notify_one();
             assert_eq!(in_flight.await.unwrap(), slow, "its answer reaches its call");
-            assert!(metrics.limiter_breaker_open(), "{slow:?} after the open closes nothing");
+            assert!(metrics.limiter().breaker_open(), "{slow:?} after the open closes nothing");
             assert_eq!(
-                metrics.limiter_breaker_opened_total(),
+                metrics.limiter().breaker_transitions_total(true),
                 1,
                 "{slow:?} after the open opens nothing again"
             );
@@ -736,8 +742,8 @@ mod tests {
             settle().await;
         }
         assert_eq!(health.asked.load(Ordering::SeqCst), 5, "one probe per period, no spin");
-        assert_eq!(metrics.limiter_breaker_probe_restarts_total(), 5);
-        assert!(metrics.limiter_breaker_open(), "the breaker stays open");
+        assert_eq!(metrics.limiter().task_restarts_total(LimiterTask::BreakerProbe), 5);
+        assert!(metrics.limiter().breaker_open(), "the breaker stays open");
         assert_eq!(admit(&limiter).await, AdmitOutcome::NotSent);
     }
 

@@ -76,7 +76,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         // materialises one: an ended call (or one that left this worker)
         // takes no answer, and the dispatch's per-call ephemera go.
         let Some(call) = ctx.state.peek(&call_ref) else {
-            ctx.metrics.bump_limiter_refresh_answer_discarded_call_gone();
+            ctx.metrics.limiter().count_refresh_discarded(crate::metrics::RefreshDiscard::CallGone);
             drop(_guard);
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;

@@ -19,6 +19,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
+use b2bua::metrics::{LimiterFailure, LimiterOp, ReleaseGiveUp};
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
@@ -218,15 +219,22 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     }
 
     let metrics = s.b2bua.metrics();
-    assert!(metrics.limiter_breaker_open(), "three failed admits open the breaker");
-    assert_eq!(metrics.limiter_breaker_opened_total(), 1);
+    assert_eq!(metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::Timeout), 3);
+    assert_eq!(metrics.limiter().uncounted_calls(), 3, "each timed-out call runs uncounted");
+    assert!(metrics.limiter().breaker_open(), "three failed admits open the breaker");
+    assert_eq!(metrics.limiter().breaker_transitions_total(true), 1);
     let admits = s.sent_on("/v1/admit");
     let (open_call, took) = s.establish().await;
-    assert_eq!(metrics.limiter_breaker_admits_not_sent_total(), 1, "counted as not sent");
+    assert_eq!(
+        metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
+        1,
+        "counted as not sent"
+    );
     assert_eq!(s.sent_on("/v1/admit"), admits, "the breaker is open: no admit request");
     let transit = Duration::from_millis(2 * SIMULATED_TRANSIT_DELAY_MS);
     assert!(took < transit + ADMIT_BUDGET / 2, "no admit timeout paid ({took:?})");
     dialogs.push(open_call);
+    assert_eq!(metrics.limiter().uncounted_calls(), 4, "and the call the open breaker let by");
 
     // The counted call ends while the breaker is open: its release waits.
     let releases = s.sent_on("/v1/release");
@@ -240,18 +248,20 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // closes, the waiting release leaves and the next call is counted.
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     advance(PROBE + Duration::from_millis(200)).await;
-    assert!(!metrics.limiter_breaker_open(), "the probe closed the breaker");
-    assert_eq!(metrics.limiter_breaker_closed_total(), 1);
+    assert!(!metrics.limiter().breaker_open(), "the probe closed the breaker");
+    assert_eq!(metrics.limiter().breaker_transitions_total(false), 1);
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "the release left on close");
     assert_eq!(s.holds(), [0, 0, 0], "the call counted before the outage drained");
     let (next, _) = s.establish().await;
     assert_eq!(s.holds(), [1, 1, 1], "the next call is counted");
     dialogs.push(next);
 
+    assert_eq!(metrics.limiter().uncounted_calls(), 4, "a counted call is not in it");
     for dialog in &mut dialogs {
         s.hang_up(dialog).await;
     }
     s.assert_drained().await;
+    assert_eq!(metrics.limiter().uncounted_calls(), 0, "every call's end leaves the gauge");
     let admitted = distinct(s.admitted_keys());
     assert_eq!(admitted.len(), 5, "six calls, five admits: {admitted:?}");
     assert_eq!(distinct(s.released_keys()), admitted, "only a call that sent an admit releases");
@@ -283,22 +293,32 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
     dialogs.push(s.establish().await.0);
     assert_eq!(s.sent_on("/v1/admit"), 4, "the breaker closed: the next call admits");
     let metrics = s.b2bua.metrics();
-    assert_eq!(metrics.limiter_breaker_admits_not_sent_total(), 2);
-    assert!(metrics.limiter_breaker_probe_failures_total() >= 4, "the probe failed while cut");
+    assert_eq!(metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen), 2);
+    assert!(metrics.limiter().failures_of(LimiterOp::Health) >= 4, "the probe failed while cut");
     assert_eq!(
-        (metrics.limiter_breaker_opened_total(), metrics.limiter_breaker_closed_total()),
+        (
+            metrics.limiter().breaker_transitions_total(true),
+            metrics.limiter().breaker_transitions_total(false)
+        ),
         (1, 1)
     );
     let text = metrics.prometheus_text();
     assert!(text.contains("b2bua_limiter_breaker_open 0"), "{text}");
     assert!(text.contains("b2bua_limiter_breaker_transitions_total{to=\"open\"} 1"), "{text}");
-    assert!(text.contains("b2bua_limiter_breaker_admits_not_sent_total 2"), "{text}");
+    for line in [
+        "b2bua_limiter_failures_total{op=\"admit\",cause=\"breaker_open\"} 2",
+        "b2bua_limiter_failures_total{op=\"admit\",cause=\"transport\"} 3",
+        "b2bua_limiter_uncounted_calls 5",
+    ] {
+        assert!(text.contains(line), "{line} in {text}");
+    }
     assert_eq!(s.holds(), [1, 1, 1], "the next call is counted");
 
     for dialog in &mut dialogs {
         s.hang_up(dialog).await;
     }
     s.assert_drained().await;
+    assert_eq!(metrics.limiter().uncounted_calls(), 0);
     let admitted = distinct(s.admitted_keys());
     assert_eq!(admitted.len(), 4);
     assert_eq!(
@@ -325,27 +345,27 @@ async fn a_refresh_held_while_open_re_registers_a_lapsed_set_on_close() {
     for _ in 0..3 {
         outage.push(s.establish().await.0);
     }
-    assert!(s.b2bua.metrics().limiter_breaker_open(), "three failed admits open the breaker");
+    assert!(s.b2bua.metrics().limiter().breaker_open(), "three failed admits open the breaker");
     for dialog in &mut outage {
         s.hang_up(dialog).await;
     }
 
     advance(Duration::from_secs(130)).await;
-    assert!(s.b2bua.metrics().limiter_breaker_open(), "still open while stalled");
+    assert!(s.b2bua.metrics().limiter().breaker_open(), "still open while stalled");
     assert_eq!(s.sent_on("/v1/refresh"), 0, "no refresh request while open");
-    assert_eq!(s.b2bua.metrics().limiter_refresh_due(), 1, "the counted call's refresh is held");
+    assert_eq!(s.b2bua.metrics().limiter().refresh_due(), 1, "the counted call's refresh is held");
     assert_eq!(s.holds(), [0, 0, 0], "the call's set lapsed on the limiter");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     advance(PROBE + Duration::from_millis(200)).await;
-    assert!(!s.b2bua.metrics().limiter_breaker_open(), "the probe closed the breaker");
+    assert!(!s.b2bua.metrics().limiter().breaker_open(), "the probe closed the breaker");
     assert_eq!(s.holds(), [1, 1, 1], "the held refresh re-registered the set on close");
 
     s.hang_up(&mut counted).await;
     s.assert_drained().await;
     // The outage calls' releases waited past the lease and were given up:
     // the calls never held anything. Only the counted call is released.
-    assert_eq!(s.b2bua.metrics().limiter_release_dropped_lease_expired_total(), 3);
+    assert_eq!(s.b2bua.metrics().limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 3);
     assert_eq!(s.released_keys(), s.admitted_keys()[..1]);
     let _ = s.h.finish().await;
 }

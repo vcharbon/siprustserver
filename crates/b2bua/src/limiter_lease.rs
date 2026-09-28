@@ -125,8 +125,8 @@ impl LimiterLease {
     /// Publish the gauges of `lease`, under the watch's lock so the gauges
     /// read the value stored.
     fn publish(&self, lease: Duration) {
-        self.metrics.set_limiter_lease(lease);
-        self.metrics.set_limiter_refresh_period(refresh_period(self.pace, lease));
+        self.metrics.limiter().set_lease(lease);
+        self.metrics.limiter().set_refresh_period(refresh_period(self.pace, lease));
     }
 
     /// Warn about and count a learnt `lease` the pace does not fit.
@@ -137,7 +137,7 @@ impl LimiterLease {
         let lease_ms = millis(lease);
         let period_ms = millis(refresh_period(Some(pace), lease));
         if pace.period + pace.tick >= lease {
-            self.metrics.bump_limiter_lease_too_short();
+            self.metrics.limiter().count_lease_too_short();
             tracing::warn!(
                 lease_ms,
                 configured_refresh_ms = millis(pace.period),
@@ -150,7 +150,7 @@ impl LimiterLease {
             tracing::info!(lease_ms, refresh_ms = period_ms, "limiter lease learnt");
         }
         if lease / PERIODS_PER_LEASE < pace.period {
-            self.metrics.bump_limiter_refresh_period_clamped();
+            self.metrics.limiter().count_refresh_period_clamped();
         }
     }
 }
@@ -179,13 +179,13 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let l = lease(&metrics);
         assert_eq!(l.current(), Duration::from_secs(120));
-        assert_eq!(metrics.limiter_lease(), Duration::from_secs(120));
+        assert_eq!(metrics.limiter().lease(), Duration::from_secs(120));
         assert_eq!(l.refresh_period(), Duration::from_secs(40));
         l.learn(Duration::from_secs(150));
         assert_eq!(l.current(), Duration::from_secs(150));
-        assert_eq!(metrics.limiter_lease(), Duration::from_secs(150));
-        assert_eq!(metrics.limiter_lease_too_short_total(), 0, "41 s < 150 s");
-        assert_eq!(metrics.limiter_refresh_period_clamped_total(), 0, "40 s <= 50 s");
+        assert_eq!(metrics.limiter().lease(), Duration::from_secs(150));
+        assert_eq!(metrics.limiter().lease_too_short_total(), 0, "41 s < 150 s");
+        assert_eq!(metrics.limiter().refresh_period_clamped_total(), 0, "40 s <= 50 s");
     }
 
     #[test]
@@ -193,13 +193,13 @@ mod tests {
         let metrics = B2buaMetrics::new();
         let config = B2buaConfig { limiter_refresh_sec: 120, ..Default::default() };
         let l = LimiterLease::from_config(&config, metrics.clone());
-        assert_eq!(metrics.limiter_lease_too_short_total(), 0, "the default is not checked");
+        assert_eq!(metrics.limiter().lease_too_short_total(), 0, "the default is not checked");
         l.learn(DEFAULT_LEASE);
-        assert_eq!(metrics.limiter_lease_too_short_total(), 1);
-        assert_eq!(metrics.limiter_refresh_period_clamped_total(), 1);
+        assert_eq!(metrics.limiter().lease_too_short_total(), 1);
+        assert_eq!(metrics.limiter().refresh_period_clamped_total(), 1);
         assert_eq!(l.refresh_period(), Duration::from_secs(40), "a third of the lease");
         l.learn(DEFAULT_LEASE);
-        assert_eq!(metrics.limiter_lease_too_short_total(), 1, "stated again: nothing");
+        assert_eq!(metrics.limiter().lease_too_short_total(), 1, "stated again: nothing");
     }
 
     #[test]
@@ -208,13 +208,13 @@ mod tests {
         let l = lease(&metrics);
         l.learn(Duration::from_secs(41));
         l.learn(Duration::from_secs(41));
-        assert_eq!(metrics.limiter_lease_too_short_total(), 1, "the same lease counts once");
+        assert_eq!(metrics.limiter().lease_too_short_total(), 1, "the same lease counts once");
         l.learn(Duration::from_secs(30));
-        assert_eq!(metrics.limiter_lease_too_short_total(), 2, "a new short lease counts");
+        assert_eq!(metrics.limiter().lease_too_short_total(), 2, "a new short lease counts");
         l.learn(Duration::from_secs(120));
         l.learn(Duration::from_secs(30));
-        assert_eq!(metrics.limiter_lease_too_short_total(), 3, "back to short counts again");
-        assert_eq!(metrics.limiter_refresh_period(), Duration::from_secs(10));
+        assert_eq!(metrics.limiter().lease_too_short_total(), 3, "back to short counts again");
+        assert_eq!(metrics.limiter().refresh_period(), Duration::from_secs(10));
     }
 
     #[test]

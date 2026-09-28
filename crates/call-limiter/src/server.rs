@@ -102,6 +102,7 @@ impl HttpService for LimiterServer {
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
                 self.store.release(&parsed.keys);
+                self.metrics.on_release(parsed.keys.len());
                 json_ok(&serde_json::json!({}))
             }
             ("POST", "/v1/refresh") => {
@@ -110,9 +111,9 @@ impl HttpService for LimiterServer {
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
                 let calls = parsed.calls.iter().map(|c| (c.key.as_str(), c.ids.as_slice()));
-                let outcomes = self
-                    .store
-                    .refresh_all(calls)
+                let results = self.store.refresh_all(calls);
+                self.metrics.on_refresh(&results);
+                let outcomes = results
                     .into_iter()
                     .map(|outcome| match outcome {
                         RefreshResult::Extended => RefreshAnswer::Extended,
@@ -121,7 +122,6 @@ impl HttpService for LimiterServer {
                         RefreshResult::Dropped => RefreshAnswer::Dropped,
                     })
                     .collect();
-                self.metrics.on_refresh(parsed.calls.len());
                 json_ok(&RefreshResponse { outcomes, lease_ms: self.lease_ms() })
             }
             ("GET", "/v1/health") => json_ok(&HealthResponse {

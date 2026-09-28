@@ -88,7 +88,7 @@ pub struct LimiterCount {
     /// call went on as it was; its release frees whatever a request that
     /// landed left on the store. An admit the worker's open circuit breaker
     /// answered never reaches this seam: the worker counts it
-    /// (`limiter_breaker_admits_not_sent_total`).
+    /// (`b2bua_limiter_failures_total{cause="breaker_open"}`).
     pub failed_open: i64,
     /// The registered store's live count summed over every id, if the SUT
     /// has a store (the default limiter's, or one registered by the test).

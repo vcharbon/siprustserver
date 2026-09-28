@@ -29,6 +29,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
+use b2bua::metrics::{LimiterFailure, LimiterOp};
 use b2bua_harness::B2buaSut;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
@@ -475,7 +476,7 @@ async fn a_call_waiting_on_its_admit_delays_no_other_call(limiter: Limiter) {
 
     let mut dave_dialog = s.answer(dave_call, dave_uas, &s.bob).await;
     let mut erin_dialog = s.answer(erin_call, erin_uas, &s.bob).await;
-    assert!(!s.b2bua.metrics().limiter_breaker_open(), "two failed admits keep it closed");
+    assert!(!s.b2bua.metrics().limiter().breaker_open(), "two failed admits keep it closed");
     s.hang_up(&mut dave_dialog, &s.bob).await;
     s.hang_up(&mut erin_dialog, &s.bob).await;
     s.back_and_drained().await;
@@ -556,7 +557,7 @@ async fn an_open_breaker_costs_no_limiter_time(limiter: Limiter) {
         outage.push(dialog);
     }
     let metrics = s.b2bua.metrics();
-    assert!(metrics.limiter_breaker_open(), "three admits without an answer open the breaker");
+    assert!(metrics.limiter().breaker_open(), "three admits without an answer open the breaker");
     let admits = s.sent_on("/v1/admit");
 
     let (mut call, mut bob_uas, took) = s.invite(&s.alice).await;
@@ -572,7 +573,7 @@ async fn an_open_breaker_costs_no_limiter_time(limiter: Limiter) {
     s.carol.receive("ACK").await;
     assert_eq!(s.sent_on("/v1/admit"), admits, "no admit request while open");
     assert_eq!(
-        metrics.limiter_breaker_admits_not_sent_total(),
+        metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
         2,
         "the INVITE's and the failover's"
     );
@@ -593,7 +594,7 @@ async fn an_open_breaker_costs_no_limiter_time(limiter: Limiter) {
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     b2bua_harness::advance((PROBE + Duration::from_millis(200)).as_millis() as u64).await;
-    assert!(!metrics.limiter_breaker_open(), "the probe closed the breaker");
+    assert!(!metrics.limiter().breaker_open(), "the probe closed the breaker");
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "every release left on close");
     s.back_and_drained().await;
     assert_eq!(s.admitted_keys().len(), 4, "the counted call and the three outage calls");

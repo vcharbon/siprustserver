@@ -942,7 +942,8 @@ pub enum RuleAction {
     /// limiter (one `admit(key, ..)` net of the set the call held), so the
     /// call is `counted` with `ids` as the limiter confirmed them, and
     /// `release_owed` once any admit request left for the key (the call's
-    /// obligation only grows). On a live call the refresh cadence follows;
+    /// obligation only grows), `fail_open` when it runs uncounted on a route
+    /// naming ids the limiter did not confirm. On a live call the refresh cadence follows;
     /// the terminal settle releases a call that owes it. A `key` that is not
     /// the resident call's names an earlier call under the same `call_ref`:
     /// the call's state is left alone and that key is released when owed.
@@ -950,6 +951,7 @@ pub enum RuleAction {
         key: String,
         counted: bool,
         release_owed: bool,
+        fail_open: bool,
         ids: Vec<String>,
     },
     /// Synthesize a final failure response on the a-leg INVITE server txn

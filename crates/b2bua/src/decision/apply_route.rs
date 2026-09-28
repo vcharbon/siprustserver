@@ -158,7 +158,7 @@ pub async fn apply_route(
             // Fail open: the call runs uncounted (no refresh).
             AdmitOutcome::Unavailable | AdmitOutcome::NotSent => {}
             // The key was minted this turn, so a release fence on it is
-            // unreachable; counted as `limiter_admit_released_initial`.
+            // unreachable; counted as `b2bua_limiter_admit_released_total{site="initial"}`.
             AdmitOutcome::Released => {
                 fx.buffered.push(BufferedObservabilityEffect::LimiterAdmitReleased);
             }

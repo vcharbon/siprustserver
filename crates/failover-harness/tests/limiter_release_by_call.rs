@@ -28,6 +28,7 @@ use b2bua::decision::{
     ScriptedDecisionEngine,
 };
 use b2bua::limiter::CallLimiter;
+use b2bua::limiter::RefreshOutcome;
 use b2bua::limiter_http::HttpCallLimiter;
 use call::ReleaseEventKind;
 use call_limiter::wire::AdmitEntry;
@@ -527,7 +528,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         rig.holds()
     );
     assert_eq!(rig.store.stats().reregistered_calls, 1);
-    assert_eq!(backup.metrics().limiter_refresh_reregistered_total(), 1);
+    assert_eq!(backup.metrics().limiter().refresh_answers_total(RefreshOutcome::Reregistered), 1);
     assert!(
         fh.now_ms() - reinvite_at <= refresh_period_ms(),
         "re-registered within one refresh period of the re-INVITE ({} ms)",
@@ -942,7 +943,7 @@ async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
         if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     assert!(!primary.serves(&call_ref), "the primary removed the call");
     assert!(!backup.holds_any_trace(&call_ref).await, "the removal reached the backup");
-    assert_eq!(primary.metrics().limiter_release_queue_depth(), 1, "its release waits");
+    assert_eq!(primary.metrics().limiter().release_queue_depth(), 1, "its release waits");
     assert_eq!(rig.holds(), [1, 1, 0], "the stalled limiter applied nothing");
 
     // ── the primary crashes with its release queue ───────────────────────

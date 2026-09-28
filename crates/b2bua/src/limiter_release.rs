@@ -43,7 +43,7 @@ use tokio::time::Instant;
 use crate::config::B2buaConfig;
 use crate::limiter::{CallLimiter, ReleaseAnswer};
 use crate::limiter_lease::LimiterLease;
-use crate::metrics::B2buaMetrics;
+use crate::metrics::{B2buaMetrics, LimiterTask, ReleaseGiveUp};
 
 /// Most keys one release request carries.
 pub const MAX_BATCH: usize = 1_000;
@@ -194,7 +194,7 @@ impl ReleaseQueue {
         while w.entries.len() >= self.config.cap {
             let Some((_, oldest)) = w.entries.pop_first() else { break };
             w.by_key.remove(&oldest.key);
-            self.metrics.bump_limiter_release_dropped_cap();
+            self.metrics.limiter().count_release_given_up(ReleaseGiveUp::Cap, 1);
         }
         let seq = w.next_seq;
         w.next_seq += 1;
@@ -321,7 +321,7 @@ impl ReleaseQueue {
             (given_up, w.held)
         };
         if given_up > 0 {
-            self.metrics.add_limiter_release_dropped_shutdown(given_up as u64);
+            self.metrics.limiter().count_release_given_up(ReleaseGiveUp::Shutdown, given_up as u64);
             tracing::warn!(
                 given_up,
                 held,
@@ -357,7 +357,7 @@ impl ReleaseQueue {
                         w.sending = false;
                         self.back_off(&mut w, Instant::now());
                     }
-                    self.metrics.bump_limiter_release_drainer_restarts();
+                    self.metrics.limiter().count_task_restart(LimiterTask::ReleaseSender);
                     tracing::error!(
                         waiting = self.waiting(),
                         "limiter release drainer panicked; restarting it"
@@ -430,7 +430,7 @@ impl ReleaseQueue {
             ReleaseAnswer::Unavailable => {
                 self.back_off(&mut w, now);
                 let kept = seqs.iter().filter(|seq| w.entries.contains_key(seq)).count();
-                self.metrics.add_limiter_release_retries(kept as u64);
+                self.metrics.limiter().count_release_retries(kept as u64);
             }
         }
         self.publish_depth(&w);
@@ -453,7 +453,7 @@ impl ReleaseQueue {
             }
             let entry = entry.remove();
             w.by_key.remove(&entry.key);
-            self.metrics.bump_limiter_release_dropped_lease_expired();
+            self.metrics.limiter().count_release_given_up(ReleaseGiveUp::LeaseExpired, 1);
             dropped = true;
         }
         if dropped {
@@ -463,7 +463,7 @@ impl ReleaseQueue {
 
     /// Publish the queue's depth, and wake a flush when it is empty.
     fn publish_depth(&self, w: &Waiting) {
-        self.metrics.set_limiter_release_queue_depth(w.entries.len() as u64);
+        self.metrics.limiter().set_release_queue_depth(w.entries.len() as u64);
         if w.entries.is_empty() {
             self.settled.notify_waiters();
         }
@@ -550,7 +550,7 @@ mod tests {
         settle().await;
         assert_eq!(sent(&limiter), [keys(&["a"])]);
         assert_eq!(q.waiting(), 0);
-        assert_eq!(metrics.limiter_release_queue_depth(), 0);
+        assert_eq!(metrics.limiter().release_queue_depth(), 0);
     }
 
     /// Answers a release only once the test lets it go.
@@ -607,7 +607,7 @@ mod tests {
         q.push("c");
         settle().await;
         assert_eq!(sent(&limiter), [keys(&["a"])], "b and c wait for the backoff");
-        assert_eq!(metrics.limiter_release_retries_total(), 1);
+        assert_eq!(metrics.limiter().release_retries_total(), 1);
 
         limiter.down.store(false, Ordering::SeqCst);
         tokio::time::advance(BACKOFF_INITIAL).await;
@@ -648,7 +648,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(10)).await;
         settle().await;
         assert_eq!(q.waiting(), 1, "a waited one lease");
-        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 1);
         q.resume();
         settle().await;
         assert_eq!(sent(&limiter), [keys(&["b"])], "a is never sent");
@@ -663,8 +663,8 @@ mod tests {
         q.push("b");
         q.push("c");
         assert_eq!(q.waiting(), 2);
-        assert_eq!(metrics.limiter_release_dropped_cap_total(), 1);
-        assert_eq!(metrics.limiter_release_queue_depth(), 2);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Cap), 1);
+        assert_eq!(metrics.limiter().release_queue_depth(), 2);
         q.resume();
         settle().await;
         assert_eq!(sent(&limiter), [keys(&["b", "c"])]);
@@ -730,7 +730,7 @@ mod tests {
         settle().await;
         q.push("b");
         settle().await;
-        assert_eq!(metrics.limiter_release_drainer_restarts_total(), 1);
+        assert_eq!(metrics.limiter().task_restarts_total(LimiterTask::ReleaseSender), 1);
         assert_eq!(q.waiting(), 2, "the panic counts as a failed send: both wait");
         tokio::time::advance(BACKOFF_INITIAL).await;
         settle().await;
@@ -780,7 +780,7 @@ mod tests {
             tokio::time::advance(Duration::from_millis(100)).await;
             settle().await;
         }
-        let restarts = metrics.limiter_release_drainer_restarts_total();
+        let restarts = metrics.limiter().task_restarts_total(LimiterTask::ReleaseSender);
         // 200 ms doubling to 5 s: 5 steps to the cap, then one per 5 s.
         assert!((5..=20).contains(&restarts), "{restarts} restarts in 60 s");
         assert_eq!(q.waiting_keys(), ["a"], "the queue is intact");
@@ -826,7 +826,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(10)).await;
         q.push("c");
         assert_eq!(q.waiting_keys(), ["c"], "a shorter lease gives up both at once");
-        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 2);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -843,11 +843,15 @@ mod tests {
         tokio::time::advance(Duration::from_secs(10)).await;
         lease.learn(Duration::from_secs(30));
         settle().await;
-        assert_eq!(metrics.limiter_release_queue_depth(), 1, "inside the new lease");
+        assert_eq!(metrics.limiter().release_queue_depth(), 1, "inside the new lease");
         tokio::time::advance(Duration::from_secs(20)).await;
         settle().await;
-        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1, "at 30 s, not 120 s");
-        assert_eq!(metrics.limiter_release_queue_depth(), 0);
+        assert_eq!(
+            metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
+            1,
+            "at 30 s, not 120 s"
+        );
+        assert_eq!(metrics.limiter().release_queue_depth(), 0);
         lease.learn(Duration::from_secs(5));
         q.push("b");
         settle().await;
@@ -855,7 +859,7 @@ mod tests {
         lease.learn(Duration::from_secs(1));
         settle().await;
         assert_eq!(
-            metrics.limiter_release_dropped_lease_expired_total(),
+            metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired),
             2,
             "a lease learnt shorter than an entry has waited gives it up at once"
         );
@@ -875,7 +879,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(20)).await;
         q.push("b");
         assert_eq!(q.waiting_keys(), ["b"]);
-        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::LeaseExpired), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -898,7 +902,7 @@ mod tests {
         let (q, metrics) = queue(limiter.clone(), 10);
         let out = q.flush(Duration::from_secs(3)).await;
         assert_eq!(out, ReleaseFlush::default());
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 0);
     }
 
     /// A queue whose limiter failed six sends in a row: the next send waits
@@ -931,7 +935,7 @@ mod tests {
         assert_eq!(out, ReleaseFlush { queued: 2, given_up: 0, elapsed: Duration::ZERO });
         assert_eq!(sent(&limiter)[sends..], [keys(&["a", "b"])], "one send, at once");
         assert_eq!(q.waiting(), 0);
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -950,7 +954,7 @@ mod tests {
             "the flush's first failed send backs off one step, not the longest backoff"
         );
         assert_eq!(sent(&limiter)[sends..], [keys(&["a"]), keys(&["a"])]);
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -964,8 +968,8 @@ mod tests {
         assert_eq!(out, ReleaseFlush { queued: 2, given_up: 2, elapsed: Duration::ZERO });
         assert!(sent(&limiter).is_empty(), "a held queue sends nothing");
         assert_eq!(q.waiting(), 0);
-        assert_eq!(metrics.limiter_release_queue_depth(), 0);
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+        assert_eq!(metrics.limiter().release_queue_depth(), 0);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 2);
         q.resume();
         settle().await;
         assert!(sent(&limiter).is_empty(), "a given-up entry is never sent");
@@ -986,7 +990,7 @@ mod tests {
         assert!(q.sending());
         let out = q.flush(Duration::ZERO).await;
         assert_eq!(out, ReleaseFlush { queued: 1, given_up: 1, elapsed: Duration::ZERO });
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 1);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 1);
         limiter.go.notify_one();
         settle().await;
         assert_eq!(q.waiting(), 0, "the late answer finds nothing to remove");
@@ -1001,9 +1005,9 @@ mod tests {
         q.push("b");
         assert_eq!(q.give_up_all(), 2);
         assert_eq!(q.waiting(), 0);
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 2);
         assert_eq!(q.give_up_all(), 0, "nothing left to give up");
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1016,7 +1020,11 @@ mod tests {
         q.stop();
         let out = q.flush(Duration::from_secs(3)).await;
         assert_eq!(out, ReleaseFlush::default(), "a crashed worker's queue is lost, not flushed");
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0, "a crash counts nothing");
+        assert_eq!(
+            metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown),
+            0,
+            "a crash counts nothing"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1032,7 +1040,7 @@ mod tests {
             stopper.stop();
         });
         assert_eq!(out, ReleaseFlush::default(), "the crash cut the flush, not its bound");
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1051,7 +1059,7 @@ mod tests {
             out,
             ReleaseFlush { queued: 1, given_up: 1, elapsed: Duration::from_millis(100) }
         );
-        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 1);
+        assert_eq!(metrics.limiter().release_given_up_total(ReleaseGiveUp::Shutdown), 1);
     }
 
     #[tokio::test(start_paused = true)]

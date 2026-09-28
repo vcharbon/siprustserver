@@ -505,7 +505,7 @@ snap_active() { vmq 'sum(b2bua_active_calls)'; }
 snap_ghost()  { vmq 'sum(b2bua_active_calls) - sum(sipp_current_calls)'; }
 # Call-limiter exercise: the dedicated stream's ADMITTED-and-held concurrency,
 # read SIPp-side (rejected 486s never enter hold). A healthy limiter pins this at
-# LIMITER_TARGET. The limiter's own `limiter_current_total` gauge is NOT usable
+# LIMITER_TARGET. The limiter's own `limiter_holds` gauge is NOT usable
 # here: every call now carries the global-stress entry, so that gauge aggregates
 # all streams (thousands).
 snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }

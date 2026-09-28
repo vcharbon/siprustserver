@@ -232,7 +232,7 @@ async fn a_withdrawn_workers_exit_waits_for_its_release_flush_and_a_current_back
         elder.flow_caught_up(&bak_ord, Partition::Bak),
         "the backup applied everything logged, the flush's changes included, before the exit"
     );
-    assert_eq!(elder.metrics().drain_release_flushes("sent"), 1);
+    assert_eq!(elder.metrics().limiter().release_flushes_total("sent"), 1);
 
     // ── the process exits; a replacement reclaims the call and it ends ────────
     fh.depart(&pri_ord);

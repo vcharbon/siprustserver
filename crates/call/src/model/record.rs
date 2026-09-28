@@ -122,6 +122,11 @@ pub struct PrackedProvisional {
 /// refresh its lease. `release_owed` is set once an admit request left for the
 /// key, whatever its answer, and is never cleared: the request may have landed,
 /// so the call releases its key once at its end. `counted` implies it.
+/// `fail_open` marks a call that runs uncounted although its route names
+/// limiter ids: its admit got no usable answer or was not sent while the call
+/// was uncounted, the limiter refused it on a release fence, or a refresh
+/// learnt that an admit of the key dropped its set. Any answered admit that
+/// restates the set, a cap refusal included, clears it; it implies `!counted`.
 /// `generation` counts the restatements of the set after the call's first
 /// admit ([`set`](Self::set)): a refresh answer applies to the call only under
 /// the generation its refresh was sent for.
@@ -130,6 +135,7 @@ pub struct CallLimiterState {
     pub key: String,
     pub counted: bool,
     pub release_owed: bool,
+    pub fail_open: bool,
     pub ids: Vec<String>,
     pub generation: u32,
 }
@@ -137,20 +143,49 @@ pub struct CallLimiterState {
 impl CallLimiterState {
     /// The state of a call under `key` that sent no admit request.
     pub fn uncounted(key: String) -> Self {
-        Self { key, counted: false, release_owed: false, ids: Vec::new(), generation: 0 }
+        Self {
+            key,
+            counted: false,
+            release_owed: false,
+            fail_open: false,
+            ids: Vec::new(),
+            generation: 0,
+        }
     }
 
     /// The state under `key` after an admitted set: counted iff the set is
     /// not empty; the release is owed either way.
     pub fn admitted(key: String, ids: Vec<String>) -> Self {
-        Self { key, counted: !ids.is_empty(), release_owed: true, ids, generation: 0 }
+        Self {
+            key,
+            counted: !ids.is_empty(),
+            release_owed: true,
+            fail_open: false,
+            ids,
+            generation: 0,
+        }
     }
 
     /// The state under `key` after an admit request the limiter answered
     /// with no set for the call (a cap refusal that dropped or never had
     /// one, a release fence): uncounted, the release owed.
     pub fn unconfirmed(key: String) -> Self {
-        Self { key, counted: false, release_owed: true, ids: Vec::new(), generation: 0 }
+        Self {
+            key,
+            counted: false,
+            release_owed: true,
+            fail_open: false,
+            ids: Vec::new(),
+            generation: 0,
+        }
+    }
+
+    /// This state after an admit of a set the limiter did not confirm (no
+    /// usable answer, no request sent, a release fence): a counted call stays
+    /// as it is; an uncounted one runs `fail_open` when the set it asked for
+    /// names ids (`wanted`).
+    pub fn failed_open(&self, wanted: bool) -> Self {
+        Self { fail_open: !self.counted && wanted, ..self.clone() }
     }
 
     /// This state after an admit request whose answer is lost: the set it
@@ -159,12 +194,14 @@ impl CallLimiterState {
         Self { release_owed: true, ..self.clone() }
     }
 
-    /// State the outcome of a replaced set, the key kept: `counted` and `ids`
-    /// are replaced, the release obligation only grows (a counted call owes
-    /// it), and the generation moves on.
-    pub fn set(&mut self, counted: bool, release_owed: bool, ids: Vec<String>) {
+    /// State the outcome of a replaced set, the key kept: `counted`,
+    /// `fail_open` (only on an uncounted call) and `ids` are replaced, the
+    /// release obligation only grows (a counted call owes it), and the
+    /// generation moves on.
+    pub fn set(&mut self, counted: bool, release_owed: bool, fail_open: bool, ids: Vec<String>) {
         self.counted = counted;
         self.release_owed |= release_owed || counted;
+        self.fail_open = fail_open && !counted;
         self.ids = ids;
         self.generation = self.generation.wrapping_add(1);
     }

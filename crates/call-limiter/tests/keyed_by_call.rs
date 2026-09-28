@@ -668,8 +668,12 @@ async fn one_refresh_request_answers_every_call_it_names_in_order() {
     assert_eq!([store.held("x"), store.held("y")], [3, 1], "known [x, y] and lapsed [x, x]");
     assert_eq!(store.stats().reregistered_calls, 1);
     let text = metrics.prometheus_text(store.stats());
-    assert!(text.contains("limiter_refresh_total 1\n"), "{text}");
-    assert!(text.contains("limiter_refresh_calls_total 5\n"), "{text}");
+    assert!(text.contains("limiter_refresh_requests_total 1\n"), "{text}");
+    for (outcome, calls) in [("extended", 2), ("reregistered", 1), ("released", 1), ("dropped", 1)]
+    {
+        let line = format!("limiter_refresh_calls_total{{outcome=\"{outcome}\"}} {calls}\n");
+        assert!(text.contains(&line), "{line} in {text}");
+    }
 
     let direct = store.refresh_all([("known", &["x".to_string()][..]), ("gone", &[][..])]);
     assert_eq!(direct, [RefreshResult::Extended, RefreshResult::Released]);

@@ -114,12 +114,13 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// callouts, so the two can never drift from each other. One
 /// `admit(key, entries, release_on_refusal = true)`, checked net of the set
 /// the call holds: a refusal releases that set in the same step. Nothing is
-/// sent for a route stating no limiter on a call the limiter does not count.
+/// sent for a route stating no limiter on a call the limiter does not count,
+/// which no longer fails open: its route asks for nothing.
 /// `Ok(state)`: the call's admission state the fold carries
 /// ([`state_after_admit`] from `prior`) — counted with the route's ids, as it
 /// was after a lost answer, or uncounted after an empty route or a
 /// release-fence refusal (the call ended; counted as
-/// `limiter_admit_released_fold`); `Err(limiter_id)`: refused on a cap — the
+/// `b2bua_limiter_admit_released_total{site="fold"}`); `Err(limiter_id)`: refused on a cap — the
 /// caller owns the treatment, the call holds nothing and owes its release.
 async fn admit_route_limiters(
     ctx: &RouterCtx,
@@ -127,7 +128,7 @@ async fn admit_route_limiters(
     route: &RouteDecision,
 ) -> Result<CallLimiterState, String> {
     if route.call_limiter.is_empty() && !prior.counted {
-        return Ok(prior.clone());
+        return Ok(prior.failed_open(false));
     }
     let entries: Vec<LimiterEntry> = route
         .call_limiter
@@ -140,7 +141,7 @@ async fn admit_route_limiters(
         AdmitOutcome::Rejected { limiter_id } => Err(limiter_id),
         outcome => {
             if outcome == AdmitOutcome::Released {
-                ctx.metrics.bump_limiter_admit_released_fold();
+                ctx.metrics.limiter().count_admit_released(crate::metrics::AdmitSite::Fold);
             }
             Ok(state_after_admit(prior, &outcome, true, ids))
         }
@@ -829,6 +830,7 @@ mod tests {
             key: "call-1#k".into(),
             counted,
             release_owed,
+            fail_open: false,
             ids: if counted { vec!["x".into(), "y".into()] } else { vec![] },
             generation: 0,
         };
