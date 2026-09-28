@@ -373,18 +373,25 @@ fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
     );
 }
 
-/// A leg a BYE already resolved keeps its disposition when a later request's
+/// A leg a BYE already ended keeps its disposition when a later request's
 /// transaction on it times out (a NOTIFY on a subscription usage that outlived
-/// the dialog, RFC 5057 §5.2); a leg whose CANCEL is still in flight is not
-/// resolved and is still settled by the timeout.
+/// the dialog, RFC 5057 §5.2): it is re-terminated with no disposition, which
+/// answers what is still pending toward it. A leg whose CANCEL is in flight,
+/// or a going-away leg with no disposition yet, is still settled `Cancelled`.
 #[test]
-fn a_timeout_on_a_resolved_leg_changes_nothing() {
+fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
     for disposition in [call::ByeDisposition::ByeReceived, call::ByeDisposition::ByeConfirmed] {
         let mut call = test_call();
         call.a_leg.state = LegState::Terminated;
         call.a_leg.bye_disposition = Some(disposition);
         let actions = a_leg_timeout_result(&call, "NOTIFY");
-        assert!(actions.is_empty(), "{disposition:?}: nothing to resolve, got {actions:?}");
+        assert!(
+            matches!(
+                actions.as_slice(),
+                [RuleAction::TerminateLeg { leg_id, bye_disposition: None }] if leg_id == "a"
+            ),
+            "{disposition:?}: re-terminated, disposition kept, got {actions:?}",
+        );
     }
     let mut call = test_call();
     call.a_leg.state = LegState::Terminated;
@@ -392,8 +399,26 @@ fn a_timeout_on_a_resolved_leg_changes_nothing() {
     call.a_leg.disposition = LegDisposition::Cancelling;
     let actions = a_leg_timeout_result(&call, "INVITE");
     assert!(
-        matches!(actions.as_slice(), [RuleAction::TerminateLeg { .. }]),
+        matches!(
+            actions.as_slice(),
+            [RuleAction::TerminateLeg {
+                bye_disposition: Some(call::ByeDisposition::Cancelled),
+                ..
+            }]
+        ),
         "a CANCEL in flight is still settled by the timeout, got {actions:?}",
+    );
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    let actions = handle_timeout_result(&call, "b-1");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::Cancelled) }]
+                if leg_id == "b-1"
+        ),
+        "a going-away pending leg with no disposition ends cancelled, got {actions:?}",
     );
 }
 
