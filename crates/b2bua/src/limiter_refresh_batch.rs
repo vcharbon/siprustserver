@@ -10,20 +10,22 @@
 //!
 //! A key marked again while due keeps its place and its expiry, and takes the
 //! latest ids and generation. A request with no usable answer puts its keys
-//! back: they leave with the next tick's request. Bounds: an entry due for one
-//! lease from its first mark is given up (the call's own refresh marks it
-//! again every period), a mark onto a full batch gives up the oldest entry,
-//! and the release of a call forgets its entry, so an ended call's set is
-//! never refreshed after its release was queued; all three are counted. An
-//! entry is a key, its call, its ids and its generation. The batch is not
-//! replicated: a worker that dies loses it, and a call a peer materialises
-//! marks itself.
+//! back, and the next round waits the batch's backoff: a tick, or longer once
+//! the doubling from [`BACKOFF_INITIAL`] passes it, up to [`BACKOFF_MAX`];
+//! an answered request ends it. The limiter is one endpoint, so the backoff
+//! is the batch's, not the entry's. Bounds: an entry due for one lease from
+//! its first mark is given up (the call's own refresh marks it again every
+//! period), a mark onto a full batch gives up the oldest entry waiting, and
+//! the release of a call forgets its entry, so an ended call's set is never
+//! refreshed after its release was queued; all three are counted. An entry is
+//! a key, its call, its ids and its generation. The batch is not replicated:
+//! a worker that dies loses it, and a call a peer materialises marks itself.
 //!
 //! [`RefreshBatch::hold`] and [`RefreshBatch::resume`] are the seam the
 //! worker's circuit breaker drives: while held nothing is sent (entries still
-//! expire), and a resume sends every key due at once. The sender is
-//! supervised: one that panics is restarted with the batch intact, and
-//! counted.
+//! expire), and a resume sends every key due at once, whatever the backoff.
+//! The sender is supervised: one that panics is restarted with the batch
+//! intact, and counted.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -39,6 +41,12 @@ use crate::limiter::{CallLimiter, RefreshAnswer, RefreshCall, RefreshOutcome};
 use crate::limiter_release::MAX_LEASE;
 use crate::metrics::B2buaMetrics;
 
+/// The backoff after the first unanswered request (a tick when shorter).
+pub const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
+
+/// The longest wait between two rounds while the limiter keeps failing.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
 /// The batch's pace and bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshBatchConfig {
@@ -49,7 +57,7 @@ pub struct RefreshBatchConfig {
     /// How long an entry is worth sending after its first mark: the
     /// limiter's lease.
     pub lease: Duration,
-    /// Most entries the batch holds.
+    /// Most entries the batch holds, the request in flight included.
     pub cap: usize,
 }
 
@@ -137,25 +145,37 @@ struct Entry {
     call_ref: String,
     ids: Vec<String>,
     generation: u32,
-    /// The entry's place in [`Due::order`].
+    /// The mark that placed the entry: its tie-break in [`Due::order`].
     seq: u64,
     /// Past this instant the entry is given up.
     expires_at: Instant,
 }
 
+impl Entry {
+    /// The entry's place in [`Due::order`].
+    fn place(&self) -> (Instant, u64) {
+        (self.expires_at, self.seq)
+    }
+}
+
 #[derive(Default)]
 struct Due {
     by_key: HashMap<String, Entry>,
-    /// Keys by first mark: the first expires first.
-    order: BTreeMap<u64, String>,
+    /// Keys by expiry, then by mark: the first expires first, and is the
+    /// oldest.
+    order: BTreeMap<(Instant, u64), String>,
     next_seq: u64,
     /// The entries of the request in flight, by key. A failed request puts
     /// back those still here; a forget removes its key from here too.
     in_flight: HashMap<String, Entry>,
     /// A breaker holds the batch: nothing is sent.
     held: bool,
-    /// The batch resumed: the next round leaves without waiting its tick.
+    /// The batch resumed: the next round leaves without waiting.
     send_now: bool,
+    /// Consecutive unanswered requests.
+    failures: u32,
+    /// The next round waits until this instant (set by an unanswered request).
+    retry_at: Option<Instant>,
 }
 
 impl Due {
@@ -165,7 +185,7 @@ impl Due {
 
     /// Hold `entry` under `key` at its own place.
     fn insert(&mut self, key: String, entry: Entry) {
-        self.order.insert(entry.seq, key.clone());
+        self.order.insert(entry.place(), key.clone());
         self.by_key.insert(key, entry);
     }
 }
@@ -221,8 +241,12 @@ impl RefreshBatch {
             entry.generation = generation;
             return;
         }
-        while due.by_key.len() >= self.config.cap {
-            let Some((_, oldest)) = due.order.pop_first() else { break };
+        while due.len() >= self.config.cap {
+            let Some((_, oldest)) = due.order.pop_first() else {
+                // Every entry is in flight: this mark is the one given up.
+                self.metrics.bump_limiter_refresh_forgotten_cap();
+                return;
+            };
             due.by_key.remove(&oldest);
             self.metrics.bump_limiter_refresh_forgotten_cap();
         }
@@ -248,7 +272,7 @@ impl RefreshBatch {
     /// it back.
     pub fn forget(&self, key: &str) {
         let mut due = self.lock();
-        let waiting = due.by_key.remove(key).map(|entry| due.order.remove(&entry.seq));
+        let waiting = due.by_key.remove(key).map(|entry| due.order.remove(&entry.place()));
         let in_flight = due.in_flight.remove(key);
         if waiting.is_some() || in_flight.is_some() {
             self.metrics.bump_limiter_refresh_forgotten_released();
@@ -268,12 +292,16 @@ impl RefreshBatch {
         self.lock().held = true;
     }
 
-    /// Send again (a breaker closed): every key due leaves at once.
+    /// Send again (a breaker closed): every key due leaves at once, whatever
+    /// the backoff. A resume during a round, which sends every key due anyway,
+    /// lets the next round leave at once too.
     pub fn resume(&self) {
         {
             let mut due = self.lock();
             due.held = false;
             due.send_now = true;
+            due.failures = 0;
+            due.retry_at = None;
         }
         self.wake.notify_one();
         self.resumed.notify_one();
@@ -299,15 +327,15 @@ impl RefreshBatch {
         }
     }
 
-    /// Wait for a key due, collect for one tick (cut short by a resume),
-    /// then send every key due; a request with no usable answer ends the
-    /// round, and its keys wait for the next.
+    /// Wait for a key due, collect for one tick or the backoff (cut short by
+    /// a resume), then send every key due; a request with no usable answer
+    /// ends the round and backs off, and its keys wait for the next.
     async fn send(self: Arc<Self>) {
         loop {
             while !self.sendable() {
                 self.wake.notified().await;
             }
-            self.tick().await;
+            self.wait_round().await;
             self.lock().send_now = false;
             while let Some(calls) = self.take() {
                 let answer = self.limiter.refresh(&calls).await;
@@ -317,6 +345,7 @@ impl RefreshBatch {
                     RefreshAnswer::Answered(outcomes) => self.settle(&calls, outcomes),
                     RefreshAnswer::Unavailable => {
                         self.put_back();
+                        self.back_off();
                         break;
                     }
                 }
@@ -324,17 +353,28 @@ impl RefreshBatch {
         }
     }
 
-    /// Wait one tick, or less when the batch resumes.
-    async fn tick(&self) {
+    /// Wait one tick, or until the backoff ends, or less when the batch
+    /// resumes.
+    async fn wait_round(&self) {
+        let until = self.lock().retry_at.unwrap_or_else(|| Instant::now() + self.config.tick);
         let resumed = async {
             while !self.lock().send_now {
                 self.resumed.notified().await;
             }
         };
         tokio::select! {
-            _ = tokio::time::sleep(self.config.tick) => {}
+            _ = tokio::time::sleep_until(until) => {}
             _ = resumed => {}
         }
+    }
+
+    /// One more unanswered request: no round before the next backoff step,
+    /// and never before a tick.
+    fn back_off(&self) {
+        let mut due = self.lock();
+        due.failures = due.failures.saturating_add(1);
+        let wait = backoff(due.failures).max(self.config.tick);
+        due.retry_at = Some(Instant::now() + wait);
     }
 
     /// Whether a key is due and the batch not held.
@@ -365,9 +405,12 @@ impl RefreshBatch {
     /// Apply an answered request: every key leaves the batch, and each
     /// answer that is not `Extended` is counted and handed to its call.
     fn settle(&self, calls: &[RefreshCall], outcomes: Vec<RefreshOutcome>) {
+        debug_assert_eq!(calls.len(), outcomes.len(), "one outcome per call");
         let mut handed = Vec::new();
         {
             let mut due = self.lock();
+            due.failures = 0;
+            due.retry_at = None;
             for (call, outcome) in calls.iter().zip(outcomes) {
                 let entry = due.in_flight.remove(&call.key);
                 match outcome {
@@ -417,7 +460,7 @@ impl RefreshBatch {
     fn expire(&self, due: &mut Due, now: Instant) {
         let mut expired = false;
         while let Some(first) = due.order.first_entry() {
-            if due.by_key.get(first.get()).is_some_and(|e| e.expires_at > now) {
+            if first.key().0 > now {
                 break;
             }
             let key = first.remove();
@@ -434,6 +477,13 @@ impl RefreshBatch {
     fn publish(&self, due: &Due) {
         self.metrics.set_limiter_refresh_due(due.len() as u64);
     }
+}
+
+/// The wait after `failures` consecutive unanswered requests, before the
+/// tick floor.
+fn backoff(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    BACKOFF_INITIAL.saturating_mul(1 << doublings).min(BACKOFF_MAX)
 }
 
 #[cfg(test)]
@@ -503,12 +553,16 @@ mod tests {
     }
 
     fn rig(script: Vec<Script>, max: usize, cap: usize) -> Rig {
+        rig_leased(script, max, cap, Duration::from_secs(20))
+    }
+
+    fn rig_leased(script: Vec<Script>, max: usize, cap: usize, lease: Duration) -> Rig {
         let limiter = Arc::new(Scripted::default());
         *limiter.script.lock().unwrap() = script.into();
         let metrics = B2buaMetrics::new();
         let answers = Arc::new(Mutex::new(Vec::new()));
         let sink = answers.clone();
-        let config = RefreshBatchConfig { tick: TICK, max, lease: Duration::from_secs(20), cap };
+        let config = RefreshBatchConfig { tick: TICK, max, lease, cap };
         let batch = RefreshBatch::new(limiter.clone(), config, metrics.clone(), move |a| {
             sink.lock().unwrap().push(a)
         });
@@ -729,6 +783,81 @@ mod tests {
         advance(TICK).await;
         assert_eq!(r.requests(), [ids(&["a"]), ids(&["a"])]);
         assert_eq!(r.batch.due(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_requests_back_off_and_an_answer_ends_the_backoff() {
+        let script = (0..9).map(|_| Script::Unavailable).collect();
+        let r = rig_leased(script, 100, 100, Duration::from_secs(120));
+        let start = Instant::now();
+        mark(&r.batch, "a");
+        let at = |secs: f64| start + Duration::from_secs_f64(secs);
+        // Sends at 1 s, then retries at 2, 3, 4 (the tick floor), 5.6, 8.8,
+        // 13.8, 18.8, 23.8 (5 s at most) and 28.8 s, which is answered.
+        for (until, sent) in [(1.1, 1), (4.1, 4), (5.5, 4), (5.7, 5), (13.7, 6), (13.9, 7)] {
+            tokio::time::sleep_until(at(until)).await;
+            settle().await;
+            assert_eq!(r.requests().len(), sent, "requests by {until} s");
+        }
+        tokio::time::sleep_until(at(28.9)).await;
+        settle().await;
+        assert_eq!(r.requests().len(), 10);
+        assert_eq!(r.metrics.limiter_refresh_requests_answered_total(), 1);
+        assert_eq!(r.batch.due(), 0);
+        mark(&r.batch, "b");
+        advance(TICK + Duration::from_millis(10)).await;
+        assert_eq!(r.requests().len(), 11, "answered: the next key leaves one tick later");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_ends_the_backoff() {
+        let script = (0..12).map(|_| Script::Unavailable).collect();
+        let r = rig_leased(script, 100, 100, Duration::from_secs(120));
+        mark(&r.batch, "a");
+        for _ in 0..200 {
+            advance(TICK / 10).await;
+        }
+        // Sent at 1, 2, 3, 4, 5.6, 8.8, 13.8 and 18.8 s; the next waits 5 s.
+        let sent = r.requests().len();
+        assert_eq!(sent, 8, "backing off");
+        r.batch.hold();
+        r.batch.resume();
+        advance(Duration::from_millis(1)).await;
+        assert_eq!(r.requests().len(), sent + 1, "a resume sends at once");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cap_counts_the_request_in_flight() {
+        let r = rig(vec![Script::Wait { fail: false }], 100, 2);
+        mark(&r.batch, "a");
+        mark(&r.batch, "b");
+        advance(TICK).await;
+        assert_eq!(r.requests(), [ids(&["a", "b"])]);
+        mark(&r.batch, "c");
+        assert_eq!(r.batch.due(), 2, "a full batch takes no mark while its entries are in flight");
+        assert_eq!(r.metrics.limiter_refresh_forgotten_cap_total(), 1);
+        r.limiter.go.notify_one();
+        settle().await;
+        assert_eq!(r.batch.due(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_marked_again_while_in_flight_expires_one_lease_after_its_first_mark() {
+        let r = rig(vec![Script::Wait { fail: true }], 100, 100);
+        mark(&r.batch, "a");
+        advance(TICK).await;
+        advance(Duration::from_millis(500)).await;
+        mark(&r.batch, "b");
+        advance(Duration::from_millis(500)).await;
+        mark(&r.batch, "a");
+        r.batch.hold();
+        r.limiter.go.notify_one();
+        settle().await;
+        assert_eq!(r.batch.due(), 2);
+        // a was first marked at 0 s, b at 1.5 s; the lease is 20 s.
+        advance(Duration::from_millis(18_500)).await;
+        assert_eq!(r.batch.due(), 1, "a is given up at 20 s, behind the later mark of b");
+        assert_eq!(r.metrics.limiter_refresh_forgotten_lease_expired_total(), 1);
     }
 
     #[test]

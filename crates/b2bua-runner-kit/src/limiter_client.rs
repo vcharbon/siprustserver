@@ -19,8 +19,10 @@ use http_net::HttpTransport;
 pub(crate) struct LimiterClientSettings {
     /// The limiter's `host:port`; `None` runs without a limiter.
     pub hostport: Option<String>,
-    /// The admit, refresh and health budget.
+    /// The admit and health budget.
     pub timeout: Duration,
+    /// The refresh budget.
+    pub refresh_timeout: Duration,
     /// The release budget.
     pub release_timeout: Duration,
     /// The longest boot waits for the name's first lookup.
@@ -42,6 +44,7 @@ pub(crate) async fn limiter_client(
         LimiterTarget::name_with(hostport, resolver),
         settings.timeout,
     )
+    .with_refresh_timeout(settings.refresh_timeout)
     .with_release_timeout(settings.release_timeout);
     // A name still unresolved leaves the client without an address: the
     // breaker logs its open start.
@@ -187,6 +190,7 @@ mod tests {
             let settings = LimiterClientSettings {
                 hostport: Some(NAME.into()),
                 timeout: Duration::from_millis(150),
+                refresh_timeout: Duration::from_secs(2),
                 release_timeout: Duration::from_secs(2),
                 boot_lookup: PROBE,
             };
@@ -377,6 +381,7 @@ mod tests {
         let settings = LimiterClientSettings {
             hostport: None,
             timeout: Duration::from_millis(150),
+            refresh_timeout: Duration::from_secs(2),
             release_timeout: Duration::from_secs(2),
             boot_lookup: PROBE,
         };

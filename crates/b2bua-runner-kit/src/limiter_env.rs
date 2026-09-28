@@ -3,7 +3,8 @@
 //! | variable | meaning | default |
 //! |---|---|---|
 //! | `LIMITER_URL` | the limiter, `[http://]host:port[/]` | unset: no limiter |
-//! | `LIMITER_TIMEOUT_MS` | the budget of one admit or refresh (fail-open past it) | 150 |
+//! | `LIMITER_TIMEOUT_MS` | the budget of one admit (fail-open past it) and health probe | 150 |
+//! | `LIMITER_REFRESH_TIMEOUT_MS` | the budget of one refresh request | 2000 |
 //! | `LIMITER_REFRESH_SECONDS` | how often a counted call extends its lease | 40 |
 //! | `LIMITER_REFRESH_BATCH_MS` | the refresh tick: a refresh due leaves within it, batched | 1000 |
 //! | `LIMITER_REFRESH_BATCH_MAX` | most keys one refresh request carries | 1000 |
@@ -24,6 +25,7 @@ use crate::stated;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LimiterEnv {
     pub timeout_ms: u64,
+    pub refresh_timeout_ms: u64,
     pub refresh_sec: i64,
     pub refresh_batch_ms: u64,
     pub refresh_batch_max: usize,
@@ -88,6 +90,7 @@ pub(crate) fn limiter_from_lookup(
     };
     Ok(LimiterEnv {
         timeout_ms: positive("LIMITER_TIMEOUT_MS", 150)?,
+        refresh_timeout_ms: positive("LIMITER_REFRESH_TIMEOUT_MS", 2_000)?,
         refresh_sec: seconds("LIMITER_REFRESH_SECONDS", 40)?,
         refresh_batch_ms: positive("LIMITER_REFRESH_BATCH_MS", 1_000)?,
         refresh_batch_max: positive("LIMITER_REFRESH_BATCH_MAX", 1_000)? as usize,
@@ -106,8 +109,9 @@ pub(crate) fn limiter_from_lookup(
 mod tests {
     use super::*;
 
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 10] = [
         "LIMITER_TIMEOUT_MS",
+        "LIMITER_REFRESH_TIMEOUT_MS",
         "LIMITER_REFRESH_SECONDS",
         "LIMITER_REFRESH_BATCH_MS",
         "LIMITER_REFRESH_BATCH_MAX",
@@ -131,6 +135,7 @@ mod tests {
             env,
             LimiterEnv {
                 timeout_ms: 150,
+                refresh_timeout_ms: 2_000,
                 refresh_sec: 40,
                 refresh_batch_ms: 1_000,
                 refresh_batch_max: 1_000,
@@ -147,6 +152,7 @@ mod tests {
     fn stated_values_are_taken() {
         let env = from(&[
             ("LIMITER_TIMEOUT_MS", "100"),
+            ("LIMITER_REFRESH_TIMEOUT_MS", "900"),
             ("LIMITER_REFRESH_SECONDS", "20"),
             ("LIMITER_REFRESH_BATCH_MS", "500"),
             ("LIMITER_REFRESH_BATCH_MAX", "50"),
@@ -161,6 +167,7 @@ mod tests {
             env,
             LimiterEnv {
                 timeout_ms: 100,
+                refresh_timeout_ms: 900,
                 refresh_sec: 20,
                 refresh_batch_ms: 500,
                 refresh_batch_max: 50,

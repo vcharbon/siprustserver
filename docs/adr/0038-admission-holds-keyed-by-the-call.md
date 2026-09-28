@@ -160,11 +160,16 @@ and a lost release could not be retried.
     generation due on the worker's refresh batch and goes on. One tick
     (1 s) after a key falls due, the batch sends every key due, at most
     `LIMITER_REFRESH_BATCH_MAX` keys per request, one request at a time,
-    under the admit budget: the request rate is one per tick whatever the
+    under its own budget (`LIMITER_REFRESH_TIMEOUT_MS`, 2 s, since no call
+    waits on it): the request rate is one per tick whatever the
     number of counted calls, and the calls one node reclaims at once, whose
     refreshes are all past due, leave in `ceil(calls / max)` requests. A key
     marked again while due is sent once with its latest ids. A request with
-    no usable answer keeps its keys for the next tick. An entry is given up
+    no usable answer keeps its keys, and the next round waits a backoff that
+    doubles from 200 ms with each consecutive unanswered request, never
+    below a tick nor above 5 s; an answer or the breaker's close ends it.
+    Refreshes never trip the breaker, so a dead limiter behind a closed one
+    draws a request every 5 s. An entry is given up
     one lease after its first mark, at the release queue's cap (the oldest),
     or when its call's release is queued, so an ended call's set is never
     refreshed after its release; all three are counted. The batch is not
@@ -175,7 +180,9 @@ and a lost release could not be retried.
     uncounted call or an older generation (a fold restated the set since)
     changes nothing. `Dropped` makes the call uncounted, still owing its
     release; `Released` and `Reregistered` leave it as it is. The breaker
-    drives the batch like the release queue (decision 10).
+    drives the batch like the release queue (decision 10). A drain does not
+    flush the batch: a call live at the exit is refreshed by the timer its
+    successor re-arms.
 
 ## Lease, refresh and the replica TTL
 
@@ -213,7 +220,8 @@ cells that prove re-registration run the deployed relation.
 - Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
   same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
   the lease by more than one period; `LIMITER_REFRESH_BATCH_MS` (1000, below
-  the refresh period) and `LIMITER_REFRESH_BATCH_MAX` (1000),
+  the refresh period, the refresh period plus a tick below the lease),
+  `LIMITER_REFRESH_BATCH_MAX` (1000), `LIMITER_REFRESH_TIMEOUT_MS` (2000),
   `LIMITER_RELEASE_TIMEOUT_MS`, `LIMITER_RELEASE_QUEUE_CAP`,
   `LIMITER_BREAKER_FAILURES` (3), `LIMITER_BREAKER_PROBE_MS` (1000) and the
   exit's release flush bound `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the
@@ -249,7 +257,9 @@ cells that prove re-registration run the deployed relation.
   (`b2bua_limiter_refresh_answers_discarded_total{reason=call_gone|stale}`)
   and sender restarts (`b2bua_limiter_refresh_sender_restarts_total`). A
   refresh is sent within one tick of falling due, so the lease must outlast
-  the refresh period plus a tick.
+  the refresh period plus a tick; boot refuses a configuration where it
+  does not. A call's trace shows its refresh falling due and every answer
+  but `Extended`: an extended lease leaves no per-call evidence.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the
   flush and reboots later than one lease) re-registers a set until the

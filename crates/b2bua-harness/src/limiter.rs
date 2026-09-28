@@ -258,6 +258,7 @@ impl SutLimiter {
         let server = http.serve(addr, service).await.expect("default limiter binds");
         let client: Arc<dyn CallLimiter> = Arc::new(
             HttpCallLimiter::new(Arc::new(http), addr, DEFAULT_CLIENT_BUDGET)
+                .with_refresh_timeout(DEFAULT_CLIENT_BUDGET)
                 .with_release_timeout(DEFAULT_CLIENT_BUDGET),
         );
         let sut =

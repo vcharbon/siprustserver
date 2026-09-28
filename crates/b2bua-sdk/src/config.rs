@@ -576,6 +576,15 @@ impl B2buaConfig {
                 self.limiter_refresh_batch_ms
             ));
         }
+        let lease_ms = self.limiter_lease_sec.saturating_mul(1000);
+        if refresh_ms.saturating_add(self.limiter_refresh_batch_ms as i64) >= lease_ms {
+            return Err(format!(
+                "limiter_refresh_sec={} with limiter_refresh_batch_ms={} reaches \
+                 limiter_lease_sec={}: a refresh leaves up to one tick after it falls due, \
+                 inside the lease",
+                self.limiter_refresh_sec, self.limiter_refresh_batch_ms, self.limiter_lease_sec
+            ));
+        }
         if self.limiter_refresh_batch_max == 0 {
             return Err("limiter_refresh_batch_max=0: a refresh request carries at least one \
                         key"

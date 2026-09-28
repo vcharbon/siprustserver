@@ -414,6 +414,8 @@ pub struct RunnerEnv {
     /// `LIMITER_LEASE_SECONDS` — the limiter service's lease; a release queued
     /// longer is given up (default 120).
     pub limiter_lease_sec: i64,
+    /// `LIMITER_REFRESH_TIMEOUT_MS` — the refresh request budget (default 2000).
+    pub limiter_refresh_timeout_ms: u64,
     /// `LIMITER_RELEASE_TIMEOUT_MS` — the release request budget (default 2000).
     pub limiter_release_timeout_ms: u64,
     /// `LIMITER_RELEASE_QUEUE_CAP` — most releases the worker's release queue
@@ -542,6 +544,7 @@ impl RunnerEnv {
             limiter_refresh_batch_ms: limiter.refresh_batch_ms,
             limiter_refresh_batch_max: limiter.refresh_batch_max,
             limiter_lease_sec: limiter.lease_sec,
+            limiter_refresh_timeout_ms: limiter.refresh_timeout_ms,
             limiter_release_timeout_ms: limiter.release_timeout_ms,
             limiter_release_queue_cap: limiter.queue_cap,
             limiter_breaker_failures: limiter.breaker_failures,
@@ -817,6 +820,7 @@ impl RunnerBase {
                 service = %self.name,
                 limiter = %hostport,
                 timeout_ms = self.env.limiter_timeout_ms,
+                refresh_timeout_ms = self.env.limiter_refresh_timeout_ms,
                 release_timeout_ms = self.env.limiter_release_timeout_ms,
                 refresh_sec = self.env.limiter_refresh_sec,
                 breaker_failures = self.env.limiter_breaker_failures,
@@ -827,6 +831,7 @@ impl RunnerBase {
         let settings = limiter_client::LimiterClientSettings {
             hostport,
             timeout: std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+            refresh_timeout: std::time::Duration::from_millis(self.env.limiter_refresh_timeout_ms),
             release_timeout: std::time::Duration::from_millis(self.env.limiter_release_timeout_ms),
             boot_lookup: std::time::Duration::from_millis(self.env.limiter_breaker_probe_ms),
         };

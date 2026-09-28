@@ -6,9 +6,9 @@
 //! wrapped in `tokio::time::timeout`, and a timeout *or* any transport error
 //! (a target name that does not resolve included) *or* a non-200 status maps
 //! to `Unavailable`. An admit runs on a call's turn under the fail-open
-//! budget; a refresh runs off every call, in the worker's refresh batch,
-//! under the same budget; a release runs off every call, in the worker's
-//! release queue, under its own longer budget. The health answer
+//! budget; a refresh runs off every call, in the worker's refresh batch, and
+//! a release off every call, in the worker's release queue, each under its
+//! own longer budget, since no call waits on either. The health answer
 //! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
 //! store, under the admit budget; it has an address once the target's name
 //! resolved, and forgetting it makes the next request look the name up again.
@@ -33,11 +33,16 @@ use crate::limiter_target::LimiterTarget;
 /// The release budget a client runs with unless told otherwise.
 pub const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The refresh budget a client runs with unless told otherwise.
+pub const DEFAULT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// HTTP-backed limiter client over a pluggable transport.
 pub struct HttpCallLimiter {
     endpoint: Arc<Endpoint>,
-    /// The admit, refresh and health budget.
+    /// The admit and health budget.
     timeout: Duration,
+    /// The refresh budget.
+    refresh_timeout: Duration,
     /// The release budget.
     release_timeout: Duration,
 }
@@ -85,8 +90,8 @@ impl Endpoint {
 
 impl HttpCallLimiter {
     /// Build a client targeting the limiter service at `addr`, with `timeout` as
-    /// the admit and refresh fail-open budget and [`DEFAULT_RELEASE_TIMEOUT`]
-    /// as the release budget.
+    /// the admit fail-open budget, [`DEFAULT_REFRESH_TIMEOUT`] as the refresh
+    /// budget and [`DEFAULT_RELEASE_TIMEOUT`] as the release budget.
     pub fn new(transport: Arc<dyn HttpTransport>, addr: SocketAddr, timeout: Duration) -> Self {
         Self::with_target(transport, LimiterTarget::addr(addr), timeout)
     }
@@ -106,8 +111,15 @@ impl HttpCallLimiter {
                 addr_key,
             }),
             timeout,
+            refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
             release_timeout: DEFAULT_RELEASE_TIMEOUT,
         }
+    }
+
+    /// The same client with `refresh_timeout` as its refresh budget.
+    pub fn with_refresh_timeout(mut self, refresh_timeout: Duration) -> Self {
+        self.refresh_timeout = refresh_timeout;
+        self
     }
 
     /// The same client with `release_timeout` as its release budget.
@@ -238,7 +250,7 @@ impl CallLimiter for HttpCallLimiter {
                 .map(|c| wire::RefreshCall { key: c.key.clone(), ids: c.ids.clone() })
                 .collect(),
         };
-        let Some(resp) = self.post("/v1/refresh", &body, self.timeout).await else {
+        let Some(resp) = self.post("/v1/refresh", &body, self.refresh_timeout).await else {
             return RefreshAnswer::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {

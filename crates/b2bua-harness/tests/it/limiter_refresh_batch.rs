@@ -480,13 +480,14 @@ async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     let resumed = s.start.elapsed();
-    s.advance_to(resumed + Duration::from_secs(5) + TICK + Duration::from_millis(200)).await;
+    // The backoff waits 5 s at most; the call's own refresh is due at 40 s.
+    s.advance_to(resumed + Duration::from_secs(5) + Duration::from_millis(100)).await;
     let metrics = s.b2bua.metrics();
     assert_eq!(metrics.limiter_refresh_requests_answered_total(), 1, "the retry is answered");
     assert_eq!(s.holds(), [1, 1, 1], "the call stays counted");
 
-    // The next refresh falls due at 45 s and leaves within one tick.
-    s.advance_to(9 * REFRESH + TICK + Duration::from_millis(200)).await;
+    // The next refresh falls due at 40 s and leaves within one tick.
+    s.advance_to(8 * REFRESH + TICK + Duration::from_millis(200)).await;
     assert_eq!(metrics.limiter_refresh_requests_answered_total(), 2, "no backoff left");
 
     s.hang_up(&mut dialog).await;
