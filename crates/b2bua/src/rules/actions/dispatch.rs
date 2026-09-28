@@ -307,11 +307,11 @@ impl ActionExecutor<'_> {
                 *call = call::helpers::set_reroute(call.clone(), state.clone());
             }
             RuleAction::SetFeatures { features } => {
-                // The withhold latch: the standing withheld option tags union
-                // into the incoming declaration — a reroute cannot restore a
-                // tag the call already withholds (`apply_route` parity).
+                // The call-lifetime latches: the standing withheld option tags
+                // union into the incoming declaration and the stated charging
+                // vector carries over unless restated (`apply_route` parity).
                 let mut features = features.clone();
-                features.latch_withheld_option_tags(call.features.as_ref());
+                features.latch_call_lifetime(call.features.as_ref());
                 call.features = Some(features);
             }
             RuleAction::MergeCallExt { ext } => {

@@ -155,7 +155,8 @@ pub struct AdvertiseCapabilitiesFeature {
 /// `P-Charging-Vector` on every leg it ORIGINATES, so the records of the two
 /// operators either side of it match on one identifier. A vector the originator
 /// sent is relayed unchanged whether or not this arm is present — an identifier
-/// re-minted mid-path breaks the correlation it exists for.
+/// re-minted mid-path breaks the correlation it exists for. A call carrying a
+/// [`FeatureActivations::stated_charging_vector`] mints none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChargingVectorFeature {
     /// The element the identifier is generated at (`icid-generated-at`).
@@ -189,6 +190,14 @@ pub struct FeatureActivations {
     /// decodes as no activation.
     #[serde(default)]
     pub charging_vector: Option<ChargingVectorFeature>,
+    /// RFC 7315 §5.6: the call's charging vector as a decision stated it — the
+    /// whole `P-Charging-Vector` value. Present, the stack states it on every
+    /// message it sends on every leg of the call, requests and responses but
+    /// `100`, in place of any relayed or minted copy. A call-lifetime latch
+    /// ([`FeatureActivations::latch_call_lifetime`]): a later route stating none
+    /// keeps it, one stating another replaces it.
+    #[serde(default)]
+    pub stated_charging_vector: Option<String>,
     /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
     /// `Supported` set would ride the originated INVITE is narrowed by these
     /// tags (an emptied set drops its line) and a relayed `Require` naming
@@ -197,7 +206,7 @@ pub struct FeatureActivations {
     /// never offers `100rel` leaves 18x relay untouched. The declaration is a
     /// call-lifetime LATCH:
     /// every applied route's list unions into the standing one
-    /// ([`FeatureActivations::latch_withheld_option_tags`], run by
+    /// ([`FeatureActivations::latch_call_lifetime`], run by
     /// `apply_route` and `SetFeatures`), so a failover route whose decision
     /// does not restate it cannot restore a withheld tag. `#[serde(default)]`
     /// so a body encoded before this arm decodes as no withhold.
@@ -206,11 +215,19 @@ pub struct FeatureActivations {
 }
 
 impl FeatureActivations {
-    /// The withhold latch: union `previous`'s withheld option tags into this
-    /// route's declaration. A route can widen the withhold; none can restore a
-    /// withheld tag — the property belongs to the call, not to the leg the
-    /// declaring route dialled.
-    pub fn latch_withheld_option_tags(&mut self, previous: Option<&FeatureActivations>) {
+    /// The call-lifetime latches, run where a route's features replace the
+    /// standing ones: the stated charging vector carries over unless this route
+    /// states its own, and the withheld option tags union (a route can widen the
+    /// withhold; none can restore a withheld tag). Both properties belong to the
+    /// call, not to the leg the declaring route dialled.
+    pub fn latch_call_lifetime(&mut self, previous: Option<&FeatureActivations>) {
+        if self.stated_charging_vector.is_none() {
+            self.stated_charging_vector = previous.and_then(|f| f.stated_charging_vector.clone());
+        }
+        self.latch_withheld_option_tags(previous);
+    }
+
+    fn latch_withheld_option_tags(&mut self, previous: Option<&FeatureActivations>) {
         let standing = previous.and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]);
         if standing.is_empty() {
             return;
@@ -241,6 +258,7 @@ mod tests {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
+            stated_charging_vector: None,
             withhold_option_tags: withheld.map(|w| w.iter().map(|t| t.to_string()).collect()),
         }
     }
@@ -252,23 +270,45 @@ mod tests {
     #[test]
     fn the_withhold_latch_unions_and_never_narrows() {
         let mut inherited = features(None);
-        inherited.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        inherited.latch_call_lifetime(Some(&features(Some(&["100rel"]))));
         assert_eq!(
             inherited.withhold_option_tags.as_deref(),
             Some(["100rel".to_string()].as_slice())
         );
 
         let mut widened = features(Some(&["timer", "100REL"]));
-        widened.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        widened.latch_call_lifetime(Some(&features(Some(&["100rel"]))));
         assert_eq!(
             widened.withhold_option_tags.as_deref(),
             Some(["timer".to_string(), "100REL".into()].as_slice()),
         );
 
         let mut untouched = features(None);
-        untouched.latch_withheld_option_tags(Some(&features(None)));
+        untouched.latch_call_lifetime(Some(&features(None)));
         assert_eq!(untouched.withhold_option_tags, None);
-        untouched.latch_withheld_option_tags(None);
+        untouched.latch_call_lifetime(None);
         assert_eq!(untouched.withhold_option_tags, None);
+    }
+
+    /// The stated charging vector latch: a route stating none keeps the
+    /// standing one, a route stating another replaces it, and with nothing
+    /// standing, nothing is invented.
+    #[test]
+    fn the_stated_charging_vector_outlives_a_route_that_states_none() {
+        let stating = |v: Option<&str>| FeatureActivations {
+            stated_charging_vector: v.map(str::to_string),
+            ..features(None)
+        };
+        let mut kept = stating(None);
+        kept.latch_call_lifetime(Some(&stating(Some("icid-value=first"))));
+        assert_eq!(kept.stated_charging_vector.as_deref(), Some("icid-value=first"));
+
+        let mut replaced = stating(Some("icid-value=second"));
+        replaced.latch_call_lifetime(Some(&stating(Some("icid-value=first"))));
+        assert_eq!(replaced.stated_charging_vector.as_deref(), Some("icid-value=second"));
+
+        let mut none = stating(None);
+        none.latch_call_lifetime(None);
+        assert_eq!(none.stated_charging_vector, None);
     }
 }

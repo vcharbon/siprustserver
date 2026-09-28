@@ -450,6 +450,7 @@ Content-Length: 0\r\n\r\n";
             no_answer_timeout_sec: None,
             call_limiters: None,
             charging_vector: None,
+            stated_charging_vector: None,
             withhold_option_tags: None,
             advertise_capabilities: Some(call::features::AdvertiseCapabilitiesFeature {
                 toward_originator: None,

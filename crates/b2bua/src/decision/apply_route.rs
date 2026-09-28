@@ -78,11 +78,12 @@ pub async fn apply_route(
         crate::trace::intake::force_enable(&mut call, invite_wire, now_ms);
     }
 
-    // The withhold latch: a failover route that does not restate the withheld
-    // option tags cannot restore one — union the standing list into this
-    // route's declaration before it replaces the features (SetFeatures parity).
+    // The call-lifetime latches: a failover route that does not restate the
+    // withheld option tags cannot restore one, and one that states no charging
+    // vector keeps the call's — merged before its features replace the standing
+    // ones (SetFeatures parity).
     let mut features = route.features.clone();
-    features.latch_withheld_option_tags(call.features.as_ref());
+    features.latch_call_lifetime(call.features.as_ref());
     call.features = Some(features);
     call.callback_context = route.callback_context.clone();
     // Release-event subscription registry: recorded like
@@ -259,7 +260,7 @@ pub async fn apply_route(
         None,
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
-        call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
+        crate::rules::charging::minting_arm(&call),
         &capabilities::withheld_option_tags(&call, None, offers_sdp),
         &capabilities::offered_option_tags(&call, None),
         None,

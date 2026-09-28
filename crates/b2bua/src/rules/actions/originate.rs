@@ -100,7 +100,7 @@ impl ActionExecutor<'_> {
             body_override,
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
-            call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
+            crate::rules::charging::minting_arm(call),
             &capabilities::withheld_option_tags(call, kind, offers_sdp),
             &capabilities::offered_option_tags(call, kind),
             kind,

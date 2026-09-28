@@ -72,9 +72,11 @@ impl ActionExecutor<'_> {
                 provenance,
             )
         });
-        if let Some((e, branch)) = ack {
+        if let Some((mut e, branch)) = ack {
             // Retain THE ACK's exact bytes + destination before it leaves, so a
-            // retransmitted 2xx re-passes this datagram (§13.2.2.4).
+            // retransmitted 2xx re-passes this datagram (§13.2.2.4) — stamped
+            // with the call's charging vector first, as it leaves.
+            crate::rules::charging::stamp(call, &mut e);
             if let OutboundBody::Request(r) = &e.body {
                 *call = call::helpers::retain_emitted_ack(
                     call.clone(),

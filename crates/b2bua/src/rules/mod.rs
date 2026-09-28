@@ -7,6 +7,7 @@
 
 pub mod actions;
 pub mod capabilities;
+pub mod charging;
 pub mod defaults;
 pub mod docgen;
 pub mod executor;

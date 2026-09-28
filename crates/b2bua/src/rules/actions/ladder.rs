@@ -31,7 +31,9 @@ impl ActionExecutor<'_> {
     // ── arming ─────────────────────────────────────────────────────────────
 
     /// Retain the a-leg's INITIAL answer as the datagram it leaves as — its
-    /// `image()`, which the transaction layer sends verbatim — and arm its
+    /// `image()` once stamped with the call's charging vector
+    /// ([`crate::rules::charging`]), which the transaction layer sends
+    /// verbatim — and arm its
     /// §13.3.1.4 ladder under `AckOf2xx`, keyed by the To-tag and CSeq the 2xx
     /// itself carries — the two facts the caller's ACK echoes. The a-leg INVITE
     /// server transaction goes `Completed` on this final, so the txn layer
@@ -41,8 +43,9 @@ impl ActionExecutor<'_> {
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
-        effect: &OutboundSipEffect,
+        effect: &mut OutboundSipEffect,
     ) {
+        crate::rules::charging::stamp(call, effect);
         let OutboundBody::Response(resp) = &effect.body else {
             return;
         };
@@ -55,17 +58,18 @@ impl ActionExecutor<'_> {
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face) and arm its §13.3.1.4 ladder. The marker also holds the
+    /// either face), stamped as it leaves, and arm its §13.3.1.4 ladder. The marker also holds the
     /// dialog's INVITE server transaction in RFC 6026 *Accepted* for
     /// `reinvite-glare`, for exactly as long as the ladder's give-up stands.
     pub(super) fn retain_reinvite_2xx(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
-        resp: &SipResponse,
+        resp: &mut SipResponse,
         dest: (String, u16),
         target_leg: &str,
     ) {
+        crate::rules::charging::stamp_response(call, resp);
         let (unacked, obligation, first) = unacked_2xx_of(resp, dest, target_leg);
         let target_dialog = if target_leg == call.a_leg.leg_id {
             call.a_leg.dialogs.first_mut()
@@ -109,8 +113,9 @@ impl ActionExecutor<'_> {
         );
     }
 
-    /// Retain the reliable provisional as its `image()` — the datagram the
-    /// transaction layer sends verbatim — and arm its first §3 rung under
+    /// Retain the reliable provisional as its `image()`, stamped as it leaves —
+    /// the datagram the transaction layer sends verbatim — and arm its first §3
+    /// rung under
     /// `PrackOf`. The obligation is this stack's: the `RSeq` the peer must
     /// PRACK is our own mint (`assign_a_rseq`), so the ladder under its copies
     /// is ours — per `(a_tag, a_rseq)`, one per shown dialog (§4, errata 4603).
@@ -121,10 +126,11 @@ impl ActionExecutor<'_> {
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
-        effect: &OutboundSipEffect,
+        effect: &mut OutboundSipEffect,
         a_tag: &str,
         a_rseq: i64,
     ) {
+        crate::rules::charging::stamp(call, effect);
         let OutboundBody::Response(resp) = &effect.body else {
             return;
         };

@@ -215,10 +215,10 @@ impl ActionExecutor<'_> {
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
-        effect: OutboundSipEffect,
+        mut effect: OutboundSipEffect,
     ) {
         self.retire(call, fx, Scope::Provisionals);
-        self.retain_a_leg_answer(call, fx, &effect);
+        self.retain_a_leg_answer(call, fx, &mut effect);
         fx.outbound.push(effect);
     }
 

@@ -457,6 +457,7 @@ pub fn default_platform_features() -> FeatureActivations {
         call_limiters: None,
         advertise_capabilities: None,
         charging_vector: None,
+        stated_charging_vector: None,
         withhold_option_tags: None,
     }
 }

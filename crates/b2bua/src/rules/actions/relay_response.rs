@@ -277,7 +277,7 @@ impl ActionExecutor<'_> {
                     transparent_headers,
                     contact,
                 );
-                let relayed = generators::generate_relayed_response(status, &reason, &opts);
+                let mut relayed = generators::generate_relayed_response(status, &reason, &opts);
                 let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);
                 // §8.1.3.3 / §14.1: the snapshot correlates EVERY response of the
                 // transaction back to the originator, so it must outlive a relayed
@@ -328,9 +328,9 @@ impl ActionExecutor<'_> {
                         &source_leg_id,
                         Some(pending.inbound_cseq),
                     );
-                    self.retain_reinvite_2xx(call, fx, &relayed, dest.clone(), target_leg);
+                    self.retain_reinvite_2xx(call, fx, &mut relayed, dest.clone(), target_leg);
                 }
-                let effect = OutboundSipEffect {
+                let mut effect = OutboundSipEffect {
                     body: OutboundBody::Response(relayed),
                     mode: OutboundTxnMode::ServerResponse,
                     destination: dest,
@@ -342,7 +342,7 @@ impl ActionExecutor<'_> {
                 // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
                 // ladder on the face it left on.
                 if let Some((shown_tag, a_rseq)) = ladder {
-                    self.arm_reliable_provisional_ladder(call, fx, &effect, &shown_tag, a_rseq);
+                    self.arm_reliable_provisional_ladder(call, fx, &mut effect, &shown_tag, a_rseq);
                 }
                 fx.outbound.push(effect);
                 return;
@@ -472,7 +472,7 @@ impl ActionExecutor<'_> {
                 resp,
                 &mut passthrough,
             );
-            let Some(effect) = relay::response_to_a_leg(
+            let Some(mut effect) = relay::response_to_a_leg(
                 call,
                 fx,
                 &a_invite,
@@ -497,7 +497,7 @@ impl ActionExecutor<'_> {
                 // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
                 // caller-facing ladder.
                 if let Some(a_rseq) = a_rseq.filter(|_| (101..200).contains(&status)) {
-                    self.arm_reliable_provisional_ladder(call, fx, &effect, &a_face, a_rseq);
+                    self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_face, a_rseq);
                 }
                 fx.outbound.push(effect);
             }
@@ -545,7 +545,7 @@ impl ActionExecutor<'_> {
             resp,
             &mut passthrough,
         );
-        let Some(effect) = relay::response_to_a_leg(
+        let Some(mut effect) = relay::response_to_a_leg(
             call,
             fx,
             &a_invite,
@@ -576,7 +576,7 @@ impl ActionExecutor<'_> {
             // repeat until PRACKed (RFC 3262 §3): retain it + arm the
             // caller-facing ladder.
             if let Some(a_rseq) = a_rseq.filter(|_| (101..200).contains(&status)) {
-                self.arm_reliable_provisional_ladder(call, fx, &effect, &a_tag, a_rseq);
+                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_tag, a_rseq);
             }
             fx.outbound.push(effect);
         }

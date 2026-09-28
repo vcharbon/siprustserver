@@ -63,6 +63,9 @@ pub(super) async fn process_result(
         now_ms,
         ctx.limiter_lease.refresh_period().as_millis() as i64,
     );
+    // Every message the turn sends states the call's charging vector before
+    // the ring records it or the wire sees it (RFC 7315 §5.6).
+    let result = crate::rules::charging::stamp_outbound(result);
     // What the turn sends is on the record before the record lands, and a
     // termination this turn began is cut after it: every ring entry with
     // `seq <= termination.last_seq` was received or sent as part of
