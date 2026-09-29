@@ -109,6 +109,33 @@ const run = (
     media
   }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
 
+/**
+ * A cell with a second leg A that also receives the endpoint's session: the
+ * INVITE on B opens it, a re-INVITE on A carries what each side sent there.
+ */
+const acrossLegs = (
+  captured: { readonly b: string; readonly a: string },
+  replayed: { readonly b: string; readonly a: string }
+): ReadonlyArray<BodyProbe> => {
+  const flowAB: ReadonlyArray<Flow.Step> = [
+    step("s2", "B", "expect", { method: "INVITE", body: sdpBody("resources/b1.sdp") }, false),
+    step("s4", "A", "expect", { method: "INVITE", body: sdpBody("resources/a2.sdp") })
+  ]
+  return confront({
+    pivot: { ...pivot, flow: [...flowAB] },
+    verdict,
+    recordings: new Map([
+      ["A", [message(4, "in", "s4", "INVITE sip:a@example.invalid SIP/2.0", "2 INVITE", true, replayed.a)]],
+      ["B", [message(2, "in", "s2", "INVITE sip:b@example.invalid SIP/2.0", "1 INVITE", false, replayed.b)]]
+    ]),
+    resources: new Map([
+      ["resources/b1.sdp", utf8.encode(captured.b)],
+      ["resources/a2.sdp", utf8.encode(captured.a)]
+    ]),
+    media: "verbatim"
+  }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+}
+
 const rows = (probes: ReadonlyArray<BodyProbe>) =>
   probes.map((p) => ({ step: p.step, signature: signature(p), minted: p.sdp?.mintedOrigin === true }))
 
@@ -141,6 +168,33 @@ describe("the origin of a session the endpoint opens", () => {
 
   it("where the capture minted and the replay relays the peer's origin, the row is unmarked", () => {
     expect(rows(run(sdp(PEER), sdp(o(556, 556, "peer", "198.51.100.7"))))[0]).toMatchObject({ minted: false })
+  })
+
+  it("a session the capture carries onto another leg, which the replay opens afresh there, is unmarked", () => {
+    const got = rows(acrossLegs(
+      { b: sdp(o(1000, 1000)), a: sdp(o(1000, 1001)) },
+      { b: sdp(o(7, 7)), a: sdp(o(9, 9)) }
+    ))
+    expect(got).toEqual([
+      { step: "s4", signature: "body:sdp:session:o=:request:INVITE:in-dialog", minted: false },
+      { step: "s2", signature: "body:sdp:session:o=:initial-invite", minted: true }
+    ])
+  })
+
+  it("two sessions the capture keeps apart per leg, which the replay shares at +1, are unmarked on the second", () => {
+    const got = rows(acrossLegs(
+      { b: sdp(o(1000, 1000)), a: sdp(o(2000, 2000)) },
+      { b: sdp(o(7, 7)), a: sdp(o(7, 8)) }
+    ))
+    expect(got.find((r) => r.step === "s4")).toMatchObject({ minted: false })
+  })
+
+  it("a session carried across legs alike on both sides stays marked", () => {
+    const got = rows(acrossLegs(
+      { b: sdp(o(1000, 1000)), a: sdp(o(1000, 1001)) },
+      { b: sdp(o(7, 7)), a: sdp(o(7, 8)) }
+    ))
+    expect(got.every((r) => r.minted)).toBe(true)
   })
 
   it("the same bytes state nothing", () => {

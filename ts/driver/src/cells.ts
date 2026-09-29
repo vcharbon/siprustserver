@@ -424,14 +424,14 @@ const readStatedBodies = Effect.fn("Driver.readStatedBodies")(function* (
   return out
 })
 
-/** Every per-leg recording of one finished bundle, keyed by leg name. */
+/** Every per-leg recording of one finished bundle, keyed by leg name, legs in name order. */
 const readRecordings = Effect.fn("Driver.readRecordings")(function* (absolute: string) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
   const dir = path.join(absolute, RECORDING_DIR)
   const out = new Map<string, ReadonlyArray<Bundle.RecordedMessage>>()
   if (!(yield* fs.exists(dir))) return out
-  for (const entry of yield* fs.readDirectory(dir)) {
+  for (const entry of [...(yield* fs.readDirectory(dir))].sort()) {
     if (!entry.endsWith(".jsonl")) continue
     const text = yield* fs.readFileString(path.join(dir, entry))
     out.set(entry.slice(0, -".jsonl".length), yield* Bundle.decodeRecording(text))

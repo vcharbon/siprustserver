@@ -1,8 +1,8 @@
 /**
  * The origin ledger: an origin the replayed endpoint mints is read as the
- * captured one only where both sides minted it, the sess-id pairing holds
- * one-to-one across the leg, and each session steps its version alike on
- * both sides. A relayed origin, a session continued under another sess-id and
+ * captured one only where both sides minted it, the pairing of origins holds
+ * one-to-one across the cell, a session opens in the same form on both sides,
+ * and each session steps its version alike on both sides. A relayed origin, a session continued under another sess-id and
  * a version step of another size stay differences.
  */
 import { describe, expect, it } from "vitest"
@@ -103,10 +103,28 @@ describe("ledger", () => {
     expect(leg.read(sdp(o(1000, 1000)), sdp(o(7, 7)))).toBe(true)
   })
 
-  it("two legs keep their own pairing", () => {
-    const a = ledger(nothingDriven)
-    const b = ledger(nothingDriven)
-    expect(a.read(sdp(o(1000, 1000)), sdp(o(7, 7)))).toBe(true)
-    expect(b.read(sdp(o(1000, 1000)), sdp(o(8, 8)))).toBe(true)
+  it("two captured sessions the replay folds into one are refused, whatever the step", () => {
+    const cell = ledger(nothingDriven)
+    expect(cell.read(sdp(o(1000, 1000)), sdp(o(7, 7)))).toBe(true)
+    expect(cell.read(sdp(o(2000, 2000)), sdp(o(7, 8)))).toBe(false)
+  })
+
+  it("one captured session the replay splits into two is refused", () => {
+    const cell = ledger(nothingDriven)
+    expect(cell.read(sdp(o(1000, 1000)), sdp(o(7, 7)))).toBe(true)
+    expect(cell.read(sdp(o(1000, 1001)), sdp(o(8, 8)))).toBe(false)
+  })
+
+  it("a pairing broken on the third description is refused although its step matches", () => {
+    const cell = ledger(nothingDriven)
+    expect(cell.read(sdp(o(100, 100)), sdp(o(7, 7)))).toBe(true)
+    expect(cell.read(sdp(o(200, 200)), sdp(o(9, 9)))).toBe(true)
+    expect(cell.read(sdp(o(100, 101)), sdp(o(9, 10)))).toBe(false)
+  })
+
+  it("a session opened in another form is refused: sess-version equal to sess-id on one side only", () => {
+    expect(ledger(nothingDriven).read(sdp(o(1000, 1000)), sdp(o(7, 1)))).toBe(false)
+    expect(ledger(nothingDriven).read(sdp(o(1000, 1)), sdp(o(7, 7)))).toBe(false)
+    expect(ledger(nothingDriven).read(sdp(o(1000, 1)), sdp(o(7, 1)))).toBe(true)
   })
 })

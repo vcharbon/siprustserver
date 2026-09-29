@@ -119,3 +119,20 @@ export const SDP_SIGNATURE_PREFIX = "body:sdp:"
 /** The session-description rows no lane rule answers for, in record order. */
 export const failingSdp = (records: ReadonlyArray<ConfrontationRecord>): ReadonlyArray<ConfrontationRecord> =>
   records.filter((r) => r.signature.startsWith(SDP_SIGNATURE_PREFIX) && !recordPasses(r))
+
+/**
+ * The records ordered by the flow step each was observed at, `steps` being
+ * the document's step ids in flow order; a record at a step `steps` does not
+ * name, or at none, sorts after every placed one. Stable: records of one step
+ * keep their order.
+ */
+export const inStepOrder = (
+  records: ReadonlyArray<ConfrontationRecord>,
+  steps: ReadonlyArray<string>
+): ReadonlyArray<ConfrontationRecord> => {
+  const rank = new Map(steps.map((step, at) => [step, at]))
+  const of = (record: ConfrontationRecord): number => rank.get(record.step) ?? Number.MAX_SAFE_INTEGER
+  return records.map((record, at) => ({ record, at }))
+    .sort((a, b) => of(a.record) - of(b.record) || a.at - b.at)
+    .map(({ record }) => record)
+}

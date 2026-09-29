@@ -322,42 +322,56 @@ const headerProbes = (
  * whose only controls are tab, CR and LF), standard base64 on both where
  * either is not.
  *
- * On a verbatim run each leg's `sdp` pairs are read in wire order by one
- * origin {@link Ledger}, over the origins the capture's `send` steps and the
- * run's own sends drove into the endpoint.
+ * On a verbatim run every `sdp` pair of the cell is read by one origin
+ * {@link Ledger} in wire order across the legs, over the origins the capture's
+ * `send` steps and the run's own sends drove into the endpoint, so a session
+ * carried from one leg onto another is held to the same pairing. The probes
+ * are returned leg by leg, as before.
  */
 export const bodyProbes = (
   input: ConfrontInput,
   steps: ReadonlyMap<string, Flow.Step>
 ): ReadonlyArray<ProbeAt> => {
-  const out: Array<ProbeAt> = []
   const media = input.media ?? "rebooked"
   const driven = media === "verbatim" ? drivenOrigins(input) : undefined
-  for (const recording of input.recordings.values()) {
-    const origins = driven === undefined ? undefined : ledger(driven)
-    for (const message of recording) {
-      if (message.dir !== "in" || message.repeat_of !== undefined) continue
-      const step = message.step === undefined ? undefined : steps.get(message.step)
-      if (step === undefined || step.op !== "expect") continue
-      const body = step.msg.body
-      if (body === undefined) continue
-      const scope = scopeOf(message)
-      if (scope === undefined) continue
-      if (Body.isResourceBody(body)) {
-        const mediaType = mediaTypeOf(body["content-type"], message)
-        const received = recordedBody(message)
-        const probes = "fault" in received
-          ? [faultProbe(step.id, mediaType, scope, received.fault)]
-          : bodyProbe(step.id, body, mediaType, scope, expectedBytes(input.resources, body.ref), received.bytes, media, origins)
-        for (const probe of probes) out.push({ step: step.id, probe })
-      } else if (Body.isMultipartBody(body)) {
-        for (const probe of multipartProbes(step.id, body.multipart, scope, input.resources, message, media, origins)) {
-          out.push({ step: step.id, probe })
-        }
-      }
-    }
+  const origins = driven === undefined ? undefined : ledger(driven)
+  const legs = [...input.recordings.values()]
+  const wire = legs
+    .flatMap((recording, leg) => recording.map((message, at) => ({ leg, at, message })))
+    .sort((a, b) => a.message.at_us - b.message.at_us || a.leg - b.leg || a.at - b.at)
+  const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
+  for (const { message } of wire) found.set(message, messageBodyProbes(input, steps, message, media, origins))
+  return legs.flatMap((recording) => recording.flatMap((message) => found.get(message) ?? []))
+}
+
+/** One reception's body probes; none where it answers no `expect` stating a body. */
+const messageBodyProbes = (
+  input: ConfrontInput,
+  steps: ReadonlyMap<string, Flow.Step>,
+  message: Bundle.RecordedMessage,
+  media: Bundle.MediaMode,
+  origins: Ledger | undefined
+): ReadonlyArray<ProbeAt> => {
+  if (message.dir !== "in" || message.repeat_of !== undefined) return []
+  const step = message.step === undefined ? undefined : steps.get(message.step)
+  if (step === undefined || step.op !== "expect") return []
+  const body = step.msg.body
+  if (body === undefined) return []
+  const scope = scopeOf(message)
+  if (scope === undefined) return []
+  if (Body.isResourceBody(body)) {
+    const mediaType = mediaTypeOf(body["content-type"], message)
+    const received = recordedBody(message)
+    const probes = "fault" in received
+      ? [faultProbe(step.id, mediaType, scope, received.fault)]
+      : bodyProbe(step.id, body, mediaType, scope, expectedBytes(input.resources, body.ref), received.bytes, media, origins)
+    return probes.map((probe) => ({ step: step.id, probe }))
   }
-  return out
+  if (Body.isMultipartBody(body)) {
+    return multipartProbes(step.id, body.multipart, scope, input.resources, message, media, origins)
+      .map((probe) => ({ step: step.id, probe }))
+  }
+  return []
 }
 
 /**

@@ -11,12 +11,14 @@
  * An origin is MINTED on a side when no description that side drove into the
  * endpoint carries its identity (username, sess-id, nettype, addrtype,
  * address): the capture's sends for the captured side, the run's own sends for
- * the replayed side. A {@link Ledger} holds one leg's descriptions in wire
- * order and admits a pair only when both origins are minted, differ in the two
- * numbers alone, keep a one-to-one sess-id pairing across the leg (a session
- * the capture keeps, the replay keeps; a session the capture changes, the
- * replay changes), and step sess-version by the same amount since that
- * session's previous description on the leg (RFC 3264 §8).
+ * the replayed side. A {@link Ledger} holds one cell's descriptions in wire
+ * order across its legs and admits a pair only when both origins are minted,
+ * differ in the two numbers alone, keep a one-to-one pairing of origin
+ * identities across the cell (a session the capture keeps, the replay keeps,
+ * on whichever leg; a session the capture changes, the replay changes), open
+ * a session in the same form (sess-version equal to sess-id on both sides or
+ * on neither), and step sess-version by the same amount since that session's
+ * previous description (RFC 3264 §8).
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -68,45 +70,46 @@ export interface Driven {
   readonly replayed: ReadonlySet<string>
 }
 
-/** One leg's origin reading, in wire order. */
+/** One cell's origin reading, in wire order across its legs. */
 export interface Ledger {
   /**
-   * Reads one captured/replayed description pair of the leg and says whether
-   * its origins are a minted origin and its counterpart. Every pair whose
-   * origins parse is recorded, admitted or not, so a later pair is held to
-   * the sessions the leg has already shown.
+   * Reads one captured/replayed description pair and says whether its
+   * origins are a minted origin and its counterpart. Every pair whose origins
+   * parse is recorded, admitted or not, so a later pair is held to the
+   * sessions the cell has already shown.
    */
   readonly read: (captured: string, replayed: string) => boolean
 }
 
-/** A ledger for one leg, over the identities each side drove into the endpoint. */
+/** A ledger for one cell, over the identities each side drove into the endpoint. */
 export const ledger = (driven: Driven): Ledger => {
-  const toReplayed = new Map<bigint, bigint>()
-  const toCaptured = new Map<bigint, bigint>()
-  const lastCaptured = new Map<bigint, bigint>()
-  const lastReplayed = new Map<bigint, bigint>()
+  const toReplayed = new Map<string, string>()
+  const toCaptured = new Map<string, string>()
+  const lastCaptured = new Map<string, bigint>()
+  const lastReplayed = new Map<string, bigint>()
   return {
     read: (capturedText, replayedText) => {
       const a = originOf(capturedText)
       const b = originOf(replayedText)
       if (a === undefined || b === undefined) return false
-      const paired = (toReplayed.get(a.sessId) ?? b.sessId) === b.sessId &&
-        (toCaptured.get(b.sessId) ?? a.sessId) === a.sessId
-      const before = lastCaptured.get(a.sessId)
-      const beforeReplayed = lastReplayed.get(b.sessId)
+      const left = identityOf(a)
+      const right = identityOf(b)
+      const paired = (toReplayed.get(left) ?? right) === right && (toCaptured.get(right) ?? left) === left
+      const before = lastCaptured.get(left)
+      const beforeReplayed = lastReplayed.get(right)
       const stepped = before === undefined || beforeReplayed === undefined
-        ? before === beforeReplayed
+        ? before === beforeReplayed && (a.sessVersion === a.sessId) === (b.sessVersion === b.sessId)
         : a.sessVersion - before === b.sessVersion - beforeReplayed
       const admitted = paired &&
         stepped &&
         a.username === b.username &&
         a.network === b.network &&
-        !driven.captured.has(identityOf(a)) &&
-        !driven.replayed.has(identityOf(b))
-      if (!toReplayed.has(a.sessId)) toReplayed.set(a.sessId, b.sessId)
-      if (!toCaptured.has(b.sessId)) toCaptured.set(b.sessId, a.sessId)
-      lastCaptured.set(a.sessId, a.sessVersion)
-      lastReplayed.set(b.sessId, b.sessVersion)
+        !driven.captured.has(left) &&
+        !driven.replayed.has(right)
+      if (!toReplayed.has(left)) toReplayed.set(left, right)
+      if (!toCaptured.has(right)) toCaptured.set(right, left)
+      lastCaptured.set(left, a.sessVersion)
+      lastReplayed.set(right, b.sessVersion)
       return admitted
     }
   }

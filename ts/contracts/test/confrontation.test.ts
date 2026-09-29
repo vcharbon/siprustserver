@@ -90,6 +90,13 @@ describe("the confrontation record", () => {
     ]
     expect(Confrontation.failingSdp(records)).toEqual([first, second])
   })
+
+  it("orders records by the document's step order, unplaced ones last, stable within a step", () => {
+    const at = (step: string, signature = "s") => ({ ...record, step, signature })
+    const rows = [at("s9"), at(""), at("s2", "first"), at("s12"), at("s2", "second"), at("x")]
+    expect(Confrontation.inStepOrder(rows, ["s2", "s9", "s12"]).map((r) => `${r.step}:${r.signature}`))
+      .toEqual(["s2:first", "s2:second", "s9:s", "s12:s", ":s", "x:s"])
+  })
 })
 
 describe("the classification summary", () => {
