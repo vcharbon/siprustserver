@@ -440,6 +440,65 @@ async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
     assert_eq!(acks, 0, "a delayed-offer b-leg cannot be ACKed by this stack");
 }
 
+/// A route that drops the caller's offer mints the callee's INVITE offerless:
+/// the give-up treats that b-leg as the delayed offer it is (RFC 3264 §4), by
+/// the INVITE that left, not the one that came in — BYE alone, no bare ACK.
+#[tokio::test(start_paused = true)]
+async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
+    use b2bua::decision::test_adapter::route_to;
+    use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
+
+    let h = Harness::new("b2bua-unacked-2xx-dropped-offer-give-up");
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs, so neither her answer nor the callee's \
+             2xx to the offerless INVITE the route minted — whose ACK owes an answer only \
+             she could supply — is acknowledged; that silence is the give-up under test",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to("127.0.0.1", 5073);
+                r.update_body = BodyUpdate::Drop;
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.ack_timeout_sec = ACK_TIMEOUT_SEC)
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(uas.request().body().is_empty(), "the route dropped the offer");
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 0, "the callee's INVITE carried no offer: no bare ACK answers his");
+}
+
 /// The mirrored face: the CALLEE re-INVITEs with an offer, the caller answers,
 /// and the callee never ACKs. The 2xx relayed to him ladders on his face and
 /// gives up; the caller's 2xx is one this stack took as UAC on a re-INVITE it

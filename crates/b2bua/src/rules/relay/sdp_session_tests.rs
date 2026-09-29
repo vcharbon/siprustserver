@@ -516,3 +516,23 @@ fn a_relayed_description_does_not_leak_into_another_fork() {
         "f2 only ever saw the opening INVITE",
     );
 }
+
+/// On a confirmed dialog a stack description is restated whatever version it
+/// states: one at the next version but with fewer streams than the dialog
+/// holds keeps the missing slot rejected in place (RFC 3264 §8), instead of
+/// leaving as written.
+#[test]
+fn a_confirmed_dialog_restates_a_stack_description_at_the_next_version() {
+    let mut c = call();
+    let two = "v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\nm=video 10002 RTP/AVP 96\r\n";
+    send(&mut c, "b-1", Author::Leg("a"), Carried::Opening, two);
+    let out = send(
+        &mut c,
+        "b-1",
+        Author::Stack,
+        Carried::InDialog,
+        &sdp("alice 1 2 IN IP4 192.0.2.1", 10000),
+    );
+    assert_eq!(o_line(&out), "o=alice 1 2 IN IP4 192.0.2.1");
+    assert!(out.ends_with("m=audio 10000 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n"), "{out}");
+}

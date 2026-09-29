@@ -62,7 +62,10 @@ pub use sdp::{
     SdpValidationError,
 };
 /// Answers composed on a party's behalf out of its own earlier description (RFC 3264 §6).
-pub use sdp_answer::{answer_direction, answer_from_own, reject_offer, FormatPreference};
+pub use sdp_answer::{
+    answer_direction, answer_from_own, answer_from_own_agreeing, has_live_stream, reject_offer,
+    FormatPreference,
+};
 pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{

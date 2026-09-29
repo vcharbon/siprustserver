@@ -352,3 +352,79 @@ async fn the_answer_speaks_for_the_offer_the_callee_was_sent() {
     hang_up(&mut dialog, &bob, &b2bua).await;
     let _ = h.finish().await;
 }
+
+/// SDES (RFC 4568): the two answers the B2BUA composes for one early
+/// re-offer agree on the suite, so both ends run one SRTP context — the
+/// re-offerer's first suite the caller also offered, each answer under the
+/// tag of the offer it answers.
+#[tokio::test]
+async fn both_answers_agree_on_the_sdes_suite() {
+    const SAVP_OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/SAVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_32 inline:QUxJQ0VZQUxJQ0VZQUxJQ0VZQUxJQ0VZQUxJQ0VZ\r\na=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:QUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VY\r\n";
+    const SAVP_ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/SAVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_32 inline:Qk9CWUJPQllCT0JZQk9CWUJPQllCT0JZQk9CWUJP\r\n";
+    let h = Harness::with_transit_delay("fake-prack-answer-sdes", 0);
+    let alice = h.agent("alice", "127.0.0.1:5871").await;
+    let bob = h.agent("bob", "127.0.0.1:5872").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5873", 5872).await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(SAVP_OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(SAVP_ANSWER)
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    let update = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/SAVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:Qk9CWEJPQlhCT0JYQk9CWEJPQlhCT0JYQk9CWEJP\r\na=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:Qk9CWTJCT0JZMkJPQlkyQk9CWTJCT0JZMkJPQlky\r\n";
+    let to_bob = reoffer(&mut uas.dialog(), update).await;
+    assert!(
+        to_bob.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VY\r\n"),
+        "bob's first suite, alice's key for it, under bob's tag: {to_bob}",
+    );
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    let to_alice = String::from_utf8_lossy(ok.body()).into_owned();
+    assert!(
+        to_alice.contains("a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:Qk9CWEJPQlhCT0JYQk9CWEJPQlhCT0JYQk9CWEJP\r\n"),
+        "the same suite, bob's key for it, under alice's tag: {to_alice}",
+    );
+    assert_eq!(to_alice.matches("a=crypto:").count(), 1, "{to_alice}");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}
+
+/// A refused re-offer states nothing: the callee's next one is answered as
+/// the next version of the caller's session after the INVITE.
+#[tokio::test]
+async fn a_reoffer_after_a_refused_one_is_answered_at_the_next_version() {
+    let h = Harness::with_transit_delay("fake-prack-answer-after-refusal", 0);
+    let alice = h.agent("alice", "127.0.0.1:5881").await;
+    let bob = h.agent("bob", "127.0.0.1:5882").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5883", 5882).await;
+    let (mut call, mut uas) = ringing(&alice, &bob, &b2bua).await;
+
+    let mut bob_dialog = uas.dialog();
+    let opus = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\n";
+    let mut refused = bob_dialog.request(InDialogMethod::Update, Some(opus)).await;
+    refused.expect(488).await;
+    let pcma = "v=0\r\no=bob 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    assert_eq!(
+        reoffer(&mut bob_dialog, pcma).await,
+        "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+    );
+    uas.respond(200, "OK").await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}

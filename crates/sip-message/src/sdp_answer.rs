@@ -6,7 +6,8 @@
 //! live stream reduced to ONE format both ends listed (the one ranked first by
 //! the side the caller names) plus a common `telephone-event` on audio, the
 //! direction both ends allow. [`reject_offer`] answers an offer rejecting every
-//! stream.
+//! stream; [`has_live_stream`] tells an answer that accepts something from one
+//! that rejects every stream.
 //!
 //! Every value is read through [`crate::sdp_doc`]; the own description's lines
 //! are carried byte for byte except the ones an answer must change. Pure and
@@ -37,19 +38,25 @@ pub enum FormatPreference {
 /// - an offered stream with port 0 is answered with its own m-line;
 /// - one `own` does not describe at that rank, or describes with another media
 ///   type or transport profile, or with no format in common, or offers SDES
-///   keys (RFC 4568) for no suite `own` holds, is answered rejected: its
-///   m-line with port 0;
+///   keys (RFC 4568) for no suite `own` holds, or either side sets up over
+///   DTLS (out of scope: the handshake role and certificate are the party's
+///   own), is answered rejected: its m-line with port 0;
 /// - one `own` describes with port 0 is answered with `own`'s m-line;
 /// - otherwise `own`'s media section answers it with `own`'s port and
 ///   transport and the formats [`FormatPreference`] keeps, under the offer's
 ///   numbers (RFC 3264 §6.1); `own`'s per-format attributes (`rtpmap`, `fmtp`,
 ///   `rtcp-fb`) for those formats only, renumbered, an `rtpmap` spelled as the
-///   offer spells it; ONE `crypto` line, `own`'s key for the first offered
-///   suite it holds under the offer's tag, where the offer carries SDES; its
-///   other lines as written (ICE and `mid` attributes included: the answer
+///   offer spells it, and the offer's `rtpmap` for a dynamic number `own`
+///   binds none for; ONE `crypto` line, `own`'s key for the first suite both
+///   hold in the [`FormatPreference`] order, under the offer's tag, where the
+///   offer carries SDES; the offer's `mid` in place of `own`'s (RFC 5888
+///   §9.2); its other lines as written (ICE attributes included: the answer
 ///   speaks for `own`'s transport); and the direction [`answer_direction`]
 ///   gives, written in place of `own`'s media-level one or added where it
 ///   differs from what the stream inherits.
+///
+/// `own`'s session-level `group` lines are left out: they group `own`'s
+/// streams, not the offer's (RFC 5888 §9.2).
 ///
 /// A static format (below 96) is common by number; a dynamic one by encoding
 /// (name, clock rate, channels, RFC 4566 §6), whatever number each side gives
@@ -64,6 +71,30 @@ pub fn answer_from_own(
     preference: FormatPreference,
     origin: Option<&str>,
 ) -> Option<Vec<u8>> {
+    answer_from_own_agreeing(offer, own, preference, origin, None)
+}
+
+/// [`answer_from_own`], each stream's SDES suite the one `agreed` (the other
+/// answer of the same exchange, one m-line per stream of the same rank) keeps
+/// there, so both ends of a back-to-back exchange run one SRTP context; a
+/// stream whose `agreed` counterpart keeps no suite chooses as
+/// [`answer_from_own`] does.
+pub fn answer_from_own_agreeing(
+    offer: &[u8],
+    own: &[u8],
+    preference: FormatPreference,
+    origin: Option<&str>,
+    agreed: Option<&[u8]>,
+) -> Option<Vec<u8>> {
+    let agreed_suites: Vec<Option<String>> = agreed
+        .and_then(parse_sdp_body)
+        .map(|d| {
+            d.media
+                .iter()
+                .map(|m| extract_cryptos(m).into_iter().next().map(|(_, s, _)| s))
+                .collect()
+        })
+        .unwrap_or_default();
     let offer_doc = parse_sdp_body(offer)?;
     let own_doc = parse_sdp_body(own)?;
     let offer_text = String::from_utf8_lossy(offer);
@@ -73,7 +104,8 @@ pub fn answer_from_own(
     let eol = if own_text.contains("\r\n") { "\r\n" } else { "\n" };
 
     let mut out = String::new();
-    for line in lines(owned.session) {
+    // An own `group` answers nothing the offer grouped (RFC 5888 §9.2).
+    for line in lines(owned.session).filter(|l| !l.starts_with("a=group:")) {
         match (line.starts_with("o="), origin) {
             (true, Some(o)) => push_line(&mut out, &format!("o={o}"), eol),
             _ => push_line(&mut out, line, eol),
@@ -107,9 +139,12 @@ pub fn answer_from_own(
             reject(&mut out, owned.media[i].value().to_string());
             continue;
         }
-        let answerable = mine.transport == stream.transport;
+        let answerable = mine.transport == stream.transport
+            && !over_dtls(stream, offered.session)
+            && !over_dtls(mine, owned.session);
         let kept = answerable.then(|| kept_formats(stream, mine, preference)).flatten();
-        let crypto = sdes_answer(stream, mine);
+        let required = agreed_suites.get(i).cloned().flatten();
+        let crypto = sdes_answer(stream, mine, preference, required.as_deref());
         let (Some(kept), Some(crypto)) = (kept, crypto) else {
             reject(&mut out, with_port_zero(offered_value));
             continue;
@@ -123,6 +158,12 @@ pub fn answer_from_own(
         answered_section(&mut out, owned.media[i].text, &answer, eol);
     }
     Some(out.into_bytes())
+}
+
+/// Whether `sdp` is a session description with a stream not rejected (a
+/// non-zero port, RFC 3264 §6).
+pub fn has_live_stream(sdp: &[u8]) -> bool {
+    parse_sdp_body(sdp).is_some_and(|d| d.media.iter().any(|m| m.port.is_some_and(|p| p != 0)))
 }
 
 /// The direction an answerer states for a stream it can use `own`-wise, offered
@@ -266,19 +307,43 @@ fn kept_formats(
 }
 
 /// The one `crypto` line answering the SDES keys `offered` carries (RFC 4568
-/// §5.1.2): `own`'s key for the first offered suite it holds, under the
-/// offer's tag. `Some(None)` where the offer carries no SDES; `None` where it
-/// does and `own` holds none of its suites.
-fn sdes_answer(offered: &MediaLine, own: &MediaLine) -> Option<Option<String>> {
+/// §5.1.2): `own`'s key for the first suite both hold, in the order
+/// `preference` names (`required` alone where given), under the offer's tag.
+/// `Some(None)` where the offer carries no SDES; `None` where it does and no
+/// suite qualifies.
+fn sdes_answer(
+    offered: &MediaLine,
+    own: &MediaLine,
+    preference: FormatPreference,
+    required: Option<&str>,
+) -> Option<Option<String>> {
     let offered_keys = extract_cryptos(offered);
     if offered_keys.is_empty() {
         return Some(None);
     }
     let own_keys = extract_cryptos(own);
-    offered_keys.iter().find_map(|(tag, suite, _)| {
-        let (_, _, rest) = own_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
-        Some(Some(format!("a=crypto:{tag} {suite} {rest}")))
-    })
+    let ranked: Vec<&String> = match preference {
+        FormatPreference::Offerer => offered_keys.iter().map(|(_, s, _)| s).collect(),
+        FormatPreference::Answerer => own_keys.iter().map(|(_, s, _)| s).collect(),
+    };
+    ranked.into_iter().filter(|s| required.is_none_or(|r| s.eq_ignore_ascii_case(r))).find_map(
+        |suite| {
+            let (tag, suite, _) =
+                offered_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
+            let (_, _, rest) = own_keys.iter().find(|(_, s, _)| s.eq_ignore_ascii_case(suite))?;
+            Some(Some(format!("a=crypto:{tag} {suite} {rest}")))
+        },
+    )
+}
+
+/// Whether `media` (under the `session` lines of its description) is set up
+/// over DTLS (RFC 5763/5764): a TLS transport, or a `setup` / `fingerprint`
+/// attribute. The handshake role and certificate are the party's own, so no
+/// answer on its behalf can state them: such a stream is rejected.
+fn over_dtls(media: &MediaLine, session: &str) -> bool {
+    media.transport.to_ascii_uppercase().contains("TLS")
+        || media.attributes.iter().any(|a| a.starts_with("setup:") || a.starts_with("fingerprint:"))
+        || lines(session).any(|l| l.starts_with("a=setup:") || l.starts_with("a=fingerprint:"))
 }
 
 /// What one answered stream states.
@@ -318,7 +383,9 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
         eol,
     );
     let offered_maps = extract_rtpmaps(answer.stream);
-    let (mut dir_written, mut crypto_written) = (false, false);
+    let offered_mid = answer.stream.attributes.iter().find_map(|a| a.strip_prefix("mid:"));
+    let (mut dir_written, mut crypto_written, mut mid_written) = (false, false, false);
+    let mut mapped: Vec<&str> = Vec::new();
     for line in section {
         let attr = line.strip_prefix("a=");
         let bound = attr.and_then(|a| {
@@ -333,11 +400,21 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
                 continue;
             }
             let Some(kept) = answer.kept.iter().find(|k| k.own == format) else { continue };
+            if name == "rtpmap:" {
+                mapped.push(&kept.offered);
+            }
             let tail = match offered_maps.iter().find(|(pt, _)| *pt == kept.offered) {
                 Some((_, enc)) if name == "rtpmap:" => enc.as_str(),
                 _ => tail,
             };
             push_line(out, format!("a={name}{} {tail}", kept.offered).trim_end(), eol);
+            continue;
+        }
+        if attr.is_some_and(|a| a.starts_with("mid:")) {
+            if let (Some(mid), false) = (offered_mid, mid_written) {
+                push_line(out, &format!("a=mid:{mid}"), eol);
+            }
+            mid_written = true;
             continue;
         }
         if attr.is_some_and(|a| a.starts_with("crypto:")) {
@@ -354,6 +431,17 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
                 dir_written = true;
             }
             None => push_line(out, line, eol),
+        }
+    }
+    if let (Some(mid), false) = (offered_mid, mid_written) {
+        push_line(out, &format!("a=mid:{mid}"), eol);
+    }
+    for kept in answer.kept.iter().filter(|k| is_dynamic(&k.offered)) {
+        if mapped.contains(&kept.offered.as_str()) {
+            continue;
+        }
+        if let Some((_, enc)) = offered_maps.iter().find(|(pt, _)| *pt == kept.offered) {
+            push_line(out, &format!("a=rtpmap:{} {enc}", kept.offered), eol);
         }
     }
     if !dir_written && answer.dir != answer.inherited {

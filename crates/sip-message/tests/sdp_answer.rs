@@ -370,3 +370,59 @@ fn amr_octet_alignment_must_agree() {
         "m=audio 4000 RTP/AVP 98\r\na=rtpmap:98 AMR/8000\r\na=fmtp:98 octet-align=1\r\n"
     );
 }
+
+/// RFC 5888 §9.2: each answered m-line carries the offer's `mid`; the own
+/// description's session-level `group` is not an answer to the offer's and is
+/// not copied.
+#[test]
+fn the_answer_takes_the_offers_mid_and_states_no_group_of_its_own() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 4000 RTP/AVP 8\r\na=mid:0\r\na=ptime:20\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 8\r\na=mid:voice\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        answer,
+        "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\na=mid:voice\r\na=ptime:20\r\n",
+    );
+    let no_mid = offer.replace("a=mid:voice\r\n", "");
+    let answer =
+        text(answer_from_own(no_mid.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert!(stream_of(&answer) == "m=audio 4000 RTP/AVP 8\r\na=ptime:20\r\n", "{answer}");
+    let own_no_mid = own.replace("a=mid:0\r\n", "");
+    let answer = text(answer_from_own(
+        offer.as_bytes(),
+        own_no_mid.as_bytes(),
+        FormatPreference::Offerer,
+        None,
+    ));
+    assert!(
+        stream_of(&answer) == "m=audio 4000 RTP/AVP 8\r\na=ptime:20\r\na=mid:voice\r\n",
+        "{answer}"
+    );
+}
+
+/// DTLS-SRTP (RFC 5763) is out of scope: the handshake role and fingerprint
+/// are the party's own, so a stream either side sets up over DTLS is rejected.
+#[test]
+fn a_dtls_stream_is_rejected() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 UDP/TLS/RTP/SAVP 8\r\na=setup:actpass\r\na=fingerprint:sha-256 AB:CD\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 UDP/TLS/RTP/SAVP 8\r\na=setup:actpass\r\na=fingerprint:sha-256 EF:01\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 0 UDP/TLS/RTP/SAVP 8\r\n");
+}
+
+/// A kept dynamic number the own description binds with no rtpmap (a static
+/// format under the offer's dynamic number) carries the offer's rtpmap (RFC
+/// 4566 §6: a dynamic payload type is always mapped).
+#[test]
+fn a_dynamic_number_always_carries_its_rtpmap() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=ptime:20\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 97\r\na=rtpmap:97 PCMU/8000\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 4000 RTP/AVP 97\r\na=ptime:20\r\na=rtpmap:97 PCMU/8000\r\n"
+    );
+}

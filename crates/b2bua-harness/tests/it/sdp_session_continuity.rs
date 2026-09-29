@@ -431,3 +431,70 @@ async fn a_replaced_initial_offer_opens_a_session_of_the_stacks_own() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let _ = h.finish().await;
 }
+
+/// What crosses an early dialog stays that dialog's state through its
+/// confirmation: the caller's answer to the callee's early UPDATE, relayed
+/// back into the dialog it came from, is what the callee holds once that
+/// dialog confirms. A later description of hers under another session id is
+/// restated one version above THAT answer (RFC 3264 §8), not above her INVITE.
+#[tokio::test]
+async fn an_answer_relayed_into_an_early_dialog_is_what_it_confirms_with() {
+    let h = Harness::with_transit_delay("sdp-session-early-relayed-answer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5691").await;
+    let bob = h.agent("bob", "127.0.0.1:5692").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5692).start(&h, "b2bua", "127.0.0.1:5693").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(ALICE_OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(BOB_ANSWER)
+        .await;
+    let p183 = call.expect(183).await;
+    let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack.expect(200).await;
+
+    let mut bob_dialog = uas.dialog();
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(BOB_REOFFER)).await;
+    let mut at_alice = alice.receive("UPDATE").await;
+    at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
+    let answered = update.expect(200).await;
+    assert_eq!(String::from_utf8_lossy(answered.body()), ALICE_REANSWER, "relayed as written");
+
+    // The INVITE's offer was answered in the reliable 183 (RFC 3262 §5).
+    uas.respond(200, "OK").await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // Her own description under another session id: restated above what bob holds.
+    let moved = "v=0\r\no=alice 909 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    let mut reinv = dialog.reinvite(Some(moved)).await;
+    let cseq = dialog.local_cseq();
+    let mut at_bob = bob.receive("INVITE").await;
+    assert_eq!(
+        body_of(&at_bob),
+        continued(moved, "alice 101 3 IN IP4 127.0.0.1"),
+        "one above the answer bob holds in the dialog that confirmed",
+    );
+    at_bob.respond(200, "OK").with_sdp(&BOB_REOFFER.replace("202 2", "202 3")).await;
+    reinv.expect(200).await;
+    dialog.ack_for(cseq, None).await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
