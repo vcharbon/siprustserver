@@ -337,7 +337,7 @@ fn answered_section(out: &mut String, text: &str, answer: &Answered<'_>, eol: &s
                 Some((_, enc)) if name == "rtpmap:" => enc.as_str(),
                 _ => tail,
             };
-            push_line(out, &format!("a={name}{} {tail}", kept.offered).trim_end().to_string(), eol);
+            push_line(out, format!("a={name}{} {tail}", kept.offered).trim_end(), eol);
             continue;
         }
         if attr.is_some_and(|a| a.starts_with("crypto:")) {
