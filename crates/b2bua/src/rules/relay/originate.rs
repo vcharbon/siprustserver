@@ -188,6 +188,13 @@ fn narrow_token_set<K: header::kind::TokenKind>(
     }
 }
 
+/// The INVITE that dialled `leg`, as it left the stack (after every edit a
+/// route applied), re-parsed from the leg's initial client-transaction handle.
+/// `None` on the originator's leg, which the stack did not dial.
+pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
+    super::ack::parse_request(&leg.pending_invite_txn.as_ref()?.original_invite)
+}
+
 /// Clamp a decision-supplied ring deadline (s) for an originated leg under the
 /// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_sec`),
 /// with the per-call `debug!` note on a clamp — the ONE clamp site both

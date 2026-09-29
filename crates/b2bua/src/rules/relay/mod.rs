@@ -43,8 +43,8 @@ mod originate_tests;
 pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::ack_b_leg;
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
-pub(crate) use originate::clamp_no_answer;
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
+pub(crate) use originate::{clamp_no_answer, dialling_invite};
 pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};
 
 // One session per dialog, whoever authored the description (RFC 3264 §8).

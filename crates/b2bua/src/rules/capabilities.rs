@@ -38,7 +38,7 @@ use call::features::{AdvertisedCapabilities, FeatureActivations, RelayFirst18xSt
 use call::{Call, LegKind};
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{Allow, HeaderName, Supported};
-use sip_message::SipHeader;
+use sip_message::{SipHeader, SipRequest};
 
 /// The face of the back-to-back UA an advertisement is emitted on. The two are
 /// declared independently, so a bridge between asymmetric domains can narrow
@@ -115,10 +115,9 @@ pub fn declared(call: &Call, face: Face) -> Option<CapabilitySet> {
     declared_in(call.features.as_ref(), face)
 }
 
-/// The set advertised on `face` for a message the B2BUA mints with NO peer
-/// advertisement to relay — a re-INVITE it originates, a 2xx it answers on a
-/// leg of its own: the declared one, else no line at all. The captured
-/// platform states nothing on these, and neither does this stack.
+/// The set the B2BUA states of its own on `face`, beside whatever peer
+/// advertisement a message carries through: the declared one, else no line
+/// at all.
 pub fn advertised(call: &Call, face: Face) -> CapabilitySet {
     declared(call, face).unwrap_or_else(CapabilitySet::silent)
 }
@@ -126,6 +125,26 @@ pub fn advertised(call: &Call, face: Face) -> CapabilitySet {
 /// [`advertised`] on whichever face `leg_id` sits on.
 pub fn for_leg(call: &Call, leg_id: &str) -> CapabilitySet {
     advertised(call, Face::of_leg(leg_id))
+}
+
+/// The set a re-INVITE the B2BUA originates on `leg_id` states: `Allow` and
+/// `Supported` as [`for_leg`]; `Accept` (RFC 3261 §20.1) is the one the INVITE
+/// that dialled the leg stated (`dialling_invite`), so a peer the stack dialled
+/// reads one statement of acceptable bodies over the dialog's life. Toward the
+/// originator, and on a dialled leg whose INVITE stated none, no `Accept`.
+pub fn for_reinvite(
+    call: &Call,
+    leg_id: &str,
+    dialling_invite: Option<&SipRequest>,
+) -> CapabilitySet {
+    let own = for_leg(call, leg_id);
+    let accept = match Face::of_leg(leg_id) {
+        Face::Originator => None,
+        Face::Originated => dialling_invite.and_then(|invite| {
+            CapabilitySet::relayed(invite.headers()).accept().map(<[_]>::to_vec)
+        }),
+    };
+    CapabilitySet::stating(own.allow().cloned(), own.supported().cloned(), accept)
 }
 
 /// The set advertised on `face` for a message that carries the peer's own

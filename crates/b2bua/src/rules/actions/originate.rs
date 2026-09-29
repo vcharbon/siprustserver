@@ -218,7 +218,9 @@ impl ActionExecutor<'_> {
     }
 
     /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer plus
-    /// `add_headers` (Allow/Supported). CSeq = dialog.localCSeq + 1. Used by
+    /// `add_headers` (Allow/Supported), the leg's capability set
+    /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
+    /// CSeq = dialog.localCSeq + 1. Used by
     /// `promote18xPemTo200` to resync Alice when bob's final SDP differs from the
     /// early-media SDP promoted into the synthetic 200 OK. The response comes back
     /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
@@ -280,9 +282,11 @@ impl ActionExecutor<'_> {
             ),
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
-            // A re-INVITE this stack originates states only a DECLARED set;
-            // the captured platform advertises nothing on its own re-INVITEs.
-            capabilities: Some(capabilities::for_leg(call, leg_id)),
+            capabilities: Some(capabilities::for_reinvite(
+                call,
+                leg_id,
+                relay::dialling_invite(leg_at(call, idx)).as_ref(),
+            )),
             ..Default::default()
         };
         let res =

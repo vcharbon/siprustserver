@@ -114,7 +114,7 @@ pub(crate) fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
 }
 
 /// A request re-parsed from the bytes a client-transaction handle caches it as.
-fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
+pub(super) fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
     use sip_message::SipParser;
     match sip_message::parser::custom::CustomParser::new().parse(bytes).ok()? {
         sip_message::SipMessage::Request(r) => Some(r),

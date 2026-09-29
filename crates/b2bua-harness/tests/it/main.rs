@@ -89,6 +89,7 @@ mod refer_reject;
 mod refer_timers;
 mod refer_transparent_relay;
 mod reinvite;
+mod reinvite_accept;
 mod reinvite_cancel;
 mod release_event;
 mod reroute_limiter_holds;
