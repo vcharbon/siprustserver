@@ -63,8 +63,8 @@ pub use sdp::{
 };
 /// Answers composed on a party's behalf out of its own earlier description (RFC 3264 §6).
 pub use sdp_answer::{
-    answer_direction, answer_from_own, answer_from_own_agreeing, has_live_stream, reject_offer,
-    FormatPreference,
+    answer_direction, answer_from_own, answer_from_own_agreeing, answer_reoffer_both_ways,
+    has_live_stream, reject_offer, BothWays, FormatPreference,
 };
 pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.

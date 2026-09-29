@@ -492,3 +492,50 @@ fn a_rejected_stream_keeps_the_offers_mid() {
         "m=audio 0 RTP/AVP 0\r\na=mid:1\r\nm=video 0 RTP/AVP 31\r\na=mid:2\r\n"
     );
 }
+
+/// An early re-offer answered both ways: the re-offerer out of what it was
+/// sent, the first offerer out of the re-offer, the two agreeing on the
+/// streams they accept.
+#[test]
+fn a_reoffer_answered_both_ways() {
+    let original = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8 0\r\n";
+    let reoffer = "v=0\r\no=b 1 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0 8\r\n";
+    let both = sip_message::answer_reoffer_both_ways(
+        reoffer.as_bytes(),
+        original.as_bytes(),
+        original.as_bytes(),
+        "a 1 2 IN IP4 192.0.2.1",
+    )
+    .expect("answerable");
+    assert_eq!(stream_of(&text(Some(both.to_reofferer))), "m=audio 4000 RTP/AVP 0\r\n");
+    assert_eq!(stream_of(&text(Some(both.to_offerer))), "m=audio 5000 RTP/AVP 0\r\n");
+}
+
+/// The re-offerer was sent another offer than the first offerer's: its
+/// re-offer suits what it was sent, not the first offerer (keys on her side
+/// only). Both answers accept the same streams — none — so the re-offer is
+/// not answerable and is refused.
+#[test]
+fn a_reoffer_both_answers_cannot_accept_is_refused() {
+    let original = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAA\r\n";
+    let sent = "v=0\r\no=m 5 1 IN IP4 192.0.2.5\r\ns=-\r\nc=IN IP4 192.0.2.5\r\nt=0 0\r\nm=audio 6000 RTP/AVP 8\r\n";
+    let reoffer = "v=0\r\no=b 1 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 8\r\n";
+    let both = sip_message::answer_reoffer_both_ways(
+        reoffer.as_bytes(),
+        sent.as_bytes(),
+        original.as_bytes(),
+        "m 5 2 IN IP4 192.0.2.5",
+    );
+    assert!(both.is_none(), "{:?}", both.map(|b| text(Some(b.to_reofferer))));
+}
+
+/// Connection-oriented media (RFC 4145 / RFC 4975) is the party's own to set
+/// up: a TCP transport is rejected, with or without a `setup` attribute.
+#[test]
+fn a_tcp_stream_is_rejected() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 TCP/RTP/AVP 8\r\nm=message 4002 TCP/MSRP *\r\na=path:msrp://192.0.2.1:4002/a;tcp\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 TCP/RTP/AVP 8\r\nm=message 5002 TCP/MSRP *\r\na=path:msrp://192.0.2.2:5002/b;tcp\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 0 TCP/RTP/AVP 8\r\nm=message 0 TCP/MSRP *\r\n");
+}

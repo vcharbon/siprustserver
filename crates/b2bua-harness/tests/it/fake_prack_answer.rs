@@ -481,10 +481,10 @@ async fn keys_on_the_callers_side_only_refuse_the_reoffer() {
     let _ = h.finish().await;
 }
 
-/// Two streams, keys on bob's audio only: both answers reject the audio and
-/// accept the video, so both ends run the same stream set.
+/// Two streams, keys on bob's audio only (symmetric SDES): both answers reject
+/// the audio and accept the video, so both ends run the same stream set.
 #[tokio::test]
-async fn both_answers_accept_the_same_streams() {
+async fn keys_on_the_callees_stream_only_reject_it_in_both_answers() {
     const AV: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
     const AV_ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
     let h = Harness::with_transit_delay("fake-prack-answer-same-streams", 0);
@@ -523,6 +523,49 @@ async fn a_bundled_reoffer_is_refused() {
 
     let bundled = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\na=group:BUNDLE a\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=mid:a\r\n";
     let mut update = uas.dialog().request(InDialogMethod::Update, Some(bundled)).await;
+    update.expect(488).await;
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert_eq!(String::from_utf8_lossy(ok.body()), ANSWER, "the 183's answer stays in force");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}
+
+/// The callee was sent another offer than the caller's (a route replaced
+/// it): the caller keyed her audio by SDES, the callee's copy and his
+/// re-offer are plain. His re-offer is acceptable against what he was sent,
+/// but her side cannot take it (keys on one side only), and both answers
+/// accept the same streams: none, so the re-offer is refused and the 183's
+/// exchange stands.
+#[tokio::test]
+async fn a_stream_the_callers_answer_rejects_is_rejected_in_the_callees() {
+    use b2bua::decision::test_adapter::route_to_with_18x;
+    use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
+    use std::sync::Arc;
+
+    const KEYED: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VY\r\n";
+    const SENT: &str = "v=0\r\no=media 5 1 IN IP4 192.0.2.50\r\ns=-\r\nc=IN IP4 192.0.2.50\r\nt=0 0\r\nm=audio 11000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    let h = Harness::with_transit_delay("fake-prack-answer-replaced-keyed", 0);
+    let alice = h.agent("alice", "127.0.0.1:5911").await;
+    let bob = h.agent("bob", "127.0.0.1:5912").await;
+    let b2bua = B2buaSut::builder(Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to_with_18x("127.0.0.1", 5912, RelayFirst18xStrategy::FakePrack);
+                r.update_body = BodyUpdate::Replace(SENT.into());
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    ))
+    .start(&h, "b2bua", "127.0.0.1:5913")
+    .await;
+
+    let (mut call, mut uas) = ringing_with(&alice, &bob, &b2bua, KEYED, ANSWER).await;
+    assert_eq!(String::from_utf8_lossy(uas.request().body()), SENT);
+    let plain = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    let mut update = uas.dialog().request(InDialogMethod::Update, Some(plain)).await;
     update.expect(488).await;
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;

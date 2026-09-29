@@ -43,9 +43,9 @@ pub enum FormatPreference {
 ///   type or transport profile, or with no format in common, or offers SDES
 ///   keys (RFC 4568) with no suite in common — keys on one side only included
 ///   —, or either side sets up a connection of its own (DTLS, RFC 5763, or
-///   comedia, RFC 4145: out of scope, the role and certificate are the
-///   party's own), is answered rejected: its m-line with port 0 and the
-///   offer's `mid`;
+///   connection-oriented media over TCP, RFC 4145 / RFC 4975: out of scope,
+///   the role and certificate are the party's own), is answered rejected: its
+///   m-line with port 0 and the offer's `mid`;
 /// - one `own` describes with port 0 is answered with `own`'s m-line;
 /// - otherwise `own`'s media section answers it with `own`'s port and
 ///   transport and the formats [`FormatPreference`] keeps, under the offer's
@@ -150,8 +150,8 @@ pub fn answer_from_own_agreeing(
             continue;
         }
         let answerable = mine.transport == stream.transport
-            && !over_dtls(stream, offered.session)
-            && !over_dtls(mine, owned.session);
+            && !sets_up_own_connection(stream, offered.session)
+            && !sets_up_own_connection(mine, owned.session);
         let kept = answerable.then(|| kept_formats(stream, mine, preference)).flatten();
         let required =
             agreed.and_then(|m| extract_cryptos(m).into_iter().next()).map(|(_, s, _)| s);
@@ -169,6 +169,52 @@ pub fn answer_from_own_agreeing(
         answered_section(&mut out, owned.media[i].text, &answer, eol);
     }
     Some(out.into_bytes())
+}
+
+/// The two answers a back-to-back UA composes for a re-offer inside an early
+/// dialog it answers on the first offerer's behalf.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BothWays {
+    /// The re-offer answered out of the offer the re-offerer was sent.
+    pub to_reofferer: Vec<u8>,
+    /// The first offerer's own offer answered out of the re-offer.
+    pub to_offerer: Vec<u8>,
+}
+
+/// `reoffer` answered both ways ([`BothWays`]), or `None` where it cannot be
+/// answered and the re-offerer is refused (RFC 3311 §5.2): either answer
+/// cannot be built ([`answer_from_own`]), or no stream of a re-offer with a
+/// live one is accepted.
+///
+/// The re-offerer is answered out of `sent`, the offer it was sent, in its
+/// own order of preference, under `origin` (the next version of that
+/// session); the first offerer's `original` offer is answered out of the
+/// re-offer in the re-offerer's order, under the re-offer's origin. Both
+/// answers accept the same streams under one SDES suite: the re-offerer's
+/// answer is built, the first offerer's agrees with it, and the re-offerer's
+/// is built again agreeing with that ([`answer_from_own_agreeing`]).
+pub fn answer_reoffer_both_ways(
+    reoffer: &[u8],
+    sent: &[u8],
+    original: &[u8],
+    origin: &str,
+) -> Option<BothWays> {
+    let to_reofferer = |agreed: Option<&[u8]>| {
+        answer_from_own_agreeing(reoffer, sent, FormatPreference::Offerer, Some(origin), agreed)
+    };
+    let first = to_reofferer(None)?;
+    let to_offerer = answer_from_own_agreeing(
+        original,
+        reoffer,
+        FormatPreference::Answerer,
+        None,
+        Some(&first),
+    )?;
+    let to_reofferer = to_reofferer(Some(&to_offerer))?;
+    if has_live_stream(reoffer) && !has_live_stream(&to_reofferer) {
+        return None;
+    }
+    Some(BothWays { to_reofferer, to_offerer })
 }
 
 /// Whether `sdp` is a session description with a stream not rejected (a
@@ -349,12 +395,15 @@ fn sdes_answer(
 
 /// Whether `media` (under the `session` lines of its description) sets up a
 /// connection of its own: over DTLS (RFC 5763/5764: a TLS transport or a
-/// `fingerprint`), or connection-oriented media (RFC 4145 comedia: a `setup`
-/// attribute, TCP/RTP/AVP, BFCP, MSRP over TCP). The connection role and
+/// `fingerprint`), or connection-oriented media (RFC 4145 comedia, RFC 4975
+/// MSRP: a TCP transport — TCP/RTP/AVP, TCP/BFCP, TCP/MSRP, TCP/TLS/… — or a
+/// `setup` attribute). The connection role and
 /// certificate are the party's own, so no answer on its behalf can state
 /// them: such a stream is rejected.
-fn over_dtls(media: &MediaLine, session: &str) -> bool {
-    media.transport.to_ascii_uppercase().contains("TLS")
+fn sets_up_own_connection(media: &MediaLine, session: &str) -> bool {
+    let transport = media.transport.to_ascii_uppercase();
+    transport.starts_with("TCP")
+        || transport.contains("TLS")
         || media.attributes.iter().any(|a| a.starts_with("setup:") || a.starts_with("fingerprint:"))
         || lines(session).any(|l| l.starts_with("a=setup:") || l.starts_with("a=fingerprint:"))
 }
