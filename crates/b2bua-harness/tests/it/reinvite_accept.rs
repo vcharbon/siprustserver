@@ -31,9 +31,10 @@ struct Observed {
     originator_reinvite: Vec<String>,
 }
 
-/// Alice (stating `caller_accept`) ↔ Bob, Bob REFERs Alice to Charlie, the
+/// Alice (stating `caller_accept`) ↔ Bob, Bob REFERs Alice to Charlie under a
+/// decision stating `update_headers` (a JSON object, `{}` for none), the
 /// transfer completes and Alice hangs up on Charlie.
-async fn transfer(name: &str, caller_accept: Option<&str>) -> Observed {
+async fn transfer(name: &str, caller_accept: Option<&str>, update_headers: &str) -> Observed {
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent("alice", "127.0.0.1:5961").await;
     let bob = h.agent("bob", "127.0.0.1:5971").await;
@@ -60,7 +61,7 @@ async fn transfer(name: &str, caller_accept: Option<&str>) -> Observed {
         .with_header(
             "X-Api-Call",
             &format!(
-                r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+                r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}},"update_headers":{update_headers}}}"#
             ),
         )
         .send()
@@ -99,9 +100,12 @@ async fn transfer(name: &str, caller_accept: Option<&str>) -> Observed {
 /// there; the originator's re-INVITE states none.
 #[tokio::test]
 async fn a_reinvite_on_a_dialled_leg_restates_the_accept_its_invite_stated() {
-    let seen =
-        transfer("reinvite-accept-restated", Some("application/sdp, text/plain;charset=utf-8"))
-            .await;
+    let seen = transfer(
+        "reinvite-accept-restated",
+        Some("application/sdp, text/plain;charset=utf-8"),
+        "{}",
+    )
+    .await;
     assert_eq!(seen.target_invite, ["application/sdp, text/plain;charset=utf-8"]);
     assert_eq!(seen.target_reinvite, seen.target_invite, "the dialled leg's own Accept");
     assert_eq!(seen.originator_reinvite, Vec::<String>::new(), "none toward the originator");
@@ -110,8 +114,23 @@ async fn a_reinvite_on_a_dialled_leg_restates_the_accept_its_invite_stated() {
 /// A dialled leg whose INVITE stated no `Accept` is sent none on a re-INVITE.
 #[tokio::test]
 async fn a_dialled_leg_whose_invite_stated_no_accept_is_sent_none() {
-    let seen = transfer("reinvite-accept-none", None).await;
+    let seen = transfer("reinvite-accept-none", None, "{}").await;
     assert_eq!(seen.target_invite, Vec::<String>::new());
     assert_eq!(seen.target_reinvite, Vec::<String>::new());
+    assert_eq!(seen.originator_reinvite, Vec::<String>::new());
+}
+
+/// The `Accept` restated is the one the dialling INVITE stated as it left, the
+/// decision's header edit applied, not the originator's.
+#[tokio::test]
+async fn a_reinvite_restates_the_dialled_invite_accept_as_edited_not_the_originators() {
+    let seen = transfer(
+        "reinvite-accept-edited",
+        Some("application/sdp, text/plain"),
+        r#"{"Accept":"application/sdp, text/html"}"#,
+    )
+    .await;
+    assert_eq!(seen.target_invite, ["application/sdp, text/html"], "the edit reaches the INVITE");
+    assert_eq!(seen.target_reinvite, ["application/sdp, text/html"], "the edited Accept, restated");
     assert_eq!(seen.originator_reinvite, Vec::<String>::new());
 }

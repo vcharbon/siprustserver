@@ -9,7 +9,10 @@
 //! rule's own `Allow`/`Supported`) beats the call's declared set for that face,
 //! which beats the set RELAYED from the peer (RFC 3261 §16.6, [`relaying`]),
 //! and where nothing was declared and nothing was received the face states
-//! NO line. An advertisement is a claim about the party that makes it: a
+//! NO line. A re-INVITE the stack originates has no peer message to relay
+//! from: on a leg it dialled, its `Accept` restates the one the dialling
+//! INVITE stated as it left, edits applied ([`for_reinvite`]), and toward the
+//! originator it states none. An advertisement is a claim about the party that makes it: a
 //! back-to-back UA relays the peer's verbatim and never widens, narrows or
 //! invents one, and what a peer left unsaid stays unsaid. The one claim the
 //! stack states on its own behalf is an extension it exercises itself: an
