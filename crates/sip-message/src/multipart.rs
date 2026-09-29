@@ -803,7 +803,7 @@ mod tests {
             .with_header("MIME-Version", "1.0")
             .with_header("Content-Length", "5")
             .with_header("Content-ID", "<d@example.invalid>");
-        let one = attach(None, &[], b"", &[stated.clone()]);
+        let one = attach(None, &[], b"", std::slice::from_ref(&stated));
         assert_eq!(one.content_type.as_deref(), Some("application/vnd.example.data"));
         assert_eq!(
             one.headers,
