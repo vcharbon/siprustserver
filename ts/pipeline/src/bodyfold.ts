@@ -10,8 +10,7 @@
  * trimmed. Attributes keep their order and entities stay as written. `sdp`
  * reads both sides as a session description under a mask (`./sdpfold.ts`),
  * the one fold that takes a parameter: the mask is the document's and the
- * run's, never the fold's own, and on a verbatim run it is identity but for
- * the clock an `o=` line's numbers may carry. Widening
+ * run's, never the fold's own, and on a verbatim run it is identity. Widening
  * a fold is how a body oracle goes blind, so what it does not list, it does
  * not do.
  */

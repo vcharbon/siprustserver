@@ -63,8 +63,8 @@ pub fn response_to_a_leg(
         super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
         body,
         content_type.as_ref(),
-        // An opening description (the INVITE's own responses) leaves as written.
-        crate::config::SdpForm::AsWritten,
+        // An opening description (the INVITE's own responses) consults no policy.
+        &crate::config::AsWritten,
     );
     let opts = GenerateResponseOpts {
         to_tag,

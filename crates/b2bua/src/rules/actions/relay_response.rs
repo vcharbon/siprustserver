@@ -281,7 +281,7 @@ impl ActionExecutor<'_> {
                     relay::Carried::answering(&Method::from_wire(&cseq_method), status),
                     relay_body.clone(),
                     relay_content_type.as_ref(),
-                    self.config.sdp_form_after_restatement,
+                    self.config.sdp_form.as_ref(),
                 );
                 let opts = snapshot_response_opts(
                     &pending,

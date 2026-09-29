@@ -56,10 +56,8 @@ describe("foldBody", () => {
       expect(bodiesEqual("sdp", offer(), "", rebooked)).toBe(false)
     })
 
-    it("on a verbatim run is identity: the same bytes and nothing less, the `o=` clock apart", () => {
-      expect(foldBody("sdp", offer(), verbatim)).toBe(offer().replace("o=- 1 2 ", "o=- * 1 "))
-      expect(bodiesEqual("sdp", offer(), offer({ o: "o=- 77 78 IN IP4 192.0.2.10" }), verbatim)).toBe(true)
-      expect(bodiesEqual("sdp", offer(), offer({ o: "o=- 77 79 IN IP4 192.0.2.10" }), verbatim)).toBe(false)
+    it("on a verbatim run is identity: the same bytes and nothing less", () => {
+      expect(foldBody("sdp", offer(), verbatim)).toBe(offer())
       expect(bodiesEqual("sdp", offer(), offer(), verbatim)).toBe(true)
       expect(bodiesEqual("sdp", offer(), offer().replace(/\r\n/g, "\n"), verbatim)).toBe(false)
       expect(bodiesEqual("sdp", offer(), offer({ c: "c=IN IP4 127.0.0.2" }), verbatim)).toBe(false)

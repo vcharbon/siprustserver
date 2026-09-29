@@ -7,9 +7,32 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipStr};
 
 use super::{adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, Author, Carried};
-use crate::config::{B2buaConfig, SdpForm};
+use crate::config::{AsWritten, B2buaConfig, SdpCrossing, SdpForm, SdpFormPolicy};
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, src};
+
+/// A service policy that re-serializes a peer's description once the call has
+/// a restatement: the test stand-in for a deployment's rule.
+#[derive(Debug)]
+struct CanonicalOnceRestated;
+
+impl SdpFormPolicy for CanonicalOnceRestated {
+    fn form(&self, crossing: &SdpCrossing) -> SdpForm {
+        if crossing.by_peer && crossing.call_restated {
+            SdpForm::Canonical
+        } else {
+            SdpForm::AsWritten
+        }
+    }
+}
+
+/// `AsWritten` is the stack's default; `Canonical` names [`CanonicalOnceRestated`].
+fn policy(form: SdpForm) -> &'static dyn SdpFormPolicy {
+    match form {
+        SdpForm::AsWritten => &AsWritten,
+        SdpForm::Canonical => &CanonicalOnceRestated,
+    }
+}
 
 /// A confirmed caller leg `a` and confirmed legs `b-1`, `b-2`, `b-3`.
 fn call() -> Call {
@@ -62,7 +85,7 @@ fn send_in(
         carried,
         body.as_bytes().to_vec(),
         Some(&ct()),
-        form,
+        policy(form),
     );
     String::from_utf8(out).unwrap()
 }
@@ -429,7 +452,7 @@ fn answer_in_f1(c: &mut Call, origin: &str) -> String {
         Carried::InDialog,
         body.as_bytes().to_vec(),
         Some(&ct()),
-        SdpForm::AsWritten,
+        policy(SdpForm::AsWritten),
     );
     String::from_utf8(out).unwrap()
 }
@@ -454,7 +477,7 @@ fn a_stack_description_stating_the_next_version_leaves_as_written() {
         Carried::InDialog,
         sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
         Some(&ct()),
-        SdpForm::AsWritten,
+        policy(SdpForm::AsWritten),
     );
     assert_eq!(o_line(&String::from_utf8(relayed).unwrap()), "o=alice 1 4 IN IP4 192.0.2.1");
 }
@@ -505,7 +528,7 @@ fn a_relayed_early_exchange_survives_confirmation() {
         Carried::InDialog,
         vec![],
         None,
-        SdpForm::AsWritten,
+        policy(SdpForm::AsWritten),
     );
     let answer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
     let out = continue_on_leg(
@@ -516,7 +539,7 @@ fn a_relayed_early_exchange_survives_confirmation() {
         Carried::answering(&Method::Update, 200),
         answer.clone().into_bytes(),
         Some(&ct()),
-        SdpForm::AsWritten,
+        policy(SdpForm::AsWritten),
     );
     assert_eq!(String::from_utf8(out).unwrap(), answer);
     adopt_confirmed_dialog(&mut c.b_legs[0], 0);
@@ -540,7 +563,7 @@ fn a_relayed_description_does_not_leak_into_another_fork() {
         Carried::answering(&Method::Update, 200),
         sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
         Some(&ct()),
-        SdpForm::AsWritten,
+        policy(SdpForm::AsWritten),
     );
     adopt_confirmed_dialog(&mut c.b_legs[0], 1);
     assert_eq!(
@@ -696,4 +719,103 @@ fn the_calls_restatement_is_recorded_on_the_leg_it_crossed() {
     let (c, _) = restated_once(SdpForm::AsWritten);
     assert!(c.a_leg.sdp_session.has_restated, "the caller's leg carried a restatement");
     assert!(c.b_legs.iter().all(|l| !l.sdp_session.has_restated));
+}
+
+/// A restatement inside an early dialog whose fork then loses stays the
+/// call's: the confirming fork and the pruned forks do not erase it.
+#[test]
+fn a_restatement_in_a_losing_fork_stays_the_calls() {
+    let mut c = forked();
+    answer_in_f1(&mut c, "alice 1 2 IN IP4 192.0.2.1");
+    continue_on_leg(
+        &mut c,
+        "b-1",
+        Some("f1"),
+        Author::Leg("a"),
+        Carried::InDialog,
+        sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
+        Some(&ct()),
+        policy(SdpForm::AsWritten),
+    );
+    adopt_confirmed_dialog(&mut c.b_legs[0], 1);
+    let winner = c.b_legs[0].dialogs.remove(1);
+    c.b_legs[0].dialogs = vec![winner];
+    c.b_legs[0].state = LegState::Confirmed;
+    assert!(c.b_legs[0].sdp_session.has_restated, "the confirmed leg keeps the call's fact");
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::Opening,
+        &peer_sdp("dave 4 1 IN IP4 192.0.2.4", 40000),
+    );
+    let out = send_in(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::InDialog,
+        &peer_sdp("dave 4 2 IN IP4 192.0.2.4", 40002),
+        SdpForm::Canonical,
+    );
+    assert_eq!(out, in_form("dave 4 2 IN IP4 192.0.2.4", 40002));
+}
+
+/// The leg's own state, set aside while a description crosses one of its early
+/// dialogs, still states the call's restatement.
+#[test]
+fn the_calls_restatement_is_read_through_an_early_dialog() {
+    let mut c = forked();
+    let relay_in_f1 = |c: &mut Call, version: u32, form: SdpForm| {
+        let out = continue_on_leg(
+            c,
+            "b-1",
+            Some("f1"),
+            Author::Leg("a"),
+            Carried::answering(&Method::Update, 200),
+            peer_sdp(&format!("alice 1 {version} IN IP4 192.0.2.1"), 10002).into_bytes(),
+            Some(&ct()),
+            policy(form),
+        );
+        String::from_utf8(out).unwrap()
+    };
+    relay_in_f1(&mut c, 2, SdpForm::AsWritten);
+    c.b_legs[0].sdp_session.has_restated = true;
+    assert_eq!(
+        relay_in_f1(&mut c, 3, SdpForm::Canonical),
+        in_form("alice 1 3 IN IP4 192.0.2.1", 10002)
+    );
+}
+
+/// Every crossing the seam asks a policy about, in order.
+#[derive(Debug, Default)]
+struct Recording(std::sync::Mutex<Vec<SdpCrossing>>);
+
+impl SdpFormPolicy for Recording {
+    fn form(&self, crossing: &SdpCrossing) -> SdpForm {
+        self.0.lock().unwrap().push(*crossing);
+        SdpForm::AsWritten
+    }
+}
+
+/// The seam asks the policy about in-dialog descriptions only, and states
+/// who wrote each and whether the call, or this description, is restated.
+#[test]
+fn the_policy_sees_each_in_dialog_crossing_as_it_stands() {
+    let rec = Recording::default();
+    let mut c = call();
+    let cross = |c: &mut Call, author: Author<'_>, carried: Carried, body: String| {
+        continue_on_leg(c, "a", None, author, carried, body.into_bytes(), Some(&ct()), &rec);
+    };
+    cross(&mut c, Author::Leg("b-1"), Carried::Opening, peer_sdp("bob 202 1 IN IP4 192.0.2.2", 1));
+    cross(&mut c, Author::Leg("b-1"), Carried::InDialog, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 2));
+    cross(&mut c, Author::Leg("b-2"), Carried::InDialog, peer_sdp("carol 3 1 IN IP4 192.0.2.3", 3));
+    cross(&mut c, Author::Stack, Carried::InDialog, peer_sdp("as 7 7 IN IP4 192.0.2.9", 4));
+    let seen = rec.0.lock().unwrap().clone();
+    let crossing =
+        |by_peer, restated, call_restated| SdpCrossing { by_peer, restated, call_restated };
+    assert_eq!(
+        seen,
+        vec![crossing(true, false, false), crossing(true, true, true), crossing(false, true, true)],
+        "the opening description is not asked about"
+    );
 }

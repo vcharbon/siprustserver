@@ -14,9 +14,14 @@ use crate::sdp_doc::{direction_of, media_line, Sections};
 /// `a=fmtp` in the `m=` format order, the other attributes as written, then
 /// the direction attribute (RFC 3264 §6.1). A live media section that states
 /// none states the one it takes by default, explicitly: the session-level
-/// direction attribute, else `a=sendrecv` (RFC 4566 §6); a rejected one (port
-/// 0) gains none (RFC 3264 §6: its attributes carry no meaning). Lines keep the description's
-/// line ending, every line ends with it, and a blank line is left out.
+/// direction attribute, else `a=sendrecv` (RFC 4566 §6). A section with port
+/// 0 gains none: a rejected stream's attributes carry no meaning (RFC 3264
+/// §6), and a `bundle-only` section (RFC 8843), also port 0, is read the same
+/// way.
+///
+/// Every line ends with the description's line ending: CRLF where any line
+/// uses it (a mix of CRLF and bare LF leaves as CRLF throughout), else LF. A
+/// blank line is left out.
 pub fn canonical_form(sdp: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(sdp).ok()?;
     if !text.starts_with("v=") {

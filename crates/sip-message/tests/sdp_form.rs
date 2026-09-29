@@ -170,3 +170,14 @@ m=video 0 RTP/AVP 96\r\n"
     let rejected = "v=0\r\no=- 10 20 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\n";
     assert_eq!(canonical_form(rejected.as_bytes()), None);
 }
+
+/// A mix of CRLF and bare LF leaves as CRLF throughout; a blank line is left
+/// out.
+#[test]
+fn a_mixed_line_ending_leaves_as_crlf_without_blank_lines() {
+    let sdp = "v=0\r\no=- 10 20 IN IP4 192.0.2.1\ns=-\r\n\r\nt=0 0\nm=audio 49170 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\n";
+    assert_eq!(
+        canonical(sdp),
+        "v=0\r\no=- 10 20 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+    );
+}

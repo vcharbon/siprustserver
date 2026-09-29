@@ -4,3 +4,4 @@
 //! paths are unchanged.
 
 pub use b2bua_sdk::config::*;
+pub use b2bua_sdk::sdp_form::{AsWritten, SdpCrossing, SdpForm, SdpFormPolicy};

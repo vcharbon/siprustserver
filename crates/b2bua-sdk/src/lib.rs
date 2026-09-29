@@ -31,6 +31,7 @@ pub mod model;
 pub mod provisional;
 pub mod reason_phrase;
 pub mod relayed_final;
+pub mod sdp_form;
 pub mod service;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
@@ -57,5 +58,6 @@ pub mod rules {
     pub use call::{MachineId, StateLabel, TerminationCause, TimeoutKind};
 }
 
-pub use config::{B2buaConfig, SdpForm};
+pub use config::B2buaConfig;
 pub use event::CallEvent;
+pub use sdp_form::{AsWritten, SdpCrossing, SdpForm, SdpFormPolicy};

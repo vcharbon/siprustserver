@@ -25,19 +25,20 @@
 //! leg the stack opened keeps its own session state until one of them
 //! confirms (RFC 3261 §12.1.2).
 //!
-//! Once the stack has restated a description anywhere in the call, a peer's
-//! description inside a dialog leaves in the form
-//! [`B2buaConfig::sdp_form_after_restatement`](crate::config::B2buaConfig)
-//! states, on every leg: as written, or re-serialized
-//! ([`sip_message::canonical_form`]). The stack's own descriptions, and every
-//! description before the call's first restatement, leave as written.
+//! A description inside a dialog leaves in the form the service's
+//! [`SdpFormPolicy`] gives it from what the seam knows ([`SdpCrossing`]): as
+//! written, or re-serialized ([`sip_message::canonical_form`]). An opening
+//! description always leaves as written. Whether the stack has restated
+//! anything in the call is the call's fact: each leg records the
+//! restatements it carried, and a confirming dialog takes over the facts of
+//! the forks it replaces.
 
 use std::borrow::Cow;
 
 use call::{Call, Leg, LegSdpSession, LegState};
 use sip_message::SdpOrigin;
 
-use crate::config::SdpForm;
+use crate::config::{SdpCrossing, SdpForm, SdpFormPolicy};
 use crate::effects::{OutboundBody, OutboundSipEffect};
 use sip_message::header::MediaType;
 use sip_message::multipart::sdp_range;
@@ -123,8 +124,7 @@ impl Carried {
 /// A version at the top of its range has no next one: a description that would
 /// be restated above it leaves as written, and opens the session anew where the
 /// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
-/// `form` is the stack's form for a peer's description once the call has a
-/// restatement.
+/// `policy` decides the form of an in-dialog description.
 #[allow(clippy::too_many_arguments)]
 pub fn continue_on_leg(
     call: &mut Call,
@@ -134,12 +134,14 @@ pub fn continue_on_leg(
     carried: Carried,
     body: Vec<u8>,
     content_type: Option<&MediaType>,
-    form: SdpForm,
+    policy: &dyn SdpFormPolicy,
 ) -> Vec<u8> {
+    let call_restated = has_restated(call);
+    let formed = Formed { policy, call_restated };
     let Some(opening) = dialog.and_then(|tag| enter_early_dialog(call, leg_id, tag)) else {
-        return continue_session(call, leg_id, author, carried, body, content_type, form);
+        return continue_session(call, leg_id, author, carried, body, content_type, formed);
     };
-    let out = continue_session(call, leg_id, author, carried, body, content_type, form);
+    let out = continue_session(call, leg_id, author, carried, body, content_type, formed);
     if let (Some(tag), Some(leg)) = (dialog, call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)) {
         let offers_received = leg.sdp_session.offers_received;
         let own =
@@ -178,7 +180,7 @@ fn continue_session(
     carried: Carried,
     body: Vec<u8>,
     content_type: Option<&MediaType>,
-    form: SdpForm,
+    formed: Formed<'_>,
 ) -> Vec<u8> {
     if carried == Carried::Outside {
         return body;
@@ -197,7 +199,6 @@ fn continue_session(
         _ => None,
     };
     let sdp = reordered.as_deref().unwrap_or(sdp);
-    let call_restated = has_restated(call);
     let Some(leg) = leg_mut(call, leg_id) else {
         return body;
     };
@@ -228,10 +229,12 @@ fn continue_session(
             restate_session(sdp, &stated)
         }
     });
-    let reformed = form == SdpForm::Canonical
-        && matches!(author, Author::Leg(_))
-        && carried.in_dialog()
-        && (call_restated || restated.is_some());
+    let reformed = carried.in_dialog()
+        && formed.policy.form(&SdpCrossing {
+            by_peer: matches!(author, Author::Leg(_)),
+            restated: restated.is_some(),
+            call_restated: formed.call_restated || restated.is_some(),
+        }) == SdpForm::Canonical;
     let state = &mut leg.sdp_session;
     let out = match restated {
         Some(r) => {
@@ -279,11 +282,16 @@ fn continue_session(
 
 /// The session state the early dialog at `dialog` carries, handed to `leg` as
 /// that dialog confirms it; nothing where the dialog carries the opening state.
+/// Whatever that dialog carries, the leg keeps the restatements its other
+/// forks and its own state carried: the call's fact outlives the pruned forks.
 pub fn adopt_confirmed_dialog(leg: &mut Leg, dialog: usize) {
+    let restated = leg.sdp_session.has_restated
+        || leg.dialogs.iter().any(|d| d.ext.sdp_session.as_ref().is_some_and(|s| s.has_restated));
     if let Some(mut own) = leg.dialogs.get_mut(dialog).and_then(|d| d.ext.sdp_session.take()) {
         own.offers_received = leg.sdp_session.offers_received;
         leg.sdp_session = own;
     }
+    leg.sdp_session.has_restated |= restated;
 }
 
 /// The `o=` value of the next version of the session `leg`'s dialog whose
@@ -396,6 +404,15 @@ fn stated(leg: &Leg) -> Option<StatedSession> {
         origin: leg.sdp_session.sent_origin.clone()?,
         media: leg.sdp_session.sent_media.clone(),
     })
+}
+
+/// The policy deciding an in-dialog description's form, and whether the call
+/// had a restatement before this description (read before any early-dialog
+/// state takes the leg's place).
+#[derive(Clone, Copy)]
+struct Formed<'a> {
+    policy: &'a dyn SdpFormPolicy,
+    call_restated: bool,
 }
 
 /// Whether this stack has restated a description anywhere in `call`: on a leg,

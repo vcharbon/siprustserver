@@ -2,6 +2,8 @@
 //! dispatcher / router / store / rules read. Behavioural timeouts that have a
 //! tokio analogue stay here as plain values.
 
+use crate::sdp_form::{AsWritten, SdpFormPolicy};
+
 /// Tunables for a B2BUA worker. Cheap to clone (a handful of scalars + two
 /// short strings); share one instance across the stack.
 #[derive(Clone, Debug)]
@@ -330,12 +332,9 @@ pub struct B2buaConfig {
     /// `body_override: None` on purpose to relay the caller's own offer). `None`
     /// (the default) = no canned SDP, today's behaviour.
     pub default_sdp: Option<Vec<u8>>,
-    /// How a peer's session description leaves once this stack has restated a
-    /// description anywhere in the call (RFC 3264 §8): as its author wrote it,
-    /// or re-serialized in canonical form ([`sip_message::canonical_form`]).
-    /// Before the call's first restatement, a description always leaves as
-    /// written.
-    pub sdp_form_after_restatement: SdpForm,
+    /// The service's hook deciding the form an in-dialog session description
+    /// leaves in ([`SdpFormPolicy`]); [`AsWritten`] by default.
+    pub sdp_form: std::sync::Arc<dyn SdpFormPolicy>,
     /// **Node capability advertisement.** The `Allow`/`Supported` set this
     /// worker advertises on the out-of-dialog OPTIONS health reply (RFC 3261
     /// §11.2) — a node-scoped statement, not a call-scoped one, so it is
@@ -503,22 +502,12 @@ impl Default for B2buaConfig {
             // Default SDP source: None = no canned offer. Opt-in per-CreateLeg
             // via `body_override`, never an automatic fallback.
             default_sdp: None,
-            sdp_form_after_restatement: SdpForm::AsWritten,
+            sdp_form: std::sync::Arc::new(AsWritten),
             node_capabilities: sip_message::generators::CapabilitySet::default(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),
         }
     }
-}
-
-/// How the stack writes a session description it forwards.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SdpForm {
-    /// The author's bytes, apart from what a restatement changes.
-    #[default]
-    AsWritten,
-    /// Re-serialized by [`sip_message::canonical_form`].
-    Canonical,
 }
 
 impl B2buaConfig {

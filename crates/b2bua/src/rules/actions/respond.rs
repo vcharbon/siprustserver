@@ -72,7 +72,7 @@ impl ActionExecutor<'_> {
                 relay::Carried::of(req.method(), Some(status), req.to().tag().is_some()),
                 body.to_vec(),
                 content_type.as_ref(),
-                self.config.sdp_form_after_restatement,
+                self.config.sdp_form.as_ref(),
             );
             let opts = GenerateResponseOpts { to_tag, body, content_type, ..Default::default() };
             let resp = generators::generate_response(req, status, reason, &opts);
