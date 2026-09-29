@@ -372,11 +372,11 @@ fn amr_octet_alignment_must_agree() {
 }
 
 /// RFC 5888 §9.2: each answered m-line carries the offer's `mid`; the own
-/// description's session-level `group` is not an answer to the offer's and is
-/// not copied.
+/// description's session-level `group` (here lip-sync) is not an answer to
+/// the offer's and is not copied.
 #[test]
 fn the_answer_takes_the_offers_mid_and_states_no_group_of_its_own() {
-    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 4000 RTP/AVP 8\r\na=mid:0\r\na=ptime:20\r\n";
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\na=group:LS 0\r\nm=audio 4000 RTP/AVP 8\r\na=mid:0\r\na=ptime:20\r\n";
     let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 8\r\na=mid:voice\r\n";
     let answer =
         text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
@@ -424,5 +424,71 @@ fn a_dynamic_number_always_carries_its_rtpmap() {
     assert_eq!(
         stream_of(&answer),
         "m=audio 4000 RTP/AVP 97\r\na=ptime:20\r\na=rtpmap:97 PCMU/8000\r\n"
+    );
+}
+
+/// SDES either side carries and the other does not is no suite in common
+/// (RFC 4568 §5.1.2): the stream is rejected whichever side holds the keys.
+#[test]
+fn keys_on_one_side_only_reject_the_stream() {
+    let keyed = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAA\r\n";
+    let plain = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 8\r\n";
+    for (offer, own) in [(plain, keyed), (keyed, plain)] {
+        let answer = text(answer_from_own(
+            offer.as_bytes(),
+            own.as_bytes(),
+            FormatPreference::Offerer,
+            None,
+        ));
+        assert!(stream_of(&answer).starts_with("m=audio 0 RTP/AVP 8\r\n"), "{answer}");
+    }
+}
+
+/// The two answers of one exchange accept the same streams: a stream the
+/// agreed answer rejects at a rank is rejected here too.
+#[test]
+fn a_stream_the_agreed_answer_rejects_is_rejected() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\nm=video 4002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 8\r\nm=video 5002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    let agreed = "v=0\r\no=b 1 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\nm=video 5002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    let answer = text(sip_message::answer_from_own_agreeing(
+        offer.as_bytes(),
+        own.as_bytes(),
+        FormatPreference::Offerer,
+        None,
+        Some(agreed.as_bytes()),
+    ));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 0 RTP/AVP 8\r\nm=video 4002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+    );
+}
+
+/// BUNDLE (RFC 8843) is out of scope: an offer or own description grouping
+/// streams under it cannot be answered on a party's behalf.
+#[test]
+fn a_bundle_group_is_not_answered() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\n";
+    let bundled = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\na=group:BUNDLE a v\r\nm=audio 5000 RTP/AVP 8\r\na=mid:a\r\nm=video 5000 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=mid:v\r\n";
+    assert_eq!(
+        answer_from_own(bundled.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None),
+        None
+    );
+    assert_eq!(
+        answer_from_own(own.as_bytes(), bundled.as_bytes(), FormatPreference::Answerer, None),
+        None
+    );
+}
+
+/// A rejected m-line keeps the offer's `mid` (RFC 5888 §9.2).
+#[test]
+fn a_rejected_stream_keeps_the_offers_mid() {
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\n";
+    let offer = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0\r\na=mid:1\r\nm=video 5002 RTP/AVP 31\r\na=mid:2\r\n";
+    let answer =
+        text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(
+        stream_of(&answer),
+        "m=audio 0 RTP/AVP 0\r\na=mid:1\r\nm=video 0 RTP/AVP 31\r\na=mid:2\r\n"
     );
 }

@@ -29,7 +29,10 @@ pub enum FormatPreference {
 }
 
 /// The answer to `offer` built out of `own`, a description the answering party
-/// stated earlier, or `None` where either is not a session description.
+/// stated earlier, or `None` where either is not a session description or
+/// either groups streams under BUNDLE (RFC 8843: out of scope, the shared
+/// transport and its demultiplexing are the party's own; the caller refuses
+/// the offer instead).
 ///
 /// Session-level lines are `own`'s, its `o=` value replaced by `origin` where
 /// one is given. The answer has one m-line per offered stream, in order,
@@ -38,9 +41,11 @@ pub enum FormatPreference {
 /// - an offered stream with port 0 is answered with its own m-line;
 /// - one `own` does not describe at that rank, or describes with another media
 ///   type or transport profile, or with no format in common, or offers SDES
-///   keys (RFC 4568) for no suite `own` holds, or either side sets up over
-///   DTLS (out of scope: the handshake role and certificate are the party's
-///   own), is answered rejected: its m-line with port 0;
+///   keys (RFC 4568) with no suite in common — keys on one side only included
+///   —, or either side sets up a connection of its own (DTLS, RFC 5763, or
+///   comedia, RFC 4145: out of scope, the role and certificate are the
+///   party's own), is answered rejected: its m-line with port 0 and the
+///   offer's `mid`;
 /// - one `own` describes with port 0 is answered with `own`'s m-line;
 /// - otherwise `own`'s media section answers it with `own`'s port and
 ///   transport and the formats [`FormatPreference`] keeps, under the offer's
@@ -74,11 +79,12 @@ pub fn answer_from_own(
     answer_from_own_agreeing(offer, own, preference, origin, None)
 }
 
-/// [`answer_from_own`], each stream's SDES suite the one `agreed` (the other
-/// answer of the same exchange, one m-line per stream of the same rank) keeps
-/// there, so both ends of a back-to-back exchange run one SRTP context; a
-/// stream whose `agreed` counterpart keeps no suite chooses as
-/// [`answer_from_own`] does.
+/// [`answer_from_own`] agreeing with `agreed`, the other answer of the same
+/// exchange (one m-line per stream of the same rank), so both ends of a
+/// back-to-back exchange run the same streams under one SRTP context: a stream
+/// `agreed` rejects at a rank is rejected here, and a stream `agreed` keeps an
+/// SDES suite for keeps that suite. A rank `agreed` does not describe chooses
+/// as [`answer_from_own`] does.
 pub fn answer_from_own_agreeing(
     offer: &[u8],
     own: &[u8],
@@ -86,21 +92,16 @@ pub fn answer_from_own_agreeing(
     origin: Option<&str>,
     agreed: Option<&[u8]>,
 ) -> Option<Vec<u8>> {
-    let agreed_suites: Vec<Option<String>> = agreed
-        .and_then(parse_sdp_body)
-        .map(|d| {
-            d.media
-                .iter()
-                .map(|m| extract_cryptos(m).into_iter().next().map(|(_, s, _)| s))
-                .collect()
-        })
-        .unwrap_or_default();
+    let agreed_media = agreed.and_then(parse_sdp_body).map(|d| d.media).unwrap_or_default();
     let offer_doc = parse_sdp_body(offer)?;
     let own_doc = parse_sdp_body(own)?;
     let offer_text = String::from_utf8_lossy(offer);
     let own_text = String::from_utf8_lossy(own);
     let offered = Sections::of(&offer_text);
     let owned = Sections::of(&own_text);
+    if bundles(offered.session) || bundles(owned.session) {
+        return None;
+    }
     let eol = if own_text.contains("\r\n") { "\r\n" } else { "\n" };
 
     let mut out = String::new();
@@ -118,15 +119,24 @@ pub fn answer_from_own_agreeing(
         .is_none()
         .then(|| own_doc.media.iter().find_map(|m| m.c_line.clone()))
         .flatten();
-    let reject = |out: &mut String, m_value: String| {
-        push_line(out, &format!("m={m_value}"), eol);
-        if let Some(c) = &stub_c {
-            push_line(out, &format!("c={c}"), eol);
-        }
-    };
-
     for (i, stream) in offer_doc.media.iter().enumerate() {
         let offered_value = offered.media[i].value();
+        // A rejected m-line keeps the offer's `mid` (RFC 5888 §9.2).
+        let mid = stream.attributes.iter().find_map(|a| a.strip_prefix("mid:"));
+        let reject = |out: &mut String, m_value: String| {
+            push_line(out, &format!("m={m_value}"), eol);
+            if let Some(c) = &stub_c {
+                push_line(out, &format!("c={c}"), eol);
+            }
+            if let Some(mid) = mid {
+                push_line(out, &format!("a=mid:{mid}"), eol);
+            }
+        };
+        let agreed = agreed_media.get(i);
+        if agreed.is_some_and(|m| m.port == Some(0)) && stream.port != Some(0) {
+            reject(&mut out, with_port_zero(offered_value));
+            continue;
+        }
         if stream.port == Some(0) {
             reject(&mut out, offered_value.to_string());
             continue;
@@ -143,7 +153,8 @@ pub fn answer_from_own_agreeing(
             && !over_dtls(stream, offered.session)
             && !over_dtls(mine, owned.session);
         let kept = answerable.then(|| kept_formats(stream, mine, preference)).flatten();
-        let required = agreed_suites.get(i).cloned().flatten();
+        let required =
+            agreed.and_then(|m| extract_cryptos(m).into_iter().next()).map(|(_, s, _)| s);
         let crypto = sdes_answer(stream, mine, preference, required.as_deref());
         let (Some(kept), Some(crypto)) = (kept, crypto) else {
             reject(&mut out, with_port_zero(offered_value));
@@ -309,8 +320,8 @@ fn kept_formats(
 /// The one `crypto` line answering the SDES keys `offered` carries (RFC 4568
 /// §5.1.2): `own`'s key for the first suite both hold, in the order
 /// `preference` names (`required` alone where given), under the offer's tag.
-/// `Some(None)` where the offer carries no SDES; `None` where it does and no
-/// suite qualifies.
+/// `Some(None)` where neither side carries SDES; `None` where either does and
+/// no suite qualifies (keys on one side only included, whichever side).
 fn sdes_answer(
     offered: &MediaLine,
     own: &MediaLine,
@@ -318,10 +329,10 @@ fn sdes_answer(
     required: Option<&str>,
 ) -> Option<Option<String>> {
     let offered_keys = extract_cryptos(offered);
-    if offered_keys.is_empty() {
+    let own_keys = extract_cryptos(own);
+    if offered_keys.is_empty() && own_keys.is_empty() {
         return Some(None);
     }
-    let own_keys = extract_cryptos(own);
     let ranked: Vec<&String> = match preference {
         FormatPreference::Offerer => offered_keys.iter().map(|(_, s, _)| s).collect(),
         FormatPreference::Answerer => own_keys.iter().map(|(_, s, _)| s).collect(),
@@ -336,14 +347,25 @@ fn sdes_answer(
     )
 }
 
-/// Whether `media` (under the `session` lines of its description) is set up
-/// over DTLS (RFC 5763/5764): a TLS transport, or a `setup` / `fingerprint`
-/// attribute. The handshake role and certificate are the party's own, so no
-/// answer on its behalf can state them: such a stream is rejected.
+/// Whether `media` (under the `session` lines of its description) sets up a
+/// connection of its own: over DTLS (RFC 5763/5764: a TLS transport or a
+/// `fingerprint`), or connection-oriented media (RFC 4145 comedia: a `setup`
+/// attribute, TCP/RTP/AVP, BFCP, MSRP over TCP). The connection role and
+/// certificate are the party's own, so no answer on its behalf can state
+/// them: such a stream is rejected.
 fn over_dtls(media: &MediaLine, session: &str) -> bool {
     media.transport.to_ascii_uppercase().contains("TLS")
         || media.attributes.iter().any(|a| a.starts_with("setup:") || a.starts_with("fingerprint:"))
         || lines(session).any(|l| l.starts_with("a=setup:") || l.starts_with("a=fingerprint:"))
+}
+
+/// Whether session-level `lines` group streams under BUNDLE (RFC 8843).
+fn bundles(session: &str) -> bool {
+    lines(session).any(|l| {
+        l.strip_prefix("a=group:").is_some_and(|g| {
+            g.split_whitespace().next().is_some_and(|s| s.eq_ignore_ascii_case("BUNDLE"))
+        })
+    })
 }
 
 /// What one answered stream states.

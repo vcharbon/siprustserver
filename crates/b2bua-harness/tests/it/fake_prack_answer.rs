@@ -428,3 +428,107 @@ async fn a_reoffer_after_a_refused_one_is_answered_at_the_next_version() {
     hang_up(&mut dialog, &bob, &b2bua).await;
     let _ = h.finish().await;
 }
+
+/// Alice offers `offer`; bob answers `answer` in a reliable 183 the B2BUA
+/// PRACKs itself.
+async fn ringing_with(
+    alice: &Agent,
+    bob: &Agent,
+    b2bua: &B2buaSut,
+    offer: &str,
+    answer: &str,
+) -> (ClientInvite, ServerTxn) {
+    let mut call = alice
+        .invite(bob)
+        .with_sdp(offer)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(answer)
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    (call, uas)
+}
+
+/// Best-effort SRTP (RTP/AVP with SDES keys, RFC 4568): alice keyed her
+/// stream, bob's re-offer carries none. No suite in common rejects it on both
+/// answers alike; with no stream left the re-offer is refused and the 183's
+/// exchange stands.
+#[tokio::test]
+async fn keys_on_the_callers_side_only_refuse_the_reoffer() {
+    const KEYED: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VYQUxJQ0VY\r\n";
+    let h = Harness::with_transit_delay("fake-prack-answer-keys-caller-only", 0);
+    let alice = h.agent("alice", "127.0.0.1:5891").await;
+    let bob = h.agent("bob", "127.0.0.1:5892").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5893", 5892).await;
+    let (mut call, mut uas) = ringing_with(&alice, &bob, &b2bua, KEYED, ANSWER).await;
+
+    let plain = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    let mut update = uas.dialog().request(InDialogMethod::Update, Some(plain)).await;
+    update.expect(488).await;
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert_eq!(String::from_utf8_lossy(ok.body()), ANSWER, "the 183's answer stays in force");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}
+
+/// Two streams, keys on bob's audio only: both answers reject the audio and
+/// accept the video, so both ends run the same stream set.
+#[tokio::test]
+async fn both_answers_accept_the_same_streams() {
+    const AV: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    const AV_ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    let h = Harness::with_transit_delay("fake-prack-answer-same-streams", 0);
+    let alice = h.agent("alice", "127.0.0.1:5895").await;
+    let bob = h.agent("bob", "127.0.0.1:5896").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5897", 5896).await;
+    let (mut call, mut uas) = ringing_with(&alice, &bob, &b2bua, AV, AV_ANSWER).await;
+
+    let update = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:Qk9CWEJPQlhCT0JYQk9CWEJPQlhCT0JYQk9CWEJP\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n";
+    assert_eq!(
+        reoffer(&mut uas.dialog(), update).await,
+        "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n",
+    );
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert_eq!(
+        String::from_utf8_lossy(ok.body()),
+        "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\nm=video 20002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n",
+    );
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}
+
+/// BUNDLE (RFC 8843) is out of scope: a re-offer grouping its streams under
+/// it cannot be answered on the caller's behalf, so it is refused and the
+/// 183's exchange stands.
+#[tokio::test]
+async fn a_bundled_reoffer_is_refused() {
+    let h = Harness::with_transit_delay("fake-prack-answer-bundle", 0);
+    let alice = h.agent("alice", "127.0.0.1:5898").await;
+    let bob = h.agent("bob", "127.0.0.1:5899").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5900", 5899).await;
+    let (mut call, mut uas) = ringing(&alice, &bob, &b2bua).await;
+
+    let bundled = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\na=group:BUNDLE a\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=mid:a\r\n";
+    let mut update = uas.dialog().request(InDialogMethod::Update, Some(bundled)).await;
+    update.expect(488).await;
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert_eq!(String::from_utf8_lossy(ok.body()), ANSWER, "the 183's answer stays in force");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    hang_up(&mut dialog, &bob, &b2bua).await;
+    let _ = h.finish().await;
+}

@@ -47,9 +47,7 @@ use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::{
-    answer_from_own, answer_from_own_agreeing, has_live_stream, FormatPreference, Method,
-};
+use sip_message::{answer_from_own_agreeing, has_live_stream, FormatPreference, Method};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
@@ -413,18 +411,25 @@ define_service! {
                         .find_map(relay::acked_invite)
                 });
                 let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));
-                let to_bob = sent.as_ref().and_then(|r| r.sdp()).zip(origin).and_then(|(own, o)| {
-                    answer_from_own(offer, own, FormatPreference::Offerer, Some(&o))
-                });
+                // Both answers accept the same streams under one SRTP suite:
+                // bob's first, alice's agreeing with it, then bob's agreeing
+                // with hers.
+                let sent_sdp = sent.as_ref().and_then(|r| r.sdp());
+                let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+                let answer_bob = |agreed: Option<&[u8]>| {
+                    let (own, o) = sent_sdp.zip(origin.as_deref())?;
+                    answer_from_own_agreeing(offer, own, FormatPreference::Offerer, Some(o), agreed)
+                };
+                let answer_alice = |agreed: Option<&[u8]>| {
+                    let own = caller.sdp()?;
+                    answer_from_own_agreeing(own, offer, FormatPreference::Answerer, None, agreed)
+                };
+                let to_alice = answer_bob(None).and_then(|first| answer_alice(Some(&first)));
+                let to_bob = to_alice.as_deref().and_then(|agreed| answer_bob(Some(agreed)));
                 // An answerer that can accept no stream of an offer refuses it
                 // (RFC 3311 §5.2) rather than answer every stream rejected: the
                 // early exchange already agreed stays in force.
                 let to_bob = to_bob.filter(|answer| has_live_stream(answer) || !has_live_stream(offer));
-                // Alice's answer agrees with bob's on the SRTP suite (one context).
-                let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-                let to_alice = caller.sdp().and_then(|own| {
-                    answer_from_own_agreeing(own, offer, FormatPreference::Answerer, None, to_bob.as_deref())
-                });
                 match to_bob.zip(to_alice) {
                     Some((to_bob, to_alice)) => ok(vec![
                         RuleAction::Respond {
