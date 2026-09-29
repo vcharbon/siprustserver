@@ -19,7 +19,8 @@
  *   keyed by ref, and a ref the caller did not supply is the caller's error.
  *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
  *   names only where the run's media mode says the lane rebooked them, and
- *   on a verbatim run holds the two texts to the same bytes.
+ *   on a verbatim run holds the two texts to the same bytes, an origin the
+ *   replayed endpoint mints marked on its `o=` row (`./sdporigin.ts`).
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied).
@@ -35,6 +36,7 @@ import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
+import { type Driven, identitiesIn, type Ledger, ledger } from "./sdporigin.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
@@ -68,7 +70,7 @@ export interface ConfrontInput {
    * Absent for an authored case.
    */
   readonly captured?: CapturedLegs
-  /** Resource ref → its bytes, for every resource body or part an `expect` step states. */
+  /** Resource ref → its bytes, for every resource body or part a `send` or `expect` step states. */
   readonly resources?: ReadonlyMap<string, Uint8Array>
   /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
   readonly media?: Bundle.MediaMode
@@ -319,6 +321,10 @@ const headerProbes = (
  * A probe's sides stay strings: the text where BOTH sides are text (UTF-8
  * whose only controls are tab, CR and LF), standard base64 on both where
  * either is not.
+ *
+ * On a verbatim run each leg's `sdp` pairs are read in wire order by one
+ * origin {@link Ledger}, over the origins the capture's `send` steps and the
+ * run's own sends drove into the endpoint.
  */
 export const bodyProbes = (
   input: ConfrontInput,
@@ -326,7 +332,9 @@ export const bodyProbes = (
 ): ReadonlyArray<ProbeAt> => {
   const out: Array<ProbeAt> = []
   const media = input.media ?? "rebooked"
+  const driven = media === "verbatim" ? drivenOrigins(input) : undefined
   for (const recording of input.recordings.values()) {
+    const origins = driven === undefined ? undefined : ledger(driven)
     for (const message of recording) {
       if (message.dir !== "in" || message.repeat_of !== undefined) continue
       const step = message.step === undefined ? undefined : steps.get(message.step)
@@ -340,10 +348,10 @@ export const bodyProbes = (
         const received = recordedBody(message)
         const probes = "fault" in received
           ? [faultProbe(step.id, mediaType, scope, received.fault)]
-          : bodyProbe(step.id, body, mediaType, scope, expectedBytes(input.resources, body.ref), received.bytes, media)
+          : bodyProbe(step.id, body, mediaType, scope, expectedBytes(input.resources, body.ref), received.bytes, media, origins)
         for (const probe of probes) out.push({ step: step.id, probe })
       } else if (Body.isMultipartBody(body)) {
-        for (const probe of multipartProbes(step.id, body.multipart, scope, input.resources, message, media)) {
+        for (const probe of multipartProbes(step.id, body.multipart, scope, input.resources, message, media, origins)) {
           out.push({ step: step.id, probe })
         }
       }
@@ -351,6 +359,40 @@ export const bodyProbes = (
   }
   return out
 }
+
+/**
+ * The origin identities each side drove into the endpoint: the texts of the
+ * capture's `send` bodies the caller supplied, and every body the run sent.
+ */
+const drivenOrigins = (input: ConfrontInput): Driven => {
+  const captured: Array<string> = []
+  for (const step of Pivot.pivotSteps(input.pivot)) {
+    const body = step.msg.body
+    if (step.op !== "send" || body === undefined) continue
+    const refs = Body.isResourceBody(body)
+      ? [body.ref]
+      : Body.isMultipartBody(body)
+      ? body.multipart.parts.map((part) => part.ref)
+      : []
+    for (const ref of refs) {
+      const text = textOfResource(input.resources?.get(ref))
+      if (text !== undefined) captured.push(text)
+    }
+  }
+  const replayed: Array<string> = []
+  for (const recording of input.recordings.values()) {
+    for (const message of recording) {
+      if (message.dir !== "out") continue
+      const received = recordedBody(message)
+      const text = "fault" in received ? undefined : Wire.utf8Of(received.bytes)
+      if (text !== undefined) replayed.push(text)
+    }
+  }
+  return { captured: identitiesIn(captured), replayed: identitiesIn(replayed) }
+}
+
+const textOfResource = (bytes: Uint8Array | undefined): string | undefined =>
+  bytes === undefined ? undefined : Wire.utf8Of(bytes)
 
 /** The bytes a resource ref names; a ref the caller did not supply is the caller's error. */
 const expectedBytes = (resources: ReadonlyMap<string, Uint8Array> | undefined, ref: string): Uint8Array => {
@@ -421,7 +463,8 @@ const bodyProbe = (
   scope: MsgScope,
   captured: Uint8Array,
   replayed: Uint8Array,
-  media: Bundle.MediaMode
+  media: Bundle.MediaMode,
+  origins: Ledger | undefined
 ): ReadonlyArray<BodyProbe> => {
   const compare = body.compare ?? "exact"
   if (compare === "exact") {
@@ -438,7 +481,10 @@ const bodyProbe = (
     return [{ kind: "body", step, mediaType, scope, compare, captured: [a], replayed: [b] }]
   }
   if (compare === "sdp") {
-    return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText).map((d) => ({
+    // The ledger reads every pair of the leg, equal ones included, so a later
+    // description is held to the sessions this one showed.
+    const minted = origins?.read(capturedText, replayedText) ?? false
+    return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText, minted).map((d) => ({
       kind: "body",
       step,
       mediaType,
@@ -446,7 +492,7 @@ const bodyProbe = (
       compare,
       captured: d.captured,
       replayed: d.replayed,
-      sdp: { section: d.section, line: d.line }
+      sdp: { section: d.section, line: d.line, ...(d.mintedOrigin === true ? { mintedOrigin: true as const } : {}) }
     }))
   }
   if (bodiesEqual(compare, capturedText, replayedText)) return []
@@ -472,7 +518,8 @@ const multipartProbes = (
   scope: MsgScope,
   resources: ReadonlyMap<string, Uint8Array> | undefined,
   message: Bundle.RecordedMessage,
-  media: Bundle.MediaMode
+  media: Bundle.MediaMode,
+  origins: Ledger | undefined
 ): ReadonlyArray<BodyProbe> => {
   const mediaType = mimeKey(expected["content-type"])
   if (message.body === undefined) {
@@ -501,7 +548,7 @@ const multipartProbes = (
     if (expectedType !== receivedType) {
       return [{ kind: "body" as const, step, mediaType: expectedType, scope, compare: "exact" as const, captured: [expectedType], replayed: [receivedType] }]
     }
-    return bodyProbe(step, part, expectedType, scope, expectedBytes(resources, part.ref), received[n]!.bytes, media)
+    return bodyProbe(step, part, expectedType, scope, expectedBytes(resources, part.ref), received[n]!.bytes, media, origins)
   })
 }
 

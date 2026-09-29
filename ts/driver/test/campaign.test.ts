@@ -177,9 +177,10 @@ describe("an expected body", () => {
     const records = Confrontation.parseConfrontationLines(
       fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
     )
-    // The stub ran verbatim, so the `c=` address it changed is a row beside
-    // the codec; `o=` and the attribute order are not.
+    // The stub ran verbatim, so the `o=` numbers and the `c=` address it
+    // changed are rows beside the codec; the attribute order is not.
     expect(records.filter((r) => r.kind === "body").map((r) => [r.signature, r.captured, r.replayed])).toEqual([
+      ["body:sdp:session:o=:request:INFO:in-dialog", ["o=- 1 2 IN IP4 10.0.0.1"], ["o=- 7 8 IN IP4 10.0.0.1"]],
       ["body:sdp:session:c=:request:INFO:in-dialog", ["c=IN IP4 192.0.2.10"], ["c=IN IP4 10.0.0.1"]],
       ["body:sdp:m0:m=:request:INFO:in-dialog", ["m=audio 6000 RTP/AVP 8"], ["m=audio 4000 RTP/AVP 0"]],
       ["body:sdp:m0:a=rtpmap:request:INFO:in-dialog", ["a=rtpmap:8 PCMA/8000"], ["a=rtpmap:0 PCMU/8000"]]

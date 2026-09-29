@@ -75,6 +75,21 @@ describe("the confrontation record", () => {
     expect(Confrontation.recordsPass([record, unknown])).toBe(false)
     expect(Confrontation.recordsPass([])).toBe(true)
   })
+
+  it("names the session-description rows no rule answers for, in record order", () => {
+    const sdp = (signature: string, cls: Confrontation.RecordClass) =>
+      ({ ...record, kind: "body" as const, signature, class: cls })
+    const first = sdp("body:sdp:m0:a=ptime:response:200:INVITE", "unknown")
+    const second = sdp("body:sdp:session:o=:initial-invite", "unlisted")
+    const records = [
+      sdp("body:sdp:session:o=:request:ACK:in-dialog", "accepted"),
+      first,
+      { ...record, class: "unknown" as const },
+      sdp("body:application/example+xml:request:INFO:in-dialog", "unknown"),
+      second
+    ]
+    expect(Confrontation.failingSdp(records)).toEqual([first, second])
+  })
 })
 
 describe("the classification summary", () => {

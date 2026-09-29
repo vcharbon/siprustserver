@@ -25,12 +25,13 @@ export type BodyMode = typeof BodyMode.Type
  * How an expect holds the received body against its resource: byte for byte;
  * as XML text after normalisation (declaration dropped, whitespace-only text
  * between tags removed, ends trimmed — nothing else); or as an SDP session
- * description (sections by position, lines per section as a multiset, `o=`
- * sess-id and sess-version masked always, the fields the expect's `rewrite`
- * tokens name — `c=addr` the address of a `c=IN IP4` line, `m=port` the
- * non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never —
- * masked where the run rebooked media; on a verbatim run the same bytes once
- * the structure matches). Absent means `exact`.
+ * description (sections by position, lines per section as a multiset; `o=`
+ * sess-id and sess-version and the fields the expect's `rewrite` tokens name
+ * — `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero port of
+ * an `m=` line with its `/count` kept, `a=rtcp` never — masked where the run
+ * rebooked media; on a verbatim run the same bytes once the structure
+ * matches, a minted origin's numbers stated on their own `o=` row). Absent
+ * means `exact`.
  */
 export const BodyCompare = Schema.Literals(["exact", "xml", "sdp"])
 export type BodyCompare = typeof BodyCompare.Type

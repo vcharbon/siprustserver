@@ -106,6 +106,16 @@ export const parseConfrontationLines = (text: string): ReadonlyArray<Confrontati
     .filter((line) => line.trim().length > 0)
     .map((line) => decodeConfrontationRecordSync(JSON.parse(line) as unknown))
 
+/** Whether a record is `accepted` or `known-bug`: a difference a lane rule answers for. */
+export const recordPasses = (record: ConfrontationRecord): boolean =>
+  record.class === "accepted" || record.class === "known-bug"
+
 /** The classification verdict: no record is `unlisted` or `unknown`. */
-export const recordsPass = (records: ReadonlyArray<ConfrontationRecord>): boolean =>
-  records.every((r) => r.class === "accepted" || r.class === "known-bug")
+export const recordsPass = (records: ReadonlyArray<ConfrontationRecord>): boolean => records.every(recordPasses)
+
+/** The signature prefix of every session-description row, `body:sdp:<section>:<line>:<scope>`. */
+export const SDP_SIGNATURE_PREFIX = "body:sdp:"
+
+/** The session-description rows no lane rule answers for, in record order. */
+export const failingSdp = (records: ReadonlyArray<ConfrontationRecord>): ReadonlyArray<ConfrontationRecord> =>
+  records.filter((r) => r.signature.startsWith(SDP_SIGNATURE_PREFIX) && !recordPasses(r))

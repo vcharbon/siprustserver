@@ -334,7 +334,7 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     ? undefined
     : yield* FlowsFile.readFlowsLegsDecoded(cell.flows, observedLegs(pivot))
   if (captured !== undefined) yield* Flows.requireSchemaVersion(captured.envelope)
-  const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
+  const resources = yield* readStatedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
   // The run configuration states what the media plane did to the session
   // descriptions the run sent, which decides what an expected SDP is held to.
   const config = yield* Bundle.decodeRunConfig(
@@ -393,11 +393,13 @@ const observedLegs = (pivot: Pivot.PivotV3): ReadonlySet<number> =>
   )
 
 /**
- * Every resource an `expect` step's body or part references, read from the
- * case directory as bytes and keyed by its ref — what the confrontation holds
- * the received bodies against.
+ * Every resource a `send` or `expect` step's body or part references, read
+ * from the case directory as bytes and keyed by its ref: what the
+ * confrontation holds the received bodies against (an expected one must
+ * exist), and what the capture drove into the system (a sent one the
+ * directory lacks is left out).
  */
-const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
+const readStatedBodies = Effect.fn("Driver.readStatedBodies")(function* (
   caseDir: string,
   pivot: Pivot.PivotV3
 ) {
@@ -406,7 +408,7 @@ const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
   const out = new Map<string, Uint8Array>()
   for (const step of Pivot.pivotSteps(pivot)) {
     const body = step.msg.body
-    if (step.op !== "expect" || body === undefined) continue
+    if ((step.op !== "expect" && step.op !== "send") || body === undefined) continue
     const refs = Body.isResourceBody(body)
       ? [body.ref]
       : Body.isMultipartBody(body)
@@ -414,7 +416,9 @@ const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
         : []
     for (const ref of refs) {
       if (out.has(ref)) continue
-      out.set(ref, yield* fs.readFile(path.join(caseDir, ref)))
+      const file = path.join(caseDir, ref)
+      if (step.op === "send" && !(yield* fs.exists(file))) continue
+      out.set(ref, yield* fs.readFile(file))
     }
   }
   return out

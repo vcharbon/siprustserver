@@ -8,6 +8,7 @@
  * independent of the capture, the values and the header casing.
  */
 import type { Body } from "@sip/contracts"
+import { Confrontation } from "@sip/contracts"
 import { setDelta } from "./fold.js"
 import { canonicalName } from "./wire.js"
 
@@ -144,8 +145,13 @@ export interface BodyProbe extends ProbeSite {
   readonly captured: ReadonlyArray<string>
   /** What the run received: the whole text (`""` where the message carried no body), or the key's lines under `sdp`. */
   readonly replayed: ReadonlyArray<string>
-  /** Where in the session description the difference sits; set under `sdp` only. */
-  readonly sdp?: { readonly section: string; readonly line: string }
+  /**
+   * Where in the session description the difference sits; set under `sdp`
+   * only. `mintedOrigin` marks a `session:o=` row of a verbatim run whose two
+   * origins read as one the replayed endpoint mints and its counterpart
+   * (`./sdporigin.ts`); the signature does not carry it.
+   */
+  readonly sdp?: { readonly section: string; readonly line: string; readonly mintedOrigin?: true }
 }
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
@@ -156,7 +162,7 @@ export const signature = (probe: Probe): string => {
   if (probe.kind === "body") {
     return probe.sdp === undefined
       ? `body:${probe.mediaType}:${scopeText(probe.scope)}`
-      : `body:sdp:${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
+      : `${Confrontation.SDP_SIGNATURE_PREFIX}${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
   }
   const base = `shape:${shapeText(probe.shapeKind)}`
   return probe.scope === undefined ? base : `${base}:${scopeText(probe.scope)}`
