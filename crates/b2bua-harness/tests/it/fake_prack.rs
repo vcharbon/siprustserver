@@ -215,9 +215,8 @@ async fn multiple_18x() {
 
 const OPUS_ONLY: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n";
 
-/// Bob's UPDATE offers only a codec alice never offered → no intersection →
-/// the B2BUA answers with the stream rejected (port 0, RFC 3264 §6) and bob's
-/// bodyless 200 gives alice her stream rejected too.
+/// Bob's UPDATE offers only a codec alice never offered → no stream she could
+/// accept → 488 (RFC 3311 §5.2); the call proceeds on the 183's answer.
 #[tokio::test]
 async fn update_codec_mismatch() {
     let h = Harness::with_transit_delay("fake-prack-update-codec-mismatch", 0);
@@ -242,21 +241,15 @@ async fn update_codec_mismatch() {
     call.expect(180).await;
     bob.receive("PRACK").await.respond(200, "OK").await;
 
-    // UPDATE with no codec overlap → 200 rejecting the stream.
+    // UPDATE with no codec overlap → 488.
     let mut bob_dialog = uas.dialog();
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(OPUS_ONLY)).await;
-    let answer = update.expect(200).await;
-    assert!(
-        String::from_utf8_lossy(answer.body()).contains("\r\nm=audio 0 RTP/AVP 96\r\n"),
-        "the offered stream is answered rejected",
-    );
+    update.expect(488).await;
 
+    // Call still proceeds on the original cached SDP from the 183.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(
-        String::from_utf8_lossy(ok.body()).contains("\r\nm=audio 0 RTP/AVP 8 18 101\r\n"),
-        "alice's 200 rejects her stream",
-    );
+    assert_eq!(ok.body().as_ref(), ANSWER.as_bytes(), "alice 200 carries the 183's answer");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

@@ -47,7 +47,7 @@ use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::{answer_from_own, FormatPreference, Method};
+use sip_message::{answer_from_own, parse_sdp_body, FormatPreference, Method};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
@@ -363,8 +363,9 @@ define_service! {
         // description answering it (RFC 3264 §6, bob's preferred common format
         // per stream, the next version of her session in that early dialog);
         // and caches, for a 2xx without a description, alice's offer answered
-        // from bob's (his preferred format, his origin). 488 only where either
-        // is not a description; a bodyless refresh is answered 200 bare.
+        // from bob's (his preferred format, his origin). 488 where she can
+        // accept no stream of it (RFC 3311 §5.2) or either is not a
+        // description; a bodyless refresh is answered 200 bare.
         // `is_fake_prack_masking` scopes this to that window — once the a-leg is
         // confirmed a b-leg UPDATE is an ordinary in-dialog request and falls
         // through to CORE `relay-update`. The FromA sibling's `leg_states` gate
@@ -377,7 +378,7 @@ define_service! {
             transitions: [],
             effects: [
                 Effect::Respond { status: 200, label: "200 OK → B (alice's offer answering bob's)" },
-                Effect::Respond { status: 488, label: "488 → B (no description to answer from)" },
+                Effect::Respond { status: 488, label: "488 → B (no stream alice can accept)" },
             ],
             matcher: Match::request()
                 .method("UPDATE")
@@ -417,6 +418,14 @@ define_service! {
                 let to_alice = caller
                     .sdp()
                     .and_then(|own| answer_from_own(own, offer, FormatPreference::Answerer, None));
+                // An answerer that can accept no stream of an offer refuses it
+                // (RFC 3311 §5.2) rather than answer every stream rejected: the
+                // early exchange already agreed stays in force.
+                let live = |sdp: &[u8]| {
+                    parse_sdp_body(sdp)
+                        .is_some_and(|d| d.media.iter().any(|m| m.port.is_some_and(|p| p != 0)))
+                };
+                let to_bob = to_bob.filter(|answer| live(answer) || !live(offer));
                 match to_bob.zip(to_alice) {
                     Some((to_bob, to_alice)) => ok(vec![
                         RuleAction::Respond {

@@ -153,28 +153,27 @@ async fn a_second_reoffer_is_answered_as_the_next_version() {
     let _ = h.finish().await;
 }
 
-/// No format in common rejects the stream (port 0, RFC 3264 §6) instead of
-/// refusing the whole offer; the caller's 200 then rejects her stream too.
+/// A re-offer the caller's offer can accept no stream of is refused (RFC 3311
+/// §5.2, 488): an answer rejecting every stream would end the media the early
+/// exchange already agreed. That exchange stays in force: the callee's 200
+/// without a description gives the caller the answer his reliable 183 gave.
 #[tokio::test]
-async fn no_common_format_rejects_the_stream() {
+async fn a_reoffer_with_no_acceptable_stream_is_refused() {
     let h = Harness::with_transit_delay("fake-prack-answer-no-common", 0);
     let alice = h.agent("alice", "127.0.0.1:5821").await;
     let bob = h.agent("bob", "127.0.0.1:5822").await;
     let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5823", 5822).await;
     let (mut call, mut uas) = ringing(&alice, &bob, &b2bua).await;
 
-    let opus = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\n";
-    assert_eq!(
-        reoffer(&mut uas.dialog(), opus).await,
-        "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 96\r\n",
-    );
+    let opus = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\nm=video 30002 RTP/AVP 97\r\na=rtpmap:97 H264/90000\r\n";
+    let mut bob_dialog = uas.dialog();
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(opus)).await;
+    let refused = update.expect(488).await;
+    assert!(refused.body().is_empty(), "the refusal carries no description");
 
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert_eq!(
-        String::from_utf8_lossy(ok.body()),
-        "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 8 18 101\r\n",
-    );
+    assert_eq!(String::from_utf8_lossy(ok.body()), ANSWER, "the 183's answer stays in force");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     hang_up(&mut dialog, &bob, &b2bua).await;
