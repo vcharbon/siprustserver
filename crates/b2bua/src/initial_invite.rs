@@ -501,8 +501,7 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
         contact: invite.raw(HeaderName::Contact).map(str::to_string).collect(),
         content_type: invite.raw(HeaderName::ContentType).next().map(str::to_string),
         sip_headers,
-        sip_body: (!invite.body().is_empty())
-            .then(|| String::from_utf8_lossy(invite.body()).into_owned()),
+        sip_body: (!invite.body().is_empty()).then(|| invite.body().to_vec()),
     }
 }
 
@@ -842,6 +841,31 @@ mod multi_instance_header_tests {
         // The single-value accessor returns the first instance for the common read.
         assert_eq!(req.sip_header("History-Info"), Some("<sip:a@ex.com>;index=1"));
         assert_eq!(req.sip_header("Absent"), None);
+    }
+
+    /// The decision reads the INVITE's body byte for byte: a binary body is
+    /// never re-encoded on its way to the decision engine.
+    #[test]
+    fn a_binary_body_reaches_the_decision_byte_for_byte() {
+        let body: &[u8] = &[0x77, 0x83, 0xFF, 0x00, 0x0A];
+        let head = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKbin\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: binary-body\r\n\
+             CSeq: 1 INVITE\r\n\
+             Content-Type: application/vnd.example.data\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let raw = [head.as_bytes(), body].concat();
+        let invite = match CustomParser::new().parse(&raw).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        };
+        assert_eq!(build_request(&invite).sip_body.as_deref(), Some(body));
     }
 
     /// RFC 3261 §7.3.1: a header name is case-insensitive and its lines are one

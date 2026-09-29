@@ -174,3 +174,168 @@ async fn a_failover_route_attaches_its_parts() {
     assert_offer_beside_the_data(uas.request());
     answer_and_hang_up(h, b2bua, &carol, call, uas).await;
 }
+
+/// The caller's own entity headers describe its bare offer, not the composed
+/// body: a request-level `Content-ID` does not ride on the request, it rides
+/// with the offer inside the framing.
+#[tokio::test]
+async fn the_callers_entity_headers_stay_with_its_offer() {
+    let h = Harness::with_transit_delay("b2bua-attached-parts-entity-headers", 0);
+    let alice = h.agent("alice", "127.0.0.1:5067").await;
+    let bob = h.agent("bob", "127.0.0.1:5078").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| NewCallResponse::Route(attaching(vec![data_part()], 5078)))
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5087").await;
+
+    let call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Content-ID", "<s@example.invalid>")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let uas = bob.receive("INVITE").await;
+    let req = uas.request();
+    assert!(lines(req, "Content-ID").is_empty(), "no request-level Content-ID");
+    let ct = req.header::<MediaType>().expect("a Content-Type").expect("it parses");
+    let boundary = ct.param("boundary").and_then(ParamValue::as_str).expect("a boundary");
+    let parts = decompose_multipart(req.body(), boundary);
+    assert_eq!(parts[0].content_id.as_deref(), Some("<s@example.invalid>"), "with the offer");
+    answer_and_hang_up(h, b2bua, &bob, call, uas).await;
+}
+
+/// A leg a failover route mints around a body that carries no description is
+/// a delayed offer: the fake-prack strategy withholds `100rel` from it as from
+/// any offerless INVITE, whatever else the caller's body carried.
+#[tokio::test]
+async fn a_failover_leg_without_a_description_withholds_100rel() {
+    use b2bua::decision::test_adapter::route_to_with_18x;
+    use call::features::RelayFirst18xStrategy;
+    use sip_message::header::Supported;
+
+    let h = Harness::with_transit_delay("b2bua-attached-parts-delayed-offer-failover", 0);
+    let alice = h.agent("alice", "127.0.0.1:5068").await;
+    let bob = h.agent("bob", "127.0.0.1:5079").await;
+    let carol = h.agent("carol", "127.0.0.1:5069").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5079);
+                r.callback_context = Some("ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                let mut r = route_to_with_18x("127.0.0.1", 5069, RelayFirst18xStrategy::FakePrack);
+                r.update_body = BodyUpdate::AttachParts(vec![data_part()]);
+                CallTreatment::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5088").await;
+
+    let location = location_part();
+    let mut call = alice
+        .invite(&bob)
+        .with_header("Supported", "100rel")
+        .with_header("Content-ID", "<loc@example.invalid>")
+        .with_body(&location.content_type, location.payload.clone())
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut first = bob.receive("INVITE").await;
+    first.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    let mut uas = carol.receive("INVITE").await;
+    let req = uas.request();
+    assert_eq!(req.body().as_ref(), DATA, "the stated part alone: no description rides");
+    let supported = req.header::<Supported>().map(|s| s.expect("readable Supported"));
+    assert!(!supported.is_some_and(|s| s.contains("100rel")), "100rel withheld");
+
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack_with(Some(ANSWER)).await;
+    let ack = carol.receive("ACK").await;
+    assert_eq!(ack.request().body().as_ref(), ANSWER.as_bytes(), "the caller's answer");
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A release reroute of the established call attaches its parts to the
+/// replacement leg's INVITE, beside the caller's original offer.
+#[tokio::test(start_paused = true)]
+async fn a_release_reroute_attaches_its_parts() {
+    use b2bua::decision::{CallReleaseResponse, ReleaseOutcome};
+    use call::ReleaseEventKind;
+    use std::time::Duration;
+
+    let h = Harness::new("b2bua-attached-parts-release-reroute");
+    let alice = h.agent("alice", "127.0.0.1:5160").await;
+    let bob = h.agent("bob", "127.0.0.1:5170").await;
+    let carol = h.agent("carol", "127.0.0.1:5180").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5170);
+                r.features.platform.max_duration_sec = 60;
+                r.callback_context = Some("ctx".into());
+                r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                NewCallResponse::Route(r)
+            })
+            .on_release(|_| {
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(attaching(
+                    vec![data_part()],
+                    5180,
+                )))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5190")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(uas.request().body().as_ref(), OFFER.as_bytes(), "the first route keeps");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    h.advance(Duration::from_secs(61)).await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    assert_offer_beside_the_data(carol_uas.request());
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let tag = carol_uas.dialog().local_tag().to_string();
+    while let Some(mut again) = carol.try_receive_tolerating("INVITE", &[]).await {
+        again.respond(200, "OK").with_sdp(ANSWER).with_to_tag(&tag).await;
+    }
+    carol.receive("ACK").await;
+    let mut realign = alice.receive("INVITE").await;
+    realign.respond(200, "OK").with_sdp(OFFER).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    h.advance(Duration::from_secs(5)).await;
+    let mut bye = alice_dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let _ = h.finish().await;
+}

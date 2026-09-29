@@ -81,7 +81,17 @@ fn minted_body(
 ) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
     if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
         let ct = source_content_type(a_leg_invite, body);
-        let attached = sip_message::attach_parts(ct.as_deref(), &body.bytes, parts);
+        // The originator's entity headers describe the bytes only when they are
+        // its own body, typed by its own Content-Type.
+        let described: Vec<(String, String)> = match body.content_type {
+            Some(_) => Vec::new(),
+            None => a_leg_invite
+                .headers()
+                .iter()
+                .map(|h| (h.name.to_string(), h.value.to_string()))
+                .collect(),
+        };
+        let attached = sip_message::attach_parts(ct.as_deref(), &described, &body.bytes, parts);
         let content_type = attached.content_type.as_deref().and_then(media_type);
         return (attached.body, content_type, attached.headers);
     }
@@ -289,11 +299,14 @@ pub fn build_b_leg(
         })
         .collect();
     // The entity headers the minted body states for itself; a name the decision
-    // stated stands.
+    // stated stands, and a structural name is the generator's.
     let decided = extra_headers.clone();
     for (name, value) in entity_headers {
         let header = HeaderName::from(name.as_str());
-        if !decided.iter().any(|h| header.matches(&h.name)) && !removed(header_updates, &header) {
+        if HeaderName::class_of(&name) != HeaderClass::Structural
+            && !decided.iter().any(|h| header.matches(&h.name))
+            && !removed(header_updates, &header)
+        {
             extra_headers
                 .push(MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) });
         }
@@ -472,7 +485,8 @@ pub fn build_b_leg(
         label: format!("b-leg INVITE ({leg_id})"),
         leg_id: Some(leg_id.to_string()),
         // The originator's INVITE forwarded, unless the decision put its own
-        // body on it — then the offer, and the message, are this stack's.
+        // body on it — then the offer, and the message, are this stack's; a
+        // body composed around attached parts is this stack's too.
         provenance: match body_override {
             Some(_) => Provenance::Authored,
             None => Provenance::Relayed,

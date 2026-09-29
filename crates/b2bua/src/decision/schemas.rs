@@ -42,8 +42,9 @@ pub struct NewCallRequest {
     /// [`NewCallRequest::sip_header_values`], which fold case.
     #[serde(default)]
     pub sip_headers: Vec<(String, String)>,
+    /// The INVITE's body, byte for byte (a binary part stays binary).
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub sip_body: Option<String>,
+    pub sip_body: Option<Vec<u8>>,
 }
 
 impl NewCallRequest {
