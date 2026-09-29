@@ -197,6 +197,40 @@ describe("the origin of a session the endpoint opens", () => {
     expect(got.every((r) => r.minted)).toBe(true)
   })
 
+  it("a session the capture carries onto another leg, which the replay continues from another sess-id at the same step, is unmarked", () => {
+    // Only the cell-wide pairing decides: on leg A alone both sides open a
+    // session in the same form at a step of their own.
+    const got = rows(acrossLegs(
+      { b: sdp(o(1000, 1000)), a: sdp(o(1000, 1001)) },
+      { b: sdp(o(7, 7)), a: sdp(o(9, 10)) }
+    ))
+    expect(got.find((r) => r.step === "s4")).toMatchObject({ minted: false })
+  })
+
+  it("steps each side in its own order: a replay that reaches leg C before leg A stays marked", () => {
+    const flowABC: ReadonlyArray<Flow.Step> = [
+      step("s2", "B", "expect", { method: "INVITE", body: sdpBody("resources/b1.sdp") }, false),
+      step("s4", "A", "expect", { method: "INVITE", body: sdpBody("resources/a2.sdp") }),
+      step("s6", "C", "expect", { method: "INVITE", body: sdpBody("resources/c3.sdp") })
+    ]
+    const probes = confront({
+      pivot: { ...pivot, flow: [...flowABC] },
+      verdict,
+      recordings: new Map([
+        ["A", [message(4, "in", "s4", "INVITE sip:a@example.invalid SIP/2.0", "2 INVITE", true, sdp(o(7, 9)))]],
+        ["B", [message(2, "in", "s2", "INVITE sip:b@example.invalid SIP/2.0", "1 INVITE", false, sdp(o(7, 7)))]],
+        ["C", [message(3, "in", "s6", "INVITE sip:c@example.invalid SIP/2.0", "3 INVITE", true, sdp(o(7, 8)))]]
+      ]),
+      resources: new Map([
+        ["resources/b1.sdp", utf8.encode(sdp(o(1000, 1000)))],
+        ["resources/a2.sdp", utf8.encode(sdp(o(1000, 1001)))],
+        ["resources/c3.sdp", utf8.encode(sdp(o(1000, 1002)))]
+      ]),
+      media: "verbatim"
+    }).probes.flatMap((p) => (p.probe.kind === "body" ? [p.probe] : []))
+    expect(rows(probes).map((r) => [r.step, r.minted])).toEqual([["s4", true], ["s2", true], ["s6", true]])
+  })
+
   it("the same bytes state nothing", () => {
     expect(run(sdp(o(1000, 1000)), sdp(o(1000, 1001)))).toEqual([])
   })

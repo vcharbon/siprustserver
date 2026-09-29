@@ -11,14 +11,15 @@
  * An origin is MINTED on a side when no description that side drove into the
  * endpoint carries its identity (username, sess-id, nettype, addrtype,
  * address): the capture's sends for the captured side, the run's own sends for
- * the replayed side. A {@link Ledger} holds one cell's descriptions in wire
- * order across its legs and admits a pair only when both origins are minted,
- * differ in the two numbers alone, keep a one-to-one pairing of origin
- * identities across the cell (a session the capture keeps, the replay keeps,
- * on whichever leg; a session the capture changes, the replay changes), open
- * a session in the same form (sess-version equal to sess-id on both sides or
- * on neither), and step sess-version by the same amount since that session's
- * previous description (RFC 3264 §8).
+ * the replayed side. {@link readOrigins} reads one cell's description pairs
+ * and admits a pair only when both origins are minted, differ in the two
+ * numbers alone, keep a one-to-one pairing of origin identities across the
+ * cell (a session the capture keeps, the replay keeps, on whichever leg; a
+ * session the capture changes, the replay changes), and step sess-version by
+ * the same amount since that session's previous description, each side in its
+ * OWN order: the capture's by the flow, the replay's by its wire (RFC 3264
+ * §8). A session's first description opens in the same form on both sides
+ * (sess-version equal to sess-id on both or on neither).
  */
 
 /** One parsed `o=` line: the two numbers apart from the fields every run reproduces. */
@@ -70,49 +71,118 @@ export interface Driven {
   readonly replayed: ReadonlySet<string>
 }
 
-/** One cell's origin reading, in wire order across its legs. */
-export interface Ledger {
-  /**
-   * Reads one captured/replayed description pair and says whether its
-   * origins are a minted origin and its counterpart. Every pair whose origins
-   * parse is recorded, admitted or not, so a later pair is held to the
-   * sessions the cell has already shown.
-   */
+/** One captured/replayed description pair, with where it sits in each side's own order. */
+export interface Sighting {
+  readonly captured: string
+  readonly replayed: string
+  /** Its place in the capture's order: the flow step's position. */
+  readonly capturedAt: number
+  /** Its place in the replay's order: the wire position of its reception. */
+  readonly replayedAt: number
+}
+
+/** Each sighting's predecessor on its own side: the index of the same identity's previous one in `order`. */
+const predecessors = (
+  identities: ReadonlyArray<string | undefined>,
+  order: ReadonlyArray<number>
+): ReadonlyArray<number | undefined> => {
+  const out: Array<number | undefined> = identities.map(() => undefined)
+  const last = new Map<string, number>()
+  for (const at of order) {
+    const identity = identities[at]
+    if (identity === undefined) continue
+    out[at] = last.get(identity)
+    last.set(identity, at)
+  }
+  return out
+}
+
+const orderBy = (sightings: ReadonlyArray<Sighting>, key: (s: Sighting) => number): ReadonlyArray<number> =>
+  sightings.map((_, at) => at).sort((a, b) => key(sightings[a]!) - key(sightings[b]!) || a - b)
+
+/**
+ * Whether each sighting's origins are a minted origin and its counterpart.
+ * Every pair whose origins parse takes part in the pairing and the steps,
+ * admitted or not, so a pair is held to every session the cell shows.
+ */
+export const readOrigins = (sightings: ReadonlyArray<Sighting>, driven: Driven): ReadonlyArray<boolean> => {
+  const left = sightings.map((s) => originOf(s.captured))
+  const right = sightings.map((s) => originOf(s.replayed))
+  const parsed = (at: number): boolean => left[at] !== undefined && right[at] !== undefined
+  const leftId = left.map((o, at) => (o === undefined || !parsed(at) ? undefined : identityOf(o)))
+  const rightId = right.map((o, at) => (o === undefined || !parsed(at) ? undefined : identityOf(o)))
+  const byReplay = orderBy(sightings, (s) => s.replayedAt)
+  const beforeLeft = predecessors(leftId, orderBy(sightings, (s) => s.capturedAt))
+  const beforeRight = predecessors(rightId, byReplay)
+  // The pairing is one-to-one over the cell; the replay's order says which
+  // pair a broken pairing is charged to.
+  const paired: Array<boolean> = sightings.map(() => false)
+  const toReplayed = new Map<string, string>()
+  const toCaptured = new Map<string, string>()
+  for (const at of byReplay) {
+    const l = leftId[at]
+    const r = rightId[at]
+    if (l === undefined || r === undefined) continue
+    paired[at] = (toReplayed.get(l) ?? r) === r && (toCaptured.get(r) ?? l) === l
+    if (!toReplayed.has(l)) toReplayed.set(l, r)
+    if (!toCaptured.has(r)) toCaptured.set(r, l)
+  }
+  return sightings.map((_, at) => {
+    const a = left[at]
+    const b = right[at]
+    if (a === undefined || b === undefined) return false
+    const pa = beforeLeft[at]
+    const pb = beforeRight[at]
+    const stepped = pa === undefined || pb === undefined
+      ? pa === pb && (a.sessVersion === a.sessId) === (b.sessVersion === b.sessId)
+      : a.sessVersion - left[pa]!.sessVersion === b.sessVersion - right[pb]!.sessVersion
+    return paired[at]! &&
+      stepped &&
+      a.username === b.username &&
+      a.network === b.network &&
+      !driven.captured.has(identityOf(a)) &&
+      !driven.replayed.has(identityOf(b))
+  })
+}
+
+/**
+ * The origin reading of one reception, as the body confrontation asks it: one
+ * `read` per description pair the reception carries, in the order it carries
+ * them.
+ */
+export interface Reception {
   readonly read: (captured: string, replayed: string) => boolean
 }
 
-/** A ledger for one cell, over the identities each side drove into the endpoint. */
-export const ledger = (driven: Driven): Ledger => {
-  const toReplayed = new Map<string, string>()
-  const toCaptured = new Map<string, string>()
-  const lastCaptured = new Map<string, bigint>()
-  const lastReplayed = new Map<string, bigint>()
-  return {
-    read: (capturedText, replayedText) => {
-      const a = originOf(capturedText)
-      const b = originOf(replayedText)
-      if (a === undefined || b === undefined) return false
-      const left = identityOf(a)
-      const right = identityOf(b)
-      const paired = (toReplayed.get(left) ?? right) === right && (toCaptured.get(right) ?? left) === left
-      const before = lastCaptured.get(left)
-      const beforeReplayed = lastReplayed.get(right)
-      const stepped = before === undefined || beforeReplayed === undefined
-        ? before === beforeReplayed && (a.sessVersion === a.sessId) === (b.sessVersion === b.sessId)
-        : a.sessVersion - before === b.sessVersion - beforeReplayed
-      const admitted = paired &&
-        stepped &&
-        a.username === b.username &&
-        a.network === b.network &&
-        !driven.captured.has(left) &&
-        !driven.replayed.has(right)
-      if (!toReplayed.has(left)) toReplayed.set(left, right)
-      if (!toCaptured.has(right)) toCaptured.set(right, left)
-      lastCaptured.set(left, a.sessVersion)
-      lastReplayed.set(right, b.sessVersion)
-      return admitted
+/** Where a reception sits in each side's own order. */
+export interface Place {
+  readonly capturedAt: number
+  readonly replayedAt: number
+}
+
+/**
+ * The two passes of a cell's origin reading over one deterministic walk of
+ * its receptions: `collecting` notes every pair and answers false, then
+ * `answering` answers the same walk, call for call, from {@link readOrigins}.
+ */
+export interface Ledger {
+  readonly at: (place: Place) => Reception
+}
+
+/** The first pass: every pair noted, in walk order. */
+export const collecting = (into: Array<Sighting>): Ledger => ({
+  at: (place) => ({
+    read: (captured, replayed) => {
+      into.push({ captured, replayed, ...place })
+      return false
     }
-  }
+  })
+})
+
+/** The second pass: the answers of the first pass's pairs, in the same walk order. */
+export const answering = (answers: ReadonlyArray<boolean>): Ledger => {
+  let next = 0
+  return { at: () => ({ read: () => answers[next++] ?? false }) }
 }
 
 /** The text with its first `o=` line replaced by the first one of `from`; the text itself where either states none. */

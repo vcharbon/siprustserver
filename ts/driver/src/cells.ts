@@ -31,13 +31,13 @@ import * as FileSystem from "effect/FileSystem"
 import * as Path from "effect/Path"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
+import { readRecordings } from "./recordings.js"
 import {
   cellDir,
   cellIdOf,
   CLASSIFICATION_FILE,
   CONFRONTATION_FILE,
   ERROR_FILE,
-  RECORDING_DIR,
   RESULT_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
@@ -420,21 +420,6 @@ const readStatedBodies = Effect.fn("Driver.readStatedBodies")(function* (
       if (step.op === "send" && !(yield* fs.exists(file))) continue
       out.set(ref, yield* fs.readFile(file))
     }
-  }
-  return out
-})
-
-/** Every per-leg recording of one finished bundle, keyed by leg name, legs in name order. */
-const readRecordings = Effect.fn("Driver.readRecordings")(function* (absolute: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const dir = path.join(absolute, RECORDING_DIR)
-  const out = new Map<string, ReadonlyArray<Bundle.RecordedMessage>>()
-  if (!(yield* fs.exists(dir))) return out
-  for (const entry of [...(yield* fs.readDirectory(dir))].sort()) {
-    if (!entry.endsWith(".jsonl")) continue
-    const text = yield* fs.readFileString(path.join(dir, entry))
-    out.set(entry.slice(0, -".jsonl".length), yield* Bundle.decodeRecording(text))
   }
   return out
 })

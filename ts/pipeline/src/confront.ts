@@ -36,7 +36,7 @@ import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
-import { type Driven, identitiesIn, type Ledger, ledger } from "./sdporigin.js"
+import { answering, collecting, type Driven, identitiesIn, type Ledger, readOrigins, type Reception, type Sighting } from "./sdporigin.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
@@ -323,24 +323,39 @@ const headerProbes = (
  * either is not.
  *
  * On a verbatim run every `sdp` pair of the cell is read by one origin
- * {@link Ledger} in wire order across the legs, over the origins the capture's
- * `send` steps and the run's own sends drove into the endpoint, so a session
- * carried from one leg onto another is held to the same pairing. The probes
- * are returned leg by leg, as before.
+ * reading (`./sdporigin.ts`), over the origins the capture's `send` steps and
+ * the run's own sends drove into the endpoint, each pair placed in the
+ * capture's flow order and in the replay's wire order across the legs, so a
+ * session carried from one leg onto another is held to the same pairing. The
+ * walk runs twice: once to note the pairs, once with their answers. The
+ * probes are returned leg by leg.
  */
 export const bodyProbes = (
   input: ConfrontInput,
   steps: ReadonlyMap<string, Flow.Step>
 ): ReadonlyArray<ProbeAt> => {
   const media = input.media ?? "rebooked"
-  const driven = media === "verbatim" ? drivenOrigins(input) : undefined
-  const origins = driven === undefined ? undefined : ledger(driven)
   const legs = [...input.recordings.values()]
   const wire = legs
     .flatMap((recording, leg) => recording.map((message, at) => ({ leg, at, message })))
     .sort((a, b) => a.message.at_us - b.message.at_us || a.leg - b.leg || a.at - b.at)
-  const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
-  for (const { message } of wire) found.set(message, messageBodyProbes(input, steps, message, media, origins))
+  const flowAt = new Map([...steps.keys()].map((id, at) => [id, at]))
+  const walk = (origins: Ledger | undefined): ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>> => {
+    const found = new Map<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>()
+    wire.forEach(({ message }, replayedAt) => {
+      const capturedAt = message.step === undefined ? Number.MAX_SAFE_INTEGER : flowAt.get(message.step) ?? Number.MAX_SAFE_INTEGER
+      found.set(message, messageBodyProbes(input, steps, message, media, origins?.at({ capturedAt, replayedAt })))
+    })
+    return found
+  }
+  let found: ReadonlyMap<Bundle.RecordedMessage, ReadonlyArray<ProbeAt>>
+  if (media === "verbatim") {
+    const sightings: Array<Sighting> = []
+    walk(collecting(sightings))
+    found = walk(answering(readOrigins(sightings, drivenOrigins(input))))
+  } else {
+    found = walk(undefined)
+  }
   return legs.flatMap((recording) => recording.flatMap((message) => found.get(message) ?? []))
 }
 
@@ -350,7 +365,7 @@ const messageBodyProbes = (
   steps: ReadonlyMap<string, Flow.Step>,
   message: Bundle.RecordedMessage,
   media: Bundle.MediaMode,
-  origins: Ledger | undefined
+  origins: Reception | undefined
 ): ReadonlyArray<ProbeAt> => {
   if (message.dir !== "in" || message.repeat_of !== undefined) return []
   const step = message.step === undefined ? undefined : steps.get(message.step)
@@ -478,7 +493,7 @@ const bodyProbe = (
   captured: Uint8Array,
   replayed: Uint8Array,
   media: Bundle.MediaMode,
-  origins: Ledger | undefined
+  origins: Reception | undefined
 ): ReadonlyArray<BodyProbe> => {
   const compare = body.compare ?? "exact"
   if (compare === "exact") {
@@ -495,8 +510,8 @@ const bodyProbe = (
     return [{ kind: "body", step, mediaType, scope, compare, captured: [a], replayed: [b] }]
   }
   if (compare === "sdp") {
-    // The ledger reads every pair of the leg, equal ones included, so a later
-    // description is held to the sessions this one showed.
+    // Every pair is read, equal ones included, so each is held to the
+    // sessions the cell shows.
     const minted = origins?.read(capturedText, replayedText) ?? false
     return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText, minted).map((d) => ({
       kind: "body",
@@ -533,7 +548,7 @@ const multipartProbes = (
   resources: ReadonlyMap<string, Uint8Array> | undefined,
   message: Bundle.RecordedMessage,
   media: Bundle.MediaMode,
-  origins: Ledger | undefined
+  origins: Reception | undefined
 ): ReadonlyArray<BodyProbe> => {
   const mediaType = mimeKey(expected["content-type"])
   if (message.body === undefined) {
