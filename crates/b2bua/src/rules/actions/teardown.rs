@@ -216,6 +216,7 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
+                // FIXME(b2bua): destroy_leg on a confirmed a-leg sets ByeSent without a BYE; mint the a-leg BYE.
                 if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &stated, None) {
                     fx.outbound.push(e);
                 }

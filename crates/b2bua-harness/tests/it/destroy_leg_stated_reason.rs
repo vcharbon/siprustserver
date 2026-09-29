@@ -1,7 +1,8 @@
 //! A service that ends a leg on its own states the release's `Reason`
 //! (RFC 3326) on the request `DestroyLeg` mints for it: the `CANCEL` of a
 //! ringing callee (§2 names `CANCEL`), the `BYE` of an answered one. A
-//! teardown stating nothing carries no `Reason`, whatever the peer sent.
+//! `DestroyLeg` stating nothing carries no `Reason`, even when the caller's
+//! `BYE` that prompted it stated one.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
+use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -26,7 +28,7 @@ mod releaser {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{LegState, TimerType};
+    use call::{ByeDisposition, Direction, LegState, TimerType};
     use sip_message::Method;
 
     pub const FIRE_SEC: i64 = 5;
@@ -44,7 +46,47 @@ mod releaser {
                 },
             ]))
         },
-        rules: [ release_on_fire() ],
+        rules: [ release_on_fire(), end_callee_on_caller_bye() ],
+    }
+
+    /// The caller's `BYE`: answer it and `DestroyLeg` the callee stating
+    /// nothing, in place of the core relay.
+    fn end_callee_on_caller_bye() -> RuleDefinition {
+        sm_rule! {
+            id: "releaser-caller-bye",
+            machine: RELEASER,
+            active: [ RlState::Armed ],
+            transitions: [ RlState::Armed => Terminal ],
+            effects: [
+                Effect::Respond { status: 200, label: "200 OK [bye] → caller" },
+                Effect::Originate { method: Method::Bye, label: "BYE → callee, stating nothing" },
+                Effect::LifecycleCommand { label: "graceful teardown of the rest" },
+            ],
+            matcher: Match::request().method("BYE").direction(Direction::FromA),
+            handle: |ctx: &RuleContext| {
+                let a = ctx.source_leg_id.to_string();
+                let b = ctx.call.b_legs().first().expect("the callee leg").leg_id.to_string();
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::Respond {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: vec![],
+                        content_type: None,
+                    },
+                    RuleAction::TerminateLeg {
+                        leg_id: a.clone(),
+                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                    },
+                    RuleAction::DestroyLeg { leg_id: b, headers: vec![] },
+                    RuleAction::BeginTermination {
+                        reason: None,
+                        cause: call::TerminationCause::RemoteBye,
+                        by_leg: Some(a),
+                    },
+                    RuleAction::ClearState { machine: RELEASER },
+                ]))
+            },
+        }
     }
 
     fn release_on_fire() -> RuleDefinition {
@@ -148,6 +190,42 @@ async fn the_bye_of_an_answered_callee_carries_the_stated_reason() {
     let mut bye_alice = alice.receive("BYE").await;
     assert!(reasons(bye_alice.request()).is_empty(), "nothing stated for the caller's BYE");
     bye_alice.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// The caller's `BYE` states a `Reason`; the service's `DestroyLeg` of the
+/// callee states nothing, so the callee's `BYE` carries no `Reason`.
+#[tokio::test(start_paused = true)]
+async fn a_bye_stating_nothing_carries_no_reason_whatever_the_caller_stated() {
+    let h = Harness::new("destroy-leg-stated-reason-none");
+    let alice = h.agent("alice", "127.0.0.1:5062").await;
+    let bob = h.agent("bob", "127.0.0.1:5072").await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5072)))
+            .services(vec![releaser::service_def()])
+            .tune(|c| c.keepalive_interval_sec = 3_600)
+            .start(&h, "b2bua", "127.0.0.1:5082")
+            .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog
+        .send_request(InDialogMethod::Bye)
+        .with_header("Reason", "Q.850;cause=31")
+        .send()
+        .await;
+    bye.expect(200).await;
+    let mut bye_bob = bob.receive("BYE").await;
+    assert!(reasons(bye_bob.request()).is_empty(), "nothing stated, nothing relayed");
+    bye_bob.respond(200, "OK").await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();

@@ -614,10 +614,11 @@ pub enum RuleAction {
         /// leg is gated out of the generic relay-to-peer fallback.
         kind: Option<LegKind>,
     },
-    /// End `leg_id` as its state asks: a confirmed dialog is BYE'd, a pending
-    /// INVITE CANCELled (RFC 3261 §9.1), and the leg terminated. `headers` are
-    /// application headers the rule states on that BYE or CANCEL, verbatim —
-    /// the RFC 3326 `Reason` of a release of its own; empty states none.
+    /// End b-leg `leg_id` as its state asks: a confirmed dialog is BYE'd, a
+    /// pending INVITE CANCELled (RFC 3261 §9.1), and the leg terminated.
+    /// `headers` are application headers the rule states on that BYE or
+    /// CANCEL, verbatim — the RFC 3326 `Reason` of a release of its own; empty
+    /// states none.
     DestroyLeg {
         leg_id: String,
         headers: Vec<(String, String)>,

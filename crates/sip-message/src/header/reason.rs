@@ -1,6 +1,9 @@
 //! [`Reason`] (RFC 3326): the protocol and cause a `BYE` or `CANCEL` states.
 
+use crate::sip_str::SipStr;
+
 use super::aliases::Reason;
+use super::value::HeaderValue;
 
 /// The RFC 3326 §2 protocol token of an ITU-T Q.850 cause.
 pub const Q850: &str = "Q.850";
@@ -11,29 +14,37 @@ impl Reason {
         self.token()
     }
 
-    /// The `cause` the value states (RFC 3326 §2, `1*DIGIT`); `None` when it
-    /// states none or one that is not a decimal code.
-    pub fn cause(&self) -> Option<u16> {
+    /// The `cause` the value states (RFC 3326 §2, `1*DIGIT`) as written,
+    /// leading zeros kept; `None` when it states none or one that is not
+    /// decimal.
+    pub fn cause_digits(&self) -> Option<&str> {
         let value = self.param("cause")?.as_str()?;
-        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        value.parse().ok()
+        (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())).then_some(value)
+    }
+
+    /// The `cause` the value states as a number; `None` when it states none,
+    /// one that is not decimal, or one past `u16`.
+    pub fn cause(&self) -> Option<u16> {
+        self.cause_digits()?.parse().ok()
     }
 }
 
-/// The cause `reasons` state for `protocol`, matched case-insensitively: the
-/// first value naming it (RFC 3326 §2 allows one per protocol), `None` when
-/// none names it or the one that does states no cause.
-pub fn stated_cause(reasons: &[Reason], protocol: &str) -> Option<u16> {
-    reasons.iter().find(|r| r.is(protocol)).and_then(Reason::cause)
+/// The `Reason` values of `lines` (a message's `Reason` header lines, in wire
+/// order) that read: a line that does not parse is skipped, so it hides none
+/// of the others.
+pub fn readable_reasons(lines: impl IntoIterator<Item = SipStr>) -> Vec<Reason> {
+    lines.into_iter().filter_map(|line| Reason::parse_line(&line).ok()).flatten().collect()
+}
+
+/// The first of `reasons` naming `protocol`, matched case-insensitively
+/// (RFC 3326 §2 allows one value per protocol).
+pub fn reason_for<'a>(reasons: &'a [Reason], protocol: &str) -> Option<&'a Reason> {
+    reasons.iter().find(|r| r.is(protocol))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::HeaderValue;
-    use crate::sip_str::SipStr;
 
     fn reason(raw: &str) -> Reason {
         Reason::parse(&SipStr::owned(raw)).unwrap()
@@ -48,30 +59,44 @@ mod tests {
         assert_eq!((sip.protocol(), sip.cause()), ("SIP", Some(200)));
     }
 
-    /// The grammar's LWS around `;` and `=` (RFC 3261 §25.1 SEMI, EQUAL) and a
-    /// zero-padded code read as the same cause.
+    /// The grammar's LWS around `;` and `=` (RFC 3261 §25.1 SEMI, EQUAL) reads
+    /// as the same cause; its digits read as written.
     #[test]
-    fn spacing_and_leading_zeros_state_the_same_cause() {
-        for raw in ["Q.850 ;cause=16", "Q.850; cause=16", "Q.850;cause = 16", "q.850;cause=016"] {
-            assert_eq!(stated_cause(&[reason(raw)], Q850), Some(16), "{raw:?}");
+    fn spacing_reads_the_same_cause_and_digits_read_as_written() {
+        for raw in ["Q.850 ;cause=16", "Q.850; cause=16", "Q.850;cause = 16", "q.850;cause=16"] {
+            let reasons = [reason(raw)];
+            assert_eq!(reason_for(&reasons, Q850).and_then(Reason::cause), Some(16), "{raw:?}");
         }
+        let padded = reason("Q.850;cause=016");
+        assert_eq!((padded.cause_digits(), padded.cause()), (Some("016"), Some(16)));
     }
 
     #[test]
     fn a_value_without_a_decimal_cause_states_none() {
         assert_eq!(reason("SIP;text=\"Call terminated\"").cause(), None);
         assert_eq!(reason("Q.850;cause").cause(), None);
-        assert_eq!(reason("Q.850;cause=abc").cause(), None);
-        assert_eq!(reason("Q.850;cause=99999999").cause(), None);
+        assert_eq!(reason("Q.850;cause=abc").cause_digits(), None);
+        let huge = reason("Q.850;cause=99999999");
+        assert_eq!((huge.cause_digits(), huge.cause()), (Some("99999999"), None));
     }
 
     /// Several values (one per protocol) are read by protocol, never by position.
     #[test]
-    fn the_cause_is_the_one_stated_for_the_protocol() {
+    fn the_value_is_the_one_stated_for_the_protocol() {
         let both = [reason("SIP;cause=600"), reason("Q.850;cause=17")];
-        assert_eq!(stated_cause(&both, Q850), Some(17));
-        assert_eq!(stated_cause(&both, "SIP"), Some(600));
-        assert_eq!(stated_cause(&both[..1], Q850), None, "no Q.850 value");
-        assert_eq!(stated_cause(&[], Q850), None);
+        assert_eq!(reason_for(&both, Q850).and_then(Reason::cause), Some(17));
+        assert_eq!(reason_for(&both, "SIP").and_then(Reason::cause), Some(600));
+        assert!(reason_for(&both[..1], Q850).is_none(), "no Q.850 value");
+    }
+
+    /// A line that does not parse is skipped; the other lines, and every value
+    /// of a comma-folded line, still read.
+    #[test]
+    fn a_line_that_does_not_read_hides_no_other() {
+        let lines = [";cause=1", "SIP;cause=200, Q.850;cause=17"].map(SipStr::owned);
+        let reasons = readable_reasons(lines);
+        let protocols: Vec<&str> = reasons.iter().map(Reason::protocol).collect();
+        assert_eq!(protocols, ["SIP", "Q.850"]);
+        assert!(readable_reasons(Vec::<SipStr>::new()).is_empty());
     }
 }

@@ -57,7 +57,7 @@ pub use name_addr::NameAddr;
 pub use name_addr_header::NameAddrHeader;
 pub use numeric::NumericHeader;
 pub use params::{ParamValue, Params};
-pub use reason::{stated_cause, Q850};
+pub use reason::{readable_reasons, reason_for, Q850};
 pub use token_list::TokenListHeader;
 pub use token_params::{parse_token_params, TokenParamsHeader};
 pub use uri::{HostPort, Uri};
