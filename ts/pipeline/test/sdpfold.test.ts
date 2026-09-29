@@ -107,6 +107,24 @@ describe("diffSdp", () => {
       })
     }
 
+    it("an `o=` whose sess-id and version move by one amount is the same session read at another clock", () => {
+      const at = (id: string, version: string) =>
+        crlf(swap(OFFER, "o=- 1234 5678 IN IP4 192.0.2.10", `o=- ${id} ${version} IN IP4 192.0.2.10`))
+      const captured = at("1789719540919", "1789719540921")
+      expect(diffSdp(VERBATIM, captured, at("5000", "5002"))).toEqual([])
+      expect(foldSdp(VERBATIM, captured)).toBe(foldSdp(VERBATIM, at("5000", "5002")))
+      const stepped = at("5000", "5003")
+      expect(diffSdp(VERBATIM, captured, stepped)).toEqual([
+        { section: "document", line: "bytes", captured: [captured], replayed: [stepped] }
+      ])
+      const renamed = at("5001", "5003")
+      expect(diffSdp(VERBATIM, at("5000", "5002"), renamed)).toEqual([])
+      const other = crlf(swap(OFFER, "o=- 1234 5678 IN IP4 192.0.2.10", "o=- 1234 5678 IN IP4 192.0.2.11"))
+      expect(diffSdp(VERBATIM, crlf(OFFER), other)).toEqual([
+        { section: "session", line: "o=", captured: ["o=- 1234 5678 IN IP4 192.0.2.10"], replayed: ["o=- 1234 5678 IN IP4 192.0.2.11"] }
+      ])
+    })
+
     it("a structural difference is its rows and never the bytes row", () => {
       const changed = crlf(swap(OFFER, "a=ptime:20", "a=ptime:30"))
       expect(diffSdp(VERBATIM, crlf(OFFER), changed)).toEqual([
@@ -223,8 +241,8 @@ describe("foldSdp", () => {
     }
   })
 
-  it("is the text itself on a verbatim run, and leaves a text that is no session description verbatim", () => {
-    expect(foldSdp(VERBATIM, crlf(OFFER))).toBe(crlf(OFFER))
+  it("is the text itself on a verbatim run, its `o=` read up to the clock, and leaves a text that is no session description verbatim", () => {
+    expect(foldSdp(VERBATIM, crlf(OFFER))).toBe(crlf(swap(OFFER, "o=- 1234 5678 IN IP4 192.0.2.10", "o=- * 4444 IN IP4 192.0.2.10")))
     expect(foldSdp(FLOOR, crlf(OFFER))).not.toBe(crlf(OFFER))
     expect(foldSdp(FLOOR, "<a/>")).toBe("<a/>")
     expect(foldSdp(FLOOR, "")).toBe("")

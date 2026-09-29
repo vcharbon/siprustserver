@@ -7,7 +7,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser, SipStr};
 
 use super::{adopt_confirmed_dialog, continue_on_leg, next_origin_in_dialog, Author, Carried};
-use crate::config::B2buaConfig;
+use crate::config::{B2buaConfig, SdpForm};
 use crate::initial_invite::build_initial_call;
 use crate::router::test_support::{invite, src};
 
@@ -42,8 +42,28 @@ fn ct() -> MediaType {
 
 /// What reaches leg `to` of `body` written by `author`, `carried` as stated.
 fn send(call: &mut Call, to: &str, author: Author<'_>, carried: Carried, body: &str) -> String {
-    let out =
-        continue_on_leg(call, to, None, author, carried, body.as_bytes().to_vec(), Some(&ct()));
+    send_in(call, to, author, carried, body, SdpForm::AsWritten)
+}
+
+/// [`send`] with the stack's form after a restatement stated.
+fn send_in(
+    call: &mut Call,
+    to: &str,
+    author: Author<'_>,
+    carried: Carried,
+    body: &str,
+    form: SdpForm,
+) -> String {
+    let out = continue_on_leg(
+        call,
+        to,
+        None,
+        author,
+        carried,
+        body.as_bytes().to_vec(),
+        Some(&ct()),
+        form,
+    );
     String::from_utf8(out).unwrap()
 }
 
@@ -409,6 +429,7 @@ fn answer_in_f1(c: &mut Call, origin: &str) -> String {
         Carried::InDialog,
         body.as_bytes().to_vec(),
         Some(&ct()),
+        SdpForm::AsWritten,
     );
     String::from_utf8(out).unwrap()
 }
@@ -433,6 +454,7 @@ fn a_stack_description_stating_the_next_version_leaves_as_written() {
         Carried::InDialog,
         sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
         Some(&ct()),
+        SdpForm::AsWritten,
     );
     assert_eq!(o_line(&String::from_utf8(relayed).unwrap()), "o=alice 1 4 IN IP4 192.0.2.1");
 }
@@ -475,7 +497,16 @@ fn each_early_dialog_keeps_its_own_session() {
 #[test]
 fn a_relayed_early_exchange_survives_confirmation() {
     let mut c = forked();
-    continue_on_leg(&mut c, "b-1", Some("f1"), Author::Leg("a"), Carried::InDialog, vec![], None);
+    continue_on_leg(
+        &mut c,
+        "b-1",
+        Some("f1"),
+        Author::Leg("a"),
+        Carried::InDialog,
+        vec![],
+        None,
+        SdpForm::AsWritten,
+    );
     let answer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
     let out = continue_on_leg(
         &mut c,
@@ -485,6 +516,7 @@ fn a_relayed_early_exchange_survives_confirmation() {
         Carried::answering(&Method::Update, 200),
         answer.clone().into_bytes(),
         Some(&ct()),
+        SdpForm::AsWritten,
     );
     assert_eq!(String::from_utf8(out).unwrap(), answer);
     adopt_confirmed_dialog(&mut c.b_legs[0], 0);
@@ -508,6 +540,7 @@ fn a_relayed_description_does_not_leak_into_another_fork() {
         Carried::answering(&Method::Update, 200),
         sdp("alice 1 2 IN IP4 192.0.2.1", 10002).into_bytes(),
         Some(&ct()),
+        SdpForm::AsWritten,
     );
     adopt_confirmed_dialog(&mut c.b_legs[0], 1);
     assert_eq!(
@@ -535,4 +568,132 @@ fn a_confirmed_dialog_restates_a_stack_description_at_the_next_version() {
     );
     assert_eq!(o_line(&out), "o=alice 1 2 IN IP4 192.0.2.1");
     assert!(out.ends_with("m=audio 10000 RTP/AVP 0\r\nm=video 0 RTP/AVP 96\r\n"), "{out}");
+}
+
+// ── the form a description leaves in once the call has a restatement ──
+
+/// A description as a peer writes it: the `fmtp` before the `rtpmap` lines,
+/// no direction attribute.
+fn peer_sdp(origin: &str, port: u16) -> String {
+    format!(
+        "v=0\r\no={origin}\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio {port} RTP/AVP 8 18\r\na=fmtp:18 annexb=no\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\na=ptime:20\r\n"
+    )
+}
+
+/// [`peer_sdp`] in canonical form.
+fn in_form(origin: &str, port: u16) -> String {
+    format!(
+        "v=0\r\no={origin}\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio {port} RTP/AVP 8 18\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\na=ptime:20\r\na=sendrecv\r\n"
+    )
+}
+
+/// Caller `a` answered by `b-1`, the transfer target `b-2` offering: the
+/// first restatement of the call, toward the caller.
+fn restated_once(form: SdpForm) -> (Call, String) {
+    let mut c = call();
+    send_in(
+        &mut c,
+        "a",
+        Author::Leg("b-1"),
+        Carried::Opening,
+        &peer_sdp("bob 202 1 IN IP4 192.0.2.2", 20000),
+        form,
+    );
+    let out = send_in(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::InDialog,
+        &peer_sdp("carol 303 1 IN IP4 192.0.2.3", 30000),
+        form,
+    );
+    (c, out)
+}
+
+/// Until the call's first restatement a peer's description leaves as its
+/// author wrote it, whatever the form: a plain relay is byte-transparent.
+#[test]
+fn before_any_restatement_a_description_leaves_as_written() {
+    let mut c = call();
+    for (carried, version) in [(Carried::Opening, 1), (Carried::InDialog, 2)] {
+        let body = peer_sdp(&format!("bob 202 {version} IN IP4 192.0.2.2"), 20000);
+        let out = send_in(&mut c, "a", Author::Leg("b-1"), carried, &body, SdpForm::Canonical);
+        assert_eq!(out, body);
+    }
+}
+
+/// The restatement itself leaves in canonical form; under `AsWritten` it
+/// keeps the author's attribute order.
+#[test]
+fn a_restatement_leaves_in_canonical_form() {
+    let (_, out) = restated_once(SdpForm::Canonical);
+    assert_eq!(out, in_form("bob 202 2 IN IP4 192.0.2.2", 30000));
+    let (_, out) = restated_once(SdpForm::AsWritten);
+    assert_eq!(out, peer_sdp("bob 202 2 IN IP4 192.0.2.2", 30000));
+}
+
+/// Once the call has a restatement, a peer's description leaves in canonical
+/// form on every leg, restated or not: the caller's answer opening the
+/// transfer target's dialog, and the target's own next description relayed
+/// back as its author's.
+#[test]
+fn after_a_restatement_every_peer_description_leaves_in_canonical_form() {
+    let (mut c, _) = restated_once(SdpForm::Canonical);
+    let answer = send_in(
+        &mut c,
+        "b-3",
+        Author::Leg("a"),
+        Carried::InDialog,
+        &peer_sdp("alice 101 1 IN IP4 192.0.2.1", 10000),
+        SdpForm::Canonical,
+    );
+    assert_eq!(answer, in_form("alice 101 1 IN IP4 192.0.2.1", 10000), "not restated, in form");
+    let again = send_in(
+        &mut c,
+        "b-3",
+        Author::Leg("a"),
+        Carried::InDialog,
+        &peer_sdp("alice 101 2 IN IP4 192.0.2.1", 10002),
+        SdpForm::Canonical,
+    );
+    assert_eq!(again, in_form("alice 101 2 IN IP4 192.0.2.1", 10002));
+}
+
+/// The stack's own description leaves as the stack wrote it, restatement or
+/// not: only a peer's description is re-serialized.
+#[test]
+fn a_stack_description_keeps_its_own_form_after_a_restatement() {
+    let (mut c, _) = restated_once(SdpForm::Canonical);
+    let own = peer_sdp("as 7 7 IN IP4 192.0.2.9", 40000);
+    let out = send_in(&mut c, "b-3", Author::Stack, Carried::Opening, &own, SdpForm::Canonical);
+    assert_eq!(out, own);
+}
+
+/// A description of the stack's own stating the next version inside an early
+/// dialog restates nothing: a peer's description elsewhere in the call still
+/// leaves as written.
+#[test]
+fn a_stack_description_at_the_next_version_is_no_restatement() {
+    let mut c = forked();
+    answer_in_f1(&mut c, "alice 1 2 IN IP4 192.0.2.1");
+    send(
+        &mut c,
+        "a",
+        Author::Leg("b-2"),
+        Carried::Opening,
+        &peer_sdp("dave 4 1 IN IP4 192.0.2.4", 40000),
+    );
+    let body = peer_sdp("dave 4 2 IN IP4 192.0.2.4", 40002);
+    let out =
+        send_in(&mut c, "a", Author::Leg("b-2"), Carried::InDialog, &body, SdpForm::Canonical);
+    assert_eq!(out, body);
+}
+
+/// The restatement is the call's: a leg that restated nothing itself, whose
+/// state travels with a replicated or reclaimed call, still sees it.
+#[test]
+fn the_calls_restatement_is_recorded_on_the_leg_it_crossed() {
+    let (c, _) = restated_once(SdpForm::AsWritten);
+    assert!(c.a_leg.sdp_session.has_restated, "the caller's leg carried a restatement");
+    assert!(c.b_legs.iter().all(|l| !l.sdp_session.has_restated));
 }

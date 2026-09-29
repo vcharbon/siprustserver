@@ -25,7 +25,10 @@
  * because the render re-assembles line endings there; on a `verbatim` run the
  * tokens mask nothing and the two texts must be the same BYTES — an attribute
  * reorder, a line ending, trailing whitespace or a blank line the structural
- * pass erases is then one `document:bytes` row with both texts whole.
+ * pass erases is then one `document:bytes` row with both texts whole. The
+ * bytes read an `o=` line up to the clock its owner may read (RFC 4566 §5.2
+ * suggests a timestamp for both numbers): a sess-id and a sess-version moved
+ * by one amount are the same bytes, a version step that differs is not.
  */
 import type { Bundle } from "@sip/contracts"
 
@@ -136,9 +139,20 @@ const sortedMasked = (mask: SdpMask, lines: ReadonlyArray<string>): ReadonlyArra
  * exactly when {@link diffSdp} states no difference between them.
  */
 export const foldSdp = (mask: SdpMask, text: string): string => {
-  if (mask.verbatim) return text
+  if (mask.verbatim) return clockFree(text)
   return structuralFold(mask, text)
 }
+
+/**
+ * The text with its `o=` sess-id read as `*` and its sess-version as the
+ * offset from the sess-id: the same for two descriptions of one session whose
+ * owner stamped both numbers from a clock read at another instant.
+ */
+const clockFree = (text: string): string =>
+  text.replace(
+    /^o=(\S+) ([0-9]+) ([0-9]+) /m,
+    (_, user: string, id: string, version: string) => `o=${user} * ${BigInt(version) - BigInt(id)} `
+  )
 
 const structuralFold = (mask: SdpMask, text: string): string => {
   const lines = linesOf(text)
@@ -157,6 +171,7 @@ export const diffSdp = (mask: SdpMask, captured: string, replayed: string): Read
   if (captured === replayed) return []
   const structural = diffStructure(mask, captured, replayed)
   if (structural.length > 0 || !mask.verbatim) return structural
+  if (clockFree(captured) === clockFree(replayed)) return []
   return [{ section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]
 }
 

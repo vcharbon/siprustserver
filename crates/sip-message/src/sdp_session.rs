@@ -160,6 +160,20 @@ pub fn in_author_order(sdp: &[u8], slots: &[Option<u32>]) -> Option<Vec<u8>> {
     Some(out.into_bytes())
 }
 
+/// `sdp` as the first description of a session this stack opens at `stamp`:
+/// its `o=` sess-id and sess-version both `stamp` (RFC 4566 §5.2 suggests a
+/// timestamp for both), every other byte as written. `None` where `sdp` has
+/// no readable `o=` line.
+pub fn stamp_session(sdp: &[u8], stamp: u64) -> Option<Vec<u8>> {
+    let origin = parse_origin(sdp)?;
+    let stamped = format!(
+        "o={} {stamp} {stamp} {} {} {}",
+        origin.username, origin.nettype, origin.addrtype, origin.unicast_address
+    );
+    let text = String::from_utf8_lossy(sdp);
+    Some(text.replacen(&origin.raw_origin_line, &stamped, 1).into_bytes())
+}
+
 /// A stated stream's `m=` value with its port set to 0 — the stream rejected
 /// (RFC 3264 §6), transport and formats as stated.
 fn rejected(m: &MediaLine) -> String {
@@ -286,6 +300,23 @@ mod tests {
             text(out.sdp),
             "v=0\no=b2b 700 8 IN IP4 192.0.2.10\ns=-\nt=0 0\nm=audio 30000 RTP/AVP 8\nm=video 0 RTP/AVP 96\n"
         );
+    }
+
+    /// The sess-id and sess-version both take the stamp; username, network
+    /// type, address and every other line are as written.
+    #[test]
+    fn a_stamped_session_takes_the_stamp_as_id_and_version() {
+        let template = b"v=0\r\no=b2b 1 1 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 6000 RTP/AVP 8\r\na=ptime:20\r\n";
+        assert_eq!(
+            text(stamp_session(template, 1_700_000_000_123).expect("a stamped session")),
+            "v=0\r\no=b2b 1700000000123 1700000000123 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.20\r\nt=0 0\r\nm=audio 6000 RTP/AVP 8\r\na=ptime:20\r\n"
+        );
+        let lf = b"v=0\no=- 0 0 IN IP4 192.0.2.10\ns=-\nt=0 0";
+        assert_eq!(
+            text(stamp_session(lf, 7).unwrap()),
+            "v=0\no=- 7 7 IN IP4 192.0.2.10\ns=-\nt=0 0"
+        );
+        assert_eq!(stamp_session(b"v=0\r\ns=-\r\n", 7), None, "no o= to stamp");
     }
 
     /// RFC 3264 §6: the answer to the restated offer comes back to its author

@@ -165,6 +165,7 @@ pub fn representative_call() -> Call {
             session_author: Some("b-2".into()),
             session_id: Some("202".into()),
             restated: true,
+            has_restated: true,
         },
     };
     a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
@@ -713,7 +714,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
         (proptest::option::of("(a|b-[0-9]{1,2})"), proptest::option::of("[a-z0-9 .]{1,40}")),
         proptest::option::of("(a|b-[0-9]{1,2})"),
         proptest::option::of("[0-9]{1,20}"),
-        (any::<bool>(), any::<u32>()),
+        (any::<bool>(), any::<u32>(), any::<bool>()),
     )
         .prop_map(
             |(
@@ -723,7 +724,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
                 (sent_slots_author, restated_from),
                 session_author,
                 session_id,
-                (restated, offers_received),
+                (restated, offers_received, has_restated),
             )| {
                 LegSdpSession {
                     sent_origin,
@@ -735,6 +736,7 @@ fn arb_sdp_session() -> impl Strategy<Value = LegSdpSession> {
                     session_id,
                     restated,
                     offers_received,
+                    has_restated,
                 }
             },
         )

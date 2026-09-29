@@ -32,6 +32,7 @@ pub mod sdp;
 pub mod sdp_answer;
 pub mod sdp_diff;
 pub mod sdp_doc;
+pub mod sdp_form;
 pub mod sdp_session;
 pub mod serializer;
 pub mod sipfrag;
@@ -73,11 +74,14 @@ pub use sdp_doc::{
     extract_format_list, extract_rtpmaps, media_line, parse_origin, parse_sdp_body, MediaLine,
     SdpDirection, SdpDoc, SdpOrigin,
 };
+/// A description serialized by the stack itself: canonical attribute order,
+/// the direction always stated.
+pub use sdp_form::canonical_form;
 /// One party's session across a dialog whose description author changes (RFC 3264 §8):
 /// it cuts a description at its `m=` lines byte for byte and reads every value
 /// through `sdp_doc`.
 pub use sdp_session::{
-    in_author_order, restate_session, restate_session_again, Restated, StatedSession,
+    in_author_order, restate_session, restate_session_again, stamp_session, Restated, StatedSession,
 };
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};

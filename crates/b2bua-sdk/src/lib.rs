@@ -57,5 +57,5 @@ pub mod rules {
     pub use call::{MachineId, StateLabel, TerminationCause, TimeoutKind};
 }
 
-pub use config::B2buaConfig;
+pub use config::{B2buaConfig, SdpForm};
 pub use event::CallEvent;

@@ -50,6 +50,7 @@ impl ActionExecutor<'_> {
             relay::Carried::InDialog,
             body,
             content_type.as_ref(),
+            self.config.sdp_form_after_restatement,
         );
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
@@ -250,6 +251,7 @@ impl ActionExecutor<'_> {
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
             content_type.as_ref(),
+            self.config.sdp_form_after_restatement,
         );
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);

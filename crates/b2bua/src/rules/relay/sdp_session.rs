@@ -24,18 +24,26 @@
 //! are then restated above it as on a confirmed one. Each early dialog of a
 //! leg the stack opened keeps its own session state until one of them
 //! confirms (RFC 3261 §12.1.2).
+//!
+//! Once the stack has restated a description anywhere in the call, a peer's
+//! description inside a dialog leaves in the form
+//! [`B2buaConfig::sdp_form_after_restatement`](crate::config::B2buaConfig)
+//! states, on every leg: as written, or re-serialized
+//! ([`sip_message::canonical_form`]). The stack's own descriptions, and every
+//! description before the call's first restatement, leave as written.
 
 use std::borrow::Cow;
 
 use call::{Call, Leg, LegSdpSession, LegState};
 use sip_message::SdpOrigin;
 
+use crate::config::SdpForm;
 use crate::effects::{OutboundBody, OutboundSipEffect};
 use sip_message::header::MediaType;
 use sip_message::multipart::sdp_range;
 use sip_message::{
-    in_author_order, parse_origin, restate_session, restate_session_again, Method, SipRequest,
-    StatedSession,
+    canonical_form, in_author_order, parse_origin, restate_session, restate_session_again, Method,
+    SipRequest, StatedSession,
 };
 
 /// Who wrote a description the stack sends.
@@ -115,6 +123,8 @@ impl Carried {
 /// A version at the top of its range has no next one: a description that would
 /// be restated above it leaves as written, and opens the session anew where the
 /// stack had stated no version of its own (RFC 3264 §8 — never a wrapped one).
+/// `form` is the stack's form for a peer's description once the call has a
+/// restatement.
 #[allow(clippy::too_many_arguments)]
 pub fn continue_on_leg(
     call: &mut Call,
@@ -124,11 +134,12 @@ pub fn continue_on_leg(
     carried: Carried,
     body: Vec<u8>,
     content_type: Option<&MediaType>,
+    form: SdpForm,
 ) -> Vec<u8> {
     let Some(opening) = dialog.and_then(|tag| enter_early_dialog(call, leg_id, tag)) else {
-        return continue_session(call, leg_id, author, carried, body, content_type);
+        return continue_session(call, leg_id, author, carried, body, content_type, form);
     };
-    let out = continue_session(call, leg_id, author, carried, body, content_type);
+    let out = continue_session(call, leg_id, author, carried, body, content_type, form);
     if let (Some(tag), Some(leg)) = (dialog, call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)) {
         let offers_received = leg.sdp_session.offers_received;
         let own =
@@ -167,6 +178,7 @@ fn continue_session(
     carried: Carried,
     body: Vec<u8>,
     content_type: Option<&MediaType>,
+    form: SdpForm,
 ) -> Vec<u8> {
     if carried == Carried::Outside {
         return body;
@@ -185,6 +197,7 @@ fn continue_session(
         _ => None,
     };
     let sdp = reordered.as_deref().unwrap_or(sdp);
+    let call_restated = has_restated(call);
     let Some(leg) = leg_mut(call, leg_id) else {
         return body;
     };
@@ -215,6 +228,10 @@ fn continue_session(
             restate_session(sdp, &stated)
         }
     });
+    let reformed = form == SdpForm::Canonical
+        && matches!(author, Author::Leg(_))
+        && carried.in_dialog()
+        && (call_restated || restated.is_some());
     let state = &mut leg.sdp_session;
     let out = match restated {
         Some(r) => {
@@ -225,6 +242,7 @@ fn continue_session(
             };
             state.restated_from = repeat_key;
             state.restated = true;
+            state.has_restated = true;
             Cow::Owned(r.sdp)
         }
         None => {
@@ -249,6 +267,10 @@ fn continue_session(
         state.sent_origin = Some(now.origin);
         state.sent_media = now.media;
     }
+    let out = match reformed.then(|| canonical_form(&out)).flatten() {
+        Some(canonical) => Cow::Owned(canonical),
+        None => out,
+    };
     if matches!(out, Cow::Borrowed(_)) && reordered.is_none() {
         return body;
     }
@@ -373,6 +395,18 @@ fn stated(leg: &Leg) -> Option<StatedSession> {
     Some(StatedSession {
         origin: leg.sdp_session.sent_origin.clone()?,
         media: leg.sdp_session.sent_media.clone(),
+    })
+}
+
+/// Whether this stack has restated a description anywhere in `call`: on a leg,
+/// or inside an early dialog of one.
+fn has_restated(call: &Call) -> bool {
+    std::iter::once(&call.a_leg).chain(&call.b_legs).any(|leg| {
+        leg.sdp_session.has_restated
+            || leg
+                .dialogs
+                .iter()
+                .any(|d| d.ext.sdp_session.as_ref().is_some_and(|s| s.has_restated))
     })
 }
 

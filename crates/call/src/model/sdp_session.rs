@@ -41,4 +41,8 @@ pub struct LegSdpSession {
     /// restatement): the author's own next description no longer continues
     /// the versions the peer holds and is restated too.
     pub restated: bool,
+    /// This stack has restated a description on this leg at least once.
+    /// Never cleared: a call with any such leg has had a restatement.
+    #[serde(default)]
+    pub has_restated: bool,
 }
