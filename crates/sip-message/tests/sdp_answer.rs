@@ -538,4 +538,25 @@ fn a_tcp_stream_is_rejected() {
     let answer =
         text(answer_from_own(offer.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
     assert_eq!(stream_of(&answer), "m=audio 0 TCP/RTP/AVP 8\r\nm=message 0 TCP/MSRP *\r\n");
+    let trailing = "v=0\r\no=b 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 5000 RTP/AVP/TCP 8\r\n";
+    let own = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP/TCP 8\r\n";
+    let answer =
+        text(answer_from_own(trailing.as_bytes(), own.as_bytes(), FormatPreference::Offerer, None));
+    assert_eq!(stream_of(&answer), "m=audio 0 RTP/AVP/TCP 8\r\n", "TCP as any profile component");
+}
+
+/// A re-offer whose streams are all already rejected offers nothing to
+/// refuse: it is answered, each stream rejected as offered.
+#[test]
+fn a_reoffer_with_every_stream_rejected_is_answered() {
+    let original = "v=0\r\no=a 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 8\r\n";
+    let reoffer = "v=0\r\no=b 1 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\n";
+    let both = sip_message::answer_reoffer_both_ways(
+        reoffer.as_bytes(),
+        original.as_bytes(),
+        original.as_bytes(),
+        "a 1 2 IN IP4 192.0.2.1",
+    )
+    .expect("answered, not refused");
+    assert_eq!(stream_of(&text(Some(both.to_reofferer))), "m=audio 0 RTP/AVP 8\r\n");
 }

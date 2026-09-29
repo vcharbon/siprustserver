@@ -42,10 +42,11 @@ pub enum FormatPreference {
 /// - one `own` does not describe at that rank, or describes with another media
 ///   type or transport profile, or with no format in common, or offers SDES
 ///   keys (RFC 4568) with no suite in common — keys on one side only included
-///   —, or either side sets up a connection of its own (DTLS, RFC 5763, or
-///   connection-oriented media over TCP, RFC 4145 / RFC 4975: out of scope,
-///   the role and certificate are the party's own), is answered rejected: its
-///   m-line with port 0 and the offer's `mid`;
+///   —, or either side sets up a connection of its own (DTLS, RFC 5763;
+///   connection-oriented media over TCP, RFC 4145 / RFC 4975; any `setup`
+///   attribute, whatever the transport: out of scope, the role and
+///   certificate are the party's own), is answered rejected: its m-line with
+///   port 0 and the offer's `mid`;
 /// - one `own` describes with port 0 is answered with `own`'s m-line;
 /// - otherwise `own`'s media section answers it with `own`'s port and
 ///   transport and the formats [`FormatPreference`] keeps, under the offer's
@@ -183,8 +184,8 @@ pub struct BothWays {
 
 /// `reoffer` answered both ways ([`BothWays`]), or `None` where it cannot be
 /// answered and the re-offerer is refused (RFC 3311 §5.2): either answer
-/// cannot be built ([`answer_from_own`]), or no stream of a re-offer with a
-/// live one is accepted.
+/// cannot be built ([`answer_from_own_agreeing`]), or no stream of a re-offer
+/// with a live one is accepted.
 ///
 /// The re-offerer is answered out of `sent`, the offer it was sent, in its
 /// own order of preference, under `origin` (the next version of that
@@ -394,16 +395,16 @@ fn sdes_answer(
 }
 
 /// Whether `media` (under the `session` lines of its description) sets up a
-/// connection of its own: over DTLS (RFC 5763/5764: a TLS transport or a
-/// `fingerprint`), or connection-oriented media (RFC 4145 comedia, RFC 4975
-/// MSRP: a TCP transport — TCP/RTP/AVP, TCP/BFCP, TCP/MSRP, TCP/TLS/… — or a
-/// `setup` attribute). The connection role and
+/// connection of its own: over DTLS (RFC 5763/5764: a TLS or DTLS transport
+/// component, or a `fingerprint`), or connection-oriented media (RFC 4145 comedia, RFC 4975
+/// MSRP: TCP as any component of the transport — TCP/RTP/AVP, RTP/AVP/TCP,
+/// TCP/BFCP, TCP/MSRP, TCP/TLS/… — or a `setup` attribute, whatever the
+/// transport). The connection role and
 /// certificate are the party's own, so no answer on its behalf can state
 /// them: such a stream is rejected.
 fn sets_up_own_connection(media: &MediaLine, session: &str) -> bool {
-    let transport = media.transport.to_ascii_uppercase();
-    transport.starts_with("TCP")
-        || transport.contains("TLS")
+    let transport = &media.transport;
+    transport.split('/').any(|p| ["TCP", "TLS", "DTLS"].iter().any(|t| p.eq_ignore_ascii_case(t)))
         || media.attributes.iter().any(|a| a.starts_with("setup:") || a.starts_with("fingerprint:"))
         || lines(session).any(|l| l.starts_with("a=setup:") || l.starts_with("a=fingerprint:"))
 }
