@@ -49,8 +49,8 @@ pub use error::SipParseError;
 pub use header::{canonical_header_items, header_forms_equivalent, HeaderClass, HeaderName};
 pub use method::Method;
 pub use multipart::{
-    compose as compose_multipart, decompose as decompose_multipart, sdp_range, Composed,
-    LocatedPart, MultipartError, MultipartPart,
+    attach as attach_parts, compose as compose_multipart, decompose as decompose_multipart,
+    is_entity_header, sdp_range, Attached, Composed, LocatedPart, MultipartError, MultipartPart,
 };
 /// RFC 3261 §7.3.3 compact-form expansion, probed one name at a time.
 pub use parser::custom::compact_forms::compact_form_canonical;

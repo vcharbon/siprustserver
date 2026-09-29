@@ -196,6 +196,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
 
                 let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
+                let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
@@ -203,7 +204,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     new_to: fold.new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context: fold.callback_context,
-                    body_override: fold.body_override.map(|b| Body::own(b, None)),
+                    body_override: leg_body,
                     header_updates: fold.header_updates,
                     kind: None,
                 });

@@ -233,13 +233,24 @@ pub async fn apply_route(
     let header_updates: Vec<(String, Option<String>)> =
         route.update_headers.as_ref().map(header_lines).unwrap_or_default();
     // Whether the INVITE this route mints carries an offer: the relayed
-    // a-leg body under `Keep`, none under `Drop`, the substitute under
-    // `Replace`. The strategy's withhold and the `fake-prack` delayed-offer
-    // fallback both read it.
+    // a-leg description under `Keep` and `AttachParts`, none under `Drop`, the
+    // substitute under `Replace`. The strategy's withhold and the `fake-prack`
+    // delayed-offer fallback both read it.
     let offers_sdp = match &route.update_body {
-        BodyUpdate::Keep => relay::carries_sdp(a_invite),
+        BodyUpdate::Keep | BodyUpdate::AttachParts(_) => relay::carries_sdp(a_invite),
         BodyUpdate::Drop => false,
         BodyUpdate::Replace(body) => !body.is_empty(),
+    };
+    // Attached parts are composed at the mint, beside the a-leg's description.
+    let attached = match &route.update_body {
+        BodyUpdate::AttachParts(parts) => Some(
+            crate::rules::model::Body::from_leg(
+                a_invite.body().to_vec(),
+                call.a_leg.leg_id.clone(),
+            )
+            .with_parts(parts.clone()),
+        ),
+        _ => None,
     };
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address (055). The
@@ -257,7 +268,7 @@ pub async fn apply_route(
         no_answer,
         config,
         id_gen,
-        None,
+        attached.as_ref(),
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         crate::rules::charging::minting_arm(&call),
@@ -296,7 +307,7 @@ pub async fn apply_route(
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
         let mut draft = req.thaw();
         match &route.update_body {
-            BodyUpdate::Keep => {}
+            BodyUpdate::Keep | BodyUpdate::AttachParts(_) => {}
             BodyUpdate::Drop => {
                 draft = draft.without_body();
                 if let Some(d) = leg.dialogs.first_mut() {
@@ -324,7 +335,7 @@ pub async fn apply_route(
     leg.sdp_session = relay::opened(
         &effect,
         match &route.update_body {
-            BodyUpdate::Keep => relay::Author::Leg(&call.a_leg.leg_id),
+            BodyUpdate::Keep | BodyUpdate::AttachParts(_) => relay::Author::Leg(&call.a_leg.leg_id),
             BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
         },
     );

@@ -10,7 +10,7 @@
 use call::{CallModelState, TimerType};
 
 use crate::event::CallEvent;
-use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
+use crate::rules::model::{Body, RuleAction, RuleContext, TimerDelay};
 use b2bua_sdk::header_update::payload_lines;
 
 /// Whether a decision fold has landed on a call already going away — the
@@ -49,6 +49,9 @@ pub(crate) struct RouteFold {
     /// `update_body` wire shape: absent = keep A's INVITE body, null = drop
     /// (`Some(vec![])`), string = substitute.
     pub body_override: Option<Vec<u8>>,
+    /// `attach_parts`: A's session description sent beside these parts
+    /// (`BodyUpdate::AttachParts`); absent = none attached.
+    pub attach_parts: Option<Vec<sip_message::MultipartPart>>,
     /// The call's admission state after the dispatching task replaced its
     /// set on the limiter; `None` on a payload that carries none.
     pub limiter: Option<call::CallLimiterState>,
@@ -91,8 +94,29 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
             Some(_) => None,
         },
+        attach_parts: payload
+            .get("attach_parts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         limiter: admitted_state(payload),
     })
+}
+
+impl RouteFold {
+    /// The body the fold's leg is minted with: A's INVITE body beside the
+    /// attached parts, the substitute, or `None` to relay A's body.
+    pub(crate) fn leg_body(&self, ctx: &RuleContext) -> Option<Body> {
+        match (&self.attach_parts, &self.body_override) {
+            (Some(parts), _) => Some(
+                Body::from_leg(
+                    ctx.call.a_leg_invite().body.clone(),
+                    ctx.call.a_leg().leg_id.clone(),
+                )
+                .with_parts(parts.clone()),
+            ),
+            (None, Some(bytes)) => Some(Body::own(bytes.clone(), None)),
+            (None, None) => None,
+        }
+    }
 }
 
 /// The `(topic, outcome)` of the folds whose dispatching task may have changed

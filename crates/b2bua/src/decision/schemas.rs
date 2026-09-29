@@ -112,14 +112,17 @@ pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
     }
 }
 
-/// Three-way body directive on a route: leave the inbound body, drop it, or
-/// substitute a new one (the source's `update_body` absent/null/value).
+/// Body directive on a route: leave the inbound body, drop it, substitute a
+/// new one (the source's `update_body` absent/null/value), or send the inbound
+/// session description beside the stated parts, which replace every other part
+/// the inbound body frames (RFC 5621 §3).
 #[derive(Debug, Clone, Default, Serialize)]
 pub enum BodyUpdate {
     #[default]
     Keep,
     Drop,
     Replace(String),
+    AttachParts(Vec<sip_message::MultipartPart>),
 }
 
 #[derive(Debug, Clone, Serialize)]

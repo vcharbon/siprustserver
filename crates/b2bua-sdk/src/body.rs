@@ -3,6 +3,8 @@
 //! description continues the session the dialog carries or is restated under
 //! it (RFC 3264 §8), so every body names it.
 
+use sip_message::MultipartPart;
+
 /// Who wrote a body a rule action sends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BodyAuthor {
@@ -21,12 +23,22 @@ pub struct Body {
     /// present.
     pub content_type: Option<String>,
     pub author: BodyAuthor,
+    /// Entity parts sent beside the session description `bytes` carry, in
+    /// place of every other part they frame (RFC 5621 §3,
+    /// [`sip_message::attach_parts`]). `None` sends `bytes` as they are.
+    pub parts: Option<Vec<MultipartPart>>,
 }
 
 impl Body {
     /// `bytes` typed `content_type`, written by `author`.
     pub fn new(bytes: Vec<u8>, content_type: Option<String>, author: BodyAuthor) -> Self {
-        Self { bytes, content_type, author }
+        Self { bytes, content_type, author, parts: None }
+    }
+
+    /// The same body with `parts` sent beside its session description.
+    pub fn with_parts(mut self, parts: Vec<MultipartPart>) -> Self {
+        self.parts = Some(parts);
+        self
     }
 
     /// A session description written by the peer of `leg`.

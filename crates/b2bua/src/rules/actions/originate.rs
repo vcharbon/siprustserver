@@ -75,12 +75,7 @@ impl ActionExecutor<'_> {
         let no_answer_timeout_sec = no_answer_timeout_sec
             .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        // Whether the INVITE this leg is minted with carries an offer: the
-        // override's body where one is given (empty = none), else the a-leg's.
-        let offers_sdp = match body_override {
-            Some(body) => !body.bytes.is_empty(),
-            None => relay::carries_sdp(&a_invite),
-        };
+        let offers_sdp = relay::mints_offer(&a_invite, body_override);
         // Same refusal as the admission reject above, for the other way a
         // decision can name no destination: an address field that does not read
         // (055). The leg is not created and no INVITE goes out — originating on
@@ -97,7 +92,7 @@ impl ActionExecutor<'_> {
             no_answer_timeout_sec,
             self.config,
             self.id_gen,
-            body_override.map(|b| b.bytes.as_slice()),
+            body_override,
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             crate::rules::charging::minting_arm(call),

@@ -22,9 +22,10 @@ use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
 use super::address::{address, identity, UnreadableAddress};
-use super::body::{media_type, sdp};
+use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_contact, leg_via};
+use crate::rules::model::Body;
 
 /// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
 /// Every header rides as an unparsed line, so the rebuilt message carries the
@@ -55,13 +56,49 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
 /// replaces the originator's body states a body of the same role (a held REFER
 /// offer) or none at all, and the set describing the originator's body rides
 /// only as far as what replaced it still answers for.
-fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
+fn relay_scope(body_override: Option<&Body>) -> RelayScope {
     let scope = RelayScope::request();
     match body_override {
-        Some(body) if body.is_empty() => scope.without_source_body(),
+        Some(body) if body.bytes.is_empty() || body.parts.is_some() => scope.without_source_body(),
         Some(_) => scope.with_replaced_body(),
         None => scope,
     }
+}
+
+/// Whether a relayed header may ride beside the minted body: a body carrying
+/// attached parts is composed here, so no entity header of the source's body
+/// describes it.
+fn describes_minted_body(body_override: Option<&Body>, name: &str) -> bool {
+    !(body_override.is_some_and(|b| b.parts.is_some()) && sip_message::is_entity_header(name))
+}
+
+/// The body the minted INVITE carries, its media type, and the entity headers
+/// the INVITE states for it: the source's body, an override's bytes, or an
+/// override's session description beside its attached parts.
+fn minted_body(
+    a_leg_invite: &SipRequest,
+    body_override: Option<&Body>,
+) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
+    if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
+        let ct = source_content_type(a_leg_invite, body);
+        let attached = sip_message::attach_parts(ct.as_deref(), &body.bytes, parts);
+        let content_type = attached.content_type.as_deref().and_then(media_type);
+        return (attached.body, content_type, attached.headers);
+    }
+    let body = match body_override {
+        Some(b) => b.bytes.clone(),
+        None => a_leg_invite.body().to_vec(),
+    };
+    let content_type = if body.is_empty() {
+        None
+    } else {
+        a_leg_invite
+            .raw(HeaderName::ContentType)
+            .next()
+            .and_then(media_type)
+            .or_else(|| body_override.map(|_| sdp()))
+    };
+    (body, content_type, Vec::new())
 }
 
 /// True iff `header_updates` names `header` with no value — a caller stating
@@ -185,10 +222,11 @@ pub fn build_b_leg(
     no_answer_timeout_sec: Option<i64>,
     config: &B2buaConfig,
     id_gen: &IdGen,
-    // REFER transfer overrides: `body_override` replaces the cloned a-leg body
-    // (held SDP, or empty = drop); `header_updates` set/remove extra headers on
-    // the transfer INVITE. The basic-B2BUA path passes `(None, &[])`.
-    body_override: Option<&[u8]>,
+    // Body override: replaces the cloned a-leg body (held SDP, or empty =
+    // drop), or attaches parts beside its session description
+    // ([`Body::parts`]); `header_updates` set/remove extra headers on the
+    // minted INVITE. The basic-B2BUA path passes `(None, &[])`.
+    body_override: Option<&Body>,
     header_updates: &[(String, Option<String>)],
     // Capability set advertised on this originated leg
     // (`Allow`/`Supported`/`Accept`), resolved by the caller: declared, else
@@ -236,19 +274,7 @@ pub fn build_b_leg(
     };
     let from_uri = from_addr.uri().clone();
     let to_uri = to_addr.uri().clone();
-    let body = match body_override {
-        Some(b) => b.to_vec(),
-        None => a_leg_invite.body().to_vec(),
-    };
-    let content_type = if body.is_empty() {
-        None
-    } else {
-        a_leg_invite
-            .raw(HeaderName::ContentType)
-            .next()
-            .and_then(media_type)
-            .or_else(|| body_override.map(|_| sdp()))
-    };
+    let (body, content_type, entity_headers) = minted_body(a_leg_invite, body_override);
     // `(name, Some(v))` sets, `(name, None)` removes — either way the name is the
     // caller's and no relayed or configured copy of it rides (see [`removed`]).
     // Neither reaches a STRUCTURAL name (RFC 3261 §16.6): the generator owns
@@ -262,6 +288,16 @@ pub fn build_b_leg(
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
         .collect();
+    // The entity headers the minted body states for itself; a name the decision
+    // stated stands.
+    let decided = extra_headers.clone();
+    for (name, value) in entity_headers {
+        let header = HeaderName::from(name.as_str());
+        if !decided.iter().any(|h| header.matches(&h.name)) && !removed(header_updates, &header) {
+            extra_headers
+                .push(MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) });
+        }
+    }
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
     // call declares one; a half nobody stated carries no line. The offer and
@@ -286,6 +322,7 @@ pub fn build_b_leg(
         if extra_headers.iter().any(|h| name.matches(&h.name))
             || removed(header_updates, &name)
             || !generators::relayable(configured, relay_scope(body_override))
+            || !describes_minted_body(body_override, configured)
         {
             continue;
         }
@@ -306,7 +343,10 @@ pub fn build_b_leg(
     for header in generators::relayable_headers(a_leg_invite.headers(), relay_scope(body_override))
     {
         let name = HeaderName::from(header.name.as_str());
-        if !stated.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
+        if !stated.iter().any(|h| name.matches(&h.name))
+            && !removed(header_updates, &name)
+            && describes_minted_body(body_override, header.name.as_str())
+        {
             extra_headers.push(header);
         }
     }

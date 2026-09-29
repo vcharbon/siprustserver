@@ -100,10 +100,11 @@ pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
 
 /// `true` when the INVITE last sent on this dialog carried the offer, so the ACK
 /// for its 2xx owes no answer body (RFC 3264 §4) and this stack can compose it
-/// from the dialog alone. A delayed-offer INVITE answers this `false`: its ACK
-/// carries the answer, which only the acknowledging peer's own ACK supplies.
+/// from the dialog alone. A delayed-offer INVITE answers this `false`, a body
+/// framing no session description included (RFC 5621 §3.1): its ACK carries
+/// the answer, which only the acknowledging peer's own ACK supplies.
 pub(crate) fn acked_invite_carries_offer(dialog: &Dialog) -> bool {
-    acked_invite(dialog).is_some_and(|r| !r.body().is_empty())
+    acked_invite(dialog).is_some_and(|r| r.sdp().is_some())
 }
 
 /// The INVITE last sent on this dialog, re-parsed from its cached

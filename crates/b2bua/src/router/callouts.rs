@@ -678,9 +678,12 @@ struct RoutePayload {
     // subscription registry, so a route with no `subscribe[]` must CLEAR a
     // previous route's — exactly what `apply_route` does on the initial path.
     subscriptions: Vec<call::ReleaseEventKind>,
-    // Keep → absent; Drop → null; Replace(s) → the string.
+    // Keep / AttachParts → absent; Drop → null; Replace(s) → the string.
     #[serde(skip_serializing_if = "Option::is_none")]
     update_body: Option<Option<String>>,
+    // AttachParts(parts) → the parts; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attach_parts: Option<Vec<sip_message::MultipartPart>>,
     /// The call's admission state after the dispatching task replaced its
     /// set.
     call_limiter: CallLimiterState,
@@ -715,10 +718,14 @@ fn route_result_payload(
         features: route.features,
         service_ext: route.service_ext,
         subscriptions: route.subscriptions,
-        update_body: match route.update_body {
-            crate::decision::BodyUpdate::Keep => None,
+        update_body: match &route.update_body {
+            crate::decision::BodyUpdate::Keep | crate::decision::BodyUpdate::AttachParts(_) => None,
             crate::decision::BodyUpdate::Drop => Some(None),
-            crate::decision::BodyUpdate::Replace(s) => Some(Some(s)),
+            crate::decision::BodyUpdate::Replace(s) => Some(Some(s.clone())),
+        },
+        attach_parts: match route.update_body {
+            crate::decision::BodyUpdate::AttachParts(parts) => Some(parts),
+            _ => None,
         },
         call_limiter: admitted,
         failed_leg_id,

@@ -2,8 +2,10 @@
 //! bodies, so the header describing one is the stack's to state (§16.6); these
 //! are the readers every emission site shares.
 
-use sip_message::header::{HeaderValue, MediaType};
+use sip_message::header::{HeaderName, HeaderValue, MediaType};
 use sip_message::{SipRequest, SipStr};
+
+use crate::rules::model::Body;
 
 /// The media type a policy- or peer-supplied value names. The B2BUA emits its
 /// own body, so the header describing it is the stack's to state (§16.6). Text
@@ -27,6 +29,28 @@ pub fn sdp() -> MediaType {
 /// INVITE.
 pub fn carries_sdp(req: &SipRequest) -> bool {
     req.sdp().is_some()
+}
+
+/// The media type of an override's bytes: the one it states, else the
+/// originator's — an override without one re-sends the originator's body.
+pub fn source_content_type(a_invite: &SipRequest, body: &Body) -> Option<String> {
+    body.content_type
+        .clone()
+        .or_else(|| a_invite.raw(HeaderName::ContentType).next().map(str::to_string))
+}
+
+/// Whether the INVITE minted from `a_invite` under `body_override` makes an
+/// offer: the originator's body when there is no override, an override's
+/// bytes when it has any, and the session description an override with
+/// attached parts carries (RFC 5621 §3.1).
+pub fn mints_offer(a_invite: &SipRequest, body_override: Option<&Body>) -> bool {
+    match body_override {
+        None => carries_sdp(a_invite),
+        Some(body) if body.parts.is_none() => !body.bytes.is_empty(),
+        Some(body) => source_content_type(a_invite, body)
+            .and_then(|ct| MediaType::parse(&SipStr::owned(&ct)).ok())
+            .is_some_and(|ct| sip_message::sdp_range(&ct, &body.bytes).is_some()),
+    }
 }
 
 #[cfg(test)]

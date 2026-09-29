@@ -12,12 +12,14 @@
 //!   same parts frames identically, so a replay is reproducible; a delimiter
 //!   that would appear inside a payload is extended until it cannot.
 
+use serde::{Deserialize, Serialize};
+
 use crate::header::{HeaderValue, MediaType, ParamValue};
 use crate::sip_str::SipStr;
 
 /// One entity part: its media type, any further entity headers it states, and
 /// its content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultipartPart {
     /// The part's `Content-Type`, parameters included.
     pub content_type: String,
@@ -105,6 +107,18 @@ pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed
         }
         None => derive_boundary(parts),
     };
+    let body = frame(&boundary, parts);
+    let content_type = match stated {
+        Some(_) => container_type.to_string(),
+        None => format!("{container_type};boundary={boundary}"),
+    };
+    Ok(Composed { content_type, body })
+}
+
+/// The body of `parts` framed under `boundary` (RFC 2046 §5.1.1): a delimiter
+/// line per part, its `Content-Type` and further entity headers, a blank line,
+/// the content, and the closing delimiter.
+fn frame(boundary: &str, parts: &[MultipartPart]) -> Vec<u8> {
     let mut body: Vec<u8> = Vec::new();
     for part in parts {
         body.extend_from_slice(b"--");
@@ -128,11 +142,97 @@ pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed
     body.extend_from_slice(b"--");
     body.extend_from_slice(boundary.as_bytes());
     body.extend_from_slice(b"--\r\n");
-    let content_type = match stated {
-        Some(_) => container_type.to_string(),
-        None => format!("{container_type};boundary={boundary}"),
-    };
-    Ok(Composed { content_type, body })
+    body
+}
+
+/// A message body built by [`attach`]: the bytes, the `Content-Type` that
+/// describes them (`None` for no body), and the further entity headers the
+/// message itself states for them, `(name, value)` in emission order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    pub content_type: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// The body carrying the session description of `body` (typed `content_type`)
+/// beside `parts`, which replace every other part `body` frames (RFC 5621 §3).
+///
+/// - a description and parts: `multipart/mixed`, the description first;
+/// - no description, one part: that part is the body, its entity headers the
+///   message's;
+/// - no description, several parts: `multipart/mixed` of them;
+/// - a description alone: that description, bare, its entity headers the
+///   message's; nothing at all: no body.
+///
+/// A body carrying a part states `MIME-Version: 1.0` on the message (RFC 2045
+/// §4). A description framed in `body` keeps its own entity headers.
+pub fn attach(content_type: Option<&str>, body: &[u8], parts: &[MultipartPart]) -> Attached {
+    let mut all: Vec<MultipartPart> = Vec::with_capacity(parts.len() + 1);
+    all.extend(session_description(content_type, body));
+    all.extend(parts.iter().cloned());
+    match all.as_slice() {
+        [] => Attached { content_type: None, headers: Vec::new(), body: Vec::new() },
+        [one] => Attached {
+            content_type: Some(one.content_type.clone()),
+            headers: if parts.is_empty() { Vec::new() } else { vec![mime_version()] }
+                .into_iter()
+                .chain(one.headers.iter().cloned())
+                .collect(),
+            body: one.payload.clone(),
+        },
+        several => {
+            let boundary = derive_boundary(several);
+            Attached {
+                content_type: Some(format!("multipart/mixed;boundary={boundary}")),
+                headers: vec![mime_version()],
+                body: frame(&boundary, several),
+            }
+        }
+    }
+}
+
+fn mime_version() -> (String, String) {
+    ("MIME-Version".to_string(), "1.0".to_string())
+}
+
+/// The session description `body` carries under `content_type`, as a part:
+/// the whole body under `application/sdp`, the first non-empty
+/// `application/sdp` part of a `multipart/…` body with its entity headers.
+fn session_description(content_type: Option<&str>, body: &[u8]) -> Option<MultipartPart> {
+    let text = content_type?;
+    let media = MediaType::parse(&SipStr::owned(text)).ok()?;
+    if body.is_empty() {
+        return None;
+    }
+    if media.is_sdp() {
+        return Some(MultipartPart::new(text.trim(), body.to_vec()));
+    }
+    let boundary = media.is_multipart().then(|| media.param("boundary")).flatten()?;
+    let located = decompose(body, boundary.as_str()?).into_iter().find(|part| {
+        part.len > 0
+            && MediaType::parse(&SipStr::owned(&part.content_type)).is_ok_and(|ct| ct.is_sdp())
+    })?;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(id) = &located.content_id {
+        headers.push(("Content-ID".to_string(), id.clone()));
+    }
+    headers.extend(located.headers.iter().cloned());
+    Some(MultipartPart {
+        content_type: located.content_type,
+        headers,
+        payload: body[located.offset..located.offset + located.len].to_vec(),
+    })
+}
+
+/// Whether `name` is a MIME entity header (RFC 2045 §9: `MIME-Version` and every
+/// `Content-` field) — a statement about the body the message carries, which
+/// rides only with that body.
+pub fn is_entity_header(name: &str) -> bool {
+    const CONTENT: &[u8] = b"content-";
+    let bytes = name.trim().as_bytes();
+    name.trim().eq_ignore_ascii_case("MIME-Version")
+        || (bytes.len() > CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT))
 }
 
 /// A boundary no payload contains, derived from the parts so the same parts
@@ -534,5 +634,94 @@ mod tests {
             Err(MultipartError::NotMultipart { content_type: "application/sdp".into() })
         );
         assert_eq!(compose("multipart/mixed", &[]), Err(MultipartError::NoParts));
+    }
+
+    fn data() -> MultipartPart {
+        MultipartPart::new("application/vnd.example.data", vec![0x77, 0x15, 0x00, 0x0a])
+            .with_header("Content-ID", "<data@example.invalid>")
+            .with_header("Content-Transfer-Encoding", "binary")
+    }
+
+    fn location() -> MultipartPart {
+        MultipartPart::new("application/pidf+xml", b"<presence/>".to_vec())
+            .with_header("Content-ID", "<loc@example.invalid>")
+    }
+
+    /// RFC 5621 §3: a bare description beside parts frames as
+    /// `multipart/mixed`, description first and byte-exact, the parts after it
+    /// with their own entity headers, `MIME-Version` on the message.
+    #[test]
+    fn a_bare_description_and_parts_frame_as_multipart_mixed() {
+        let attached = attach(Some("application/sdp"), &sdp().payload, &[data()]);
+        let ct = attached.content_type.as_deref().expect("a body");
+        assert!(media(ct).is("multipart/mixed"), "{ct}");
+        assert_eq!(attached.headers, [("MIME-Version".to_string(), "1.0".to_string())]);
+        let boundary =
+            media(ct).param("boundary").and_then(ParamValue::as_str).unwrap().to_string();
+        let parts = decompose(&attached.body, &boundary);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].content_type, "application/sdp");
+        assert_eq!(&attached.body[parts[0].offset..][..parts[0].len], sdp().payload.as_slice());
+        assert_eq!(parts[1].content_type, "application/vnd.example.data");
+        assert_eq!(parts[1].content_id.as_deref(), Some("<data@example.invalid>"));
+        assert_eq!(&attached.body[parts[1].offset..][..parts[1].len], data().payload.as_slice());
+    }
+
+    /// The parts replace every non-description part the source frames; the
+    /// framed description keeps its own entity headers.
+    #[test]
+    fn the_parts_replace_the_sources_other_parts() {
+        let source = compose(
+            "multipart/mixed",
+            &[sdp().with_header("Content-Disposition", "session"), location()],
+        )
+        .unwrap();
+        let attached = attach(Some(&source.content_type), &source.body, &[data()]);
+        let ct = attached.content_type.unwrap();
+        let boundary =
+            media(&ct).param("boundary").and_then(ParamValue::as_str).unwrap().to_string();
+        let parts = decompose(&attached.body, &boundary);
+        let types: Vec<&str> = parts.iter().map(|p| p.content_type.as_str()).collect();
+        assert_eq!(types, ["application/sdp", "application/vnd.example.data"]);
+        assert_eq!(parts[0].headers, [("Content-Disposition".to_string(), "session".to_string())]);
+    }
+
+    /// Without a description one part is the body, its entity headers and
+    /// `MIME-Version` the message's; several frame as `multipart/mixed`; none
+    /// leave no body.
+    #[test]
+    fn without_a_description_one_part_is_the_body() {
+        let one = attach(None, b"", &[location()]);
+        assert_eq!(one.content_type.as_deref(), Some("application/pidf+xml"));
+        assert_eq!(
+            one.headers,
+            [
+                ("MIME-Version".to_string(), "1.0".to_string()),
+                ("Content-ID".to_string(), "<loc@example.invalid>".to_string())
+            ]
+        );
+        assert_eq!(one.body, location().payload);
+
+        let several = attach(Some("text/plain"), b"note", &[location(), data()]);
+        assert!(media(several.content_type.as_deref().unwrap()).is("multipart/mixed"));
+        assert_eq!(several.headers, [("MIME-Version".to_string(), "1.0".to_string())]);
+
+        let none = attach(None, b"", &[]);
+        assert_eq!(none, Attached { content_type: None, headers: Vec::new(), body: Vec::new() });
+        let bare = attach(Some("application/sdp"), &sdp().payload, &[]);
+        assert_eq!(bare.content_type.as_deref(), Some("application/sdp"));
+        assert!(bare.headers.is_empty(), "a description alone is no MIME entity of ours");
+        assert_eq!(bare.body, sdp().payload);
+    }
+
+    /// RFC 2045 §9: `MIME-Version` and the `Content-` fields describe the body.
+    #[test]
+    fn the_entity_headers_are_mime_version_and_the_content_fields() {
+        for name in ["MIME-Version", "mime-version", "Content-ID", "content-disposition"] {
+            assert!(is_entity_header(name), "{name}");
+        }
+        for name in ["Contact", "Content-", "Via", "X-Content-Id"] {
+            assert!(!is_entity_header(name), "{name}");
+        }
     }
 }

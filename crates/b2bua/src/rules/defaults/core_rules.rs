@@ -18,8 +18,8 @@ use sip_txn::TimeoutKind as TxnTimeoutKind;
 use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
 
 use crate::rules::model::{
-    Body, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition,
-    RuleHandleResult, TimerDelay, CORE_LAYER,
+    Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+    TimerDelay, CORE_LAYER,
 };
 
 use super::route_fold::{
@@ -792,6 +792,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let no_answer =
                     fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
                 actions.extend(route_fold_parity_actions(&fold, ctx));
+                let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
@@ -799,7 +800,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     new_to: fold.new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context: fold.callback_context,
-                    body_override: fold.body_override.map(|b| Body::own(b, None)),
+                    body_override: leg_body,
                     header_updates: fold.header_updates,
                     kind: None,
                 });
