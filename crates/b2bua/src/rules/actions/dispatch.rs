@@ -101,8 +101,8 @@ impl ActionExecutor<'_> {
                     *kind,
                 );
             }
-            RuleAction::DestroyLeg { leg_id } => {
-                self.destroy_leg(call, fx, leg_id);
+            RuleAction::DestroyLeg { leg_id, headers } => {
+                self.destroy_leg(call, fx, leg_id, headers);
             }
             RuleAction::CancelLeg { leg_id } => {
                 self.cancel_leg(call, fx, ctx, leg_id);

@@ -221,7 +221,7 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     let actions = no_answer_result(&call, "b-2");
     // No consult here: the caller's 480 and the teardown follow the destroy.
     match actions.as_slice() {
-        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, RuleAction::RespondToALeg { status: 480, .. }, RuleAction::BeginTermination { .. }]
+        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed, .. }, RuleAction::RespondToALeg { status: 480, .. }, RuleAction::BeginTermination { .. }]
             if leg_id == "b-2"
                 && reason.as_deref() == Some("no_answer_timeout")
                 && destroyed == "b-2" => {}

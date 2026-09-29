@@ -321,7 +321,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: Some("release-reroute-failed".into()),
                     },
-                    RuleAction::DestroyLeg { leg_id: st.new_leg_id.clone() },
+                    RuleAction::DestroyLeg { leg_id: st.new_leg_id.clone(), headers: vec![] },
                 ];
                 actions.extend(fail_teardown(ctx, "release-reroute-failed"));
                 ok(actions)
@@ -351,7 +351,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 if let Some(old) = st.old_leg_id.clone() {
                     // BYE the displaced b-leg (DestroyLeg: confirmed → BYE +
                     // `bye_sent`; its 200 resolves via `resolve-bye-response`).
-                    actions.push(RuleAction::DestroyLeg { leg_id: old });
+                    actions.push(RuleAction::DestroyLeg { leg_id: old, headers: vec![] });
                 }
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Answer,

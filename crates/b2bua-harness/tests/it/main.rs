@@ -30,6 +30,7 @@ mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;
 mod decision_log;
+mod destroy_leg_stated_reason;
 mod discarded_invite_and_cancel;
 mod discarded_request_readmitted;
 mod ended_leg_txn_timeout;

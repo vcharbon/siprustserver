@@ -253,7 +253,10 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
-                        actions.push(RuleAction::DestroyLeg { leg_id: other.leg_id.clone() });
+                        actions.push(RuleAction::DestroyLeg {
+                            leg_id: other.leg_id.clone(),
+                            headers: vec![],
+                        });
                     }
                 }
                 actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{b}") });

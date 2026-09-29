@@ -189,10 +189,25 @@ impl ActionExecutor<'_> {
         self.schedule(call, fx, TimerType::TerminatingTimeout, TERMINATING_TIMEOUT_MS, None);
     }
 
-    pub(super) fn destroy_leg(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+    /// End `leg_id` ([`crate::rules::model::RuleAction::DestroyLeg`]): BYE a
+    /// confirmed dialog, CANCEL a pending INVITE, each carrying `stated`.
+    pub(super) fn destroy_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        stated: &[(String, String)],
+    ) {
         // A destroyed leg's ladders die with it (RFC 3262 §3): no rung
         // re-offers a torn-down leg's answer.
         self.retire(call, fx, Scope::Leg(leg_id));
+        let stated: Vec<SipHeader> = stated
+            .iter()
+            .map(|(name, value)| SipHeader {
+                name: name.clone().into(),
+                value: value.clone().into(),
+            })
+            .collect();
         let state = call
             .b_legs
             .iter()
@@ -201,13 +216,13 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &[], None) {
+                if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &stated, None) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
-                if let Some(e) = self.cancel_to_leg(call, leg_id, &[]) {
+                if let Some(e) = self.cancel_to_leg(call, leg_id, &stated) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::Cancelled);

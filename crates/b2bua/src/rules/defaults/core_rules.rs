@@ -289,7 +289,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: Some("cancel_crossing".into()),
                     },
-                    RuleAction::DestroyLeg { leg_id: b },
+                    RuleAction::DestroyLeg { leg_id: b, headers: vec![] },
                 ])
             },
         ),
@@ -1388,9 +1388,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             let mut actions = Vec::new();
             for b in ctx.call.b_legs() {
                 match b.state {
-                    LegState::Confirmed => {
-                        actions.push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone() })
-                    }
+                    LegState::Confirmed => actions
+                        .push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone(), headers: vec![] }),
                     LegState::Trying | LegState::Early => {
                         actions.push(RuleAction::CancelLeg { leg_id: b.leg_id.clone() })
                     }
@@ -1492,7 +1491,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                             status_code: None,
                             reason: Some("transaction_timeout".into()),
                         },
-                        RuleAction::DestroyLeg { leg_id: leg.clone() },
+                        RuleAction::DestroyLeg { leg_id: leg.clone(), headers: vec![] },
                         // A blackholed hop drew no final: this consult states an
                         // empty relayable image, so an earlier attempt's headers
                         // cannot answer it.
@@ -1572,7 +1571,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     status_code: None,
                     reason: Some("no_answer_timeout".into()),
                 },
-                RuleAction::DestroyLeg { leg_id: leg.clone() },
+                RuleAction::DestroyLeg { leg_id: leg.clone(), headers: vec![] },
             ];
             match ctx.call.callback_context() {
                 // Failover-capable → ask /call/failure (origin no_answer_timeout);

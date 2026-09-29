@@ -215,7 +215,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
                     status_code: None,
                     reason: Some("no_answer_timeout".to_string()),
                 },
-                RuleAction::DestroyLeg { leg_id: c_leg_id },
+                RuleAction::DestroyLeg { leg_id: c_leg_id, headers: vec![] },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 RuleAction::SetTransfer { state: None },

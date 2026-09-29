@@ -133,7 +133,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             content_type: None,
         },
         // Tear down the media leg (it is Confirmed → DestroyLeg BYEs it).
-        RuleAction::DestroyLeg { leg_id: media },
+        RuleAction::DestroyLeg { leg_id: media, headers: vec![] },
         // Dial the real destination as a normal adopted leg; core `confirm-dialog`
         // will answer the caller with its SDP and bridge on its 200.
         RuleAction::CreateLeg {
