@@ -184,11 +184,13 @@ async fn from_user_calls_on_one_shared_socket_each_reach_their_own_call() {
         rig(7400, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
             .await;
     let reporter = reporter();
+    // One pool across the mix, so every call draws the next distinct number.
+    let pool = caller_pool();
     let driver = Driver::new(
         cfg(rig.b2bua.addr, 20.0, 2, 300, 0xF20A),
         vec![
-            mix("basic_call").with_case(Some(caller_pool())),
-            mix("crossing_bye").with_case(Some(caller_pool())),
+            mix("basic_call").with_case(Some(pool.clone())),
+            mix("crossing_bye").with_case(Some(pool)),
         ],
         reporter.clone(),
         rig.transport.clone(),

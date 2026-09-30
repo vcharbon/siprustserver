@@ -3,7 +3,7 @@
 use regex::Regex;
 use scenario_harness::legpick::LegInfo;
 use scenario_harness::realcall::CorrelationStamp;
-use sip_message::sniff::header_value;
+use sip_message::sniff::{from_user, header_value};
 
 /// How the per-call correlation token is carried through the SUT, with two
 /// halves:
@@ -121,6 +121,12 @@ impl Correlation {
         Self { strategy: Strategy::FromUser }
     }
 
+    /// Whether the call's key is its caller's From URI user (the driver takes
+    /// the key from the resolved identity instead of minting one).
+    pub fn is_from_user(&self) -> bool {
+        matches!(self.strategy, Strategy::FromUser)
+    }
+
     /// The STAMP half: how a scenario writes `token` into the outgoing INVITE.
     pub fn stamp(&self, token: &str) -> CorrelationStamp {
         match &self.strategy {
@@ -144,7 +150,7 @@ impl Correlation {
                 }
             }
             Strategy::ToUser => LegInfo::new(raw).to_user(),
-            Strategy::FromUser => None,
+            Strategy::FromUser => from_user(raw),
         }
     }
 }

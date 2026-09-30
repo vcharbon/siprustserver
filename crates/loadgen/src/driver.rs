@@ -1,11 +1,14 @@
 //! The load driver: a CPS governor that spawns one `Send` task per call onto a
 //! shared multi-threaded runtime, bounded by a max-in-flight semaphore, picking
-//! scenarios by weighted random. Each per-call task mints a correlation token,
-//! binds its agents on the **mux** (one socket per defined endpoint, many
-//! dialogs demuxed), runs the scenario inside a `catch_unwind` boundary (a panic
-//! is a *counted* failure, never a worker abort), tears the call down
+//! scenarios by weighted random. Each per-call task takes its correlation key
+//! (minted, or the resolved caller's From user under from-user correlation),
+//! binds its agents on the **mux** (one socket per defined endpoint address,
+//! many dialogs demuxed), runs the scenario inside a `catch_unwind` boundary (a
+//! panic is a *counted* failure, never a worker abort), tears the call down
 //! (CANCEL/BYE) however it ended, classifies the result, and records it —
-//! optionally projecting a sampled callflow (recording layered on the mux).
+//! optionally projecting a sampled callflow (recording layered on the mux). A
+//! call whose key is missing, unusable or held by a concurrent call is
+//! recorded `rejected` before any datagram.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -27,6 +30,7 @@ use crate::ctx::{CallCtx, CallEnv};
 use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation, MuxCore};
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
+use crate::scenarios::ScenarioId;
 use scenario_harness::actor::ActorScenario;
 
 /// The mux transport the driver binds calls on.
@@ -34,7 +38,9 @@ pub struct MuxTransport {
     pub core: Arc<MuxCore>,
     /// The caller (UAC) endpoint address.
     pub uac_addr: SocketAddr,
-    /// The callee (UAS) endpoint address (the SUT routes the b-leg here).
+    /// The callee (UAS) endpoint address (the SUT routes the b-leg here). Equal
+    /// to [`uac_addr`](Self::uac_addr) in the shared-socket layout, where the
+    /// SUT returns each new leg to the ip:port that originated the call.
     pub uas_addr: SocketAddr,
     /// The transfer-target (REFER) endpoint address.
     pub refer_addr: SocketAddr,
@@ -433,8 +439,24 @@ async fn run_one(
     // number-plan digits (`+041…`, `0491…`) that its specs map back to the
     // role. Either way no leg needs a per-leg socket — they are "distinguished
     // by prefix".
-    let token = mint_token();
+    //
+    // Under from-user correlation the key is the resolved caller's From user
+    // (the SUT keeps it on every leg it originates); a call without one is
+    // refused here, before any bind or datagram.
+    let token = if transport.correlation.is_from_user() {
+        match from_user_key(core.from.as_deref()) {
+            Ok(key) => key,
+            Err(reason) => return record_rejected(&reporter, id, reason),
+        }
+    } else {
+        mint_token()
+    };
     let mut routing = CallRouting::new(token.clone());
+    // Shared-socket layout: the caller binds the callee legs' address, so
+    // every bind there is declared, the caller first (the bind order below).
+    if transport.uac_addr == transport.uas_addr {
+        routing = routing.caller(transport.uac_addr);
+    }
     for leg in legs {
         routing = routing.leg(transport.uas_addr, leg.role);
     }
@@ -475,7 +497,13 @@ async fn run_one(
     );
     binder.seed_ids(next_seed(seed_base));
 
-    let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
+    // Binds are fallible: a callee leg whose key a concurrent call already
+    // holds is refused by the mux (`token_collision`) and the call is recorded
+    // `rejected`; the agents bound so far deregister as they drop.
+    let alice = match binder.try_agent("alice", transport.uac_addr).await {
+        Ok(agent) => agent,
+        Err(e) => return record_rejected(&reporter, id, bind_rejection(&e)),
+    };
     // Bind order is load-bearing on the shared callee socket: the mux assigns
     // receivers in leg-declaration order, so bind the callee agents exactly in
     // `legs` order to match the `routing.leg` declarations above. All callee
@@ -485,8 +513,10 @@ async fn run_one(
     // socket).
     let mut callee_agents: Vec<(&'static str, Agent)> = Vec::with_capacity(legs.len());
     for leg in legs {
-        callee_agents
-            .push((leg.role, binder.agent(leg.role, &transport.uas_addr.to_string()).await));
+        match binder.try_agent(leg.role, transport.uas_addr).await {
+            Ok(agent) => callee_agents.push((leg.role, agent)),
+            Err(e) => return record_rejected(&reporter, id, bind_rejection(&e)),
+        }
     }
     let agent_for = |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
     // The primary callee: the "bob" role (every derived spec — and every downstream
@@ -682,6 +712,35 @@ async fn run_one(
     };
 
     reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
+    reporter.dec_inflight();
+}
+
+/// The from-user correlation key of a call: the URI user of its resolved
+/// caller identity, or the bounded rejection reason when there is none.
+fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
+    let from = from.ok_or("no_from")?;
+    sip_message::sniff::address_user(from).ok_or("userless_from")
+}
+
+/// The bounded rejection reason for a refused agent bind: a key already held
+/// by a concurrent call, or any other bind failure.
+fn bind_rejection(e: &sip_net::BindError) -> &'static str {
+    match e.reason {
+        sip_net::BindErrorReason::AlreadyBound => "key_in_flight",
+        _ => "bind_failed",
+    }
+}
+
+/// Record a call refused before any datagram as `rejected` and close its
+/// in-flight count.
+fn record_rejected(reporter: &Reporter, id: ScenarioId, reason: &'static str) {
+    let outcome = CallOutcome::Rejected(reason);
+    let class = ResultClass::from(&outcome);
+    let case = outcome.case(None);
+    let sample = reporter
+        .wants_sample(id, &class, &case, ChaosTag::Clear)
+        .then(|| RenderedSample { html: None, detail: outcome.detail(), e2e_ms: 0.0 });
+    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample, ChaosTag::Clear);
     reporter.dec_inflight();
 }
 

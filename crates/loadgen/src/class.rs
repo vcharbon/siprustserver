@@ -30,6 +30,10 @@ pub enum CallOutcome {
     /// over the sampled trace — carries the FAILED verdicts only. Sampled calls
     /// only — checks are a per-sample oracle, like the RFC audit.
     CheckFail(Vec<e2e_model::CheckVerdict>),
+    /// The call was refused before any datagram: its correlation key is
+    /// missing, unusable, or held by a concurrent call. Carries the bounded
+    /// reason (`no_from`, `userless_from`, `key_in_flight`, `bind_failed`).
+    Rejected(&'static str),
 }
 
 /// A low-cardinality bucket for a call result. `Display`/[`label`](Self::label)
@@ -95,11 +99,12 @@ impl ResultClass {
     ///
     /// Only the **timing-independent** classes are never excused, because their
     /// cause is unrelated to dialog timing and should always be seen: `Panic` (a
-    /// code panic) and `Unparseable` (wire corruption). `CheckFail` IS excusable
+    /// code panic), `Unparseable` (wire corruption) and `Rejected` (a key
+    /// refused before any datagram). `CheckFail` IS excusable
     /// like the other protocol/content symptoms — a call rerouted mid-kill can
     /// legitimately show a different wire shape than the case's oracle expects.
     pub fn chaos_excusable(&self) -> bool {
-        !matches!(self, ResultClass::Panic | ResultClass::Unparseable)
+        !matches!(self, ResultClass::Panic | ResultClass::Unparseable | ResultClass::Rejected)
     }
 }
 
@@ -116,6 +121,7 @@ impl From<&CallOutcome> for ResultClass {
             CallOutcome::RfcAuditFail(_) => ResultClass::RfcAuditFail,
             CallOutcome::CheckFail(_) => ResultClass::CheckFail,
             CallOutcome::Panic(_) => ResultClass::Panic,
+            CallOutcome::Rejected(_) => ResultClass::Rejected,
             CallOutcome::Step(e) => match e {
                 StepError::Timeout { .. } | StepError::QueueClosed { .. } => ResultClass::Timeout,
                 StepError::WrongStatus { got, .. } => ResultClass::WrongStatus(*got),
@@ -135,6 +141,9 @@ impl CallOutcome {
             CallOutcome::Ok => None,
             CallOutcome::Step(e) => Some(e.to_string()),
             CallOutcome::Panic(m) => Some(format!("panic: {m}")),
+            CallOutcome::Rejected(reason) => {
+                Some(format!("rejected before any datagram: {reason}"))
+            }
             CallOutcome::RfcAuditFail(findings) => Some(format!(
                 "rfc audit: {}",
                 findings.iter().map(|f| f.detail.clone()).collect::<Vec<_>>().join("; ")
@@ -170,6 +179,7 @@ impl CallOutcome {
                 format!("{}@{}", step_who(e), last_phase.unwrap_or("start"))
             }
             CallOutcome::Panic(_) => last_phase.unwrap_or("start").to_string(),
+            CallOutcome::Rejected(reason) => reason.to_string(),
             CallOutcome::RfcAuditFail(findings) => {
                 joined_distinct(findings.iter().map(|f| f.rule.as_str()))
             }

@@ -8,11 +8,13 @@ report that keeps the first-N samples per `(scenario × result-class)` — inclu
 the OK flows and, for failures, *why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
-endpoint: `uac`, `uas`, `refer`), so call rate is not bounded by fds/ephemeral
-ports. Calls are correlated by one random per-call token; **how the token
-travels through the SUT is a pluggable per-run strategy** (`--correlate`): a
-relayed header (default `X-Loadgen-Id`, needs SUT cooperation) or the To-header
-user-part (works against any SIP-correct B2BUA). See *Correlation strategies*.
+endpoint address: `uac`, `uas`, `refer`, or one shared socket with
+`--shared-socket`), so call rate is not bounded by fds/ephemeral ports. Calls
+are correlated by one per-call token; **how the token travels through the SUT
+is a pluggable per-run strategy** (`--correlate`): a relayed header (default
+`X-Loadgen-Id`, needs SUT cooperation), the To-header user-part (works against
+any SIP-correct B2BUA), or the caller's From user (for a SUT that keeps the
+calling party's number on every leg). See *Correlation strategies*.
 
 ---
 
@@ -73,7 +75,8 @@ Prerequisites for the real cluster (one-time):
   `172.20.0.1`). See the `cluster-nat-inventory` notes for the NAT details.
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
-`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlate` /
+`--base-port` (uac=base, uas=base+1, refer=base+2), `--shared-socket` (all
+three on `base`; see *Shared socket*), `--correlate` /
 `--correlation-header` / `--correlation-template` / `--correlation-extract`
 (see *Correlation strategies*), `--route-pin-to-uas`, `--refer-key` (the
 `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run SUT auth
@@ -192,8 +195,9 @@ loadgen standalone is its reader.
 
 ### Correlation strategies
 
-Every call mints one random token; the mux demuxes an inbound **initial** leg
-(a Call-ID it has never seen) back to its call by recovering that token. A
+Every call carries one token (minted, or its caller's From user under
+`from-user`); the mux demuxes an inbound **initial** leg (a Call-ID it has
+never seen) back to its call by recovering that token. A
 strategy has two halves — **stamp** (how the token is written into the outgoing
 INVITE) and **extract** (how it is recovered from a received leg) — picked
 per run with `--correlate`; all mux endpoints share the one strategy:
@@ -223,18 +227,39 @@ per run with `--correlate`; all mux endpoints share the one strategy:
   the To user is now loadgen-owned, so don't combine it with a SUT that routes
   or rewrites on the To user. (The REFER scenario's `Refer-To` user becomes the
   token too, so the transfer leg keeps correlating.)
+- **`--correlate from-user`** — the token IS the calling party's **From URI
+  user**, taken from the attached Test case's resolved `core.from` (per call
+  from its binding pool); nothing is stamped and the loadgen mints no number.
+  Extraction reads the From user of the arriving INVITE, so the SUT may rewrite
+  the From host, display name and tag, and may route on the To. Contract:
+  - every mix entry carries a case (`--case` or `case=`), checked at startup;
+  - a call whose resolved From is absent or has no user, or whose number a
+    concurrent call holds (`loadgen_mux_token_collision_total`), is counted
+    `class="rejected"` before any datagram;
+  - the caller's first INVITE must carry the key as its From user; a mismatch
+    fails the send and counts `loadgen_mux_caller_key_mismatch_total`.
 
 Correlation failures are observable either way: an arriving initial INVITE with
 no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
 extracted token matching no pending call counts `reason="unknown_token"`.
 
 In code the strategy is `loadgen::Correlation` (`header(name)`,
-`header_templated(name, template, extract)`, `to_user()`); the stamp half is
+`header_templated(name, template, extract)`, `to_user()`, `from_user()`); the stamp half is
 applied inside `CallEnv::outgoing_invite` via `CorrelationStamp` (the per-call
 identity half, orthogonal to the egress rewrite), the extract half by the mux
 demux. Both strategies are covered by unit tests (`mux::tests`) and the
 smoke suite (`loadgen_to_user_correlation_without_relayed_header` proves a full
 call correlates with **no** relay configured on the SUT).
+
+### Shared socket
+
+`--shared-socket` binds `alice`, `bob` and `charlie` on one address (`--base-port`);
+an `--endpoint-config` giving the roles one address is the explicit form. It
+fits a SUT that sends each new leg back to the ip:port that originated the
+call. The mux binds each distinct address once; per call the driver declares
+the caller bind first, then the callee legs, so responses reach the caller by
+its Call-ID and a new leg reaches its callee by the call's token (and, with
+several legs, the R-URI picker). The layout is independent of `--correlate`.
 
 ### Packet loss + auto-retransmit (robustness testing)
 

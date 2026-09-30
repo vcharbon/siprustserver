@@ -82,12 +82,14 @@ pub struct Args {
     /// Shorthand: local host IP to bind the mux endpoints on (reachable from the SUT).
     #[arg(long, default_value = "127.0.0.1")]
     pub bind_ip: IpAddr,
-    /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2.
+    /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2
+    /// (all three = base under `--shared-socket`).
     #[arg(long, default_value_t = 6000)]
     pub base_port: u16,
     /// Shorthand: bind alice, bob and charlie on ONE socket (`base_port`), for a
     /// SUT that sends each new leg back to the ip:port that originated the call.
     /// An `--endpoint-config` giving the roles one address is the explicit form.
+    /// Independent of `--correlate`. Ignored when `--endpoint-config` is set.
     #[arg(long, default_value_t = false)]
     pub shared_socket: bool,
     /// Correlation strategy: how the per-call token travels through the SUT.
@@ -96,7 +98,10 @@ pub struct Args {
     /// `B2BUA_RELAY_HEADERS`). `to-user`: the token IS the To-header user-part —
     /// survives any SIP-correct B2BUA with zero SUT cooperation. `from-user`:
     /// the token IS the From URI user of the attached case's resolved caller,
-    /// for a SUT that keeps the calling party's number on every leg.
+    /// for a SUT that keeps the calling party's number on every leg; every mix
+    /// entry needs a case (checked at startup), and a call whose resolved From
+    /// has no user, or whose number a concurrent call holds, is counted
+    /// `rejected` before any datagram.
     #[arg(long, default_value = "header")]
     pub correlate: String,
     /// Correlation header name (the `header` strategy): the transparent
@@ -296,10 +301,12 @@ fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConfig {
         }
         return cfg;
     }
+    let port =
+        |offset: u16| if args.shared_socket { args.base_port } else { args.base_port + offset };
     let roles: std::collections::BTreeMap<String, SocketAddr> = [
-        ("alice".to_string(), (args.bind_ip, args.base_port).into()),
-        ("bob".to_string(), (args.bind_ip, args.base_port + 1).into()),
-        ("charlie".to_string(), (args.bind_ip, args.base_port + 2).into()),
+        ("alice".to_string(), (args.bind_ip, port(0)).into()),
+        ("bob".to_string(), (args.bind_ip, port(1)).into()),
+        ("charlie".to_string(), (args.bind_ip, port(2)).into()),
         ("lb".to_string(), args.target),
     ]
     .into();
@@ -323,7 +330,28 @@ fn correlation(args: &Args) -> Result<Correlation, String> {
         )
         .map_err(|e| format!("bad correlation config: {e}")),
         "to-user" | "to_user" => Ok(Correlation::to_user()),
-        other => Err(format!("unknown --correlate {other:?} (expected `header` or `to-user`)")),
+        "from-user" | "from_user" => Ok(Correlation::from_user()),
+        other => Err(format!(
+            "unknown --correlate {other:?} (expected `header`, `to-user` or `from-user`)"
+        )),
+    }
+}
+
+/// From-user correlation takes each call's key from its attached case's
+/// resolved caller, so every mix entry must carry a case. `Err` names the
+/// entries without one.
+pub fn check_from_user_mix(correlation: &Correlation, mix: &[MixEntry]) -> Result<(), String> {
+    if !correlation.is_from_user() {
+        return Ok(());
+    }
+    let caseless: Vec<&str> = mix.iter().filter(|e| e.case.is_none()).map(|e| e.id).collect();
+    if caseless.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--correlate from-user needs a case (--case or case=) on every mix entry; \
+             none on {caseless:?}"
+        ))
     }
 }
 
@@ -558,6 +586,7 @@ pub async fn run_with_inputs(
     };
 
     let correlation = correlation(&args).unwrap_or_else(|e| panic!("{e}"));
+    check_from_user_mix(&correlation, &scenarios).unwrap_or_else(|e| panic!("{e}"));
 
     // The ONE environment-axis document (authored file or flag-synthesized):
     // endpoint binds + SUT ingress + recv bound + egress policy.
@@ -825,5 +854,26 @@ mod tests {
             matches!(stamp, Ok(crate::CorrelationStamp::FromUser)),
             "from-user must select the From-user stamp, got {stamp:?}"
         );
+    }
+
+    /// From-user correlation refuses a mix with a case-less entry at startup;
+    /// other strategies accept it.
+    #[test]
+    fn from_user_mix_needs_a_case_on_every_entry() {
+        let registry = ShapeRegistry::with_defaults();
+        let inputs = ScenarioInputs::default();
+        let entry = |id| MixEntry::by_id(&registry, id, &inputs, 1.0).unwrap();
+        let case: e2e_model::TestCase = serde_json::from_str(
+            r#"{ "id": "c", "compatibleShapes": ["basic_call"],
+                 "input": { "core": { "from": "sip:+15550100@pool.example" } } }"#,
+        )
+        .unwrap();
+        let case = Arc::new(LoadCase::new(case, &Default::default(), 1).unwrap());
+
+        let mix = vec![entry("basic_call").with_case(Some(case)), entry("reinvite")];
+        let err = check_from_user_mix(&Correlation::from_user(), &mix).unwrap_err();
+        assert!(err.contains("reinvite") && !err.contains("basic_call"), "{err}");
+        assert!(check_from_user_mix(&Correlation::from_user(), &mix[..1]).is_ok());
+        assert!(check_from_user_mix(&Correlation::to_user(), &mix).is_ok());
     }
 }

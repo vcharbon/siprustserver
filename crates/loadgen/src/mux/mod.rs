@@ -4,6 +4,9 @@
 //!
 //! A [`MuxCore`] owns a small, fixed set of **named endpoints**, each = exactly
 //! one datagram endpoint on the underlying fabric with a dispatcher recv-loop.
+//! Endpoint specs sharing an address share its one endpoint (the shared
+//! caller/callee layout, for a SUT that returns each new leg to the ip:port
+//! that originated the call).
 //! The fabric is a [`SignalingNetwork`] seam: real UDP by default
 //! ([`MuxCore::bind`]), or any other impl — notably the simulated network under
 //! the paused-clock test lane — via [`MuxCore::bind_on`]. Each endpoint
@@ -15,7 +18,7 @@
 //! # Module map
 //!
 //! - [`correlation`] — how the per-call token travels through the SUT
-//!   (pluggable per run: relayed header, or To-user).
+//!   (pluggable per run: relayed header, To-user, or the caller's From user).
 //! - [`demux`] — the inbound path. Precedence per datagram: (1) **known
 //!   Call-ID** (our UAC dialog, or a UAS dialog after its first request) — this
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
@@ -240,6 +243,11 @@ impl MuxCore {
     /// harness) to run the REAL driver + mux + demux + loss-model stack under a
     /// paused clock with no real sockets; the loss/retransmit knobs sit ABOVE
     /// this seam and behave identically on either fabric.
+    ///
+    /// Each distinct address is bound once: specs naming one address (a shared
+    /// caller/callee layout) share its endpoint, and the FIRST spec's role is
+    /// that endpoint's default for binds a call's [`CallRouting`] leaves
+    /// undeclared.
     pub async fn bind_on(
         fabric: &dyn SignalingNetwork,
         specs: Vec<EndpointSpec>,
@@ -252,6 +260,9 @@ impl MuxCore {
         let stats = Arc::new(MuxStats::new(orphan_sample_cap));
         let mut endpoints = HashMap::new();
         for spec in specs {
+            if endpoints.contains_key(&spec.addr) {
+                continue;
+            }
             let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
                 fabric.bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX)).await.map_err(
                     |e| std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message)),

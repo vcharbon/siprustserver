@@ -154,6 +154,12 @@ impl MuxCore {
             "loadgen_mux_token_collision_total {}\n",
             s.token_collision.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP loadgen_mux_caller_key_mismatch_total Caller INVITEs refused before the wire: From user is not the call key (from-user correlation).\n");
+        out.push_str("# TYPE loadgen_mux_caller_key_mismatch_total counter\n");
+        out.push_str(&format!(
+            "loadgen_mux_caller_key_mismatch_total {}\n",
+            s.caller_key_mismatch.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP loadgen_mux_claim_unfired_total Claims released without firing (expected inbound leg never came).\n");
         out.push_str("# TYPE loadgen_mux_claim_unfired_total counter\n");
         out.push_str(&format!(

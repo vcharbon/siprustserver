@@ -349,7 +349,10 @@ impl Reporter {
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
         *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
-        g.e2e.entry(scenario).or_insert_with(Hist::new).record(e2e.as_secs_f64() * 1000.0);
+        // A rejected call never ran: it has no end-to-end time to fold in.
+        if class != ResultClass::Rejected {
+            g.e2e.entry(scenario).or_insert_with(Hist::new).record(e2e.as_secs_f64() * 1000.0);
+        }
         for (name, d) in checkpoints {
             g.checkpoints
                 .entry((scenario, name))

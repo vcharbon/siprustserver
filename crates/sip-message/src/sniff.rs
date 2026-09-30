@@ -459,8 +459,17 @@ pub fn name_addr_uri(raw: &[u8], name: &str) -> Option<String> {
 /// header is absent, no reader accepts it, or its URI names no user. The
 /// display name, the URI host and parameters, and the header's own `;tag=`
 /// never affect the result.
-pub fn from_user(_raw: &[u8]) -> Option<String> {
-    None
+pub fn from_user(raw: &[u8]) -> Option<String> {
+    address_user(&header_rows_compact(raw, "From").into_iter().next()?)
+}
+
+/// The URI user of an address value — a `name-addr` or `addr-spec`, as a
+/// From or To header carries it, header parameters allowed — or `None` when
+/// no reader accepts it or its URI names no user.
+pub fn address_user(value: &str) -> Option<String> {
+    use crate::header::{From as FromHeader, HeaderValue};
+    let addr = FromHeader::parse(&crate::sip_str::SipStr::owned(value)).ok()?;
+    addr.uri().user().filter(|user| !user.is_empty()).map(str::to_string)
 }
 
 /// What one URI states about where a message goes: the canonical text, the
@@ -884,6 +893,17 @@ Content-Length: 0\r\n\r\n"
             "a bare addr-spec's `;tag=` is the header's parameter, not the URI's",
         );
         assert_eq!(name_addr_uri(raw, "Contact"), None, "an absent header reads None");
+    }
+
+    #[test]
+    fn address_user_reads_an_address_value() {
+        assert_eq!(address_user("sip:+15550100@pool.example").as_deref(), Some("+15550100"));
+        assert_eq!(
+            address_user("\"Pool\" <sip:+15550100@pool.example>;tag=1").as_deref(),
+            Some("+15550100")
+        );
+        assert_eq!(address_user("sip:pool.example"), None, "a userless URI");
+        assert_eq!(address_user("not an address"), None);
     }
 
     #[test]

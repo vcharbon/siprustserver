@@ -11,7 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use scenario_harness::claim::ClaimRule;
 use scenario_harness::legpick::LegPicker;
-use sip_message::sniff::call_id;
+use sip_message::preparse::is_invite_request_buffer;
+use sip_message::sniff::{call_id, from_user};
 use sip_net::queue::PacketQueue;
 use sip_net::{
     BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
@@ -203,17 +204,17 @@ impl SignalingNetwork for MuxNetwork {
                     let slot = e.into_mut();
                     if slot.owner != self.owner {
                         // Claims are scoped (token, rule) per call instance —
-                        // a colliding token (To-user correlation + a shared
-                        // callee number) fails HERE, before any leg could be
-                        // misdelivered.
+                        // a colliding token (a number shared under To-user or
+                        // From-user correlation) fails HERE, before any leg
+                        // could be misdelivered.
                         mux.stats.token_collision.fetch_add(1, Ordering::Relaxed);
                         return Err(BindError {
                             reason: BindErrorReason::AlreadyBound,
                             addr: opts.addr,
                             message: format!(
                                 "correlation token {token:?} already registered by a \
-                                 concurrent call (shared callee number under To-user \
-                                 correlation?)"
+                                 concurrent call (a number shared under To-user or \
+                                 From-user correlation?)"
                             ),
                         });
                     }
@@ -259,9 +260,14 @@ impl SignalingNetwork for MuxNetwork {
             });
         }
 
+        // Under from-user correlation the call's key IS its caller's From
+        // user, so a caller endpoint holds the key its INVITE must present.
+        let caller_key =
+            (role == Role::Caller && mux.correlation.is_from_user()).then(|| self.token.clone());
         Ok(Box::new(MuxEndpoint {
             local: mux.addr,
             role,
+            caller_key,
             mux: mux.clone(),
             queue,
             keyset,
@@ -293,6 +299,9 @@ impl SignalingNetwork for MuxNetwork {
 struct MuxEndpoint {
     local: SocketAddr,
     role: Role,
+    /// The From user a caller's initial INVITE must carry (from-user
+    /// correlation only): the call's key, registered by its callee legs.
+    caller_key: Option<String>,
     mux: Arc<MuxSocket>,
     queue: Arc<PacketQueue>,
     keyset: Arc<Mutex<Vec<Key>>>,
@@ -317,6 +326,19 @@ impl UdpEndpoint for MuxEndpoint {
         // local bookkeeping, so it happens even when the datagram is then dropped
         // on the wire below (a real UAC that loses its INVITE still owns the dialog).
         if self.role == Role::Caller && !self.caller_registered.load(Ordering::Relaxed) {
+            // Under from-user correlation an INVITE whose From user is not the
+            // call's key would return legs to another call (or to none): it is
+            // refused and counted, never sent.
+            if let Some(key) = &self.caller_key {
+                if is_invite_request_buffer(buf) && from_user(buf).as_deref() != Some(key.as_str())
+                {
+                    self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
+                    return Err(SendError::stated(format!(
+                        "caller INVITE From user {:?} is not the call key {key:?}",
+                        from_user(buf)
+                    )));
+                }
+            }
             if let Some(cid) = call_id(buf) {
                 let mut g = self.mux.reg.lock().unwrap();
                 g.by_call_id.insert(

@@ -194,16 +194,30 @@ impl AgentBinder {
     /// [`Harness::agent`](crate::Harness). Role-tagged `{Uac, Uas}` (a test UA
     /// originates and answers, never proxies). Bind with port `0` to let the OS
     /// assign a free port against a real network, then read [`Agent::addr`].
+    /// Panics on a bad address or a refused bind; [`try_agent`](Self::try_agent)
+    /// is the fallible form.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
-        let name = name.into();
         let requested: SocketAddr =
             addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.try_agent(name, requested)
+            .await
+            .unwrap_or_else(|e| panic!("bind {requested} failed: {e}"))
+    }
+
+    /// [`agent`](Self::agent) returning the network's refusal instead of
+    /// panicking — the load driver counts a refused bind (a correlation key
+    /// already held by a concurrent call) as a rejected call.
+    pub async fn try_agent(
+        &self,
+        name: impl Into<String>,
+        requested: SocketAddr,
+    ) -> Result<Agent, sip_net::BindError> {
+        let name = name.into();
         let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
         let ep = self
             .network
             .bind_udp(BindUdpOpts::new(requested, 64).with_roles(roles).with_lane_label(&name))
-            .await
-            .unwrap_or_else(|e| panic!("bind {requested} failed: {e}"));
+            .await?;
         // A port-`0` bind means "whichever port is free". The UA advertises
         // itself in Via and Contact and the recorder keys its lane on the same
         // socket, so both take the port the OS actually gave it — which is why
@@ -221,7 +235,7 @@ impl AgentBinder {
                 NetworkTag::Ext,
             );
         }
-        Agent {
+        Ok(Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
             rr_fold: decide_rr_fold(&name),
             name,
@@ -238,7 +252,7 @@ impl AgentBinder {
             txn: Arc::new(crate::absorption::Absorption::raw_wire()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
-        }
+        })
     }
 
     /// Render this call's recorded trace as a standalone callflow HTML page
