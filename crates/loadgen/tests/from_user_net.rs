@@ -231,7 +231,8 @@ async fn a_calling_number_in_flight_is_refused_and_counted_while_its_call_comple
     assert!(ok > 0, "no call holding the number completed:\n{report}");
     assert_eq!(ok + rejected, total, "a class other than ok/rejected:\n{report}");
     // One number and no pool: each rejected call made all 8 draws, each
-    // refused as a collision.
+    // refused as a collision. Exact only on this current-thread (paused) runtime,
+    // where the holder cannot release between one call's draws.
     assert_eq!(rig.core.stats().token_collision.load(Relaxed), 8 * rejected);
     assert_eq!(orphans(&rig.core), 0, "orphans: {:?}", rig.core.stats().samples());
     settle(&rig, &reporter).await;

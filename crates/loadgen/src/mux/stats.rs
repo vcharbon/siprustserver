@@ -30,15 +30,17 @@ pub struct MuxStats {
     /// claim accepted them — a scenario/SUT mismatch on a KNOWN call, counted
     /// apart from true orphans (which never correlated at all).
     pub unclaimed: AtomicU64,
-    /// Token-slot registrations rejected because a CONCURRENT call already
-    /// owns the token (To-user correlation + intentionally shared callee
-    /// numbers) — the residual ambiguity surfaced as an explicit failure.
+    /// Token-slot registrations (draws) rejected because a CONCURRENT call
+    /// already owns the token (a number shared under To-user or From-user
+    /// correlation). A from-user call makes up to `KEY_DRAWS` draws, so this
+    /// counts refused draws, not refused calls.
     pub token_collision: AtomicU64,
     /// Caller INVITEs refused before the wire because, under from-user
     /// correlation, their From URI user is not the call's registered key.
     pub caller_key_mismatch: AtomicU64,
-    /// From-user calls refused because their key's previous call ended not ok
-    /// within [`RELEASE_HOLD`](super::RELEASE_HOLD).
+    /// From-user draws refused because the key's previous call ended not ok
+    /// within [`RELEASE_HOLD`](super::RELEASE_HOLD). A call makes up to
+    /// `KEY_DRAWS` draws, so this counts refused draws, not refused calls.
     pub key_cooling: AtomicU64,
     /// Claims released (call teardown or pending-reap) without ever firing —
     /// an expected inbound leg the SUT never dialed.
@@ -187,7 +189,7 @@ impl MuxCore {
             "loadgen_mux_unclaimed_total {}\n",
             s.unclaimed.load(Ordering::Relaxed)
         ));
-        out.push_str("# HELP loadgen_mux_token_collision_total Token-slot registrations rejected: token already owned by a concurrent call.\n");
+        out.push_str("# HELP loadgen_mux_token_collision_total Token-slot registration draws refused: token already owned by a concurrent call (up to KEY_DRAWS per call).\n");
         out.push_str("# TYPE loadgen_mux_token_collision_total counter\n");
         out.push_str(&format!(
             "loadgen_mux_token_collision_total {}\n",
@@ -199,7 +201,7 @@ impl MuxCore {
             "loadgen_mux_caller_key_mismatch_total {}\n",
             s.caller_key_mismatch.load(Ordering::Relaxed)
         ));
-        out.push_str("# HELP loadgen_mux_key_cooling_total From-user calls refused: the key's previous call ended not ok within 64*T1.\n");
+        out.push_str("# HELP loadgen_mux_key_cooling_total From-user draws refused: the key's previous call ended not ok within 64*T1 (up to KEY_DRAWS per call).\n");
         out.push_str("# TYPE loadgen_mux_key_cooling_total counter\n");
         out.push_str(&format!(
             "loadgen_mux_key_cooling_total {}\n",

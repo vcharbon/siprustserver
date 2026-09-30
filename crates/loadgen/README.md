@@ -237,9 +237,10 @@ per run with `--correlate`; all mux endpoints share the one strategy:
     (visual separators kept; a `tel:` URI's number without its parameters);
   - a call whose resolved From is absent or has no user is counted
     `class="rejected"` before any datagram. A drawn number a concurrent call
-    holds (`loadgen_mux_token_collision_total`) or that is cooling is re-drawn
-    from the case's pool, up to 8 draws; only when every draw is unavailable is
-    the call `rejected`. Those contention rejections are classified against the
+    holds or that is cooling is re-drawn from the case's pool, up to 8 draws;
+    only when every draw is unavailable is the call `rejected`. Each refused
+    draw counts once (`loadgen_mux_token_collision_total`,
+    `loadgen_mux_key_cooling_total`), so these count draws, not calls. Those contention rejections are classified against the
     chaos markers of the last 64·T1, like the failure that caused them;
   - the caller's first INVITE must carry the key as its From user; a mismatch
     fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
