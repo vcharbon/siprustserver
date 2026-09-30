@@ -25,6 +25,9 @@ pub struct MuxStats {
     /// owns the token (To-user correlation + intentionally shared callee
     /// numbers) — the residual ambiguity surfaced as an explicit failure.
     pub token_collision: AtomicU64,
+    /// Caller INVITEs refused before the wire because, under from-user
+    /// correlation, their From URI user is not the call's registered key.
+    pub caller_key_mismatch: AtomicU64,
     /// Claims released (call teardown or pending-reap) without ever firing —
     /// an expected inbound leg the SUT never dialed.
     pub claim_unfired: AtomicU64,

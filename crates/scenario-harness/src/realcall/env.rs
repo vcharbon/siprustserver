@@ -40,6 +40,10 @@ pub enum CorrelationStamp {
     /// survives a third-party SUT that strips unknown headers (zero SUT
     /// cooperation).
     ToUser,
+    /// The token IS the calling party's From URI user, which the resolved core
+    /// identity already carries: no header and no To override. Requires a SUT
+    /// that keeps the From URI user on every originated leg.
+    FromUser,
 }
 
 /// The per-call **core identity** overrides — the load-side twin of the e2e
@@ -301,6 +305,7 @@ impl<'a> CallEnv<'a> {
             CorrelationStamp::ToUser => {
                 to = Some(format!("sip:{}@{}", self.token, self.bob.addr()));
             }
+            CorrelationStamp::FromUser => {}
         }
         if self.emergency {
             headers.push(("Resource-Priority".to_string(), "esnet.0".to_string()));

@@ -49,6 +49,9 @@ pub enum ResultClass {
     Unparseable,
     RfcAuditFail,
     CheckFail,
+    /// Refused before any datagram: the call's correlation key is missing,
+    /// unusable, or already held by a concurrent call.
+    Rejected,
     Panic,
 }
 
@@ -65,6 +68,7 @@ impl ResultClass {
             ResultClass::Unparseable => "unparseable".to_string(),
             ResultClass::RfcAuditFail => "rfc_audit_fail".to_string(),
             ResultClass::CheckFail => "check_fail".to_string(),
+            ResultClass::Rejected => "rejected".to_string(),
             ResultClass::Panic => "panic".to_string(),
         }
     }

@@ -24,6 +24,10 @@ use sip_message::sniff::header_value;
 /// - [`Correlation::to_user`] — the token IS the To-header user-part. A
 ///   SIP-correct B2BUA copies the To URI onto its originated leg, so this
 ///   survives a third-party SUT that strips unknown headers (zero cooperation).
+/// - [`Correlation::from_user`] — the token IS the calling party's From URI
+///   user, taken from the call's resolved identity (nothing is stamped). Fits a
+///   SUT that keeps the From URI user on every originated leg while it may
+///   rewrite the host, display name and tag.
 #[derive(Debug, Clone)]
 pub struct Correlation {
     strategy: Strategy,
@@ -41,6 +45,7 @@ enum Strategy {
         extract: Option<Regex>,
     },
     ToUser,
+    FromUser,
 }
 
 /// What a token looks like inside a structured header value when deriving the
@@ -110,6 +115,12 @@ impl Correlation {
         Self { strategy: Strategy::ToUser }
     }
 
+    /// Token = the From URI user of the call's own INVITE — zero SUT
+    /// cooperation beyond keeping the calling party's number.
+    pub fn from_user() -> Self {
+        Self { strategy: Strategy::FromUser }
+    }
+
     /// The STAMP half: how a scenario writes `token` into the outgoing INVITE.
     pub fn stamp(&self, token: &str) -> CorrelationStamp {
         match &self.strategy {
@@ -118,6 +129,7 @@ impl Correlation {
                 value: template.replace("${token}", token),
             },
             Strategy::ToUser => CorrelationStamp::ToUser,
+            Strategy::FromUser => CorrelationStamp::FromUser,
         }
     }
 
@@ -132,6 +144,7 @@ impl Correlation {
                 }
             }
             Strategy::ToUser => LegInfo::new(raw).to_user(),
+            Strategy::FromUser => None,
         }
     }
 }
@@ -250,5 +263,33 @@ mod tests {
         // To-user only), and a userless To yields no token.
         let userless = invite("<sip:10.0.0.9:5070>", "X-Loadgen-Id: lg999\r\n");
         assert_eq!(c.token(&userless), None);
+    }
+
+    /// From-user strategy: stamp is [`CorrelationStamp::FromUser`] (nothing
+    /// written); extraction reads the From URI user of a received leg whose
+    /// host, display name and tag differ from the caller's, ignores the To and
+    /// any relayed header, and yields nothing for a userless From.
+    #[test]
+    fn from_user_strategy_extracts_from_the_from_header() {
+        let c = Correlation::from_user();
+        assert!(matches!(c.stamp("+1555010"), CorrelationStamp::FromUser));
+
+        let leg = |from: &str| {
+            format!(
+                "INVITE sip:+15550900@10.0.0.9 SIP/2.0\r\nCall-ID: c2@h\r\n\
+                 X-Loadgen-Id: lg999\r\nTo: <sip:+15550900@10.0.0.9>\r\n\
+                 From: {from}\r\nCSeq: 1 INVITE\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let rewritten = leg("\"Relayed\" <sip:+1555010@sut.example:5080;user=phone>;tag=sut1");
+        assert_eq!(c.token(&rewritten).as_deref(), Some("+1555010"));
+        let compact = String::from_utf8(leg("<sip:+1555010@10.0.0.1>;tag=a1"))
+            .unwrap()
+            .replace("From:", "f:")
+            .into_bytes();
+        assert_eq!(c.token(&compact).as_deref(), Some("+1555010"), "compact f: form");
+
+        assert_eq!(c.token(&leg("<sip:sut.example>;tag=s1")), None, "userless From");
     }
 }

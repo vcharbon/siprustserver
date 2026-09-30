@@ -85,11 +85,18 @@ pub struct Args {
     /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2.
     #[arg(long, default_value_t = 6000)]
     pub base_port: u16,
+    /// Shorthand: bind alice, bob and charlie on ONE socket (`base_port`), for a
+    /// SUT that sends each new leg back to the ip:port that originated the call.
+    /// An `--endpoint-config` giving the roles one address is the explicit form.
+    #[arg(long, default_value_t = false)]
+    pub shared_socket: bool,
     /// Correlation strategy: how the per-call token travels through the SUT.
     /// `header` (default): a transparent header the SUT must RELAY onto every
     /// leg (`--correlation-header`/`--correlation-template`; our b2bua:
     /// `B2BUA_RELAY_HEADERS`). `to-user`: the token IS the To-header user-part —
-    /// survives any SIP-correct B2BUA with zero SUT cooperation.
+    /// survives any SIP-correct B2BUA with zero SUT cooperation. `from-user`:
+    /// the token IS the From URI user of the attached case's resolved caller,
+    /// for a SUT that keeps the calling party's number on every leg.
     #[arg(long, default_value = "header")]
     pub correlate: String,
     /// Correlation header name (the `header` strategy): the transparent
@@ -303,6 +310,20 @@ fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConfig {
         recv_timeout_ms,
         transit_delay_ms: 0,
         egress: args.route_pin_to_uas.then_some(e2e_model::EgressPolicySpec::ApiCallPin),
+    }
+}
+
+/// The run's [`Correlation`] from `--correlate` and the header knobs.
+fn correlation(args: &Args) -> Result<Correlation, String> {
+    match args.correlate.as_str() {
+        "header" => Correlation::header_templated(
+            args.correlation_header.clone(),
+            args.correlation_template.clone(),
+            args.correlation_extract.as_deref(),
+        )
+        .map_err(|e| format!("bad correlation config: {e}")),
+        "to-user" | "to_user" => Ok(Correlation::to_user()),
+        other => Err(format!("unknown --correlate {other:?} (expected `header` or `to-user`)")),
     }
 }
 
@@ -536,16 +557,7 @@ pub async fn run_with_inputs(
             .collect()
     };
 
-    let correlation = match args.correlate.as_str() {
-        "header" => Correlation::header_templated(
-            args.correlation_header.clone(),
-            args.correlation_template.clone(),
-            args.correlation_extract.as_deref(),
-        )
-        .unwrap_or_else(|e| panic!("bad correlation config: {e}")),
-        "to-user" | "to_user" => Correlation::to_user(),
-        other => panic!("unknown --correlate {other:?} (expected `header` or `to-user`)"),
-    };
+    let correlation = correlation(&args).unwrap_or_else(|e| panic!("{e}"));
 
     // The ONE environment-axis document (authored file or flag-synthesized):
     // endpoint binds + SUT ingress + recv bound + egress policy.
@@ -790,5 +802,28 @@ mod tests {
         assert!(!args.explicit("drop_rate"));
         assert_eq!(args.cps, 30.0);
         assert!(args.drop);
+    }
+
+    /// `--shared-socket` synthesizes one address for alice, bob and charlie:
+    /// the base port, on the bind IP.
+    #[test]
+    fn shared_socket_binds_every_role_on_the_base_port() {
+        let args = Args::parse_from(["loadgen", "--shared-socket", "--base-port", "7400"]);
+        let cfg = endpoint_config(&args, 5000);
+        let base: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        for role in ["alice", "bob", "charlie"] {
+            assert_eq!(cfg.addr(role), base, "{role} binds the shared base port");
+        }
+    }
+
+    /// `--correlate from-user` selects the From-user strategy (nothing stamped).
+    #[test]
+    fn correlate_from_user_selects_the_from_user_strategy() {
+        let args = Args::parse_from(["loadgen", "--correlate", "from-user"]);
+        let stamp = correlation(&args).map(|c| c.stamp("+1555010"));
+        assert!(
+            matches!(stamp, Ok(crate::CorrelationStamp::FromUser)),
+            "from-user must select the From-user stamp, got {stamp:?}"
+        );
     }
 }

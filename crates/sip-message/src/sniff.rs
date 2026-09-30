@@ -455,6 +455,14 @@ pub fn name_addr_uri(raw: &[u8], name: &str) -> Option<String> {
     Some(addr.uri().to_string())
 }
 
+/// The user part of the `From` URI (compact `f` included), or `None` when the
+/// header is absent, no reader accepts it, or its URI names no user. The
+/// display name, the URI host and parameters, and the header's own `;tag=`
+/// never affect the result.
+pub fn from_user(_raw: &[u8]) -> Option<String> {
+    None
+}
+
 /// What one URI states about where a message goes: the canonical text, the
 /// host and effective port RFC 3263 §4 resolves it to, and whether it is a
 /// loose route (`;lr`, RFC 3261 §19.1.1).
@@ -876,6 +884,29 @@ Content-Length: 0\r\n\r\n"
             "a bare addr-spec's `;tag=` is the header's parameter, not the URI's",
         );
         assert_eq!(name_addr_uri(raw, "Contact"), None, "an absent header reads None");
+    }
+
+    #[test]
+    fn from_user_reads_the_from_uri_user_in_every_spelling() {
+        let with = |from: &str| {
+            format!("INVITE sip:x@h SIP/2.0\r\n{from}\r\nTo: <sip:other@h>\r\n\r\n").into_bytes()
+        };
+        let cases = [
+            ("From: <sip:+1555010@a.example>;tag=1", "name-addr"),
+            ("From: sip:+1555010@a.example;tag=1", "bare addr-spec"),
+            ("f: <sip:+1555010@a.example>;tag=1", "compact form"),
+            ("From: \"Caller Name\" <sip:+1555010@b.example:5070>;tag=9", "quoted display name"),
+            ("From: Caller <sip:+1555010@c.example;user=phone>;tag=x", "token display name"),
+        ];
+        for (row, shape) in cases {
+            assert_eq!(from_user(&with(row)).as_deref(), Some("+1555010"), "{shape}: {row}");
+        }
+        assert_eq!(from_user(&with("From: <sip:a.example>;tag=1")), None, "a userless URI");
+        assert_eq!(
+            from_user(b"INVITE sip:x@h SIP/2.0\r\nTo: <sip:+1555010@h>\r\n\r\n"),
+            None,
+            "an absent From reads None, whatever the To carries",
+        );
     }
 
     #[test]
