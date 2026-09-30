@@ -86,10 +86,7 @@ async fn next_line(ep: &dyn UdpEndpoint) -> Option<String> {
 }
 
 fn orphans(core: &MuxCore) -> u64 {
-    let s = core.stats();
-    s.orphan_no_header.load(Relaxed)
-        + s.orphan_unknown_token.load(Relaxed)
-        + s.orphan_stray.load(Relaxed)
+    core.stats().orphans_total()
 }
 
 /// A layout whose caller and callee roles name one address opens ONE fabric
@@ -245,4 +242,179 @@ async fn a_caller_invite_whose_from_user_is_not_the_key_is_refused_before_the_wi
 
     drop((alice, bob, alice_ok, bob_ok));
     assert_eq!(core.registry_size(), 0, "mux registry leak");
+}
+
+/// Whether a bounded orphan sample names `reason`.
+fn orphan_sampled(core: &MuxCore, reason: &str) -> bool {
+    core.stats().samples().iter().any(|s| s.starts_with(&format!("[{reason}]")))
+}
+
+/// A leg the SUT keeps retransmitting after its call released the key never
+/// reaches the next call drawing that key: the released Call-ID is held back
+/// and the retransmission counts as a `released` orphan.
+#[tokio::test(start_paused = true)]
+async fn a_retransmitted_leg_of_a_released_call_never_reaches_the_next_call_on_its_key() {
+    let shared = addr(47401);
+    let (_sim, core, sut) = setup(shared, 47409).await;
+    let sut_addr = sut.local_addr();
+
+    let net_a = core.network(CallRouting::new("+1555010").caller(shared).leg(shared, "bob"));
+    let alice_a = net_a.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let bob_a = net_a.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    alice_a.send_to(&caller_invite("cid-a", "+1555010", shared), sut_addr).await.unwrap();
+    assert!(next_line(sut.as_ref()).await.is_some_and(|l| l.starts_with("INVITE")));
+    sut.send_to(&return_invite("+15550900", "ret-a", "+1555010"), shared).await.unwrap();
+    assert!(next_line(bob_a.as_ref()).await.is_some_and(|l| l.starts_with("INVITE")));
+    drop((alice_a, bob_a));
+
+    let net_b = core.network(CallRouting::new("+1555010").caller(shared).leg(shared, "bob"));
+    let alice_b = net_b.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let bob_b = net_b.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    alice_b.send_to(&caller_invite("cid-b", "+1555010", shared), sut_addr).await.unwrap();
+    assert!(next_line(sut.as_ref()).await.is_some_and(|l| l.starts_with("INVITE")));
+
+    sut.send_to(&return_invite("+15550900", "ret-a", "+1555010"), shared).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), bob_b.recv()).await;
+    assert!(got.is_err(), "the released call's leg reached the next call");
+    assert!(orphan_sampled(&core, "released"), "samples: {:?}", core.stats().samples());
+    drop((alice_b, bob_b));
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+}
+
+/// A call's legs are accepted only once its caller has sent its INVITE: a leg
+/// carrying the key before that is an `early` orphan; after it, a leg is
+/// delivered.
+#[tokio::test(start_paused = true)]
+async fn a_leg_before_the_callers_invite_is_an_early_orphan() {
+    let shared = addr(47501);
+    let (_sim, core, sut) = setup(shared, 47509).await;
+    let sut_addr = sut.local_addr();
+
+    let net = core.network(CallRouting::new("+1555012").caller(shared).leg(shared, "bob"));
+    let alice = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let bob = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+
+    sut.send_to(&return_invite("+15550900", "stale", "+1555012"), shared).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), bob.recv()).await;
+    assert!(got.is_err(), "a leg before the caller's INVITE was delivered");
+    assert!(orphan_sampled(&core, "early"), "samples: {:?}", core.stats().samples());
+
+    alice.send_to(&caller_invite("cid-e", "+1555012", shared), sut_addr).await.unwrap();
+    assert!(next_line(sut.as_ref()).await.is_some_and(|l| l.starts_with("INVITE")));
+    sut.send_to(&return_invite("+15550900", "ret-e", "+1555012"), shared).await.unwrap();
+    assert_eq!(
+        next_line(bob.as_ref()).await.as_deref(),
+        Some("INVITE sip:+15550900@127.0.0.1 SIP/2.0"),
+        "a leg after the caller's INVITE is delivered",
+    );
+    drop((alice, bob));
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+}
+
+/// The caller-key check runs on the caller's first INVITE, whatever the caller
+/// sent before it: an OPTIONS first does not let a mismatched INVITE through.
+#[tokio::test(start_paused = true)]
+async fn an_options_before_the_invite_does_not_skip_the_caller_key_check() {
+    let shared = addr(47601);
+    let (_sim, core, sut) = setup(shared, 47609).await;
+    let sut_addr = sut.local_addr();
+
+    let net = core.network(CallRouting::new("+1555013").caller(shared).leg(shared, "bob"));
+    let alice = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let bob = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+
+    let options = format!(
+        "OPTIONS sip:127.0.0.1:9 SIP/2.0\r\nVia: SIP/2.0/UDP {shared};branch=z9hG4bK-o1\r\n\
+         Max-Forwards: 70\r\nCall-ID: cid-o\r\nFrom: <sip:+1555013@{shared}>;tag=o1\r\n\
+         To: <sip:127.0.0.1:9>\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n"
+    );
+    alice.send_to(options.as_bytes(), sut_addr).await.unwrap();
+    assert!(next_line(sut.as_ref()).await.is_some_and(|l| l.starts_with("OPTIONS")));
+
+    let sent = alice.send_to(&caller_invite("cid-x", "+15550199", shared), sut_addr).await;
+    assert!(sent.is_err(), "a mismatched INVITE after an OPTIONS must fail the send");
+    assert_eq!(core.stats().caller_key_mismatch.load(Relaxed), 1);
+    drop((alice, bob));
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+}
+
+/// A new INVITE (To without a tag) reusing the caller's own Call-ID is never
+/// handed to the caller: it counts as a `call_id_reuse` orphan (RFC 3261
+/// §8.1.1.4 gives each new dialog its own Call-ID).
+#[tokio::test(start_paused = true)]
+async fn a_return_invite_reusing_the_callers_call_id_is_an_orphan() {
+    let shared = addr(47701);
+    let (_sim, core, sut) = setup(shared, 47709).await;
+    let sut_addr = sut.local_addr();
+
+    let net = core.network(CallRouting::new("+1555014").caller(shared).leg(shared, "bob"));
+    let alice = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let bob = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    alice.send_to(&caller_invite("cid-r", "+1555014", shared), sut_addr).await.unwrap();
+    assert!(next_line(sut.as_ref()).await.is_some_and(|l| l.starts_with("INVITE")));
+
+    sut.send_to(&return_invite("+15550900", "cid-r", "+1555014"), shared).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), alice.recv()).await;
+    assert!(got.is_err(), "a new INVITE on the caller's Call-ID reached the caller");
+    let got = tokio::time::timeout(Duration::from_secs(1), bob.recv()).await;
+    assert!(got.is_err(), "a new INVITE on the caller's Call-ID reached the callee");
+    assert!(orphan_sampled(&core, "call_id_reuse"), "samples: {:?}", core.stats().samples());
+    drop((alice, bob));
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+}
+
+/// The endpoint's default role for binds a call leaves undeclared is its
+/// FIRST spec's: a callee-first address refuses an undeclared bind, a
+/// caller-first one takes it as a caller.
+#[tokio::test(start_paused = true)]
+async fn the_first_spec_role_is_the_default_for_undeclared_binds() {
+    let sim = SimulatedSignalingNetwork::new(1);
+    let (callee_first, caller_first) = (addr(47801), addr(47802));
+    let core = MuxCore::bind_on(
+        &sim,
+        vec![
+            EndpointSpec { addr: callee_first, role: Role::Callee },
+            EndpointSpec { addr: callee_first, role: Role::Caller },
+            EndpointSpec { addr: caller_first, role: Role::Caller },
+            EndpointSpec { addr: caller_first, role: Role::Callee },
+        ],
+        Correlation::from_user(),
+        64,
+        8,
+        RECV,
+        Clock::test_at(0),
+    )
+    .await
+    .unwrap();
+    let net = core.network(CallRouting::new("+1555015"));
+    let err = net.bind_udp(BindUdpOpts::new(callee_first, 16)).await.err();
+    assert!(
+        err.is_some_and(|e| e.message.contains("without a declared leg")),
+        "a callee-first address refuses an undeclared bind"
+    );
+    assert!(net.bind_udp(BindUdpOpts::new(caller_first, 16)).await.is_ok());
+}
+
+/// Specs requesting one address share one endpoint even when the address asks
+/// the OS for a port (port 0): the dedup keys on the requested address.
+#[tokio::test]
+async fn port_zero_specs_on_one_requested_address_open_one_socket() {
+    let any: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let core = MuxCore::bind(
+        vec![
+            EndpointSpec { addr: any, role: Role::Caller },
+            EndpointSpec { addr: any, role: Role::Callee },
+        ],
+        Correlation::from_user(),
+        64,
+        8,
+        RECV,
+        Clock::system(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(core.addrs().len(), 1, "one socket for one requested address");
+    let local = core.local_addr(any).expect("the requested address resolves");
+    assert_eq!(local, core.addrs()[0]);
+    assert_ne!(local.port(), 0, "the resolved address is the bound one");
 }

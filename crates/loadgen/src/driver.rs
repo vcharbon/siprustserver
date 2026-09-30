@@ -7,8 +7,8 @@
 //! panic is a *counted* failure, never a worker abort), tears the call down
 //! (CANCEL/BYE) however it ended, classifies the result, and records it —
 //! optionally projecting a sampled callflow (recording layered on the mux). A
-//! call whose key is missing, unusable or held by a concurrent call is
-//! recorded `rejected` before any datagram.
+//! call whose key is missing, unusable, held by a concurrent call or cooling
+//! after a failed call is recorded `rejected` before any datagram.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -446,11 +446,17 @@ async fn run_one(
     let token = if transport.correlation.is_from_user() {
         match from_user_key(core.from.as_deref()) {
             Ok(key) => key,
-            Err(reason) => return record_rejected(&reporter, id, reason),
+            Err(reason) => {
+                return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected(reason))
+            }
         }
     } else {
         mint_token()
     };
+    if transport.correlation.is_from_user() && transport.core.key_cooling(&token) {
+        return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected("key_cooling"));
+    }
+    let key = token.clone();
     let mut routing = CallRouting::new(token.clone());
     // Shared-socket layout: the caller binds the callee legs' address, so
     // every bind there is declared, the caller first (the bind order below).
@@ -499,10 +505,11 @@ async fn run_one(
 
     // Binds are fallible: a callee leg whose key a concurrent call already
     // holds is refused by the mux (`token_collision`) and the call is recorded
-    // `rejected`; the agents bound so far deregister as they drop.
+    // `rejected`; any other refusal is a layout defect, recorded as a `panic`.
+    // The agents bound so far deregister as they drop.
     let alice = match binder.try_agent("alice", transport.uac_addr).await {
         Ok(agent) => agent,
-        Err(e) => return record_rejected(&reporter, id, bind_rejection(&e)),
+        Err(e) => return record_unrun(&reporter, &chaos, id, bind_refusal(&e)),
     };
     // Bind order is load-bearing on the shared callee socket: the mux assigns
     // receivers in leg-declaration order, so bind the callee agents exactly in
@@ -515,7 +522,7 @@ async fn run_one(
     for leg in legs {
         match binder.try_agent(leg.role, transport.uas_addr).await {
             Ok(agent) => callee_agents.push((leg.role, agent)),
-            Err(e) => return record_rejected(&reporter, id, bind_rejection(&e)),
+            Err(e) => return record_unrun(&reporter, &chaos, id, bind_refusal(&e)),
         }
     }
     let agent_for = |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
@@ -567,19 +574,24 @@ async fn run_one(
     // counted failure, never a worker abort). The body is built ONCE here so
     // its declared waivers (ADR-0024 §6) can be read for the audit, then the
     // BUILT call is run — never built twice. A build guard error is part of the
-    // downstream contract, surfaced as the call's Result (there is no panic to
-    // catch on that arm).
+    // downstream contract, surfaced as the call's Result; a build panic is
+    // caught at the same boundary as a run panic.
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
-        LoadBody::Actor(scenario) => match scenario.build(&env) {
-            Ok(call) => {
-                plan_waivers = call.waivers.clone();
-                AssertUnwindSafe(scenario_harness::actor::run_built_actor_call(call, &env, &ctx))
+        LoadBody::Actor(scenario) => {
+            match std::panic::catch_unwind(AssertUnwindSafe(|| scenario.build(&env))) {
+                Ok(Ok(call)) => {
+                    plan_waivers = call.waivers.clone();
+                    AssertUnwindSafe(scenario_harness::actor::run_built_actor_call(
+                        call, &env, &ctx,
+                    ))
                     .catch_unwind()
                     .await
+                }
+                Ok(Err(e)) => Ok(Err(e)),
+                Err(payload) => Err(payload),
             }
-            Err(e) => Ok(Err(e)),
-        },
+        }
     };
 
     let failed = !matches!(result, Ok(Ok(())));
@@ -649,6 +661,11 @@ async fn run_one(
         .collect();
 
     let class = ResultClass::from(&outcome);
+    // A from-user key whose call ended not ok cools before another call may
+    // draw it; released while this call's endpoints still hold it.
+    if transport.correlation.is_from_user() {
+        transport.core.release_key(&key, class.is_ok());
+    }
     let e2e = ctx.elapsed();
     let checkpoints = ctx.take_checkpoints();
     // Fold this call's 18x outcome into the cross-call ringing-delivery gate (a
@@ -666,9 +683,9 @@ async fn run_one(
     // bug CONNECTS near the kill yet desyncs at teardown, so excusing it on the
     // near-kill connect would HIDE it (proven 2026-06-29 — neither self-heal path
     // recovers). Only transient/transport failures (the real kill collateral) are
-    // eligible. See `ResultClass::chaos_excusable`.
+    // eligible. See `CallOutcome::chaos_excusable`.
     let chaos_tag = match chaos.as_ref() {
-        Some(c) if class.chaos_excusable() => {
+        Some(c) if outcome.chaos_excusable() => {
             c.classify_call(ctx.start_instant(), Instant::now(), &ctx.phases())
         }
         _ => ChaosTag::Clear,
@@ -722,25 +739,42 @@ fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
     sip_message::sniff::address_user(from).ok_or("userless_from")
 }
 
-/// The bounded rejection reason for a refused agent bind: a key already held
-/// by a concurrent call, or any other bind failure.
-fn bind_rejection(e: &sip_net::BindError) -> &'static str {
+/// The outcome of a refused agent bind: a key a concurrent call holds is a
+/// `key_in_flight` rejection; any other refusal (no mux endpoint at the
+/// address, more binds than declared) is a layout defect, a counted panic.
+fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
     match e.reason {
-        sip_net::BindErrorReason::AlreadyBound => "key_in_flight",
-        _ => "bind_failed",
+        sip_net::BindErrorReason::AlreadyBound => CallOutcome::Rejected("key_in_flight"),
+        _ => CallOutcome::Panic(format!("agent bind refused: {e}")),
     }
 }
 
-/// Record a call refused before any datagram as `rejected` and close its
-/// in-flight count.
-fn record_rejected(reporter: &Reporter, id: ScenarioId, reason: &'static str) {
-    let outcome = CallOutcome::Rejected(reason);
+/// Record a call that never ran (refused before any datagram) and close its
+/// in-flight count. A chaos-excusable outcome is classified against the
+/// markers of the last [`RELEASE_HOLD`](crate::mux::RELEASE_HOLD): a key's
+/// holder may be a call a fault held open that long.
+fn record_unrun(
+    reporter: &Reporter,
+    chaos: &Option<Arc<ChaosLog>>,
+    id: ScenarioId,
+    outcome: CallOutcome,
+) {
     let class = ResultClass::from(&outcome);
     let case = outcome.case(None);
-    let sample = reporter
-        .wants_sample(id, &class, &case, ChaosTag::Clear)
-        .then(|| RenderedSample { html: None, detail: outcome.detail(), e2e_ms: 0.0 });
-    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample, ChaosTag::Clear);
+    let now = Instant::now();
+    let chaos_tag = match chaos {
+        Some(c) if outcome.chaos_excusable() => {
+            let since = now.checked_sub(crate::mux::RELEASE_HOLD).unwrap_or(now);
+            c.classify_call(since, now, &[])
+        }
+        _ => ChaosTag::Clear,
+    };
+    let sample = reporter.wants_sample(id, &class, &case, chaos_tag).then(|| RenderedSample {
+        html: None,
+        detail: outcome.detail(),
+        e2e_ms: 0.0,
+    });
+    reporter.record(id, &outcome, &case, Duration::ZERO, &[], sample, chaos_tag);
     reporter.dec_inflight();
 }
 

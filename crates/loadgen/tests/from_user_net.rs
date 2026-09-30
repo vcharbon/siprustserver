@@ -147,10 +147,7 @@ fn reporter() -> Arc<Reporter> {
 }
 
 fn orphans(core: &MuxCore) -> u64 {
-    let s = core.stats();
-    s.orphan_no_header.load(Relaxed)
-        + s.orphan_unknown_token.load(Relaxed)
-        + s.orphan_stray.load(Relaxed)
+    core.stats().orphans_total()
 }
 
 /// The `loadgen_inflight` gauge: every started call was recorded as finished.
@@ -362,5 +359,126 @@ async fn a_shared_socket_works_with_header_correlation() {
     assert!(total >= 10, "governor under-delivered: {total}\n{}", reporter.render_prometheus());
     assert_eq!(ok, total, "NOK calls:\n{}", reporter.render_prometheus());
     assert_eq!(orphans(&rig.core), 0, "orphans: {:?}", rig.core.stats().samples());
+    settle(&rig, &reporter).await;
+}
+
+/// A load body whose build panics, or fails without sending anything.
+struct Broken {
+    panics: bool,
+}
+
+impl scenario_harness::actor::ActorScenario for Broken {
+    fn id(&self) -> &'static str {
+        if self.panics {
+            "panicking_build"
+        } else {
+            "failing_build"
+        }
+    }
+    fn build(
+        &self,
+        _env: &loadgen::CallEnv<'_>,
+    ) -> Result<scenario_harness::actor::ActorCall, scenario_harness::StepError> {
+        if self.panics {
+            panic!("the load body's build panicked");
+        }
+        Err(scenario_harness::StepError::Timeout { who: "alice".to_string() })
+    }
+}
+
+fn broken(panics: bool) -> MixEntry {
+    let body: Arc<dyn scenario_harness::actor::ActorScenario> = Arc::new(Broken { panics });
+    MixEntry::from((body, 1.0))
+}
+
+/// A load body whose build panics is a counted `panic`, and the call still
+/// closes its in-flight count.
+#[tokio::test(start_paused = true)]
+async fn a_panicking_build_is_a_counted_panic() {
+    let rig = rig(
+        7470,
+        Layout::Distinct,
+        Correlation::header("X-Loadgen-Id"),
+        B2buaSut::route_all_with_refer,
+        Some("X-Loadgen-Id"),
+    )
+    .await;
+    let reporter = reporter();
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 5.0, 1, 0, 0xBAD1),
+        vec![broken(true)],
+        reporter.clone(),
+        rig.transport.clone(),
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    assert!(total >= 3, "panicking builds were not counted:\n{}", reporter.render_prometheus());
+    assert_eq!(reporter.count("panicking_build", &ResultClass::Panic), total);
+    settle(&rig, &reporter).await;
+}
+
+/// A calling number whose call ended NOT ok may still have a leg outstanding
+/// at the SUT, so it is held back: a call drawing it within 64·T1 is
+/// `rejected` (key cooling) before any datagram.
+#[tokio::test(start_paused = true)]
+async fn a_calling_number_whose_call_failed_is_held_back() {
+    let rig =
+        rig(7480, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
+            .await;
+    let reporter = reporter();
+    let fixed = case(r#""input": { "core": { "from": "sip:+15550123456@pool.example" } }"#);
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 2.0, 3, 0, 0xC001),
+        vec![broken(false).with_case(Some(fixed))],
+        reporter.clone(),
+        rig.transport.clone(),
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let report = reporter.render_prometheus();
+    assert!(total >= 4, "governor under-delivered: {total}\n{report}");
+    assert_eq!(reporter.count("failing_build", &ResultClass::Timeout), 1, "{report}");
+    assert_eq!(reporter.count("failing_build", &ResultClass::Rejected), total - 1, "{report}");
+    settle(&rig, &reporter).await;
+}
+
+/// A bind the layout cannot satisfy (no mux endpoint at the callee address) is
+/// a configuration defect: it stays loud as a counted `panic`, never a
+/// `rejected` call.
+#[tokio::test(start_paused = true)]
+async fn a_bind_on_an_undefined_endpoint_is_a_counted_panic_not_a_rejection() {
+    let rig = rig(
+        7490,
+        Layout::Distinct,
+        Correlation::header("X-Loadgen-Id"),
+        B2buaSut::route_all_with_refer,
+        Some("X-Loadgen-Id"),
+    )
+    .await;
+    let transport = Arc::new(MuxTransport {
+        core: rig.core.clone(),
+        uac_addr: rig.transport.uac_addr,
+        uas_addr: addr(7499),
+        refer_addr: rig.transport.refer_addr,
+        correlation: rig.transport.correlation.clone(),
+        recv_timeout: RECV,
+        clock: rig.transport.clock.clone(),
+    });
+    let reporter = reporter();
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 5.0, 1, 0, 0xC0F1),
+        vec![mix("basic_call")],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let report = reporter.render_prometheus();
+    assert!(total >= 3, "calls on an undefined endpoint were not counted:\n{report}");
+    assert_eq!(reporter.count("basic_call", &ResultClass::Rejected), 0, "{report}");
+    assert_eq!(reporter.count("basic_call", &ResultClass::Panic), total, "{report}");
     settle(&rig, &reporter).await;
 }

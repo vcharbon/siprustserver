@@ -31,8 +31,9 @@ pub enum CallOutcome {
     /// only — checks are a per-sample oracle, like the RFC audit.
     CheckFail(Vec<e2e_model::CheckVerdict>),
     /// The call was refused before any datagram: its correlation key is
-    /// missing, unusable, or held by a concurrent call. Carries the bounded
-    /// reason (`no_from`, `userless_from`, `key_in_flight`, `bind_failed`).
+    /// missing, unusable, held by a concurrent call, or cooling after a failed
+    /// call. Carries the bounded reason (`no_from`, `userless_from`,
+    /// `key_in_flight`, `key_cooling`).
     Rejected(&'static str),
 }
 
@@ -135,6 +136,17 @@ impl From<&CallOutcome> for ResultClass {
 }
 
 impl CallOutcome {
+    /// Whether this outcome may be excused as chaos collateral:
+    /// [`ResultClass::chaos_excusable`], except that a `key_in_flight`
+    /// rejection is excusable (the key's holder may be a call a fault keeps
+    /// open), while every other rejection is not.
+    pub fn chaos_excusable(&self) -> bool {
+        match self {
+            CallOutcome::Rejected(reason) => *reason == "key_in_flight",
+            other => ResultClass::from(other).chaos_excusable(),
+        }
+    }
+
     /// A human-readable one-line detail for the error sample (None for Ok).
     pub fn detail(&self) -> Option<String> {
         match self {
@@ -230,4 +242,21 @@ fn slug(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key held by a concurrent call may be a call a fault holds open, so
+    /// that rejection is chaos-excusable; the other rejections are not.
+    #[test]
+    fn only_a_key_in_flight_rejection_is_chaos_excusable() {
+        assert!(CallOutcome::Rejected("key_in_flight").chaos_excusable());
+        for reason in ["no_from", "userless_from", "key_cooling"] {
+            assert!(!CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
+        }
+        assert!(!CallOutcome::Panic("p".into()).chaos_excusable());
+        assert!(CallOutcome::Step(StepError::Timeout { who: "alice".into() }).chaos_excusable());
+    }
 }

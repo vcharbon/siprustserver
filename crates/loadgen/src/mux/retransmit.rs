@@ -22,6 +22,9 @@ use super::stats::MuxStats;
 const T1: Duration = Duration::from_millis(500); // first retransmit interval
 const T2: Duration = Duration::from_secs(4); // non-INVITE / 2xx backoff cap
 const TXN_TIMEOUT: Duration = Duration::from_secs(32); // Timer B/F/H = 64·T1
+/// How long a released Call-ID, or a key whose call ended not ok, is held
+/// back: 64·T1, the longest a peer keeps retransmitting an INVITE (Timer B).
+pub const RELEASE_HOLD: Duration = TXN_TIMEOUT;
 
 /// Stop-control shared between a spawned resender task and the [`CallTxns`] engine
 /// that owns it. The engine flips `stop` (and wakes the task) when the transaction

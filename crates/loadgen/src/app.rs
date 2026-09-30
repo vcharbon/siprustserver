@@ -591,9 +591,8 @@ pub async fn run_with_inputs(
     // The ONE environment-axis document (authored file or flag-synthesized):
     // endpoint binds + SUT ingress + recv bound + egress policy.
     let endpoint = endpoint_config(&args, recv_timeout_ms);
-    let uac = endpoint.addr("alice");
-    let uas = endpoint.addr("bob");
-    let refer = endpoint.addr("charlie");
+    let (uac, uas, refer) =
+        (endpoint.addr("alice"), endpoint.addr("bob"), endpoint.addr("charlie"));
     let via = endpoint.addr("lb");
     let egress = endpoint.egress_policy();
     let recv_timeout = endpoint.recv_timeout();
@@ -611,6 +610,9 @@ pub async fn run_with_inputs(
         clock.clone(),
     )
     .await?;
+    // The transport addresses the bound endpoints (a port-0 request resolves).
+    let bound = |requested| core.local_addr(requested).expect("every role's address is bound");
+    let (uac, uas, refer) = (bound(uac), bound(uas), bound(refer));
 
     let transport = Arc::new(MuxTransport {
         core: core.clone(),
@@ -777,9 +779,7 @@ fn egress_label(egress: &crate::EgressPolicy) -> String {
 fn mux_canaries(core: &MuxCore) -> Canaries {
     use std::sync::atomic::Ordering;
     let s = core.stats();
-    let orphans = s.orphan_no_header.load(Ordering::Relaxed)
-        + s.orphan_unknown_token.load(Ordering::Relaxed)
-        + s.orphan_stray.load(Ordering::Relaxed);
+    let orphans = s.orphans_total();
     let drops = s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
     Canaries { orphans, drops, ..Canaries::default() }
 }

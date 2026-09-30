@@ -2,9 +2,10 @@
 //! key, applies the per-call loss/retransmit state, and delivers to the right
 //! call's inbox — or counts-and-drops. Plus the pending-slot reaper.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use scenario_harness::claim::{resolve_claim, ClaimRule};
@@ -29,8 +30,11 @@ pub(super) async fn dispatch_loop(mux: std::sync::Weak<MuxSocket>, endpoint: Arc
 }
 
 /// Demux precedence: (1) known Call-ID — covers EVERY in-dialog datagram with
-/// no token or R-URI cooperation; (2) correlation token — an initial INVITE
-/// spawning a new leg of a known call; (3) orphan.
+/// no token or R-URI cooperation, except a new INVITE on a caller's own
+/// Call-ID (`call_id_reuse` orphan); (2) correlation token — an initial INVITE
+/// spawning a new leg of a known call, unless its Call-ID was released by a
+/// finished call (`released`) or the call's caller has not sent its INVITE yet
+/// (`early`); (3) orphan.
 fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
     let cid = call_id(raw);
     let mut g = mux.reg.lock().unwrap();
@@ -41,6 +45,10 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
     //    `reg` across a send.
     if let Some(cid) = &cid {
         if let Some(d) = g.by_call_id.get(cid) {
+            if d.caller && is_invite_request_buffer(raw) && LegInfo::new(raw).is_initial_invite() {
+                mux.stats.orphan(OrphanReason::CallIdReuse, raw);
+                return;
+            }
             let d = d.clone();
             drop(g);
             handle_inbound(mux, &d, raw, src);
@@ -54,6 +62,10 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
     //    call's lifetime so re-routes / multi-REFER / re-REFER (further legs of
     //    the same call on this socket) each promote their own dialog.
     if is_invite_request_buffer(raw) {
+        if cid.as_ref().is_some_and(|c| g.released.get(c).is_some_and(|t| *t > Instant::now())) {
+            mux.stats.orphan(OrphanReason::Released, raw);
+            return;
+        }
         let Some(tok) = mux.correlation.token(raw) else {
             mux.stats.orphan(OrphanReason::NoHeader, raw);
             return;
@@ -62,6 +74,10 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
             mux.stats.orphan(OrphanReason::UnknownToken, raw);
             return;
         };
+        if !slot.gate.open() {
+            mux.stats.orphan(OrphanReason::Early, raw);
+            return;
+        }
         // Receiver selection. A claim-mode slot resolves by the scenario's
         // declared per-leg rules (consumed once; a miss is `unclaimed`, never
         // a misdelivery — even with a single pending receiver). Otherwise the
@@ -131,7 +147,12 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
         // promote token→Call-ID so in-dialog traffic demuxes directly.
         let delivery = {
             let recv = &slot.receivers[idx];
-            Delivery { queue: recv.queue.clone(), drop: recv.drop.clone(), txns: recv.txns.clone() }
+            Delivery {
+                caller: false,
+                queue: recv.queue.clone(),
+                drop: recv.drop.clone(),
+                txns: recv.txns.clone(),
+            }
         };
         if let Some(cid) = &cid {
             slot.receivers[idx].keyset.lock().unwrap().push(Key::CallId(cid.clone()));
@@ -209,13 +230,21 @@ fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {
 /// Periodic sweep of pending callee legs whose INVITE never arrived. A slot that
 /// has seen at least one leg (`arrived`) is left alone — a live call may outlast
 /// the pending deadline; its receivers are released on agent `Drop`, not here.
-pub(super) async fn reap_loop(sockets: Vec<Arc<MuxSocket>>, stats: Arc<MuxStats>, ttl: Duration) {
+/// Released Call-IDs and cooling keys past their hold deadline go too.
+pub(super) async fn reap_loop(
+    sockets: Vec<Arc<MuxSocket>>,
+    stats: Arc<MuxStats>,
+    ttl: Duration,
+    cooling: Arc<Mutex<HashMap<String, Instant>>>,
+) {
     let mut tick = tokio::time::interval(ttl.max(Duration::from_secs(5)));
     loop {
         tick.tick().await;
         let now = Instant::now();
+        cooling.lock().unwrap().retain(|_, deadline| *deadline > now);
         for mux in &sockets {
             let mut g = mux.reg.lock().unwrap();
+            g.released.retain(|_, deadline| *deadline > now);
             let expired: Vec<String> = g
                 .by_token
                 .iter()

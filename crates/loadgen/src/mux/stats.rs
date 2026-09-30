@@ -14,6 +14,15 @@ pub struct MuxStats {
     pub orphan_no_header: AtomicU64,
     pub orphan_unknown_token: AtomicU64,
     pub orphan_stray: AtomicU64,
+    /// An initial INVITE on a Call-ID a finished call released within
+    /// [`RELEASE_HOLD`](super::RELEASE_HOLD): a late retransmission of a leg of
+    /// that call, never routed to the next call on its key.
+    pub orphan_released: AtomicU64,
+    /// A leg carrying a call's key before that call's caller sent its INVITE.
+    pub orphan_early: AtomicU64,
+    /// A new INVITE (To without a tag) on a Call-ID a caller owns: the SUT
+    /// reused the dialog's Call-ID for a new leg (RFC 3261 §8.1.1.4).
+    pub orphan_call_id_reuse: AtomicU64,
     pub pending_expired: AtomicU64,
     pub inbox_drop: AtomicU64,
     pub delivered: AtomicU64,
@@ -28,6 +37,9 @@ pub struct MuxStats {
     /// Caller INVITEs refused before the wire because, under from-user
     /// correlation, their From URI user is not the call's registered key.
     pub caller_key_mismatch: AtomicU64,
+    /// From-user calls refused because their key's previous call ended not ok
+    /// within [`RELEASE_HOLD`](super::RELEASE_HOLD).
+    pub key_cooling: AtomicU64,
     /// Claims released (call teardown or pending-reap) without ever firing —
     /// an expected inbound leg the SUT never dialed.
     pub claim_unfired: AtomicU64,
@@ -57,6 +69,9 @@ impl MuxStats {
                 self.orphan_unknown_token.fetch_add(1, Ordering::Relaxed)
             }
             OrphanReason::Stray => self.orphan_stray.fetch_add(1, Ordering::Relaxed),
+            OrphanReason::Released => self.orphan_released.fetch_add(1, Ordering::Relaxed),
+            OrphanReason::Early => self.orphan_early.fetch_add(1, Ordering::Relaxed),
+            OrphanReason::CallIdReuse => self.orphan_call_id_reuse.fetch_add(1, Ordering::Relaxed),
         };
         let method = cseq_method_label(raw);
         *self.orphan_by_method.lock().unwrap().entry((reason.label(), method)).or_default() += 1;
@@ -78,6 +93,21 @@ impl MuxStats {
         }
     }
 
+    /// Every orphan, whatever its reason.
+    pub fn orphans_total(&self) -> u64 {
+        [
+            &self.orphan_no_header,
+            &self.orphan_unknown_token,
+            &self.orphan_stray,
+            &self.orphan_released,
+            &self.orphan_early,
+            &self.orphan_call_id_reuse,
+        ]
+        .iter()
+        .map(|c| c.load(Ordering::Relaxed))
+        .sum()
+    }
+
     /// Bounded orphan samples (the "notify" surface).
     pub fn samples(&self) -> Vec<String> {
         self.samples.lock().unwrap().clone()
@@ -95,6 +125,12 @@ pub(super) enum OrphanReason {
     NoRoute,
     /// An unknown Call-ID that is not an initial INVITE (a late straggler).
     Stray,
+    /// An INVITE on a Call-ID a finished call released (see `orphan_released`).
+    Released,
+    /// A leg before its call's caller sent its INVITE (see `orphan_early`).
+    Early,
+    /// A new INVITE on a caller-owned Call-ID (see `orphan_call_id_reuse`).
+    CallIdReuse,
 }
 
 impl OrphanReason {
@@ -104,6 +140,9 @@ impl OrphanReason {
             OrphanReason::UnknownToken => "unknown_token",
             OrphanReason::NoRoute => "no_route",
             OrphanReason::Stray => "stray",
+            OrphanReason::Released => "released",
+            OrphanReason::Early => "early",
+            OrphanReason::CallIdReuse => "call_id_reuse",
         }
     }
 }
@@ -159,6 +198,12 @@ impl MuxCore {
         out.push_str(&format!(
             "loadgen_mux_caller_key_mismatch_total {}\n",
             s.caller_key_mismatch.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP loadgen_mux_key_cooling_total From-user calls refused: the key's previous call ended not ok within 64*T1.\n");
+        out.push_str("# TYPE loadgen_mux_key_cooling_total counter\n");
+        out.push_str(&format!(
+            "loadgen_mux_key_cooling_total {}\n",
+            s.key_cooling.load(Ordering::Relaxed)
         ));
         out.push_str("# HELP loadgen_mux_claim_unfired_total Claims released without firing (expected inbound leg never came).\n");
         out.push_str("# TYPE loadgen_mux_claim_unfired_total counter\n");

@@ -237,7 +237,16 @@ per run with `--correlate`; all mux endpoints share the one strategy:
     concurrent call holds (`loadgen_mux_token_collision_total`), is counted
     `class="rejected"` before any datagram;
   - the caller's first INVITE must carry the key as its From user; a mismatch
-    fails the send and counts `loadgen_mux_caller_key_mismatch_total`.
+    fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
+  - a number whose call ended not ok cools for 64·T1 (32 s): a call drawing it
+    meanwhile is `rejected` and counts `loadgen_mux_key_cooling_total`. A
+    number whose call ended ok is reusable at once.
+
+The mux never hands a finished call's leg to the next call on its key: an
+INVITE on a Call-ID a finished call released within 64·T1 is a
+`reason="released"` orphan, and a leg arriving before its call's caller sent
+its INVITE is a `reason="early"` orphan. A new INVITE reusing a caller's own
+Call-ID (RFC 3261 §8.1.1.4) is a `reason="call_id_reuse"` orphan.
 
 Correlation failures are observable either way: an arriving initial INVITE with
 no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an

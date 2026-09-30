@@ -458,18 +458,27 @@ pub fn name_addr_uri(raw: &[u8], name: &str) -> Option<String> {
 /// The user part of the `From` URI (compact `f` included), or `None` when the
 /// header is absent, no reader accepts it, or its URI names no user. The
 /// display name, the URI host and parameters, and the header's own `;tag=`
-/// never affect the result.
+/// never affect the result; the user reads as [`address_user`] reads it
+/// (percent-unescaped, a `tel:` subscriber number without its parameters).
 pub fn from_user(raw: &[u8]) -> Option<String> {
     address_user(&header_rows_compact(raw, "From").into_iter().next()?)
 }
 
 /// The URI user of an address value — a `name-addr` or `addr-spec`, as a
 /// From or To header carries it, header parameters allowed — or `None` when
-/// no reader accepts it or its URI names no user.
+/// no reader accepts it or its URI names no user. The user is returned
+/// percent-unescaped, the form two users compare in (RFC 3261 §19.1.4); a
+/// `tel:` URI's user is its subscriber number, before any `;` parameter.
 pub fn address_user(value: &str) -> Option<String> {
     use crate::header::{From as FromHeader, HeaderValue};
     let addr = FromHeader::parse(&crate::sip_str::SipStr::owned(value)).ok()?;
-    addr.uri().user().filter(|user| !user.is_empty()).map(str::to_string)
+    let uri = addr.uri();
+    let user = if uri.scheme().eq_ignore_ascii_case("tel") {
+        uri.host().split(';').next().unwrap_or("")
+    } else {
+        uri.user()?
+    };
+    (!user.is_empty()).then(|| crate::param_codec::decode_param(user))
 }
 
 /// What one URI states about where a message goes: the canonical text, the
@@ -904,6 +913,23 @@ Content-Length: 0\r\n\r\n"
         );
         assert_eq!(address_user("sip:pool.example"), None, "a userless URI");
         assert_eq!(address_user("not an address"), None);
+    }
+
+    /// The user compares unescaped (RFC 3261 §19.1.4), and a tel URI's user is
+    /// its subscriber number before any `;` parameter.
+    #[test]
+    fn address_user_unescapes_and_reads_tel_uris() {
+        assert_eq!(address_user("sip:%2B1555010@h").as_deref(), Some("+1555010"));
+        assert_eq!(address_user("<sip:%2b1555%30%31@h>;tag=1").as_deref(), Some("+155501"));
+        assert_eq!(address_user("tel:+1555010").as_deref(), Some("+1555010"));
+        assert_eq!(
+            address_user("\"T\" <tel:+1555010;phone-context=example.com>;tag=2").as_deref(),
+            Some("+1555010")
+        );
+        assert_eq!(
+            from_user(b"INVITE sip:x@h SIP/2.0\r\nf: <tel:+1555010>;tag=3\r\n\r\n").as_deref(),
+            Some("+1555010")
+        );
     }
 
     #[test]
