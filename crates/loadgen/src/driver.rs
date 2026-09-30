@@ -7,8 +7,10 @@
 //! panic is a *counted* failure, never a worker abort), tears the call down
 //! (CANCEL/BYE) however it ended, classifies the result, and records it —
 //! optionally projecting a sampled callflow (recording layered on the mux). A
-//! call whose key is missing, unusable, held by a concurrent call or cooling
-//! after a failed call is recorded `rejected` before any datagram.
+//! call whose key is missing or unusable is recorded `rejected` before any
+//! datagram; one whose number is held by a concurrent call or cooling after a
+//! failed call re-draws from its case's pool, and is `rejected` only when
+//! every draw is unavailable.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -413,118 +415,67 @@ async fn run_one(
     reporter.inc_inflight();
     let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
 
-    // Resolve THIS call's binding from the attached Test case (pool walk +
-    // token expansion): the core From/To/R-URI to fold into the outgoing
-    // INVITE, the per-call dwell overrides over the global CallConfig
-    // defaults, the sampled-page banner, and the resolved input the case's
-    // checks bind `${input.*}` against. No case → all defaults.
-    let resolved = case.as_ref().map(|c| c.resolve());
-    let (core, dwells, banner, resolved_input) = match resolved {
-        Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
-        None => (Default::default(), Default::default(), None, None),
-    };
-
-    // Two-tier callee demux. One correlation token per CALL: alice stamps it on
-    // her INVITE (per the run's strategy — relayed header or To-user) and the SUT
-    // carries it onto every downstream leg, so every callee leg shares it. That
-    // token is the FIRST tier — it selects the call INSTANCE (mux `by_token`).
-    //
-    // Every callee-side leg (the shape's named `LegSpec`s — historically bob,
-    // the rerouting `bob2`, the transfer `charlie`) shares ONE socket
-    // (`transport.uas_addr`); the SECOND tier — WHICH leg of this instance — is
-    // the R-URI-prefix leg picker, fed each leg's declared `ruri_prefixes`
-    // labelled with its role. The in-house shapes' legs arrive under their role
-    // (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's `new_ruri`, the
-    // transfer's Refer-To user); an open-registry shape's legs arrive under
-    // number-plan digits (`+041…`, `0491…`) that its specs map back to the
-    // role. Either way no leg needs a per-leg socket — they are "distinguished
-    // by prefix".
-    //
-    // Under from-user correlation the key is the resolved caller's From user
-    // (the SUT keeps it on every leg it originates); a call without one is
-    // refused here, before any bind or datagram.
-    let token = if transport.correlation.is_from_user() {
-        match from_user_key(core.from.as_deref()) {
-            Ok(key) => key,
-            Err(reason) => {
-                return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected(reason))
-            }
-        }
-    } else {
-        mint_token()
-    };
-    if transport.correlation.is_from_user() && transport.core.key_cooling(&token) {
-        return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected("key_cooling"));
-    }
-    let key = token.clone();
-    let mut routing = CallRouting::new(token.clone());
-    // Shared-socket layout: the caller binds the callee legs' address, so
-    // every bind there is declared, the caller first (the bind order below).
-    if transport.uac_addr == transport.uas_addr {
-        routing = routing.caller(transport.uac_addr);
-    }
-    for leg in legs {
-        routing = routing.leg(transport.uas_addr, leg.role);
-    }
-    if legs.len() > 1 {
-        // The SUT originates its PRIMARY callee leg from its own route config, so
-        // that INVITE's R-URI is the bare route target (`sip:host:port`, userless)
-        // — unlike a transfer (Refer-To → `sip:charlie@…`) or reroute
-        // (`new_ruri` → `sip:bob2@…`) leg, which carries a distinguishing
-        // user-part. Route such a userless leg to the primary (first-declared)
-        // role instead of orphaning it; otherwise every multi-leg shape (refer,
-        // reroute) drops its very first bob leg as `no endpoint to route to`.
-        routing = routing.picker(
-            transport.uas_addr,
-            labelled_prefix_leg_picker_defaulting(
-                legs.iter().flat_map(|leg| leg.ruri_prefixes.iter().map(|p| (*p, leg.role))),
-                Some(legs[0].role),
-            ),
-        );
-    }
-
+    let from_user = transport.correlation.is_from_user();
     let record = reporter.should_record(id);
-    // Simulated packet loss + auto-retransmit both ride the mux transport (the mux
-    // dispatcher is the background pump that reacts to inbound datagrams). The loss
-    // RNG is seeded off the call seed so a run is reproducible; 0 rate is a no-op,
-    // and retransmit off leaves the transport untouched.
-    let mux_net = transport.core.network_tuned(
-        routing,
-        tuning.drop_rate,
-        tuning.retransmit,
-        next_seed(seed_base),
-        tuning.drop_nth,
-    );
-    let binder = AgentBinder::mux(
-        Arc::new(mux_net),
-        transport.clock.clone(),
-        transport.recv_timeout,
-        record,
-    );
-    binder.seed_ids(next_seed(seed_base));
-
-    // Binds are fallible: a callee leg whose key a concurrent call already
-    // holds is refused by the mux (`token_collision`) and the call is recorded
-    // `rejected`; any other refusal is a layout defect, recorded as a `panic`.
-    // The agents bound so far deregister as they drop.
-    let alice = match binder.try_agent("alice", transport.uac_addr).await {
-        Ok(agent) => agent,
-        Err(e) => return record_unrun(&reporter, &chaos, id, bind_refusal(&e)),
-    };
-    // Bind order is load-bearing on the shared callee socket: the mux assigns
-    // receivers in leg-declaration order, so bind the callee agents exactly in
-    // `legs` order to match the `routing.leg` declarations above. All callee
-    // legs share `uas_addr`; the prefix picker demuxes them
-    // (`transport.refer_addr` is retained as a bound endpoint for the CLI's
-    // alice/bob/charlie role set, but no longer carries a separate transfer
-    // socket).
-    let mut callee_agents: Vec<(&'static str, Agent)> = Vec::with_capacity(legs.len());
-    for leg in legs {
-        match binder.try_agent(leg.role, transport.uas_addr).await {
-            Ok(agent) => callee_agents.push((leg.role, agent)),
-            Err(e) => return record_unrun(&reporter, &chaos, id, bind_refusal(&e)),
+    // Under from-user correlation a drawn number held by a concurrent call or
+    // cooling after a failed one is re-drawn from the case's pool, so one
+    // number's contention never fails a call a free number could carry.
+    let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
+    let mut draw = 0;
+    let (core, dwells, banner, resolved_input, token, binder, alice, callee_agents) = loop {
+        draw += 1;
+        // Resolve THIS call's binding from the attached Test case (pool walk +
+        // token expansion): the core From/To/R-URI to fold into the outgoing
+        // INVITE, the per-call dwell overrides over the global CallConfig
+        // defaults, the sampled-page banner, and the resolved input the case's
+        // checks bind `${input.*}` against. No case → all defaults.
+        let (core, dwells, banner, resolved_input) = match case.as_ref().map(|c| c.resolve()) {
+            Some(r) => (r.core, r.dwells, Some(r.banner), Some(r.input)),
+            None => (Default::default(), Default::default(), None, None),
+        };
+        // The call's key: minted, or under from-user correlation the resolved
+        // caller's From user (the SUT keeps it on every leg it originates); a
+        // call without one is refused here, before any bind or datagram.
+        let token = if from_user {
+            match from_user_key(core.from.as_deref()) {
+                Ok(key) => key,
+                Err(reason) => {
+                    return record_unrun(&reporter, &chaos, id, CallOutcome::Rejected(reason))
+                }
+            }
+        } else {
+            mint_token()
+        };
+        // Simulated packet loss + auto-retransmit both ride the mux transport
+        // (the mux dispatcher is the background pump that reacts to inbound
+        // datagrams). The loss RNG is seeded off the call seed so a run is
+        // reproducible; 0 rate is a no-op, and retransmit off leaves the
+        // transport untouched.
+        let mux_net = transport.core.network_tuned(
+            call_routing(&transport, legs, &token),
+            tuning.drop_rate,
+            tuning.retransmit,
+            next_seed(seed_base),
+            tuning.drop_nth,
+        );
+        let binder = AgentBinder::mux(
+            Arc::new(mux_net),
+            transport.clock.clone(),
+            transport.recv_timeout,
+            record,
+        );
+        binder.seed_ids(next_seed(seed_base));
+        match bind_agents(&binder, &transport, legs).await {
+            Ok((alice, callees)) => {
+                break (core, dwells, banner, resolved_input, token, binder, alice, callees)
+            }
+            Err(e) => match bind_refusal(&e) {
+                CallOutcome::Rejected(_) if draw < draws => continue,
+                outcome => return record_unrun(&reporter, &chaos, id, outcome),
+            },
         }
-    }
+    };
+    let key = token.clone();
     let agent_for = |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
     // The primary callee: the "bob" role (every derived spec — and every downstream
     // shape — declares it), falling back to the first declared leg for an
@@ -732,6 +683,71 @@ async fn run_one(
     reporter.dec_inflight();
 }
 
+/// How many numbers a from-user call draws from its case's pool before it is
+/// rejected for contention (every draw held or cooling).
+const KEY_DRAWS: usize = 8;
+
+/// The per-call routing the driver declares: one correlation token per call,
+/// the callee legs on the callee address, and the R-URI picker when there are
+/// several.
+///
+/// Two-tier callee demux. The token is the FIRST tier — it selects the call
+/// INSTANCE (mux `by_token`); the SUT carries it onto every downstream leg, so
+/// every callee leg shares it. Every callee-side leg (the shape's named
+/// `LegSpec`s — historically bob, the rerouting `bob2`, the transfer
+/// `charlie`) shares ONE socket (`transport.uas_addr`); the SECOND tier —
+/// WHICH leg of this instance — is the R-URI-prefix leg picker, fed each leg's
+/// declared `ruri_prefixes` labelled with its role. The in-house shapes' legs
+/// arrive under their role (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's
+/// `new_ruri`, the transfer's Refer-To user); an open-registry shape's legs
+/// arrive under number-plan digits (`+041…`, `0491…`) that its specs map back
+/// to the role. Either way no leg needs a per-leg socket.
+fn call_routing(transport: &MuxTransport, legs: &[LegSpec], token: &str) -> CallRouting {
+    let mut routing = CallRouting::new(token);
+    // Shared-socket layout: the caller binds the callee legs' address, so
+    // every bind there is declared, the caller first (the bind order below).
+    if transport.uac_addr == transport.uas_addr {
+        routing = routing.caller(transport.uac_addr);
+    }
+    for leg in legs {
+        routing = routing.leg(transport.uas_addr, leg.role);
+    }
+    if legs.len() > 1 {
+        // The SUT originates its PRIMARY callee leg from its own route config, so
+        // that INVITE's R-URI is the bare route target (`sip:host:port`, userless)
+        // — unlike a transfer (Refer-To → `sip:charlie@…`) or reroute
+        // (`new_ruri` → `sip:bob2@…`) leg, which carries a distinguishing
+        // user-part. Route such a userless leg to the primary (first-declared)
+        // role instead of orphaning it; otherwise every multi-leg shape (refer,
+        // reroute) drops its very first bob leg as `no endpoint to route to`.
+        routing = routing.picker(
+            transport.uas_addr,
+            labelled_prefix_leg_picker_defaulting(
+                legs.iter().flat_map(|leg| leg.ruri_prefixes.iter().map(|p| (*p, leg.role))),
+                Some(legs[0].role),
+            ),
+        );
+    }
+    routing
+}
+
+/// Bind the call's agents: alice, then the callee legs in `legs` order (the
+/// order the routing declares them — load-bearing on a shared socket). A
+/// refusal is returned as is (see [`bind_refusal`]); the agents bound so far
+/// deregister as they drop.
+async fn bind_agents(
+    binder: &AgentBinder,
+    transport: &MuxTransport,
+    legs: &[LegSpec],
+) -> Result<(Agent, Vec<(&'static str, Agent)>), sip_net::BindError> {
+    let alice = binder.try_agent("alice", transport.uac_addr).await?;
+    let mut callees = Vec::with_capacity(legs.len());
+    for leg in legs {
+        callees.push((leg.role, binder.try_agent(leg.role, transport.uas_addr).await?));
+    }
+    Ok((alice, callees))
+}
+
 /// The from-user correlation key of a call: the URI user of its resolved
 /// caller identity, or the bounded rejection reason when there is none.
 fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
@@ -740,11 +756,13 @@ fn from_user_key(from: Option<&str>) -> Result<String, &'static str> {
 }
 
 /// The outcome of a refused agent bind: a key a concurrent call holds is a
-/// `key_in_flight` rejection; any other refusal (no mux endpoint at the
-/// address, more binds than declared) is a layout defect, a counted panic.
+/// `key_in_flight` rejection, a key cooling after a failed call a
+/// `key_cooling` one; any other refusal (no mux endpoint at the address, more
+/// binds than declared) is a layout defect, a counted panic.
 fn bind_refusal(e: &sip_net::BindError) -> CallOutcome {
     match e.reason {
         sip_net::BindErrorReason::AlreadyBound => CallOutcome::Rejected("key_in_flight"),
+        sip_net::BindErrorReason::HeldBack => CallOutcome::Rejected("key_cooling"),
         _ => CallOutcome::Panic(format!("agent bind refused: {e}")),
     }
 }

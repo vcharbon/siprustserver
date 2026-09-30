@@ -137,12 +137,13 @@ impl From<&CallOutcome> for ResultClass {
 
 impl CallOutcome {
     /// Whether this outcome may be excused as chaos collateral:
-    /// [`ResultClass::chaos_excusable`], except that a `key_in_flight`
-    /// rejection is excusable (the key's holder may be a call a fault keeps
-    /// open), while every other rejection is not.
+    /// [`ResultClass::chaos_excusable`], except that a key-contention rejection
+    /// is excusable — `key_in_flight` (the holder may be a call a fault keeps
+    /// open) and `key_cooling` (the previous call may have failed on a fault) —
+    /// while a missing or unusable key is not.
     pub fn chaos_excusable(&self) -> bool {
         match self {
-            CallOutcome::Rejected(reason) => *reason == "key_in_flight",
+            CallOutcome::Rejected(reason) => matches!(*reason, "key_in_flight" | "key_cooling"),
             other => ResultClass::from(other).chaos_excusable(),
         }
     }
@@ -248,12 +249,15 @@ fn slug(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A key held by a concurrent call may be a call a fault holds open, so
-    /// that rejection is chaos-excusable; the other rejections are not.
+    /// A key held by a concurrent call, or cooling after a failed one, may be
+    /// a fault's doing, so those rejections are chaos-excusable; a missing or
+    /// unusable key is not.
     #[test]
-    fn only_a_key_in_flight_rejection_is_chaos_excusable() {
-        assert!(CallOutcome::Rejected("key_in_flight").chaos_excusable());
-        for reason in ["no_from", "userless_from", "key_cooling"] {
+    fn only_key_contention_rejections_are_chaos_excusable() {
+        for reason in ["key_in_flight", "key_cooling"] {
+            assert!(CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
+        }
+        for reason in ["no_from", "userless_from"] {
             assert!(!CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
         }
         assert!(!CallOutcome::Panic("p".into()).chaos_excusable());

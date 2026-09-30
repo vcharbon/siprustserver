@@ -230,7 +230,9 @@ async fn a_calling_number_in_flight_is_refused_and_counted_while_its_call_comple
     assert!(rejected > 0, "overlapping calls on one number were not refused:\n{report}");
     assert!(ok > 0, "no call holding the number completed:\n{report}");
     assert_eq!(ok + rejected, total, "a class other than ok/rejected:\n{report}");
-    assert_eq!(rig.core.stats().token_collision.load(Relaxed), rejected);
+    // One number and no pool: each rejected call made all 8 draws, each
+    // refused as a collision.
+    assert_eq!(rig.core.stats().token_collision.load(Relaxed), 8 * rejected);
     assert_eq!(orphans(&rig.core), 0, "orphans: {:?}", rig.core.stats().samples());
     settle(&rig, &reporter).await;
 }
@@ -480,5 +482,124 @@ async fn a_bind_on_an_undefined_endpoint_is_a_counted_panic_not_a_rejection() {
     assert!(total >= 3, "calls on an undefined endpoint were not counted:\n{report}");
     assert_eq!(reporter.count("basic_call", &ResultClass::Rejected), 0, "{report}");
     assert_eq!(reporter.count("basic_call", &ResultClass::Panic), total, "{report}");
+    settle(&rig, &reporter).await;
+}
+
+/// A load body whose FIRST call fails without sending anything and whose
+/// later calls are a plain basic call.
+struct FailsOnce {
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl scenario_harness::actor::ActorScenario for FailsOnce {
+    fn id(&self) -> &'static str {
+        "fails_once"
+    }
+    fn build(
+        &self,
+        env: &loadgen::CallEnv<'_>,
+    ) -> Result<scenario_harness::actor::ActorCall, scenario_harness::StepError> {
+        if !self.failed.swap(true, Relaxed) {
+            return Err(scenario_harness::StepError::Timeout { who: "alice".to_string() });
+        }
+        scenario_harness::actor::scenarios::BasicCall.build(env)
+    }
+}
+
+fn fails_once() -> MixEntry {
+    let body: Arc<dyn scenario_harness::actor::ActorScenario> =
+        Arc::new(FailsOnce { failed: std::sync::atomic::AtomicBool::new(false) });
+    MixEntry::from((body, 1.0))
+}
+
+/// A number that is cooling is not a failure of the next call: the call
+/// re-draws from the case's pool and runs on a free number.
+#[tokio::test(start_paused = true)]
+async fn a_cooling_number_is_redrawn_from_the_pool() {
+    let rig =
+        rig(7500, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
+            .await;
+    let reporter = reporter();
+    let pool = case(
+        r#""bindings": { "mode": "seq", "entries": [
+             { "core": { "from": "sip:+15550700@pool.example" } },
+             { "core": { "from": "sip:+15550701@pool.example" } } ] }"#,
+    );
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 2.0, 3, 0, 0x4ED4),
+        vec![fails_once().with_case(Some(pool))],
+        reporter.clone(),
+        rig.transport.clone(),
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let report = reporter.render_prometheus();
+    assert!(total >= 5, "governor under-delivered: {total}\n{report}");
+    assert_eq!(reporter.count("fails_once", &ResultClass::Timeout), 1, "{report}");
+    assert_eq!(reporter.count("fails_once", &ResultClass::Rejected), 0, "{report}");
+    assert_eq!(reporter.count("fails_once", &ResultClass::Ok), total - 1, "{report}");
+    assert!(rig.core.stats().key_cooling.load(Relaxed) > 0, "no draw met the cooling number");
+    settle(&rig, &reporter).await;
+}
+
+/// A call refused because its only number is cooling after a failure near a
+/// fault is chaos collateral like the failure itself: tagged `near`.
+#[tokio::test(start_paused = true)]
+async fn a_cooling_rejection_near_a_fault_is_excused() {
+    let rig =
+        rig(7510, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
+            .await;
+    let reporter = reporter();
+    let chaos = Arc::new(loadgen::ChaosLog::new(rig.transport.clock.clone()));
+    chaos.record("kill_worker", None);
+    let fixed = case(r#""input": { "core": { "from": "sip:+15550123456@pool.example" } }"#);
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 2.0, 3, 0, 0xC4A0),
+        vec![broken(false).with_case(Some(fixed))],
+        reporter.clone(),
+        rig.transport.clone(),
+    )
+    .with_chaos(chaos);
+    driver.run().await;
+
+    let rejected = reporter.count("failing_build", &ResultClass::Rejected);
+    let report = reporter.render_prometheus();
+    assert!(rejected >= 3, "the cooling number was not refused:\n{report}");
+    assert_eq!(
+        reporter.count_tagged("failing_build", &ResultClass::Rejected, loadgen::ChaosTag::Near),
+        rejected,
+        "a cooling rejection within the fault's hold must be excused:\n{report}"
+    );
+    settle(&rig, &reporter).await;
+}
+
+/// A cooled number is usable again once `RELEASE_HOLD` has passed, and a call
+/// that ended ok leaves its number free for the very next call.
+#[tokio::test(start_paused = true)]
+async fn a_cooled_calling_number_is_usable_again_after_the_hold() {
+    let rig =
+        rig(7520, Layout::Shared, Correlation::from_user(), B2buaSut::route_all_with_refer, None)
+            .await;
+    let reporter = reporter();
+    let fixed = case(r#""input": { "core": { "from": "sip:+15550123457@pool.example" } }"#);
+    // One call every 10 s for 60 s: the failure at 0 s cools the number past
+    // the calls at 10, 20 and 30 s (64·T1 = 32 s); the calls from 40 s on run.
+    let driver = Driver::new(
+        cfg(rig.b2bua.addr, 0.1, 60, 0, 0x4E1D),
+        vec![fails_once().with_case(Some(fixed))],
+        reporter.clone(),
+        rig.transport.clone(),
+    );
+    driver.run().await;
+
+    let report = reporter.render_prometheus();
+    let total = reporter.total_calls();
+    let ok = reporter.count("fails_once", &ResultClass::Ok);
+    let rejected = reporter.count("fails_once", &ResultClass::Rejected);
+    assert_eq!(reporter.count("fails_once", &ResultClass::Timeout), 1, "{report}");
+    assert_eq!(rejected, 3, "the calls inside the hold are refused:\n{report}");
+    assert!(ok >= 2, "the number is reused after the hold, then again after an ok call:\n{report}");
+    assert_eq!(ok + rejected + 1, total, "{report}");
     settle(&rig, &reporter).await;
 }

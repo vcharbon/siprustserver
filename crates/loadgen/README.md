@@ -233,14 +233,19 @@ per run with `--correlate`; all mux endpoints share the one strategy:
   Extraction reads the From user of the arriving INVITE, so the SUT may rewrite
   the From host, display name and tag, and may route on the To. Contract:
   - every mix entry carries a case (`--case` or `case=`), checked at startup;
-  - a call whose resolved From is absent or has no user, or whose number a
-    concurrent call holds (`loadgen_mux_token_collision_total`), is counted
-    `class="rejected"` before any datagram;
+  - the key is the From user percent-unescaped and compared as written
+    (visual separators kept; a `tel:` URI's number without its parameters);
+  - a call whose resolved From is absent or has no user is counted
+    `class="rejected"` before any datagram. A drawn number a concurrent call
+    holds (`loadgen_mux_token_collision_total`) or that is cooling is re-drawn
+    from the case's pool, up to 8 draws; only when every draw is unavailable is
+    the call `rejected`. Those contention rejections are classified against the
+    chaos markers of the last 64·T1, like the failure that caused them;
   - the caller's first INVITE must carry the key as its From user; a mismatch
     fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
-  - a number whose call ended not ok cools for 64·T1 (32 s): a call drawing it
-    meanwhile is `rejected` and counts `loadgen_mux_key_cooling_total`. A
-    number whose call ended ok is reusable at once.
+  - a number whose call ended not ok cools for 64·T1 (32 s): a draw of it
+    meanwhile counts `loadgen_mux_key_cooling_total`. A number whose call
+    ended ok is reusable at once.
 
 The mux never hands a finished call's leg to the next call on its key: an
 INVITE on a Call-ID a finished call released within 64·T1 is a

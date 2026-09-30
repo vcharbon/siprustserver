@@ -325,6 +325,9 @@ pub enum BindErrorReason {
     AddrInUse,
     /// Any other OS-level bind failure.
     OsError,
+    /// A multiplexing network holds back what the bind would claim (a
+    /// per-call key released by a failed call) for a while; retry later.
+    HeldBack,
 }
 
 /// Failure binding a UDP endpoint (port of `BindError`).

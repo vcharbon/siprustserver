@@ -418,3 +418,26 @@ async fn port_zero_specs_on_one_requested_address_open_one_socket() {
     assert_eq!(local, core.addrs()[0]);
     assert_ne!(local.port(), 0, "the resolved address is the bound one");
 }
+
+/// A cooling key is refused at bind, in the same step that would claim it:
+/// the bind fails with the held-back reason and is counted.
+#[tokio::test(start_paused = true)]
+async fn a_cooling_key_is_refused_at_bind() {
+    let shared = addr(47901);
+    let (_sim, core, _sut) = setup(shared, 47909).await;
+    core.release_key("+1555016", false);
+
+    let net = core.network(CallRouting::new("+1555016").caller(shared).leg(shared, "bob"));
+    let _alice = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    let err = net.bind_udp(BindUdpOpts::new(shared, 16)).await.err();
+    assert!(
+        err.as_ref().is_some_and(|e| e.reason == sip_net::BindErrorReason::HeldBack),
+        "a cooling key must fail the bind, got {err:?}"
+    );
+    assert_eq!(core.stats().key_cooling.load(Relaxed), 1);
+
+    core.release_key("+1555017", true);
+    let net = core.network(CallRouting::new("+1555017").caller(shared).leg(shared, "bob"));
+    let _alice = net.bind_udp(BindUdpOpts::new(shared, 16)).await.unwrap();
+    assert!(net.bind_udp(BindUdpOpts::new(shared, 16)).await.is_ok(), "a clean key binds");
+}

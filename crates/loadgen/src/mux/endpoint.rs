@@ -205,6 +205,15 @@ impl SignalingNetwork for MuxNetwork {
             }
             let token = self.token.clone();
             let mut g = mux.reg.lock().unwrap();
+            // A key cooling after a failed call is refused in the same step
+            // (under the registry lock) that would claim it.
+            if !g.by_token.contains_key(&token) && self.core.key_cooling(&token) {
+                return Err(BindError {
+                    reason: BindErrorReason::HeldBack,
+                    addr: opts.addr,
+                    message: format!("correlation key {token:?} is cooling after a failed call"),
+                });
+            }
             let pending_ttl = self.core.pending_ttl;
             let slot = match g.by_token.entry(token.clone()) {
                 std::collections::hash_map::Entry::Occupied(e) => {
@@ -373,7 +382,9 @@ impl UdpEndpoint for MuxEndpoint {
             }
             if invite {
                 self.invite_sent.store(true, Ordering::Relaxed);
-                self.gate.invite_sent.store(true, Ordering::Relaxed);
+                // Release: the Call-ID registered above is visible to the
+                // dispatcher that Acquire-loads the gate open.
+                self.gate.invite_sent.store(true, Ordering::Release);
             }
         }
         // Record the outbound message in the retransmit engine BEFORE the loss
@@ -439,7 +450,7 @@ impl Drop for MuxEndpoint {
             match key {
                 Key::CallId(c) => {
                     g.by_call_id.remove(&c);
-                    g.released.insert(c, Instant::now() + RELEASE_HOLD);
+                    g.release(c, Instant::now() + RELEASE_HOLD);
                 }
                 // Remove only THIS receiver from a possibly-shared slot; drop the
                 // slot once its last receiver leaves. A claim that never fired is

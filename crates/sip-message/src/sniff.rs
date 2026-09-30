@@ -459,7 +459,9 @@ pub fn name_addr_uri(raw: &[u8], name: &str) -> Option<String> {
 /// header is absent, no reader accepts it, or its URI names no user. The
 /// display name, the URI host and parameters, and the header's own `;tag=`
 /// never affect the result; the user reads as [`address_user`] reads it
-/// (percent-unescaped, a `tel:` subscriber number without its parameters).
+/// (percent-unescaped, a `tel:` subscriber number without its parameters),
+/// and compares as written: RFC 3966 visual separators (`-`, `.`, `(`, `)`)
+/// are kept, so `+1-555-010` is not `+1555010`.
 pub fn from_user(raw: &[u8]) -> Option<String> {
     address_user(&header_rows_compact(raw, "From").into_iter().next()?)
 }
@@ -922,6 +924,9 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(address_user("sip:%2B1555010@h").as_deref(), Some("+1555010"));
         assert_eq!(address_user("<sip:%2b1555%30%31@h>;tag=1").as_deref(), Some("+155501"));
         assert_eq!(address_user("tel:+1555010").as_deref(), Some("+1555010"));
+        // Visual separators stay: the user is compared as written.
+        assert_eq!(address_user("tel:+1-555-010").as_deref(), Some("+1-555-010"));
+        assert_eq!(address_user("sip:+1-555-010@h").as_deref(), Some("+1-555-010"));
         assert_eq!(
             address_user("\"T\" <tel:+1555010;phone-context=example.com>;tag=2").as_deref(),
             Some("+1555010")

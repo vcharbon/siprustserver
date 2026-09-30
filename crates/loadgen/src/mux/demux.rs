@@ -62,7 +62,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
     //    call's lifetime so re-routes / multi-REFER / re-REFER (further legs of
     //    the same call on this socket) each promote their own dialog.
     if is_invite_request_buffer(raw) {
-        if cid.as_ref().is_some_and(|c| g.released.get(c).is_some_and(|t| *t > Instant::now())) {
+        if cid.as_ref().is_some_and(|c| g.is_released(c, Instant::now())) {
             mux.stats.orphan(OrphanReason::Released, raw);
             return;
         }
@@ -244,7 +244,7 @@ pub(super) async fn reap_loop(
         cooling.lock().unwrap().retain(|_, deadline| *deadline > now);
         for mux in &sockets {
             let mut g = mux.reg.lock().unwrap();
-            g.released.retain(|_, deadline| *deadline > now);
+            g.expire_released(now);
             let expired: Vec<String> = g
                 .by_token
                 .iter()

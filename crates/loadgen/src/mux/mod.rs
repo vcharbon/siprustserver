@@ -46,8 +46,9 @@
 //! - a call that has a caller accepts legs only once that caller has sent its
 //!   INVITE; a leg before it is an `early` orphan;
 //! - a from-user key whose call ended not ok cools for [`RELEASE_HOLD`]
-//!   ([`MuxCore::release_key`]); a call drawing it meanwhile is refused
-//!   ([`MuxCore::key_cooling`]). A key whose call ended ok is reusable at once.
+//!   ([`MuxCore::release_key`]); a bind claiming it meanwhile fails with
+//!   `BindErrorReason::HeldBack`, checked under the registry lock in the step
+//!   that would claim it. A key whose call ended ok is reusable at once.
 //!
 //! A new INVITE on a Call-ID a caller owns (a SUT reusing the dialog's Call-ID
 //! for a new leg, against RFC 3261 §8.1.1.4) is a `call_id_reuse` orphan.
@@ -75,7 +76,7 @@ pub use stats::MuxStats;
 use loss::DropModel;
 use retransmit::CallTxns;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -202,7 +203,7 @@ impl CallGate {
     /// Whether the call accepts legs: it has no caller, or its caller has sent
     /// its INVITE (a leg before that belongs to an earlier call on the key).
     pub(in crate::mux) fn open(&self) -> bool {
-        !self.has_caller.load(Ordering::Relaxed) || self.invite_sent.load(Ordering::Relaxed)
+        !self.has_caller.load(Ordering::Relaxed) || self.invite_sent.load(Ordering::Acquire)
     }
 }
 
@@ -211,7 +212,36 @@ pub(in crate::mux) struct SocketRegistry {
     pub(in crate::mux) by_call_id: HashMap<String, Delivery>,
     pub(in crate::mux) by_token: HashMap<String, CallSlot>,
     /// Call-IDs released by finished calls, until their hold deadline.
-    pub(in crate::mux) released: HashMap<String, Instant>,
+    released: HashMap<String, Instant>,
+    /// The same holds in deadline order, so expiry pops only what expired.
+    released_order: VecDeque<(Instant, String)>,
+}
+
+impl SocketRegistry {
+    /// Hold `call_id` back until `deadline` (deadlines arrive in order: every
+    /// hold is the same length from its release).
+    pub(in crate::mux) fn release(&mut self, call_id: String, deadline: Instant) {
+        self.released.insert(call_id.clone(), deadline);
+        self.released_order.push_back((deadline, call_id));
+    }
+
+    /// Whether `call_id` is held back at `now`.
+    pub(in crate::mux) fn is_released(&self, call_id: &str, now: Instant) -> bool {
+        self.released.get(call_id).is_some_and(|deadline| *deadline > now)
+    }
+
+    /// Drop the holds that expired by `now`, touching only those.
+    pub(in crate::mux) fn expire_released(&mut self, now: Instant) {
+        while let Some((deadline, _)) = self.released_order.front() {
+            if *deadline > now {
+                break;
+            }
+            let (_, call_id) = self.released_order.pop_front().expect("front exists");
+            if self.released.get(&call_id).is_some_and(|d| *d <= now) {
+                self.released.remove(&call_id);
+            }
+        }
+    }
 }
 
 /// One defined endpoint = one fabric endpoint + dispatcher + per-socket registry.
