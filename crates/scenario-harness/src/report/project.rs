@@ -9,8 +9,8 @@
 //!
 //! Lane identity is `(ip,port)` (the recorder's `Lane::addr`); a lane's id is
 //! its address string so `RecordedSipEntry::{from,to}` map straight onto lane
-//! ids. Wire text is carried as each row's expandable `detail`, so the historic
-//! per-message wire dump survives verbatim in both artifacts.
+//! ids. Wire text is carried as each row's expandable `detail`, so the
+//! per-message wire dump is kept verbatim in both artifacts.
 
 use layer_harness::{Lane as RecLane, NetworkTag, RecordedScenario};
 use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
@@ -219,14 +219,16 @@ pub fn normalize_doc(doc: &SeqDoc) -> SeqDoc {
 /// was never registered as a lane (rare) is appended so its rows resolve.
 ///
 /// Lane identity is the recorder's lane KEY — the bare `ip:port`, or the
-/// logical-sub-lane `ip:port#<endpoint>` form (036 ask C) when several logical
+/// logical-sub-lane `ip:port#<endpoint>` form when several logical
 /// endpoints share one socket. Sub-lanes carry a `group` (the shared `ip:port`)
 /// so the renderer brackets them under one socket header.
 fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lane> {
     let mut lanes: Vec<Lane> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for l in rec_lanes {
+    // A service lane is declared by the HTTP projection only when an exchange
+    // uses it (`super::http`), so an idle service draws no empty column.
+    for l in rec_lanes.iter().filter(|l| l.network != NetworkTag::Service) {
         let id = l.key.clone();
         let addr = l.addr.to_string();
         let sublane = id.contains('#');
@@ -244,6 +246,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
             NetworkTag::Core => LaneKind::Sut,
             NetworkTag::Ext if name == "proxy" => LaneKind::Sut,
             NetworkTag::Ext => LaneKind::Ua,
+            NetworkTag::Service => LaneKind::Service,
         };
         if seen.insert(id.clone()) {
             let mut lane = Lane::new(id, label, kind);
@@ -256,7 +259,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
 
     // Backstop: any lane id referenced by a row but never registered — an
     // unregistered address, or the synthesized `ip:port#noendpoint` sub-lane
-    // an unrouted-but-call-correlated datagram renders on (036 ask C).
+    // an unrouted-but-call-correlated datagram renders on.
     for e in entries {
         let (from_id, to_id) = entry_lane_ids(e);
         for id in [from_id, to_id] {
@@ -303,9 +306,8 @@ fn entry_lane_ids(e: &RecordedSipEntry) -> (String, String) {
 fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
     // Carry the transit (sent → received) as the first detail line whenever the
     // message actually crossed with a delay; a zero-transit / undelivered entry
-    // shows only the single stamp. This preserves the historic text report's
-    // two-timestamp transit display now that the global view is rendered by the
-    // shared (plane-neutral) renderer, which keys off a single `at_ms`.
+    // shows only the single stamp. This keeps the two-timestamp transit display
+    // under the shared (plane-neutral) renderer, which keys off a single `at_ms`.
     let mut detail = String::new();
     if let Some(rcvd) = e.received_ms.filter(|r| *r != e.sent_ms) {
         detail.push_str(&format!(
@@ -341,7 +343,7 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         to: Some(to),
         label,
         detail: Some(detail),
-        // Colour-band per dialog (036 ask C): rows sharing a Call-ID share a
+        // Colour-band per dialog: rows sharing a Call-ID share a
         // hue, so a b2bua's a-leg vs b-leg — or a reroute's primary vs alt
         // dialog — read as distinct flows at a glance.
         conn: (!f.call_id.is_empty()).then(|| f.call_id.clone()),
@@ -374,7 +376,7 @@ mod tests {
         RecordedScenario { transport_kind: TransportKind::Live, lanes: vec![], anomalies: vec![] }
     }
 
-    /// 036 ask C: registered sub-lanes keep their composite key as the lane id
+    /// registered sub-lanes keep their composite key as the lane id
     /// and group under the shared socket; an `Unrouted` entry lands on a
     /// synthesized `ip:port#noendpoint` sub-lane adjacent to its siblings; and
     /// rows colour-band by Call-ID via `conn`.

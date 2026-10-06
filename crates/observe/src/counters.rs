@@ -7,6 +7,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use metric_catalogue::{Family, Labels};
+
 /// Lifecycle log lines dropped because the writer's bounded queue was full.
 pub static LOG_LINES_DROPPED: AtomicU64 = AtomicU64::new(0);
 
@@ -43,48 +45,104 @@ pub fn get(c: &AtomicU64) -> u64 {
     c.load(Ordering::Relaxed)
 }
 
+/// Lifecycle log lines dropped.
+pub const LOG_LINES_DROPPED_TOTAL: Family = Family::counter(
+    "log_lines_dropped_total",
+    Labels::None,
+    "Lifecycle log lines dropped because the non-blocking writer queue was full.",
+);
+
+/// Trace activations refused without an exporter.
+pub const TRACE_DROPPED_NO_EXPORTER_TOTAL: Family = Family::counter(
+    "trace_dropped_no_exporter_total",
+    Labels::None,
+    "Trace activation attempts refused because no OTLP endpoint is configured.",
+);
+
+/// Trace activations refused by the token bucket.
+pub const TRACE_DENIED_RATE_TOTAL: Family = Family::counter(
+    "trace_denied_rate_total",
+    Labels::None,
+    "Trace activations refused by the activation token bucket.",
+);
+
+/// Trace activations refused by the active-trace cap.
+pub const TRACE_DENIED_ACTIVE_CAP_TOTAL: Family = Family::counter(
+    "trace_denied_active_cap_total",
+    Labels::None,
+    "Trace activations refused by the concurrent active-trace cap.",
+);
+
+/// Malformed `X-Trace-Sample` values ignored.
+pub const TRACE_HEADER_MALFORMED_TOTAL: Family = Family::counter(
+    "trace_header_malformed_total",
+    Labels::None,
+    "X-Trace-Sample header values ignored because they did not read as a float in 0..=1.",
+);
+
+/// Calls admitted for tracing.
+pub const TRACE_ADMITTED_TOTAL: Family = Family::counter(
+    "trace_admitted_total",
+    Labels::None,
+    "Calls admitted for tracing (a root span was opened).",
+);
+
+/// Hydrated traced calls refused a root span.
+pub const TRACE_ADOPTION_REFUSED_TOTAL: Family = Family::counter(
+    "trace_adoption_refused_total",
+    Labels::None,
+    "Hydrated traced calls this node opened no root span for because the admission chain refused.",
+);
+
+/// Every family [`prometheus_text`] renders, in exposition order.
+pub const FAMILIES: &[Family] = &[
+    LOG_LINES_DROPPED_TOTAL,
+    TRACE_DROPPED_NO_EXPORTER_TOTAL,
+    TRACE_DENIED_RATE_TOTAL,
+    TRACE_DENIED_ACTIVE_CAP_TOTAL,
+    TRACE_HEADER_MALFORMED_TOTAL,
+    TRACE_ADMITTED_TOTAL,
+    TRACE_ADOPTION_REFUSED_TOTAL,
+];
+
 /// Prometheus exposition for every counter above, appended by each runner's
 /// `/metrics` handler.
 pub fn prometheus_text() -> String {
     let mut s = String::new();
-    for (name, help, value) in [
-        (
-            "log_lines_dropped_total",
-            "Lifecycle log lines dropped because the non-blocking writer queue was full.",
-            get(&LOG_LINES_DROPPED),
-        ),
-        (
-            "trace_dropped_no_exporter_total",
-            "Trace activation attempts refused because no OTLP endpoint is configured.",
-            get(&TRACE_DROPPED_NO_EXPORTER),
-        ),
-        (
-            "trace_denied_rate_total",
-            "Trace activations refused by the activation token bucket.",
-            get(&TRACE_DENIED_RATE),
-        ),
-        (
-            "trace_denied_active_cap_total",
-            "Trace activations refused by the concurrent active-trace cap.",
-            get(&TRACE_DENIED_ACTIVE_CAP),
-        ),
-        (
-            "trace_header_malformed_total",
-            "X-Trace-Sample header values ignored because they did not read as a float in 0..=1.",
-            get(&TRACE_HEADER_MALFORMED),
-        ),
-        (
-            "trace_admitted_total",
-            "Calls admitted for tracing (a root span was opened).",
-            get(&TRACE_ADMITTED),
-        ),
-        (
-            "trace_adoption_refused_total",
-            "Hydrated traced calls this node opened no root span for because the admission chain refused.",
-            get(&TRACE_ADOPTION_REFUSED),
-        ),
-    ] {
-        s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"));
+    for (family, counter) in FAMILIES.iter().zip([
+        &LOG_LINES_DROPPED,
+        &TRACE_DROPPED_NO_EXPORTER,
+        &TRACE_DENIED_RATE,
+        &TRACE_DENIED_ACTIVE_CAP,
+        &TRACE_HEADER_MALFORMED,
+        &TRACE_ADMITTED,
+        &TRACE_ADOPTION_REFUSED,
+    ]) {
+        family.render_value(&mut s, get(counter));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each counter is rendered under its own family, as declared.
+    #[test]
+    fn each_counter_renders_under_its_own_family() {
+        let before: Vec<u64> = [&TRACE_DENIED_RATE, &TRACE_ADMITTED].map(get).to_vec();
+        bump(&TRACE_DENIED_RATE);
+        bump(&TRACE_DENIED_RATE);
+        bump(&TRACE_ADMITTED);
+        let text = prometheus_text();
+        for family in FAMILIES {
+            assert_eq!(family.check(&text), Ok(()));
+        }
+        let value = |name: &str| {
+            let line = text.lines().find(|l| l.starts_with(&format!("{name} "))).unwrap();
+            line.rsplit(' ').next().unwrap().parse::<u64>().unwrap()
+        };
+        assert!(value("trace_denied_rate_total") >= before[0] + 2);
+        assert!(value("trace_admitted_total") > before[1]);
+    }
 }

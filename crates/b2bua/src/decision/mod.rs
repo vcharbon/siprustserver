@@ -9,12 +9,13 @@ pub mod apply_route;
 mod schemas;
 pub mod test_adapter;
 
+pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
 pub use schemas::{
     default_platform_features, read_stated_port, BodyUpdate, CallFailureRequest,
-    CallFailureResponse, CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest,
+    CallFailureResponse, CallReferRequest, CallReferResponse, CallReleaseRequest,
     CallReleaseResponse, CallSnapshot, CallTreatment, FailureInfo, FeatureActivations, LegSnapshot,
     NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
-    RouteDecision, SipDestination, SipHeaderUpdates,
+    RouteDecision, SipDestination,
 };
 pub use test_adapter::{default_call_refer, ReferOutcome, ReleaseOutcome, ScriptedDecisionEngine};
 
@@ -49,7 +50,7 @@ pub trait CallDecisionEngine: Send + Sync {
         &self,
         _req: CallReleaseRequest,
     ) -> Result<CallReleaseResponse, CallDecisionError> {
-        Ok(CallReleaseResponse::Release { label: None })
+        Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
     }
 }
 
@@ -57,6 +58,14 @@ pub trait CallDecisionEngine: Send + Sync {
 pub enum CallDecisionError {
     #[error("decision backend unavailable: {0}")]
     Unavailable(String),
+    /// The engine read no decision and refuses the call with a final it
+    /// states. The initial and failover paths answer it exactly as a reject
+    /// decision (same code, reason policy and headers) and mark no decision:
+    /// the final is the stack's own. Any other consult treats it as
+    /// [`CallDecisionError::Unavailable`], and [`DeadlineDecisionEngine`]
+    /// counts it in the backend's unavailability episode.
+    #[error("decision refused with {code}")]
+    Refused { code: u16, reason: Option<String>, update_headers: Option<SipHeaderUpdates> },
 }
 
 /// Hard per-round-trip deadline on the decision backend (ADR-0022). The core
@@ -78,10 +87,9 @@ pub enum CallDecisionError {
 /// received its `202 Accepted`, so a hanging refer authorization strands no
 /// waiting INVITE; it is bounded instead by the dedicated
 /// `refer_subscription_expiry_sec` (60 s) + `refer_overall_safety_sec`
-/// (120 s) timers (see `refer_reject.rs::refer_http_timeout`). This is a
-/// documented divergence from the TS `callControlReferTimeoutMs`: the Rust port
-/// bounds the REFER lifecycle with those subscription timers rather than a
-/// decision deadline, so `call_refer` passes straight through.
+/// (120 s) timers (see `refer_reject.rs::refer_http_timeout`). Those
+/// subscription timers, not a decision deadline, bound the REFER lifecycle, so
+/// `call_refer` passes straight through.
 ///
 /// `call_release` is **not caller-blocking** either (the call is established;
 /// nobody waits behind a 100), but unlike `call_refer` it has **no dedicated
@@ -136,10 +144,11 @@ impl DeadlineDecisionEngine {
     }
 
     /// Fold one round-trip outcome into `method`'s degradation episode: a
-    /// deadline breach and a backend-reported `Unavailable` belong to the SAME
+    /// deadline breach and any engine error — `Unavailable`, and a `Refused`
+    /// the engine stated because it read no decision — belong to the SAME
     /// episode (both are "the decision engine is not answering calls"); real
-    /// answers for the idle window end it. Aggregated, never one line per call
-    /// (ADR-0026).
+    /// answers for the idle window end it. Logging only; aggregated, never one
+    /// line per call (ADR-0026).
     fn observe_outcome<T>(
         &self,
         method: &'static str,
@@ -193,6 +202,6 @@ impl CallDecisionEngine for DeadlineDecisionEngine {
         req: CallReleaseRequest,
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         let outcome = tokio::time::timeout(self.deadline, self.inner.call_release(req)).await;
-        self.observe_outcome("/calls/events/release", outcome)
+        self.observe_outcome("/call/release", outcome)
     }
 }

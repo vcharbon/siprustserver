@@ -84,7 +84,7 @@ async fn cancel_after_answer_does_not_tear_down() {
         "no cancel event — late CANCEL was absorbed: {kinds:?}"
     );
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

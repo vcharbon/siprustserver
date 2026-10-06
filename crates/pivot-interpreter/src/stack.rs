@@ -200,6 +200,22 @@ pub struct LegStack {
     ids: u64,
 }
 
+/// The dialog identity a leg's out-of-dialog requests carry: its Call-ID and
+/// its own tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogIdentity {
+    pub call_id: String,
+    pub local_tag: String,
+}
+
+/// The identity leg `leg` dials under in the run seeded by `nonce`.
+pub fn dialog_identity(leg: &str, nonce: &str) -> DialogIdentity {
+    DialogIdentity {
+        call_id: format!("{leg}-{nonce}@pivot.invalid"),
+        local_tag: format!("{leg}-{nonce}-tag"),
+    }
+}
+
 impl LegStack {
     /// A leg that has not spoken yet. `local_uri`/`remote_uri` are the
     /// addresses its From and To carry; the lane composes them.
@@ -214,10 +230,11 @@ impl LegStack {
         let leg = leg.into();
         let local_uri = local_uri.into();
         let remote_uri = remote_uri.into();
+        let identity = dialog_identity(&leg, run_nonce);
         LegStack {
             dialog: StackDialog {
-                call_id: format!("{leg}-{run_nonce}@pivot.invalid"),
-                local_tag: format!("{leg}-{run_nonce}-tag"),
+                call_id: identity.call_id,
+                local_tag: identity.local_tag,
                 remote_tag: String::new(),
                 local_uri,
                 remote_uri: remote_uri.clone(),
@@ -244,6 +261,11 @@ impl LegStack {
 
     pub fn has_dialog(&self) -> bool {
         self.has_dialog
+    }
+
+    /// Whether an INVITE 2xx has confirmed the leg's dialog (RFC 3261 §13).
+    pub fn confirmed(&self) -> bool {
+        self.confirmed
     }
 
     /// The INVITE this leg sent most recently, whether or not it is ACKed.
@@ -419,6 +441,34 @@ impl LegStack {
         body: Vec<u8>,
         content_type: Option<String>,
     ) -> Result<SipResponse, StackError> {
+        self.respond_selected(answer, headers, body, content_type, |_| true)
+    }
+
+    /// [`respond`](Self::respond) to ONE named server transaction: the request
+    /// with this CSeq number on the dialog `to_tag` names — two forks number
+    /// their first in-dialog request alike, so the tag is part of the name.
+    pub fn respond_to(
+        &mut self,
+        cseq: u32,
+        to_tag: Option<&str>,
+        answer: &Answer<'_>,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Result<SipResponse, StackError> {
+        self.respond_selected(answer, headers, body, content_type, |r| {
+            r.cseq().seq() == cseq && r.to().tag() == to_tag
+        })
+    }
+
+    fn respond_selected(
+        &mut self,
+        answer: &Answer<'_>,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+        selected: impl Fn(&SipRequest) -> bool,
+    ) -> Result<SipResponse, StackError> {
         let Answer { status, reason, cseq_method, early_tag } = *answer;
         let wanted = cseq_method.map(Method::from_wire);
         let matching = || {
@@ -426,6 +476,7 @@ impl LegStack {
                 .iter()
                 .rev()
                 .filter(|r| wanted.as_ref().is_none_or(|m| r.cseq().method() == m))
+                .filter(|r| selected(r))
         };
         // The newest transaction of that method still OPEN, and only then the
         // newest at all. A capture may answer two outstanding transactions of
@@ -859,8 +910,12 @@ impl LegStack {
         if !tag.is_empty() {
             self.dialog.remote_tag = tag;
         }
+        // RFC 3261 §12.1.1 / §12.2.1.1 set the dialog's URIs once, from the
+        // creating request; a request inside the dialog changes neither. The
+        // display name and header parameters ride along so the scripted peer
+        // writes its identity as the captured one did.
         if self.dialog.remote_uri.is_empty() {
-            self.dialog.remote_uri = request.from().uri().to_string();
+            self.dialog.remote_uri = request.from().clone().without_tag().to_string();
         }
         if let Some(contact) = request.contacts().as_slice().first() {
             self.dialog.remote_target = contact.uri().to_string();
@@ -872,7 +927,9 @@ impl LegStack {
         }
         if request.method() == Method::Invite {
             self.dialog.call_id = request.call_id().to_string();
-            self.dialog.local_uri = request.to().uri().to_string();
+            if self.dialog.local_uri.is_empty() {
+                self.dialog.local_uri = request.to().clone().without_tag().to_string();
+            }
         }
         self.received.push(request.clone());
     }
@@ -921,7 +978,7 @@ fn media_type(text: &str) -> MediaType {
 
 /// Whether a provisional is reliable (RFC 3262 §3: `Require: 100rel`). Header
 /// reading is `sip-message`'s.
-fn reliably(response: &SipResponse) -> bool {
+pub(crate) fn reliably(response: &SipResponse) -> bool {
     response
         .header::<header::Require>()
         .and_then(Result::ok)
@@ -929,7 +986,7 @@ fn reliably(response: &SipResponse) -> bool {
 }
 
 /// The `RSeq` a response carries, where it carries a readable one.
-fn rseq_of(response: &SipResponse) -> Option<u32> {
+pub(crate) fn rseq_of(response: &SipResponse) -> Option<u32> {
     response.header::<header::RSeq>().and_then(Result::ok).map(|r| r.value())
 }
 
@@ -980,6 +1037,18 @@ mod tests {
     fn stack(leg: &str, nonce: &str) -> LegStack {
         let addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         LegStack::new(leg, addr, addr, nonce, "", "")
+    }
+
+    /// A leg's dialog carries the identity [`dialog_identity`] names for its
+    /// leg and nonce: what a lane computes before the run.
+    #[test]
+    fn a_leg_dials_under_the_identity_its_leg_and_nonce_name() {
+        let identity = dialog_identity("A", "n1");
+        assert_eq!(identity.call_id, "A-n1@pivot.invalid");
+        assert_eq!(identity.local_tag, "A-n1-tag");
+        let leg = stack("A", "n1");
+        assert_eq!(leg.call_id(), identity.call_id);
+        assert_eq!(leg.dialog.local_tag, identity.local_tag);
     }
 
     /// A UAS stack that has taken an inbound INVITE, and the INVITE itself.
@@ -1362,6 +1431,44 @@ mod tests {
         assert_eq!(second.cseq().seq(), 2, "fork 2's INVITE was its CSeq 1");
     }
 
+    /// [`respond_to`](LegStack::respond_to) answers the transaction it names,
+    /// not the newest of the method: two forks' PRACKs are both CSeq 2, so the
+    /// To-tag is what tells fork 1's from fork 2's.
+    #[test]
+    fn respond_to_answers_the_named_transaction_not_the_newest_of_its_method() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        for (fork, rseq) in [("B-early-f1", "1"), ("B-early-f2", "1")] {
+            let rings = uas
+                .respond(
+                    &Answer {
+                        status: 180,
+                        reason: "Ringing",
+                        cseq_method: Some("INVITE"),
+                        early_tag: Some(fork),
+                    },
+                    &reliable(rseq),
+                    Vec::new(),
+                    None,
+                )
+                .expect("the fork rings");
+            uac.learn_response(&rings);
+            let prack = uac.prack(Some(fork), &[], Vec::new(), None, None).expect("PRACKed");
+            assert_eq!(prack.cseq().seq(), 2, "each fork's own space");
+            uas.learn_request(&prack);
+        }
+        let answer =
+            Answer { status: 200, reason: "OK", cseq_method: Some("PRACK"), early_tag: None };
+        let first = uas
+            .respond_to(2, Some("B-early-f1"), &answer, &[], Vec::new(), None)
+            .expect("fork 1's PRACK is answered by name");
+        assert_eq!(first.to().tag(), Some("B-early-f1"), "not the newest PRACK, fork 2's");
+        assert!(
+            uas.respond_to(2, Some("B-early-f9"), &answer, &[], Vec::new(), None).is_err(),
+            "a transaction the leg never took is refused"
+        );
+    }
+
     #[test]
     fn a_prack_naming_a_fork_the_leg_never_rang_is_refused_by_name() {
         let mut uac = called_by_two_forks();
@@ -1409,7 +1516,7 @@ mod tests {
         assert_eq!(uas.rseq(), Some(7001));
     }
 
-    /// K7's answer: RFC 3262 §3 numbers an RSeq space PER early dialog, so each
+    /// RFC 3262 §3 numbers an RSeq space PER early dialog, so each
     /// fork publishes its own — which is what `${early:<id>.rseq}` reads and
     /// what the leg's single value cannot say.
     #[test]
@@ -1697,6 +1804,85 @@ mod tests {
         assert_eq!(bye.to().tag(), Some(dialog_tag.as_str()), "the BYE rides the 2xx's dialog");
     }
 
+    /// RFC 3261 §12.1.1, §12.2.1.1: a dialog's local and remote URIs are set
+    /// once, by the INVITE that created it; a re-INVITE either side sends leaves
+    /// them as they were. Keeping the display name and header parameters with
+    /// them mirrors the captured peer, which wrote its identity that way.
+    #[test]
+    fn a_re_invite_leaves_each_side_s_dialog_identity_as_the_opening_invite_set_it() {
+        let alice = "\"Alice\" <sip:+15556000001;verstat=x@a.invalid;user=phone>;x-param=1";
+        let bob = "\"Bob\" <sip:+15556000004@b.invalid;user=phone>";
+        let mut uac = stack("A", "r1a2b3");
+        let addresses = Addresses { ruri: "sip:+15556000004@b.invalid", from: alice, to: bob };
+        let invite = uac
+            .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+            .expect("the caller composes its INVITE");
+        let mut uas = stack("B", "r1a2b3");
+        uas.learn_request(&invite);
+        let ok = uas
+            .respond(
+                &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: None },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers");
+        uac.learn_response(&ok);
+        uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs");
+        // The callee's re-INVITE writes the caller's identity without its
+        // display name, which RFC 3261 permits; the caller's dialog keeps its own.
+        uas.dialog.remote_uri = "<sip:+15556000001;verstat=x@a.invalid;user=phone>".to_string();
+        let re_invite =
+            uas.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
+        assert_eq!(re_invite.to().display(), None);
+        uac.learn_request(&re_invite);
+
+        let from_caller = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("a BYE");
+        assert_eq!(from_caller.from().display(), Some("Alice"));
+        assert!(from_caller.from().param("x-param").is_some(), "{}", from_caller.from());
+        assert_eq!(from_caller.to().display(), Some("Bob"));
+        let from_callee = uas.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("a BYE");
+        assert_eq!(from_callee.from().display(), Some("Bob"));
+        assert_eq!(from_callee.to().display(), None, "the callee keeps the identity it wrote");
+    }
+
+    /// The callee side learns both addresses from the INVITE that created the
+    /// dialog, display names and header parameters included, and a caller
+    /// re-INVITE that writes them bare changes neither (RFC 3261 §12.1.1).
+    #[test]
+    fn the_callee_keeps_the_name_addrs_the_creating_invite_stated() {
+        let alice = "\"Alice\" <sip:+15556000001@a.invalid;user=phone>;x-param=1";
+        let bob = "\"Bob\" <sip:+15556000004@b.invalid;user=phone>";
+        let mut uac = stack("A", "r9");
+        let addresses = Addresses { ruri: "sip:+15556000004@b.invalid", from: alice, to: bob };
+        let invite = uac
+            .out_of_dialog(Method::Invite, &addresses, &[], Vec::new(), None, None)
+            .expect("the caller composes its INVITE");
+        let mut uas = stack("B", "r9");
+        uas.learn_request(&invite);
+        let ok = uas
+            .respond(
+                &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: None },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers");
+        uac.learn_response(&ok);
+        uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs");
+        uac.dialog.local_uri = "<sip:+15556000001@a.invalid;user=phone>".to_string();
+        uac.dialog.remote_uri = "<sip:+15556000004@b.invalid;user=phone>".to_string();
+        let re_invite =
+            uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
+        uas.learn_request(&re_invite);
+
+        let bye = uas.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("a BYE");
+        assert_eq!(bye.from().display(), Some("Bob"));
+        assert_eq!(bye.to().display(), Some("Alice"));
+        assert!(bye.to().param("x-param").is_some(), "{}", bye.to());
+        assert_ne!(bye.to().tag(), None, "the tag is the dialog's, kept apart");
+    }
+
     /// RFC 3261 §13.2.1: the ACK to a 2xx carries the CSeq NUMBER of the INVITE
     /// it answers — the re-INVITE's, not the dialog-opening one's.
     #[test]
@@ -1889,7 +2075,7 @@ mod tests {
         assert_eq!(ack.top_via().branch().unwrap_or_default(), branch.as_str());
         assert_eq!(ack.cseq().seq(), re_invite.cseq().seq());
         // A negative in-dialog final closes nothing: the dialog stands and the
-        // next request keeps numbering where the re-INVITE left off (K15).
+        // next request keeps numbering where the re-INVITE left off (RFC 3261 §12.2.1.1).
         let bye =
             uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("the dialog is alive");
         assert_eq!(bye.cseq().seq(), 3);

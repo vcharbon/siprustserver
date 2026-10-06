@@ -99,7 +99,9 @@ derive from the class, so a rung index is the whole of a ladder's state, and
 `Ladder::at_rung` rebuilds one whole from it. This replaces three different
 field sets and keeps the property the §3 ladder reasoned for in a comment: no
 epoch anchor rides in a replicated body, so a takeover resumes the ladder
-exactly where it stood.
+from the last replicated write, bounded by the deadline in the ledger. A rung
+is a quiet turn and rides only in the next write (ADR-0014, "a counter counts
+writes that change the call, not progress").
 
 The `Ladder` cursor carries the elapsed total beside the rung, because a
 retargeted ladder's elapsed time is no longer a function of its rung alone.
@@ -134,7 +136,7 @@ constructor that built a message without an image (`hydrate_response`) is
 gone, and `hydrate_request` renders one, so no typed message reaches the layer
 imageless. A second render at the socket would have to be written back into
 `sip-txn` against the doc contract on `send_response`, and
-`sip-txn/tests/response_leaves_as_its_image.rs` pins the wire to the image.
+`sip-txn/tests/it/response_leaves_as_its_image.rs` pins the wire to the image.
 
 `rfc_rules` gains the wire twin of the invariant: a rung must be byte-identical
 to the emission it repeats, checked in every harness `finish()` and across the
@@ -210,8 +212,10 @@ one token — which makes the oracle itself an assertion of the X3 invariant.
 - ADR-0007 (transaction layer shape) and ADR-0010 (B2BUA rules shape) keep
   their decisions; this ADR moves the dialog-level retransmission obligation
   from the rule layer to the framework and gives both layers one schedule.
-- ADR-0014's reactive-only takeover is unaffected: a rung index and an opaque
-  datagram replicate exactly as the interval fields they replace did.
+- ADR-0014's reactive-only takeover is unaffected: an opaque datagram
+  replicates with the write that retains it; the rung index rides only in the
+  next write that changes the call, so a node restoring the call holds the
+  rung the last write held.
 - The B2BUA data model loses four retained structs and three interval fields;
   the SDK loses two `RuleAction` variants and gains none.
 
@@ -219,18 +223,18 @@ one token — which makes the oracle itself an assertion of the X3 invariant.
 
 `sip-retransmit`'s table-driven schedule test (one row per class, plus the
 authored forms and `tightened_to`), the existing
-`sip-txn/tests/{fsm,cancel_retransmit,cancel_hold}` suite unchanged,
-`sip-txn/tests/response_leaves_as_its_image.rs` (the wire is the image),
-`b2bua-harness/tests/{unacked_2xx_retransmit_is_faithful,
+`sip-txn/tests/it/{fsm,cancel_retransmit,cancel_hold}` suite unchanged,
+`sip-txn/tests/it/response_leaves_as_its_image.rs` (the wire is the image),
+`b2bua-harness/tests/it/{unacked_2xx_retransmit_is_faithful,
 unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 (`unacked_2xx_reap` includes the Timer L ceiling under a 60 s deadline),
 `b2bua-harness/tests/unacked_2xx_reap.rs` also holds the X5 floor: a
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
-`b2bua/tests/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
+`b2bua/tests/it/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
 2xx ladder alone; `settle_give_up` ends a session a service parked and leaves a
 `PrackOf` give-up to the rules), `b2bua-sdk/src/config.rs` (a non-positive
-deadline is refused and falls back to 32 s), `call/tests/model_helpers.rs` (the 2xx ladder never runs
+deadline is refused and falls back to 32 s), `call/tests/it/model_helpers.rs` (the 2xx ladder never runs
 past Timer L; `Scope::Provisionals` names no 2xx),
-`failover-harness/tests/prack_takeover.rs`, and the new byte-identity rule in
+`failover-harness/tests/it/prack_takeover.rs`, and the new byte-identity rule in
 the `rfc-rules` census.

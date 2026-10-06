@@ -15,7 +15,7 @@ const REPLAY: Campaign.PivotReplayCell = {
 const RUST: Campaign.RustTestCell = {
   kind: "rust-test",
   crate: "demo-e2e",
-  name: "bc_02::relay_transparent"
+  name: "relay::transparent_18x"
 }
 
 describe("the cell coordinate", () => {
@@ -26,7 +26,7 @@ describe("the cell coordinate", () => {
       infra: "some-lane"
     })
     expect(cellIdOf(RUST)).toEqual({
-      case: "bc_02::relay_transparent",
+      case: "relay::transparent_18x",
       shape: "rust-test",
       infra: "demo-e2e"
     })
@@ -38,7 +38,7 @@ describe("the cell coordinate", () => {
 
   it("puts the two shapes in distinct directories of one run", () => {
     expect(cellDir(REPLAY)).toBe("transparent-defect.v3__pivot-replay__some-lane")
-    expect(cellDir(RUST)).toBe("bc_02::relay_transparent__rust-test__demo-e2e")
+    expect(cellDir(RUST)).toBe("relay::transparent_18x__rust-test__demo-e2e")
     expect(cellDir(REPLAY)).not.toBe(cellDir(RUST))
   })
 

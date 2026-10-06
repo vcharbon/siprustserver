@@ -224,7 +224,7 @@ pub struct Inject {
     /// Always `inject`.
     pub op: InjectOp,
     /// Open action token from the deployment's injector registry
-    /// (`store-fault:LiveAudit`, `http:bl-cut`, `node-kill`).
+    /// (`store-fault:LiveAudit`, `http:decision-cut`, `node-kill`).
     pub action: String,
     /// What the action applies to, in the injector's own vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]

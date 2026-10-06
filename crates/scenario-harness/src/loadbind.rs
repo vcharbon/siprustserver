@@ -13,7 +13,7 @@
 //! hands out holds only `Send` fields (`Arc` endpoint + id source), and the
 //! recording machinery underneath ([`Recorder`], the recording decorator) is all
 //! `Arc<Mutex<…>>` — also `Send`. So `AgentBinder` reproduces the load-bearing
-//! half of [`Harness::build`] (recorder + the RFC-contract-wrapped network +
+//! half of `Harness::build` (recorder + the RFC-contract-wrapped network +
 //! `Agent` construction) **without** the `Rc` fields and the panic gate, yielding
 //! a `Send + Sync` factory.
 //!
@@ -63,8 +63,8 @@ pub struct WaiverOutcome {
 }
 
 /// A `Send + Sync` factory that binds [`Agent`]s on a recording-wrapped (or, when
-/// not recording, raw) network — the load-driver analogue of [`Harness`]
-/// (crate::Harness) minus the `!Send` `Rc` state and the Drop-time panic gate.
+/// not recording, raw) network — the load-driver analogue of
+/// [`Harness`](crate::Harness) minus the `!Send` `Rc` state and the Drop-time panic gate.
 pub struct AgentBinder {
     /// The network agents bind on: the RFC-contract + recording decorator stack
     /// when recording, else the raw network (zero overhead).
@@ -141,7 +141,8 @@ impl AgentBinder {
     /// Core constructor over a **caller-supplied** network + clock — the seam that
     /// lets the fake smoke test bind agents on the SAME `SimulatedSignalingNetwork`
     /// an in-process `B2buaSut` runs on (a separate instance is an isolated fabric
-    /// they can't talk across). Mirrors [`Harness::with_network_and_clock`].
+    /// they can't talk across). Mirrors
+    /// [`Harness::with_network_and_clock`](crate::Harness::with_network_and_clock).
     pub fn with_network(
         network: Arc<dyn SignalingNetwork>,
         clock: Clock,
@@ -180,7 +181,8 @@ impl AgentBinder {
     /// Re-seed the shared branch/tag/Call-ID counter — MANDATORY against a real,
     /// stateful, shared SUT (the cluster), where reusing identifiers across runs
     /// makes the SUT's transaction layer absorb the new INVITE as a retransmit
-    /// (RFC 3261 §17.2.3 / §8.1.1.4). See [`Harness::seed_ids`].
+    /// (RFC 3261 §17.2.3 / §8.1.1.4). See
+    /// [`Harness::seed_ids`](crate::Harness::seed_ids).
     pub fn seed_ids(&self, seed: u64) {
         self.ids.0.store(seed, Ordering::Relaxed);
     }
@@ -194,22 +196,36 @@ impl AgentBinder {
     /// [`Harness::agent`](crate::Harness). Role-tagged `{Uac, Uas}` (a test UA
     /// originates and answers, never proxies). Bind with port `0` to let the OS
     /// assign a free port against a real network, then read [`Agent::addr`].
+    /// Panics on a bad address or a refused bind; [`try_agent`](Self::try_agent)
+    /// is the fallible form.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
-        let name = name.into();
         let requested: SocketAddr =
             addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.try_agent(name, requested)
+            .await
+            .unwrap_or_else(|e| panic!("bind {requested} failed: {e}"))
+    }
+
+    /// [`agent`](Self::agent) returning the network's refusal instead of
+    /// panicking — the load driver counts a refused bind (a correlation key
+    /// already held by a concurrent call) as a rejected call.
+    pub async fn try_agent(
+        &self,
+        name: impl Into<String>,
+        requested: SocketAddr,
+    ) -> Result<Agent, sip_net::BindError> {
+        let name = name.into();
         let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
         let ep = self
             .network
             .bind_udp(BindUdpOpts::new(requested, 64).with_roles(roles).with_lane_label(&name))
-            .await
-            .unwrap_or_else(|e| panic!("bind {requested} failed: {e}"));
+            .await?;
         // A port-`0` bind means "whichever port is free". The UA advertises
         // itself in Via and Contact and the recorder keys its lane on the same
         // socket, so both take the port the OS actually gave it — which is why
         // the lane is registered AFTER the bind, not before.
         let addr = if requested.port() == 0 { ep.local_addr() } else { requested };
-        // Per-logical-endpoint sub-lane (036 ask C): load agents may SHARE a
+        // Per-logical-endpoint sub-lane: load agents may SHARE a
         // mux socket (callee + alt legs), so each registers — and binds — under
         // `ip:port#<name>` instead of colliding on the socket's lane. The
         // projector groups sub-lanes under their shared `ip:port` header.
@@ -221,7 +237,7 @@ impl AgentBinder {
                 NetworkTag::Ext,
             );
         }
-        Agent {
+        Ok(Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
             rr_fold: decide_rr_fold(&name),
             name,
@@ -238,7 +254,7 @@ impl AgentBinder {
             txn: Arc::new(crate::absorption::Absorption::raw_wire()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
-        }
+        })
     }
 
     /// Render this call's recorded trace as a standalone callflow HTML page
@@ -249,7 +265,7 @@ impl AgentBinder {
     /// `banner` is an always-shown per-call context line (the resolved binding —
     /// the actual From/To used — on the load surface); it renders in the page
     /// header on PASS and FAIL alike. `detail` is the call's failure reason (the
-    /// [`StepError`]/outcome string); when present on a NOT-passed call it is
+    /// [`StepError`](crate::StepError)/outcome string); when present on a NOT-passed call it is
     /// surfaced in the rendered page so the sampled callflow explains WHY it
     /// failed, not merely that it did.
     /// `chaos_markers` are injected-fault instants as `(wall_clock_epoch_ms,
@@ -287,8 +303,8 @@ impl AgentBinder {
     /// the merged plan + case waivers; attribution resolves the mux sub-lane key
     /// (`ip:port#name` → `name`) of each finding's OFFENDING wire entry, so a
     /// party-scoped waiver never covers a co-socketed sibling's or the SUT's
-    /// finding. A rule-only scope reproduces the historic `allowViolations`
-    /// filter byte-for-byte. The returned [`WaiverOutcome::used`] mask (aligned
+    /// finding. A rule-only scope filters by rule name alone (the
+    /// `allowViolations` semantics). The returned [`WaiverOutcome::used`] mask (aligned
     /// to `waivers`) folds into the per-CAMPAIGN unused-waiver gate — NOT
     /// enforced per call (a divergent branch may legitimately never trip a rule).
     pub fn rfc_findings(&self, waivers: &[crate::WaiverScope]) -> WaiverOutcome {

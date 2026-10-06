@@ -11,24 +11,21 @@
 //! reply's `X-Overload` payload feeds the [`WorkerLoadObserver`]. Health is
 //! written through the [`WorkerRegistryControl`] seam.
 //!
-//! Why the transaction layer: the old fan-out sent ONE datagram per worker per
-//! tick, so a single lost packet was a full miss and two losses in ~2.5 s
-//! falsely flipped a healthy worker `Dead` (shedding it from selection).
-//! Timer E now retransmits at T1 inside the reply window, absorbing
+//! Why the transaction layer: a fan-out of ONE datagram per worker per tick
+//! turns a single lost packet into a full miss, and two losses in ~2.5 s
+//! falsely flip a healthy worker `Dead` (shedding it from selection).
+//! Timer E retransmits at T1 inside the reply window, absorbing
 //! single-packet loss; correlation is the transaction branch instead of a
 //! minted-Call-ID parse. The probe keeps its own reply window — Timer F is a
 //! fixed 32 s, far too slow for health detection — and **cancels** the
 //! transaction when the window expires, so per-probe state (here and in the
 //! transaction map) does not outlive `timeout_ms` by more than a turn.
 //!
-//! Late-reply recovery (the 2026-05-05 k8s endurance regression): the TS source
-//! kept a per-cycle `pendingByCallId[callId]` entry that its reap cleared at a
-//! short fixed deadline; under sustained traffic every valid-but-late 200 OK
-//! landed AFTER its entry was cleared, was silently discarded, and a worker that
-//! once crossed `threshold` stayed `Dead` for the rest of the run. That class of
-//! bug is structurally impossible here: a probe stays in `pending` keyed by its
-//! durable transaction Via branch, and a reply correlates by that branch in
-//! `handle_reply` for as long as the probe is still pending — which is governed
+//! Late-reply recovery: a valid-but-late 200 OK must still count, or a worker
+//! that once crossed `threshold` stays `Dead` for the rest of the run. A probe
+//! stays in `pending` keyed by its durable transaction Via branch, and a reply
+//! correlates by that branch in `handle_reply` for as long as the probe is
+//! still pending — which is governed
 //! by the **tick-gated reap**, not the timeout/interval ratio. The reap runs
 //! once per `interval_ms` tick and evicts only probes whose `deadline_ms <= now`
 //! at that tick, so a probe lingers in `pending` until the FIRST tick at-or-after
@@ -40,7 +37,7 @@
 //! later reap cannot count a spurious miss. A reply that lands after its branch
 //! has already been reaped, or that correlates to no `pending` probe at all (a
 //! forged/replayed branch), is dropped: it can never revive a worker. Locked by
-//! `tests/health_probe_late_reply.rs`.
+//! `tests/it/health_probe_late_reply.rs`.
 //!
 //! Identity hygiene (the dead-pod resurrection race): every pending probe
 //! carries the ADDRESS it was sent to, and a reply or miss only counts while
@@ -48,12 +45,11 @@
 //! dead pod's old IP cannot mark the recreated (never-probed) pod `Alive`. A
 //! host move also resets the worker's miss count and overload band, so the
 //! fresh pod is judged from scratch instead of inheriting the dead pod's
-//! state (which excluded an idle fresh pod from selection until its first
+//! state (which would exclude an idle fresh pod from selection until its first
 //! `X-Overload` reply).
 //!
 //! Scheduling rides `tokio::time` directly (per the sip-clock ADR); the tick
-//! period is `interval_ms` (the old loop slept `interval` and THEN drained for
-//! `timeout`, making the effective period `interval + timeout`).
+//! period is `interval_ms` (not `interval + timeout`).
 
 use std::collections::HashMap;
 use std::sync::Arc;

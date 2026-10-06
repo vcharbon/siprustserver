@@ -30,6 +30,8 @@ async fn b_leg_busy_is_relayed_and_call_terminates() {
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
 
@@ -50,5 +52,7 @@ async fn decision_reject_answers_caller_directly() {
     assert_eq!(cdrs.len(), 1);
     assert!(cdrs[0].b_legs.is_empty(), "no b-leg created on reject");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }

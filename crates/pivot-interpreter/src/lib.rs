@@ -1,8 +1,8 @@
 //! pivot-interpreter — the pivot v3 scenario interpreter.
 //!
 //! **Compile once, run many** (`PCAP2TEST_PIVOT_V3.md` §14): a document
-//! compiles to an immutable [`Plan`](plan::Plan); a run instance is that plan
-//! plus an identity substitution ([`instance::Instance`]), and every accessor
+//! compiles to an immutable [`Plan`]; a run instance is that plan
+//! plus an identity substitution (`instance::Instance`), and every accessor
 //! resolves against runner dialog state — never against document text. Nothing
 //! is re-parsed per call.
 //!
@@ -43,6 +43,8 @@
 //! - `gate` — what an `expect` gates on, and what it does with a datagram
 //!   that does not match.
 //! - `claim` — how a UAS claims its inbound INVITE.
+//! - `cancel` — the answer to a CANCEL sent after its INVITE's non-2xx
+//!   final.
 //! - `cursor` — the scheduler: readiness, `after`, dwell, `alt` commit,
 //!   `optional` release, `unordered` completion.
 //! - `early` — the early dialogs a forking callee answers under (§6.1).
@@ -71,6 +73,7 @@
 
 pub(crate) mod background;
 pub(crate) mod bundle;
+pub(crate) mod cancel;
 pub(crate) mod checks;
 pub(crate) mod claim;
 pub(crate) mod close;
@@ -97,12 +100,14 @@ pub(crate) mod stack;
 pub(crate) mod state;
 
 pub use exec::{Lane, Outcome};
+pub use instance::mint_nonce;
 pub use media::{Booking, MediaMode};
 pub use plan::{Plan, PlanError};
 pub use recording::Recording;
 pub use render::UriComposer;
 pub use replay::{replay, ReplayError};
 pub use settle::Sut;
+pub use stack::{dialog_identity, DialogIdentity};
 
 /// The run bundle's wire contracts, owned by [`pivot_schema::bundle`].
 pub use pivot_schema::bundle::{

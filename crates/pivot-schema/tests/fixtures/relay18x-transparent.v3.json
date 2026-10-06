@@ -39,7 +39,7 @@
           "collapse: 2 upstream 18x reached the caller as 1"
         ],
         "messages": "FIRST",
-        "mode": "18X_TO_180_SDP_TRANSPARENT"
+        "mode": "DOWNGRADE_KEEP_SDP"
       }
     }
   ],
@@ -47,17 +47,17 @@
     "annotations": {
       "flags": [
         {
-          "detail": "R-URI \"199990433000900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "R-URI \"199990415550900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         },
         {
-          "detail": "To \"+33000900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "To \"+15550900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         }
       ]
     },
     "family": "transparent",
-    "id": "capture_7146b916-5ab7-4ef7-b5d4-97c862ec6648.pcap.gz-auto",
+    "id": "capture_relay18x-transparent.pcap.gz-auto",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -69,16 +69,16 @@
       "call_groups": [
         0
       ],
-      "capture": "capture_7146b916-5ab7-4ef7-b5d4-97c862ec6648.pcap.gz"
+      "capture": "capture_relay18x-transparent.pcap.gz"
     },
-    "title": "capture_7146b916-5ab7-4ef7-b5d4-97c862ec6648.pcap.gz basic call (groups 0)",
+    "title": "capture_relay18x-transparent.pcap.gz basic call (groups 0)",
     "variant": "repro"
   },
   "endpoints": [
     {
       "binding": "loopback",
       "id": "ep0",
-      "observed": "172.20.245.10:5060",
+      "observed": "192.0.2.110:5060",
       "side": "peer"
     }
   ],
@@ -115,7 +115,7 @@
           },
           {
             "name": "P-Charging-Vector",
-            "value": "icid-value=exampleicid1000000000000000000000000000000;icid-generated-at=172.20.245.4"
+            "value": "icid-value=exampleicid1000000000000000000000000000000;icid-generated-at=192.0.2.104"
           },
           {
             "name": "P-Early-Media",
@@ -127,7 +127,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "\"+0000000900001\" <sip:+3348000900001@172.20.76.222>"
+            "value": "\"+0000000900001\" <sip:+1555800900001@192.0.2.122>"
           },
           {
             "name": "Supported",
@@ -135,11 +135,11 @@
           },
           {
             "name": "User-Agent",
-            "value": "JLAB620"
+            "value": "example-ua"
           },
           {
-            "name": "P-Charge-Info",
-            "value": "sip:926592061@172.20.245.10:5060"
+            "name": "X-Vendor-Charge",
+            "value": "sip:555000901@192.0.2.110:5060"
           },
           {
             "name": "Content-Disposition",
@@ -148,10 +148,10 @@
         ],
         "method": "INVITE",
         "ruri": {
-          "frozen": "199990433000900002"
+          "frozen": "199990415550900002"
         },
         "to": {
-          "frozen": "+33000900002"
+          "frozen": "+15550900002"
         }
       },
       "observed": {
@@ -210,7 +210,7 @@
           },
           {
             "name": "P-Charging-Vector",
-            "value": "icid-value=exampleicid1000000000000000000000000000000;icid-generated-at=172.20.245.4"
+            "value": "icid-value=exampleicid1000000000000000000000000000000;icid-generated-at=192.0.2.104"
           },
           {
             "name": "P-Early-Media",
@@ -222,7 +222,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "\"+0000000900001\" <sip:+3348000900001@carrier.example.net>"
+            "value": "\"+0000000900001\" <sip:+1555800900001@carrier.example.net>"
           },
           {
             "name": "Supported",
@@ -230,11 +230,11 @@
           },
           {
             "name": "User-Agent",
-            "value": "JLAB620"
+            "value": "example-ua"
           },
           {
-            "name": "P-Charge-Info",
-            "value": "sip:926592061@172.20.245.10:5060"
+            "name": "X-Vendor-Charge",
+            "value": "sip:555000901@192.0.2.110:5060"
           },
           {
             "name": "Content-Disposition",
@@ -242,7 +242,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900004@carrier.example.net>;limit=10;reason=unconditional;counter=1"
+            "value": "<sip:+15550900004@carrier.example.net>;limit=10;reason=unconditional;counter=1"
           }
         ],
         "method": "INVITE"
@@ -295,23 +295,23 @@
           },
           {
             "name": "Server",
-            "value": "OneAccess_OneOS-pCPE-PPC_pi2-6.9.2m2 (PBXPLUG_401)"
+            "value": "example-pbx/1.0"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid05000000000000000000000000000000000000000000;icid-generated-at=203.0.113.17;orig-ioi=SbcNodeB"
           },
           {
-            "name": "P-Term",
-            "value": "sbc.site2.113"
+            "name": "X-Vendor-Term",
+            "value": "edge2.example.e113"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           },
           {
-            "name": "P-Orig",
-            "value": "cl4.site2.psx01"
+            "name": "X-Vendor-Orig",
+            "value": "core2.example.px01"
           }
         ],
         "reason": "Session Progress",
@@ -346,23 +346,23 @@
           },
           {
             "name": "Server",
-            "value": "OneAccess_OneOS-pCPE-PPC_pi2-6.9.2m2 (PBXPLUG_401)"
+            "value": "example-pbx/1.0"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid05000000000000000000000000000000000000000000;icid-generated-at=203.0.113.17;orig-ioi=SbcNodeB"
           },
           {
-            "name": "P-Term",
-            "value": "sbc.site2.113"
+            "name": "X-Vendor-Term",
+            "value": "edge2.example.e113"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           },
           {
-            "name": "P-Orig",
-            "value": "cl4.site2.psx01"
+            "name": "X-Vendor-Orig",
+            "value": "core2.example.px01"
           }
         ],
         "reason": "Ringing",
@@ -393,23 +393,23 @@
           },
           {
             "name": "Server",
-            "value": "OneAccess_OneOS-pCPE-PPC_pi2-6.9.2m2 (PBXPLUG_401)"
+            "value": "example-pbx/1.0"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid05000000000000000000000000000000000000000000;icid-generated-at=203.0.113.17;orig-ioi=SbcNodeB"
           },
           {
-            "name": "P-Term",
-            "value": "sbc.site2.113"
+            "name": "X-Vendor-Term",
+            "value": "edge2.example.e113"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           },
           {
-            "name": "P-Orig",
-            "value": "cl4.site2.psx01"
+            "name": "X-Vendor-Orig",
+            "value": "core2.example.px01"
           }
         ],
         "reason": "Ringing",
@@ -561,31 +561,31 @@
         "headers": [
           {
             "name": "Diversion",
-            "value": "<sip:+33000900004@203.0.113.33>;limit=10;reason=unconditional;counter=1"
+            "value": "<sip:+15550900004@203.0.113.33>;limit=10;reason=unconditional;counter=1"
           },
           {
             "name": "Server",
-            "value": "OneAccess_OneOS-pCPE-PPC_pi2-6.9.2m2 (PBXPLUG_401)"
+            "value": "example-pbx/1.0"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900003@203.0.113.10>;device=sbc.site2.113;reason=SIP;location=CUSTOMER;realm=2234800;code=487;text=\"Request Terminated\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900003@203.0.113.10>;cause=487"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid05000000000000000000000000000000000000000000;icid-generated-at=203.0.113.17;orig-ioi=SbcNodeB"
           },
           {
-            "name": "P-Term",
-            "value": "sbc.site2.113"
+            "name": "X-Vendor-Term",
+            "value": "edge2.example.e113"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           },
           {
-            "name": "P-Orig",
-            "value": "cl4.site2.psx01"
+            "name": "X-Vendor-Orig",
+            "value": "core2.example.px01"
           }
         ],
         "reason": "Request Terminated",
@@ -628,7 +628,7 @@
       ],
       "kind": "external-caller",
       "name": "caller",
-      "observed": "+33000900001"
+      "observed": "+15550900001"
     },
     {
       "catalog": {
@@ -639,7 +639,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900003"
+      "observed": "+15550900003"
     }
   ],
   "legs": [

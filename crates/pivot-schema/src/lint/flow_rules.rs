@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use crate::body::Body;
 use crate::flow::{CheckMode, FlowNode, Op, Step};
+use crate::lint::transactions::{discharged_by, landing_of};
 use crate::lint::{at, reach, Index, Place, Reach, Report};
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -138,7 +139,7 @@ fn confirms_dialog_marking(index: &Index<'_>, report: &mut Report) {
             );
             continue;
         }
-        let Some(dialog) = dialog_of(&dialogs, step, *place) else {
+        let Some(dialog) = dialog_of(&all, &dialogs, step, *place) else {
             report.error(
                 "in-dialog/confirm-outside-dialog",
                 &path,
@@ -186,15 +187,24 @@ struct Dialog<'a> {
     /// Whether the leg carries another dialog on the same run, which is what
     /// makes the fork tag load-bearing for pairing.
     forked: bool,
-    /// The first ACK the run reaches after the final, where there is one.
+    /// The ACK that answers the final, where the run carries one.
     confirming: Option<&'a Step>,
 }
 
 /// Every dialog the document opens: a `2xx` to an INVITE that no earlier `2xx`
 /// to an INVITE on the same leg AND the same fork precedes. Under forking each
 /// answered fork mints its own dialog on the one leg, so the fork tag is part of
-/// the identity; a re-INVITE's `2xx` names the fork its dialog rings on and so
-/// opens nothing.
+/// the identity; a re-INVITE's `2xx` names the fork its dialog rings on, or
+/// names none inside a dialog already up, and either way opens nothing.
+///
+/// The ACK answering the final is the one that DISCHARGES its transaction as
+/// the leg's state holds it (`lint::transactions`): a re-INVITE sent over the
+/// un-ACKed 2xx is answered 491 (RFC 3261 §14.1) and its ACK is that
+/// transaction's own (§17.1.1.3), so it runs first and confirms nothing. Under
+/// forking each answered fork's 2xx is its own final owed its own ACK
+/// (§13.2.2.4), and an ACK that names a fork pairs by the tag, whatever order
+/// the ACKs run in; an ACK naming none — one the leg sends, which names no
+/// fork (§6.1) — pairs with the fork's 2xx it discharges.
 fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
     let creating: Vec<(Place, &'a Step)> =
         all.iter().filter(|(_, step)| is_dialog_creating(step)).copied().collect();
@@ -204,7 +214,7 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
             !creating.iter().any(|(other_place, other)| {
                 other.id != step.id
                     && other.leg == step.leg
-                    && other.early.as_deref() == step.early.as_deref()
+                    && (step.early.is_none() || other.early == step.early)
                     && reach(*other_place, *place) == Reach::Ok
             })
         })
@@ -221,13 +231,22 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
                         || reach(*place, *other_place) == Reach::Ok)
             });
             let fork = step.early.as_deref();
+            let transaction = landing_of(all, step, *place);
+            let answers = |ack: &Step, ack_place: Place| match (forked, ack.early.as_deref()) {
+                (true, Some(named)) => Some(named) == fork,
+                (true, None) => discharged_by(all, ack, ack_place)
+                    .is_some_and(|discharge| discharge.final_.id == step.id),
+                (false, _) => discharged_by(all, ack, ack_place).is_some_and(|discharge| {
+                    discharge.transaction == transaction && is_dialog_creating(discharge.final_)
+                }),
+            };
             let confirming = all
                 .iter()
                 .find(|(ack_place, ack)| {
                     is_ack(ack)
                         && ack.leg == step.leg
                         && reach(*place, *ack_place) == Reach::Ok
-                        && (!forked || ack.early.as_deref() == fork)
+                        && answers(ack, *ack_place)
                 })
                 .map(|(_, ack)| *ack);
             Dialog {
@@ -243,17 +262,31 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
 }
 
 /// The dialog a marked ACK belongs to: the latest one its own run opened on its
-/// leg, and under forking the one it names.
+/// leg, and under forking the one it names — or, naming none, the one whose
+/// 2xx it discharges, else the latest as on an unforked leg.
 fn dialog_of<'a, 'd>(
+    all: &[(Place, &'a Step)],
     dialogs: &'d [Dialog<'a>],
     step: &Step,
     place: Place,
 ) -> Option<&'d Dialog<'a>> {
-    dialogs.iter().rfind(|dialog| {
-        dialog.leg == step.leg
-            && reach(dialog.place, place) == Reach::Ok
-            && (!dialog.forked || dialog.fork == step.early.as_deref())
-    })
+    let on_leg =
+        |dialog: &&Dialog<'a>| dialog.leg == step.leg && reach(dialog.place, place) == Reach::Ok;
+    match step.early.as_deref() {
+        Some(named) => dialogs
+            .iter()
+            .rfind(|dialog| on_leg(dialog) && (!dialog.forked || dialog.fork == Some(named))),
+        None => {
+            let discharged =
+                discharged_by(all, step, place).map(|discharge| discharge.final_.id.as_str());
+            dialogs
+                .iter()
+                .rfind(|dialog| {
+                    on_leg(dialog) && (!dialog.forked || Some(dialog.final_id) == discharged)
+                })
+                .or_else(|| dialogs.iter().rfind(on_leg))
+        }
+    }
 }
 
 /// Where a transaction-derived message may carry a STORED body (§6.3).
@@ -346,24 +379,13 @@ fn is_invite_final(step: &Step) -> bool {
         && step.msg.cseq_method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
 }
 
-/// Whether this ACK step answers a 2xx: the nearest INVITE final its own run
-/// reaches on its leg. A leg holding no final at all reads as non-2xx — the
-/// conservative side, since a body nothing emits is worse than one never stored.
+/// Whether this ACK step answers a 2xx: the final it discharges as the leg's
+/// state holds it (`lint::transactions`), which after a 491 round is the 2xx
+/// still waiting and not the 491 nearest to it. An ACK discharging nothing
+/// reads as non-2xx — the conservative side, since a body nothing emits is
+/// worse than one never stored.
 fn acks_a_2xx(all: &[(Place, &Step)], step: &Step, place: Place) -> bool {
-    all.iter()
-        .filter(|(other_place, other)| {
-            other.id != step.id
-                && other.leg == step.leg
-                && other.msg.status.is_some_and(|s| s >= 200)
-                && other
-                    .msg
-                    .cseq_method
-                    .as_deref()
-                    .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
-                && reach(*other_place, place) == Reach::Ok
-        })
-        .next_back()
-        .is_some_and(|(_, final_)| final_.msg.status.is_some_and(|s| s < 300))
+    discharged_by(all, step, place).is_some_and(|discharge| is_dialog_creating(discharge.final_))
 }
 
 /// Whether the step is a `2xx` answering an INVITE.

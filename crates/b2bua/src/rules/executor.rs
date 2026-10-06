@@ -1,7 +1,9 @@
 //! Rule selection + execution — port of `Matcher.ts` (`pickRanked`) +
 //! `RuleExecutor.ts`. First handler returning `Some` wins; its actions run
 //! through the [`ActionExecutor`], then termination is finalized + invariants
-//! enforced. No candidate → the default handler. Selection gates on the
+//! enforced. A handler that only observes writes its call-ext slices and the
+//! chain goes on ([`RuleHandleResult::observe`]). No candidate → the default
+//! handler. Selection gates on the
 //! call's lifecycle too: a call already going away makes no forward progress
 //! on its own clock, so an asynchronous trigger reaches only its teardown
 //! rules there (`RuleDefinition::teardown`) and every other candidate is
@@ -16,7 +18,9 @@ use crate::obligations::ObligationSet;
 
 use super::actions::ActionExecutor;
 use super::invariants;
-use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+use b2bua_sdk::model::{
+    EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+};
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
 /// machine's cursor is one of its `active_states`. A machine-less core rule is
@@ -81,7 +85,7 @@ fn select<'a>(rules: &'a [RuleDefinition], call: &Call, ctx: &RuleContext) -> Se
     Selection { ranked: candidates.into_iter().map(|(_, r)| r).collect(), absorbed }
 }
 
-/// The ranked candidates for `ctx` on `call` (see [`select`]).
+/// The ranked candidates for `ctx` on `call` (see `select`).
 pub fn pick_ranked<'a>(
     rules: &'a [RuleDefinition],
     call: &Call,
@@ -91,8 +95,10 @@ pub fn pick_ranked<'a>(
 }
 
 /// Run the rule chain for `ctx` over the authoritative `call`. The first
-/// matching rule that returns `Some` handles the event; no candidate → the
-/// default no-op result (the unchanged call, no effects). A fire the
+/// matching rule that returns `Some` handles the event; a result that only
+/// observes ([`RuleHandleResult::observe`]) writes its call-ext slices and the
+/// chain goes on over the call with those writes. No candidate → the default
+/// no-op result (the call as the observers left it, no effects). A fire the
 /// going-away gate absorbed is counted either way.
 pub fn execute_rules(
     rules: &[RuleDefinition],
@@ -102,8 +108,20 @@ pub fn execute_rules(
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);
+    // The call as the observers so far left it; `None` until one wrote.
+    let mut observed: Option<Call> = None;
     for rule in selection.ranked {
+        let call = observed.as_ref().unwrap_or(call);
+        let rule_ctx = RuleContext { call: RuleCall::new(call), ..*ctx };
+        let ctx = &rule_ctx;
         if let Some(outcome) = (rule.handle)(ctx) {
+            if outcome.observes {
+                report_diagnostics(rule, call, &outcome);
+                let next = apply_observation(rule, call, &outcome.actions);
+                crate::trace::emit::rule_observed(&next, exec.now_ms, rule.id);
+                observed = Some(next);
+                continue;
+            }
             let before = call.clone();
             report_diagnostics(rule, call, &outcome);
             check_declared_effects(rule, &outcome.actions);
@@ -119,7 +137,13 @@ pub fn execute_rules(
                 );
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors, torn_down);
             let result = invariants::finalize(result);
-            let mut enforced = invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            let mut enforced = invariants::enforce(
+                obligations,
+                &before,
+                result,
+                exec.now_ms,
+                invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+            );
             // Recorded from the FINAL call, so the trace carries what finalize
             // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
             // otherwise shows on a traced call as a `sip.out` with no matching
@@ -129,9 +153,44 @@ pub fn execute_rules(
             return enforced;
         }
     }
+    let call = observed.as_ref().unwrap_or(call);
     let mut result = HandlerResult::new(call.clone());
     note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
     result
+}
+
+/// Apply an observation's call-ext writes to `call`. Any other action is not
+/// an observation's to take: an authoring bug, which panics under
+/// `debug_assertions` (as an undeclared effect does) and is dropped and logged
+/// in release, so the claiming rule's handling stays the turn's only effect.
+fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction]) -> Call {
+    let mut call = call.clone();
+    for action in actions {
+        match action {
+            RuleAction::MergeCallExt { ext } => {
+                for (key, value) in ext {
+                    let value = (!value.is_null()).then(|| value.clone());
+                    call = call::helpers::set_call_ext(call, key, value);
+                }
+            }
+            other => {
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "rule '{}' observed with a {:?} action (an observation writes call ext only)",
+                        rule.id,
+                        other.effect_kind(),
+                    );
+                }
+                tracing::error!(
+                    call_ref = %call.call_ref,
+                    rule = %rule.id,
+                    action = ?other,
+                    "an observing rule may only write call ext; action dropped"
+                );
+            }
+        }
+    }
+    call
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming

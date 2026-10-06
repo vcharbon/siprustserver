@@ -8,10 +8,9 @@
 //! the packet arrives later). This is the fake-transport fabric: a scenario
 //! runs in zero wall-time under a paused tokio clock.
 //!
-//! Deferred vs. the source (tracked in MIGRATION_STATUS): the `ConnectivityGate`
-//! (per-fiber partition gating for the k8s reliability tests) is not ported in
-//! this slice — it belongs with the cluster harness. `send_fault` (per-pair
-//! send failure injection) is ported, as it's a pure-network fault primitive.
+//! Per-fiber partition gating belongs with the cluster harness, not here.
+//! `send_fault` (per-pair send failure injection) lives here, as it's a
+//! pure-network fault primitive.
 
 use std::collections::HashMap;
 use std::future::Future;

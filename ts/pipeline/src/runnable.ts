@@ -13,8 +13,10 @@
  * - {@link unackedFinals} — the final is there and the ACK is not. The SUT sent
  *   the INVITE and took a 2xx, so the SUT owes the ACK; the capture holds none.
  * - {@link unackedTakenFinals} — the same hole on the other side of the arrow.
- *   The ACTOR sent an offer-less INVITE and took a 2xx, and the leg goes on to
- *   carry a new in-dialog transaction, which only a CONFIRMED dialog carries.
+ *   The ACTOR sent the INVITE and took a 2xx, and either the leg goes on to
+ *   carry a new in-dialog transaction, which only a CONFIRMED dialog carries, or
+ *   the 2xx's ladder stopped short of its schedule and the far leg expects the
+ *   ACK relayed.
  * - {@link orphanResponses} — the response is there and the request is not, with
  *   the method left open. A response belongs to a transaction, so a leg holding
  *   one and not the request that opened it lost that request to the trace,
@@ -31,12 +33,16 @@
  * ACK carries its own stored content and states its own coordinates, so it is
  * emittable whatever the flow holds around it.
  *
- * The two ACK rules are predictions about the RUN, so both read the OFFER MODEL
- * the exchange was dialled with ({@link offeredIngress}): an offer-carrying
- * INVITE draws its ACK out of the UAC that sent it, an offer-less one leaves
- * that ACK to travel end to end (RFC 3264 §4).
+ * The two ACK rules are predictions about the RUN, and the prediction is that an
+ * ACK to a 2xx travels END TO END: the stack relays the acknowledging party's
+ * own (RFC 3261 §13.2.2.4), so a leg whose ACK the trace lost holds a step
+ * nothing satisfies. Where that ACK never comes, the §13.3.1.4 give-up composes
+ * only the one owing no answer body ({@link offeredIngress}, RFC 3264 §4), and
+ * {@link unackedFinals} charges on that.
  */
-import { Body, Flow } from "@sip/contracts"
+import { Body, Flow, Schedules, Tokens } from "@sip/contracts"
+import { PROXIMITY_US } from "./delay.js"
+import { inviteTransactions } from "./transactions.js"
 
 /** The reason token a document ACKing an unfinalled transaction is refused by. */
 export const FINAL_NOT_CAPTURED = "source-final-not-captured"
@@ -83,13 +89,15 @@ const repeats = (step: Flow.Step): boolean => (step.retransmits ?? 0) > 0
 
 /**
  * Whether the INVITE that opened this exchange carried an OFFER, which is what
- * decides who owes the ACK to its 2xx.
+ * decides whether this stack can compose the ACK to its 2xx ALONE.
  *
- * A UAC that offered ACKs the 2xx on receipt, because the answer came back in
- * the response (RFC 3261 §13.2.2.4). A UAC that did NOT offer takes the offer
- * IN the 2xx and owes the answer in its ACK (RFC 3264 §4), and a B2BUA holding
- * that leg has no answer of its own — it waits for the ACK arriving on the leg
- * the offer-less INVITE came from, and relays it.
+ * A UAC that offered has its answer in the response (RFC 3261 §13.2.2.4), so
+ * that ACK owes no body and the stack can form it from dialog state. A UAC that
+ * did NOT offer takes the offer IN the 2xx and owes the answer in its ACK
+ * (RFC 3264 §4), which only the far party supplies. Either one is the far
+ * party's own, relayed; what the offer decides is what the stack can put on the
+ * leg when that ACK never comes — the §13.3.1.4 give-up acknowledges the first
+ * before its BYE and leaves the second to the BYE alone.
  *
  * Read at the INGRESS, never on the SUT's own INVITE, because what the SUT
  * emits is what the document CAPTURED and a platform is free to re-offer where
@@ -200,13 +208,14 @@ const isAckArrival = (step: Flow.Step): boolean => step.op === "expect" && isAck
  * lacks it lost it, and a conformant SUT replaying the document sends it and is
  * charged an unexpected datagram.
  *
- * What makes the hole cost anything is that the RUN puts an ACK there, and
- * which ACK that is turns on the offer model ({@link offeredIngress}). Where the
- * exchange was dialled WITH an offer the SUT ACKs the 2xx on receipt and the
- * charge is unconditional. Where it was dialled without one the SUT's ACK
- * carries an answer only the ingress leg's own ACK supplies, so it goes out
- * exactly when that ACK arrives — and where the document holds none after this
- * 2xx, nothing lands, the case replays as written, and the coverage is kept.
+ * What makes the hole cost anything is that the RUN still puts an ACK there, and
+ * whether it can turns on the offer model ({@link offeredIngress}). Where the
+ * exchange was dialled WITH an offer the stack can compose that ACK alone, so
+ * the §13.3.1.4 give-up puts one on the leg ahead of its BYE and the charge is
+ * unconditional. Where it was dialled without one the ACK owes an answer only
+ * the ingress leg's own ACK supplies, so it goes out exactly when that ACK
+ * arrives — and where the document holds none after this 2xx, nothing lands,
+ * the case replays as written, and the coverage is kept.
  *
  * TWO SHAPES ARE NOT THIS HOLE, and each is read off the document itself:
  *
@@ -301,27 +310,61 @@ export const unackedLine = (
  */
 export const ACTOR_ACK_NOT_CAPTURED = "source-actor-ack-not-captured"
 
-/** One dialog-creating 2xx the ACTOR owed an ACK for, and what proves it sent one. */
-export interface UnackedTakenFinal {
+/**
+ * What proves the actor's missing ACK crossed the wire: a later in-dialog
+ * request on the leg (`continuation`), or a 2xx whose ladder stopped short of
+ * its schedule while the far leg expects its ACK relayed (`relayed-ack`).
+ */
+export type LostAckGroundKind = "continuation" | "relayed-ack"
+
+/** Where a 2xx's declared ladder stopped, in ms from the 2xx. */
+export interface LadderEnd {
+  /** How many rungs the document declares. */
+  readonly rungs: number
+  /** The instant of the last declared rung. */
+  readonly lastRungMs: number
+  /** The instant the next rung of the schedule was due. */
+  readonly dueMs: number
+}
+
+/** One dialog-creating 2xx the ACTOR owed an ACK for, and the step that proves it sent one. */
+interface UnackedTaken {
   /** The step id of the 2xx the leg took. */
   readonly final: string
   /** The id of the INVITE step the actor had sent on this leg. */
   readonly invite: string
   readonly leg: string
-  /** The id of the later in-dialog request the leg carries. */
-  readonly continuation: string
-  /** The method that request names. */
-  readonly method: string
   /** Where the 2xx sits in the capture, where the step states it. */
   readonly observed?: Flow.Observed
   /** Where the INVITE sits in the capture, where the step states it. */
   readonly inviteObserved?: Flow.Observed
-  /** Where the continuing request sits in the capture, where the step states it. */
-  readonly continuationObserved?: Flow.Observed
 }
 
-/** The finding before the continuation that proves it. */
-type UnackedTaken = Omit<UnackedTakenFinal, "continuation" | "method">
+/** The finding with its ground: one arm per proof. */
+export type UnackedTakenFinal =
+  & UnackedTaken
+  & {
+    /** The id of the step that proves it. */
+    readonly proof: string
+    /** Where the proving step sits in the capture, where the step states it. */
+    readonly proofObserved?: Flow.Observed
+  }
+  & (
+    | {
+      readonly ground: "continuation"
+      /** The method the later in-dialog request on the leg names. */
+      readonly method: string
+    }
+    | {
+      readonly ground: "relayed-ack"
+      /** The far leg whose ACK step is the actor's ACK relayed. */
+      readonly groundLeg: string
+      /** How long the leg stayed silent after the 2xx, in ms: past the rung that was due. */
+      readonly silenceMs: number
+      /** The ladder the 2xx ran before it stopped; absent where it declares none. */
+      readonly ladder?: LadderEnd
+    }
+  )
 
 /**
  * Whether a request on the leg is one only a CONFIRMED dialog carries. ACK and
@@ -335,7 +378,246 @@ const isContinuation = (step: Flow.Step): boolean =>
   isRequest(step) && !["ACK", "BYE", "CANCEL"].includes(method(step))
 
 /**
- * Every dialog-creating 2xx the actor takes, never ACKs, and goes on to use.
+ * Every 2xx the actor takes on a leg and no ACK on that leg ever settles, each
+ * at its position in the step list, in document order — the SETTLE predicate,
+ * apart from what proves the missing ACK was lost.
+ *
+ * Leg state names the transaction an ACK settles, never the step's captured
+ * `cseq` ({@link inviteTransactions}): the newest INVITE the actor sent that
+ * holds a final and no ACK yet, each ACK its own. A non-2xx final consumes an
+ * ACK the same way (§17.1.1.3) and is never owed. A second final on the same
+ * INVITE — a fork's 2xx, a re-emission — is its own step owed its own ACK
+ * (§13.2.2.4); a repeat the document folds is no step. A 2xx the actor takes
+ * on a leg it never sent an INVITE on is nobody's to settle here.
+ */
+const unsettledTakenFinals = (
+  steps: ReadonlyArray<Flow.Step>
+): ReadonlyArray<{ readonly at: number; readonly final: UnackedTaken }> =>
+  [...inviteTransactions(steps).byLeg.values()]
+    .flat()
+    .flatMap((t) => {
+      if (
+        t.op !== "send" ||
+        t.invite === undefined ||
+        t.acked ||
+        t.final === undefined ||
+        !isInviteSuccess(t.final.step)
+      ) {
+        return []
+      }
+      const final = t.final.step
+      const invite = t.invite
+      return [{
+        at: t.final.at,
+        final: {
+          final: final.id,
+          invite: invite.id,
+          leg: final.leg,
+          ...(final.observed === undefined ? {} : { observed: final.observed }),
+          ...(invite.observed === undefined ? {} : { inviteObserved: invite.observed })
+        }
+      }]
+    })
+    .sort((a, b) => a.at - b.at)
+
+/**
+ * Whether the request at `at` is an INVITE the leg's next INVITE final travelling
+ * the other way answers 491: RFC 6026 Accepted glare, the answering side stating
+ * an earlier INVITE is still un-ACKed at that moment — the opposite of a
+ * confirmed dialog.
+ */
+const answeredRequestPending = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): boolean => {
+  const request = steps[at]!
+  if (!isInvite(request)) return false
+  const final = steps
+    .slice(at + 1)
+    .find((s) => s.leg === leg && s.op !== request.op && isInviteFinal(s))
+  return final?.msg.status === 491
+}
+
+/**
+ * The first new in-dialog transaction the leg carries after the 2xx
+ * ({@link isContinuation}), traffic no unconfirmed dialog carries. A re-INVITE
+ * the peer answered 491 is not that traffic ({@link answeredRequestPending});
+ * the continuation after it still is. Undefined where the leg carries none.
+ */
+const continuationAfter = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): Flow.Step | undefined => {
+  for (let i = at + 1; i < steps.length; i += 1) {
+    const s = steps[i]!
+    if (s.leg !== leg || !isContinuation(s) || answeredRequestPending(steps, i, leg)) continue
+    return s
+  }
+  return undefined
+}
+
+/** The wait before each rung of a 2xx's ladder, T1 first, to its give-up (RFC 3261 §13.3.1.4). */
+const FINAL_2XX_RUNGS_MS = Schedules.rungIntervalsMs("final-2xx")
+
+/**
+ * Where the declared ladder of the 2xx stopped: its rung count, the instant of
+ * its last rung — the gaps the document states summed, the schedule's where it
+ * states none ({@link Schedules.rungGapsMs}) — and the instant the schedule's
+ * next rung was due. The next rung is the schedule's gap, not the stated pace
+ * extrapolated: a platform whose T1 is not the RFC's is measured against the
+ * RFC's ladder. A 2xx declaring no rung is a ladder that stopped at its head,
+ * the first rung due at T1. Undefined where the ladder ran to the schedule's
+ * end: no rung was due after it.
+ */
+const ladderEnd = (step: Flow.Step): LadderEnd | undefined => {
+  const rungs = step.retransmits ?? 0
+  const next = FINAL_2XX_RUNGS_MS[rungs]
+  if (next === undefined) return undefined
+  const lastRungMs = Schedules.rungGapsMs("final-2xx", rungs, step.retransmit_intervals_ms)
+    .reduce((sum, gap) => sum + gap, 0)
+  return { rungs, lastRungMs, dueMs: lastRungMs + next }
+}
+
+/**
+ * Whether the far leg's ACK step sits AFTER the ladder's last rung, by the two
+ * `observed` instants. Vacuous where the ladder declares no rung; false where
+ * either coordinate is unstated, since nothing then sets the ACK against the
+ * rung.
+ */
+const ackAfterLastRung = (twoxx: Flow.Step, ack: Flow.Step, ladder: LadderEnd): boolean => {
+  if (ladder.rungs === 0) return true
+  const from = twoxx.observed?.at_us
+  const to = ack.observed?.at_us
+  return from !== undefined && to !== undefined && to > from + ladder.lastRungMs * 1000
+}
+
+/** Whether the step ends the dialog it sits in, whichever side sends it. */
+const endsDialog = (step: Flow.Step): boolean =>
+  isRequest(step) && ["BYE", "CANCEL"].includes(method(step))
+
+/**
+ * How long the leg stayed silent after the 2xx at `at`, in ms, as the capture
+ * measured it: from the 2xx's `observed.at_us` to the first same-leg step that
+ * ends the dialog ({@link endsDialog}), or the leg's last step where none
+ * does. The ladder the platform owed is folded over the whole envelope, so a
+ * step that keeps the dialog going does not close the window. Undefined where
+ * either coordinate is unstated or the leg carries nothing after the 2xx.
+ */
+const silenceAfter = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number | undefined => {
+  const rest = steps.slice(at + 1).filter((s) => s.leg === leg)
+  const bound = rest.find(endsDialog) ?? rest.at(-1)
+  const from = steps[at]!.observed?.at_us
+  const to = bound?.observed?.at_us
+  if (from === undefined || to === undefined) return undefined
+  return Math.floor((to - from) / 1000)
+}
+
+const isRelayedSuccess = (step: Flow.Step, leg: string): boolean =>
+  step.leg !== leg && step.op === "send" && isInviteSuccess(step)
+
+/**
+ * The index of the far leg's 2xx the SUT relayed onto `leg` as the 2xx at
+ * `at`: the step the 2xx's delay is anchored on, where the cut stamped a
+ * cross-leg 2xx-to-INVITE there — the relay the classifier read (§6.9) — and
+ * otherwise the nearest cross-leg 2xx sent within relay proximity of the 2xx's
+ * own instant, before or after it in the merged order: two captures, two
+ * clocks, and the classifier anchors a relay stamped later than its arrival
+ * on the arrival's own leg. -1 where none.
+ */
+const relayedSuccessOf = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number => {
+  const step = steps[at]!
+  const anchor = Tokens.anchorStep(step.delay.from)
+  const stamped = anchor === undefined ? -1 : steps.findIndex((s) => s.id === anchor)
+  if (stamped >= 0 && isRelayedSuccess(steps[stamped]!, leg)) return stamped
+  const t = step.observed?.at_us
+  if (t === undefined) return -1
+  let nearest = -1
+  steps.forEach((s, i) => {
+    const u = s.observed?.at_us
+    if (!isRelayedSuccess(s, leg) || u === undefined || Math.abs(u - t) >= PROXIMITY_US) return
+    if (nearest < 0 || Math.abs(u - t) < Math.abs(steps[nearest]!.observed!.at_us - t)) nearest = i
+  })
+  return nearest
+}
+
+/**
+ * The far leg's ACK step to the transaction whose 2xx the SUT relayed onto this
+ * leg at `at` ({@link relayedSuccessOf}): the first ACK that leg EXPECTS after
+ * its 2xx, up to the far leg's next INVITE, which owns every ACK past it.
+ * Undefined where the far leg expects none.
+ */
+const relayedAckAfter = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): Flow.Step | undefined => {
+  const relayed = relayedSuccessOf(steps, at, leg)
+  if (relayed < 0) return undefined
+  const far = steps[relayed]!.leg
+  for (let i = relayed + 1; i < steps.length; i += 1) {
+    const s = steps[i]!
+    if (s.leg !== far) continue
+    if (isInvite(s)) return undefined
+    if (isAckArrival(s)) return s
+  }
+  return undefined
+}
+
+/** What proves the missing ACK was lost, as {@link lostAckGround} finds it. */
+type LostAckGround =
+  | { readonly kind: "continuation"; readonly step: Flow.Step }
+  | {
+    readonly kind: "relayed-ack"
+    readonly step: Flow.Step
+    readonly silenceMs: number
+    readonly ladder: LadderEnd
+  }
+
+/**
+ * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
+ * it. Two proofs, the first that holds:
+ *
+ * - a continuation on the leg ({@link continuationAfter});
+ * - the far leg expects that ACK relayed AFTER the last rung of the
+ *   platform's 2xx ladder toward the actor ({@link relayedAckAfter},
+ *   {@link ackAfterLastRung}) — that step is the proof. It is read only where
+ *   the ladder stopped short of its schedule ({@link ladderEnd}) and the leg's
+ *   silence ({@link silenceAfter}) ran past the rung that was due: a UAS
+ *   repeats a 2xx rung after rung until the ACK arrives (§13.3.1.4), so only
+ *   then may the ACK have reached. The far leg's ACK is read as the actor's
+ *   relayed, which a platform that ACKs the far leg on its own falsifies.
+ *
+ * Undefined where neither holds, and the abandoned-dialog reading stands.
+ */
+const lostAckGround = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): LostAckGround | undefined => {
+  const continuation = continuationAfter(steps, at, leg)
+  if (continuation !== undefined) return { kind: "continuation", step: continuation }
+  const twoxx = steps[at]!
+  const ladder = ladderEnd(twoxx)
+  if (ladder === undefined) return undefined
+  const silenceMs = silenceAfter(steps, at, leg)
+  if (silenceMs === undefined || silenceMs <= ladder.dueMs) return undefined
+  const relayed = relayedAckAfter(steps, at, leg)
+  if (relayed === undefined || !ackAfterLastRung(twoxx, relayed, ladder)) return undefined
+  return { kind: "relayed-ack", step: relayed, silenceMs, ladder }
+}
+
+/**
+ * Every dialog-creating 2xx the actor takes, never ACKs, and demonstrably ACKed.
  * Empty for a document cut from a vantage that captured its whole call.
  *
  * The mirror of {@link unackedFinals}: there the peer answers the SUT and the
@@ -343,75 +625,69 @@ const isContinuation = (step: Flow.Step): boolean =>
  * §13.2.2.4). The cost is worse than a stray datagram — the peer leg's ACK step
  * is gated on a message that never comes, taking the run down at that step.
  *
- * DELAYED-OFFER only, because that is the only dial the peer leg's ACK waits
- * for. An actor that offered draws an offer-carrying INVITE out of the SUT, and
- * the SUT ACKs the peer's 2xx on receipt whatever this leg does; an actor that
- * did not leaves the SUT owing an answer it can only take from this leg's ACK
- * (RFC 3264 §4), so withholding it strands the peer's ACK step.
+ * EVERY dial, offer or none, because the ACK the SUT owes the peer leg IS this
+ * one, relayed (§13.2.2.4): an actor that took the 2xx and never ACKed leaves
+ * that peer step waiting on a datagram the document never scripts, whatever the
+ * offer model was.
  *
- * The continuation is the second discriminator, because an actor that truly
- * never ACKs is a corner case worth REPLAYING — our own reaper answers it — and
- * looks identical up to this point. So the charge rests on what the leg carries
- * AFTERWARDS: a new in-dialog transaction ({@link isContinuation}) is traffic no
- * unconfirmed dialog carries, and its presence means the ACK crossed the wire
- * and the trace lost it. Where the leg carries none, the abandoned-dialog
- * reading stands and the case is kept.
+ * Two questions, answered apart. Whether an ACK on the leg SETTLES the 2xx
+ * ({@link unsettledTakenFinals}) reads the whole leg: an ACK the leg captures
+ * for that transaction settles it wherever it sits, before or after a
+ * continuation, and only a 2xx no ACK on the leg ever answers is charged. What
+ * proves the missing ACK was LOST rather than never sent
+ * ({@link lostAckGround}) is the second discriminator, because an actor that
+ * truly never ACKs is a corner case worth REPLAYING — our own reaper answers
+ * it — and looks identical up to this point. The far leg's ACK step is the
+ * actor's ACK relayed: where the actor never sent one it waits on a datagram
+ * the document never scripts, and the case is refused, never completed from
+ * the far leg's step.
  *
- * One forward pass per leg. Charged on the 2xx, so an INVITE the actor sent and
- * nobody answered is untouched, and a non-2xx final is out of scope: its ACK is
- * the client transaction's (§17.1.1.3), composed from the final itself.
+ * Charged on the 2xx, so an INVITE the actor sent and nobody answered is
+ * untouched, and a non-2xx final is out of scope: its ACK is the client
+ * transaction's (§17.1.1.3), composed from the final itself.
  */
 export const unackedTakenFinals = (
   flow: ReadonlyArray<Flow.FlowNode>
 ): ReadonlyArray<UnackedTakenFinal> => {
   const steps = flow.flatMap((node) => Flow.flowNodeSteps(node))
-  const opened = new Map<string, Flow.Step>()
-  const owed = new Map<string, { readonly at: number; readonly final: UnackedTaken }>()
-  const charged: Array<UnackedTakenFinal> = []
-  const settle = (leg: string): void => {
-    const pending = owed.get(leg)
-    owed.delete(leg)
-    if (pending === undefined) return
-    const next = steps.slice(pending.at + 1).find((s) => s.leg === leg && isContinuation(s))
-    if (next === undefined) return
-    charged.push({
-      ...pending.final,
-      continuation: next.id,
-      method: method(next),
-      ...(next.observed === undefined ? {} : { continuationObserved: next.observed })
-    })
-  }
-  steps.forEach((step, at) => {
-    if (isInvite(step)) {
-      settle(step.leg)
-      if (step.op === "send" && !carriesBody(step)) opened.set(step.leg, step)
-      else opened.delete(step.leg)
-    } else if (step.op === "expect" && isInviteSuccess(step)) {
-      const invite = opened.get(step.leg)
-      if (invite === undefined) return
-      owed.set(step.leg, {
-        at,
-        final: {
-          final: step.id,
-          invite: invite.id,
-          leg: step.leg,
-          ...(step.observed === undefined ? {} : { observed: step.observed }),
-          ...(invite.observed === undefined ? {} : { inviteObserved: invite.observed })
+  return unsettledTakenFinals(steps).flatMap(({ at, final }) => {
+    const ground = lostAckGround(steps, at, final.leg)
+    if (ground === undefined) return []
+    const proof = ground.step
+    const stated = {
+      ...final,
+      proof: proof.id,
+      ...(proof.observed === undefined ? {} : { proofObserved: proof.observed })
+    }
+    return [
+      ground.kind === "continuation"
+        ? { ...stated, ground: ground.kind, method: method(proof) }
+        : {
+          ...stated,
+          ground: ground.kind,
+          groundLeg: proof.leg,
+          silenceMs: ground.silenceMs,
+          ...(ground.ladder.rungs === 0 ? {} : { ladder: ground.ladder })
         }
-      })
-    } else if (step.op === "send" && isAck(step)) owed.delete(step.leg)
+    ]
   })
-  for (const leg of [...owed.keys()]) settle(leg)
-  return charged
 }
 
 /** One charged 2xx as the refusal's line states it. */
 const unackedTakenClause = (c: UnackedTakenFinal): string => {
   const where = (o: Flow.Observed | undefined): string =>
     o === undefined ? "" : ` (capture leg ${o.leg} msg ${o.msg})`
+  const proof = c.ground === "continuation"
+    ? `goes on to carry the ${c.method} at ${c.proof}${where(c.proofObserved)}`
+    : c.ladder === undefined
+    ? `the 2xx never repeated over the ${c.silenceMs} ms the leg stayed silent and leg ` +
+      `${c.groundLeg} step ${c.proof}${where(c.proofObserved)} expects that ACK relayed`
+    : `the 2xx's ladder stopped after ${c.ladder.rungs} rung${c.ladder.rungs === 1 ? "" : "s"} ` +
+      `at +${c.ladder.lastRungMs} ms where the next was due at +${c.ladder.dueMs} ms, over the ` +
+      `${c.silenceMs} ms the leg stayed silent, and leg ${c.groundLeg} step ${c.proof}` +
+      `${where(c.proofObserved)} expects that ACK relayed after that rung`
   return `leg ${c.leg} step ${c.final}${where(c.observed)} answers the actor's INVITE at ` +
-    `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet goes on ` +
-    `to carry the ${c.method} at ${c.continuation}${where(c.continuationObserved)}`
+    `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet ${proof}`
 }
 
 /** The one-line finding, for stderr and for `excluded.json`. */

@@ -18,7 +18,7 @@ use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::{ProxyMetrics, RoutingStrategy};
 
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 const W1: &str = "10.0.0.1";
 
 async fn core_with_metrics() -> (ProxyCore, Arc<ProxyMetrics>) {

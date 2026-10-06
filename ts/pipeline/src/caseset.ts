@@ -4,10 +4,10 @@
  * The cut proposes a case per call (`./cut.ts`); this file decides whether each
  * one is written. The ORDER is the whole of it:
  *
- * 1. every refusal the policy states that needs no document is decided first —
- *    the CAPTURE tier (the family alone) ahead of the CASE tier (the family
- *    plus the cut's vantages), so a rule never sees more than its decision
- *    needs — and such a case is never assembled;
+ * 1. every refusal that needs no document is decided first — the CAPTURE tier
+ *    (the family alone) ahead of the CASE tier (the family plus the cut's
+ *    vantages, the pipeline's own rules ahead of the policy's), so a rule never
+ *    sees more than its decision needs — and such a case is never assembled;
  * 2. what is left is a DEFERRED refusal — the case is assembled, and the refusal
  *    is withdrawn exactly where the document DECLARES every charged coordinate
  *    it names;
@@ -33,13 +33,14 @@
  */
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import { assemble, type Assembled } from "./assemble.js"
+import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CaseSpec } from "./case-spec.js"
 import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
 import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
 import type { CaptureInput, CaptureRule } from "./capture-rules.js"
-import type { CaseRule, RefusalInput } from "./case-rules.js"
+import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -47,6 +48,8 @@ import type { SutSet } from "./sut.js"
 /** One proposed case, decided. */
 export interface CaseOutcome {
   readonly spec: CaseSpec
+  /** The case's own legs: `cutLegs`, else the vantages' — what its refusals are recorded against. */
+  readonly legs: ReadonlyArray<number>
   /** The case's own correlated calls (`cut.ts::caseCallIds`). */
   readonly callIds: ReadonlyArray<string>
   /** The assembled document, where the case is generated. */
@@ -87,6 +90,7 @@ export interface CaseSetInput {
 /** One spec assembled, or the reason it threw. Never both, never neither. */
 const build = (
   input: CaseSetInput,
+  index: CaptureIndex,
   spec: CaseSpec
 ): { readonly built: Assembled } | { readonly error: string } => {
   try {
@@ -98,6 +102,7 @@ const build = (
         sut: input.sut,
         plan: input.plan,
         policy: input.policy,
+        index,
         ...(input.parts === undefined ? {} : { parts: input.parts }),
         ...(input.allowed === undefined ? {} : { allowed: input.allowed })
       })
@@ -113,12 +118,13 @@ const build = (
  */
 const quarantineOf = (
   input: CaseSetInput,
+  index: CaptureIndex,
   spec: CaseSpec,
   already?: Assembled
 ): Pick<CaseOutcome, "quarantined" | "quarantineError"> => {
   if (input.quarantine !== true) return {}
   if (already !== undefined) return { quarantined: already }
-  const attempt = build(input, spec)
+  const attempt = build(input, index, spec)
   return "built" in attempt ? { quarantined: attempt.built } : { quarantineError: attempt.error }
 }
 
@@ -166,9 +172,12 @@ const onDocument = (
 
 export const decideCases = (input: CaseSetInput): CaptureCases => {
   const outcomes: Array<CaseOutcome> = []
+  // Once per capture, whatever the number of cases: the correlation and the
+  // forms table are each a pass over the whole document.
+  const index = captureIndex(input.flows, input.policy.derives, input.plan)
   for (const spec of input.specs) {
     const legs = spec.cutLegs ?? [spec.uac.leg, ...spec.uas.map((u) => u.leg)]
-    const callIds = caseCallIds(input.flows, input.sut, legs, input.policy.derives)
+    const callIds = caseCallIds(input.flows, input.sut, legs, index.correlation)
     // The capture tier first, because it needs strictly less: a rule that
     // decides on the family alone never sees the vantages the cut produced.
     const captured = {
@@ -182,20 +191,21 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     const site = { caseId: spec.id, capture: input.capture }
     const refusals = [
       ...atCapture(input.policy.refuseAtCapture, site, captured),
-      ...atCase(input.policy.refuse, site, { ...captured, spec })
+      ...atCase([...CASE_RULES, ...input.policy.refuse], site, { ...captured, spec })
     ]
 
     // A case refused on a rule no declaration can answer is never assembled, so
     // its deferred refusals stand with it: there is no document to declare in.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, callIds, refused: refusals, ...quarantineOf(input, spec) })
+      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
       continue
     }
-    const attempt = build(input, spec)
+    const attempt = build(input, index, spec)
     if ("error" in attempt) {
       // No document, so nothing is declared and every deferred refusal stands.
       outcomes.push({
         spec,
+        legs,
         callIds,
         refused: refusals,
         error: attempt.error,
@@ -217,8 +227,8 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, callIds, refused: standing, ...quarantineOf(input, spec, built) }
-        : { spec, callIds, built, refused: [] }
+        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
+        : { spec, legs, callIds, built, refused: [] }
     )
   }
   return { outcomes, refused: outcomes.flatMap((o) => o.refused) }

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold → BYE.
+  Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold until
+  the SUT ends the call.
 
   After ACK the scenario loops on in-dialog OPTIONS from the B2BUA's
   keepaliveRule (TimerRules), replying 200 OK to EACH one for the life
@@ -16,31 +17,23 @@
   count — size those (and the offered LONG_CPS) for the target steady
   concurrency.
 
-  The single exit path:
-    - keepalive timeout (B2BUA torn down, chaos, network failure) →
-      `recv timeout="420000" ontimeout="end_hold"` jumps to BYE.
+  The exit paths:
+    - the SUT's BYE (max duration, keepalive timeout, any policy teardown) is
+      answered 200 and ends the call successfully;
+    - silence (B2BUA torn down, chaos, network failure) ends the call as the
+      lane's `-recv_timeout` failure (timeout_recv), which endurance.sh's
+      stall taint reads against unexpected_msg. The hold carries no bound of
+      its own.
 
-  Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
-  relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
-  OPTIONS during the pause. That was incorrect: sipp's `pingreply`
-  only handles the legacy literal PING method, not OPTIONS. Every
-  long-call therefore lost its A-leg keepalive, the B2BUA terminated
-  the call ~5 min in, and the scenario's BYE 15 min later hit a dead
-  dialog (481). See endurance run chaos-endurance-2h-20260511.
+  A flat `<pause milliseconds="1200000"/>` relying on sipp's default
+  `pingreply` cannot replace this loop: `pingreply` only handles the
+  legacy literal PING method, not OPTIONS. Such a long call would lose
+  its A-leg keepalive, the B2BUA would terminate it ~5 min in, and the
+  scenario's BYE 15 min later would hit a dead dialog (481).
 
   Loop pattern mirrors `uas-basic.xml` (the B-leg UAS). 200 OK echoes
   `[last_From:]` / `[last_To:]` / `[last_Call-ID:]` / `[last_CSeq:]` so
   the response carries the dialog tags + CSeq from the request.
-
-  The recv timeout is sized for the env-driven default
-  `KEEPALIVE_INTERVAL_SEC=300s` (src/config/AppConfig.ts) — 420 s
-  gives 120 s headroom. Under the reactive-only takeover model
-  (ADR-0014) a quiescent long-call on a rebooting worker is recovered
-  solely by the primary's bootstrap-rehydrate → ReclaimAll → smoothed
-  keepalive replay; the worst-positioned quiescent call survives iff
-  `reboot + smoothing_drain ≤ 120 s`. The embedded layer default is
-  900 s; if a deployment uses the embedded layer with that larger
-  interval, raise this timeout accordingly.
 
   RFC 3261 conformance:
     §11      In-dialog OPTIONS may be sent by either party; UAS
@@ -103,33 +96,32 @@
        arriving for `timeout` ms (B2BUA terminated the call, chaos event,
        network failure) → exit to the BYE phase.
 
-       There is deliberately NO per-call OPTIONS cap. An earlier revision
-       capped the loop at 4 iterations (UAC sends its own BYE after ~20 min)
-       to bound sipp's CurrentCall growth, but that cap CORRUPTED the
-       reboot-survival measurement: once a call passed its 4th OPTIONS it
-       left this recv, so the rebooted worker's smoothed keepalive-replay
-       burst (router::reclaim_all) landed OPTIONS on a UAC no longer parked
-       here → sipp scored them OutOfCallMsgs and aborted the call with
-       `unexpected_msg`, which read as a (false) ~130% long-call loss across
-       every reboot even though the server's reclaim was 100% complete and
-       correctly routed. A real UAC answers in-dialog OPTIONS for the life
+       There is deliberately NO per-call OPTIONS cap. Capping the loop (e.g.
+       at 4 iterations, the UAC sending its own BYE after ~20 min) to bound
+       sipp's CurrentCall growth CORRUPTS the reboot-survival measurement:
+       once a call passes its last OPTIONS it leaves this recv, so the
+       rebooted worker's smoothed keepalive-replay burst
+       (router::reclaim_all) lands OPTIONS on a UAC no longer parked here →
+       sipp scores them OutOfCallMsgs and aborts the call with
+       `unexpected_msg`, which reads as a (false) long-call loss across every
+       reboot even though the server's reclaim is complete and correctly
+       routed. A real UAC answers in-dialog OPTIONS for the life
        of the call, so this models reality AND removes the artifact: a
        reclaimed dialog's replayed OPTIONS always lands on a parked recv and
        is answered. CurrentCall growth is bounded operationally by the job's
        `-l MAX_CONCURRENT` ceiling + `-recv_timeout` dead-call reaper
        (lib/sipext-gen.sh, the docker UAC stream launcher), not by a per-call message count. -->
   <label id="hold_loop"/>
-  <!-- An AS-initiated BYE (max-duration cap, keepalive-timeout, any policy
+  <!-- A SUT-initiated BYE (max-duration cap, keepalive-timeout, any policy
        teardown) is a LEGITIMATE call end a real UAC answers with 200 — NOT a
-       loss. Parked solely on the OPTIONS recv, it scored unexpected_msg: the
-       2026-06-11 run's "peak 6.5% / kill_worker 16.6% long-loss" was in fact
-       the SUT's 1 h GlobalDuration mowing down the lockstep-aged long cohort
+       loss. Parked solely on the OPTIONS recv, it would score unexpected_msg:
+       the SUT's 1 h GlobalDuration mows down the lockstep-aged long cohort
        (the `-l` ceiling freezes creation ~14 min in, so the whole population
-       hits the cap together at run-start+1h, echoing hourly) — both chaos
-       events merely coincided with the wave. With this branch only true
-       SILENCE (no keepalive for 420 s → end_hold → UAC BYE) reads as loss. -->
+       hits the cap together at run-start+1h, echoing hourly), and any chaos
+       event coinciding with the wave would read as long-call loss. With this
+       branch only true silence (the lane's -recv_timeout) reads as loss. -->
   <recv request="BYE" optional="true" next="answer_bye"/>
-  <recv request="OPTIONS" crlf="true" timeout="420000" ontimeout="end_hold"/>
+  <recv request="OPTIONS" crlf="true"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK
@@ -144,25 +136,6 @@
     ]]>
   </send>
   <nop next="hold_loop"/>
-
-  <label id="end_hold"/>
-  <send retrans="500">
-    <![CDATA[
-      BYE [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
-      [routes]
-      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
-      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
-      Call-ID: [call_id]
-      CSeq: 2 BYE
-      Contact: sip:sipp@[local_ip]:[local_port]
-      Max-Forwards: 70
-      Content-Length: 0
-    ]]>
-  </send>
-
-  <recv response="200" crlf="true"/>
-  <nop next="hold_done"/>
 
   <!-- AS-initiated teardown: answer the BYE and end the call SUCCESSFULLY. -->
   <label id="answer_bye"/>
@@ -181,6 +154,38 @@
   </send>
 
   <label id="hold_done"/>
+
+  <nop next="end"/>
+
+  <!-- SIPp runs a call one step per loop turn and reads its socket in between:
+       a request that lands while the call stands on a send or a nop matches no
+       recv at hand and comes here. An OPTIONS is answered and the call resumes
+       the step it stood on; a BYE ends the call as the hold's own BYE does.
+       Anything else is unexpected here too and fails the call. -->
+  <label id="_unexp.main"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
+  <recv request="BYE" crlf="true" next="answer_bye"/>
+  <label id="unexp_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+  <label id="end"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="60000, 300000, 600000, 900000, 1200000"/>

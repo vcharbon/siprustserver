@@ -33,7 +33,7 @@ fn addr(n: u16) -> SocketAddr {
 }
 
 /// The trivial 2-node backup resolver: the backup is always "the other node".
-/// (S10 sources this from the proxy's `w_bak` cookie instead — see
+/// (the live path sources this from the proxy's `w_bak` cookie — see
 /// [`replication_target`]'s doc-comment.)
 fn resolver_to(peer: &'static str) -> impl Fn(&str) -> Option<String> {
     move |_call_ref: &str| Some(peer.to_string())
@@ -363,7 +363,7 @@ async fn bidirectional_coexistence_converges_independently() {
 
 // ---------------------------------------------------------------------------
 // convergence property: after a takeover + reboot + quiescence, A and B agree on
-// the call at the highest call_gen (goal-1 convergence, scoped to 2 nodes).
+// the call at the highest call_gen (scoped to 2 nodes).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

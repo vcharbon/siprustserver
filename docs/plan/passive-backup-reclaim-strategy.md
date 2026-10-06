@@ -372,16 +372,16 @@ writing its takeover mutation into its own `bak:` replica.
 ## 11. Test plan
 
 **Delete** (removed behaviour):
-- `eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once` ([failover.rs:606](../../crates/failover-harness/tests/failover.rs#L606)).
+- `eager_takeover_keeps_quiescent_dialog_alive_and_hands_back_once` ([failover.rs:606](../../crates/failover-harness/tests/it/failover.rs#L606)).
 - `deactivate_targets_by_primary_and_pull_watermark` ([s11_tests.rs:92](../../crates/b2bua/src/repl/s11_tests.rs#L92)).
 - `simulate_peer_removed`-driven eager assertions; `transparent_v1.rs` eager cells.
 
 **Rewrite** (re-point eager → reactive/reboot; replace handback with self-release):
-- `cseq_stays_in_order_across_eager_takeover_and_reclaim` ([failover.rs:752](../../crates/failover-harness/tests/failover.rs#L752))
+- `cseq_stays_in_order_across_eager_takeover_and_reclaim` ([failover.rs:752](../../crates/failover-harness/tests/it/failover.rs#L752))
   → drive takeover **reactively**; keep the RFC CSeq audit across reclaim + self-release.
-- `reboot_reclaim_hands_back_exactly_one_owner` ([failover.rs:490](../../crates/failover-harness/tests/failover.rs#L490))
+- `reboot_reclaim_hands_back_exactly_one_owner` ([failover.rs:490](../../crates/failover-harness/tests/it/failover.rs#L490))
   → "exactly one owner after reclaim + backup self-release" (no `Deactivate`).
-- `acting_backup_terminate_leaves_no_expired_context_for_reclaim` ([failover.rs:880](../../crates/failover-harness/tests/failover.rs#L880))
+- `acting_backup_terminate_leaves_no_expired_context_for_reclaim` ([failover.rs:880](../../crates/failover-harness/tests/it/failover.rs#L880))
   → self-release on BYE terminal state.
 
 **Keep** (reactive/reclaim unchanged): `drop_local_sheds_live_copy_but_keeps_backup_element`

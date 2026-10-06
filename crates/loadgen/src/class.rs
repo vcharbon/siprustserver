@@ -30,6 +30,11 @@ pub enum CallOutcome {
     /// over the sampled trace — carries the FAILED verdicts only. Sampled calls
     /// only — checks are a per-sample oracle, like the RFC audit.
     CheckFail(Vec<e2e_model::CheckVerdict>),
+    /// The call was refused before any datagram: its correlation key is
+    /// missing, unusable, held by a concurrent call, or cooling after a failed
+    /// call. Carries the bounded reason (`no_from`, `userless_from`,
+    /// `key_in_flight`, `key_cooling`).
+    Rejected(&'static str),
 }
 
 /// A low-cardinality bucket for a call result. `Display`/[`label`](Self::label)
@@ -49,6 +54,9 @@ pub enum ResultClass {
     Unparseable,
     RfcAuditFail,
     CheckFail,
+    /// Refused before any datagram: the call's correlation key is missing,
+    /// unusable, or already held by a concurrent call.
+    Rejected,
     Panic,
 }
 
@@ -65,6 +73,7 @@ impl ResultClass {
             ResultClass::Unparseable => "unparseable".to_string(),
             ResultClass::RfcAuditFail => "rfc_audit_fail".to_string(),
             ResultClass::CheckFail => "check_fail".to_string(),
+            ResultClass::Rejected => "rejected".to_string(),
             ResultClass::Panic => "panic".to_string(),
         }
     }
@@ -78,9 +87,9 @@ impl ResultClass {
     /// (acceptable kill collateral) when the **per-phase** rule also holds (a
     /// dialog-state transition occurred within the phase tolerance of the fault).
     ///
-    /// The accepted constraint (2026-06-29): *a call whose dialog state changed
-    /// within ~200 ms of the kill may take a small impact — established and
-    /// ringing calls are what we protect.* So a SIP **protocol** symptom of a
+    /// The accepted constraint: *a call whose dialog state changed within
+    /// ~200 ms of the kill may take a small impact — established and ringing
+    /// calls are what we protect.* So a SIP **protocol** symptom of a
     /// concurrent-with-the-kill state change (a `RfcAuditFail` CSeq desync, a
     /// `WrongMethod` phantom CANCEL, an `Unexpected` 481) IS excusable — those are
     /// exactly the forked-b-leg confirm-race collateral, which only ever hits a
@@ -91,11 +100,12 @@ impl ResultClass {
     ///
     /// Only the **timing-independent** classes are never excused, because their
     /// cause is unrelated to dialog timing and should always be seen: `Panic` (a
-    /// code panic) and `Unparseable` (wire corruption). `CheckFail` IS excusable
+    /// code panic), `Unparseable` (wire corruption) and `Rejected` (a key
+    /// refused before any datagram). `CheckFail` IS excusable
     /// like the other protocol/content symptoms — a call rerouted mid-kill can
     /// legitimately show a different wire shape than the case's oracle expects.
     pub fn chaos_excusable(&self) -> bool {
-        !matches!(self, ResultClass::Panic | ResultClass::Unparseable)
+        !matches!(self, ResultClass::Panic | ResultClass::Unparseable | ResultClass::Rejected)
     }
 }
 
@@ -112,6 +122,7 @@ impl From<&CallOutcome> for ResultClass {
             CallOutcome::RfcAuditFail(_) => ResultClass::RfcAuditFail,
             CallOutcome::CheckFail(_) => ResultClass::CheckFail,
             CallOutcome::Panic(_) => ResultClass::Panic,
+            CallOutcome::Rejected(_) => ResultClass::Rejected,
             CallOutcome::Step(e) => match e {
                 StepError::Timeout { .. } | StepError::QueueClosed { .. } => ResultClass::Timeout,
                 StepError::WrongStatus { got, .. } => ResultClass::WrongStatus(*got),
@@ -125,12 +136,27 @@ impl From<&CallOutcome> for ResultClass {
 }
 
 impl CallOutcome {
+    /// Whether this outcome may be excused as chaos collateral:
+    /// [`ResultClass::chaos_excusable`], except that a key-contention rejection
+    /// is excusable — `key_in_flight` (the holder may be a call a fault keeps
+    /// open) and `key_cooling` (the previous call may have failed on a fault) —
+    /// while a missing or unusable key is not.
+    pub fn chaos_excusable(&self) -> bool {
+        match self {
+            CallOutcome::Rejected(reason) => matches!(*reason, "key_in_flight" | "key_cooling"),
+            other => ResultClass::from(other).chaos_excusable(),
+        }
+    }
+
     /// A human-readable one-line detail for the error sample (None for Ok).
     pub fn detail(&self) -> Option<String> {
         match self {
             CallOutcome::Ok => None,
             CallOutcome::Step(e) => Some(e.to_string()),
             CallOutcome::Panic(m) => Some(format!("panic: {m}")),
+            CallOutcome::Rejected(reason) => {
+                Some(format!("rejected before any datagram: {reason}"))
+            }
             CallOutcome::RfcAuditFail(findings) => Some(format!(
                 "rfc audit: {}",
                 findings.iter().map(|f| f.detail.clone()).collect::<Vec<_>>().join("; ")
@@ -166,6 +192,7 @@ impl CallOutcome {
                 format!("{}@{}", step_who(e), last_phase.unwrap_or("start"))
             }
             CallOutcome::Panic(_) => last_phase.unwrap_or("start").to_string(),
+            CallOutcome::Rejected(reason) => reason.to_string(),
             CallOutcome::RfcAuditFail(findings) => {
                 joined_distinct(findings.iter().map(|f| f.rule.as_str()))
             }
@@ -216,4 +243,25 @@ fn slug(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key held by a concurrent call, or cooling after a failed one, may be
+    /// a fault's doing, so those rejections are chaos-excusable; a missing or
+    /// unusable key is not.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn only_key_contention_rejections_are_chaos_excusable() {
+        for reason in ["key_in_flight", "key_cooling"] {
+            assert!(CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
+        }
+        for reason in ["no_from", "userless_from"] {
+            assert!(!CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");
+        }
+        assert!(!CallOutcome::Panic("p".into()).chaos_excusable());
+        assert!(CallOutcome::Step(StepError::Timeout { who: "alice".into() }).chaos_excusable());
+    }
 }

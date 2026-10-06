@@ -56,6 +56,15 @@ pub fn rule_fired(call: &Call, at_ms: i64, rule_id: &str) {
     record(call, "rule.fired", at_ms, rule_id, b"");
 }
 
+/// A rule that observed the event without claiming it: its call-ext writes
+/// landed and the chain went on.
+pub fn rule_observed(call: &Call, at_ms: i64, rule_id: &str) {
+    if !sampled(call) {
+        return;
+    }
+    record(call, "rule.observed", at_ms, rule_id, b"");
+}
+
 /// A state-machine cursor move a rule caused (ADR-0016 X1).
 pub fn rule_transition(
     call: &Call,

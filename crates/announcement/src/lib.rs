@@ -1,4 +1,4 @@
-//! # announcement — an out-of-tree callflow service (ADR-0016 slice 8 capstone)
+//! # announcement — an out-of-tree callflow service (ADR-0016)
 //!
 //! An early-media **MRF announcement** service, built against the public Rule
 //! SDK ([`b2bua_sdk`]) **alone** — it has no dependency on `b2bua`. It proves the
@@ -35,7 +35,7 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
+    Body, Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState, TerminationCause};
@@ -94,14 +94,13 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
     ok(vec![
         // Establish the media dialog so the MSCML INFO can ride it.
         RuleAction::ConfirmDialog { leg_id: media.clone() },
-        RuleAction::AckLeg { leg_id: media.clone(), body: Vec::new(), content_type: None },
+        RuleAction::AckLeg { leg_id: media.clone(), body: None },
         // Early media: the MRF's SDP onto the caller as an unreliable 183.
         RuleAction::SendProvisionalToLeg {
             leg_id: "a".to_string(),
             status: 183,
             reason: "Session Progress".to_string(),
-            body: mrf_sdp.to_vec(),
-            content_type: None,
+            body: Some(Body::from_leg(mrf_sdp.to_vec(), media.clone())),
             to_tag: None,
             p_early_media: Some("sendrecv".to_string()),
         },
@@ -109,8 +108,10 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
         RuleAction::SendRequestToLeg {
             leg_id: media,
             method: "INFO".to_string(),
-            body: mscml::build_play(&data.clip_id),
-            content_type: Some(mscml::CONTENT_TYPE.to_string()),
+            body: Some(Body::own(
+                mscml::build_play(&data.clip_id),
+                Some(mscml::CONTENT_TYPE.to_string()),
+            )),
             headers: vec![],
         },
         RuleAction::SetState { machine: MACHINE, to: State::Announcing.label() },
@@ -132,7 +133,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             content_type: None,
         },
         // Tear down the media leg (it is Confirmed → DestroyLeg BYEs it).
-        RuleAction::DestroyLeg { leg_id: media },
+        RuleAction::DestroyLeg { leg_id: media, headers: vec![] },
         // Dial the real destination as a normal adopted leg; core `confirm-dialog`
         // will answer the caller with its SDP and bridge on its 200.
         RuleAction::CreateLeg {
@@ -144,6 +145,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             callback_context: None,
             body_override: None,
             header_updates: vec![],
+            header_adds: vec![],
             kind: None,
         },
         // The announcement is done: hand off to the destination leg + core bridge
@@ -171,15 +173,14 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 /// caller only ever saw a `183` early dialog, so this is a reject-teardown: answer
 /// the INFO, send the caller its 4xx final, and terminate.
 ///
-/// This path is the whole point of announce-then-reject. The parked media leg is an
-/// **unadopted** `Media` leg, so core `confirm-dialog` (correctly, since the fix)
-/// does NOT mark the a-leg `Confirmed` off its 200 — the a-leg is still `Early`.
-/// `BeginTermination` sees the 4xx among the turn's effects and resolves the
-/// a-leg (`ByeDisposition::None` + `Terminated`) — no BYE toward
-/// the caller, and no spurious ADR-0022 503 on a later turn (e.g. a crossing BYE
-/// from the media leg). No un-confirm repair (a wire-silent
-/// `TerminateLeg{Rejected}` on the a-leg) is needed — the generic layer keeps
-/// the a-side honest.
+/// This path is the whole point of announce-then-reject. The parked media leg is
+/// an **unadopted** `Media` leg, so core `confirm-dialog` does NOT mark the a-leg
+/// `Confirmed` off its 200 — the a-leg is still `Early`. `BeginTermination` sees
+/// the 4xx among the turn's effects and resolves the a-leg
+/// (`ByeDisposition::None` + `Terminated`) — no BYE toward the caller, and no
+/// spurious ADR-0022 503 on a later turn (e.g. a crossing BYE from the media
+/// leg). No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the
+/// a-leg) is needed — the generic layer keeps the a-side honest.
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
@@ -271,6 +272,7 @@ define_service! {
                     callback_context: None,
                     body_override: None,
                     header_updates: vec![],
+                    header_adds: vec![],
                     kind: Some(call::LegKind::Media),
                 },
             ]),

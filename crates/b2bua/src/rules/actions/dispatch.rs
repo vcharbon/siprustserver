@@ -10,8 +10,9 @@ use call::helpers::{
 use call::{Call, CdrEvent, TagMapping};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
-use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
+use b2bua_sdk::model::{Body, MessageTransform, RuleAction, RuleContext};
+use sip_message::SipHeader;
 
 use super::select::{find_pending_dialog, resolve_peer};
 use super::teardown::terminate_all;
@@ -36,21 +37,30 @@ impl ActionExecutor<'_> {
                 self.relay_to(call, fx, ctx, leg_id, transform, None);
             }
             RuleAction::Respond { status, reason, body, content_type } => {
-                self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref());
+                self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref(), vec![]);
             }
-            RuleAction::AckLeg { leg_id, body, content_type } => {
+            RuleAction::RefuseGlare { refusal } => {
+                self.refuse_glare(call, fx, ctx, *refusal);
+            }
+            RuleAction::AckLeg { leg_id, body } => {
                 // A body-bearing ACK carries a delayed-offer answer (RFC 3261
                 // §13.2.2.4); default its type to `application/sdp` when none is
                 // given. An empty ACK stays a bare ACK — no body, no Content-Type.
-                let ct = if body.is_empty() {
-                    None
-                } else {
-                    content_type
-                        .as_deref()
-                        .and_then(relay::media_type)
-                        .or_else(|| Some(relay::sdp()))
-                };
-                self.ack_leg(call, fx, leg_id, body.clone(), ct, Provenance::Authored);
+                let (bytes, content_type, author, descriptors) = parts(body);
+                let ct = (!bytes.is_empty())
+                    .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
+                let mut own = Vec::new();
+                relay::describe_body(&mut own, bytes, descriptors);
+                self.ack_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    bytes.to_vec(),
+                    ct,
+                    own,
+                    Provenance::Authored,
+                    author,
+                );
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
@@ -71,6 +81,9 @@ impl ActionExecutor<'_> {
                     },
                 );
             }
+            RuleAction::MapUnshownDialog { b_leg_id, b_tag } => {
+                self.map_unshown_dialog(call, b_leg_id, b_tag);
+            }
             RuleAction::Merge { leg_a, leg_b } => {
                 *call = merge_leg(call.clone(), leg_a.clone(), leg_b.clone());
             }
@@ -86,6 +99,7 @@ impl ActionExecutor<'_> {
                 callback_context,
                 body_override,
                 header_updates,
+                header_adds,
                 kind,
             } => {
                 self.create_leg(
@@ -98,13 +112,14 @@ impl ActionExecutor<'_> {
                     new_to.as_deref(),
                     *no_answer_timeout_sec,
                     callback_context.as_deref(),
-                    body_override.as_deref(),
+                    body_override.as_ref(),
                     header_updates,
+                    header_adds,
                     *kind,
                 );
             }
-            RuleAction::DestroyLeg { leg_id } => {
-                self.destroy_leg(call, fx, leg_id);
+            RuleAction::DestroyLeg { leg_id, headers } => {
+                self.destroy_leg(call, fx, ctx, leg_id, headers);
             }
             RuleAction::CancelLeg { leg_id } => {
                 self.cancel_leg(call, fx, ctx, leg_id);
@@ -135,6 +150,7 @@ impl ActionExecutor<'_> {
                 fx.critical.push(CriticalStateEffect::CancelAllTimers);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
+                self.reject_all_pending_non_invites(call, fx);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
             RuleAction::BeginTermination { reason, cause, by_leg } => {
@@ -175,15 +191,18 @@ impl ActionExecutor<'_> {
                 // realising the transition to the terminal `[*]`. Idempotent.
                 call.sm_cursors.remove(machine);
             }
-            RuleAction::SendRequestToLeg { leg_id, method, body, content_type, headers } => {
+            RuleAction::SendRequestToLeg { leg_id, method, body, headers } => {
+                let (bytes, content_type, author, descriptors) = parts(body);
                 self.send_request_to_leg(
                     call,
                     fx,
                     leg_id,
                     method,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
                     headers,
+                    descriptors,
+                    author,
                 );
             }
             RuleAction::SendProvisionalToLeg {
@@ -191,20 +210,22 @@ impl ActionExecutor<'_> {
                 status,
                 reason,
                 body,
-                content_type,
                 to_tag,
                 p_early_media,
             } => {
+                let (bytes, content_type, author, descriptors) = parts(body);
                 self.send_provisional_to_leg(
                     call,
                     fx,
                     leg_id,
                     *status,
                     reason,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
+                    descriptors,
                     to_tag.as_deref(),
                     p_early_media.as_deref(),
+                    author,
                 );
             }
             RuleAction::SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag } => {
@@ -213,7 +234,11 @@ impl ActionExecutor<'_> {
                 // per-To-tag dialog here — the PRACK targets strictly `(leg,
                 // b_tag)` (no first-dialog fallback).
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
-                self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag);
+                let responder_sdp = ctx.response().is_some_and(|r| r.sdp().is_some());
+                self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag, responder_sdp);
+            }
+            RuleAction::TrackEarlyDialog { leg_id, b_tag } => {
+                self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
             }
             RuleAction::CacheSdpOnLegDialog { leg_id, b_tag, body } => {
                 // Same suppressed-fork registration as SendPrackToLeg: the cache
@@ -234,7 +259,17 @@ impl ActionExecutor<'_> {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);
             }
             RuleAction::SendReinvite { leg_id, body, add_headers } => {
-                self.send_reinvite(call, fx, leg_id, body, add_headers);
+                let (bytes, content_type, author, descriptors) = parts(body);
+                self.send_reinvite(
+                    call,
+                    fx,
+                    leg_id,
+                    bytes,
+                    content_type,
+                    descriptors,
+                    add_headers,
+                    author,
+                );
             }
             RuleAction::SetPromotePem { state } => {
                 *call = call::helpers::set_promote_pem(call.clone(), state.clone());
@@ -280,16 +315,54 @@ impl ActionExecutor<'_> {
                 *call = call::helpers::set_transfer(call.clone(), state.clone());
             }
             RuleAction::FailureAsyncHttp { request } => {
+                // One change number per admit the failover chain may send.
+                let chain = u64::from(crate::answer_deadline::FAILURE_CHAIN);
                 fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::FailureAsyncHttp {
                     call_ref: call.call_ref.clone(),
                     request: request.clone(),
+                    limiter_change: call.limiter.owe_consult(chain),
+                    deadline: None,
                 });
             }
             RuleAction::ReleaseAsyncHttp { request } => {
                 fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::ReleaseAsyncHttp {
                     call_ref: call.call_ref.clone(),
                     request: request.clone(),
+                    limiter_change: call.limiter.owe_consult(1),
                 });
+            }
+            RuleAction::ReplaceAdmissionSet { correlation_id, entries, moves_call } => {
+                let key = call.limiter.key().to_string();
+                match call.limiter.replace_set(entries.clone(), *moves_call) {
+                    call::Replacement::Send { change, held } => {
+                        fx.fire_and_forget.push(
+                            crate::effects::FireAndForgetEffect::LimiterAdmit {
+                                call_ref: call.call_ref.clone(),
+                                correlation_id: correlation_id.clone(),
+                                key,
+                                change,
+                                held,
+                                entries: entries.clone(),
+                            },
+                        );
+                    }
+                    call::Replacement::NothingToSend { change } => {
+                        // The result re-enters as not sent.
+                        let result = crate::limiter::report::LimiterAdmitResult {
+                            call_ref: call.call_ref.clone(),
+                            correlation_id: correlation_id.clone(),
+                            report: call::AdmitReport {
+                                key,
+                                change,
+                                entries: entries.clone(),
+                                outcome: call::AdmitOutcome::NotSent,
+                            },
+                        };
+                        fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::Reenter(
+                            Box::new(result.into_event()),
+                        ));
+                    }
+                }
             }
             RuleAction::SetSubscriptions { events } => {
                 // The latest applied (re)route's declaration replaces the set
@@ -300,30 +373,21 @@ impl ActionExecutor<'_> {
                 *call = call::helpers::set_reroute(call.clone(), state.clone());
             }
             RuleAction::SetFeatures { features } => {
-                // The withhold latch: the standing withheld option tags union
-                // into the incoming declaration — a reroute cannot restore a
-                // tag the call already withholds (`apply_route` parity).
+                // The call-lifetime latch: the standing withheld option tags
+                // union into the incoming declaration (`apply_route` parity).
                 let mut features = features.clone();
-                features.latch_withheld_option_tags(call.features.as_ref());
+                features.latch_call_lifetime(call.features.as_ref());
                 call.features = Some(features);
+            }
+            RuleAction::SetStatedHeaders { headers } => {
+                if let Some(features) = call.features.as_mut() {
+                    features.stated_headers = headers.clone();
+                }
             }
             RuleAction::MergeCallExt { ext } => {
                 for (service_id, value) in ext {
                     let v = (!value.is_null()).then(|| value.clone());
                     *call = call::helpers::set_call_ext(call.clone(), service_id, v);
-                }
-            }
-            RuleAction::RecordLimiterHolds { entries, window } => {
-                // Holds were INCRed by the router's failover fold; recording
-                // them here is what makes the `→ terminated` invariant DECR
-                // them (and the LimiterRefresh cadence re-stamp them).
-                for (limiter_id, limit) in entries {
-                    call.limiter_entries.push(call::CallLimiterState {
-                        limiter_id: limiter_id.clone(),
-                        limit: *limit,
-                        origin_window: *window,
-                        increment_succeeded: Some(true),
-                    });
                 }
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
@@ -342,21 +406,23 @@ impl ActionExecutor<'_> {
                 status,
                 reason,
                 body,
-                content_type,
                 to_tag,
                 header_updates,
                 relayed,
             } => {
+                let (bytes, content_type, author, descriptors) = parts(body);
                 self.answer_a_leg_new_dialog(
                     call,
                     fx,
                     *status,
                     reason,
-                    body,
-                    content_type.as_deref(),
+                    bytes,
+                    content_type,
+                    descriptors,
                     to_tag.as_deref(),
                     header_updates,
                     relayed,
+                    author,
                 );
             }
         }
@@ -381,5 +447,16 @@ impl ActionExecutor<'_> {
         if let Some(req) = ctx.request() {
             self.relay_request(call, fx, ctx, target_leg, req, target_to_tag);
         }
+    }
+}
+
+/// A rule action's body as the executor sends it: bytes (empty for none), the
+/// stated media type, its author, and the lines describing it.
+fn parts(body: &Option<Body>) -> (&[u8], Option<&str>, relay::Author<'_>, &[SipHeader]) {
+    match body {
+        Some(b) => {
+            (&b.bytes, b.content_type.as_deref(), relay::Author::from(&b.author), &b.descriptors)
+        }
+        None => (&[], None, relay::Author::Stack, &[]),
     }
 }

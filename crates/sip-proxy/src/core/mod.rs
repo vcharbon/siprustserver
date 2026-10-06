@@ -15,6 +15,8 @@
 mod dual_face_tests;
 mod request;
 mod response;
+#[cfg(test)]
+mod stickiness_metric_tests;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -31,7 +33,7 @@ use crate::cancel_lru::CancelBranchLru;
 use crate::face::FaceCidrs;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
-use crate::observability::ProxyMetrics;
+use crate::observability::{ProxyMetrics, UdpShardStats};
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
 use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
@@ -86,7 +88,7 @@ pub(crate) struct ProxyCoreParts {
     /// `host:port`). Usually the endpoint's bound address.
     pub advertised: ProxyAddr,
     /// Dual-face mode: the external-plane socket + advertise + face picker.
-    /// `None` → single-face (today's behaviour, unchanged).
+    /// `None` → single-face.
     pub external: Option<ExternalFaceParts>,
     pub strategy: Arc<dyn RoutingStrategy>,
     pub registry: Arc<dyn WorkerRegistry>,
@@ -297,7 +299,7 @@ impl ProxyCore {
                 self.metrics.record_send_failure();
                 // Per-peer attribution (sip_proxy_peer_failures_total{...,
                 // kind=…}): classify against the registry (a known worker is
-                // internal/pinned, else external/LRU-bounded), and name an
+                // internal and always its own series, else external, under the cap), and name an
                 // oversize message as such rather than blaming the peer.
                 self.metrics.record_peer_failure(
                     &dst,
@@ -313,7 +315,7 @@ impl ProxyCore {
     /// Classify a forward target internal/external for the per-peer metric: a
     /// destination that resolves to a known worker (registry) is the in-cluster
     /// data path and is pinned; everything else (a UAC/UAS, a DNS-named callee)
-    /// is external and LRU-bounded.
+    /// is external and under the family's cap.
     fn classify_peer(&self, target: &ProxyAddr) -> crate::observability::peer_failures::PeerScope {
         if self.registry.lookup_by_address(target).is_some() {
             crate::observability::peer_failures::PeerScope::Internal
@@ -369,23 +371,9 @@ impl ProxyCore {
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
-                    let c = endpoint.counters();
-                    // Intake-shed drops are counted on BOTH faces — in
-                    // dual-face mode callers arrive on the external socket, so
-                    // its pre-ingress drops must not be invisible.
-                    let ext = ext_endpoint.as_ref().map(|e| e.counters());
-                    let ext_shed = ext.map_or(0, |c| c.pre_ingress_dropped);
-                    // Refused sends are counted on BOTH faces too: the
-                    // external face is the one toward peers that vanish.
-                    let ext_would_block = ext.map_or(0, |c| c.send_would_block);
                     metrics.set_udp_endpoint_stats(
                         shard,
-                        endpoint.queue_depth() as u64,
-                        endpoint.queue_max() as u64,
-                        c.enqueued,
-                        c.tail_dropped,
-                        c.pre_ingress_dropped + ext_shed,
-                        c.send_would_block + ext_would_block,
+                        UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
                     );
                 }
             })
@@ -630,7 +618,7 @@ mod sweeper_tests {
     use async_trait::async_trait;
     use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
 
-    use crate::cancel_lru::{call_id_cseq_key, CancelEntry, RTX_ENTRY_TTL_MS};
+    use crate::cancel_lru::{CancelEntry, RTX_ENTRY_TTL_MS};
     use crate::registry::static_reg::StaticWorkerRegistry;
     use crate::ForwardAllStrategy;
 
@@ -663,7 +651,7 @@ mod sweeper_tests {
         }
     }
 
-    /// Regression: a running core's background sweeper physically reclaims an
+    /// A running core's background sweeper physically reclaims an
     /// expired pending-INVITE entry and re-publishes the gauge to match. Without
     /// the sweeper the entry would linger for the life of the process (an
     /// answered call never re-`lookup`s its key, so lazy eviction never fires)
@@ -678,11 +666,10 @@ mod sweeper_tests {
         // Remember one entry at the SHORT (rtx) TTL and publish the gauge, as
         // the request path does on every forward.
         lru.remember(
-            &call_id_cseq_key("call-leaky", Some("t"), 1),
+            "call-leaky-memo",
             CancelEntry {
                 target: ProxyAddr::new("10.0.0.2", 5070),
                 branch: "z9hG4bK-x".into(),
-                upstream_branch: String::new(),
                 stickiness: None,
             },
             RTX_ENTRY_TTL_MS,
@@ -851,7 +838,7 @@ mod sweeper_tests {
 
     /// Per-peer metric classification: a destination that resolves to a known
     /// worker is INTERNAL (pinned); an unknown address (a UAC/UAS) is EXTERNAL
-    /// (LRU-bounded). Drives `sip_proxy_peer_failures_total{scope}`.
+    /// (under the cap). Drives `sip_proxy_peer_failures_total{scope}`.
     #[test]
     fn classify_peer_internal_iff_known_worker() {
         use crate::observability::peer_failures::PeerScope;

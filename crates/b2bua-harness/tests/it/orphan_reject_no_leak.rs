@@ -2,23 +2,21 @@
 //!
 //! When an in-dialog request resolves to a callRef but hydrates **no** live call
 //! (`router::materialise` refuses), the B2BUA answers `481 Call/Transaction Does
-//! Not Exist`. Before the fix that path `return`ed without tearing down the
-//! per-call state the dispatch had just created — the per-call queue + its idle
-//! worker task, the `creations` bump (→ `b2bua_active_calls`), and the per-call
-//! serialization lock (→ `b2bua_store_locks`). A per-call worker exits ONLY on
-//! poison, so every orphan stranded one of each, *permanently*.
+//! Not Exist`. That path tears down the per-call state the dispatch had just
+//! created — the per-call queue + its idle worker task, the `creations` bump
+//! (→ `b2bua_active_calls`), and the per-call serialization lock
+//! (→ `b2bua_store_locks`). A per-call worker exits ONLY on poison, so a path
+//! that merely `return`ed would strand one of each per orphan, *permanently*.
 //!
-//! In the cluster this was invisible per-call but catastrophic in aggregate: a
-//! `kill_worker` left ~3000 long dialogs un-reclaimed on the rebooted worker;
-//! their UACs timed out and BYE'd; each BYE resolved (callRef in the in-dialog
-//! R-URI) → 481 → one leaked queue+lock. The rebooted worker's `active_calls`
-//! and `store_locks` ratcheted ~3150 above its TRUE call-map size and never
-//! drained — the "leak detector" panel — even after all traffic stopped
-//! (`store_calls`=0 but `active_calls`≈`store_locks`≈3000 post-drain).
+//! Invisible per call, this is catastrophic in aggregate: a worker crash leaves
+//! thousands of long dialogs un-reclaimed on the rebooted worker; their UACs time
+//! out and BYE; each BYE resolves (callRef in the in-dialog R-URI) → 481 → one
+//! leaked queue+lock, so `active_calls` and `store_locks` ratchet above the TRUE
+//! call-map size and never drain, even after all traffic stops.
 //!
 //! Repro: establish several independent calls, tear each down (distinct Call-IDs
 //! ⇒ distinct callRefs ⇒ a leak shows N-fold), then fire ONE in-dialog BYE at
-//! each now-dead dialog (each → 481). The invariant is the memory's post-drain
+//! each now-dead dialog (each → 481). The invariant is the post-drain
 //! rule: once traffic drains, the per-call accounting returns to ZERO —
 //! `creations == removals` (⇒ `active_calls` 0) and `lock_count` 0.
 
@@ -32,7 +30,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 /// Independent dialogs to establish, kill, and then orphan. >1 so a leak shows
-/// N-fold (the production ratchet was thousands of distinct lost callRefs).
+/// N-fold, one per distinct lost callRef.
 const LOST_DIALOGS: usize = 6;
 
 #[tokio::test(start_paused = true)]
@@ -77,8 +75,8 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
     assert_eq!(b2bua.lock_count(), 0, "no lock survives a clean teardown");
 
     // ── Fire ONE in-dialog BYE at each now-dead dialog. Each resolves to a gone
-    //    callRef → `materialise` refuses → 481. Pre-fix each leaks a
-    //    queue + lock + an unmatched creation. (Distinct callRefs, so they never
+    //    callRef → `materialise` refuses → 481. A leaking path would strand a
+    //    queue + lock + an unmatched creation for each. (Distinct callRefs, so they never
     //    contend on one queue.)
     for dialog in dead_dialogs.iter_mut() {
         let mut orphan = dialog.send_request(InDialogMethod::Bye).send().await;
@@ -100,9 +98,10 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
         "each orphan in-dialog request created a per-call dispatch queue",
     );
 
-    // ── THE INVARIANT: drained ⇒ per-call accounting back to ZERO. Pre-fix this
-    //    fails — `removals` stays at N while `creations` is 2N, and `lock_count`
-    //    sits at N (one stranded lock per orphan callRef).
+    // ── THE INVARIANT: drained ⇒ per-call accounting back to ZERO. A leak shows
+    //    as `removals` at N while `creations` is 2N, and `lock_count` at N (one
+    //    stranded lock per orphan callRef).
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

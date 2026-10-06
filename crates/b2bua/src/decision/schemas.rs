@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub use call::features::FeatureActivations;
 
-/// Header name → value, or `None` to delete the header.
-pub type SipHeaderUpdates = BTreeMap<String, Option<String>>;
+use b2bua_sdk::header_update::SipHeaderUpdates;
 
 /// The decision request sent on a new INVITE (the call context the backend
 /// keys decisions off — R-URI, From/To, all non-structural `X-*` headers, body).
@@ -33,28 +32,46 @@ pub struct NewCallRequest {
     pub contact: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub content_type: Option<String>,
-    /// All headers not sent as a top-level field (this is where `X-*` land).
-    ///
-    /// Multi-valued: a header appearing on N separate lines keeps **all N**
-    /// values, in wire order, under its name. `History-Info`, `Diversion`, and
-    /// `P-Asserted-Identity` are multi-hop/multi-instance by nature — collapsing
-    /// them to the last line silently drops every earlier hop before the
-    /// decision engine sees them. Use [`NewCallRequest::sip_header`] for the
-    /// common single-value read.
+    /// Every header not sent as a top-level field (this is where `X-*` land), as
+    /// `(name, value)` lines in wire order, one entry per line, duplicates kept, the
+    /// name under its wire spelling. Order is the message's own: RFC 3261 §7.3.1
+    /// makes a header name case-insensitive and several lines of one name one
+    /// ordered set, so two spellings of one name (`History-Info`, `Diversion`,
+    /// `P-Asserted-Identity` hop chains split across elements) interleave exactly as
+    /// received. Read by name with [`NewCallRequest::sip_header`] and
+    /// [`NewCallRequest::sip_header_values`], which fold case.
     #[serde(default)]
-    pub sip_headers: BTreeMap<String, Vec<String>>,
+    pub sip_headers: Vec<(String, String)>,
+    /// The INVITE's body, byte for byte (a binary part stays binary).
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub sip_body: Option<String>,
+    pub sip_body: Option<Vec<u8>>,
 }
 
 impl NewCallRequest {
-    /// First value of a repeatable header, for the common case where a consumer
-    /// wants a single value (e.g. `X-Api-Call`). Returns `None` if the header is
-    /// absent or present with no value. For every instance, index `sip_headers`
-    /// directly.
+    /// First value of a repeatable header, name compared case-insensitively, for
+    /// the common case where a consumer wants a single value (e.g. `X-Api-Call`).
+    /// Returns `None` if the header is absent.
     pub fn sip_header(&self, name: &str) -> Option<&str> {
-        self.sip_headers.get(name).and_then(|v| v.first()).map(String::as_str)
+        first_header_value(&self.sip_headers, name)
     }
+
+    /// Every line of `name` in wire order, name compared case-insensitively.
+    pub fn sip_header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        header_values(&self.sip_headers, name)
+    }
+}
+
+/// The first value of `name` in `lines`, name compared case-insensitively.
+pub fn first_header_value<'a>(lines: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    lines.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+/// Every value of `name` in `lines`, name compared case-insensitively, in order.
+pub fn header_values<'a, 'n: 'a>(
+    lines: &'a [(String, String)],
+    name: &'n str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    lines.iter().filter(move |(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
 /// A downstream SIP peer.
@@ -96,20 +113,17 @@ pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
     }
 }
 
-/// Three-way body directive on a route: leave the inbound body, drop it, or
-/// substitute a new one (the source's `update_body` absent/null/value).
+/// Body directive on a route: leave the inbound body, drop it, substitute a
+/// new one (the source's `update_body` absent/null/value), or send the inbound
+/// session description beside the stated parts, which replace every other part
+/// the inbound body frames (RFC 5621 §3).
 #[derive(Debug, Clone, Default, Serialize)]
 pub enum BodyUpdate {
     #[default]
     Keep,
     Drop,
     Replace(String),
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CallLimiterEntry {
-    pub id: String,
-    pub limit: i64,
+    AttachParts(Vec<sip_message::MultipartPart>),
 }
 
 /// A "route" decision — bridge the call to `destination`.
@@ -127,25 +141,21 @@ pub struct RouteDecision {
     pub update_headers: Option<SipHeaderUpdates>,
     pub update_body: BodyUpdate,
     pub no_answer_timeout_sec: Option<i64>,
-    pub call_limiter: Vec<CallLimiterEntry>,
+    pub call_limiter: Vec<call::LimiterEntry>,
     pub callback_context: Option<String>,
     pub features: FeatureActivations,
     pub service_ext: BTreeMap<String, serde_json::Value>,
     /// Internal release events the backend wants consulted on (`call_release`)
-    /// instead of handled locally — the Routing API's `subscribe[]`
-    ///. Recorded on the call at route-apply time (initial
-    /// route: `apply_route`; async failover/reroute route: the
-    /// `SetSubscriptions` fold), so it survives replication/takeover like
-    /// `features`. Empty = no subscriptions = today's local handling. (This
-    /// in-process type carries no serde; the persistence/back-compat default
-    /// lives on `Call.subscriptions`, which is `#[serde(default)]`.)
+    /// instead of handled locally — the route's subscription list. Recorded
+    /// on the call at route-apply time (initial route: `apply_route`; async
+    /// failover/reroute route: the `SetSubscriptions` fold), so it survives
+    /// replication/takeover like `features`. Empty = no subscriptions = local
+    /// handling.
     pub subscriptions: Vec<call::ReleaseEventKind>,
-    /// **Engine force-enable** for per-call tracing (ADR-0026). An absent field
-    /// is `false`, so an engine that never heard of tracing keeps today's
-    /// behaviour and the ADR-0017 response contract is unchanged. Honoring it
+    /// **Engine force-enable** for per-call tracing (ADR-0026): `true` asks
+    /// for the call's trace, `false` leaves it to the sampler. Honoring it
     /// still runs the full admission chain (bucket + active cap) and is
     /// monotonic: it can only turn a call's trace ON.
-    #[serde(default)]
     pub trace: bool,
     /// An opaque string the decision layer may attach to the decision,
     /// recorded on the call's decision log and read by nothing here.
@@ -180,11 +190,15 @@ pub struct RedirectContact {
 /// on a redirect (ADR-0017 header-ownership matrix).
 #[derive(Debug, Clone, Serialize)]
 pub struct RedirectDecision {
-    /// 3xx status (300/301/302/305); defaults to 302 when built via helpers.
+    /// A 3xx (RFC 3261 §21.3, an unknown 3xx included, §8.1.3.2); any other
+    /// code is refused. Defaults to 302 when built via helpers.
     pub code: u16,
     pub reason: Option<String>,
     pub contacts: Vec<RedirectContact>,
     pub update_headers: Option<SipHeaderUpdates>,
+    /// Seeded exactly as a route's `service_ext`: the slices a redirected
+    /// call's record carries.
+    pub service_ext: BTreeMap<String, serde_json::Value>,
     /// See [`RouteDecision::label`].
     pub label: Option<String>,
 }
@@ -259,9 +273,9 @@ pub struct LegSnapshot {
     pub disposition: call::LegDisposition,
     /// How the leg was (or is being) torn down; `None` while it is live.
     pub bye_disposition: Option<call::ByeDisposition>,
-    /// The B2BUA's local URI on this leg.
+    /// The B2BUA's local address on this leg, display name included.
     pub local_uri: Option<String>,
-    /// The remote party's URI on this leg.
+    /// The remote party's address on this leg, display name included.
     pub remote_uri: Option<String>,
     /// Request-URI of the outbound INVITE (post-rewrite).
     pub invite_request_uri: Option<String>,
@@ -273,7 +287,7 @@ pub struct LegSnapshot {
 /// from the authoritative `Call` at dispatch time and attached to every
 /// decision-point request that has a call behind it ([`CallFailureRequest`],
 /// [`CallReferRequest`]). One generic carrier instead of one upstream field per
-/// downstream need: a decision backend derives what it wants (a `prov18x`
+/// downstream need: a decision backend derives what it wants (an "18x seen"
 /// flag is "any `Provisional` event ≥ 180 on the failed leg", ringing duration
 /// is two timestamps, REFER authorization can read per-service state) without
 /// the platform learning any of those semantics. Cost: one clone per
@@ -294,7 +308,7 @@ pub struct CallSnapshot {
     pub sm_cursors: BTreeMap<String, String>,
     /// What the routing decision activated.
     pub features: Option<FeatureActivations>,
-    /// Live limiter holds on the call.
+    /// The ids of the limiter set the call holds.
     pub limiter_ids: Vec<String>,
 }
 
@@ -333,13 +347,13 @@ impl CallSnapshot {
                 .map(|(m, s)| (m.as_str().to_string(), s.as_str().to_string()))
                 .collect(),
             features: call.features.clone(),
-            limiter_ids: call.limiter_entries.iter().map(|e| e.limiter_id.clone()).collect(),
+            limiter_ids: call.limiter.held_ids(),
         }
     }
 }
 
 /// The release-event consult sent when a **subscribed** internal release
-/// event fires (the Routing API's `POST /calls/events/release`).
+/// event fires (the decision API's `/call/release`).
 /// Built by the `max-duration` rule's `ReleaseAsyncHttp` seed; the framework
 /// attaches the snapshot at dispatch, exactly like [`CallFailureRequest`].
 #[derive(Debug, Clone)]
@@ -365,6 +379,9 @@ pub enum CallReleaseResponse {
     Release {
         /// See [`RouteDecision::label`].
         label: Option<String>,
+        /// Service slices merged into the call before the teardown, exactly
+        /// as a route's `service_ext` (a core-reserved key is skipped).
+        service_ext: BTreeMap<String, serde_json::Value>,
     },
     /// Reroute the established call to `RouteDecision::destination`.
     Route(RouteDecision),
@@ -381,10 +398,19 @@ pub struct CallReferRequest {
     pub callback_context: Option<String>,
     pub refer_to: String,
     pub referred_by: Option<String>,
-    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`).
-    pub sip_headers: BTreeMap<String, String>,
+    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`), as
+    /// `(name, value)` lines in wire order, duplicates kept. Read by name with
+    /// [`CallReferRequest::sip_header`], which folds case.
+    pub sip_headers: Vec<(String, String)>,
     /// Call-scoped context, attached by the framework at dispatch time.
     pub snapshot: CallSnapshot,
+}
+
+impl CallReferRequest {
+    /// First value of `name`, compared case-insensitively.
+    pub fn sip_header(&self, name: &str) -> Option<&str> {
+        first_header_value(&self.sip_headers, name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -423,9 +449,32 @@ pub fn default_platform_features() -> FeatureActivations {
         refer: None,
         relay_first_18x_to_180: None,
         no_answer_timeout_sec: None,
-        call_limiters: None,
         advertise_capabilities: None,
         charging_vector: None,
         withhold_option_tags: None,
+        stated_headers: None,
+        uncharged_media_legs: false,
+        withhold_on_relayed_provisionals: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use call::LimiterEntry;
+
+    /// A route decision's `call_limiter` encodes as `[{"id":…,"limit":…}]` in
+    /// stated order, and that encoding decodes back to the same entries.
+    #[test]
+    fn route_call_limiter_json_is_id_then_limit_in_stated_order() {
+        let mut r = crate::decision::test_adapter::route_to("127.0.0.1", 5060);
+        r.call_limiter = vec![
+            LimiterEntry { id: "trunk-A".into(), limit: 3 },
+            LimiterEntry { id: "site-B".into(), limit: 100 },
+        ];
+        let encoded = serde_json::to_string(&r).unwrap();
+        let pinned = r#"[{"id":"trunk-A","limit":3},{"id":"site-B","limit":100}]"#;
+        assert!(encoded.contains(&format!(r#""call_limiter":{pinned}"#)), "{encoded}");
+        let decoded: Vec<LimiterEntry> = serde_json::from_str(pinned).unwrap();
+        assert_eq!(decoded, r.call_limiter);
     }
 }

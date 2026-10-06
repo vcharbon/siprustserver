@@ -1,4 +1,4 @@
-//! The E2E test-management website (ADR-0018 Phase I): axum + maud + htmx over
+//! The E2E test-management website (ADR-0018): axum + maud + htmx over
 //! the `e2e-core` registry. **One content-negotiated route set** — each handler
 //! renders Maud HTML for a browser and the mirrored JSON when the client sends
 //! `Accept: application/json` — so the website and the API can never drift.
@@ -692,6 +692,17 @@ async fn cell_detail(
         result.rfc.iter().filter(|a| seen.insert((a.lane.clone(), a.detail.clone()))).collect();
     rfc.sort_by_key(|a| !a.is_gating());
     let has_gating = rfc.iter().any(|a| a.is_gating());
+    // The diagram's other findings: the recorder's layer-close checks, lane
+    // name conflicts and harness verdicts, which `rfc` does not carry.
+    let mut seen_other = std::collections::HashSet::new();
+    let mut other: Vec<&seq_report::Anomaly> = result
+        .seq_doc
+        .anomalies
+        .iter()
+        .filter(|a| !a.rule_sourced)
+        .filter(|a| seen_other.insert((a.check.clone(), a.lane.clone(), a.detail.clone())))
+        .collect();
+    other.sort_by_key(|a| !a.is_gating());
     Ok(page(
         &format!("Cell {cell}"),
         html! {
@@ -743,13 +754,38 @@ async fn cell_detail(
                         b { "not" }
                         " fail the test. The RFC suite runs role-aware over the recorded wire: "
                         "each rule judges only the endpoints whose declared role (UA / proxy) it "
-                        "governs, so a proxy rule can no longer flag a UA lane. A gating "
+                        "governs, so a proxy rule never flags a UA lane. A gating "
                         "violation would FAIL the cell and show here in red."
                     }
                 }
                 table {
                     tr { th { "rule" } th { "endpoint" } th { "severity" } th { "detail" } }
                     @for a in &rfc {
+                        tr {
+                            td { code { (a.check) } }
+                            td {
+                                @if let Some(ep) = &a.endpoint { b { (ep) } " " }
+                                span .muted-inline { (a.lane.as_deref().unwrap_or("")) }
+                            }
+                            td {
+                                @if a.is_gating() { span .fail { "GATING" } }
+                                @else { span .advisory { "advisory" } }
+                            }
+                            td { (a.detail) }
+                        }
+                    }
+                }
+            }
+            @if !other.is_empty() {
+                h2 { "Structural and harness findings" }
+                p .muted {
+                    "Findings outside the RFC suite: the recording layer's own checks "
+                    "(queue leaks, in-flight imbalance, undeliverable datagrams, lane name "
+                    "conflicts) and harness verdicts. Gating rows failed the cell."
+                }
+                table {
+                    tr { th { "check" } th { "endpoint" } th { "severity" } th { "detail" } }
+                    @for a in &other {
                         tr {
                             td { code { (a.check) } }
                             td {
@@ -779,7 +815,7 @@ async fn cell_detail(
 
 /// A single run-name path segment, rejected if it could escape the load-runs
 /// root (no separators, no `..`, non-empty). Load run dir names are simple
-/// (`loadgen-report`, `endurance-20260630`), so this is strict, not clever.
+/// (`loadgen-report`, `endurance-<stamp>`), so this is strict, not clever.
 fn safe_segment(name: &str) -> bool {
     !name.is_empty()
         && name != "."

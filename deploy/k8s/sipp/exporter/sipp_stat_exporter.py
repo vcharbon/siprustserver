@@ -6,7 +6,9 @@ SIPp (`-trace_stat -stf <file> -fd 1`) appends one `;`-separated row per flush
 to a stat CSV. The first line is a header naming every column; cumulative
 counters carry a `(C)` suffix, periodic ones `(P)`. This exporter parses the
 header into a name->index map (robust to SIPp column drift across versions),
-reads the LAST data row on each scrape, and exposes it at /metrics.
+reads the LAST complete data row on each scrape, and exposes it at /metrics.
+A scrape reads the first line and a bounded window at the end of the file, so
+its memory is flat whatever the file size; stat_trim.py bounds the disk.
 
 Headline series (labelled by scenario/role/job from the env):
   sipp_current_calls            gauge   concurrent established dialogs
@@ -14,6 +16,9 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_successful_calls_total   counter SuccessfulCall(C)
   sipp_failed_calls_total       counter FailedCall(C)
   sipp_failed_total{cause=...}  counter one series per Failed* column
+  sipp_generic_counter_total{counter=N}
+                                counter GenericCounterN(C): the calls that crossed
+                                        a scenario message carrying counter="N"
   sipp_retransmissions_total    counter Retransmissions(C)
   sipp_out_of_call_msgs_total   counter OutOfCallMsgs(C)
   sipp_dead_call_msgs_total     counter DeadCallMsgs(C)
@@ -21,6 +26,13 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_response_time_ms         gauge   ResponseTime1(C)
   sipp_call_length_ms           gauge   CallLength(C)
   sipp_up                       gauge   1 when the stat file is readable/fresh
+  sipp_stat_file_allocated_bytes gauge  disk the stat file holds
+  sipp_stat_trim_failed         gauge   1 while the trimmer's last attempt failed
+  sipp_error_entries_total      counter entries of the error file (error_follow.py)
+  sipp_unexpected_msgs_total{action,expecting,received}
+                                counter unexpected-message entries: aborted or
+                                        continued, the scenario step expected, the
+                                        status code or method received
 
 Env:
   SIPP_STAT_FILE  (default /stats/stat.csv)
@@ -30,17 +42,34 @@ Env:
                                          (NOT `job`: that is reserved and gets
                                          overwritten by the vmagent scrape job)
   EXPORTER_PORT   (default 9035)
+  SIPP_STAT_KEEP_BYTES (default 16 MiB) -> tail kept on disk by the trimmer;
+                                         0 disables it (the file needs write access)
+  SIPP_ERROR_FILE (default /stats/errors.log) -> SIPp's -error_file, followed
+                                         across rotations; empty disables it
 """
 import os
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import error_follow
+import stat_trim
 
 STAT_FILE = os.environ.get("SIPP_STAT_FILE", "/stats/stat.csv")
 SCENARIO = os.environ.get("SIPP_SCENARIO", "unknown")
 ROLE = os.environ.get("SIPP_ROLE", "uac")
 JOB = os.environ.get("SIPP_JOB", "")
 PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
+KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
+ERROR_FILE = os.environ.get("SIPP_ERROR_FILE", "/stats/errors.log")
+
+# Set by main() when enabled; read by every scrape.
+TRIMMER = None
+FOLLOWER = None
+
+# Longest header line read; a stat row is about 0.5 KB, its header a few KB.
+HEADER_MAX = 64 * 1024
+# Bytes read at the end of the file per scrape: many rows, whatever the columns.
+TAIL_WINDOW = 64 * 1024
 
 # Failed* CSV column (cumulative) -> cause label on sipp_failed_total.
 FAILURE_CAUSES = {
@@ -93,23 +122,48 @@ def parse_time_ms(cell):
     return 0.0
 
 
-def read_last_row():
-    """Return (header_list, last_data_fields) or (None, None) if unreadable."""
+def read_last_row(path):
+    """Return (header_list, last_data_fields) or (None, None) if unreadable.
+
+    The last data row is the last newline-terminated non-blank line in the final
+    TAIL_WINDOW bytes: a row SIPp is still writing is skipped, and NUL bytes a
+    punched hole reads as are stripped.
+    """
     try:
-        with open(STAT_FILE, "r", errors="replace") as fh:
-            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        with open(path, "rb") as fh:
+            head = fh.readline(HEADER_MAX)
+            size = os.fstat(fh.fileno()).st_size
+            start = max(len(head), size - TAIL_WINDOW)
+            fh.seek(start)
+            tail = fh.read(size - start)
     except OSError:
         return None, None
-    if len(lines) < 2:
+    if not head.endswith(b"\n"):
         return None, None
-    header = lines[0].split(";")
-    last = lines[-1].split(";")
-    return header, last
+    lines = tail[:tail.rfind(b"\n") + 1].split(b"\n")
+    if start > len(head):
+        lines = lines[1:]  # the window may begin mid-row
+    for raw in reversed(lines):
+        line = raw.strip(b"\0").decode(errors="replace").strip()
+        if line:
+            return head.decode(errors="replace").strip().split(";"), line.split(";")
+    return None, None
 
 
-def render():
+def render(path=STAT_FILE, trimmer=None, follower=None):
     out = []
-    header, row = read_last_row()
+    try:
+        out.append(fmt("sipp_stat_file_allocated_bytes", os.stat(path).st_blocks * 512))
+    except OSError:
+        pass
+    if trimmer is not None:
+        out.append(fmt("sipp_stat_trim_failed", int(trimmer.failed)))
+    if follower is not None:
+        counts = follower.snapshot()
+        out.append(fmt("sipp_error_entries_total", counts.entries))
+        for labels, n in sorted(counts.unexpected.items()):
+            out.append(fmt("sipp_unexpected_msgs_total", n, labels))
+    header, row = read_last_row(path)
     if header is None:
         out.append(fmt("sipp_up", 0))
         return "".join(out)
@@ -158,6 +212,13 @@ def render():
         if v is not None:
             out.append(fmt("sipp_failed_total", v, [("cause", cause)]))
 
+    # Scenario counters (`counter="N"` on a message), one series per column.
+    for col in header:
+        if col.startswith("GenericCounter") and col.endswith("(C)"):
+            v = num(col, int)
+            if v is not None:
+                out.append(fmt("sipp_generic_counter_total", v, [("counter", col[14:-3])]))
+
     return "".join(out)
 
 
@@ -175,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            payload = render().encode()
+            payload = render(STAT_FILE, TRIMMER, FOLLOWER).encode()
         except Exception as exc:  # never crash the scrape
             payload = (f"sipp_up 0\n# exporter error: {exc}\n").encode()
         self.send_response(200)
@@ -192,6 +253,11 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sipp_stat_exporter: serving :{PORT}/metrics from {STAT_FILE} "
           f"(scenario={SCENARIO} role={ROLE} job={JOB or '-'})", file=sys.stderr)
+    global TRIMMER, FOLLOWER
+    if KEEP_BYTES > 0:
+        TRIMMER = stat_trim.Trimmer(STAT_FILE, KEEP_BYTES).start()
+    if ERROR_FILE:
+        FOLLOWER = error_follow.start(ERROR_FILE)
     srv.serve_forever()
 
 

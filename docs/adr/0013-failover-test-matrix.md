@@ -141,7 +141,7 @@ All multi-node HA-failover test infrastructure moves into a new dedicated crate
 - **Normal deps**: `b2bua`, `sip-proxy`, `repl-net`, `topology`, `ha-harness`,
   `scenario-harness`, **plus `call-limiter` + `http-net`** (promoted from
   dev-deps so the DSL can wire the genuine limiter stack — `HttpCallLimiter` +
-  `LimiterServer` + `WindowStore` over the **simulated** HTTP fabric
+  `LimiterServer` + `CallStore` over the **simulated** HTTP fabric
   (`SimulatedHttpNetwork`) on the fake clock, *not* a `NoopLimiter`/mock — in
   library code; the reason a dedicated crate is warranted rather than extending
   `b2bua-harness`).
@@ -228,7 +228,7 @@ transparency oracle.
   selection, not a full axis.
 
 The **whole matrix runs with the genuine limiter logic** — the b2bua's
-`HttpCallLimiter` client talking to a real `LimiterServer` + `WindowStore`, but
+`HttpCallLimiter` client talking to a real `LimiterServer` + `CallStore`, but
 over the **simulated** HTTP transport (`SimulatedHttpNetwork`) and the same fake
 `Clock::test_at(0)`, shared across crashes/reboots. "Genuine" means *not* a
 `NoopLimiter`/mock — there is no real socket and no wall-clock; the HTTP

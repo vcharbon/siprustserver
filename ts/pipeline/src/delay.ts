@@ -43,7 +43,7 @@ export interface ClassifiedDelay {
 }
 
 /** A relay is instantaneous within this window (µs). */
-const PROXIMITY_US = 2_000_000
+export const PROXIMITY_US = 2_000_000
 
 export interface StepTiming {
   readonly leg: string

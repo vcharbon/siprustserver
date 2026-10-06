@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the global allocation counter.
 //! Allocation budget for the per-call trace machinery on an UNSAMPLED call
 //! (ADR-0026).
 //!
@@ -52,6 +53,7 @@ fn unsampled_call() -> Call {
         &invite,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &B2buaConfig::default(),
+        &sip_txn::IdGen::seeded(1),
         0,
     );
     assert_eq!(call.sampled, None, "a fresh call is not sampled until the draw says so");

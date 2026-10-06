@@ -168,7 +168,7 @@ log "  dead-*            — dead pod diagnostics"
 # Overall run verdict: the run FAILED if endurance.sh exited non-zero (it died in
 # wire-up / preflight / traffic-start, or the chaos loop aborted) OR any chaos event
 # scored a fail. A non-zero endurance exit with zero recorded fails is the precise
-# early-failure case the old `|| true` masked — surface it explicitly.
+# early-failure case an `|| true` would mask — surface it explicitly.
 RUN_STATUS="SUCCESS"
 if [ "$ENDURANCE_EXIT" -ne 0 ] || [ "$fails" -gt 0 ]; then
   RUN_STATUS="FAILED"

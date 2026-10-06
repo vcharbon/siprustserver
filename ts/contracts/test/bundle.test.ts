@@ -111,6 +111,13 @@ describe("the failure vocabulary", () => {
   })
 })
 
+describe("the lane's facts", () => {
+  it("reads what the lane stated about how it ran the case", () => {
+    const verdict = decodeRunVerdictSync({ case: "c", lane: "l", status: "ok", lane_facts: { service: "scripted" } })
+    expect(verdict.lane_facts?.["service"]).toBe("scripted")
+  })
+})
+
 describe("a negative run", () => {
   const negative = decodeRunVerdictSync(JSON.parse(read(BUNDLE, "verdict-negative.json")) as unknown)
 
@@ -170,6 +177,12 @@ describe("the run configuration", () => {
       decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", media: "rewritten" })
     ).toThrow()
   })
+
+  it("reads the identity nonce a lane seeded, and none where the run minted its own", () => {
+    const seeded = decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", identity_nonce: "n1" })
+    expect(seeded.identity_nonce).toBe("n1")
+    expect(config.identity_nonce).toBeUndefined()
+  })
 })
 
 describe("a recorded message", () => {
@@ -180,6 +193,59 @@ describe("a recorded message", () => {
   it("omits the fields no step claimed rather than writing nulls", () => {
     const line = emitRecordedMessage(decodeRecordedMessageSync({ seq: 1, dir: "out", at_us: 0, raw: "X" }))
     expect(line).toBe('{"at_us":0,"dir":"out","raw":"X","seq":1}')
+  })
+
+  /**
+   * A recorded datagram rides in exactly one of the extractor's three arms
+   * (`raw` | `head` + `body_b64` | `raw_b64`), the same shape a capture's
+   * message carries, and a line whose body is bytes states the body's layout.
+   */
+  describe("carries its datagram in one of three arms", () => {
+    const HEAD = "INFO sip:b@h SIP/2.0\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: 7\r\n\r\n"
+    const BLOB_B64 = "AAEC//6AAA=="
+
+    it("decodes and re-emits a `head` + `body_b64` line", () => {
+      const line = { seq: 5, dir: "in", at_us: 1_100_000, step: "s11", head: HEAD, body_b64: BLOB_B64 }
+      const decoded = decodeRecordedMessageSync(line)
+      expect(decoded).toMatchObject({ seq: 5, step: "s11", head: HEAD, body_b64: BLOB_B64 })
+      expect(JSON.parse(emitRecordedMessage(decoded))).toEqual(line)
+    })
+
+    it("decodes and re-emits a `raw_b64` line", () => {
+      const line = { seq: 6, dir: "in", at_us: 1_200_000, raw_b64: "//5JTkZPIHNpcDpiQGggU0lQLzIuMA0KDQo=" }
+      expect(JSON.parse(emitRecordedMessage(decodeRecordedMessageSync(line)))).toEqual(line)
+    })
+
+    it("carries the body's layout beside the arm, parts located by offset", () => {
+      const line = {
+        seq: 3,
+        dir: "in",
+        at_us: 200_000,
+        step: "s3",
+        head: "INVITE sip:b@h SIP/2.0\r\nContent-Type: multipart/mixed;boundary=b1\r\nContent-Length: 20\r\n\r\n",
+        body_b64: "LS1iMQ0K//6AAA0KLS1iMS0tDQo=",
+        body: {
+          content_type: "multipart/mixed",
+          len: 20,
+          parts: [{ content_type: "application/vnd.example.blob", offset: 6, len: 4 }]
+        }
+      }
+      const decoded = decodeRecordedMessageSync(line)
+      expect(decoded.body?.parts?.[0]?.offset).toBe(6)
+      expect(JSON.parse(emitRecordedMessage(decoded))).toEqual(line)
+    })
+
+    it("refuses a line stating two arms, or none", () => {
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw: "X", head: HEAD, body_b64: BLOB_B64 })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw: "X", raw_b64: "WA==" })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, head: HEAD })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0 })).toThrow()
+    })
+
+    it("still refuses an unknown field on every arm", () => {
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, head: HEAD, body_b64: BLOB_B64, leg: "A" })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw_b64: "WA==", leg: "A" })).toThrow()
+    })
   })
 })
 

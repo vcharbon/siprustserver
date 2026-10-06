@@ -7,7 +7,8 @@
  * carries and never splits on a boundary. What it must never grow is a boundary
  * splitter.
  */
-import { Flows } from "@sip/contracts"
+import type { Flows } from "@sip/contracts"
+import { Wire } from "@sip/contracts"
 
 type Msg = Flows.Msg
 
@@ -21,8 +22,8 @@ export interface Part {
    * `Content-Type` and `Content-ID` are the fields above, never repeated here.
    */
   readonly headers?: ReadonlyArray<{ readonly name: string; readonly value: string }>
-  /** Payload bytes as a latin1 string, so a binary part survives verbatim. */
-  readonly text: string
+  /** The part's payload, byte for byte. */
+  readonly bytes: Uint8Array
 }
 
 export interface Decomposed {
@@ -35,19 +36,64 @@ export interface Decomposed {
 export type PartsIndex = ReadonlyMap<Msg, Decomposed>
 
 /**
- * The message's body as latin1 bytes — one character per byte, so a part's
- * emitted byte offsets index it directly even when the datagram arrived as
- * UTF-8 text carrying multi-byte characters.
+ * The body bytes a document's message or a recording's line carries, so a
+ * part's emitted byte offsets index them directly whatever arm the datagram
+ * was written in.
  */
-const bodyBytes = (m: Msg): string => {
-  const payload = Flows.payloadOf(m)
-  if (payload._tag === "text") {
-    const all = Buffer.from(payload.raw, "utf8")
-    const at = all.indexOf("\r\n\r\n")
-    return at < 0 ? "" : all.subarray(at + 4).toString("latin1")
+const bodyBytes = (m: Wire.Msg): Uint8Array => Wire.headBodyOf(m)?.body ?? new Uint8Array(0)
+
+/** What a layout claims that its bytes cannot honour, each side in words. */
+export interface LayoutFault {
+  /** What the layout states. */
+  readonly stated: string
+  /** What the bytes carry. */
+  readonly carried: string
+}
+
+/**
+ * Whether `layout` describes `body`: its `len` is within the bytes after the
+ * head, and every part lies within `len`. The tail may be LONGER than `len` —
+ * a datagram carries what it carries, and the declared length bounds the body
+ * (RFC 3261 §18.3) — never shorter.
+ */
+export const layoutFault = (tail: Uint8Array, layout: Flows.MsgBody): LayoutFault | undefined => {
+  if (layout.len > tail.length) {
+    return { stated: `the layout states a body of ${layout.len} bytes`, carried: `the datagram carries ${tail.length} bytes after its head` }
   }
-  if (payload._tag === "head-body") return Buffer.from(payload.body_b64, "base64").toString("latin1")
-  return ""
+  const past = (layout.parts ?? []).find((p) => p.offset + p.len > layout.len)
+  if (past !== undefined) {
+    return {
+      stated: `a ${bareType(past.content_type)} part at ${past.offset}+${past.len} reaches past the body`,
+      carried: `the layout states a body of ${layout.len} bytes`
+    }
+  }
+  return undefined
+}
+
+/** `type/subtype`, parameters dropped. */
+const bareType = (contentType: string): string => contentType.split(";")[0]?.trim() ?? contentType
+
+/**
+ * The parts a body's layout locates inside its bytes: one entry per part in
+ * body order, each sliced by the offset and length the layout states. The
+ * layout is the extractor's (`Flows.MsgBody`, and the same shape on a recorded
+ * line), so this never splits on a boundary. A layout the bytes cannot honour
+ * is the writer's error, thrown here; a confronter checks `layoutFault` first
+ * and states it as a probe instead.
+ */
+export const locate = (m: Wire.Msg, layout: Flows.MsgBody): Decomposed => {
+  const bytes = bodyBytes(m)
+  const fault = layoutFault(bytes, layout)
+  if (fault !== undefined) throw new Error(`${fault.stated}; ${fault.carried}`)
+  return {
+    contentType: layout.content_type,
+    parts: (layout.parts ?? []).map((p) => ({
+      contentType: p.content_type,
+      ...(p.content_id === undefined ? {} : { contentId: p.content_id }),
+      ...(p.headers === undefined || p.headers.length === 0 ? {} : { headers: p.headers }),
+      bytes: bytes.slice(p.offset, p.offset + p.len)
+    }))
+  }
 }
 
 /** Every multipart body the document carries, keyed by its message. */
@@ -57,19 +103,11 @@ export const index = (flows: Flows.FlowsDoc): PartsIndex => {
     for (const m of leg.msgs) {
       const parts = m.body?.parts
       if (m.body === undefined || parts === undefined || parts.length === 0) continue
-      const bytes = bodyBytes(m)
-      if (bytes.length !== m.body.len) {
-        throw new Error(`body length ${bytes.length} != emitted ${m.body.len} on ${leg.call_id}`)
+      try {
+        out.set(m, locate(m, m.body))
+      } catch (e) {
+        throw new Error(`${(e as Error).message} on ${leg.call_id}`)
       }
-      out.set(m, {
-        contentType: m.body.content_type,
-        parts: parts.map((p) => ({
-          contentType: p.content_type,
-          ...(p.content_id === undefined ? {} : { contentId: p.content_id }),
-          ...(p.headers === undefined || p.headers.length === 0 ? {} : { headers: p.headers }),
-          text: bytes.slice(p.offset, p.offset + p.len)
-        }))
-      })
     }
   }
   return out

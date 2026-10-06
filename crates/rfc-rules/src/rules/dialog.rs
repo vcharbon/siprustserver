@@ -221,8 +221,9 @@ impl Obligation for MidDialogRoute {
 /// **§8.1.2 + RFC 3263 §4 — an in-dialog request's bytes go where its own
 /// routing points.** With a non-empty loose route set §12.2.1.1 puts the next
 /// hop as the topmost Route, and RFC 3263 §4 resolves that URI to a
-/// `(host, port)`; with no Route rows the Request-URI names it. This rule
-/// confirms the datagram left for that destination.
+/// `(host, port)`; behind a strict first route that route is the next hop
+/// (§12.2.1.1 puts it in the Request-URI); with no Route rows the Request-URI
+/// names it. This rule confirms the datagram left for that destination.
 ///
 /// The occasion is ONE request the endpoint sent on a CONFIRMED dialog — before
 /// the peer has a tag, §8.1.2 lets a UA send through a configured outbound
@@ -257,7 +258,10 @@ impl Obligation for MidDialogWireDestination {
                 out.push(finding(Decision::Undecidable("a Route row no reader accepts")));
                 continue;
             };
-            let target = match routes.into_iter().next() {
+            // Behind a strict first route the next hop is that route itself,
+            // however the request was built: `MidDialogRoute` judges the build.
+            let strict = req.dialog.route_set.first().filter(|r| !r.loose).cloned();
+            let target = match strict.or_else(|| routes.into_iter().next()) {
                 Some(first) => Some((first, true)),
                 None => sniff::request_uri_facts(head).map(|u| (u, false)),
             };
@@ -292,7 +296,7 @@ impl Obligation for MidDialogWireDestination {
 
 /// The `(host, port)` an endpoint token names, or `None` where it is not an
 /// address. A logical `#label` suffix is not part of the address.
-fn wire_addr(endpoint: &str) -> Option<(String, u16)> {
+pub(super) fn wire_addr(endpoint: &str) -> Option<(String, u16)> {
     let addr: std::net::SocketAddr = endpoint.split('#').next()?.parse().ok()?;
     Some((addr.ip().to_string(), addr.port()))
 }
@@ -1444,6 +1448,74 @@ mod tests {
         let msgs =
             [invite(1_000, "z9hG4bK-i", ""), rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""), bye];
         assert!(hits(&MidDialogWireDestination, &msgs).is_empty(), "the Route hop is the target");
+    }
+
+    /// Behind a STRICT first route the Request-URI names the next hop
+    /// (§12.2.1.1 put the route there), not the target riding the last Route.
+    #[test]
+    fn a_strict_first_route_names_the_destination_in_the_request_uri() {
+        let dialog = |sent_to: &str| {
+            let mut bye = req(
+                3_000,
+                ALICE,
+                BOB,
+                "BYE",
+                "sip:127.0.0.1:5090",
+                "z9hG4bK-b",
+                2,
+                A_URI,
+                B_URI,
+                Some("bt"),
+                "Route: <sip:bob@127.0.0.1:5070>\r\n",
+            );
+            bye.dst = sent_to.to_string();
+            [
+                invite(1_000, "z9hG4bK-i", ""),
+                rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "Record-Route: <sip:127.0.0.1:5090>\r\n"),
+                bye,
+            ]
+        };
+        assert!(
+            hits(&MidDialogWireDestination, &dialog("127.0.0.1:5090")).is_empty(),
+            "the strict route is the next hop",
+        );
+        let f = hits(&MidDialogWireDestination, &dialog("127.0.0.1:5070"));
+        assert_eq!(f.len(), 1, "sent past the strict route to the target: {f:?}");
+        let Decision::Violated(Evidence::MidDialogWireTargetDiverged { from_route, .. }) =
+            &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert!(from_route, "the strict first route named the destination");
+    }
+
+    /// A strict dialog's request built loose-style but sent to the strict
+    /// route — the §8.1.2 next hop — went to the right place: the mis-built
+    /// header is `MidDialogRoute`'s finding alone.
+    #[test]
+    fn a_strict_dialog_request_sent_to_its_first_route_is_charged_once() {
+        let mut bye = req(
+            3_000,
+            ALICE,
+            BOB,
+            "BYE",
+            "sip:bob@127.0.0.1:5070",
+            "z9hG4bK-b",
+            2,
+            A_URI,
+            B_URI,
+            Some("bt"),
+            "Route: <sip:127.0.0.1:5090>\r\n",
+        );
+        bye.dst = "127.0.0.1:5090".to_string();
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", "Record-Route: <sip:127.0.0.1:5090>\r\n"),
+            bye,
+        ];
+        let wire = hits(&MidDialogWireDestination, &msgs);
+        assert!(wire.is_empty(), "the bytes went to the strict route: {wire:?}");
+        assert_eq!(hits(&MidDialogRoute, &msgs).len(), 1, "the header is charged once");
     }
 
     /// An unconfirmed dialog may still be going through a configured outbound

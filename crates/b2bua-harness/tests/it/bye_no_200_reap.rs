@@ -4,13 +4,12 @@
 //! teardown) the peer leg sits at `ByeSent` — a *non-terminal* disposition — so
 //! `is_fully_resolved` never passes, the call wedges in `Terminating` forever,
 //! `RemoveCall` is never emitted, and `b2bua_active_calls` never decrements. In
-//! k8s this leaked ~8700 dead dialogs (active_calls pinned flat for HOURS after
-//! all traffic stopped), growing worker memory without bound until the load
-//! generators OOM'd.
+//! production each such call is a dead dialog held for good, and worker memory
+//! grows without bound.
 //!
 //! The 32 s `TerminatingTimeout` safety timer (armed by `begin_termination`)
 //! must force-resolve the wedged leg and reap the call. This guards the
-//! `terminating-safety-timeout` rule, which used to be a no-op.
+//! `terminating-safety-timeout` rule.
 
 use std::time::Duration;
 
@@ -56,7 +55,7 @@ async fn unanswered_bye_is_reaped_by_safety_timer() {
 
     // ── Safety net: 32 s later the wedged call must be reaped ─────────────────
     h.advance(TERMINATING_TIMEOUT + Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // BYE-without-200 must be reaped by the 32 s safety timer.
     b2bua.assert_fully_reaped();
 

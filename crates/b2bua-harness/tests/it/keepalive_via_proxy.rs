@@ -1,9 +1,8 @@
 //! Keepalive OPTIONS flowing through a record-routing front proxy (port of
 //! `tests/scenarios/keepalive-via-proxy.ts`, the `keepaliveViaProxy` case).
 //!
-//! Regression guard for the k8s endurance bug where in-dialog keepalive OPTIONS
-//! bypassed the front proxy and every long-hold call was torn down by the
-//! keepalive-timeout rule after 15 min.
+//! Guards against in-dialog keepalive OPTIONS bypassing the front proxy, which
+//! tears every long-hold call down by the keepalive-timeout rule.
 //!
 //! Topology (same as `proxy_b2bua.rs`):
 //!
@@ -23,7 +22,7 @@ use crate::common;
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -43,13 +42,13 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     // (4 hops) settles well inside the non-INVITE Timer E (500 ms) — otherwise
     // the proxy's added latency triggers a retransmit and duplicate OPTIONS.
     let h = Harness::with_transit_delay("b2bua-keepalive-via-proxy", 1).describe(
-        "keepalive: in-dialog OPTIONS travels via proxy on both legs (regression \
-         for k8s endurance teardown).",
+        "keepalive: in-dialog OPTIONS travels via proxy on both legs (no \
+         keepalive-timeout teardown of a long-hold call).",
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
-    let _b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
         .outbound_proxy("127.0.0.1", 5081)
         .start(&h, "b2bua", B2BUA)
         .await;
@@ -93,5 +92,7 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

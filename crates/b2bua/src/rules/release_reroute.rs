@@ -33,8 +33,9 @@
 //! presence is the activation guard, so every rule here is inert on ordinary
 //! calls. These are CORE rules registered BEFORE the generic core set
 //! (`defaults::default_rules_with`), so within CORE they out-rank
-//! `confirm-dialog` / `relay-provisional` / `route-failure` by order; the
-//! explicit `overrides` document the displacement. In-dialog INVITEs from
+//! `confirm-dialog` / `route-failure` by order; the explicit `overrides`
+//! document the displacement. The replacement leg's provisionals are the
+//! core's (`relay-provisional`): A is answered, so it absorbs them. In-dialog INVITEs from
 //! either original party are 491'd while the reroute is in flight (RFC 5407
 //! §3.1 retry-later, the same treatment the transfer machine applies); a BYE
 //! from either party still rides `relay-bye` and ends the call.
@@ -44,8 +45,8 @@ use call::{
     ReroutePhase, RerouteState, TerminationCause, TimerType,
 };
 
-use super::model::{
-    Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
+use b2bua_sdk::model::{
+    Body, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
 };
 
 /// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
@@ -104,9 +105,7 @@ fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
 /// deadline) ends it under the event that raised the consult, which the fold
 /// names.
 fn release_fold_cause(payload: &serde_json::Value) -> TerminationCause {
-    let unanswered = crate::decision_log::stack_authored(payload)
-        && payload.get("reason").and_then(|v| v.as_str()) != Some("limiter_rejected");
-    if !unanswered {
+    if !crate::decision_log::stack_authored(payload) {
         return TerminationCause::DecisionRelease;
     }
     let event = payload
@@ -131,18 +130,24 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             &[],
             Match::internal_event().topic("call-release-result").outcome("release"),
             |ctx| {
-                // Fold landed on a going-away call (069): the termination in
+                // Fold landed on a going-away call: the termination in
                 // progress owns the teardown — no duplicate CDR, no
                 // BeginTermination re-arm of the safety timer.
                 if super::defaults::fold_lands_on_going_away_call(ctx) {
                     return ok(vec![]);
                 }
                 let payload = match ctx.event {
-                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
                 };
                 let cause = release_fold_cause(payload);
-                ok(vec![
+                let mut actions = Vec::new();
+                // A release seeds its service slices exactly as a route does.
+                let service_ext = super::defaults::parse_service_ext(payload);
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                actions.extend([
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
                         leg_id: ctx.call.a_leg().leg_id.clone(),
@@ -154,28 +159,30 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         cause,
                         by_leg: None,
                     },
-                ])
+                ]);
+                ok(actions)
             },
         ),
         // ── release consult folded: `reroute` → replacement b-leg + slice.
         // Output parity with the initial/failover route: the
         // shared `route_fold_parity_actions` applies features (incl. the
         // GlobalDuration re-arm — the rerouted call gets the route's fresh
-        // cap), service_ext, subscriptions, and the router-admitted limiter
-        // holds; `CreateLeg` honors the identity/header/body rewrites.
+        // cap), service_ext, subscriptions, and the limiter holds (the
+        // reroute's admitted holds replace the call's); `CreateLeg` honors
+        // the identity/header/body rewrites.
         rule(
             "release-result-reroute",
             &[],
             Match::internal_event().topic("call-release-result").outcome("reroute"),
             |ctx| {
-                // Fold landed on a going-away call (069): no replacement leg
+                // Fold landed on a going-away call: no replacement leg
                 // for a call whose parties already hung up (see
                 // `fold_lands_on_going_away_call`).
                 if super::defaults::fold_lands_on_going_away_call(ctx) {
                     return ok(vec![]);
                 }
                 let payload = match ctx.event {
-                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
                 };
                 let fold = super::defaults::parse_route_fold(payload)?;
@@ -187,6 +194,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
 
                 let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
+                let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
@@ -194,8 +202,9 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     new_to: fold.new_to,
                     no_answer_timeout_sec: no_answer,
                     callback_context: fold.callback_context,
-                    body_override: fold.body_override,
+                    body_override: leg_body,
                     header_updates: fold.header_updates,
+                    header_adds: fold.header_adds,
                     kind: None,
                 });
                 actions.push(RuleAction::SetReroute {
@@ -215,24 +224,6 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     leg_id: None,
                 });
                 ok(actions)
-            },
-        ),
-        // ── replacement leg progress: absorb its 18x (A is established — a
-        // provisional must NOT be relayed onto her answered dialog).
-        rule(
-            "reroute-b-provisional",
-            &["relay-provisional"],
-            Match::response()
-                .method("INVITE")
-                .status_class(1)
-                .direction(Direction::FromB)
-                .filter(is_new_leg),
-            |ctx| {
-                ok(vec![RuleAction::UpdateLegState {
-                    leg_id: ctx.source_leg_id.to_string(),
-                    state: LegState::Early,
-                    disposition: None,
-                }])
             },
         ),
         // ── replacement leg answers → ACK it, bridge A onto its SDP.
@@ -262,15 +253,14 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         disposition: Some(LegDisposition::Bridged),
                     },
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
-                    RuleAction::AckLeg {
-                        leg_id: new_leg.clone(),
-                        body: Vec::new(),
-                        content_type: None,
-                    },
+                    RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
-                        body: resp.body().to_vec(),
+                        body: Some(
+                            Body::from_leg(resp.body().to_vec(), new_leg.clone())
+                                .described_by(resp.headers()),
+                        ),
                         add_headers: vec![],
                     },
                     RuleAction::AddCdrEvent {
@@ -318,7 +308,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             &["no-answer"],
             Match::timer().timer_type(TimerType::NoAnswer).filter(|ctx| {
                 let timer_leg = match ctx.event {
-                    crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
+                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                     _ => None,
                 };
                 ctx.call.reroute_state().map(|r| r.new_leg_id.as_str()).is_some()
@@ -333,7 +323,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: Some("release-reroute-failed".into()),
                     },
-                    RuleAction::DestroyLeg { leg_id: st.new_leg_id.clone() },
+                    RuleAction::DestroyLeg { leg_id: st.new_leg_id.clone(), headers: vec![] },
                 ];
                 actions.extend(fail_teardown(ctx, "release-reroute-failed"));
                 ok(actions)
@@ -356,18 +346,14 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let st = ctx.call.reroute_state()?.clone();
                 let mut actions = vec![
-                    RuleAction::AckLeg {
-                        leg_id: "a".to_string(),
-                        body: Vec::new(),
-                        content_type: None,
-                    },
+                    RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
                     RuleAction::cancel_timer(&guard_timer(), None),
                     RuleAction::Merge { leg_a: "a".to_string(), leg_b: st.new_leg_id.clone() },
                 ];
                 if let Some(old) = st.old_leg_id.clone() {
                     // BYE the displaced b-leg (DestroyLeg: confirmed → BYE +
                     // `bye_sent`; its 200 resolves via `resolve-bye-response`).
-                    actions.push(RuleAction::DestroyLeg { leg_id: old });
+                    actions.push(RuleAction::DestroyLeg { leg_id: old, headers: vec![] });
                 }
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Answer,
@@ -421,21 +407,14 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         ),
         // ── glare: any in-dialog INVITE from either original party while the
         // reroute is in flight → 491 Request Pending (RFC 5407 §3.1 — retry
-        // once the reroute settles). Same treatment the transfer machine's
-        // realign phases apply. A BYE is deliberately NOT intercepted — it
-        // rides `relay-bye` and ends the whole call.
+        // once the reroute settles), or the §14.2 refusal when the INVITE
+        // meets glare on the dialog. A BYE is deliberately NOT intercepted —
+        // it rides `relay-bye` and ends the whole call.
         rule(
             "reroute-glare-reinvite",
             &["reinvite-glare", "relay-reinvite"],
             Match::request().method("INVITE").filter(|ctx| ctx.call.reroute_active()),
-            |_ctx| {
-                ok(vec![RuleAction::Respond {
-                    status: 491,
-                    reason: "Request Pending".into(),
-                    body: vec![],
-                    content_type: None,
-                }])
-            },
+            |ctx| ok(vec![super::pending_refusal::refuse_pending(ctx)]),
         ),
     ]
 }

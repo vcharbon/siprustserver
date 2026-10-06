@@ -1,12 +1,13 @@
 //! Per-leg record ([`Leg`]) and its state / disposition / role enums. Dialog
 //! internals live in [`crate::model::dialog`]; the enclosing call record in
-//! [`crate::model::call`].
+//! [`crate::model::record`].
 
 use serde::{Deserialize, Serialize};
 
 use super::dialog::Dialog;
 use super::invite_txn::InviteTxnHandle;
 use super::message_ring::MessageRing;
+use super::sdp_session::LegSdpSession;
 use super::services::ExtMap;
 
 /// Remote peer endpoint.
@@ -94,9 +95,11 @@ pub struct Leg {
     pub no_answer_timeout_sec: Option<i64>,
     /// How this leg was torn down. `None` while the call is active.
     pub bye_disposition: Option<ByeDisposition>,
-    /// B2BUA's local URI for this leg (From for outbound requests).
+    /// B2BUA's local address on this leg (From for outbound requests), as the
+    /// leg's dialog keeps it ([`crate::StackDialog::local_uri`]).
     pub local_uri: Option<String>,
-    /// Remote party's URI for this leg (To for outbound requests).
+    /// Remote party's address on this leg (To for outbound requests), in the
+    /// same form.
     pub remote_uri: Option<String>,
     /// Request-URI of the outbound INVITE — needed for CANCEL (§9.1).
     pub invite_request_uri: Option<String>,
@@ -106,6 +109,13 @@ pub struct Leg {
     pub ext: Option<ExtMap>,
     /// Explicit leg role (ADR-0014); read via [`crate::helpers::leg_kind`].
     pub kind: Option<LegKind>,
+    /// Whether this leg takes part in the originator's session timer (RFC
+    /// 4028), fixed when the stack dials it: false on a leg whose answers never
+    /// reach the originator (a media leg, one dialled after the originator's
+    /// INVITE completed) or one the call withholds `timer` from. A request
+    /// relayed toward a leg where it is false carries no timer. `None` on the
+    /// originator's leg.
+    pub in_session_timer: Option<bool>,
     /// Whether generic relay/keepalive rules own this leg; read via
     /// [`crate::helpers::is_adopted`].
     pub adopted: Option<bool>,
@@ -113,12 +123,14 @@ pub struct Leg {
     /// INVITE; `None` while that transaction is unanswered. Every TU final
     /// records itself here and so does the autonomous 487 the transaction
     /// layer sends on a CANCEL; a leg carrying one is never sent a second
-    /// final (RFC 3261 §17.2.1). Trailing under the positional codec.
-    #[serde(default)]
+    /// final (RFC 3261 §17.2.1).
     pub invite_final_sent: Option<u16>,
     /// The leg's distinct SIP messages, received and sent, under the
     /// configured cap; empty while the ring is off. Written only by
     /// [`crate::helpers::record_message`].
-    #[serde(default)]
     pub messages: MessageRing,
+    /// The session descriptions crossing the leg's dialog, kept so another
+    /// author's description continues the session its peer holds (RFC 3264
+    /// §8). Written only by the stack's description seam.
+    pub sdp_session: LegSdpSession,
 }

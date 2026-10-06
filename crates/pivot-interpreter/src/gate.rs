@@ -1,5 +1,5 @@
 //! What an `expect` **gates on**, and what it does with a datagram that does
-//! not match (`PCAP2TEST_PIVOT_V3.md` §14 item 4, closing friction K2).
+//! not match (`PCAP2TEST_PIVOT_V3.md` §14 item 4).
 //!
 //! Gating is structural and nothing else: op, leg alignment, the discriminator
 //! (`method`, or `status` plus `cseq-method`), and the budget. Then `check`
@@ -10,7 +10,7 @@
 //! something already surfaced is absorbed BELOW this API — the harness's
 //! RFC 3261 §17.2 two-view seam
 //! ([`Absorption`](scenario_harness::absorption), keyed Call-ID / top-Via
-//! branch / method for a request, plus CSeq and status for a final; issue 22)
+//! branch / method for a request, plus CSeq and status for a final)
 //! is the one implementation, and putting a second one here would let the two
 //! disagree.
 //! Everything that does surface is either matched by the armed expect, answered
@@ -446,8 +446,9 @@ pub fn declared_headers_carried(step: &CompiledStep, inbound: &Inbound) -> (usiz
 /// gates on every lane.
 ///
 /// A frozen CLOCK STAMP never gates: `Date`/`Timestamp` state when the message
-/// that carries them was sent, so the replaying stack mints its own or none at
-/// all and the captured value can hold on no run. What it found is
+/// that carries them was sent. The relaying stack carries the peer's on this
+/// run (or none, from a stored copy), a reading of that peer's clock, so the
+/// captured value is no property of the call. What it found is
 /// [`scoped_header_findings`].
 fn headers_hold(
     spec: &MsgSpec,
@@ -468,8 +469,8 @@ fn headers_hold(
     None
 }
 
-/// True iff this frozen header states when its own message was sent, which the
-/// stack that mints the message owns (RFC 3261 §20.17 / §20.38).
+/// True iff this frozen header states when its own message was sent (RFC 3261
+/// §20.17 / §20.38): the sending peer's clock, whatever the relay carries.
 fn clock_stamp(want: &Header) -> bool {
     states_send_time(&want.name)
 }
@@ -589,6 +590,16 @@ fn body_holds(spec: &MsgSpec, inbound: &Inbound) -> Option<(String, Option<Known
                 None,
             ))
         }
+        // A multipart expect keeps the media-type gate the `multipart-present`
+        // shape carries: what arrived must be multipart for the confrontation
+        // to locate its parts. The parts' content stays the confrontation's.
+        Body::Multipart(_) if !is_multipart => Some((
+            format!(
+                "body must be multipart; content type is {:?}",
+                inbound.content_type.as_deref().unwrap_or("absent")
+            ),
+            None,
+        )),
         Body::Resource(_) | Body::Multipart(_) => None,
     }
 }
@@ -960,6 +971,55 @@ mod tests {
         );
     }
 
+    /// A `multipart` body on an expect gates the media type the way the
+    /// `multipart-present` shape does: what arrived must be `multipart/*` for
+    /// the confrontation to locate its parts. The parts' content stays the
+    /// confrontation's.
+    #[test]
+    fn a_multipart_body_on_an_expect_gates_the_container_type() {
+        let config = lane();
+        let scope = Scope::new(&config, None);
+        let described = step(
+            MsgSpec {
+                method: Some("INVITE".into()),
+                body: Some(Body::Multipart(pivot_schema::body::MultipartBody {
+                    multipart: pivot_schema::body::Multipart {
+                        content_type: "multipart/mixed".into(),
+                        parts: vec![pivot_schema::body::Part {
+                            content_type: "application/vnd.example.blob".into(),
+                            reference: "resources/uas1_r0_1.bin".into(),
+                            rewrite: vec![],
+                            mode: Some(pivot_schema::body::BodyMode::Frozen),
+                            compare: None,
+                            content_id: None,
+                            headers: vec![],
+                            cid_linked: vec![],
+                        }],
+                    },
+                })),
+                ..MsgSpec::default()
+            },
+            CheckMode::Assert,
+        );
+        let mut invite = inbound_request("INVITE");
+        assert!(
+            !content_holds(&described, &invite, &scope, &plain()).matches(),
+            "a body owed and missing is refused"
+        );
+        invite.body = b"v=0".to_vec();
+        invite.content_type = Some("application/sdp".into());
+        assert!(
+            !content_holds(&described, &invite, &scope, &plain()).matches(),
+            "a single body is not a multipart one"
+        );
+        invite.body = b"--b\r\n--b--\r\n".to_vec();
+        invite.content_type = Some("multipart/mixed;boundary=b".into());
+        assert!(
+            content_holds(&described, &invite, &scope, &plain()).matches(),
+            "the parts are the confrontation's, never the gate's"
+        );
+    }
+
     /// A lane that declares the known bug keeps taking the datagram, so the run
     /// reaches the steps behind the symptom; a lane that declares nothing still
     /// refuses it. What the waived assertion found is recorded either way.
@@ -1102,7 +1162,7 @@ mod tests {
         assert!(header_findings(&recorded, &arrived, &plain()).is_empty());
     }
 
-    /// **Issue 280**: a frozen header value states `${…}` like every other
+    /// A frozen header value states `${…}` like every other
     /// string a document carries, and the expect side resolves it exactly as
     /// the send side does — one token cannot mean two things across a relay.
     #[test]
@@ -1110,7 +1170,7 @@ mod tests {
         let config = lane();
         let scope = Scope::new(&config, None);
         let state = RunState::new();
-        let bindings = IdentityBindings::new().bind("called-0-0", "intl-00", "0033000900001");
+        let bindings = IdentityBindings::new().bind("called-0-0", "intl-00", "0015550900001");
         let resolver = Resolver::new(&state, &bindings);
         let spec = MsgSpec {
             status: Some(183),
@@ -1125,7 +1185,7 @@ mod tests {
         let asserted = step(spec, CheckMode::Assert);
         let mut arrived = inbound_response(183, "INVITE");
         arrived.headers =
-            vec![("Diversion".into(), "<sip:0033000900001@h>;reason=unconditional".into())].into();
+            vec![("Diversion".into(), "<sip:0015550900001@h>;reason=unconditional".into())].into();
 
         // The relayed value IS what the accessor names, so the assertion holds
         // and nothing is owed a finding.
@@ -1136,13 +1196,13 @@ mod tests {
         // wanted is a number, and the verdict has to be readable as one.
         let mut other = arrived.clone();
         other.headers =
-            vec![("Diversion".into(), "<sip:+33000900001@h>;reason=unconditional".into())].into();
+            vec![("Diversion".into(), "<sip:+15550900001@h>;reason=unconditional".into())].into();
         let findings = header_findings(&asserted, &other, &resolver);
         assert!(
             matches!(&findings[..], [f] if matches!(&f.failure,
                 Failure::CheckFailed { expected, observed, .. }
-                    if expected == "<sip:0033000900001@h>;reason=unconditional"
-                        && observed == "<sip:+33000900001@h>;reason=unconditional")),
+                    if expected == "<sip:0015550900001@h>;reason=unconditional"
+                        && observed == "<sip:+15550900001@h>;reason=unconditional")),
             "{findings:#?}"
         );
 
@@ -1159,7 +1219,7 @@ mod tests {
         );
     }
 
-    /// **Issue 68**: a frozen list header compares by wire FORM, not by bytes.
+    /// A frozen list header compares by wire FORM, not by bytes.
     /// RFC 3261 §7.3.1 lets the separators of a list carry whitespace and lets
     /// several rows combine into one, so a platform that re-lays out its own
     /// header has changed nothing — and a platform that changed a VALUE still
@@ -1208,7 +1268,7 @@ mod tests {
         assert!(!holds(frozen(&["INVITE, ACK", "BYE"]), &carrying(&["INVITE,ACK,BYE,OPTIONS"])));
     }
 
-    /// **Issue 255**: a header set that differs NAMES itself and still fails.
+    /// A header set that differs NAMES itself and still fails.
     /// The whole assertion does not hold, so the step is not preferred; the
     /// match gate takes the datagram anyway, and every header that missed is a
     /// finding carrying the frozen value and what actually arrived.

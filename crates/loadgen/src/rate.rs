@@ -191,6 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn new_stores_and_reads_back_a_fractional_rate() {
         let h = RateHandle::new(12.5);
         assert_eq!(h.cps(), 12.5);
@@ -199,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn zero_is_paused_and_a_raise_resumes() {
         let h = RateHandle::new(0.0);
         assert!(h.is_paused());
@@ -212,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn negative_and_nan_clamp_to_zero() {
         let h = RateHandle::new(10.0);
         assert_eq!(h.set(-5.0), 0.0);
@@ -221,6 +224,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn a_clone_sees_writes_through_the_shared_cell() {
         let a = RateHandle::new(10.0);
         let b = a.clone();

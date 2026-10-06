@@ -21,7 +21,7 @@
 import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type { CaptureRule } from "./capture-rules.js"
-import type { CaseRule } from "./case-rules.js"
+import { CASE_RULES, type CaseRule } from "./case-rules.js"
 import { CUT_RULES } from "./cut.js"
 import { neverDerives, type CallIdDerivation } from "./derivation.js"
 import { DOCUMENT_RULES, type DocumentRule } from "./document-rules.js"
@@ -200,6 +200,14 @@ export interface CasePolicy {
   /** The provisional-handling profile the captured platform ran. */
   readonly relay18x: (flows: Flows.FlowsDoc, layout: Layout) => Call.Relay18x | undefined
   /**
+   * Whether the REPLAYING platform relays an in-dialog INVITE end to end. Where
+   * it does, a leg the vantage lost past the 2xx its peer sent is owed the far
+   * side of every such exchange the other leg holds, and synthesis transcribes
+   * it there (`far-side-reinvite.ts`). Neutral: states nothing, so nothing is
+   * derived and the run shows what the platform does with the INVITE.
+   */
+  readonly relaysReinvite: (flows: Flows.FlowsDoc, layout: Layout) => boolean
+  /**
    * Which called legs are resources the platform JOINED to the call rather than
    * destinations it hunted — read off the raw observations, since a media
    * resource is told apart by what its dialog carries, not by its position.
@@ -209,14 +217,14 @@ export interface CasePolicy {
     actors: ReadonlyArray<ActorObs>
   ) => JoinsReading
   /**
-   * The one behavioural delta between the source platform and the replaying
-   * one, applied to the synthesized flow. A pure rewrite: what it changes it
-   * flags.
+   * Any behavioural delta between the source platform and the replaying one,
+   * applied to the synthesized flow. A pure rewrite: what it changes it flags,
+   * and a deployment whose two platforms behave alike supplies the identity.
    *
-   * The layout rides along because the delta is MECHANISM-CONDITIONAL: which
-   * ACK a platform mints itself rather than relaying is decided by the call's
-   * shape (a chain, a transfer, a joined resource), which the flow alone does
-   * not carry.
+   * The layout rides along because such a delta can be MECHANISM-CONDITIONAL:
+   * what a platform composes itself rather than relaying may be decided by the
+   * call's shape (a chain, a transfer, a joined resource), which the flow alone
+   * does not carry.
    */
   readonly adaptFlow: (flows: Flows.FlowsDoc, flow: FlowOut, layout: Layout) => FlowOut
   /**
@@ -227,7 +235,7 @@ export interface CasePolicy {
   /** The informative family label. Never interpreted by anything downstream. */
   readonly familyOf: (view: CaseView) => string
   /**
-   * One flag per DETECTOR this deployment runs, stating its outcome on this
+   * One flag per DETECTOR the deployment runs, stating its outcome on this
    * case (`detected:` / `detected-none:` / `detection-unavailable:`).
    *
    * The roster is complete or it is worthless: a silent detector and an absent
@@ -247,7 +255,10 @@ export interface CasePolicy {
    * before {@link CasePolicy.refuse} because it needs strictly less.
    */
   readonly refuseAtCapture: ReadonlyArray<CaptureRule>
-  /** Why a proposed case is not generated, decided on the cut's vantages. */
+  /**
+   * Why a proposed case is not generated, decided on the cut's vantages. Runs
+   * after the pipeline's own case rules, which every deployment gets.
+   */
   readonly refuse: ReadonlyArray<CaseRule>
   /**
    * Why an ASSEMBLED case is not written, decided on the document alone. Runs
@@ -276,6 +287,7 @@ export const neutralPolicy: CasePolicy = {
   derives: neverDerives,
   chain: () => ({ causes: [], flags: [] }),
   relay18x: () => undefined,
+  relaysReinvite: () => false,
   joins: () => new Map(),
   adaptFlow: (_flows, flow) => flow,
   headerClass: NO_HEADER_CLASS,
@@ -320,7 +332,7 @@ export interface TieredRoster {
 /** Every refusal rule a policy runs, by tier, in the order a capture meets them. */
 export const tieredRoster = (policy: CasePolicy): TieredRoster => ({
   capture: [...CUT_RULES, ...policy.refuseAtCapture],
-  case: policy.refuse,
+  case: [...CASE_RULES, ...policy.refuse],
   document: [...DOCUMENT_RULES, ...policy.refuseOnDocument]
 })
 

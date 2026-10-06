@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): sets and removes a process environment variable.
 //! The Drop-path artifact property: a run that never reaches `finish()` still
 //! leaves its full SVG/HTML/text ladders under `SCENARIO_ARTIFACT_DIR` (unset
 //! ⇒ nothing is written), FAIL-bannered and carrying the panic message on the

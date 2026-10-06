@@ -159,7 +159,7 @@ async fn a_watchdog_fired_inside_the_terminating_window_reaches_only_teardown_ru
 
     // ── bob's withheld 487 resolves the cancelled b-leg; the call finalizes ──
     b_inv.respond(487, "Request Terminated").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().going_away_absorbed_total(), 1, "counted exactly once");
 

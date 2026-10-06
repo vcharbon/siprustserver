@@ -169,8 +169,8 @@ describe("a leg's head step (§6.8)", () => {
   it("never lets a session timer gate a head dwell", () => {
     // The second attempt's INVITE offers a session timer, but the dwell that
     // reaches it crosses from leg B to leg C and no system timer runs across
-    // two legs: measured, the 7 ms is the captured platform's own reroute
-    // latency and §9.2 would hold a fresh SUT to it.
+    // two legs: the 7 ms is the captured platform's own reroute latency and
+    // §9.2 would hold a fresh SUT to it.
     const d = classify([
       step("A", true, 0, "req:INVITE", true),
       step("B", false, 66, "req:INVITE", true),
@@ -200,7 +200,7 @@ describe("a leg's head step (§6.8)", () => {
 
 describe("a minted arrival is measured inside its own transaction (§6.8)", () => {
   /**
-   * `capture_238065`'s BYE glare on leg B: the callee's own BYE (CSeq 1) and
+   * A captured BYE glare on leg B: the callee's own BYE (CSeq 1) and
    * the SUT's relay of the caller's BYE (CSeq 2) cross, so the callee's 481 to
    * one transaction lands between the other's request and its 200.
    */

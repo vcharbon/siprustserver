@@ -1,19 +1,29 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
 //! per-peer timeout attribution, the acting-backup self-release notice, the
-//! out-of-dialog OPTIONS health responder, resolution, the full-guarantee cap
-//! shed, and finally the per-call FIFO dispatch.
+//! out-of-dialog OPTIONS health responder, resolution (an event resolving to
+//! no call goes to [`super::unroutable`]), a new INVITE's router rungs of the
+//! admission ladder ([`super::admit`]), then the offer of the event's
+//! [`Turn`] to its call's queue under its dispatch class
+//! ([`crate::dispatch::class`]). The router acts on the offer: an admitted
+//! new INVITE spends its CPS token once its turn is queued, the reaper hears
+//! a call past its lifetime cap or at its overflow ceiling, and a discarded
+//! request is paid what it is owed ([`super::owed`]).
 
 use std::sync::Arc;
 
 use sip_message::SipMessage;
 
+use super::admit;
+use super::owed::OwedAnswer;
 use super::peer_metrics::classify_b2bua_peer;
-use super::process::{process, reject_stray_cancel};
 use super::release::{release_call, ReleaseKind};
-use super::resolve::{replica_takeover_call_ref, resolve};
+use super::resolve::{replica_takeover, resolve};
 use super::responses::build_options_health_response;
+use super::turn::Turn;
+use super::unroutable::Lookup;
 use super::RouterCtx;
-use crate::event::CallEvent;
+use crate::dispatch::{Discarded, DispatchClass, Outcome};
+use b2bua_sdk::event::CallEvent;
 
 pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // Per-method / per-(method,code) data-path counters. Every inbound SIP
@@ -83,7 +93,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                             ctx.state.flush(&call);
                         }
                     }
-                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease).await;
+                    release_call(ctx, &call_ref, ReleaseKind::SelfRelease { ended: false }).await;
                 } else {
                     // A fresh in-dialog request (a second takeover during a
                     // sustained partition) re-armed a transaction since this notice
@@ -100,7 +110,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         return;
     }
 
-    // Out-of-dialog OPTIONS keepalive: self-report readiness (S7, ADR-0011 X6).
+    // Out-of-dialog OPTIONS keepalive: self-report readiness (ADR-0011 X6).
     // The front proxy probe keys on the status + Reason header text
     // (`sip-proxy::health::probe::classify_503`).
     if let CallEvent::Sip { message, src, .. } = &event {
@@ -120,6 +130,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     }
 
     let mut res = resolve(ctx, &event);
+    let mut lookup = Lookup::Answered;
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
@@ -131,74 +142,74 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         // the replica store's SIP index (the puller imported it) before declaring
         // the event unroutable, so a failed-over in-dialog request is not silently
         // dropped and the dialog can still terminate on the backup.
-        res.call_ref = replica_takeover_call_ref(ctx, &event).await;
+        match replica_takeover(ctx, &event).await {
+            Ok(Some(hit)) => res.found_by_index(hit, &event),
+            Ok(None) => {}
+            Err(_) => lookup = Lookup::Failed,
+        }
     }
     let call_ref = match res.call_ref.clone() {
         Some(r) => r,
         None => {
-            // A CANCEL reaches the router only when the transaction layer held
-            // no INVITE for it; naming no call either, it draws the RFC 3261
-            // §9.2 481 here. Every other unroutable request is the peer's to
-            // re-send or give up on.
-            reject_stray_cancel(ctx, None, &event).await;
-            ctx.metrics.bump_unroutable_dropped();
+            super::unroutable::on_unroutable(ctx, &event, lookup).await;
             return;
         }
     };
 
-    // ── Setup-CANCEL mark (069) ──────────────────────────────────────────────
+    // ── Setup-CANCEL mark ──────────────────────────────────────────────
     // An out-of-dialog CANCEL means the txn layer just finalized the initial
     // INVITE (200 + 487 already on the wire). The `Cancelled` event queues on
-    // the per-call FIFO BEHIND an initial-INVITE turn parked on its decision
-    // round trip, so the call model cannot learn the caller is gone until that
-    // turn ends — mark it here (the run loop) so the decision-application seam
-    // (`process::initial_invite_turn`) drops a route/reject landing on the
-    // cancelled call. An in-dialog CANCEL targets one re-INVITE transaction,
-    // never the call setup, and is not marked. Gated on the per-call queue
-    // existing: the racing INVITE created it synchronously in this same run
-    // loop (and a live call's worker exits only on teardown poison), so the
-    // 069 window always marks — while a stray CANCEL with no queue guards
-    // nothing, and `dispatch` may silently cap-drop its body, which would
-    // strand the mark forever (no teardown path would ever run to clear it).
-    if matches!(&event, CallEvent::Cancelled { in_dialog: false, .. })
-        && ctx.dispatcher.has_queue(&call_ref)
-    {
-        ctx.state.mark_setup_cancelled(&call_ref);
+    // the per-call FIFO BEHIND the initial-INVITE turn (waiting for a permit,
+    // or parked on its decision round trip), so the call model cannot learn
+    // the caller is gone until that turn ends — mark it here (the run loop) so
+    // the turn (`process::initial_invite_turn`) skips the decision of a setup
+    // not yet ruled, and drops a route/reject landing on the cancelled call.
+    // The mark names the cancelled INVITE's CSeq: only that INVITE's turn
+    // reads it. An in-dialog CANCEL targets one re-INVITE transaction, never
+    // the call setup, and is not marked. Gated on that INVITE being here —
+    // admitted and waiting for its turn, or the live call's own during its
+    // decision round trip — so the setup window always marks, while the CANCEL
+    // of an INVITE refused or discarded, or one reaching a queue whose call
+    // was released, marks nothing no release would clear.
+    if let CallEvent::Cancelled { in_dialog: false, invite_cseq: Some(cseq), .. } = &event {
+        if admit::invite_here(ctx, &call_ref, *cseq) {
+            ctx.state.mark_setup_cancelled(&call_ref, *cseq);
+        }
     }
 
-    // ── Full-guarantee cap shed (ADR-0022) ────────────────────────────────────
-    // At the per-call global cap, `dispatch` would SILENTLY drop a brand-new
-    // call_ref's body before any call/txn context exists — leaving a caller who
-    // already heard sip-txn's auto-100 on "100-then-silence" (the one full-queue
-    // path neither the decision deadline nor the terminated-unanswered synthesis
-    // can reach, because no call is ever born). Shed a NEW initial INVITE here
-    // with a stateless 503 instead (mirrors the Tier-3 admission gate: stateless,
-    // no per-call resources, sent through the INVITE server txn that carries the
-    // 100). In-dialog events for an at-cap new call_ref stay on the silent
-    // `dispatch` cap-drop (an in-dialog request with no live call is an orphan the
-    // protocol resends / the peer 481s; only the initial INVITE owes a final).
-    if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
+    // `CallQuiesced`, the one event with no dispatch class, returned above.
+    let Some(class) = DispatchClass::of(&event) else { return };
+    // A new INVITE is judged unless it is a copy of a call already here (live,
+    // or admitted and not born yet, on the same CSeq). The check and the offer
+    // run with no await between them.
+    let mut unborn = None;
+    if class.is_new_call() {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
-                let resp = crate::overload::build_reject_new_call_503(
-                    ctx.id_gen.new_tag(),
-                    req,
-                    ctx.config.retry_after_base_sec,
-                );
-                let _ = ctx.txn.send_response(resp, *src).await;
+                if !admit::is_copy(ctx, &call_ref, req) {
+                    match admit::admit(ctx, &call_ref, req, *src, class).await {
+                        Some(hold) => unborn = Some(hold),
+                        None => return,
+                    }
+                }
             }
         }
-        // Count it on the same cap counter (the cap WAS reached); the caller now
-        // gets a 503 rather than silence.
-        ctx.metrics.bump_cap_drop();
-        return;
     }
-
-    let ctx2 = ctx.clone();
-    ctx.dispatcher.dispatch(
-        &call_ref,
-        Box::pin(async move {
-            process(&ctx2, event, res).await;
-        }),
-    );
+    let admitted = unborn.is_some();
+    let turn = Turn { ctx: ctx.clone(), event, res, class, unborn };
+    let offer = ctx.dispatcher.offer(&call_ref, turn, class);
+    if admitted && matches!(offer.outcome, Outcome::Queued) {
+        admit::queued(ctx);
+    }
+    if offer.crossed_lifetime_cap {
+        ctx.reaper.on_lifetime_cap(&call_ref);
+    }
+    if offer.hit_overflow_ceiling {
+        ctx.reaper.on_overflow_ceiling(&call_ref);
+    }
+    if let Outcome::Discarded(discarded) = offer.outcome {
+        let Discarded { item, why, owed } = discarded;
+        let admitted = item.unborn.is_some();
+        OwedAnswer::of(ctx).render(&item.event, why, owed, admitted).await;
+    }
 }

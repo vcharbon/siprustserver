@@ -1,4 +1,4 @@
-//! `e2e` — the headless E2E campaign runner (ADR-0018 Phase H). The body
+//! `e2e` — the headless E2E campaign runner (ADR-0018). The body
 //! lives in the library so the integration tests drive the same surface.
 
 use std::process::ExitCode;

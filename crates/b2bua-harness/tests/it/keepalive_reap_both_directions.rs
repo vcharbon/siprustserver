@@ -1,18 +1,17 @@
 //! Keepalive-driven reaping of a dead peer, asserted VIA CDR GENERATION, for
 //! BOTH directions — and at scale across multiple concurrent calls.
 //!
-//! Regression for the production "no-BYE orphan" leak: an ESTABLISHED dialog
-//! whose peer vanished with no BYE was never reaped, so `b2bua_active_calls`
-//! grew without bound. The intended cleanup is the in-dialog OPTIONS keepalive
+//! Guards the "no-BYE orphan" leak: an ESTABLISHED dialog whose peer vanished
+//! with no BYE must still be reaped, or `b2bua_active_calls` grows without
+//! bound. The cleanup is the in-dialog OPTIONS keepalive
 //! (`keepalive` rule) → unanswered OPTIONS → `KeepaliveTimeout` →
 //! `keepalive-timeout` rule → `BeginTermination` → reap.
 //!
-//! Root cause it guards: the single shared `TimerService` keyed its live-epoch
-//! map by the bare timer **id** (`"Keepalive"`, `"KeepaliveTimeout:a"`, …) which
-//! is identical across calls. Scheduling a later call's keepalive overwrote an
-//! earlier call's epoch, tombstoning the earlier keepalive so it never fired —
-//! at scale, keepalives stopped and dead peers were never probed. The fix keys
-//! the map by `(call_ref, id)`. `colliding_timer_ids_across_calls_both_fire`
+//! The single shared `TimerService` keys its live-epoch map by
+//! `(call_ref, id)`: the bare timer **id** (`"Keepalive"`, `"KeepaliveTimeout:a"`,
+//! …) is identical across calls, so keyed by id alone a later call's keepalive
+//! would overwrite an earlier call's epoch and tombstone it — at scale,
+//! keepalives would stop and dead peers go unprobed. `colliding_timer_ids_across_calls_both_fire`
 //! covers the driver; these tests cover the end-to-end reap + CDR.
 //!
 //! Mirrors `keepalive_timeout.rs`: a 30 s keepalive interval + a hard 5 s
@@ -31,6 +30,8 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timer F of the unanswered BYE's client transaction (RFC 3261 §17.1.2.2), plus one.
+const BYE_TIMEOUT: Duration = Duration::from_secs(33);
 
 /// Caller (A leg) goes silent on its keepalive OPTIONS → the call is torn down
 /// and a CDR with a teardown (Bye) event is written.
@@ -56,11 +57,18 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
     let _silent = alice.receive("OPTIONS").await; // received, never answered
     bob.receive("OPTIONS").await.respond(200, "OK").await;
 
-    // A-leg keepalive times out → terminate A, BYE the healthy peer (bob).
+    // A-leg keepalive times out → BYE both peers: bob answers, alice (silent
+    // on the OPTIONS) receives hers behind the probe's retransmits and stays
+    // silent; the BYE's own timeout resolves her leg.
     h.advance(KEEPALIVE_TIMEOUT).await;
     bob.receive("BYE").await.respond(200, "OK").await;
+    let _silent_bye = alice.receive_tolerating("BYE", &["OPTIONS"]).await;
 
-    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    // The unanswered BYE times out (Timer F) and the call is fully reaped.
+    h.advance(BYE_TIMEOUT).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the reaped call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
@@ -97,11 +105,18 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
     alice.receive("OPTIONS").await.respond(200, "OK").await;
     let _silent = bob.receive("OPTIONS").await; // received, never answered
 
-    // B-leg keepalive times out → terminate B, BYE the healthy peer (alice).
+    // B-leg keepalive times out → BYE both peers: alice answers, bob (silent
+    // on the OPTIONS) receives his behind the probe's retransmits and stays
+    // silent; the BYE's own timeout resolves his leg.
     h.advance(KEEPALIVE_TIMEOUT).await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    let _silent_bye = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
 
-    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    // The unanswered BYE times out (Timer F) and the call is fully reaped.
+    h.advance(BYE_TIMEOUT).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the reaped call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
@@ -161,21 +176,27 @@ async fn two_calls_both_reap_despite_shared_timer_ids() {
     bob.receive_tolerating("OPTIONS", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("OPTIONS", &["OPTIONS"]).await.respond(200, "OK").await;
 
-    // ── Both A-leg keepalives time out → both calls reap (BYE to bob) ────────
+    // ── Both A-leg keepalives time out → both calls BYE both peers ───────────
     // Drain bob's inbound until both BYEs are answered, 200-ing any retransmit.
+    // Each silent caller receives her BYE behind the probe's retransmits and
+    // stays silent; the BYE timeouts resolve those legs.
     h.advance(KEEPALIVE_TIMEOUT).await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bob.receive_tolerating("BYE", &["OPTIONS", "BYE"]).await.respond(200, "OK").await;
+    let _b1 = alice1.receive_tolerating("BYE", &["OPTIONS"]).await;
+    let _b2 = alice2.receive_tolerating("BYE", &["OPTIONS"]).await;
 
-    settle_until(|| b2bua.cdr_records().len() >= 2).await;
+    // No orphaned established call leaked once the unanswered BYEs time out.
+    h.advance(BYE_TIMEOUT).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 2, "BOTH calls produce a CDR (neither leaked)");
     for cdr in &cdrs {
         let kinds: Vec<CdrEventType> = cdr.events.iter().map(|e| e.event_type).collect();
         assert!(kinds.contains(&CdrEventType::Bye), "each CDR has a Bye event: {kinds:?}");
     }
-    // No orphaned established call leaked.
-    b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
 }

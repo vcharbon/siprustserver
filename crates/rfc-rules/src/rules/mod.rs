@@ -1,6 +1,6 @@
 //! The rule bodies. One file per obligation family; a family's rules share
 //! one wire walk and are consumed side by side. A walk more than one FAMILY
-//! reads lives in its own module ([`branch`]) rather than in one family's
+//! reads lives in its own module (`branch`) rather than in one family's
 //! file — no rule file owns another's reading.
 
 mod branch;

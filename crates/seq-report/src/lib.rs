@@ -11,10 +11,9 @@
 //! 3. the **replication** plane (the HA changelog frames flowing between worker
 //!    nodes: `PullRequest` / `Data` / `Noop` / …).
 //!
-//! Historically each plane had its own renderer (scenario-harness's SIP
-//! HTML/text, ha-harness's replication text/mermaid) and the failover harness
-//! merely concatenated them. That made it impossible to *read the interleaving*
-//! — which is exactly what you need to understand a failover bug: did the crash
+//! Separate per-plane renderers (scenario-harness's SIP HTML/text,
+//! ha-harness's replication text/mermaid), concatenated, cannot show the
+//! *interleaving* — which is exactly what you need to understand a failover bug: did the crash
 //! land before or after the backup absorbed the in-dialog request? did the
 //! reclaim's `Deactivate` reach the survivor before the next OPTIONS?
 //!
@@ -41,6 +40,9 @@
 //! - [`RowKind::Sip`] / [`RowKind::Repl`] are point-to-point arrows
 //!   (`from` → `to`); the two planes are styled differently (colour in HTML, a
 //!   plane tag in text) so a human can tell them apart at a glance.
+//! - [`RowKind::Http`] is an HTTP request (requester → a [`LaneKind::Service`]
+//!   lane) or its reply (back), drawn in its own style; `delivered` is `false`
+//!   for a reply that never came.
 //! - [`RowKind::Lifecycle`] is a full-width BAND across all lanes (`to == None`),
 //!   a centred annotation in time order (e.g. `crash b1`, `reboot b1`).
 //!
@@ -48,7 +50,7 @@
 //! [`SeqDoc::views`] carries a fourth, optional plane: what each actor BELIEVED
 //! about another at each instant ([`ViewChange`]). It renders as a tinted chip on
 //! the observer's own column in the sequence, plus a views table and a
-//! disagreements list under the diagram — see [`views`].
+//! disagreements list under the diagram — see `views`.
 
 mod html;
 mod normalize;
@@ -76,6 +78,8 @@ pub enum LaneKind {
     /// A cluster node that carries BOTH SIP and replication traffic plus
     /// lifecycle markers (a b2bua worker, e.g. `b1`/`b2`).
     Node,
+    /// An HTTP service the actors consult (the requests' destination).
+    Service,
 }
 
 /// One diagram column. `id` is the stable key rows reference; `label` is the
@@ -124,6 +128,12 @@ pub enum RowKind {
     /// A replication changelog frame.
     Repl {
         /// `false` when the frame was not observed delivered.
+        delivered: bool,
+    },
+    /// An HTTP request or reply.
+    Http {
+        /// `false` when no reply came back (reset, withheld, abandoned) or the
+        /// request reached no service.
         delivered: bool,
     },
     /// An operator/chaos event — rendered as a full-width band, not an arrow.
@@ -228,10 +238,10 @@ pub struct SeqDoc {
     pub anomalies: Vec<Anomaly>,
     /// Belief changes on the views plane (empty for a doc that records none):
     /// what each observer held true about each subject, and when it moved. See
-    /// the [`views`] module.
+    /// the `views` module.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ViewChange>,
-    /// Wall-clock epoch (ms) corresponding to the timeline base ([`base_ms`]).
+    /// Wall-clock epoch (ms) corresponding to the timeline base (`base_ms`).
     /// `Some` only when `at_ms` is real wall-clock-aligned time (the load driver's
     /// `Clock::system()` recording) — the renderers then show an ABSOLUTE UTC
     /// time alongside the relative `T+…` stamp, so a flow correlates to external
@@ -401,9 +411,9 @@ mod tests {
         }
     }
 
-    /// Issue 1 regression: a lifecycle marker recorded at the SAME `at_ms` as a
-    /// following message must render BEFORE it — order follows the global `seq`
-    /// (true recording order), NOT `at_ms`. This is the keepalive-cell symptom:
+    /// A lifecycle marker recorded at the SAME `at_ms` as a following message
+    /// must render BEFORE it — order follows the global `seq` (true recording
+    /// order), NOT `at_ms`. This is the keepalive-cell symptom:
     /// the `reboot` band must precede the `PullRequest[Bootstrap]` it triggers
     /// even though both land on one paused-clock millisecond.
     #[test]
@@ -759,7 +769,7 @@ mod tests {
         assert!(!html.contains("data-rows"), "{html}");
     }
 
-    /// 036 ask C: consecutive lanes sharing a `group` render one bracketing
+    /// consecutive lanes sharing a `group` render one bracketing
     /// socket header above their individual captions.
     #[test]
     fn grouped_sub_lanes_render_a_shared_socket_header() {
@@ -845,7 +855,7 @@ mod tests {
         assert!(!txt.contains("Disagreements"));
     }
 
-    /// 036 ask C: SIP rows carrying a `conn` (the Call-ID) are coloured per
+    /// SIP rows carrying a `conn` (the Call-ID) are coloured per
     /// flow and named in the legend; the long id never renders inline on the
     /// arrow label.
     #[test]

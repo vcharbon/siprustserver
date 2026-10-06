@@ -44,6 +44,7 @@ use repl_net::frame::{Frame, Partition, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationListener};
 
 use super::changelog::{BodySource, Changelog};
+use crate::abort_on_drop::AbortOnDrop;
 use crate::store::PartitionRole;
 
 /// Bootstrap store-scan batch size (bodies per `send_batch`).
@@ -306,9 +307,8 @@ impl ReplServer {
                 // Send-time origin stamp for skew re-anchoring on the receiver
                 // (mirrors `drain_since`); one clock reading per bootstrap frame.
                 let origin_now_ms = self.changelog.now_ms();
-                let body = self.source.read_body(role, primary, key).await;
-                match (body, self.source.read_meta(key)) {
-                    (Some(body), Some(meta)) => frames.push(Frame::Data {
+                match self.source.read_entry(role, primary, key).await {
+                    Some((body, meta)) => frames.push(Frame::Data {
                         at: w,
                         op: repl_net::frame::Op::Put,
                         partition,
@@ -319,6 +319,8 @@ impl ReplServer {
                         origin_now_ms,
                         indexes: meta.indexes,
                         body: Some(body),
+                        answered: false,
+                        incarnation: meta.incarnation,
                     }),
                     _ => continue,
                 }
@@ -332,15 +334,5 @@ impl ReplServer {
     #[cfg(test)]
     pub fn self_ordinal(&self) -> &str {
         &self.self_ordinal
-    }
-}
-
-/// Aborts the wrapped task on drop, so a finished serve flow leaves no reader on
-/// a connection it no longer owns.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

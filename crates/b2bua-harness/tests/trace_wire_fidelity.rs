@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! End-to-end: a traced call records the DATAGRAM it received, and a decision
 //! round trip records when it actually started and ended (ADR-0026).
 //!
@@ -30,7 +31,7 @@ use b2bua::decision::{
 };
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaSut};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -78,7 +79,7 @@ impl CallDecisionEngine for SlowDecisionEngine {
 /// A gate that samples every call.
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         false,
     )));
 }
@@ -176,6 +177,7 @@ async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
          the response landed ({received}); the decision parked for {parked} ms",
     );
 
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call");
 

@@ -7,14 +7,14 @@
 stateDiagram-v2
     Masking
     Suppressing
-    Masking --> Masking : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ 200 OK → A (reuse stored To-tag, fake-prack: inject cached SDP) · merge A↔B (bridge) · cancel B no-answer · arm max-duration · arm keepalive
+    Masking --> Masking : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ 200 OK → A (shown dialog: the 180's To-tag, unshown: a fresh one, fake-prack: inject cached SDP) · merge A↔B (bridge) · cancel B no-answer · arm max-duration · arm keepalive
     Masking --> Masking : PRACK 2xx (B)
     Masking --> Masking : UPDATE (A) [leg Trying/Early] [guard] ⇒ 200 OK → A (local answer, bodyless refresh)
-    Masking --> Masking : UPDATE (B) [guard] ⇒ 200 OK → B (local skeleton-fit answer) · 488 → B (no codec intersection)
-    Masking --> Suppressing : INVITE 1xx (B) ⇒ first 18x → bare 180 → A (drop SDP/100rel) · PRACK → B (B2BUA absorbs reliable 1xx)
-    Suppressing --> Suppressing : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ 200 OK → A (reuse stored To-tag, fake-prack: inject cached SDP) · merge A↔B (bridge) · cancel B no-answer · arm max-duration · arm keepalive
+    Masking --> Masking : UPDATE (B) [guard] ⇒ 200 OK → B (alice's offer answering bob's) · 488 → B (no stream alice can accept)
+    Masking --> Suppressing : INVITE 1xx (B) [leg Trying/Early] ⇒ first 18x → bare 180 → A (drop SDP/100rel) · PRACK → B (B2BUA absorbs reliable 1xx)
+    Suppressing --> Suppressing : INVITE 2xx (B) [leg Trying/Early] [guard] ⇒ 200 OK → A (shown dialog: the 180's To-tag, unshown: a fresh one, fake-prack: inject cached SDP) · merge A↔B (bridge) · cancel B no-answer · arm max-duration · arm keepalive
     Suppressing --> Suppressing : PRACK 2xx (B)
     Suppressing --> Suppressing : UPDATE (A) [leg Trying/Early] [guard] ⇒ 200 OK → A (local answer, bodyless refresh)
-    Suppressing --> Suppressing : UPDATE (B) [guard] ⇒ 200 OK → B (local skeleton-fit answer) · 488 → B (no codec intersection)
+    Suppressing --> Suppressing : UPDATE (B) [guard] ⇒ 200 OK → B (alice's offer answering bob's) · 488 → B (no stream alice can accept)
     [*] --> Masking
 ```

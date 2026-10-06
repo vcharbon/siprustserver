@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
 import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
+import { RoutingCompiler } from "../src/routing.js"
 import {
   caseExpectingBody,
   caseExpectingSdp,
@@ -38,7 +39,7 @@ const replayCell = (over: Partial<Campaign.PivotReplayCell> = {}): Campaign.Pivo
   ...over
 })
 
-const rustCell = (name = "bc_02::transparent"): Campaign.RustTestCell => ({
+const rustCell = (name = "relay::transparent"): Campaign.RustTestCell => ({
   kind: "rust-test",
   crate: "stub-crate",
   name
@@ -112,6 +113,18 @@ describe("a red cell", () => {
     expect(exitCodeOf(run)).toBe(1)
   })
 
+  it("is red where the run panicked, whatever verdict it left", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })])
+    const cell = run.index.cells[0]!
+    const verdict = JSON.parse(fs.readFileSync(path.join(run.dir, cell.dir, "verdict.json"), "utf8"))
+    expect(verdict.status).toBe("ok")
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBeUndefined()
+    expect(exitCodeOf(run)).toBe(1)
+  })
+
   it("IS crashed where the interpreter refused before writing anything", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
@@ -164,9 +177,10 @@ describe("an expected body", () => {
     const records = Confrontation.parseConfrontationLines(
       fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
     )
-    // The stub ran verbatim, so the `c=` address it changed is a row beside
-    // the codec; `o=` and the attribute order are not.
+    // The stub ran verbatim, so the `o=` numbers and the `c=` address it
+    // changed are rows beside the codec; the attribute order is not.
     expect(records.filter((r) => r.kind === "body").map((r) => [r.signature, r.captured, r.replayed])).toEqual([
+      ["body:sdp:session:o=:request:INFO:in-dialog", ["o=- 1 2 IN IP4 10.0.0.1"], ["o=- 7 8 IN IP4 10.0.0.1"]],
       ["body:sdp:session:c=:request:INFO:in-dialog", ["c=IN IP4 192.0.2.10"], ["c=IN IP4 10.0.0.1"]],
       ["body:sdp:m0:m=:request:INFO:in-dialog", ["m=audio 6000 RTP/AVP 8"], ["m=audio 4000 RTP/AVP 0"]],
       ["body:sdp:m0:a=rtpmap:request:INFO:in-dialog", ["a=rtpmap:8 PCMA/8000"], ["a=rtpmap:0 PCMU/8000"]]
@@ -273,7 +287,30 @@ describe("a cell that never produced a result", () => {
     expect(cell.error).toBeDefined()
     const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
     expect(written).toContain("LaneUnknown")
+    expect(written).toContain("nobody-described-this")
     expect(new LaneUnknown({ lane: "x", detail: "y" })._tag).toBe("Driver.LaneUnknown")
+  })
+
+  /** A refusal's reason is its message: the error file carries it, not the tag alone. */
+  it("names the reason a deployment's routing compiler refused the cell", async () => {
+    const run = await campaign([replayCell()], {
+      rig: {
+        routing: RoutingCompiler.layerWith((cell, pivot) =>
+          Effect.fail(
+            new RoutingCompiler.RoutingRefused({
+              case: pivot.case.id,
+              lane: cell.lane,
+              detail: "attempt 1/0 dials a number whose route this compiler does not state"
+            })
+          )
+        )
+      }
+    })
+    const cell = run.index.cells[0]!
+    expect(cell.passed).toBe(false)
+    const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
+    expect(written).toContain("RoutingRefused")
+    expect(written).toContain("stub-lane: attempt 1/0 dials a number whose route this compiler does not state")
   })
 })
 
@@ -288,6 +325,16 @@ describe("the post-run escape hatch", () => {
     })
     expect(run.index.cells[0]!.passed).toBe(false)
     expect(run.cells[0]!.detail).toContain("known open defect")
+    expect(exitCodeOf(run)).toBe(1)
+  })
+
+  it("never restates a panicked run as passed", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })], {
+      rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "restated" })) }
+    })
+    expect(run.index.cells[0]!.passed).toBe(false)
     expect(exitCodeOf(run)).toBe(1)
   })
 

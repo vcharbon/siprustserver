@@ -7,6 +7,7 @@ import {
   boundaryHops,
   callFamilies,
   caseCallIds,
+  correlate,
   cutCalls,
   hopOwners,
   HAIRPIN_LOOPBACK,
@@ -215,7 +216,7 @@ describe("cutting a capture", () => {
 describe("the calls a case is a case OF", () => {
   it("is the whole correlated family restricted to the legs that touch the SUT", () => {
     const flows = cancelRaceFlows()
-    expect(caseCallIds(flows, sutSet(), [0], derivesOnePrefix)).toEqual([
+    expect(caseCallIds(flows, sutSet(), [0], correlate(flows, derivesOnePrefix))).toEqual([
       CALLER_CALL_ID,
       CALLEE_CALL_ID
     ])
@@ -223,6 +224,8 @@ describe("the calls a case is a case OF", () => {
 
   it("is one call where nothing derives, even with both legs cut", () => {
     const flows = cancelRaceFlows()
-    expect(caseCallIds(flows, sutSet(), [0], derivesNothing)).toEqual([CALLER_CALL_ID])
+    expect(caseCallIds(flows, sutSet(), [0], correlate(flows, derivesNothing))).toEqual([
+      CALLER_CALL_ID
+    ])
   })
 })

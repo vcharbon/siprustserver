@@ -4,7 +4,7 @@
 use call::TransferState;
 use sip_message::sipfrag::sipfrag_from_status;
 
-use crate::rules::model::RuleAction;
+use b2bua_sdk::model::RuleAction;
 
 pub(super) const SUB_STATE_ACTIVE_60: &str = "active;expires=60";
 pub(super) const SUB_STATE_TERMINATED_NORESOURCE: &str = "terminated;reason=noresource";

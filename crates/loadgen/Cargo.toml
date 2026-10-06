@@ -10,6 +10,7 @@ description = "SIP load generator that reuses the functional scenario-harness ch
 workspace = true
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 # The Send agent factory + fallible try_* choreography + best-effort teardown
 # helpers live here (the load-bearing reuse of the functional harness).
 scenario-harness = { path = "../scenario-harness" }

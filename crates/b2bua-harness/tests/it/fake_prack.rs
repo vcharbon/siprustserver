@@ -5,15 +5,15 @@
 //! own behalf, whatever alice advertised — it acknowledges bob's reliable 1xx
 //! itself), downgrades the first 18x to a bare 180 for alice, **originates**
 //! the PRACK toward bob itself, caches bob's reliable-1xx SDP per dialog, and
-//! substitutes the cached SDP into the 200 OK toward alice. Locally answers
-//! in-dialog UPDATE (skeleton-fit SDP from alice's offer, else 488).
+//! substitutes the cached SDP into a 200 OK without one toward alice. Locally
+//! answers an early UPDATE offer from alice's own offer (`fake_prack_answer`).
 //!
 //! The `forking` / `failover` cases ride the `/call/failure` b-leg failover path:
 //! bob1 goes reliable (183/100rel + PRACK + cached SDP) then 503s; the B2BUA fails
 //! over to bob2 on the unreliable path. bob1's cache is discarded with its leg, so
 //! alice's 200 carries bob2's own SDP.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::error::SipParseError;
@@ -105,6 +105,8 @@ async fn basic() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -153,6 +155,8 @@ async fn offers_100rel_where_the_originator_advertised_nothing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -204,14 +208,15 @@ async fn multiple_18x() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
-const OPUS_ONLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n";
+const OPUS_ONLY: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n";
 
-/// Bob's UPDATE offers only a codec alice never offered → no intersection →
-/// B2BUA replies 488; the call proceeds on the original cached SDP from the 183.
-/// (TS `fakePrackUpdateCodecMismatch`.)
+/// Bob's UPDATE offers only a codec alice never offered → no stream she could
+/// accept → 488 (RFC 3311 §5.2); the call proceeds on the 183's answer.
 #[tokio::test]
 async fn update_codec_mismatch() {
     let h = Harness::with_transit_delay("fake-prack-update-codec-mismatch", 0);
@@ -244,7 +249,7 @@ async fn update_codec_mismatch() {
     // Call still proceeds on the original cached SDP from the 183.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
-    assert!(!ok.body().is_empty(), "alice 200 carries the original cached SDP");
+    assert_eq!(ok.body().as_ref(), ANSWER.as_bytes(), "alice 200 carries the 183's answer");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -252,6 +257,8 @@ async fn update_codec_mismatch() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -304,6 +311,8 @@ async fn no_policy_control() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -346,12 +355,14 @@ async fn delayed_offer_fallback() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
-/// Bob's early-dialog UPDATE(offer) is answered locally by the B2BUA with a
-/// skeleton-fit SDP (codec ∩ alice's INVITE), and the cache advances to bob's
-/// UPDATE offer (alice's 200 carries it). (TS `fakePrackUpdateHappy`.)
+/// Bob's early-dialog UPDATE(offer) is answered locally by the B2BUA out of
+/// alice's INVITE offer, and alice's 200 carries her offer answered from bob's
+/// (`fake_prack_answer` pins the bytes). (TS `fakePrackUpdateHappy`.)
 #[tokio::test]
 async fn update_happy() {
     let h = Harness::with_transit_delay("fake-prack-update-happy", 0);
@@ -379,15 +390,15 @@ async fn update_happy() {
     // Bob sends an UPDATE with a new offer on his early dialog.
     let mut bob_dialog = uas.dialog();
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(ANSWER)).await;
-    // B2BUA answers locally: 200 with a skeleton-fit SDP body.
+    // B2BUA answers locally: 200 with alice's offer answering bob's.
     let upd_resp = update.expect(200).await;
-    assert!(!upd_resp.body().is_empty(), "skeleton-fit answer has a body");
+    assert!(!upd_resp.body().is_empty(), "the local answer has a body");
     assert!(
         is_sdp(upd_resp.header::<MediaType>()),
         "Content-Type application/sdp on the local UPDATE answer",
     );
 
-    // 200 OK INVITE (no body) → alice gets the latest cached SDP (UPDATE offer).
+    // 200 OK INVITE (no body) → alice gets her offer answered from bob's UPDATE.
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
@@ -398,6 +409,119 @@ async fn update_happy() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A `multipart/mixed` body framing `sdp` beside a binary part whose payload
+/// carries a line an SDP line-scanner would take for its own (RFC 5621 §3.1:
+/// the description is the SDP part, the rest of the body is not).
+fn framed(sdp: &str) -> sip_message::Composed {
+    use sip_message::{compose_multipart, MultipartPart};
+    let decoy = b"\x77\x15\r\nc=IN IP4 9.9.9.9\r\nm=audio 1 RTP/AVP 0\r\n\x00".to_vec();
+    compose_multipart(
+        "multipart/mixed",
+        &[
+            MultipartPart::new("application/sdp", sdp.as_bytes().to_vec()),
+            MultipartPart::new("application/vnd.example.indata", decoy),
+        ],
+    )
+    .expect("two parts frame")
+}
+
+/// Alice's offer rides inside a multipart body. The B2BUA reads it as the
+/// offer it is (fake-prack stays armed, `100rel` offered to bob) and answers
+/// bob's early UPDATE from the SDP PART alone: nothing of the sibling part's
+/// bytes reaches the local answer.
+#[tokio::test]
+async fn update_answer_reads_the_offer_framed_in_a_multipart_invite() {
+    let h = Harness::with_transit_delay("fake-prack-update-multipart-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5741").await;
+    let bob = h.agent("bob", "127.0.0.1:5742").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5743", 5742).await;
+
+    let offer = framed(OFFER);
+    let mut call = alice
+        .invite(&bob)
+        .with_body(&offer.content_type, offer.body.clone())
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(
+        has_token(uas.request().header::<Supported>(), "100rel"),
+        "a framed offer is an offer: fake-prack stays armed and solicits 100rel"
+    );
+    assert_eq!(uas.request().body().as_ref(), offer.body.as_slice(), "the body rides verbatim");
+
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(ANSWER)
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    let mut bob_dialog = uas.dialog();
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(ANSWER)).await;
+    let upd_resp = update.expect(200).await;
+    let answer = String::from_utf8_lossy(upd_resp.body()).into_owned();
+    assert!(is_sdp(upd_resp.header::<MediaType>()), "application/sdp on the local answer");
+    assert!(answer.starts_with("v=0"), "the answer is a session description: {answer:?}");
+    assert!(!answer.contains("9.9.9.9"), "the sibling part's bytes stay out: {answer:?}");
+    assert_eq!(answer.matches("\nm=").count(), 1, "one media section: {answer:?}");
+
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// Bob's reliable provisional frames its answer in a multipart body. What the
+/// B2BUA caches and later stages into alice's 200 is the SDP PART under
+/// `application/sdp`, never the multipart bytes under that label.
+#[tokio::test]
+async fn a_callee_answer_framed_in_a_multipart_provisional_is_staged_as_sdp() {
+    let h = Harness::with_transit_delay("fake-prack-multipart-183", 0);
+    let alice = h.agent("alice", "127.0.0.1:5744").await;
+    let bob = h.agent("bob", "127.0.0.1:5745").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5746", 5745).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    let answer = framed(ANSWER);
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_body(&answer.content_type, answer.body.clone())
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert!(is_sdp(ok.header::<MediaType>()), "the staged answer is labelled application/sdp");
+    assert_eq!(ok.body().as_ref(), ANSWER.as_bytes(), "and it is the SDP part alone");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -465,6 +589,8 @@ async fn run_fake_prack_failover(
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -478,11 +604,55 @@ async fn failover() {
     run_fake_prack_failover("fake-prack-failover", 5740, 5741, 5742, 5743).await;
 }
 
+/// A reroute leg is dialled while the caller's INVITE still awaits its final,
+/// so it takes the stack's own `100rel` offer like the first attempt, where the
+/// caller offered none (the offer is the stack's, never a relay of hers).
+#[tokio::test]
+async fn a_reroute_leg_is_offered_reliability_the_caller_never_offered() {
+    let h = Harness::with_transit_delay("fake-prack-reroute-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5755").await;
+    let bob1 = h.agent("bob1", "127.0.0.1:5756").await;
+    let bob2 = h.agent("bob2", "127.0.0.1:5757").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_failover(
+        "127.0.0.1",
+        5756,
+        5757,
+        "sip:+1234@127.0.0.1:5757",
+        RelayFirst18xStrategy::FakePrack,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5758")
+    .await;
+
+    let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas1 = bob1.receive("INVITE").await;
+    assert!(has_token(uas1.request().header::<Supported>(), "100rel"), "100rel offered to bob1");
+    uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await;
+
+    let mut uas2 = bob2.receive("INVITE").await;
+    assert!(
+        has_token(uas2.request().header::<Supported>(), "100rel"),
+        "the reroute leg is offered 100rel on the stack's own behalf",
+    );
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// A failover route that drops the body mints bob2's INVITE without an offer:
 /// `100rel` is withheld from it — a reliable provisional would carry an answer
-/// this stack cannot acknowledge — while the mask stays up, so alice's 200
-/// keeps the first 180's To-tag and carries the session description bob2's
-/// 200 brought.
+/// this stack cannot acknowledge — while the mask stays up: bob2's 18x are
+/// suppressed, and its 200, from a dialog the caller was never shown, opens a
+/// second caller dialog under a fresh To-tag carrying the session description
+/// bob2's 200 brought.
 #[tokio::test]
 async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mask() {
     use b2bua::decision::test_adapter::route_to_with_18x;
@@ -542,7 +712,11 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
 
     let ok = call.expect(200).await;
-    assert_eq!(ok.to().tag(), Some(first_to_tag.as_str()), "the mask's To-tag rides the 200");
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        first_to_tag.as_str(),
+        "the unshown bob2's 200 opens a second caller dialog",
+    );
     assert!(is_sdp(ok.header::<MediaType>()), "alice's 200 carries bob2's session description");
 
     let mut dialog = call.ack().await;
@@ -551,5 +725,82 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The stack offers `100rel` on its own behalf only to mask the provisionals of
+/// the originator's INVITE. A transfer target is dialled after that INVITE took
+/// its final: no provisional of it reaches the originator, so its INVITE offers
+/// nothing of the stack's own (RFC 3262 §3).
+#[tokio::test(start_paused = true)]
+async fn a_transfer_target_is_offered_no_reliability_of_the_stacks_own() {
+    use b2bua::decision::test_adapter::{default_call_refer, route_to_processing_refer};
+    use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+    use call::features::{Relay18xMessages, RelayFirst18xTo180Feature};
+    use std::sync::Arc;
+
+    const CHARLIE_PORT: u16 = 5739;
+    let h = Harness::new("fake-prack-transfer-target");
+    let alice = h.agent("alice", "127.0.0.1:5709").await;
+    let bob = h.agent("bob", "127.0.0.1:5719").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let engine = ScriptedDecisionEngine::builder()
+        .fallback(|_req| {
+            let mut r = route_to_processing_refer("127.0.0.1", 5719);
+            r.features.relay_first_18x_to_180 = Some(RelayFirst18xTo180Feature {
+                strategy: RelayFirst18xStrategy::FakePrack,
+                messages: Relay18xMessages::First,
+            });
+            NewCallResponse::Route(r)
+        })
+        .on_refer(default_call_refer)
+        .build();
+    let b2bua = B2buaSut::builder(Arc::new(engine)).start(&h, "b2bua", "127.0.0.1:5729").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    assert!(
+        has_token(bob_uas.request().header::<Supported>(), "100rel"),
+        "the dialled leg is offered 100rel while the originator's INVITE awaits its final",
+    );
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let api = format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+    );
+    bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
+        .with_header("X-Api-Call", &api)
+        .send()
+        .await
+        .expect(202)
+        .await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    assert!(
+        !has_token(charlie_uas.request().header::<Supported>(), "100rel"),
+        "the transfer target is offered no 100rel of the stack's own: {:?}",
+        charlie_uas.request()
+    );
+    charlie_uas.respond(486, "Busy Here").await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one call, one CDR");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

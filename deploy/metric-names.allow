@@ -1,0 +1,56 @@
+# Names under a catalogue's namespace that the readers in deploy/ spell but no
+# binary serves on /metrics, each scoped to the files it is allowed in; read
+# by `metric-contract check` (see crates/metric-contract). `<path>: <name>`,
+# the path relative to this directory, a file or a directory; a name here is
+# checked nowhere in its scope, so keep each scope tight. An entry no reader
+# in its scope uses any more is a finding.
+
+# Series the chaos and endurance scripts push to VictoriaMetrics themselves,
+# and the dashboards that read them.
+k8s/chaos.sh: sip_chaos_*
+k8s/endurance.sh: sip_chaos_*
+k8s/endurance.sh: sip_endurance_*
+observability/stack/grafana/dashboards/: sip_chaos_*
+
+# Chaos event names: the scripts that fire them, the files that name them.
+k8s/: limiter_kill
+k8s/: limiter_netcut
+docker/Dockerfile: limiter_netcut
+observability/stack/grafana/dashboards/call-limiter.json: limiter_kill
+observability/stack/grafana/dashboards/call-limiter.json: limiter_netcut
+observability/stack/grafana/dashboards/sipp-endurance-chaos.json: limiter_kill
+observability/stack/grafana/dashboards/sipp-endurance-chaos.json: limiter_netcut
+k8s/chaos.sh: limiter_freeze
+k8s/chaos.sh: limiter_reject
+k8s/chaos.sh: limiter_restart
+k8s/chaos.sh: limiter_slow
+k8s/chaos.sh: loadgen_chaos_flag
+k8s/endurance.sh: loadgen_chaos_flag
+
+# Shell variables of the endurance verdicts.
+k8s/endurance.sh: limiter_after
+k8s/endurance.sh: limiter_before
+k8s/endurance.sh: limiter_conc
+k8s/endurance.sh: limiter_event
+k8s/endurance.sh: limiter_mid
+k8s/endurance.sh: limiter_result
+
+# Prose shorthand for b2bua_active_calls, jemalloc_resident_bytes and
+# process_resident_memory_bytes.
+k8s/endurance.sh: b2bua_active
+observability/stack/grafana/dashboards/sipp-endurance-chaos.json: b2bua_active
+observability/stack/grafana/dashboards/jemalloc-allocator.json: jemalloc_resident
+observability/stack/grafana/dashboards/jemalloc-allocator.json: process_resident
+
+# SIPp's -trace_err and -trace_stat options and the files they name.
+k8s/lib/sipext-gen.sh: trace_*
+k8s/run.sh: trace_err
+k8s/sipp/: trace_*
+
+# Labels the scrape adds to every series.
+label:pod
+label:namespace
+label:job
+label:instance
+label:container
+label:node

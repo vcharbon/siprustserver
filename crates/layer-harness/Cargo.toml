@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Test-only contract + recording machinery shared by every migration layer. Rust port of sipjsserver src/test-harness/framework (Recorder, RunContext, EventSequencer, three-tier severity, recording helpers, anomaly ledger). See the effect-layer-test SKILL."
+description = "Test-only contract + recording machinery shared by every layer. Port of sipjsserver src/test-harness/framework (Recorder, RunContext, EventSequencer, three-tier severity, recording helpers, anomaly ledger). See the effect-layer-test SKILL."
 
 [lints]
 workspace = true

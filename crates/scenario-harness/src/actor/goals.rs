@@ -46,7 +46,7 @@ impl BodyExpect {
     /// Whether a body of `body_len` bytes, a session description or not,
     /// satisfies this claim. The ONE place the vocabulary is interpreted: the
     /// reception goals assert through it and the parked-request pick
-    /// ([`super::select`]) discriminates through it.
+    /// (`super::select`) discriminates through it.
     pub fn satisfied_by(self, body_len: usize, body_is_sdp: bool) -> bool {
         match self {
             BodyExpect::Any => true,
@@ -286,7 +286,7 @@ pub enum GoalStep {
     /// answers it). [`RequestKind::Cancel`] consumes WITHOUT rebinding — the
     /// binding stays the INVITE the CANCEL targets. `matcher` runs at consume
     /// time on the parked transaction's request. WHICH parked request is
-    /// [`super::select::select_parked`]: `rank`, then `body`, then arrival.
+    /// `super::select::select_parked`: `rank`, then `body`, then arrival.
     ExpectRequest {
         kind: RequestKind,
         body: BodyExpect,

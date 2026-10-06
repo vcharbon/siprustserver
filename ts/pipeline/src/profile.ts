@@ -10,6 +10,7 @@
  * The profile DOCUMENT is a deployment's, so it arrives decoded: this module
  * owns the matcher, never a path.
  */
+import { Flows } from "@sip/contracts"
 
 /** A profile document as a deployment writes it. */
 export interface ProfileDoc {
@@ -32,10 +33,7 @@ export class SutProfile {
 }
 
 /** The host part of an `ip:port` socket string. */
-export const ipOf = (sock: string): string => {
-  const i = sock.lastIndexOf(":")
-  return i < 0 ? sock : sock.slice(0, i)
-}
+export const ipOf = (sock: string): string => Flows.hostOf(sock)
 
 const matcher = (entry: string): ((ip: number) => boolean) => {
   const slash = entry.indexOf("/")

@@ -3,6 +3,7 @@
  * itself, caught at load time rather than on a corpus.
  */
 import { describe, expect, it } from "vitest"
+import { CASE_RULES } from "../src/case-rules.js"
 import { CUT_RULES } from "../src/cut.js"
 import { DOCUMENT_RULES } from "../src/document-rules.js"
 import { policyWith, refusalRoster, tieredRoster } from "../src/policy.js"
@@ -48,7 +49,7 @@ describe("the refusal roster loader", () => {
 
 describe("the pipeline's own rosters", () => {
   it("states one token per rule, none of them a deployment's", () => {
-    const rules = [...CUT_RULES, ...DOCUMENT_RULES]
+    const rules = [...CUT_RULES, ...CASE_RULES, ...DOCUMENT_RULES]
     expect(refusalRuleIds(rules).size).toBe(rules.length)
     expect(rules.every((r) => r.subject !== "sut")).toBe(true)
   })
@@ -80,5 +81,14 @@ describe("the roster in its tiers", () => {
     expect(tiers.capture.map((r) => r.id).slice(0, CUT_RULES.length)).toEqual(
       CUT_RULES.map((r) => r.id)
     )
+  })
+
+  it("puts the pipeline's own case rules ahead of the deployment's, at the case tier", () => {
+    const deployment = { ...CASE_RULES[0]!, id: "scope-deployment-own" }
+    const tiers = tieredRoster(policyWith({ refuse: [deployment] }))
+    expect(tiers.case.map((r) => r.id)).toEqual([
+      ...CASE_RULES.map((r) => r.id),
+      "scope-deployment-own"
+    ])
   })
 })

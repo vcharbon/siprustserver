@@ -21,7 +21,7 @@
 //!      seam, `.without_core_refer_transfer()`) relays the REFER even on a call
 //!      whose route DID activate the feature.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -104,6 +104,8 @@ async fn refer_intercept_wins_when_the_route_activates_local_processing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -115,7 +117,7 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
     let alice = h.agent("alice", "127.0.0.1:5795").await;
     let bob = h.agent("bob", "127.0.0.1:5796").await;
     // Default composition — the `refer_transfer` seed IS present. What is absent
-    // is the route's `features.refer` arm, so this platform processes no
+    // is the route's `features.refer` arm, so the B2BUA processes no
     // transfer and the REFER is an ordinary in-dialog request.
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5796).start(&h, "b2bua", "127.0.0.1:5797").await;
@@ -167,13 +169,14 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
 // ── 3. Transparent path reads no Refer-To syntax. ────────────────────────────
 
-/// A relayed REFER is not a transfer this platform runs, so its Refer-To is not
-/// this platform's to read: an unclosed name-addr no reader accepts (RFC 3261
+/// A relayed REFER is not a transfer the B2BUA runs, so its Refer-To is not
+/// the B2BUA's to read: an unclosed name-addr no reader accepts (RFC 3261
 /// §20.30 / §25.1) crosses to the peer verbatim and the answer is the far end's
 /// — here Alice's own 400, relayed back to the transferor.
 ///
@@ -222,6 +225,7 @@ async fn a_malformed_refer_to_relays_untouched_on_the_transparent_path() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -301,5 +305,7 @@ async fn refer_relays_transparently_when_core_refer_transfer_excluded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

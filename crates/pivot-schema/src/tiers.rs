@@ -238,12 +238,6 @@ fn body_registry() -> BodyRegistry {
                 handling: BodyHandling::Rewrite { tokens: vec!["c=addr".into(), "m=port".into()] },
             },
             BodyRule {
-                match_on: MediaTypeMatch::Exact {
-                    value: "application/emergencycalldata.ecall.msd".into(),
-                },
-                handling: freeze(crate::body::BodyMode::FrozenBinary),
-            },
-            BodyRule {
                 match_on: MediaTypeMatch::Prefix { value: "application/emergencycalldata.".into() },
                 handling: frozen.clone(),
             },
@@ -318,7 +312,8 @@ mod tests {
         assert!(matches!(handling("application/sdp"), BodyHandling::Rewrite { .. }));
         assert_eq!(
             handling("application/emergencycalldata.ecall.msd"),
-            BodyHandling::Freeze { mode: crate::body::BodyMode::FrozenBinary }
+            BodyHandling::Freeze { mode: crate::body::BodyMode::Frozen },
+            "a family member freezes under the family prefix, whatever its bytes"
         );
         assert_eq!(
             handling("application/mscp+xml"),
@@ -332,18 +327,34 @@ mod tests {
         assert_eq!(handling("application/octet-stream"), registry.unmatched.handling);
     }
 
+    /// The registry freezes under ONE mode. Whether a frozen payload is bytes
+    /// or text is read off the bytes at emission and at comparison, so no rule
+    /// names a media type to say so, and the export carries no second mode.
     #[test]
-    fn the_specific_ecall_rule_wins_over_the_family_prefix() {
+    fn every_frozen_rule_freezes_under_the_one_mode() {
         let registry = body_registry();
-        let first = registry
-            .rules
-            .iter()
-            .find(|r| r.match_on.matches("application/emergencycalldata.ecall.msd"))
-            .unwrap();
-        assert_eq!(
-            first.handling,
-            BodyHandling::Freeze { mode: crate::body::BodyMode::FrozenBinary }
-        );
+        for rule in &registry.rules {
+            if let BodyHandling::Freeze { mode } = &rule.handling {
+                assert_eq!(*mode, crate::body::BodyMode::Frozen, "{rule:?}");
+            }
+        }
+        let text = crate::canonical::format(&tier_data()).unwrap();
+        assert!(!text.contains("frozen-binary"), "the export names one frozen mode only");
+    }
+
+    /// A family prefix rule is the whole family's handling: no exact rule sits
+    /// in front of a prefix it also matches, or the family would be frozen two
+    /// ways.
+    #[test]
+    fn no_exact_rule_shadows_a_family_prefix() {
+        let registry = body_registry();
+        for rule in &registry.rules {
+            let MediaTypeMatch::Exact { value } = &rule.match_on else { continue };
+            let shadowed = registry.rules.iter().any(|family| {
+                matches!(&family.match_on, MediaTypeMatch::Prefix { value: prefix } if value.starts_with(prefix.as_str()))
+            });
+            assert!(!shadowed, "{value} is handled by its family's prefix rule alone");
+        }
     }
 
     #[test]

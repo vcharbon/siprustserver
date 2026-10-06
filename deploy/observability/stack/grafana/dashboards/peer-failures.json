@@ -179,7 +179,7 @@
       "id": 4,
       "type": "stat",
       "title": "failing peers",
-      "description": "Distinct peers with at least one failure in range (peer=\"__external_overflow__\" = LRU-evicted external addrs folded together).",
+      "description": "Distinct peers with at least one failure in range (peer=\"_overflow\" = the external peers past the cap, together).",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -216,8 +216,8 @@
     {
       "id": 5,
       "type": "stat",
-      "title": "external-overflow folded",
-      "description": "Failures attributed to evicted external peers (PEER_METRICS_EXTERNAL_CAP overflow). High value \u21d2 raise the cap to keep addresses resolved.",
+      "title": "external peers past the cap",
+      "description": "Failures of external peers past the family's cap of label sets (b2bua_peer_failures_overflow_total counts them too); any value means more distinct external peers failed than the cap keeps apart.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -230,7 +230,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(b2bua_peer_failures_total{pod=~\"$pod\",peer=\"__external_overflow__\"}[$__range]))",
+          "expr": "sum(increase(b2bua_peer_failures_total{pod=~\"$pod\",peer=\"_overflow\"}[$__range]))",
           "refId": "A"
         }
       ],
@@ -353,7 +353,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "b2bua failures/s internal vs external",
-      "description": "internal = cluster peers (pinned, never evicted); external = off-cluster (LRU-bounded).",
+      "description": "internal = cluster peers (always their own series); external = off-cluster (under the cap, past it peer=\"_overflow\").",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -608,7 +608,7 @@
     {
       "id": 14,
       "type": "stat",
-      "title": "external-overflow folded",
+      "title": "external peers past the cap",
       "description": "",
       "gridPos": {
         "h": 4,
@@ -622,7 +622,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(sip_proxy_peer_failures_total{peer=\"__external_overflow__\"}[$__range]))",
+          "expr": "sum(increase(sip_proxy_peer_failures_total{peer=\"_overflow\"}[$__range]))",
           "refId": "A"
         }
       ],
@@ -1079,7 +1079,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (code) (rate(sip_proxy_responses_total{method=\"INVITE\"}[$__rate_interval]))",
+          "expr": "sum by (code) (rate(sip_proxy_responses_total{method=\"INVITE\"}[$__rate_interval])) > 0",
           "refId": "A",
           "legendFormat": "{{code}}"
         }

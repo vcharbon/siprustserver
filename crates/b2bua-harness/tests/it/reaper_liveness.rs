@@ -1,26 +1,25 @@
 //! Reaper liveness policy (ADR-0020 X4 refinement): only **real SIP traffic**
 //! refreshes a call's last-touched stamp — a received message, or a turn that
 //! sent SIP out. Self-generated housekeeping turns that touch no wire (the
-//! per-call `LimiterRefresh` HTTP migration) must NOT count as liveness.
+//! per-call `LimiterRefresh` HTTP refresh) must NOT count as liveness.
 //!
-//! Endurance 2026-06-12: ~169 crash-orphaned calls sat `Active` for a full
-//! hour holding limiter slots. The reaper swept them ~20 times and never
-//! issued a verdict, because each call's own `LimiterRefresh` fire (every
-//! 300 s, < the 900 s idle threshold) refreshed its stamp — the call kept
-//! itself "alive" without a single SIP message in either direction.
+//! Were housekeeping to count, a crash-orphaned call would sit `Active` holding
+//! its limiter slot: each `LimiterRefresh` fire (every 300 s, < the 900 s idle
+//! threshold) would refresh its stamp, and the reaper would sweep it without a
+//! verdict until `GlobalDuration` fires — the call keeping itself "alive"
+//! without a single SIP message in either direction.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{establish, settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -32,10 +31,8 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)
@@ -52,7 +49,7 @@ fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn Ca
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -65,8 +62,9 @@ fn reason_of(cdr: &b2bua::cdr::CdrRecord) -> Vec<String> {
 
 /// A silent call whose only "activity" is its own `LimiterRefresh` timer must
 /// still go stale and be reaped — and the reap must release the limiter hold.
-/// Pre-fix the 10 s refresh cadence re-stamps the ledger forever, the sweep
-/// never sees it idle, and the hold is pinned until GlobalDuration.
+/// Counted as liveness, the 10 s refresh cadence would re-stamp the ledger
+/// forever, the sweep never see it idle, and the hold stay pinned until
+/// GlobalDuration.
 #[tokio::test(start_paused = true)]
 async fn limiter_refresh_self_touch_does_not_mask_staleness() {
     let h = Harness::with_transit_delay("reaper-liveness-refresh", 0);
@@ -78,6 +76,7 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
     let decision = route_with_limiter("127.0.0.1", 5072, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             // No keepalive inside the horizon; an aggressive refresh cadence
             // (10 s << idle 60 s) so the self-touch masking is fully exercised.
@@ -111,9 +110,8 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
 
     // The reap settles the obligations: the limiter hold is released.
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "reap released the limiter hold");
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -158,7 +156,7 @@ async fn received_sip_refreshes_liveness() {
     h.advance(Duration::from_secs(95)).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "silent call reaped after the idle window");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

@@ -3,7 +3,7 @@
 //!   1. `/call/failure` carries the framework-attached [`CallSnapshot`]
 //!      (observed CDR trail, legs, features, limiter holds) plus the failed
 //!      final response's non-structural headers — the generic carrier a real
-//!      decision backend derives `prov18x` / Q.850 causes / anything else from.
+//!      decision backend derives an "18x seen" flag / Q.850 causes / anything else from.
 //!   2. A **pending b-leg INVITE transaction timeout** (the dead-gateway case)
 //!      consults `/call/failure` (origin `transaction_timeout`) instead of
 //!      unconditionally terminating, so the backend can reroute — and the
@@ -15,19 +15,18 @@
 //!      holds are released at termination; a limiter reject on the failover
 //!      route re-consults `/call/failure` (origin `call_limiter`), bounded.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallFailureRequest, CallLimiterEntry, CallTreatment, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallFailureRequest, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{hangup, settle_until, B2buaSut};
 use call::CdrEventType;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -41,10 +40,8 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)
@@ -134,7 +131,7 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
     assert_eq!(snap.legs[0].leg_id, "a");
     assert_eq!(snap.legs[1].leg_id, "b-1");
     assert!(snap.features.is_some(), "route features visible to the failure decision");
-    // The observed trail: the backend derives `prov18x` (a Provisional ≥ 180
+    // The observed trail: the backend derives an "18x seen" flag (a Provisional ≥ 180
     // on the failed leg) instead of the platform exporting a bespoke flag.
     assert!(
         snap.cdr_events.iter().any(|e| e.event_type == CdrEventType::Provisional
@@ -150,6 +147,8 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
         "the triggering reject is already on the trail"
     );
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -196,8 +195,8 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     call.expect(180).await;
 
     // Dead gateway: carol never sends a final. At the sip-txn INVITE backstop
-    // (158 s) the b-leg transaction times out — pre-fix this tore the call
-    // down without ever consulting the decision backend. Advance just past the
+    // (158 s) the b-leg transaction times out — and the decision backend is
+    // consulted before any teardown. Advance just past the
     // deadline (not beyond it) so the reroute INVITE is answered inside its
     // Timer A window instead of retransmitting mid-advance.
     h.advance(Duration::from_secs(158) + Duration::from_millis(300)).await;
@@ -207,18 +206,14 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
     // … and the failed leg is cleared: the b2bua CANCELs the still-early carol
     // leg. carol is the DEAD gateway (it never sent a final — that silence is
     // what timed the b-leg INVITE client txn out and triggered the reroute), so
-    // it stays dead air and does not answer the CANCEL. This also keeps the trace
-    // genuinely RFC-clean under unacked-invite-non-2xx-final: the b2bua's
-    // carol INVITE client txn was already DELETED when the 158 s backstop fired
-    // (sip-txn `fire_timeout` → `delete_txn`), so a late 487 here would land on
-    // the unmatched-response path and never be hop-ACKed — an un-ACKable non-2xx
-    // final. A truly dead gateway emits none, so there is nothing to ACK.
+    // it stays dead air and does not answer the CANCEL. A gateway that did
+    // answer it 487 would be ACKed: `timed_out_invite_cancel` covers that.
     let _cancel = carol.receive("CANCEL").await;
     let _ = &carol_uas; // its retained INVITE server txn sends no final (dead air)
 
@@ -235,6 +230,12 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     assert_eq!(reqs[0].snapshot.callback_context.as_deref(), Some("ctx-timeout"));
     drop(reqs);
 
+    // The dead gateway never answers the CANCEL: past the 32 s terminating
+    // backstop after alice's hangup the call is reaped.
+    hangup(&mut dialog, &bob).await;
+    h.advance(Duration::from_secs(33)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -296,8 +297,7 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    // The dead leg is cleared with a CANCEL carol never answers.
-    let _cancel = carol.receive("CANCEL").await;
+    // carol answered nothing, so no CANCEL goes to her (RFC 3261 §9.1).
 
     {
         let reqs = captured.lock().unwrap();
@@ -312,10 +312,11 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     }
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    // carol never answers her CANCEL, so the call rides the terminating
-    // backstop out: advance exactly past it, then assert release.
+    // carol's leg awaits the final a CANCEL would have provoked, so the call
+    // rides the terminating backstop out: advance exactly past it, then assert
+    // release.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -323,6 +324,10 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
         invites_delivered_to(&report, carol_addr),
         4,
         "original send + the three rungs a 5 s bound buys (0.5 / 1.5 / 3.5 s), none past it"
+    );
+    assert!(
+        !report.entries().iter().any(|e| e.to == carol_addr && e.raw.starts_with(b"CANCEL ")),
+        "no CANCEL to a hop that answered nothing"
     );
 }
 
@@ -409,7 +414,7 @@ async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_
     // carol never answers her CANCEL, so the call rides the terminating
     // backstop out: advance exactly past it, then assert release.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;
@@ -438,7 +443,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
                 // The reroute carries its own per-target limit + service ext —
                 // dropped silently before failover/initial parity landed.
                 let mut r = route_to("127.0.0.1", 5071);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-B".into(), limit: 5 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-B".into(), limit: 5 }];
                 r.service_ext =
                     [("svc-x".to_string(), serde_json::json!({"k": "v"}))].into_iter().collect();
                 CallTreatment::Route(r)
@@ -447,6 +452,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -454,7 +460,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     carol.receive("INVITE").await.respond(503, "Service Unavailable").await;
     carol.receive("ACK").await;
 
-    // The failover route's limiter entry is INCRed against the new target.
+    // The failover route's limiter entry is admitted against the new target.
     let mut bob_uas = bob.receive("INVITE").await;
     settle_until(|| store.stats().current_total == 1).await;
     assert_eq!(store.stats().current_total, 1, "failover route admitted its limiter entry");
@@ -470,7 +476,67 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "BYE released the failover hold");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let _ = h.finish().await;
+}
+
+// ── 3a. Failover Route over a limited initial route: the holds are replaced ─
+
+#[tokio::test]
+async fn failover_route_limiter_replaces_the_initial_route_holds() {
+    let h = Harness::with_transit_delay("failover-limiter-replaces", 0);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5070").await; // first target — 503s
+    let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
+
+    let http = SimulatedHttpNetwork::new();
+    let (store, _lh) = serve_limiter(&http).await;
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx-replace".into());
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 5 }];
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                let mut r = route_to("127.0.0.1", 5071);
+                r.call_limiter = vec![LimiterEntry { id: "trunk-B".into(), limit: 5 }];
+                CallTreatment::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    carol.receive("INVITE").await.respond(503, "Service Unavailable").await;
+    carol.receive("ACK").await;
+
+    // The failover route owns the call's holds: trunk-B replaces trunk-A.
+    let mut bob_uas = bob.receive("INVITE").await;
+    settle_until(|| store.held("trunk-A") == 0 && store.held("trunk-B") == 1).await;
+    assert_eq!(store.held("trunk-A"), 0, "the replaced route's trunk-A hold is released");
+    assert_eq!(store.held("trunk-B"), 1, "the failover route's trunk-B hold is live");
+
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(store.stats().current_total, 1, "the answered call holds trunk-B alone");
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| store.stats().current_total == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;
 }
@@ -506,7 +572,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
                 // First hop: a full trunk (limit 0 rejects immediately). The
                 // callback context is what allows the chained re-consult.
                 let mut r = route_to("127.0.0.1", 5099);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-full".into(), limit: 0 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-full".into(), limit: 0 }];
                 r.callback_context = Some("ctx-chain-2".into());
                 CallTreatment::Route(r)
             })
@@ -514,6 +580,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -525,7 +592,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
     let reqs = captured.lock().unwrap();
@@ -537,5 +604,8 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     drop(reqs);
     assert_eq!(store.stats().current_total, 0, "the rejected trunk holds nothing");
 
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

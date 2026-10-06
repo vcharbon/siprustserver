@@ -65,7 +65,7 @@
       ]
     },
     "family": "fork",
-    "id": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz-auto",
+    "id": "capture_fork-branches.pcap.gz-auto",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -77,9 +77,9 @@
       "call_groups": [
         0
       ],
-      "capture": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz"
+      "capture": "capture_fork-branches.pcap.gz"
     },
-    "title": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz basic call (groups 0)",
+    "title": "capture_fork-branches.pcap.gz basic call (groups 0)",
     "variant": "repro"
   },
   "endpoints": [
@@ -126,7 +126,7 @@
           },
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Expires",
@@ -141,11 +141,11 @@
             "value": "session;handling=required"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -221,7 +221,7 @@
           },
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Expires",
@@ -236,11 +236,11 @@
             "value": "session;handling=required"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -252,8 +252,8 @@
             "value": "<tel:0009001>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.112"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e112"
           }
         ],
         "method": "INVITE",
@@ -321,7 +321,7 @@
           },
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Expires",
@@ -336,11 +336,11 @@
             "value": "session;handling=required"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -349,11 +349,11 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900002@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900002@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.112"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e112"
           }
         ],
         "method": "INVITE"
@@ -402,18 +402,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
             "value": "hold,talk"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -449,18 +449,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
             "value": "hold,talk"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -492,7 +492,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
@@ -527,18 +527,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
             "value": "hold,talk"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -574,18 +574,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
             "value": "hold,talk"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -617,7 +617,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Allow-Events",
@@ -659,7 +659,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Accept",
@@ -674,16 +674,16 @@
             "value": "none"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@203.0.113.1>;cause=200"
           },
           {
             "name": "P-Charging-Vector",
@@ -718,7 +718,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Accept",
@@ -733,16 +733,16 @@
             "value": "none"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@203.0.113.1>;cause=200"
           },
           {
             "name": "P-Charging-Vector",
@@ -780,7 +780,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345904"
+            "value": "1700000004"
           },
           {
             "name": "Accept",
@@ -791,8 +791,8 @@
             "value": "ACK,CANCEL,BYE,NOTIFY,INVITE,OPTIONS,INFO,UPDATE"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@203.0.113.1>;cause=200"
           },
           {
             "name": "P-Charging-Vector",
@@ -902,18 +902,18 @@
           },
           {
             "name": "Timestamp",
-            "value": "1607345943"
+            "value": "1700000043"
           },
           {
             "name": "Reason",
             "value": "Q.850;cause=16"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -921,8 +921,8 @@
             "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:203.0.113.147:5060>;device=SBC;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.147:5060>;cause=BYE"
           }
         ],
         "method": "BYE"
@@ -948,18 +948,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345943"
+            "value": "1700000043"
           },
           {
             "name": "Reason",
             "value": "Q.850;cause=16"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -967,12 +967,12 @@
             "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:203.0.113.147:5060>;device=sbc.site.112;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.147:5060>;cause=BYE"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.112"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e112"
           }
         ],
         "method": "BYE"
@@ -1034,18 +1034,18 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345943"
+            "value": "1700000043"
           },
           {
             "name": "Reason",
             "value": "Q.850;cause=16"
           },
           {
-            "name": "P-Identifier",
-            "value": "112237020"
+            "name": "X-Vendor-Id",
+            "value": "119900002"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1053,12 +1053,12 @@
             "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:203.0.113.147:5060>;device=sbc.site.112;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.147:5060>;cause=BYE"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.112"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e112"
           }
         ],
         "method": "BYE"
@@ -1085,7 +1085,7 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345943"
+            "value": "1700000043"
           },
           {
             "name": "Accept",
@@ -1117,14 +1117,14 @@
         "headers": [
           {
             "name": "Timestamp",
-            "value": "1607345943"
+            "value": "1700000043"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234801"
+            "name": "X-Vendor-Id",
+            "value": "119900001"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1150,7 +1150,7 @@
       ],
       "kind": "external-caller",
       "name": "caller",
-      "observed": "+33000900002"
+      "observed": "+15550900002"
     },
     {
       "catalog": {
@@ -1162,7 +1162,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900001"
+      "observed": "+15550900001"
     },
     {
       "catalog": {
@@ -1174,7 +1174,7 @@
       ],
       "kind": "site",
       "name": "called-1-0",
-      "observed": "+33000900001"
+      "observed": "+15550900001"
     }
   ],
   "legs": [

@@ -6,11 +6,12 @@
  * rebooked at replay); a known non-SDP type is frozen byte-exact under its
  * captured media type; anything unrecognized is frozen and flagged when it
  * carries number-like digits, so a new handler is a decision and not an
- * omission. The expect side reads the same registry: a frozen TEXT body is
- * stored and asserted by content, SDP stored and compared as a session
- * description under its rewrite tokens, multipart by shape, absence as its
- * own claim, and a binary payload stays undeclared — the recording it would be
- * confronted with is text.
+ * omission. Whether a payload is text or bytes is a fact of the bytes, never a
+ * declared mode, and no rule names a media type to say so (ADR-0035). The
+ * expect side reads the same registry: a frozen body is stored and compared
+ * byte for byte, SDP stored and compared as a session description under its
+ * rewrite tokens, a multipart part by part where extraction handed the parts
+ * over and by shape otherwise, absence as its own claim.
  *
  * A multipart body is decomposed only where extraction handed the parts over
  * (`./parts.ts`). This module owns the per-part HANDLING, never the split.
@@ -26,9 +27,8 @@ import { body as wireBody, headersInOrder } from "./wire.js"
 export interface ResourceFile {
   /** Path relative to the case dir (`resources/<name>`). */
   readonly relPath: string
-  readonly text: string
-  /** `text` holds latin1-encoded bytes and must be written back that way. */
-  readonly binary?: true
+  /** The file's content, byte for byte. */
+  readonly bytes: Uint8Array
 }
 
 /** What a step states about its body, and the files that statement references. */
@@ -55,7 +55,6 @@ interface Handling {
 const handlerFor = (contentType: string): Handling => {
   const head = mimeKey(contentType)
   if (head === "application/sdp") return { rewrite: ["c=addr", "m=port"] }
-  if (head === "application/emergencycalldata.ecall.msd") return { mode: "frozen-binary" }
   if (
     head.endsWith("+xml") ||
     head.startsWith("application/emergencycalldata.") ||
@@ -90,8 +89,8 @@ export const decompose = (m: Flows.Msg, slug: string, parts?: Decomposed): BodyR
         : { "content-type": payload.contentType }),
       ...(h.mode ? { mode: h.mode } : {})
     },
-    resources: [{ relPath, text: payload.text, ...(payload.binary ? { binary: true as const } : {}) }],
-    flags: numericFlag(h, payload.text, `${slug} body is ${payload.contentType}`),
+    resources: [{ relPath, bytes: payload.bytes }],
+    flags: numericFlag(h, payload.bytes, `${slug} body is ${payload.contentType}`),
     undecomposed: false
   }
 }
@@ -121,8 +120,8 @@ const multipart = (m: Flows.Msg, slug: string, d: Decomposed, container: string)
         : { headers: p.headers.map((x) => ({ name: x.name, value: x.value })) }),
       ...(cidLinks(p, cids).length > 0 ? { "cid-linked": cidLinks(p, cids) } : {})
     })
-    resources.push({ relPath, text: p.text, binary: true })
-    flags.push(...numericFlag(h, p.text, `part ${n} of ${slug} is ${p.contentType}`))
+    resources.push({ relPath, bytes: p.bytes })
+    flags.push(...numericFlag(h, p.bytes, `part ${n} of ${slug} is ${p.contentType}`))
   })
   return {
     // The container keeps every parameter it carried EXCEPT `boundary`, which
@@ -157,9 +156,10 @@ const referencedCids = (m: Flows.Msg): Array<readonly [string, string]> =>
  * An unrecognized payload carrying number-like digits is a DECISION owed —
  * freeze it or write a handler — never a silent freeze.
  */
-const numericFlag = (h: Handling, text: string, what: string): Array<Case.Flag> => {
+const numericFlag = (h: Handling, bytes: Uint8Array, what: string): Array<Case.Flag> => {
   if (!h.unrecognized) return []
-  const digits = [...text].filter((c) => c >= "0" && c <= "9").length
+  let digits = 0
+  for (const byte of bytes) if (byte >= 0x30 && byte <= 0x39) digits += 1
   return digits >= 5
     ? [
         {
@@ -176,22 +176,26 @@ export const carriesBody = (m: Flows.Msg): boolean => wireBody(m) !== undefined
 const NO_BODY: StoredBody = { body: { mode: "absent" }, resources: [], flags: [] }
 
 /**
- * The expect-side body assertion. A frozen TEXT body is stored as a resource
- * and asserted by content (`compare` left absent: exact); an SDP is stored
- * as a resource under the registry's rewrite tokens and compared as a session
- * description (`compare: sdp`), the tokens naming the fields the fold masks
- * where the run rebooked them, its resource written back as the bytes it came
- * as; multipart is asserted by shape, absence as its own claim. Any other
- * binary payload — one extraction handed over as `head` + `body_b64` — stays
- * undeclared: the recording it would be confronted with is text.
+ * The expect-side body assertion. A frozen body is stored as a resource and
+ * compared byte for byte, whatever its bytes hold (`compare` left absent:
+ * exact); an SDP is stored as a resource under the registry's rewrite tokens
+ * and compared as a session description (`compare: sdp`), the tokens naming
+ * the fields the fold masks where the run rebooked them. A multipart
+ * reception is stated part by part where extraction handed `parts` over —
+ * each part a resource under the same handling, with its `content-id` and
+ * entity headers as on the send side — and by shape (`multipart-present`)
+ * where it did not. Absence is its own claim.
  */
-export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
+export const expectBody = (m: Flows.Msg, slug: string, parts?: Decomposed): StoredBody => {
   const payload = wireBody(m)
   if (!payload) return NO_BODY
-  if (payload.boundary !== undefined) return { ...NO_BODY, body: { mode: "multipart-present" } }
+  if (payload.boundary !== undefined) {
+    if (!parts) return { ...NO_BODY, body: { mode: "multipart-present" } }
+    return expectMultipart(slug, parts, payload.containerType ?? parts.contentType)
+  }
+  const relPath = resourceName(slug, 0, payload.mediaType)
   const h = handlerFor(payload.mediaType)
   if (mimeKey(payload.mediaType) === "application/sdp") {
-    const relPath = resourceName(slug, 0, payload.mediaType)
     return {
       body: {
         ref: relPath,
@@ -201,17 +205,40 @@ export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
           : { "content-type": payload.contentType }),
         compare: "sdp"
       },
-      resources: [{ relPath, text: payload.text, ...(payload.binary ? { binary: true as const } : {}) }],
+      resources: [{ relPath, bytes: payload.bytes }],
       flags: []
     }
   }
-  if (h.mode !== "frozen" || payload.binary) return { ...NO_BODY, body: undefined }
-  const relPath = resourceName(slug, 0, payload.mediaType)
   return {
     body: { ref: relPath, mode: "frozen", "content-type": payload.contentType },
-    resources: [{ relPath, text: payload.text }],
-    flags: numericFlag(h, payload.text, `${slug} body is ${payload.contentType}`)
+    resources: [{ relPath, bytes: payload.bytes }],
+    flags: numericFlag(h, payload.bytes, `${slug} body is ${payload.contentType}`)
   }
+}
+
+/** The multipart expectation: every part a resource, the SDP part under its fold. */
+const expectMultipart = (slug: string, d: Decomposed, container: string): StoredBody => {
+  const out: Array<Body.Part> = []
+  const resources: Array<ResourceFile> = []
+  const flags: Array<Case.Flag> = []
+  d.parts.forEach((p, n) => {
+    const relPath = resourceName(slug, n, p.contentType)
+    const h = handlerFor(p.contentType)
+    const sdp = mimeKey(p.contentType) === "application/sdp"
+    out.push({
+      "content-type": p.contentType,
+      ref: relPath,
+      ...(h.rewrite ? { rewrite: h.rewrite } : {}),
+      ...(sdp ? { compare: "sdp" as const } : h.mode ? { mode: h.mode } : {}),
+      ...(p.contentId === undefined ? {} : { "content-id": p.contentId }),
+      ...(p.headers === undefined || p.headers.length === 0
+        ? {}
+        : { headers: p.headers.map((x) => ({ name: x.name, value: x.value })) })
+    })
+    resources.push({ relPath, bytes: p.bytes })
+    flags.push(...numericFlag(h, p.bytes, `part ${n} of ${slug} is ${p.contentType}`))
+  })
+  return { body: { multipart: { "content-type": container, parts: out } }, resources, flags }
 }
 
 /**

@@ -39,17 +39,17 @@
     "annotations": {
       "flags": [
         {
-          "detail": "R-URI \"19999010033000900004\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "R-URI \"19999010015550900004\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         },
         {
-          "detail": "From \"19999010033000900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "From \"19999010015550900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         }
       ]
     },
     "family": "transparent",
-    "id": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz-case3",
+    "id": "capture_leg-without-media.pcap.gz-case3",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -61,9 +61,9 @@
       "call_groups": [
         2
       ],
-      "capture": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz"
+      "capture": "capture_leg-without-media.pcap.gz"
     },
-    "title": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz basic call (groups 2)",
+    "title": "capture_leg-without-media.pcap.gz basic call (groups 2)",
     "variant": "repro"
   },
   "endpoints": [
@@ -86,7 +86,7 @@
       "leg": "A",
       "msg": {
         "from": {
-          "frozen": "19999010033000900002"
+          "frozen": "19999010015550900002"
         },
         "headers": [
           {
@@ -99,10 +99,10 @@
           },
           {
             "name": "User-Agent",
-            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+            "value": "example-ua"
           },
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "11"
           },
           {
@@ -110,13 +110,13 @@
             "value": "<tel:2260>"
           },
           {
-            "name": "P-Orig",
+            "name": "X-Vendor-Orig",
             "value": "sbc.3p"
           }
         ],
         "method": "INVITE",
         "ruri": {
-          "frozen": "19999010033000900004"
+          "frozen": "19999010015550900004"
         },
         "to": {
           "frozen": "8014"
@@ -178,18 +178,18 @@
           },
           {
             "name": "User-Agent",
-            "value": "Genesys SIP Server 8.1.104.06 SIP_Server_8110406"
+            "value": "example-ua"
           },
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "11"
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900001@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900001@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
+            "name": "X-Vendor-Orig",
             "value": "sbc.3p"
           },
           {
@@ -257,19 +257,19 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -308,19 +308,19 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -362,19 +362,19 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -413,19 +413,19 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -467,23 +467,23 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900004@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900004@carrier2.example.net>;cause=200"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -522,23 +522,23 @@
             "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.ort.gwm2k3.rort"
+            "name": "X-Vendor-Origin",
+            "value": "gw1.carrier.example"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900004@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900004@carrier2.example.net>;cause=200"
           },
           {
-            "name": "P-Term",
-            "value": "cl4.site.nbi.sr.stage"
+            "name": "X-Vendor-Term",
+            "value": "core.example.stage"
           },
           {
-            "name": "P-RoutingNumber",
-            "value": "+3320914"
+            "name": "X-Vendor-Route",
+            "value": "+1555091"
           },
           {
-            "name": "P-Initial-Invite",
+            "name": "X-Vendor-Initial",
             "value": "true"
           }
         ],
@@ -617,15 +617,15 @@
           },
           {
             "name": "User-Agent",
-            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+            "value": "example-ua"
           },
           {
-            "name": "P-Orig",
+            "name": "X-Vendor-Orig",
             "value": "sbc.3p"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:203.0.113.146:5061>;device=SR;reason=XACME;location=CORE;realm=XYZ;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.146:5061>;cause=BYE"
           }
         ],
         "method": "BYE"
@@ -685,15 +685,15 @@
           },
           {
             "name": "User-Agent",
-            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+            "value": "example-ua"
           },
           {
-            "name": "P-Orig",
+            "name": "X-Vendor-Orig",
             "value": "sbc.3p"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:203.0.113.146:5061>;device=SR;reason=XACME;location=CORE;realm=XYZ;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.146:5061>;cause=BYE"
           }
         ],
         "method": "BYE"
@@ -742,7 +742,7 @@
     {
       "kind": "unknown",
       "name": "caller",
-      "observed": "19999010033000900002"
+      "observed": "19999010015550900002"
     },
     {
       "catalog": {
@@ -753,7 +753,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900004"
+      "observed": "+15550900004"
     }
   ],
   "legs": [

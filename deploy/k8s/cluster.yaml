@@ -1,13 +1,13 @@
 # kind cluster topology for the Rust SIP SUT — VENDORED COPY.
 #
-# Originally a symlink to ../../../sipjsserver/tests/k8s/cluster.yaml; copied
-# in-tree at S11 so the Rust runner no longer depends on a sibling checkout and
-# the two topologies may diverge. Still uses cluster name `sip-e2e` (the WSL
-# one-cluster switch — see README), so `run.sh up` tears down any existing
-# sip-e2e first, including sipjsserver's.
+# Copied from sipjsserver/tests/k8s/cluster.yaml so the Rust runner depends on no
+# sibling checkout and the two topologies may diverge. Uses cluster name
+# `sip-e2e` (the WSL one-cluster switch — see README), so `run.sh up` tears down
+# any existing sip-e2e first, including sipjsserver's.
 #
 # Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and
-# its backup land on different nodes for real failover), load = sipp UAC/UAS.
+# its backup land on different nodes for real failover), infra = the call
+# limiter and the CDR broker + consumer (tainted, see below).
 #
 # `kernel.core_pattern` is not namespaced: the Debian node image ships
 # `10-coredump-debian.conf` (`kernel.core_pattern=core`) and the privileged
@@ -48,6 +48,24 @@ nodes:
   - role: worker
     labels:
       tier: app
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
+  # tier=infra: the shared dependencies of the call path (call limiter, CDR
+  # broker + consumer), alone on their node so a node fault takes them out
+  # without touching a worker or a generator. The taint keeps every other pod
+  # (cluster add-ons included) off it; the infra manifests tolerate it. The
+  # masq-exempt DaemonSet does not: no SIP flow starts or ends on this node.
+  - role: worker
+    labels:
+      tier: infra
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - { key: tier, value: infra, effect: NoSchedule }
     extraMounts:
       - hostPath: /dev/null
         containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf

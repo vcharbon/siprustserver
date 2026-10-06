@@ -1,4 +1,4 @@
-//! The **Run Job executor** (ADR-0018 Phase G): expand a Campaign into cells
+//! The **Run Job executor** (ADR-0018): expand a Campaign into cells
 //! {Test case × compatible Callflow shape × Infra shape}, run them with a
 //! per-`InfraKind` concurrency cap (fake fans out wide; real cells share one
 //! external cluster), persist each cell as it finishes, and write the
@@ -27,7 +27,7 @@ use crate::{checks, shapes};
 
 /// Everything one campaign run needs, fully resolved (no file I/O during the
 /// run except result persistence). Built by hand or via
-/// [`load_spec`](crate::run::load_spec).
+/// [`load_spec`].
 #[derive(Debug, Clone)]
 pub struct CampaignSpec {
     pub campaign: Campaign,

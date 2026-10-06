@@ -1,4 +1,4 @@
-//! S4 storage-layer tests: changelog mutation/compaction/tombstone/TTL/auto-clean
+//! Storage-layer tests: changelog mutation/compaction/tombstone/TTL/auto-clean
 //! + the `ReplicatingCallStore`'s peer/direction mapping and live-body drain.
 //!
 //! Under ADR-0014 the changelog is split into per-partition sub-logs (`Pri` =
@@ -12,7 +12,7 @@ use std::time::Duration;
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use sip_clock::Clock;
 
-use super::{Changelog, ReplicatingCallStore};
+use super::{BodySource, Changelog, ReplicatingCallStore};
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -144,7 +144,7 @@ async fn delete_emits_tombstone_then_reaped() {
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
-    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap();
+    store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap();
 
     // Tombstone present + drained as Delete with no body.
     assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
@@ -216,8 +216,10 @@ async fn lock_discipline_concurrent_rewrite_is_consistent() {
     }
 }
 
+/// An expired body reads as absent, and a read leaves it in place: only the
+/// reap evicts it, and hands it back once.
 #[tokio::test(start_paused = true)]
-async fn ttl_eviction_drops_body_on_access_and_reap() {
+async fn an_expired_body_reads_absent_and_only_the_reap_evicts_it() {
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone());
     put(&store, "c1", b"v1", 500, 1, &fwd("A")).await;
@@ -226,27 +228,28 @@ async fn ttl_eviction_drops_body_on_access_and_reap() {
     assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_some());
 
     tokio::time::advance(Duration::from_millis(501)).await;
-    // Lazy eviction on access.
-    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none());
+    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none(), "expired reads absent");
+    assert!(store.peek_body_raw(PRI, SELF, "c1").await.is_some(), "the read evicted nothing");
 
-    // Explicit reap also clears any leftover meta.
-    store.reap(clock.now_ms()).await;
-    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none());
+    let evicted = store.reap(clock.now_ms()).await;
+    assert_eq!(evicted.iter().map(|b| &b[..]).collect::<Vec<_>>(), vec![&b"v1"[..]]);
+    assert!(store.peek_body_raw(PRI, SELF, "c1").await.is_none(), "the reap evicted it");
+    assert!(store.reap(clock.now_ms()).await.is_empty(), "and hands it back once");
 }
 
 #[tokio::test(start_paused = true)]
 async fn resurrection_tombstone_pruned_by_reap() {
-    // Regression: the resurrection tombstone (apply-side delete-wins) must be
-    // PRUNED past its window — `delete_call` inserts one per discharge and only
-    // `put_call` reads it (within the window), so without a prune the map grows
-    // one entry per terminated call forever (an unbounded leak). Behavioural
-    // probe: a Put for a just-deleted ref is rejected (silent Ok, no body), then
-    // after the window elapses + a reap the SAME ref accepts a Put again.
+    // The resurrection tombstone (apply-side delete-wins) must be PRUNED past its
+    // window — `delete_call` inserts one per discharge and only `put_call` reads
+    // it (within the window), so without a prune the map grows one entry per
+    // terminated call forever (an unbounded leak). Behavioural probe: a Put for a
+    // just-deleted ref is rejected (silent Ok, no body), then after the window
+    // elapses + a reap the SAME ref accepts a Put again.
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone());
 
     put(&store, "c1", b"v1", 60_000, 1, &fwd("A")).await;
-    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap();
+    store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap();
 
     // Within the tombstone window: a re-creating Put is rejected (delete-wins).
     put(&store, "c1", b"v2", 60_000, 2, &fwd("A")).await;
@@ -257,7 +260,7 @@ async fn resurrection_tombstone_pruned_by_reap() {
 
     // Past the window + a reap: the tombstone is pruned, so a fresh Put lands.
     tokio::time::advance(Duration::from_millis(300_001)).await;
-    store.reap(clock.now_ms()).await;
+    let _evicted = store.reap(clock.now_ms()).await;
     put(&store, "c1", b"v3", 60_000, 3, &fwd("A")).await;
     assert!(
         store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
@@ -354,8 +357,8 @@ async fn no_peer_stores_body_without_bump() {
 }
 
 // ---------------------------------------------------------------------------
-// Review regressions: retention floor + ResetToBootstrap trigger (#1), TTL
-// backstop for `ttl<=0` replicas (#2), serve-guard-aware reap (#7).
+// Retention floor + ResetToBootstrap trigger, TTL backstop for `ttl<=0`
+// replicas, serve-guard-aware reap.
 // ---------------------------------------------------------------------------
 
 const BAK: PartitionRole = PartitionRole::Backup;
@@ -370,7 +373,7 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
     let store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await; // counter 1 (Bak)
-    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap(); // counter 2 (tombstone)
+    store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap(); // counter 2 (tombstone)
 
     // Before the reap: a puller that saw up to counter 1 is NOT told to reset
     // (the tombstone at counter 2 is still live and would be re-delivered).
@@ -395,8 +398,8 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
 /// (or an NTP step-back) can hand a fresh changelog the SAME (or a lower) gen
 /// while its counter restarts at 0; a warm puller then presents a same-gen
 /// watermark ABOVE our head (a counter we never issued) or a future-gen
-/// watermark, and the old `since.gen < gen ⇒ cold, else warm` split silently
-/// skipped every new entry until the counter outgrew the stale watermark.
+/// watermark, and a `since.gen < gen ⇒ cold, else warm` split would silently
+/// skip every new entry until the counter outgrew the stale watermark.
 #[tokio::test(start_paused = true)]
 async fn gen_collision_or_backward_clock_forces_reset() {
     let clock = Clock::test_at(0);
@@ -442,7 +445,7 @@ async fn served_peer_log_survives_reap_until_guard_dropped() {
 
     // A bump refreshes the last-active stamp; drop the guard, idle past the TTL
     // again, and reap → the now-unserved log is evicted.
-    cl.bump("A", "c1", Op::Put, Partition::Bak);
+    cl.bump_put("A", "c1", Partition::Bak);
     drop(guard);
     tokio::time::advance(Duration::from_millis(3_000)).await;
     cl.reap(clock.now_ms());
@@ -450,7 +453,7 @@ async fn served_peer_log_survives_reap_until_guard_dropped() {
 }
 
 /// A replica stored with `ttl_ms <= 0` self-evicts via the backstop TTL (so a
-/// missed delete cannot linger forever), instead of the old `expiry = None`.
+/// missed delete cannot linger forever), never `expiry = None`.
 #[tokio::test(start_paused = true)]
 async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
     let clock = Clock::test_at(0);
@@ -458,48 +461,367 @@ async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
 
     // Apply-path replica (peer:None, ttl 0) — the shape a puller stores. The
     // index keys ride along exactly as the puller passes them.
-    let idx = vec!["leg:cid-1|tag-a".to_string()];
+    let idx = vec!["a:cid-1|tag-a".to_string()];
     store
         .put_call(BAK, "A", "c1", b"v1".to_vec(), &idx, 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
     assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());
-    assert_eq!(store.get_index("leg:cid-1|tag-a").await.unwrap().as_deref(), Some("c1"));
+    assert_eq!(store.get_index("a:cid-1|tag-a").await.unwrap().as_deref(), Some("c1"));
 
-    // Past the backstop → lazily evicted on access (no permanent ghost), AND the
-    // ghost's idx:* entries are freed with it — a stranded index would both leak
-    // and let `resolve_from_replica_index` resolve a takeover to a dead callRef.
+    // Past the backstop → reads absent (no permanent ghost), its idx:* entries
+    // too — an index resolving to an expired body would let
+    // `resolve_from_replica_index` resolve a takeover to a dead callRef.
     tokio::time::advance(Duration::from_millis(1_001)).await;
     assert!(
         store.get_call(BAK, "A", "c1").await.unwrap().is_none(),
-        "ttl<=0 replica self-evicts via the backstop"
+        "ttl<=0 replica expires via the backstop"
     );
     assert_eq!(
-        store.get_index("leg:cid-1|tag-a").await.unwrap(),
+        store.get_index("a:cid-1|tag-a").await.unwrap(),
         None,
-        "lazy eviction must free the replica's index entries too"
+        "an expired replica's index entries read absent too"
     );
 }
 
-/// The bulk `reap` path frees an expired ghost's `idx:*` entries along with its
-/// body — same invariant as the lazy-eviction path above, on the sweep the
-/// runner drives every few seconds.
+/// The `reap` frees an expired ghost's `idx:*` entries along with its body, on
+/// the sweep the core drives.
 #[tokio::test(start_paused = true)]
 async fn reap_frees_expired_replica_index_entries() {
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(1_000);
 
-    let idx = vec!["leg:cid-2|tag-b".to_string(), "leg:cid-2".to_string()];
+    let idx = vec!["b:cid-2|tag-b".to_string(), "b:cid-2".to_string()];
     store
         .put_call(BAK, "A", "c2", b"v1".to_vec(), &idx, 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
-    assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap().as_deref(), Some("c2"));
+    assert_eq!(store.get_index("b:cid-2|tag-b").await.unwrap().as_deref(), Some("c2"));
 
     tokio::time::advance(Duration::from_millis(1_001)).await;
-    store.reap(clock.now_ms()).await;
+    assert_eq!(store.reap(clock.now_ms()).await.len(), 1);
 
     assert!(store.get_call(BAK, "A", "c2").await.unwrap().is_none());
-    assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap(), None);
-    assert_eq!(store.get_index("leg:cid-2").await.unwrap(), None);
+    assert_eq!(store.get_index("b:cid-2|tag-b").await.unwrap(), None);
+    assert_eq!(store.get_index("b:cid-2").await.unwrap(), None);
+}
+
+// ---------------------------------------------------------------------------
+// Per-ref metadata across writers: the record is keyed by callRef alone and
+// every local writer rewrites it. A write carries over each field it does not
+// itself carry (`backup`, `skew_offset_ms`, `authority_answered`) and replaces
+// the ones it does (`(p,b)`, expiry, role/primary, the index set — every writer
+// computes the full index set from the body, so `indexes` is carried by the
+// write, not lost). Nothing here is scheduled: the store is synchronous under
+// one mutex, so the order of the writes IS the order of the calls.
+// ---------------------------------------------------------------------------
+
+/// The puller's apply: a local write stamped with the origin node's wall clock
+/// (`peer: None`, so nothing propagates).
+fn applied(origin_now_ms: i64) -> PutOpts {
+    PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() }
+}
+
+/// The four kinds of local write, each named for the failing assertion.
+fn every_writer() -> Vec<(&'static str, PutOpts)> {
+    vec![
+        ("peerless", PutOpts::default()),
+        ("reverse", rev(SELF)),
+        ("forward", fwd("w1")),
+        ("apply", applied(70_000)),
+    ]
+}
+
+/// `every_writer` without the one that carries the field under test.
+fn every_writer_but(carrier: &str) -> Vec<(&'static str, PutOpts)> {
+    every_writer().into_iter().filter(|(w, _)| *w != carrier).collect()
+}
+
+/// The writers among `writers` — the writers that carry no value for `field`,
+/// named as in `every_writer` — that lose it: each is run on a fresh store
+/// seeded by one put under `seed_opts` then `after_seed`, and `holds` reads
+/// the field back.
+async fn writers_losing(
+    field: &str,
+    writers: Vec<(&'static str, PutOpts)>,
+    seed_opts: &PutOpts,
+    after_seed: impl Fn(&ReplicatingCallStore),
+    holds: impl Fn(&ReplicatingCallStore) -> bool,
+) -> Vec<&'static str> {
+    let mut lost = Vec::new();
+    for (writer, opts) in writers {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+        put(&store, "c1", b"v1", 0, 1, seed_opts).await;
+        after_seed(&store);
+        assert!(holds(&store), "{field} not seeded before {writer}");
+        put(&store, "c1", b"v2", 0, 2, &opts).await;
+        if !holds(&store) {
+            lost.push(writer);
+        }
+    }
+    lost
+}
+
+/// The backup ordinal is carried only by a Forward write: every write that
+/// carries none keeps it, and a Forward write to another backup replaces it.
+/// The reverse write stays in the loop although a `bak:` record never holds a
+/// backup ordinal: the store's carry-over is role-agnostic.
+#[tokio::test(start_paused = true)]
+async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
+    let backed_by_w1 =
+        |store: &ReplicatingCallStore| store.scan_refs_backed_by(SELF, "w1") == ["c1".to_string()];
+    let lost =
+        writers_losing("backup", every_writer_but("forward"), &fwd("w1"), |_| {}, backed_by_w1)
+            .await;
+    assert!(lost.is_empty(), "backup lost by {lost:?}");
+
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    put(&store, "c1", b"v1", 0, 1, &fwd("w1")).await;
+    put(&store, "c1", b"v3", 0, 3, &fwd("w2")).await;
+    assert!(store.scan_refs_backed_by(SELF, "w1").is_empty(), "backup frozen across a forward");
+    assert_eq!(store.scan_refs_backed_by(SELF, "w2"), vec!["c1".to_string()]);
+}
+
+/// The skew offset is carried only by an origin-stamped write (the puller's
+/// apply): every local flush keeps it, and a later apply replaces it.
+#[tokio::test(start_paused = true)]
+async fn skew_offset_survives_every_write_that_does_not_carry_one() {
+    let lost = writers_losing(
+        "skew offset",
+        every_writer_but("apply"),
+        &applied(70_000),
+        |_| {},
+        |store| store.skew_offset_ms("c1") == Some(30_000),
+    )
+    .await;
+    assert!(lost.is_empty(), "skew offset lost by {lost:?}");
+
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    put(&store, "c1", b"v1", 0, 1, &applied(70_000)).await;
+    put(&store, "c1", b"v3", 0, 3, &applied(60_000)).await;
+    assert_eq!(store.skew_offset_ms("c1"), Some(40_000), "skew offset frozen across an apply");
+}
+
+/// The authority's answer is carried by no write at all: every kind of local
+/// write and `reestablish_backup` keep it, and only the ref's own delete clears
+/// it — a fresh record for the same ref starts unanswered.
+#[tokio::test(start_paused = true)]
+async fn authority_answer_survives_every_write_and_leaves_with_the_ref() {
+    let lost = writers_losing(
+        "authority answer",
+        every_writer(),
+        &PutOpts::default(),
+        |store| {
+            assert!(!store.authority_answered("c1"), "unanswered until the authority publishes");
+            store.note_authority_answer("c1");
+        },
+        |store| store.authority_answered("c1"),
+    )
+    .await;
+    assert!(lost.is_empty(), "authority answer lost by {lost:?}");
+
+    let clock = Clock::test_at(100_000);
+    let store = ReplicatingCallStore::new(1, clock.clone());
+    put(&store, "c1", b"v1", 0, 1, &PutOpts::default()).await;
+    store.note_authority_answer("c1");
+    store.reestablish_backup("c1", "w1");
+    assert!(store.authority_answered("c1"), "authority answer lost by reestablish_backup");
+
+    store.delete_call(PRI, SELF, "c1", &[], false, &PutOpts::default()).await.unwrap();
+    assert!(!store.authority_answered("c1"), "the answer leaves with the ref");
+
+    // Past the resurrection tombstone, a fresh record under the same ref stands
+    // and starts unanswered: the mark belonged to the record, not the ref.
+    tokio::time::advance(Duration::from_millis(300_001)).await;
+    let _evicted = store.reap(clock.now_ms()).await;
+    put(&store, "c1", b"v3", 0, 3, &PutOpts::default()).await;
+    assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((3, 0)), "the fresh put stands");
+    assert!(!store.authority_answered("c1"), "a fresh record starts unanswered");
+}
+
+/// The fields a write does carry are replaced by every writer: the `(p,b)`
+/// version reads the new value after each write, and the expiry is refreshed
+/// (the body outlives the TTL of the write before, inside the last one's).
+#[tokio::test(start_paused = true)]
+async fn carried_fields_are_replaced_by_every_write() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    store.put_call(PRI, SELF, "c1", b"v0".to_vec(), &[], 500, 1, 0, &fwd("w1")).await.unwrap();
+    assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((1, 0)));
+
+    let mut previous = "seed";
+    for (i, (writer, opts)) in every_writer().into_iter().enumerate() {
+        // 300 ms on: inside the previous write's TTL, past the TTL of the one
+        // before it — so from the second write on, a body still here proves
+        // the previous write refreshed the expiry. The first check would sit
+        // inside the seed's own TTL and prove nothing, so it is skipped.
+        tokio::time::advance(Duration::from_millis(300)).await;
+        if i > 0 {
+            assert!(
+                store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+                "expiry not refreshed by {previous}"
+            );
+        }
+        let (p, b) = (10 + i as i64, 1 + i as i64);
+        store.put_call(PRI, SELF, "c1", b"v".to_vec(), &[], 500, p, b, &opts).await.unwrap();
+        assert_eq!(
+            store.current_cv(PRI, SELF, "c1"),
+            Some((p, b)),
+            "version not replaced by {writer}"
+        );
+        previous = writer;
+    }
+    // 600 ms after the last write: past the write before it, inside its own TTL.
+    tokio::time::advance(Duration::from_millis(300)).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+        "expiry not refreshed by {previous}"
+    );
+    tokio::time::advance(Duration::from_millis(300)).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_none(),
+        "the refreshed TTL still expires"
+    );
+}
+
+/// `opts` naming the call incarnation `incarnation`.
+fn named(opts: PutOpts, incarnation: &str) -> PutOpts {
+    PutOpts { incarnation: Some(incarnation.to_string()), ..opts }
+}
+
+/// The resurrection tombstone buries the call the delete removed, not its
+/// callRef. Inside the window a late `Put` of that call — named or not — is
+/// ignored, while a new call born on the same ref is stored and replicated at
+/// once, under its own name; the buried call stays buried after it.
+#[tokio::test(start_paused = true)]
+async fn a_delete_buries_its_call_and_not_the_next_one_on_its_ref() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    put(&store, "c1", b"first", 60_000, 4, &named(fwd("A"), "c1#1")).await;
+    // The delete names no call: the body it removes does.
+    store.delete_call(PRI, SELF, "c1", &[], false, &fwd("A")).await.unwrap();
+
+    put(&store, "c1", b"first-late", 60_000, 5, &named(rev("A"), "c1#1")).await;
+    put(&store, "c1", b"unnamed-late", 60_000, 5, &PutOpts::default()).await;
+    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none(), "the call stays buried");
+    assert!(store.buries("c1", Some("c1#1")));
+    assert!(!store.buries("c1", Some("c1#2")));
+
+    put(&store, "c1", b"retry", 60_000, 1, &named(fwd("A"), "c1#2")).await;
+    assert_eq!(store.get_call(PRI, SELF, "c1").await.unwrap().as_deref(), Some(&b"retry"[..]));
+    assert_eq!(store.incarnation("c1").as_deref(), Some("c1#2"));
+    let frames = store
+        .changelog()
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
+        .await;
+    match one_data(frames) {
+        Frame::Data { op, call_gen, body, incarnation, .. } => {
+            assert_eq!(op, Op::Put, "the new call's put replicates");
+            assert_eq!(call_gen, 1);
+            assert_eq!(body.as_deref(), Some(&b"retry"[..]));
+            assert_eq!(incarnation.as_deref(), Some("c1#2"), "under its own name");
+        }
+        other => panic!("expected Data, got {other:?}"),
+    }
+
+    put(&store, "c1", b"first-later", 60_000, 9, &named(rev("A"), "c1#1")).await;
+    assert_eq!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().as_deref(),
+        Some(&b"retry"[..]),
+        "the buried call does not overwrite the new one"
+    );
+}
+
+/// A delete removing no body buries the call it names, so a node that
+/// never held the call still refuses it.
+#[tokio::test(start_paused = true)]
+async fn a_delete_naming_its_call_buries_it_with_no_body_held() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    store.delete_call(PRI, SELF, "c1", &[], false, &named(fwd("A"), "c1#1")).await.unwrap();
+    put(&store, "c1", b"late", 60_000, 2, &named(rev("A"), "c1#1")).await;
+    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none());
+    put(&store, "c1", b"retry", 60_000, 1, &named(fwd("A"), "c1#2")).await;
+    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_some());
+}
+
+/// A write of another call on the ref starts a fresh record: the facts the
+/// record kept about the call it replaces (the authority's answer, the backup
+/// ordinal, the skew offset) are not the new call's. An unnamed write is one
+/// of the held call and keeps its name.
+#[tokio::test(start_paused = true)]
+async fn a_write_of_another_call_on_the_ref_starts_a_fresh_record() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    put(&store, "c1", b"first", 0, 3, &named(fwd("w1"), "c1#1")).await;
+    put(&store, "c1", b"first", 0, 3, &named(applied(60_000), "c1#1")).await;
+    store.note_authority_answer("c1");
+    put(&store, "c1", b"first", 0, 4, &PutOpts::default()).await;
+    assert_eq!(store.incarnation("c1").as_deref(), Some("c1#1"), "an unnamed write keeps it");
+    assert!(store.authority_answered("c1"));
+    assert_eq!(store.skew_offset_ms("c1"), Some(40_000));
+    assert_eq!(store.scan_refs_backed_by(SELF, "w1"), vec!["c1".to_string()]);
+
+    put(&store, "c1", b"retry", 0, 1, &named(PutOpts::default(), "c1#2")).await;
+    assert_eq!(store.incarnation("c1").as_deref(), Some("c1#2"));
+    assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((1, 0)));
+    assert!(!store.authority_answered("c1"), "the new call starts unanswered");
+    assert_eq!(store.skew_offset_ms("c1"), None, "and with no skew offset");
+    assert!(store.scan_refs_backed_by(SELF, "w1").is_empty(), "and with no backup ordinal");
+}
+
+/// A `Delete` frame names the call the delete removed — the one the delete
+/// named, or the body it found — so its receiver buries that call and no
+/// other.
+#[tokio::test(start_paused = true)]
+async fn a_delete_frame_names_the_call_it_removed() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    for (named_by_delete, expected) in [(true, "c1#1"), (false, "c1#1")] {
+        let fresh = ReplicatingCallStore::new(1, Clock::test_at(0));
+        put(&fresh, "c1", b"first", 60_000, 1, &named(fwd("A"), "c1#1")).await;
+        let opts = if named_by_delete { named(fwd("A"), "c1#1") } else { fwd("A") };
+        fresh.delete_call(PRI, SELF, "c1", &[], false, &opts).await.unwrap();
+        let frames = fresh
+            .changelog()
+            .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &fresh, PRI, SELF)
+            .await;
+        match one_data(frames) {
+            Frame::Data { op, incarnation, .. } => {
+                assert_eq!(op, Op::Delete);
+                assert_eq!(incarnation.as_deref(), Some(expected), "named: {named_by_delete}");
+            }
+            other => panic!("expected Data, got {other:?}"),
+        }
+    }
+    // A delete of another call than the held one leaves the held call, buries
+    // the named one, and propagates nothing over the held call's entry.
+    put(&store, "c1", b"retry", 60_000, 1, &named(fwd("A"), "c1#2")).await;
+    store.delete_call(PRI, SELF, "c1", &[], false, &named(fwd("A"), "c1#1")).await.unwrap();
+    assert_eq!(store.get_call(PRI, SELF, "c1").await.unwrap().as_deref(), Some(&b"retry"[..]));
+    assert!(store.buries("c1", Some("c1#1")));
+    let frames = store
+        .changelog()
+        .drain_since("A", BAK_P, Watermark::new(1, 0), NO_LIMIT, &store, PRI, SELF)
+        .await;
+    match one_data(frames) {
+        Frame::Data { op, incarnation, .. } => {
+            assert_eq!((op, incarnation.as_deref()), (Op::Put, Some("c1#2")), "the retry's Put");
+        }
+        other => panic!("expected Data, got {other:?}"),
+    }
+}
+
+/// A write of another call that replaces the held one takes the replaced
+/// call's index keys with it, even when the write itself carries none.
+#[tokio::test(start_paused = true)]
+async fn a_write_of_another_call_drops_the_replaced_calls_index_keys() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    let first = vec!["leg:first|a".to_string()];
+    store
+        .put_call(PRI, SELF, "c1", b"first".to_vec(), &first, 0, 3, 0, &named(fwd("A"), "c1#1"))
+        .await
+        .unwrap();
+    assert_eq!(store.get_index("leg:first|a").await.unwrap().as_deref(), Some("c1"));
+    store
+        .put_call(PRI, SELF, "c1", b"retry".to_vec(), &[], 0, 1, 0, &named(fwd("A"), "c1#2"))
+        .await
+        .unwrap();
+    assert_eq!(store.get_index("leg:first|a").await.unwrap(), None, "the replaced call's key");
+    assert_eq!(store.map_lens().1, 0, "no index key stands for the replaced call");
 }

@@ -1,7 +1,7 @@
 //! Framework guarantees — port of `InvariantEnforcer.ts` + the bye-disposition
 //! invariant. On the `→ terminated` transition the framework appends the
 //! cleanup a buggy rule might have forgotten: cancel-all-timers first, then
-//! every **obligation** the call still owes (the CDR, the limiter decrements —
+//! every **obligation** the call still owes (the CDR, the limiter release —
 //! derived from the snapshot by the [`ObligationSet`], ADR-0020 X7), then
 //! remove-call last — so termination is always clean. Termination is also
 //! *promoted* (`terminating → terminated`) once every leg is resolved.
@@ -11,6 +11,7 @@ use call::{Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, St
 
 use crate::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use crate::obligations::ObligationSet;
+use sip_message::generators::CapabilitySet;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
 /// read-only **projection** of the authoritative `CallModelState` — the engine,
@@ -37,7 +38,7 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     }
     result.call.sm_cursors.insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));
     // Project the authoritative `Call.transfer.phase` into the `transfer` machine
-    // cursor (ADR-0016 slice 7) the same way — a read-only view the transfer
+    // cursor (ADR-0016) the same way — a read-only view the transfer
     // service rules gate on; clearing the slice removes the cursor.
     super::refer_transfer::project_cursor(&mut result.call);
     // Project `(strategy, first_relayed)` into the `relayFirst18x` machine cursor
@@ -47,14 +48,24 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     result
 }
 
+/// What the funnel does for a caller whose INVITE a terminating call leaves
+/// unanswered.
+#[derive(Clone, Copy, Debug)]
+pub enum UnansweredCaller<'a> {
+    /// Answer her 503 under the deployment's advertisement for a minted final.
+    Answer(&'a CapabilitySet),
+    /// Leave the wire alone: an already-terminal reclaimed or folded body.
+    Leave,
+}
+
 /// Guarantee cleanup on the `→ terminated` transition: CancelAllTimers first,
-/// the unanswered-a-leg final (ADR-0022, when `answer_unanswered_a_leg`), then
-/// every owed obligation (`obligations.settle` — the CDR + limiter decrements
+/// the unanswered-a-leg final (ADR-0022, under `UnansweredCaller::Answer`), then
+/// every owed obligation (`obligations.settle` — the CDR + the limiter release
 /// derived from the snapshot, idempotent against rule-emitted cleanup), then
 /// RemoveCall last.
 ///
-/// `answer_unanswered_a_leg` is `true` on every LIVE-serving funnel (rules,
-/// initial-INVITE, limiter-refresh, reaper discharge) and `false` ONLY on the
+/// `unanswered` is `Answer` on every LIVE-serving funnel (rules,
+/// initial-INVITE, limiter-refresh, reaper discharge) and `Leave` ONLY on the
 /// two HA discharge helpers for already-terminal reclaimed/folded bodies
 /// (`discharge_materialized_terminal` / `discharge_folded_terminal`): those
 /// bodies were answered by whichever node served them to terminal — or their
@@ -65,7 +76,7 @@ pub fn enforce(
     before: &Call,
     mut result: HandlerResult,
     now_ms: i64,
-    answer_unanswered_a_leg: bool,
+    unanswered: UnansweredCaller<'_>,
 ) -> HandlerResult {
     let became_terminated = before.state != CallModelState::Terminated
         && result.call.state == CallModelState::Terminated;
@@ -84,8 +95,8 @@ pub fn enforce(
         tracing::error!(call_ref = %result.call.call_ref, "terminated without a termination record");
         result.effects.buffered.push(BufferedObservabilityEffect::TerminationUnrecorded);
     }
-    if answer_unanswered_a_leg {
-        answer_a_leg_if_unanswered(before, &mut result, now_ms);
+    if let UnansweredCaller::Answer(advertisement) = unanswered {
+        answer_a_leg_if_unanswered(before, &mut result, now_ms, advertisement);
     }
     let crit = &mut result.effects.critical;
     if !crit.iter().any(|e| matches!(e, CriticalStateEffect::CancelAllTimers)) {
@@ -105,7 +116,7 @@ pub fn enforce(
 /// the instant an INVITE server txn is born, so a call that reaches
 /// `→ terminated` with the caller's INVITE still unanswered strands a caller
 /// who is actively waiting: the reaper force-terminal paths deliberately emit
-/// no wire messages, and the txn sweep deletes an unanswered server txn
+/// no wire messages, and the txn backstop deletes an unanswered server txn
 /// *silently*. Append here — the one funnel every termination rides — the
 /// final response the path forgot: `503 Service Unavailable`, no Reason
 /// header (the canonical error-case reject; decision-error and overload use
@@ -120,12 +131,18 @@ pub fn enforce(
 ///    yet: neither a reject / relay / setup-timeout final of this turn nor the
 ///    487 the txn layer sent autonomously on a CANCEL.
 ///
-/// The 503 leaves through `response_to_a_leg`, the one seam every a-facing
+/// The 503 carries the deployment's advertisement for a minted final and
+/// leaves through `response_to_a_leg`, the one seam every a-facing
 /// final rides: it records the final on the leg and refuses any later one on
 /// that transaction. sip-txn drops a second final on the branch as well — in
 /// `Completed`, through the Timer I `Confirmed` hold after the ACK, and on a
 /// branch it no longer holds (`server_final_unseen_branch`).
-fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms: i64) {
+fn answer_a_leg_if_unanswered(
+    before: &Call,
+    result: &mut HandlerResult,
+    now_ms: i64,
+    advertisement: &CapabilitySet,
+) {
     let unanswered_entering = matches!(before.a_leg.state, LegState::Trying | LegState::Early);
     if !unanswered_entering || result.call.a_leg_invite.headers.is_empty() {
         return;
@@ -144,6 +161,8 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         .first()
         .map(|d| d.sip.local_tag.clone())
         .filter(|t| !t.is_empty());
+    let mut own = Vec::new();
+    super::capabilities::stamp_own_advertisement(advertisement, |_| false, &mut own);
     let Some(mut effect) = super::relay::response_to_a_leg(
         &mut result.call,
         &mut result.effects,
@@ -155,8 +174,9 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         vec![],
         None,
         None,
-        vec![],
+        own,
         crate::effects::Provenance::Authored,
+        super::relay::Author::Stack,
     ) else {
         return;
     };

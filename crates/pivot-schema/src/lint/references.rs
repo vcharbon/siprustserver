@@ -13,12 +13,15 @@ use crate::call::Position;
 use crate::flow::{Anchor, FlowNode, Op, Step};
 use crate::lint::{at, reach, Index, Place, Reach, Report};
 use crate::msg::Ref;
+use sip_message::header::NameAddr;
+use sip_message::SipStr;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     unique_ids(index, report);
     placement(index, report);
     flow_refs(index, report);
     positions(index, report);
+    name_addrs(index, report);
     document_refs(index, report);
 }
 
@@ -344,6 +347,53 @@ fn ordering(
             "a branch step exists only on the run that chose it; name the alt's own id, or a step of the same branch",
         ),
     }
+}
+
+/// A ref's `addr` is a From or To identity (§8): a name-addr, read with every
+/// `${…}` standing for a token, that leaves the tag to the stack.
+fn name_addrs(index: &Index<'_>, report: &mut Report) {
+    for (_, step) in index.all_steps() {
+        let path = at("flow", &step.id);
+        if step.msg.ruri.as_ref().and_then(Ref::addr).is_some() {
+            report.error(
+                "ref/addr-on-ruri",
+                &path,
+                "the Request-URI ref states a name-addr".to_string(),
+                "state `addr` on `from` or `to` only; a Request-URI is an addr-spec the lane composes",
+            );
+        }
+        for addr in [&step.msg.from, &step.msg.to].into_iter().flatten().filter_map(Ref::addr) {
+            match NameAddr::parse(&SipStr::owned(&blank_accessors(addr))) {
+                Err(error) => report.error(
+                    "ref/addr-unreadable",
+                    &path,
+                    format!("{addr:?} is no name-addr: {}", error.reason),
+                    "state the captured value as `[display] <uri> *(;param)`",
+                ),
+                Ok(parsed) if parsed.params().has("tag") => report.error(
+                    "ref/addr-tagged",
+                    &path,
+                    format!("{addr:?} carries a tag"),
+                    "drop the tag: the stack mints the dialog's own (tier 1)",
+                ),
+                Ok(_) => {}
+            }
+        }
+    }
+}
+
+/// `text` with every `${…}` replaced by a token, so the SIP around it reads.
+fn blank_accessors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("${") {
+        let Some(close) = rest[open..].find('}') else { break };
+        out.push_str(&rest[..open]);
+        out.push('0');
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Tier-2 positional refs resolve against the call chains. A bare `called[b][s]`

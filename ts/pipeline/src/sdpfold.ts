@@ -14,8 +14,12 @@
  *
  * The mask is the contract between the document and the run, and it states
  * exactly what the render writes (`sip_message::rewrite_connection_and_ports`).
- * `o=` sess-id and sess-version are masked always (RFC 4566 §5.2 owner values
- * no replay reproduces). The expect's own `rewrite` tokens name WHICH fields
+ * On a rebooked run `o=` sess-id and sess-version are masked (RFC 4566 §5.2
+ * owner values no replay reproduces). On a verbatim run they are compared, and
+ * a differing `o=` is its own `session:o=` row, marked where the caller read
+ * it as an origin the replayed endpoint mints (`./sdporigin.ts`); the bytes
+ * check then reads the replayed origin as the captured one, so the mark never
+ * hides another byte. The expect's own `rewrite` tokens name WHICH fields
  * are lane-owned — `c=addr`: the address of a `c=IN IP4` line, an IP6 line is
  * never written; `m=port`: the port of an `m=` line where it is non-zero, a
  * `/count` suffix kept and a port-0 stream never written — and `a=rtcp` is
@@ -28,9 +32,12 @@
  * pass erases is then one `document:bytes` row with both texts whole.
  */
 import type { Bundle } from "@sip/contracts"
+import { withOriginOf } from "./sdporigin.js"
 
-/** Which lane-owned fields the fold sets aside, beside the `o=` floor it always masks, and whether the bytes must match. */
+/** Which lane-owned fields the fold sets aside, and whether the bytes must match. */
 export interface SdpMask {
+  /** The `o=` sess-id and sess-version. */
+  readonly origin: boolean
   /** The address of a `c=IN IP4` line. */
   readonly connectionAddress: boolean
   /** The port of an `m=` line where it is non-zero, its `/count` kept. */
@@ -40,10 +47,10 @@ export interface SdpMask {
 }
 
 /** The floor of a rebooked run: `o=` sess-id and sess-version only. */
-export const FLOOR: SdpMask = { connectionAddress: false, mediaPort: false, verbatim: false }
+export const FLOOR: SdpMask = { origin: true, connectionAddress: false, mediaPort: false, verbatim: false }
 
-/** The mask of a verbatim run: the floor, and the bytes must match. */
-export const VERBATIM: SdpMask = { ...FLOOR, verbatim: true }
+/** The mask of a verbatim run: nothing masked, and the bytes must match. */
+export const VERBATIM: SdpMask = { origin: false, connectionAddress: false, mediaPort: false, verbatim: true }
 
 /**
  * The mask an expect's `rewrite` tokens declare under the run's media mode:
@@ -52,7 +59,7 @@ export const VERBATIM: SdpMask = { ...FLOOR, verbatim: true }
 export const maskOf = (rewrite: ReadonlyArray<string> | undefined, media: Bundle.MediaMode): SdpMask => {
   if (media !== "rebooked") return VERBATIM
   const tokens = new Set(rewrite ?? [])
-  return { connectionAddress: tokens.has("c=addr"), mediaPort: tokens.has("m=port"), verbatim: false }
+  return { ...FLOOR, connectionAddress: tokens.has("c=addr"), mediaPort: tokens.has("m=port") }
 }
 
 /** One differing line key of one section, both sides' verbatim lines in wire order. */
@@ -67,6 +74,8 @@ export interface SdpDifference {
   readonly line: string
   readonly captured: ReadonlyArray<string>
   readonly replayed: ReadonlyArray<string>
+  /** Set on a `session:o=` row whose two origins the caller read as a minted origin and its counterpart. */
+  readonly mintedOrigin?: true
 }
 
 const DIRECTIONS: ReadonlySet<string> = new Set(["sendrecv", "sendonly", "recvonly", "inactive"])
@@ -102,12 +111,12 @@ export const lineKey = (line: string): string => {
 
 /**
  * The line with every masked field replaced by `*`, and only the fields the
- * render writes: the `o=` owner values always; the address of a `c=IN IP4`
+ * render writes: the `o=` owner values under `origin`; the address of a `c=IN IP4`
  * line under `connectionAddress`; the port of an `m=` line under `mediaPort`
  * where it is a non-zero number, its `/count` kept (`6000/2` keeps the `/2`).
  */
 export const maskLine = (mask: SdpMask, line: string): string => {
-  if (line.startsWith("o=")) {
+  if (line.startsWith("o=") && mask.origin) {
     const fields = line.slice(2).split(" ")
     for (const index of [1, 2]) if (index < fields.length) fields[index] = "*"
     return `o=${fields.join(" ")}`
@@ -148,16 +157,29 @@ const structuralFold = (mask: SdpMask, text: string): string => {
     .join("\n\n")
 }
 
+const isOriginRow = (d: SdpDifference): boolean => d.section === "session" && d.line === "o="
+
 /**
  * Every difference between two texts read as session descriptions under the
  * mask: the structural rows, or — on a verbatim run whose structure matches
- * while the bytes do not — the one `document:bytes` row.
+ * while the bytes do not — the one `document:bytes` row. On a verbatim run a
+ * `session:o=` row is marked {@link SdpDifference.mintedOrigin} under
+ * `mintedOrigin`, and it alone never stands for the bytes: the texts must
+ * still be the same bytes once the replayed origin reads as the captured one.
  */
-export const diffSdp = (mask: SdpMask, captured: string, replayed: string): ReadonlyArray<SdpDifference> => {
+export const diffSdp = (
+  mask: SdpMask,
+  captured: string,
+  replayed: string,
+  mintedOrigin = false
+): ReadonlyArray<SdpDifference> => {
   if (captured === replayed) return []
   const structural = diffStructure(mask, captured, replayed)
-  if (structural.length > 0 || !mask.verbatim) return structural
-  return [{ section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]
+  if (!mask.verbatim) return structural
+  const rows = structural.map((d): SdpDifference => (mintedOrigin && isOriginRow(d) ? { ...d, mintedOrigin: true } : d))
+  if (structural.some((d) => !isOriginRow(d))) return rows
+  if (withOriginOf(replayed, captured) === captured) return rows
+  return [...rows, { section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]
 }
 
 /** The structural rows: sections by position, lines per section as a masked multiset. */

@@ -8,7 +8,7 @@
 # never resolve external names (sipext dual-plane invariant; the external zone
 # is deliberately NXDOMAIN in-cluster). Pinned to tier=app like the sipjs worker.
 #
-# HA replication (S11) is opt-in via ${REPL_ENABLE} (default "0" for the plain
+# HA replication is opt-in via ${REPL_ENABLE} (default "0" for the plain
 # load runner; the chaos suite sets "1"). When on, each worker:
 #   - serves its changelog on the repl TCP port (B2BUA_REPL_LISTEN);
 #   - discovers peers by watching the headless b2bua-worker Service's
@@ -38,7 +38,9 @@ spec:
       serviceAccountName: b2bua-worker
       nodeSelector: { tier: app }
       # Drain grace: SIGTERM latches Draining (OPTIONS 503 + /ready NotReady),
-      # the runner waits B2BUA_DRAIN_GRACE_MS, then exits. Keep this > grace.
+      # the runner waits B2BUA_DRAIN_GRACE_MS, then flushes its queued limiter
+      # releases for at most B2BUA_DRAIN_RELEASE_FLUSH_MS, then exits. Keep this
+      # > grace + flush.
       # A withdrawn worker exits earlier, once past B2BUA_DRAIN_MIN_MS every live
       # call's backup has applied its changelog head (ADR-0031 D2).
       terminationGracePeriodSeconds: 30
@@ -70,7 +72,7 @@ spec:
             # (X-Api-Call [field0] from the run-generated uas-targets.csv) are
             # sipext IP literals for the same reason.
             - { name: B2BUA_DEST,    value: "${SIPEXT_UAS_IP}:5060" }
-            # b-leg TargetAdmission allow-list (target_admission.rs). A non-IP
+            # b-leg destination allow-list (destination_allowlist.rs). A non-IP
             # callee host that matches none of these suffixes is 503'd + terminated
             # BEFORE the send path, so one unresolvable target can't stall the
             # send path on getaddrinfo/EAI_AGAIN. Under the sipext layout every
@@ -110,6 +112,9 @@ spec:
             # SO_SNDBUF on the signalling socket (ADR-0033); clamped at the
             # host's net.core.wmem_max.
             - { name: B2BUA_UDP_SNDBUF, value: "4194304" }
+            # SO_RCVBUF on the signalling socket; clamped at the host's
+            # net.core.rmem_max. Overflow is b2bua_udp_kernel_rx_dropped_total.
+            - { name: B2BUA_UDP_RCVBUF, value: "4194304" }
             # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ
             # (55-rabbitmq). Sits behind the in-process BufferedCdrWriter
             # (B2BUA_CDR_QUEUE drop-on-overload, unchanged); the broker queue is
@@ -146,11 +151,17 @@ spec:
             # backend attaches B2BUA_STRESS_LIMITER (below) to EVERY call, so the
             # full admit/release/refresh chain is exercised on all traffic; a call
             # that also carries an X-Api-Call `call_limiter` entry (the endurance
-            # limiter stream) is additionally capped by it. LIMITER_WINDOW_SECONDS
-            # MUST match the service's window (it sets the refresh cadence).
+            # limiter stream) is additionally capped by it. LIMITER_REFRESH_SECONDS
+            # is the lease refresh cadence; with one refresh tick it stays below
+            # the service's LIMITER_LEASE_SECONDS, which the worker learns from
+            # the service's answers (b2bua_limiter_lease_too_short_total counts a
+            # lease it reaches).
             - { name: LIMITER_URL,            value: "call-limiter.sip-test.svc.cluster.local:8080" }
-            - { name: LIMITER_WINDOW_SECONDS, value: "300" }
+            - { name: LIMITER_REFRESH_SECONDS, value: "40" }
             - { name: LIMITER_TIMEOUT_MS,     value: "150" }
+            # The worker's release queue gives a release up once it has waited
+            # the service's lease; this is the release budget.
+            - { name: LIMITER_RELEASE_TIMEOUT_MS, value: "2000" }
             # Always-on high-cap "stress" entry: never rejects (cap 999999) but
             # makes every call traverse the limiter so the chain is load-tested
             # end to end. Set ID empty to disable.
@@ -163,25 +174,17 @@ spec:
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
             - { name: B2BUA_DRAIN_MIN_MS,   value: "1000" }
-            # The binary uses jemalloc (#[global_allocator], see b2bua-runner
-            # src/main.rs). The 2026-06-14 probe proved the RSS climb is a REAL
-            # APP LEAK — jemalloc_allocated (live heap) grows ~176 MB/h at flat
-            # calls; narenas:8 did NOT help (so it's not slab fragmentation). So:
-            #  - prof:true,prof_active:true — enable jemalloc heap profiling
-            #    (binary built with the tikv-jemallocator "profiling" feature).
-            #    The /debug/heap route dumps live-allocation call stacks → jeprof
-            #    names every leak source. prof_prefix sets where auto-dumps land.
-            #  - 1s dirty/muzzy decay kept (returns genuinely-free pages); narenas
-            #    back to default (it was a dead end, removing the confound).
-            #  - lg_prof_sample:13 → sample every ~8 KiB allocated (default 19 =
-            #    512 KiB). The leak is in LARGE (>16 KiB) allocations, which the
-            #    512 KiB default samples only ~3% of the time, so the profile
-            #    under-counted and looked FLAT while mallctl `allocated` climbed.
-            #    At 8 KiB any large alloc is sampled ~always → the profile
-            #    faithfully localises the leak (modest extra backtrace CPU, fine
-            #    for a diagnostic soak).
-            # Confirm via the startup log line `prof.active=1`. (_RJEM_ = tikv.)
-            - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:13,prof_prefix:/tmp/jeprof/auto,dirty_decay_ms:1000,muzzy_decay_ms:1000" }
+            - { name: B2BUA_DRAIN_RELEASE_FLUSH_MS, value: "3000" }
+            # Heap profiling for /debug/heap at jemalloc's default interval
+            # (ADR-0038). The binary carries its allocator defaults (four
+            # arenas, thp:never, 1 s decay); this value adds to them key by key.
+            # An interval below 19 is a footprint hazard: a sample of a small
+            # object holds two to five pages outside `allocated`, so 13 doubles
+            # the heap the RSS ceiling sees. The startup line reports the
+            # resolved values and every hazard; jemalloc_footprint_hazards reads
+            # 0 on 4 KiB pages (a 64 KiB-page build reports 19 as a hazard and
+            # names 23).
+            - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto" }
             # Per-call tracing (ADR-0026). An EMPTY OTEL_EXPORTER_OTLP_ENDPOINT
             # means "no exporter": the whole sampling machinery is inert, no span
             # is ever built. run.sh stamps the lab VictoriaTraces OTLP base

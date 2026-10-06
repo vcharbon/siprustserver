@@ -13,6 +13,7 @@ use tracing_subscriber::filter::{filter_fn, FilterFn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry};
 
+use crate::payload_targets::carries_payload;
 use crate::plane::is_trace_plane;
 use crate::writer;
 
@@ -65,10 +66,13 @@ impl Drop for ObserveGuard {
 }
 
 /// The stdout plane's per-layer filter: everything EXCEPT the per-call trace
-/// plane. Per-layer, so the OTLP layer still receives what stdout refuses —
-/// a shared level/target filter would starve the exporter along with stdout.
+/// plane and a dependency's payload-carrying events. Per-layer, so the OTLP
+/// layer still receives what stdout refuses — a shared level/target filter
+/// would starve the exporter along with stdout.
 fn lifecycle_only() -> FilterFn<fn(&tracing::Metadata<'_>) -> bool> {
-    filter_fn(|meta: &tracing::Metadata<'_>| !is_trace_plane(meta.target()))
+    filter_fn(|meta: &tracing::Metadata<'_>| {
+        !is_trace_plane(meta.target()) && !carries_payload(meta)
+    })
 }
 
 /// Install the process subscriber for `service_name` and return its guard.
@@ -152,10 +156,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::admission::activation_bucket;
     use crate::admission::SampleAdmission;
     use crate::call_span::{CallIdentity, CallSpan, TraceEvent};
     use crate::rate_draw::RateDraw;
-    use crate::token_bucket::TokenBucket;
 
     /// A `MakeWriter` collecting what the fmt layer renders.
     #[derive(Clone, Default)]
@@ -198,10 +202,9 @@ mod tests {
 
         tracing::info!(node = "w-0", peer = "w-1", "takeover complete");
 
-        let lease =
-            SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0))
-                .admit(None, 0)
-                .expect("the gate is wide open in this fixture");
+        let lease = SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0))
+            .admit(None, 0)
+            .expect("the gate is wide open in this fixture");
         let span =
             CallSpan::open(lease, CallIdentity { call_id: "c1@host", from_tag: "ft", to_tag: "" });
         span.record(TraceEvent::new("sip.in", 0, "alice").with_body(b"INVITE sip:bob SIP/2.0"));
@@ -215,5 +218,32 @@ mod tests {
         );
         assert!(!text.contains("kind=sip.in"), "no per-call info line ever: {text}");
         assert!(!text.contains("http.request"), "…including the HTTP round trips: {text}");
+    }
+
+    /// A dependency that logs a message it received (an AMQP client logging a
+    /// returned publish's body) never puts that payload on stdout; its errors
+    /// still reach it.
+    #[test]
+    fn stdout_never_carries_a_dependency_logged_message_payload() {
+        let out = Collected::default();
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .compact()
+            .with_ansi(false)
+            .with_writer(out.clone())
+            .with_filter(lifecycle_only());
+        let _guard = tracing::subscriber::set_default(Registry::default().with(fmt_layer));
+
+        tracing::warn!(target: "lapin::returned_messages", message = "PAYLOAD-BYTES", "returned");
+        tracing::error!(target: "lapin::returned_messages", "returned-error");
+
+        let text = out.text();
+        assert!(
+            !text.contains("PAYLOAD-BYTES"),
+            "a returned message's body reached stdout: {text}"
+        );
+        assert!(
+            text.contains("returned-error"),
+            "errors of that target still reach stdout: {text}"
+        );
     }
 }

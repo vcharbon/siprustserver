@@ -7,9 +7,8 @@
 //! the order events were actually captured in — `at_ms` collisions are common
 //! under a paused test clock.
 //!
-//! Where the TS source split `next` (Effect) from `nextSync` (raw callback),
-//! recording in Rust is plain synchronous, so a single [`EventSequencer::next`]
-//! suffices.
+//! Recording is synchronous, so the single [`EventSequencer::next`] serves
+//! every channel.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

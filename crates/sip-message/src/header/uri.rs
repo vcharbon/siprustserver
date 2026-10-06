@@ -320,7 +320,7 @@ impl Uri {
 
     /// The dialled DIGITS of this URI's user identity: every non-digit dropped,
     /// then one leading `00` or `0` (international / trunk prefix) removed, so
-    /// `tel:+33-1-23`, `sip:0033123@h` and `sip:33123@h;npdi` all read `33123`.
+    /// `tel:+1-555-0123`, `sip:0015550123@h` and `sip:15550123@h;npdi` all read `15550123`.
     /// `None` when the identity carries no digit at all (`sip:anonymous@…`) —
     /// a caller comparing subscribers falls back to [`Uri::user_identity`].
     pub fn user_digits(&self) -> Option<String> {
@@ -571,11 +571,11 @@ mod tests {
     fn a_port_colon_does_not_make_a_value_scheme_bearing() {
         assert!(Uri::value_has_scheme("sip:anonymous@host"));
         assert!(Uri::value_has_scheme("SIPS:bob@biloxi.com"));
-        assert!(Uri::value_has_scheme("tel:+33000900002"));
+        assert!(Uri::value_has_scheme("tel:+15550900002"));
         assert!(Uri::value_has_scheme("urn:service:sos"));
         assert!(!Uri::value_has_scheme("anonymous@198.51.100.20:5060"));
         assert!(!Uri::value_has_scheme("172.31.16.99"));
-        assert!(!Uri::value_has_scheme("680181033000900002"));
+        assert!(!Uri::value_has_scheme("680181015550900002"));
         assert!(!Uri::value_has_scheme(""));
         assert!(!Uri::value_has_scheme(":5060"));
     }
@@ -634,13 +634,13 @@ mod tests {
     #[test]
     fn user_identity_is_scheme_host_and_separator_insensitive() {
         assert!(uri("tel:+1-408-555-1212").same_user_identity(&uri("sip:+14085551212@gw.com")));
-        assert!(uri("TEL:+333").same_user_identity(&uri("tel:+333")));
+        assert!(uri("TEL:+1555").same_user_identity(&uri("tel:+1555")));
         assert_eq!(uri("tel:(408)555.1212").user_identity().as_deref(), Some("4085551212"));
         assert_eq!(
-            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com:5060;user=phone")
+            uri("sip:+15550900012;verstat=TN-Validation-Passed@foo.example.com:5060;user=phone")
                 .user_identity()
                 .as_deref(),
-            Some("+33000900012"),
+            Some("+15550900012"),
         );
     }
 
@@ -658,15 +658,15 @@ mod tests {
     // one digit string; a user-parameter never leaks into it.
     #[test]
     fn user_digits_drop_punctuation_and_one_leading_trunk_prefix() {
-        assert_eq!(uri("tel:+33-1-23").user_digits().as_deref(), Some("33123"));
-        assert_eq!(uri("sip:0033123@h").user_digits().as_deref(), Some("33123"));
-        assert_eq!(uri("sip:033123@h").user_digits().as_deref(), Some("33123"));
-        assert_eq!(uri("sip:33123@h;npdi").user_digits().as_deref(), Some("33123"));
+        assert_eq!(uri("tel:+1-555-0123").user_digits().as_deref(), Some("15550123"));
+        assert_eq!(uri("sip:0015550123@h").user_digits().as_deref(), Some("15550123"));
+        assert_eq!(uri("sip:015550123@h").user_digits().as_deref(), Some("15550123"));
+        assert_eq!(uri("sip:15550123@h;npdi").user_digits().as_deref(), Some("15550123"));
         assert_eq!(
-            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com")
+            uri("sip:+15550900012;verstat=TN-Validation-Passed@foo.example.com")
                 .user_digits()
                 .as_deref(),
-            Some("33000900012"),
+            Some("15550900012"),
         );
         // Exactly ONE prefix goes: a number that really starts 0 keeps the rest.
         assert_eq!(uri("sip:0009001@h").user_digits().as_deref(), Some("09001"));

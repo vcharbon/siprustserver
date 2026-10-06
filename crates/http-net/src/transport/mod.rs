@@ -6,14 +6,17 @@ use async_trait::async_trait;
 
 #[cfg(feature = "real")]
 mod cause;
+mod entries;
+mod peer;
 #[cfg(feature = "real")]
 mod real;
 mod recording;
 mod simulated;
 
+pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
 #[cfg(feature = "real")]
 pub use real::RealHttpNetwork;
-pub use recording::{CapturedExchange, Direction, ExchangeOutcome, RecordingHttpNetwork};
+pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
 pub use simulated::{Fault, SimulatedHttpNetwork};
 
 /// A one-shot HTTP request.
@@ -68,7 +71,7 @@ impl HttpRequest {
 /// A one-shot HTTP response.
 ///
 /// [`headers`](Self::headers) let a served service emit response headers (e.g.
-/// the Routing API's `X-Example-Trace-Id`); empty by default so a status+body
+/// the decision API's `X-Example-Trace-Id`); empty by default so a status+body
 /// service is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -110,16 +113,36 @@ impl HttpResponse {
     }
 }
 
-/// The server side: an application that answers requests. The simulated fabric
-/// invokes this **in-process** (the real handler runs, after the transit
-/// delay), so a test drives client → fabric → real-server → fabric → client
-/// deterministically under a paused clock.
+/// The server side: an application that answers requests. Transports call
+/// [`answer`](Self::answer); the simulated fabric invokes it **in-process**
+/// (the real handler runs, after the transit delay), so a test drives
+/// client → fabric → real-server → fabric → client deterministically under a
+/// paused clock.
 #[async_trait]
 pub trait HttpService: Send + Sync {
     /// Handle one request and produce a response. Infallible at this layer —
     /// application errors travel as non-2xx [`HttpResponse`]s; only the
     /// *transport* fails with [`HttpError`].
     async fn handle(&self, req: HttpRequest) -> HttpResponse;
+
+    /// Answer one request: a response, or a connection closed without one.
+    /// Transports call this, never [`handle`](Self::handle) directly. The
+    /// default answers with `handle`'s response; a service that must close the
+    /// connection without responding (RFC 9112 §9.6) overrides it.
+    async fn answer(&self, req: HttpRequest) -> HttpAnswer {
+        HttpAnswer::Response(self.handle(req).await)
+    }
+}
+
+/// What a service does with one request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpAnswer {
+    /// Send this response.
+    Response(HttpResponse),
+    /// Close the connection without a response. The simulated fabric reports
+    /// it to the client as [`HttpError::Io`]; the real server drops the
+    /// connection before writing a status line.
+    Abort,
 }
 
 /// A bound server. Dropping it deregisters the service (simulated) / shuts the

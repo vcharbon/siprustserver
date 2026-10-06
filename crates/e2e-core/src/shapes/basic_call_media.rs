@@ -1,5 +1,5 @@
 //! The `basic-call-media` Callflow shape: the `basic-call` signaling flow with
-//! REAL RTP audio (Phase J). Each side opens a `MediaEndpoint` on the same
+//! REAL RTP audio. Each side opens a `MediaEndpoint` on the same
 //! fabric as the signaling (below the SIP recording decorators), the
 //! INVITE/200 carry SDP describing the actual RTP ports, and once the call is
 //! up each side streams its deterministic reference clip (Alice 200 Hz /

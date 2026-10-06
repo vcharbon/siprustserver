@@ -5,16 +5,16 @@
 
   Sent at high CAPS for ~60 s during a `non-emergency-burst` chaos
   event. No `Resource-Priority` header — the baseline streams DO have
-  it, so the three overload tiers will shed THIS burst's calls first.
+  it, so the proxy's gates and the worker's admission ladder shed THIS
+  burst's calls first.
 
   The scenario tolerates either a 200 (successful) or any of the
   typical reject codes (503 overload, 480/486 admission-control)
   terminating the call. Successful calls BYE immediately after ACK
   (no hold) so that when the chaos sub-command stops the sipp Job at
   the 60-s mark, no calls are left mid-hold with stranded dialog
-  state on the workers — a previous 1-s hold was leaking ~6 000
-  stranded dialogs per burst at high admission rates and degrading
-  subsequent runs (see 2026-05-16 perf-test post-mortem).
+  state on the workers — a 1-s hold leaks ~6 000 stranded dialogs
+  per burst at high admission rates and degrades subsequent runs.
 -->
 <scenario name="K8s UAC non-emergency burst — INVITE / hold / BYE">
 

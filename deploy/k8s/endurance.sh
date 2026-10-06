@@ -32,7 +32,7 @@
 #     the cap RECONVERGES to ~20 within LIMITER_GRACE (10 min) after the fault.
 #     cpu_starve is the OVERLOAD event: it shrinks ONE worker's CPU quota (via
 #     the kind node's cgroup, no restart) so its ELU crosses the panic threshold
-#     and the Tier-3 admission gate sheds NEW non-emergency INVITEs (503) while
+#     and the panic-ELU rung sheds NEW non-emergency INVITEs (503) while
 #     leaving emergency (Resource-Priority esnet.0) and all in-dialog traffic
 #     untouched. Unlike `peak` (which only overloaded the SIPp generators, never
 #     the platform), this actually engages the SUT's overload protection.
@@ -61,7 +61,7 @@
 #   PEAK_CAPS=200 PEAK_SECS=30 WORKER_REPLICAS=2 PASS_THRESHOLD=90
 #   cpu_starve: STARVE_TARGET=b2bua-worker-0 STARVE_SECS=90 STARVE_QUOTA_US=30000
 #               STARVE_PERIOD_US=100000 STARVE_PEAK_CAPS=120 EMERG_LOSS_TOL=1
-#               (calibrated 2026-06-20 — 0.30 core + 120cps non-emergency peak)
+#               (calibrated: 0.30 core + 120cps non-emergency peak)
 #   SMOKE=1 -> DURATION=600 CHAOS_INTERVAL=180
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -102,7 +102,7 @@ LONG_SHARDS="${LONG_SHARDS:-5}"
 LONG_SHARD_CPS=$(( LONG_CPS / LONG_SHARDS )); [ "$LONG_SHARD_CPS" -lt 1 ] && LONG_SHARD_CPS=1
 # Per-shard `-l` (= the long steady-state, since OPTIONS-hold calls grow to `-l`).
 # CAPPED at 800/shard → 4000 total long concurrency. The 5 UAS pods hold every
-# B-leg (long + short + reinvite); at the old 1800/shard (9000 long) the UAS sat
+# B-leg (long + short + reinvite); at 1800/shard (9000 long) the UAS sits
 # at ~2480 dialogs/pod — right against its ~2900 SIPp timer-wheel crash ceiling —
 # so a peak burst or normal churn tipped a pod over → UAS crash → ~1800 long
 # B-legs lose keepalive → b2bua tears those long calls down → long churns and its
@@ -120,11 +120,11 @@ SHORT_CPS="${SHORT_CPS:-100}"
 # two halves run as SEPARATE SIPp streams with DISTINCT roles so their outcomes
 # are measured apart:
 #   short_em  uac-endurance-short.xml          (Resource-Priority: esnet.0 ⇒
-#             emergency ⇒ overload.should_admit ALWAYS admits ⇒ never shed)
+#             emergency ⇒ the panic-ELU and bucket rungs ALWAYS admit ⇒ never shed)
 #   short_ne  uac-endurance-short-noemerg.xml  (no Resource-Priority ⇒ sheddable;
 #             tolerates the overload 503/480/486 as a clean terminate, so a shed
 #             call is NOT a SIPp failure — the shed is read SUT-side on
-#             b2bua_overload_rejected_total instead)
+#             b2bua_new_calls_total{outcome="rejected"} instead)
 # Default each half to SHORT_CPS/2 so the aggregate offered short rate is unchanged.
 SHORT_EM_CPS="${SHORT_EM_CPS:-$(( SHORT_CPS / 2 ))}"; [ "$SHORT_EM_CPS" -lt 1 ] && SHORT_EM_CPS=1
 SHORT_NE_CPS="${SHORT_NE_CPS:-$(( SHORT_CPS - SHORT_EM_CPS ))}"; [ "$SHORT_NE_CPS" -lt 1 ] && SHORT_NE_CPS=1
@@ -133,7 +133,7 @@ PEAK_CAPS="${PEAK_CAPS:-200}"
 PEAK_SECS="${PEAK_SECS:-30}"
 # cpu_starve (OVERLOAD) event — CPU scarcity on ONE worker, NOT a traffic peak.
 # Defaulted here too (set -u) since cpu_starve_event references them bare; the
-# values are passed through to chaos.sh. CALIBRATED 2026-06-20 — see chaos.sh.
+# values are passed through to chaos.sh. CALIBRATED — see chaos.sh.
 # The event runs the `overload` COMBO (starve + a small non-emergency peak): at
 # the calibrated 0.30-core cap the worker's BASELINE demand (~0.22) sits UNDER the
 # cap, so starve-alone would not engage; the +STARVE_PEAK_CAPS non-emergency peak
@@ -150,14 +150,13 @@ ORPHAN_REAP_WAIT="${ORPHAN_REAP_WAIT:-540}"  # must clear the FULL orphan-reap c
                                              # 300s keepalive interval. The keepalive is armed AT
                                              # ANSWER (so a killed dialog has up to 300s until its
                                              # next fire) -> in-dialog OPTIONS to the dead A-leg ->
-                                             # KeepaliveTimeout (B2BUA_KEEPALIVE_TIMEOUT_SEC, now 120s)
+                                             # KeepaliveTimeout (B2BUA_KEEPALIVE_TIMEOUT_SEC, 120s)
                                              # -> BYE to dead peer -> TerminatingTimeout safety reaper
-                                             # +32s -> RemoveCall. Zero-load floor = 300+120+32 = 452s
-                                             # (was 337s at the old 45s timeout); +queue latency at
-                                             # ~9.5k concurrent pushes the active_calls drop higher, so
-                                             # 540s (was 420s) keeps margin. Bumped in lockstep with the
-                                             # keepalive-timeout 45->120 fix for the peak keepalive-shed
-                                             # cascade — a 420s wait would FALSE-fail orphan_kill now.
+                                             # +32s -> RemoveCall. Zero-load floor = 452s
+                                             # (300+120+32); +queue latency at ~9.5k concurrent
+                                             # pushes the active_calls drop higher, so 540s keeps
+                                             # margin. Moves in lockstep with the keepalive timeout
+                                             # — a 420s wait would FALSE-fail orphan_kill.
 PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 # --- call-limiter exercise (continuous stream + limiter chaos events) ---
 LIMITER_CPS="${LIMITER_CPS:-2}"        # continuous limiter stream rate; 2cps x 30s
@@ -179,10 +178,9 @@ source "$HERE/lib/sipext-gen.sh"
 source "$HERE/lib/proxy-env.sh"
 source "$HERE/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
 export LIMITER_CAP
-LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). Was ±10:
-                                       # the 2026-06-12 zombie pinning (15/20 held
-                                       # for ~50 min by stuck-in-setup calls) sat
-                                       # INSIDE that band and was invisible. A
+LIMITER_TOL="${LIMITER_TOL:-3}"        # allowed band around the cap (±). A ±10
+                                       # band hides zombie pinning (15/20 held for
+                                       # ~50 min by stuck-in-setup calls). A
                                        # healthy stream pins the cap within ±1-2.
 LIMITER_GRACE="${LIMITER_GRACE:-600}"  # post-event divergence window (10 min): after
                                        # a limiter fault the cap may drift this long
@@ -219,7 +217,7 @@ LOADGEN_CPS="${LOADGEN_CPS:-20}"                 # base offered rate of the rust
 # Span the whole window (+ a margin so the generator never stops offering before the
 # run ends); stop_streams deletes the Job at the end regardless.
 LOADGEN_DURATION="${LOADGEN_DURATION:-$(( DURATION + 300 ))}"
-# Realistic timers (chosen 2026-06-28): 5 s ring, 8 s talk, ±5 s re-INVITE spacing,
+# Realistic timers: 5 s ring, 8 s talk, ±5 s re-INVITE spacing,
 # 20-minute hold for the long_call tail.
 LOADGEN_RING_MS="${LOADGEN_RING_MS:-5000}"
 LOADGEN_TALK_MS="${LOADGEN_TALK_MS:-8000}"
@@ -244,10 +242,10 @@ LOADGEN_DROP_RATE="${LOADGEN_DROP_RATE:-0.001}"
 LOADGEN_RINGING_TOL="${LOADGEN_RINGING_TOL:-0.99}"
 # Long-call hold = 6 min, DELIBERATELY de-aligned from the worker keepalive
 # interval (B2BUA_KEEPALIVE_SEC=300 = 5 min, 20-worker.yaml). At a 5-min multiple
-# (the old 1200 s = 20 min) the teardown BYE landed exactly on a keepalive OPTIONS
+# (e.g. 1200 s = 20 min) the teardown BYE lands exactly on a keepalive OPTIONS
 # fire → "bob expected BYE, got OPTIONS" wrong_method. 360 s crosses ONE keepalive
 # (the recording OPTIONS) and tears down ~60 s clear of the next fire. The scenario
-# teardown is also OPTIONS-tolerant now, so jitter cannot reintroduce the collision.
+# teardown is also OPTIONS-tolerant, so jitter cannot reintroduce the collision.
 LOADGEN_LONG_HOLD_SECS="${LOADGEN_LONG_HOLD_SECS:-360}"
 # Scenario weights. REFER is wired on (the cluster b2bua authorizes the loadgen
 # refer_key "refer-allow-c" via ScriptedDecisionEngine::route_all_to_with_limiter
@@ -272,8 +270,7 @@ LOADGEN_REPORT_INTERVAL="${LOADGEN_REPORT_INTERVAL:-60}"
 # "sub-RTT confirm-vs-flush" analysis; raise if propagation skew is larger.
 LOADGEN_CHAOS_PHASE_TOL_MS="${LOADGEN_CHAOS_PHASE_TOL_MS:-200}"
 # Docker caps for the loadgen container (--cpus/--memory via the k8s-unit
-# mappers in lib/sipext-gen.sh; the old *_REQ scheduler reservations have no
-# docker analog and are retired).
+# mappers in lib/sipext-gen.sh; scheduler reservations have no docker analog).
 LOADGEN_CPU_LIM="${LOADGEN_CPU_LIM:-6}"
 LOADGEN_MEM_LIM="${LOADGEN_MEM_LIM:-2Gi}"
 
@@ -384,14 +381,14 @@ launch_stream() {
   # Per-role docker caps. The exit-255 crash is a CPU-starvation timer-wheel
   # slip, not OOM/-l, so the lever is a high per-process CPU cap — NOT more
   # containers (more SIPp processes contend for the host cores and make the
-  # slip MORE likely). Docker has no request/limit split: the old k8s burst
-  # LIMITS become the --cpus/--memory caps (the requests were a scheduler
-  # reservation — meaningless on plain docker, where the generators now ride
+  # slip MORE likely). Docker has no request/limit split: the k8s-style burst
+  # LIMITS become the --cpus/--memory caps (requests are a scheduler
+  # reservation — meaningless on plain docker, where the generators ride
   # the host directly on a 20 GB WSL2 box; the caps are what keeps an
   # uncapped generator from freezing it). Override per-role via *_CPU_LIM env.
   local cpu_lim mem_lim
   case "$role" in
-    # Both short halves (short_em/short_ne) hold ~half the old single-stream
+    # Both short halves (short_em/short_ne) hold ~half the single-stream
     # concurrency (SHORT_CPS/2 × 30s).
     short_em|short_ne) cpu_lim="${SHORT_CPU_LIM:-12}"; mem_lim="2Gi" ;;
     short)  cpu_lim="${SHORT_CPU_LIM:-16}"; mem_lim="2Gi" ;;
@@ -437,7 +434,7 @@ ensure_baseline() {
     if [ "$(sipext_uac_running "$job")" != "true" ]; then
       # Capture WHY it died before relaunching, so the monitoring loop / a
       # subagent investigation has the dead container's state + log tail.
-      # (docker --restart on-failure:4 is the old Job backoffLimit analog —
+      # (docker --restart on-failure:4 is the Job backoffLimit analog —
       # reaching here means the retry budget is spent, the stream ran to its
       # MAX_CALLS, or the container vanished.)
       local dump="$RUN_DIR/dead-$job-$(date +%s)"
@@ -481,16 +478,17 @@ snap_created_role() { vmq "sum(sipp_calls_created_total{role=\"$1\"})"; }
 snap_failed_short()  { vmq 'sum(sipp_failed_calls_total{role=~"short_em|short_ne"})'; }
 snap_success_short() { vmq 'sum(sipp_successful_calls_total{role=~"short_em|short_ne"})'; }
 # Per-priority-class deltas the cpu_starve overload gate keys on. The shed of a
-# non-emergency NEW call is read SUT-side (b2bua_overload_rejected_total), not as
+# non-emergency NEW call is read SUT-side (b2bua_new_calls_total refused by the
+# panic-ELU or bucket rung), not as
 # a short_ne SIPp failure (it tolerates the 503); a short_em SIPp failure or ANY
 # emergency reject IS a regression (emergency must never be shed).
-snap_overload_rejected() { vmq 'sum(b2bua_overload_rejected_total)'; }
-snap_emergency_admitted() { vmq 'sum(b2bua_emergency_admitted_total)'; }
+snap_overload_rejected() { vmq 'sum(b2bua_new_calls_total{outcome="rejected",reason=~"panic_elu|bucket_empty"})'; }
+snap_emergency_admitted() { vmq 'sum(b2bua_new_calls_total{outcome="accepted",class="emergency"})'; }
 # Panic-ELU rejects ONLY (the CPU-overload signal; excludes bucket_empty) and the
 # worst worker's published ELU EWMA — the two dials for tuning the cpu_starve
 # throttle. ELU must cross B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75) for the
 # panic-ELU sheds to start; if it does not, the throttle is too loose.
-snap_panic_rejected() { vmq 'sum(b2bua_overload_reject_total{reason="panic_elu"})'; }
+snap_panic_rejected() { vmq 'sum(b2bua_new_calls_total{outcome="rejected",reason="panic_elu"})'; }
 snap_elu_max()        { vmq 'max(b2bua_overload_elu_ewma)'; }
 # Role-scoped live concurrency (held dialogs right now). Used to size the AT-RISK
 # long population at kill time: when the long stream sits at its `-l` ceiling,
@@ -505,7 +503,7 @@ snap_active() { vmq 'sum(b2bua_active_calls)'; }
 snap_ghost()  { vmq 'sum(b2bua_active_calls) - sum(sipp_current_calls)'; }
 # Call-limiter exercise: the dedicated stream's ADMITTED-and-held concurrency,
 # read SIPp-side (rejected 486s never enter hold). A healthy limiter pins this at
-# LIMITER_TARGET. The limiter's own `limiter_current_total` gauge is NOT usable
+# LIMITER_TARGET. The limiter's own `limiter_holds` gauge is NOT usable
 # here: every call now carries the global-stress entry, so that gauge aggregates
 # all streams (thousands).
 snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }
@@ -522,7 +520,7 @@ snap_limiter_conc() { vmq 'sum(sipp_current_calls{role="limiter"})'; }
 # We surface every UAS restart as an explicit INVOLUNTARY chaos event and TAINT
 # any chaos window it overlaps, so the run's failures are not mis-attributed to
 # the SUT. The counter is the summed docker RestartCount over the sipp-uas-*
-# containers (the exact analog of the old KSM
+# containers (the exact analog of the KSM
 # kube_pod_container_status_restarts_total query — in-cluster KSM cannot see
 # docker containers on the sipext bridge).
 snap_uas_restarts() {
@@ -541,8 +539,8 @@ snap_uas_restarts() {
 # A subsequent worker reboot ACCELERATES that detection: reclaim_all's catchup
 # smoothing re-probes the whole partition at once, so the dead-B-leg backlog drains
 # as a keepalive-timeout BYE burst inside the reboot window — a LOAD-GENERATOR
-# aftermath, not a SUT failure (endurance-20260610 #7: 12.8% long-loss == all 1968
-# keepalive-timeout BYEs, evenly across shards, B-legs on the crashed sipp-uas-2).
+# aftermath, not a SUT failure (the long-loss is then exactly the keepalive-timeout
+# BYEs, spread evenly across shards, their B-legs all on the crashed UAS).
 # The in-window restart-delta below misses it (the crash predates the event), so we
 # also taint when a UAS crash occurred within the dead-B-leg drain window
 # (keepalive interval + timeout, the longest a dead B-leg can linger undetected).
@@ -554,8 +552,8 @@ UAS_CRASH_TS_FILE="${UAS_CRASH_TS_FILE:-${RUN_DIR:-/tmp}/.last_uas_crash_ts}"
 # A kill_worker reclaim's catchup re-probes the WHOLE partition at once, so it
 # surfaces the entire dead-B-leg backlog accrued since that partition was last
 # reclaimed (= the previous reboot) — REGARDLESS of wall-clock age, which is why the
-# fixed drain window below is not enough on its own (endurance-20260610 #7: the UAS
-# crash predated the reboot by 2264s ≫ drain, yet the reboot still surfaced it).
+# fixed drain window below is not enough on its own (a UAS crash far older than the
+# drain window still surfaces at the next reboot of that partition).
 LAST_REBOOT_TS_FILE="${LAST_REBOOT_TS_FILE:-${RUN_DIR:-/tmp}/.last_reboot_ts}"
 
 # Downgrade a non-pass result to "tainted" when the UAS crashed during the window
@@ -599,11 +597,11 @@ taint_if_uas_crash() {  # $1=result  $2=uas_restarts_at_start  $3=event-type
 # (cdr-consumer, call-limiter) cannot be moved by SIP traffic, so if their summed
 # container CPU collapses to <25% of its own in-window peak, EVERY container was
 # descheduled by the host — not a SIP event. Used to quarantine an aftermath
-# long-loss that is really recv_timeout from frozen b2bua event loops (the
-# 2026-06-16 endurance idx7 artifact: a ~2.5-min host freeze; cdr/limiter CPU
-# 0.04→0.004 in lockstep, workers 0.5→0.08 then RECOVERED, long loss 100%
-# timeout_recv), which is distinct from a genuine keepalive-BYE teardown
-# (unexpected_msg/481). $1 = lookback window in seconds (the aftermath span).
+# long-loss that is really recv_timeout from frozen b2bua event loops (a
+# ~2.5-min host freeze shows cdr/limiter CPU 0.04→0.004 in lockstep, workers
+# 0.5→0.08 then RECOVERED, long loss 100% timeout_recv), which is distinct from
+# a genuine keepalive-BYE teardown (unexpected_msg/481). $1 = lookback window in
+# seconds (the aftermath span).
 # Returns 0 (stalled) / 1 (clean). Uses instant subqueries over the recent window
 # (no @ modifier) — correct because the aftermath runs while streams are still up.
 cluster_stalled_in_window() {  # $1 = window_seconds
@@ -734,10 +732,10 @@ sip_chaos_limiter_conc{type=\"$type\"} $c1"
   fi
 }
 
-# Aftermath watch (2026-06-12). The #3 peak event destroyed essentially ALL
-# standing long calls (~4000), but the teardown cascade ran for ~12 more minutes
-# AFTER the gate's measurement window closed — so the event scored "long-loss
-# 6.5% (260/4000)" instead of ~100%. After an event's verdict, keep polling the
+# Aftermath watch. An event can destroy essentially ALL standing long calls
+# (~4000) with the teardown cascade running ~12 more minutes AFTER the gate's
+# measurement window closes — scoring "long-loss 6.5% (260/4000)" instead of
+# ~100%. After an event's verdict, keep polling the
 # long-failed counter until it goes quiet (3 consecutive quiet polls) or
 # AFTERMATH_MAX_SEC elapses; a tail above LONG_LOSS_TOL emits a separate
 # "<type>_aftermath" FAIL row + metrics. Runs inside the inter-event idle
@@ -769,7 +767,7 @@ long_aftermath_watch() {
   # is an INFRA artifact, NOT a SUT teardown (which is BYE-driven => unexpected_msg).
   # Downgrade fail -> tainted. The timeout_recv≫unexpected_msg interlock deliberately
   # leaves a genuine keepalive-BYE tail (unexpected_msg) FAILING the gate, so a real
-  # HA regression is never masked. (2026-06-16 idx7 kill_worker_aftermath.)
+  # HA regression is never masked.
   if [ "$result" = "fail" ]; then
     local tr um
     tr="$(vmq "sum(increase(sipp_failed_total{role=\"long\",cause=\"timeout_recv\"}[${waited}s]))")"
@@ -806,8 +804,8 @@ sip_chaos_long_failed{type=\"${type}_aftermath\"} $adf"
 #       takeover/reclaim. long loss% = long failed / long created in-window must
 #       stay under LONG_LOSS_TOL. This is gated APART from short because at 100cps
 #       short success drowns out long loss in any blend (a reboot can lose ~100%
-#       of a worker's long dialogs and still score ~95% blended — the blind spot
-#       that masked the repl-takeover-longcall-loss regression). The observed
+#       of a worker's long dialogs and still score ~95% blended — a blind spot
+#       that masks a takeover long-call loss). The observed
 #       failure: the BYE gets `481 Call/Transaction Does Not Exist` (dialog gone on
 #       the B2BUA after the reboot) → SIPp unexpected_msg.
 #   (3) NO LEAK — the GHOST GAP (b2bua_active − sipp_current) must return near
@@ -870,9 +868,9 @@ reboot_event() {
   s1="$(snap_success)"; f1="$(snap_failed)"; a1="$(snap_active)"; conc="$(snap_conc)"
   ss1="$(snap_success_short)"; sf1="$(snap_failed_short)"
   lf1="$(snap_failed_role long)";   lc1="$(snap_created_role long)"
-  # (4) NO LIMITER PINNING (2026-06-12): calls caught mid-setup by the kill held
-  # their cap20 slots while SIP-dead, pinning the limiter stream below the cap —
-  # invisible to short/long/leak (and inside the old ±10 LIMITER_TOL). By now
+  # (4) NO LIMITER PINNING: calls caught mid-setup by the kill can hold their
+  # cap20 slots while SIP-dead, pinning the limiter stream below the cap —
+  # invisible to short/long/leak (and inside a ±10 LIMITER_TOL). By now
   # (Ready + settle + sampling, past the 150 s setup deadline) the stream must be
   # back at the cap; take the MAX of 3 samples so a refill blip can't fail it.
   lim1="$(snap_limiter_conc)"
@@ -947,7 +945,7 @@ sip_chaos_limiter_conc{type=\"kill_worker\"} $lim1"
 
 # cpu_starve_event = the OVERLOAD verification. One worker is made CPU-scarce
 # (chaos.sh cpu_starve — NOT a traffic peak), which drives its ELU past the
-# panic threshold so the Tier-3 admission gate engages. Three invariants, judged
+# panic threshold so the panic-ELU rung engages. Three invariants, judged
 # together (the experiment's explicit goals):
 #
 #   (1) IN-DIALOG UNAFFECTED — established long holds (and the 30s short holds
@@ -957,7 +955,7 @@ sip_chaos_limiter_conc{type=\"kill_worker\"} $lim1"
 #       calls is a regression, not overload protection.
 #   (2) NEW NON-EMERGENCY MAY BE SHED — the gate is allowed (expected) to 503
 #       new non-emergency INVITEs. This is the signal the overload actually
-#       ENGAGED: b2bua_overload_rejected_total must rise. If it does NOT, the
+#       ENGAGED: the panic-ELU/bucket refusals on b2bua_new_calls_total must rise. If it does NOT, the
 #       throttle was too loose to cross the ELU threshold → result n/a (calibrate
 #       STARVE_QUOTA_US down), not a pass.
 #   (3) NEW EMERGENCY NEVER SHED — short_em (Resource-Priority esnet.0) must NOT
@@ -1178,8 +1176,7 @@ docker_mem_to_mb() {  # $1 = quantity
 # --memory caps fit inside the host's currently-available memory with margin.
 # DEGRADES TO A WARNING (returns 0) if it cannot compute, so it never wedges a
 # run on a parsing hiccup — it only HARD-FAILS when it can confidently prove
-# the containers will not fit. (The old k8s version proved the UAS CPU
-# requests fit the tier=load allocatable pool; docker has no reservations, so
+# the containers will not fit. (Docker has no CPU reservations, so
 # memory-vs-MemAvailable is the meaningful host-freeze guard.)
 capacity_preflight() {
   local avail_kb avail_mb uas_mb want_mb
@@ -1261,13 +1258,13 @@ assert_workloads_ready() {
 # VictoriaMetrics from the exporters' static sipext targets). Fails fast with
 # the specific reason so a "clean-looking" zero-traffic run is impossible.
 assert_traffic_started() {
-  # 150s (was 60s): on a COLD start the sipp stat-exporter sidecars (:9035) and
+  # 150s: on a COLD start the sipp stat-exporter sidecars (:9035) and
   # loadgen (:9300) are slow to answer vmagent's scrape under the bring-up CPU
   # storm, so `sipp_calls_created_total` can take >60s to land in VM even though
-  # calls are already flowing (2026-06-30: aborted with b2bua_active_calls=3774
-  # and the metric climbing 4674→6809 moments later — a pure scrape-lag false
+  # calls are already flowing (a 60s window aborts with b2bua_active_calls in the
+  # thousands and the metric climbing moments later — a pure scrape-lag false
   # negative). 150s covers the cold stat-exporter ramp; a genuine zero-traffic
-  # run still fails (issue1), just after a longer, lag-tolerant window.
+  # run still fails, just after a longer, lag-tolerant window.
   local deadline=$(( $(date +%s) + 150 ))
   local c0 saw_pod=0
   c0="$(vmq 'sum(sipp_calls_created_total)')"
@@ -1452,9 +1449,8 @@ stop_loadgen() {
 }
 
 # The loadgen HTML callflow report (/report) is a HOST BIND MOUNT into
-# $RUN_DIR/loadgen-report now — no copy needed, it is live on disk and
-# survives the container (the old kubectl-cp-per-cycle dance and its
-# "pod already gone -> zero callflows" failure mode are structurally gone).
+# $RUN_DIR/loadgen-report — no copy needed, it is live on disk and
+# survives the container.
 # This just confirms it and logs the OK ratio / 18x gate from live metrics.
 fetch_loadgen_report() {
   [ "$LOADGEN_ENABLE" = "1" ] || return 0
@@ -1590,12 +1586,11 @@ run() {
     ensure_loadgen
     chaos_event "${cycle[$(( idx % ${#cycle[@]} ))]}" "$idx"
     idx=$(( idx + 1 ))
-    # The loadgen /report is a HOST BIND MOUNT now (re-snapshotted every
-    # LOADGEN_REPORT_INTERVAL s straight into $RUN_DIR/loadgen-report), so the
-    # old per-cycle kubectl-cp preservation dance — and its "pod already gone
-    # → zero callflows" failure mode (endurance-20260701) — is structurally
-    # gone. This per-cycle call just logs report presence + the live OK/18x
-    # ratios so a mid-run stall is visible in the run log.
+    # The loadgen /report is a HOST BIND MOUNT (re-snapshotted every
+    # LOADGEN_REPORT_INTERVAL s straight into $RUN_DIR/loadgen-report), so a
+    # report survives its pod with no copy step. This per-cycle call just logs
+    # report presence + the live OK/18x ratios so a mid-run stall is visible in
+    # the run log.
     fetch_loadgen_report
     # Remaining sleep until the next interval boundary.
     local elapsed_since=$(( $(date +%s) - now ))

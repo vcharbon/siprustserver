@@ -6,7 +6,9 @@
 //! re-sends of an unreliable provisional (RFC 3261 §13.3.1.1) are each a
 //! message of their own and are recorded per copy: that is what the wire
 //! shows. The liveness probe this stack originates and its answer are not
-//! dialog history and are recorded on neither face.
+//! dialog history and are recorded on neither face. Every entry carries the
+//! number of the turn recording it; the router seals the turn where its
+//! record lands (`call::helpers::seal_turn`).
 //!
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
@@ -17,7 +19,7 @@ use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, Provenance};
-use crate::event::CallEvent;
+use b2bua_sdk::event::CallEvent;
 
 /// The ring's configuration for one turn: the cap and the header names
 /// resolved once. `None` while the ring is off, so an unconfigured stack pays
@@ -108,6 +110,7 @@ impl Ring {
                     to_tag: cancel_tag,
                     decision_ordinal: 0,
                     headers: sip_message::capture::captured_headers(headers, &self.names),
+                    turn: 0,
                 };
                 let cancel_ok = MessageEntry {
                     direction: MessageDirection::Authored,
@@ -151,10 +154,10 @@ impl Ring {
         self.record(call, leg_id, trying)
     }
 
-    /// Record a request the router refused on the call's behalf without a
-    /// turn — one naming a dialog the leg does not hold, a CANCEL matching no
-    /// transaction (RFC 3261 §12.2.2, §9.2) — with the answer it sent, if any
-    /// (an ACK draws none).
+    /// Record a request the router refused on the call's behalf without
+    /// running the rules — one naming a dialog the leg does not hold, a
+    /// CANCEL matching no transaction (RFC 3261 §12.2.2, §9.2) — with the
+    /// answer it sent, if any (an ACK draws none).
     pub(crate) fn refused(
         &self,
         call: Call,
@@ -217,6 +220,7 @@ impl Ring {
             to_tag: req.to().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: req.captured_headers(&self.names),
+            turn: 0,
         }
     }
 
@@ -232,6 +236,7 @@ impl Ring {
             to_tag: resp.to().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: resp.captured_headers(&self.names),
+            turn: 0,
         }
     }
 }

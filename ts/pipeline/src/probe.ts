@@ -8,7 +8,9 @@
  * independent of the capture, the values and the header casing.
  */
 import type { Body } from "@sip/contracts"
+import { Confrontation } from "@sip/contracts"
 import { setDelta } from "./fold.js"
+import type { LegPlace } from "./leg-role.js"
 import { canonicalName } from "./wire.js"
 
 /** Where in the call a confronted message sits. */
@@ -88,6 +90,12 @@ export const shapeSides = (
  */
 export interface ProbeSite {
   readonly step: string
+  /**
+   * The role of the leg the step sits on and the way the message travelled;
+   * absent where the probe was attributed to no step. Outside
+   * {@link signature}, like the step.
+   */
+  readonly leg?: LegPlace
 }
 
 export interface HeaderProbe extends ProbeSite {
@@ -111,6 +119,26 @@ export interface HeaderProbe extends ProbeSite {
    * the header says nothing about what our system was handed.
    */
   readonly driven: boolean | undefined
+  /**
+   * Whether NEITHER side's message carries a body, so a header describing one
+   * (RFC 3261 §20.11–§20.13, §20.24) describes nothing on either side.
+   */
+  readonly bodiless: boolean
+  /**
+   * Every value of this header an entity part of the REPLAYED message's
+   * multipart body states (RFC 2046 §5.1), in body order; empty where that
+   * body is no multipart. A body descriptor the replay moved off the message
+   * onto the part it describes is read here.
+   */
+  readonly inReplayedParts: ReadonlyArray<string>
+  /**
+   * On a response, every value of this header the request it answers carried
+   * as the run sent it (the leg's own request with the response's CSeq);
+   * empty on a request, or where the run sent no such request.
+   */
+  readonly inAnsweredRequest: ReadonlyArray<string>
+  /** Whether the REPLAYED message carries a body. */
+  readonly replayedCarriesBody: boolean
 }
 
 export interface ShapeProbe extends ProbeSite {
@@ -139,8 +167,13 @@ export interface BodyProbe extends ProbeSite {
   readonly captured: ReadonlyArray<string>
   /** What the run received: the whole text (`""` where the message carried no body), or the key's lines under `sdp`. */
   readonly replayed: ReadonlyArray<string>
-  /** Where in the session description the difference sits; set under `sdp` only. */
-  readonly sdp?: { readonly section: string; readonly line: string }
+  /**
+   * Where in the session description the difference sits; set under `sdp`
+   * only. `mintedOrigin` marks a `session:o=` row of a verbatim run whose two
+   * origins read as one the replayed endpoint mints and its counterpart
+   * (`./sdporigin.ts`); the signature does not carry it.
+   */
+  readonly sdp?: { readonly section: string; readonly line: string; readonly mintedOrigin?: true }
 }
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
@@ -151,7 +184,7 @@ export const signature = (probe: Probe): string => {
   if (probe.kind === "body") {
     return probe.sdp === undefined
       ? `body:${probe.mediaType}:${scopeText(probe.scope)}`
-      : `body:sdp:${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
+      : `${Confrontation.SDP_SIGNATURE_PREFIX}${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
   }
   const base = `shape:${shapeText(probe.shapeKind)}`
   return probe.scope === undefined ? base : `${base}:${scopeText(probe.scope)}`

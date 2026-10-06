@@ -1,6 +1,6 @@
 # A crate's integration tests compile into one binary
 
-**Status:** accepted (2026-08-15, applied to `b2bua-harness`)
+**Status:** accepted (2026-08-15), applied to every crate of the workspace
 
 ## Context
 
@@ -37,6 +37,11 @@ Shared helpers keep working unchanged: `tests/it/common/mod.rs` is declared
 once in `main.rs`, and files that used to say `mod common;` say
 `use crate::common;`.
 
+`scripts/check-test-layout.sh`, the first step of `just test` and
+`just test-slow`, enforces it: a test target other than a crate's
+`tests/it/main.rs` fails the lane unless `test-binaries.allow` names it, and
+so does a module source under `tests/it/` that `main.rs` does not declare.
+
 ### X2 — A test that owns process-global state keeps its own binary
 
 One binary means one process, and libtest runs its tests concurrently in it.
@@ -56,6 +61,8 @@ Other crates carry the same shape and are excluded for the same reason:
 `sip-message`'s `alloc_budget`/`perf` tests read a global allocation counter
 (`crates/alloc-counter`), `media`'s `rtp_media_live` binds real UDP, and
 `scenario-harness`'s `artifact_on_drop` sets process environment.
+
+`test-binaries.allow` lists every such exception with its reason.
 
 The rule is not "consolidate everything". It is: consolidate the tests that do
 not care what shares their process, and leave the rest alone.

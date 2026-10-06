@@ -59,7 +59,7 @@ pub(crate) mod advertisement_tests {
     use super::*;
     use crate::config::B2buaConfig;
     use crate::effects::OutboundBody;
-    use crate::rules::relay::{build_b_leg, relay_request_passthrough_headers};
+    use crate::rules::relay::{build_b_leg, CallMarks};
     use sip_message::generators;
     use sip_message::header::{self, Allow, HeaderValue, Supported, Via};
     use sip_message::parser::custom::CustomParser;
@@ -105,9 +105,8 @@ CSeq: 314 INVITE\r\n"
         header_updates: &[(String, Option<String>)],
     ) -> (Option<String>, Option<String>) {
         let (_leg, effect) = build_b_leg(
-            "w0|call-ref|xyz",
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
             "b-1",
-            false,
             a_leg_invite,
             ("10.244.2.7".to_string(), 5060),
             None,
@@ -123,6 +122,8 @@ CSeq: 314 INVITE\r\n"
             &[],
             &[], // no withheld option tags
             None,
+            true,
+            0,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
@@ -197,7 +198,11 @@ Content-Length: 0\r\n\r\n";
                 header::Contact::parse(&SipStr::from_static("<sip:b2bua@10.244.2.7:5080>"))
                     .unwrap(),
             ),
-            extra_headers: relay_request_passthrough_headers(&peer_reinvite(), target_declared),
+            extra_headers: b2bua_sdk::in_dialog_relay::relayed_request_lines(
+                &peer_reinvite(),
+                target_declared,
+                generators::RelayScope::request(),
+            ),
             capabilities: Some(capabilities.clone()),
             ..Default::default()
         };
@@ -347,9 +352,8 @@ Content-Length: 0\r\n\r\n";
             invite.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            "w0|call-ref|xyz",
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
             "b-1",
-            false,
             &invite,
             ("10.244.2.7".to_string(), 5060),
             None,
@@ -365,6 +369,8 @@ Content-Length: 0\r\n\r\n";
             &[],
             &[],
             None,
+            true,
+            0,
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };
@@ -379,9 +385,8 @@ Content-Length: 0\r\n\r\n";
             bare.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            "w0|call-ref|xyz",
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
             "b-1",
-            false,
             &bare,
             ("10.244.2.7".to_string(), 5060),
             None,
@@ -397,6 +402,8 @@ Content-Length: 0\r\n\r\n";
             &[],
             &[],
             None,
+            true,
+            0,
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };
@@ -448,9 +455,11 @@ Content-Length: 0\r\n\r\n";
             refer: None,
             relay_first_18x_to_180: None,
             no_answer_timeout_sec: None,
-            call_limiters: None,
             charging_vector: None,
             withhold_option_tags: None,
+            stated_headers: None,
+            uncharged_media_legs: false,
+            withhold_on_relayed_provisionals: None,
             advertise_capabilities: Some(call::features::AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(call::features::AdvertisedCapabilities {

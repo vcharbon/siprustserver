@@ -3,8 +3,8 @@
 //!
 //! A message matching a policy NEVER touches the flow cursor. It is answered per
 //! `respond`, recorded in the run bundle, and never satisfies an `expect`. No
-//! flow step is ever written for one — this is where the v0.1 interpreter's
-//! keepalive elision lives now, as document data rather than interpreter logic.
+//! flow step is ever written for one — keepalive elision is document data
+//! here, never interpreter logic.
 //!
 //! Outside the flow is the whole scope: an arrival a frontier `expect` on that
 //! leg is OPEN on belongs to that step, and `exec` offers the policy only what

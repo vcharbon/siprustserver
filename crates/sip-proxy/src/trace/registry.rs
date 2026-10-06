@@ -303,7 +303,7 @@ impl ProxyTraces {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use observe::{RateDraw, TokenBucket, TraceEvent};
+    use observe::{activation_bucket, RateDraw, TraceEvent};
 
     fn gate(exporter: bool, max_active: usize) -> ProxyTraces {
         ProxyTraces::new(
@@ -312,7 +312,7 @@ mod tests {
                 1.0,
                 max_active,
                 RateDraw::seeded(3),
-                TokenBucket::default_at(0),
+                activation_bucket(0),
             ),
             false,
         )

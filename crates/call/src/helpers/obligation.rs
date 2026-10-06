@@ -213,3 +213,42 @@ fn unacked_2xx_slot_mut<'a>(
         .flat_map(|d| d.ext.answered_2xx.iter_mut().chain(d.ext.pending_reinvite_2xx.iter_mut()))
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
+
+/// Rebind every retained copy of a message in `call` whose bytes are `was`
+/// to `now` — the retained emissions ([`RetainedEmission::restate`]) and the
+/// INVITE client-transaction handles: the message they copy left restated.
+pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
+    for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
+        restate_leg_invite(leg, was, now);
+        for dialog in &mut leg.dialogs {
+            let ext = &mut dialog.ext;
+            for unacked in
+                [ext.answered_2xx.as_mut(), ext.pending_reinvite_2xx.as_mut()].into_iter().flatten()
+            {
+                unacked.emission.restate(was, now);
+            }
+            if let Some(ack) = ext.emitted_ack.as_mut() {
+                ack.restate(was, now);
+            }
+        }
+    }
+    for provisional in &mut call.reliable_provisionals {
+        if let Some(emission) = provisional.emission.as_mut() {
+            emission.restate(was, now);
+        }
+    }
+}
+
+/// Rebind `leg`'s INVITE client-transaction handles holding `was` to `now`:
+/// the INVITE they hold left restated.
+pub fn restate_leg_invite(leg: &mut crate::model::Leg, was: &[u8], now: &[u8]) {
+    let handles = leg
+        .pending_invite_txn
+        .iter_mut()
+        .chain(leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()));
+    for handle in handles {
+        if handle.original_invite == was {
+            handle.original_invite = now.to_vec();
+        }
+    }
+}

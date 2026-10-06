@@ -28,8 +28,8 @@ describe("the engine's input unit", () => {
     const calls = callsOf(rerouteFlows())
     expect(calls.map((c) => c.id)).toEqual(["g0", "g1"])
     expect(calls[0]!.final).toEqual({ status: 486, ts_ms: 400 })
-    expect(calls[0]!.invite?.ruriUser).toBe("33600000004")
-    expect(calls[1]!.invite?.ruriUser).toBe("33600000005")
+    expect(calls[0]!.invite?.ruriUser).toBe("15556000004")
+    expect(calls[1]!.invite?.ruriUser).toBe("15556000005")
   })
 
   it("keeps a group with no INVITE and no REFER out entirely", () => {

@@ -7,13 +7,21 @@
 //! **Failing to settle is always test failure. There is no soft mode.** A run
 //! that reached its last step and left a call up has not passed; a run whose
 //! budget expired states what was still open when it did.
+//!
+//! The scripted legs' own transactions are the interpreter's half of "every
+//! scripted dialog is terminal": a non-2xx INVITE final a leg sent holds a
+//! server transaction in Completed until the ACK it is owed or Timer H (RFC
+//! 3261 §17.2.1), and the run is not settled while one is ([`floor`]).
 
 use std::collections::BTreeMap;
 
 use pivot_schema::bundle::Failure;
 use pivot_schema::postcondition::{CdrExpectation, Postconditions};
+use sip_retransmit::timers::TIMER_H;
 
 use crate::checks::{self, Observables};
+use crate::close::{self, UnackedFinal};
+use crate::recording::Recording;
 use crate::resolve::Resolver;
 use crate::scope::Finding;
 
@@ -82,6 +90,59 @@ pub fn is_settled(flow_done: bool, sut: &dyn Sut, postconditions: Option<&Postco
     }
 }
 
+/// A non-2xx INVITE final a scripted leg sent and the system has not
+/// acknowledged: the leg, and the transaction as its ladder states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitedAck {
+    pub leg: String,
+    pub owed: UnackedFinal,
+}
+
+impl std::fmt::Display for AwaitedAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let UnackedFinal { cseq, status, .. } = self.owed;
+        write!(f, "leg {}: {status} to INVITE CSeq {cseq} awaits its ACK", self.leg)
+    }
+}
+
+/// The settle floor the scripted legs' own server transactions hold (RFC 3261
+/// §17.1.1.3, §17.2.1). `held` are inside Timer H (64·T1 from the final's
+/// first emission) and keep the run open; `expired` are past it, the
+/// transaction gone and the ACK never come — the system's failure, holding
+/// nothing further.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Floor {
+    pub held: Vec<AwaitedAck>,
+    pub expired: Vec<AwaitedAck>,
+}
+
+impl Floor {
+    /// What the floor holds open, in the settle's own words.
+    pub fn reasons(&self) -> Vec<String> {
+        self.held.iter().map(ToString::to_string).collect()
+    }
+}
+
+/// The floor at `now_us`, read off every leg the run recorded — the same
+/// ladder the generic close reads, so the emission and its ACK are matched
+/// where they were recorded, whoever composed the final.
+pub fn floor(recording: &Recording, now_us: u64) -> Floor {
+    let timer_h_us = TIMER_H * 1000;
+    let mut floor = Floor::default();
+    for (leg, messages) in recording.legs() {
+        for owed in close::unacked_finals(&messages) {
+            let sent_at_us = owed.sent_at_us;
+            let awaited = AwaitedAck { leg: leg.clone(), owed };
+            if now_us.saturating_sub(sent_at_us) < timer_h_us {
+                floor.held.push(awaited);
+            } else {
+                floor.expired.push(awaited);
+            }
+        }
+    }
+    floor
+}
+
 /// What was still open when the settle budget ran out.
 pub fn open_reasons(
     flow_done: bool,
@@ -109,7 +170,7 @@ pub fn open_reasons(
 /// exactly, then the deployment observables.
 ///
 /// A CDR `checks` entry asserts over the record SET — "some record shows this" —
-/// because `{ count, checks }` has no per-record scoping (friction K8). The
+/// because `{ count, checks }` has no per-record scoping. The
 /// failure says so rather than implying it pinned one record.
 ///
 /// Each finding carries its check's CLASS; what that costs on this lane is the
@@ -166,7 +227,7 @@ pub fn evaluate(
 mod tests {
     use super::*;
     use crate::state::RunState;
-    use pivot_schema::bundle::IdentityBindings;
+    use pivot_schema::bundle::{Dir, IdentityBindings};
     use pivot_schema::scoping::CheckClass;
 
     struct FakeSut {
@@ -212,6 +273,52 @@ mod tests {
         sut.cdrs.push(record(&[("disposition", "ANSWERED")]));
         assert!(is_settled(true, &sut, Some(&expectation)));
         assert!(open_reasons(true, &sut, Some(&expectation)).is_empty());
+    }
+
+    /// The floor holds a non-2xx INVITE final a leg sent until its ACK or Timer
+    /// H (RFC 3261 §17.2.1); past Timer H the final is expired, not held, and
+    /// the reasons name only what is held.
+    #[test]
+    fn the_floor_holds_an_unacked_final_inside_timer_h_and_expires_it_past() {
+        const INVITE: &str = "INVITE sip:b@127.0.0.1:5080 SIP/2.0\r\n\
+            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
+            From: <sip:a@example.test>;tag=a1\r\n\
+            To: <sip:b@example.test>;tag=b1\r\n\
+            Call-ID: call-a\r\n\
+            CSeq: 2 INVITE\r\n\
+            Content-Length: 0\r\n\r\n";
+        const TERMINATED: &str = "SIP/2.0 487 Request Terminated\r\n\
+            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
+            From: <sip:a@example.test>;tag=a1\r\n\
+            To: <sip:b@example.test>;tag=b1\r\n\
+            Call-ID: call-a\r\n\
+            CSeq: 2 INVITE\r\n\
+            Content-Length: 0\r\n\r\n";
+        const ACK: &str = "ACK sip:b@127.0.0.1:5080 SIP/2.0\r\n\
+            Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-2\r\n\
+            From: <sip:a@example.test>;tag=a1\r\n\
+            To: <sip:b@example.test>;tag=b1\r\n\
+            Call-ID: call-a\r\n\
+            CSeq: 2 ACK\r\n\
+            Content-Length: 0\r\n\r\n";
+        let recording = Recording::new();
+        recording.declare("B");
+        recording.push("B", Dir::In, 1_000_000, INVITE, None, None);
+        recording.push("B", Dir::Out, 1_400_000, TERMINATED, None, None);
+        let awaited = AwaitedAck {
+            leg: "B".into(),
+            owed: UnackedFinal { cseq: 2, status: 487, sent_at_us: 1_400_000 },
+        };
+
+        let held = floor(&recording, 1_400_000 + TIMER_H * 1000 - 1);
+        assert_eq!(held, Floor { held: vec![awaited.clone()], expired: vec![] });
+        assert_eq!(held.reasons(), ["leg B: 487 to INVITE CSeq 2 awaits its ACK"]);
+        let expired = floor(&recording, 1_400_000 + TIMER_H * 1000);
+        assert_eq!(expired, Floor { held: vec![], expired: vec![awaited] });
+        assert!(expired.reasons().is_empty(), "an expired transaction holds nothing open");
+
+        recording.push("B", Dir::In, 1_600_000, ACK, None, None);
+        assert_eq!(floor(&recording, 1_600_000), Floor::default(), "the ACK ended it");
     }
 
     #[test]

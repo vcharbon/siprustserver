@@ -1,8 +1,7 @@
 # Shared network + port wiring for the kind-based SIP runner — the SINGLE source
 # of truth, sourced by run.sh, endurance.sh and chaos.sh so the three never
-# drift (PROXY_VIP/PROXY_TARGET used to be defaulted independently in all three).
-# Everything here is overridable from the environment; the defaults reproduce
-# the historical layout exactly.
+# drift (PROXY_VIP/PROXY_TARGET are defaulted here once).
+# Everything here is overridable from the environment.
 #
 #   SIP_SUBNET   internal kind docker bridge /16   (default 172.20.0.0/16)
 #   SIP_GATEWAY  bridge gateway — the BOTTOM of the subnet (.0.1). kind/docker

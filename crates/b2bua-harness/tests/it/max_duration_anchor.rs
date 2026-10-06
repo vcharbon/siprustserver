@@ -64,7 +64,7 @@ async fn the_cap_runs_from_the_answer_under_the_answer_anchor() {
     h.advance(Duration::from_secs(MAX_DURATION_SEC as u64 / 2 + 1)).await;
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

@@ -108,8 +108,8 @@ struct DialPlanBinder { plan: NumberPlan }        // loaded from the platform's 
 
 impl RouteBinder for DialPlanBinder {
     fn invite_plan(&self, env: &CallEnv<'_>, intent: RouteIntent<'_>) -> InvitePlan {
-        // Map the intent's FIRST target role → the dialed number whose BL
-        // scenario realizes that behaviour (a plain number for Direct; a number
+        // Map the intent's FIRST target role → the dialed number whose service
+        // logic realizes that behaviour (a plain number for Direct; a number
         // whose downstream reroutes for FailoverOnReject).
         let number = self.plan.number_for(intent.targets()[0]);
         InvitePlan {
@@ -145,19 +145,19 @@ registers its composed shapes. `ShapeDescriptor` carries the load metadata:
 use e2e_model::{ShapeRegistry, ShapeDescriptor};
 use std::sync::Arc;
 
-fn nk_registry() -> ShapeRegistry {
+fn platform_registry() -> ShapeRegistry {
     let binder = || Arc::new(DialPlanBinder::load("config/numbers.json")) as Arc<dyn RouteBinder>;
     let mut reg = ShapeRegistry::empty();
     reg.register(
-        ShapeDescriptor::new("nk_reroute+reinvite")
+        ShapeDescriptor::new("platform_reroute+reinvite")
             .needs_bob2()                                        // topology the driver must bind
             .default_weight(1.0)                                 // share of the default mix
-            .load_shared(Arc::new(nk_reroute_reinvite(binder()))), // Arc<dyn ActorScenario>
+            .load_shared(Arc::new(platform_reroute_reinvite(binder()))), // Arc<dyn ActorScenario>
     );
     // …register the rest…
     reg
 }
-// fn main() { loadgen::app::run(Args::parse(), nk_registry()).await }
+// fn main() { loadgen::app::run(Args::parse(), platform_registry()).await }
 ```
 
 Descriptor knobs: `.anchors(&[Anchor])` (sampling), `.needs_charlie()` /
@@ -192,12 +192,12 @@ registration.
 
 ## 5. The fake-net paused-clock test pattern
 
-New shape coverage grows in `crates/loadgen/tests/fake_net.rs`: the REAL driver +
+New shape coverage grows in `crates/loadgen/tests/it/fake_net.rs`: the REAL driver +
 mux + `DropModel` loss engine run over one `SimulatedSignalingNetwork` shared with
 an in-process `B2buaCore`, under `#[tokio::test(start_paused = true)]`. Every
 timer (governor, recv, retransmit ladders, the SUT's 32 s reap) rides virtual
-time, so loss soaks that need 32 s+ of SIP traffic run deterministically in the
-default lane.
+time, so loss soaks that need 32 s+ of SIP traffic run deterministically (in the
+slow lane, like every `loadgen` test).
 
 ```rust
 #[tokio::test(start_paused = true)]

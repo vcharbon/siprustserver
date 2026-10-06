@@ -1,17 +1,23 @@
 import type { Body, Bundle, Flow, Flows, Pivot } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
+import { capturedOf, confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
 import type { MsgScope } from "../src/probe.js"
 import { signature } from "../src/probe.js"
 import { headersInOrderRaw } from "../src/wire.js"
 
+const utf8 = new TextEncoder()
+
+/** The layout the interpreter writes beside a recorded line that carries `body`, none where it carries none. */
+const laidOut = (contentType: string, body: string | undefined) =>
+  body === undefined || body.length === 0 ? {} : { body: { content_type: contentType, len: utf8.encode(body).length } }
+
 const crlf = (lines: ReadonlyArray<string>): string => `${lines.join("\r\n")}\r\n\r\n`
 
 const invite = crlf([
-  "INVITE sip:+331@h.fr SIP/2.0",
+  "INVITE sip:+15551@h.example SIP/2.0",
   "Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK1",
-  "From: <sip:+332@h.fr>;tag=a",
-  "To: <sip:+331@h.fr>",
+  "From: <sip:+15552@h.example>;tag=a",
+  "To: <sip:+15551@h.example>",
   "Call-ID: cid-1",
   "CSeq: 1 INVITE",
   "Allow: INVITE, ACK"
@@ -20,14 +26,14 @@ const invite = crlf([
 const ok200 = (callId: string, cseq: number, toTag: string): string =>
   crlf([
     "SIP/2.0 200 OK",
-    `From: <sip:+332@h.fr>;tag=a`,
-    `To: <sip:+331@h.fr>;tag=${toTag}`,
+    `From: <sip:+15552@h.example>;tag=a`,
+    `To: <sip:+15551@h.example>;tag=${toTag}`,
     `Call-ID: ${callId}`,
     `CSeq: ${cseq} INVITE`
   ])
 
 const ack = (callId: string, cseq: number): string =>
-  crlf(["ACK sip:+331@h.fr SIP/2.0", `Call-ID: ${callId}`, `CSeq: ${cseq} ACK`])
+  crlf(["ACK sip:+15551@h.example SIP/2.0", `Call-ID: ${callId}`, `CSeq: ${cseq} ACK`])
 
 describe("scopeOfRaw", () => {
   it("an INVITE with no To tag is the initial INVITE", () => {
@@ -90,6 +96,24 @@ describe("diffHeaders", () => {
     expect(probe?.inbound).toBe(true)
     expect(probe?.inboundValues).toEqual(["Q.850;cause=16"])
   })
+
+  it("states whether both sides' messages are bodiless, and does not by default", () => {
+    const captured = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Content-Disposition: session"))
+    const replayed = headersInOrderRaw(invite)
+    expect(diffHeaders(captured, replayed, scope, none)[0]?.bodiless).toBe(false)
+    expect(diffHeaders(captured, replayed, scope, none, undefined, "s1", true)[0]?.bodiless).toBe(true)
+  })
+  it("carries what the replayed body's parts state of the name, and makes no probe of a part alone", () => {
+    const captured = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Content-Disposition: session"))
+    const replayed = headersInOrderRaw(invite)
+    const parts = new Map([["content-disposition", ["session", "signal;handling=optional"]], ["mime-version", ["1.0"]]])
+    const probes = diffHeaders(captured, replayed, scope, none, undefined, "s1", false, { replayedParts: parts })
+    expect(probes.map((p) => [p.name, p.inReplayedParts])).toEqual([
+      ["Content-Disposition", ["session", "signal;handling=optional"]],
+      ["Allow", []]
+    ])
+    expect(diffHeaders(captured, replayed, scope, none)[0]?.inReplayedParts).toEqual([])
+  })
 })
 
 const step = (id: string, over: Partial<Flow.Step> = {}): Flow.Step => ({
@@ -110,19 +134,19 @@ const verdictWith = (failures: Bundle.RunVerdict["failures"]): Bundle.RunVerdict
 
 describe("the relay input a reception was driven from", () => {
   // One relay, twice: the run sends on leg A, the system emits on leg B. The
-  // captured pair carries P-Orig both ways; what differs is what the run drove.
+  // captured pair carries X-Vendor-Orig both ways; what differs is what the run drove.
   const capturedPrack = crlf([
     "PRACK sip:callee@platform SIP/2.0",
-    "To: <sip:+331@h.fr>;tag=b",
+    "To: <sip:+15551@h.example>;tag=b",
     "CSeq: 2 PRACK",
-    "P-Orig: sbc.113"
+    "X-Vendor-Orig: sbc.113"
   ])
-  const bare = crlf(["PRACK sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+331@h.fr>;tag=b", "CSeq: 2 PRACK"])
+  const bare = crlf(["PRACK sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+15551@h.example>;tag=b", "CSeq: 2 PRACK"])
   const dressed = crlf([
     "PRACK sip:b2bua@127.0.0.1 SIP/2.0",
-    "To: <sip:+331@h.fr>;tag=b",
+    "To: <sip:+15551@h.example>;tag=b",
     "CSeq: 2 PRACK",
-    "P-Orig: sbc.113"
+    "X-Vendor-Orig: sbc.113"
   ])
 
   const pivot = (): Pivot.PivotV3 => ({
@@ -154,16 +178,16 @@ describe("the relay input a reception was driven from", () => {
   const run = (sent: string) => {
     const doc = pivot()
     const flow = [{ ...(doc.flow[0] as Flow.Step), observed }]
-    return confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: recordings(sent), flows: flows() })
+    return confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: recordings(sent), captured: capturedOf(flows()) })
   }
 
   it("a bare input leaves the captured header undriven", () => {
-    const probe = run(bare).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    const probe = run(bare).probes.find((p) => p.probe.kind === "header" && p.probe.name === "X-Vendor-Orig")
     expect(probe?.probe.kind === "header" && probe.probe.driven).toBe(false)
   })
 
   it("an input that carried the header drove it", () => {
-    const probe = run(dressed).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    const probe = run(dressed).probes.find((p) => p.probe.kind === "header" && p.probe.name === "X-Vendor-Orig")
     expect(probe?.probe.kind === "header" && probe.probe.driven).toBe(true)
   })
 
@@ -173,15 +197,108 @@ describe("the relay input a reception was driven from", () => {
     const minted = new Map([
       ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s2", raw: bare }] as Array<Bundle.RecordedMessage>]
     ])
-    const confronted = confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: minted, flows: flows() })
-    const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    const confronted = confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: minted, captured: capturedOf(flows()) })
+    const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "X-Vendor-Orig")
     expect(probe?.probe.kind === "header" && probe.probe.driven).toBeUndefined()
   })
 
   it("an input of another message is no input for this one", () => {
-    const other = crlf(["BYE sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+331@h.fr>;tag=b", "CSeq: 3 BYE"])
-    const probe = run(other).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    const other = crlf(["BYE sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+15551@h.example>;tag=b", "CSeq: 3 BYE"])
+    const probe = run(other).probes.find((p) => p.probe.kind === "header" && p.probe.name === "X-Vendor-Orig")
     expect(probe?.probe.kind === "header" && probe.probe.driven).toBeUndefined()
+  })
+})
+
+describe("what a reception's recording states beside its own headers", () => {
+  const capturedInvite = crlf([
+    "INVITE sip:callee@platform SIP/2.0",
+    "To: <sip:+15551@h.example>",
+    "CSeq: 1 INVITE",
+    "Content-Type: multipart/mixed;boundary=x",
+    "Content-Disposition: session;handling=required"
+  ])
+  const replayedInvite = crlf([
+    "INVITE sip:b@127.0.0.1 SIP/2.0",
+    "To: <sip:+15551@h.example>",
+    "CSeq: 1 INVITE",
+    "Content-Type: multipart/mixed;boundary=y"
+  ])
+  const provisional = (rseq: string) =>
+    crlf(["SIP/2.0 183 Session Progress", "To: <sip:+15551@h.example>;tag=b", "CSeq: 1 INVITE", `RSeq: ${rseq}`])
+
+  const doc: Pivot.PivotV3 = {
+    pivot_version: 3,
+    case: { id: "c", title: "t", family: "f", variant: "repro", origin: "capture", lanes: {} },
+    identities: [],
+    calls: [],
+    endpoints: [],
+    actors: [],
+    legs: [],
+    flow: [
+      step("s3", { leg: "B", observed: { leg: 0, msg: 0, at_us: 0 }, msg: { method: "INVITE", headers: [], "headers-present": [] } })
+    ],
+    timing: { expect_budget_ms: 1000, settle_budget_ms: 1000 }
+  }
+  const flows = { schema: 5, legs: [{ msgs: [{ raw: capturedInvite }] }] } as unknown as Flows.FlowsDoc
+  const layout = {
+    content_type: "multipart/mixed",
+    len: 10,
+    parts: [
+      { content_type: "application/sdp", headers: [{ name: "Content-Disposition", value: "session;handling=required" }], offset: 0, len: 0 },
+      { content_type: "application/isup", content_id: "<p2>", offset: 0, len: 0 }
+    ]
+  }
+  const recordings = new Map([
+    ["A", [
+      { seq: 1, dir: "out", at_us: 1000, raw: provisional("092519") },
+      { seq: 2, dir: "out", at_us: 1100, raw: provisional("92520") },
+      { seq: 5, dir: "out", at_us: 1120, raw: provisional("92520"), repeat_of: 2 },
+      { seq: 3, dir: "out", at_us: 1150, raw: crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "CSeq: 1 INVITE", "RSeq: 7"]) },
+      { seq: 4, dir: "in", at_us: 1160, raw: provisional("8") }
+    ] as Array<Bundle.RecordedMessage>],
+    ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s3", raw: replayedInvite, body: layout }] as Array<Bundle.RecordedMessage>]
+  ])
+  const confronted = confront({ pivot: doc, verdict: verdictWith([]), recordings, captured: capturedOf(flows) })
+
+  it("a header probe carries what the replayed multipart's parts state of its name", () => {
+    const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "Content-Disposition")
+    expect(probe?.probe.kind === "header" && probe.probe.inReplayedParts).toEqual(["session;handling=required"])
+  })
+
+  it("the run states, by leg, the RSeq of each reliable provisional its actor sent, as a number, a retransmission once", () => {
+    expect(confronted.context.run.sentRSeqs).toEqual(new Map([["A", [92519, 92520]]]))
+  })
+
+  it("the run states each leg's dialog-creating INVITE as it crossed the wire", () => {
+    expect(confronted.context.run.openers.get("B")?.find((h) => h.name === "To")?.value).toBe("<sip:+15551@h.example>")
+    expect(confronted.context.run.openers.has("A")).toBe(false)
+  })
+
+  it("a header probe states whether the replayed message carries a body", () => {
+    const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "Content-Disposition")
+    expect(probe?.probe.kind === "header" && probe.probe.replayedCarriesBody).toBe(true)
+  })
+
+  it("a response's probe carries the values the request it answers carried as the run sent it", () => {
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "CSeq: 7 BYE", "Timestamp: 5 0.2"])
+    const capturedAnswer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "CSeq: 7 BYE", "Timestamp: 4"])
+    const bye = (t: string) => crlf(["BYE sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+15551@h.example>;tag=b", "CSeq: 7 BYE", `Timestamp: ${t}`])
+    const pivot: Pivot.PivotV3 = {
+      ...doc,
+      flow: [step("s9", { leg: "A", observed: { leg: 0, msg: 0, at_us: 0 }, msg: { status: 200, "cseq-method": "BYE", headers: [], "headers-present": [] } })]
+    }
+    const recordings = new Map([
+      ["A", [
+        { seq: 1, dir: "out", at_us: 10, raw: bye("3") },
+        { seq: 2, dir: "out", at_us: 11, raw: crlf(["BYE sip:x SIP/2.0", "To: <sip:+15551@h.example>;tag=b", "CSeq: 8 BYE", "Timestamp: 9"]) },
+        { seq: 3, dir: "in", at_us: 20, step: "s9", raw: answer }
+      ] as Array<Bundle.RecordedMessage>]
+    ])
+    const flows = { schema: 5, legs: [{ msgs: [{ raw: capturedAnswer }] }] } as unknown as Flows.FlowsDoc
+    const out = confront({ pivot, verdict: verdictWith([]), recordings, captured: capturedOf(flows) })
+    const probe = out.probes.find((p) => p.probe.kind === "header" && p.probe.name === "Timestamp")
+    expect(probe?.probe.kind === "header" && probe.probe.inAnsweredRequest).toEqual(["3"])
+    expect(probe?.probe.kind === "header" && probe.probe.replayedCarriesBody).toBe(false)
   })
 })
 
@@ -261,7 +378,7 @@ describe("shapeProbes", () => {
   })
 
   it("a stray request the leg answered is a serviced stray", () => {
-    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
     const probes = shapeProbes(
       verdictWith([
         {
@@ -282,7 +399,7 @@ describe("shapeProbes", () => {
   })
 
   it("an answer on another leg does not service the stray", () => {
-    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
     const probes = shapeProbes(
       verdictWith([
         {
@@ -303,7 +420,7 @@ describe("shapeProbes", () => {
   })
 
   it("an answer to another transaction on the leg does not service the stray", () => {
-    const other = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 5 BYE"])
+    const other = crlf(["SIP/2.0 200 OK", "To: <sip:+15551@h.example>;tag=b", "Call-ID: cid-1", "CSeq: 5 BYE"])
     const probes = shapeProbes(
       verdictWith([
         {
@@ -418,7 +535,7 @@ describe("an expected body held against the one received", () => {
   const info = (body: string | undefined): string =>
     crlf([
       "INFO sip:callee@127.0.0.1 SIP/2.0",
-      "To: <sip:+331@h.fr>;tag=b",
+      "To: <sip:+15551@h.example>;tag=b",
       "CSeq: 2 INFO",
       ...(body === undefined ? [] : ["Content-Type: application/example+xml;charset=utf-8"]),
       `Content-Length: ${body?.length ?? 0}`
@@ -443,12 +560,12 @@ describe("an expected body held against the one received", () => {
     ...(compare === undefined ? {} : { compare })
   })
 
-  const run = (body: Body.Body, received: string | undefined, resources = new Map([[REF, XML]])) =>
+  const run = (body: Body.Body, received: string | undefined, resources = new Map([[REF, utf8.encode(XML)]])) =>
     confront({
       pivot: expecting(body),
       verdict: verdictWith([]),
       recordings: new Map([
-        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: info(received) }] as Array<Bundle.RecordedMessage>]
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: info(received), ...laidOut("application/example+xml", received) }] as Array<Bundle.RecordedMessage>]
       ]),
       resources
     }).probes.filter((p) => p.probe.kind === "body")
@@ -504,9 +621,8 @@ describe("an expected body held against the one received", () => {
     expect(signature(probes[0]!.probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
   })
 
-  it("a shape, a binary resource, or a send is not read here", () => {
+  it("a shape or a send is not read here", () => {
     expect(run({ mode: "absent" }, XML)).toEqual([])
-    expect(run({ ...resource(), mode: "frozen-binary" }, "not the file", new Map())).toEqual([])
     const sent = confront({
       pivot: expecting(resource(), "send"),
       verdict: verdictWith([]),
@@ -527,7 +643,7 @@ describe("an expected body held against the one received", () => {
     const sdpInfo = (body: string | undefined): string =>
       crlf([
         "INFO sip:callee@127.0.0.1 SIP/2.0",
-        "To: <sip:+331@h.fr>;tag=b",
+        "To: <sip:+15551@h.example>;tag=b",
         "CSeq: 2 INFO",
         ...(body === undefined ? [] : ["Content-Type: application/sdp"]),
         `Content-Length: ${body?.length ?? 0}`
@@ -537,9 +653,9 @@ describe("an expected body held against the one received", () => {
         pivot: expecting(described),
         verdict: verdictWith([]),
         recordings: new Map([
-          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received) }] as Array<Bundle.RecordedMessage>]
+          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received), ...laidOut("application/sdp", received) }] as Array<Bundle.RecordedMessage>]
         ]),
-        resources: new Map([[SDP_REF, OFFER]]),
+        resources: new Map([[SDP_REF, utf8.encode(OFFER)]]),
         ...(media === undefined ? {} : { media })
       }).probes.filter((p) => p.probe.kind === "body")
 
@@ -601,8 +717,8 @@ describe("an expected body held against the one received", () => {
     const answer = (status: number, body: string): string =>
       crlf([
         `SIP/2.0 ${status} Reply`,
-        "From: <sip:+332@h.fr>;tag=a",
-        "To: <sip:+331@h.fr>;tag=b",
+        "From: <sip:+15552@h.example>;tag=a",
+        "To: <sip:+15551@h.example>;tag=b",
         "Call-ID: cid-1",
         "CSeq: 2 INFO",
         "Content-Type: application/example+xml",
@@ -630,10 +746,10 @@ describe("an expected body held against the one received", () => {
         }
       ]),
       recordings: new Map([
-        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>") }] as Array<Bundle.RecordedMessage>]
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>"), ...laidOut("application/example+xml", "<other/>") }] as Array<Bundle.RecordedMessage>]
       ]),
-      flows: { schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc,
-      resources: new Map([[REF, XML]])
+      captured: capturedOf({ schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc),
+      resources: new Map([[REF, utf8.encode(XML)]])
     })
     expect(confronted.probes.map((p) => signature(p.probe))).toEqual([
       "shape:status-substitution:200->481:response:481:INFO"
@@ -698,7 +814,11 @@ describe("recordOf", () => {
           replayed: ["INVITE, ACK, BYE"],
           inbound: true,
           inboundValues: ["INVITE, ACK"],
-          driven: true
+          driven: true,
+          bodiless: false,
+          inReplayedParts: [],
+          inAnsweredRequest: [],
+          replayedCarriesBody: true
         }
       },
       { class: "accepted", rule: "capability-set-added-by-stack", ticket: "" }
@@ -747,6 +867,24 @@ describe("the document's own shape", () => {
   const read = (flow: ReadonlyArray<Flow.Step>) =>
     confront({ pivot: doc(flow), verdict: verdictWith([]), recordings: new Map() }).context.document
 
+  it("transcribes every call's attempts: leg, final and cause", () => {
+    const pivot: Pivot.PivotV3 = {
+      ...doc([]),
+      calls: [{
+        id: "c1",
+        caller_leg: "A",
+        attempts: [
+          { branch: 0, position: 0, leg: "B", callee: { identity: "x" }, final: { status: 486, at_ms: 5 }, cause: "external:486" },
+          { branch: 0, position: 1, leg: "C", callee: { identity: "y" } }
+        ]
+      }] as unknown as Pivot.PivotV3["calls"]
+    }
+    expect(confront({ pivot, verdict: verdictWith([]), recordings: new Map() }).context.document.attempts).toEqual([
+      { call: "c1", callerLeg: "A", leg: "B", status: 486, cause: "external:486" },
+      { call: "c1", callerLeg: "A", leg: "C" }
+    ])
+  })
+
   it("names the final a leg ENDS on, with no ACK expect after it", () => {
     const finals = read([sendFinal("s5", "B", 500), expectAck("s6", "B"), sendFinal("s19", "D", 487)])
       .unackedFinals
@@ -776,6 +914,26 @@ describe("the document's own shape", () => {
     expect(read([provisional]).unackedFinals).toEqual([])
     expect(read([sendFinal("s5", "B", 500), expectAck("s6", "C")]).unackedFinals).toEqual([
       { step: "s5", leg: "B", status: 500, legTail: true, repeated: false }
+    ])
+  })
+
+  it("marks a step carrying a session description, and a provisional stated reliable", () => {
+    const steps = read([
+      step("s1", { leg: "A", op: "send", msg: { method: "INVITE", headers: [], "headers-present": [], body: { ref: "r1" } } }),
+      step("s5", {
+        leg: "B",
+        op: "send",
+        msg: { "cseq-method": "INVITE", status: 183, headers: [{ name: "RSeq", value: "1" }], "headers-present": [], body: { mode: "sdp-present" } }
+      }),
+      step("s6", {
+        leg: "A",
+        msg: { "cseq-method": "INVITE", status: 180, headers: [], "headers-present": [], body: { ref: "r2", "content-type": "application/isup" } }
+      })
+    ]).steps
+    expect(steps.map((s) => [s.id, s.sdp ?? false, s.reliable ?? false])).toEqual([
+      ["s1", true, false],
+      ["s5", true, true],
+      ["s6", false, false]
     ])
   })
 

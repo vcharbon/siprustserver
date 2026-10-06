@@ -20,10 +20,12 @@ import {
   plan,
   reAckedFinalFlows,
   reInviteFlows,
+  reInviteOverUnackedFinalFlows,
   request,
   response,
   SOCKETS,
   sutSet,
+  twoForksAnsweredFlows,
   withoutRepeatOf
 } from "./fixtures.js"
 
@@ -55,9 +57,9 @@ describe("every captured message is a step", () => {
     expect(flow.steps[1]!.check).toBe("record")
   })
 
-  // Issue 76: `auto` marks who COMPOSES the message, never what the document
-  // may hold. The closed field list left an ACK's frozen headers and the
-  // delayed offer's answer with no home at all.
+  // `auto` marks who COMPOSES the message, never what the document may hold:
+  // an ACK's frozen headers and the delayed offer's answer are stored like any
+  // other step's content.
   it("stores a transaction-derived step's content like any other step's", () => {
     const flow = flowOf(delayedOfferFlows(), CALLER_ONLY)
     const [confirming, answering, refused] = flow.steps.filter(
@@ -183,7 +185,7 @@ const relayedB2bFlows = (
 ): Flows.FlowsDoc => {
   const { caller, callee, sut } = SOCKETS
   const pcv = "P-Charging-Vector: icid-value=abc123"
-  const pai = "P-Asserted-Identity: <sip:+33600000004@10.0.0.1>"
+  const pai = "P-Asserted-Identity: <sip:+15556000004@10.0.0.1>"
   return doc(
     [
       leg(CALLER_CALL_ID, oneHop(caller, sut), [
@@ -353,8 +355,47 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
     const bInvite = flow.steps.find((s) => s.leg === "B" && s.op === "expect" && s.msg.method === "INVITE")!
     expect(bInvite.check).toBe("record")
     expect(bInvite.msg.headers?.find((h) => h.name === "P-Charging-Vector")?.class).toBeUndefined()
-    // A header the deployment does not own stays unclassified and gates.
+    // A header the deployment does not own, relayed byte-for-byte from the
+    // callee's 180, stays unclassified and gates.
     expect(a180.msg.headers?.find((h) => h.name === "P-Asserted-Identity")?.class).toBeUndefined()
+  })
+
+  // §6.4 at header granularity: a value the capture never shows reaching the
+  // SUT is the origin platform's own emission, whatever its name.
+  it("stamps origin-platform-header on an asserted value no capture-side send carries", () => {
+    const minted = "User-to-User: 56a5;encoding=hex;purpose=isdn-uui;content=isdn-uui"
+    const base = relayedB2bFlows()
+    const { caller, sut } = SOCKETS
+    // The SUT's 180 to the caller carries the UUI; the callee's 180 (the
+    // capture-side send) does not, and neither does the caller's INVITE.
+    const flows: Flows.FlowsDoc = {
+      ...base,
+      legs: base.legs.map((l, i) =>
+        i === 0
+          ? {
+            ...l,
+            msgs: l.msgs.map((m) =>
+              m.summary.kind === "response" && m.summary.status === 180
+                ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: ["P-Charging-Vector: icid-value=abc123", "P-Asserted-Identity: <sip:+15556000004@10.0.0.1>", minted] })
+                : m
+            )
+          }
+          : l
+      )
+    }
+    const flow = flowOf(flows, BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.check).toBe("assert")
+    expect(a180.msg.headers?.find((h) => h.name === "User-to-User")?.class).toBe("origin-platform-header")
+    // The relayed value the callee's 180 carries is protocol and still gates.
+    expect(a180.msg.headers?.find((h) => h.name === "P-Asserted-Identity")?.class).toBeUndefined()
+  })
+
+  it("leaves a relayed value unclassified when the same header reaches the SUT with it", () => {
+    const relayed = "User-to-User: 00;encoding=hex;purpose=isdn-uui;content=isdn-uui"
+    const flow = flowOf(relayedB2bFlows([relayed]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.find((h) => h.name === "User-to-User")?.class).toBeUndefined()
   })
 
   it("composes a plan-recognized number in a number-bearing header as a ${num:…} accessor", () => {
@@ -367,6 +408,193 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
     expect(a180.msg.headers?.find((h) => h.name === "P-Charging-Vector")?.value).toBe(
       "icid-value=abc123"
     )
+  })
+})
+
+/** The datagram a fixture message carries as text. */
+const rawOf = (m: Flows.Msg): string => (m as { readonly raw?: string }).raw ?? ""
+
+/**
+ * `flows` with leg `legIdx`'s dialog-opening INVITE carrying `from` / `to` as
+ * its From and To lines, the summary's URIs following them.
+ */
+const withIdentityLines = (
+  flows: Flows.FlowsDoc,
+  legIdx: number,
+  lines: { readonly from: string; readonly fromUri: string; readonly to: string; readonly toUri: string }
+): Flows.FlowsDoc => ({
+  ...flows,
+  legs: flows.legs.map((l, i) =>
+    i !== legIdx
+      ? l
+      : {
+        ...l,
+        ...(l.invite === null ? {} : { invite: { ...l.invite, from_uri: lines.fromUri, to_uri: lines.toUri } }),
+        msgs: l.msgs.map((m, j) =>
+          j !== 0 || m.summary.kind !== "request"
+            ? m
+            : {
+              ...m,
+              raw: rawOf(m)
+                .replace(/^From: .*$/m, `From: ${lines.from}`)
+                .replace(/^To: .*$/m, `To: ${lines.to}`),
+              summary: {
+                ...m.summary,
+                from: { ...m.summary.from, uri: lines.fromUri },
+                to: { ...m.summary.to, uri: lines.toUri }
+              }
+            }
+        )
+      }
+  )
+})
+
+describe("the dialog identity around the role number (§8)", () => {
+  const callerLines = {
+    from: "\"Alice\" <sip:+15556000001;verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1>;x-param=1;tag=from-a",
+    fromUri: "sip:+15556000001;verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1",
+    to: "<sip:+15556000004@example.invalid;x-uri=2;user=phone>",
+    toUri: "sip:+15556000004@example.invalid;x-uri=2;user=phone"
+  }
+
+  it("states the caller INVITE's captured From and To around the number the lane leases", () => {
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, callerLines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.from).toEqual({
+      pos: "caller",
+      form: "e164",
+      addr: "\"Alice\" <sip:${num:caller:e164};verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1>;x-param=1"
+    })
+    expect(invite.msg.to).toEqual({
+      pos: "called[0][0]",
+      form: "e164",
+      addr: "<sip:${num:called-0-0:e164}@example.invalid;x-uri=2;user=phone>"
+    })
+  })
+
+  it("brackets a bare addr-spec, so its parameters stay the header's own (RFC 3261 §20.10)", () => {
+    const lines = {
+      ...callerLines,
+      to: "sip:+15556000004@example.invalid;user=phone",
+      toUri: "sip:+15556000004@example.invalid"
+    }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, lines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.to?.addr).toBe("<sip:${num:called-0-0:e164}@example.invalid>;user=phone")
+  })
+
+  it("states the identity the platform launched on the INVITE a callee receives, and no R-URI", () => {
+    const launched = {
+      from: "<sip:+15556000001;x-user=1@platform.invalid;user=phone>;tag=from-b",
+      fromUri: "sip:+15556000001;x-user=1@platform.invalid;user=phone",
+      to: "<sip:+15556000004@example.invalid:5060>",
+      toUri: "sip:+15556000004@example.invalid:5060"
+    }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 1, launched), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "B" && s.op === "expect" && s.msg.method === "INVITE")!
+    expect(invite.msg.ruri).toBeUndefined()
+    expect(invite.msg.from?.addr).toBe("<sip:${num:caller:e164};x-user=1@platform.invalid;user=phone>")
+    expect(invite.msg.to?.addr).toBe("<sip:${num:called-0-0:e164}@example.invalid:5060>")
+  })
+
+  it("declares the dial form of a caller whose From writes its number with user parameters", () => {
+    // Every message writes the caller's number with user parameters only.
+    const base = withIdentityLines(relayedB2bFlows(), 0, callerLines)
+    const flows: Flows.FlowsDoc = {
+      ...base,
+      legs: base.legs.map((l) => ({
+        ...l,
+        msgs: l.msgs.map((m) => ({
+          ...m,
+          raw: rawOf(m).split("<sip:+15556000001@10.0.0.9>").join("<sip:+15556000001;verstat=x@10.0.0.9>")
+        }))
+      }))
+    }
+    const layout = build(flows, BOTH_VANTAGES, sutSet(), plan(), derivesOnePrefix)
+    expect(layout.topology.caller.forms).toEqual(["e164"])
+  })
+
+  it("states the bare positional ref where the captured From writes no number the plan composes", () => {
+    const lines = { ...callerLines, from: "<sip:alice@10.0.0.9>;tag=from-a" }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, lines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.from).toEqual({ pos: "caller", form: "e164" })
+  })
+
+  it("composes a number in the URI user part and an equal display name only, never in a host or a parameter", () => {
+    const pai = "P-Asserted-Identity: \"+15556000004\" <sip:+15556000004@h.invalid;x=+15556000004>"
+    const flow = flowOf(relayedB2bFlows([pai]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "\"${num:called-0-0:e164}\" <sip:${num:called-0-0:e164}@h.invalid;x=+15556000004>"
+    )
+    const named = "P-Asserted-Identity: \"Call +15556000004\" <sip:+15556000004@h.invalid>"
+    const flow2 = flowOf(relayedB2bFlows([named]), BOTH_VANTAGES)
+    const b180 = flow2.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(b180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "\"Call +15556000004\" <sip:${num:called-0-0:e164}@h.invalid>"
+    )
+  })
+
+  it("composes a number a header writes with user parameters (3GPP TS 24.229 verstat)", () => {
+    const pai = "P-Asserted-Identity: <sip:+15556000004;verstat=TN-Validation-Passed@10.0.0.1;user=phone>"
+    const flow = flowOf(relayedB2bFlows([pai]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "<sip:${num:called-0-0:e164};verstat=TN-Validation-Passed@10.0.0.1;user=phone>"
+    )
+  })
+})
+
+describe("body descriptors (RFC 3261 §20.11–§20.13, §20.24)", () => {
+  const SDP ="v=0\r\no=- 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n"
+  const descriptors = [
+    "P-Charging-Vector: icid-value=abc123",
+    "Content-Disposition: session; handling=required",
+    "Content-Encoding: identity",
+    "Content-Language: en",
+    "MIME-Version: 1.0"
+  ]
+  /** The callee rings with an SDP and its descriptors; the SUT's 180 to the caller carries `callerSdp`. */
+  const strippedFlows = (callerSdp: string | undefined): Flows.FlowsDoc => {
+    const base = relayedB2bFlows()
+    const { caller, callee, sut } = SOCKETS
+    return {
+      ...base,
+      legs: base.legs.map((l, i) => ({
+        ...l,
+        msgs: l.msgs.map((m) =>
+          m.summary.kind === "response" && m.summary.status === 180
+            ? i === 0
+              ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: descriptors, sdp: callerSdp })
+              : response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: 190, toTag: "callee-tag", headers: descriptors, sdp: SDP })
+            : m
+        )
+      }))
+    }
+  }
+  const names = (s: { msg: { headers?: ReadonlyArray<{ name: string }> } }) => (s.msg.headers ?? []).map((h) => h.name)
+
+  it("freezes no descriptor on an expect whose captured message carries no body", () => {
+    const flow = flowOf(strippedFlows(undefined), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.body).toEqual({ mode: "absent" })
+    expect(names(a180)).not.toContain("Content-Disposition")
+    expect(names(a180)).not.toContain("Content-Encoding")
+    expect(names(a180)).not.toContain("Content-Language")
+    expect(names(a180)).not.toContain("MIME-Version")
+    expect(names(a180)).toContain("P-Charging-Vector")
+    // The send keeps the captured bytes, descriptors included.
+    const b180 = flow.steps.find((s) => s.leg === "B" && s.msg.status === 180)!
+    expect(b180.op).toBe("send")
+    expect(names(b180)).toContain("Content-Disposition")
+  })
+
+  it("freezes the descriptors on an expect whose captured message carries the body they describe", () => {
+    const flow = flowOf(strippedFlows(SDP), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.body).toMatchObject({ compare: "sdp" })
+    expect(names(a180)).toEqual(expect.arrayContaining(["Content-Disposition", "Content-Encoding", "Content-Language", "MIME-Version"]))
   })
 })
 
@@ -504,5 +732,51 @@ describe("dialog markers", () => {
     const reAck = flow.steps.find((s) => s.id === "s8")!
     expect(reAck.in_dialog).toBe(true)
     expect(reAck.confirms_dialog).toBeUndefined()
+  })
+
+  // The ACK that confirms the dialog is the one answering the dialog-creating
+  // 2xx (RFC 3261 §13.2.2.4), not the first ACK the leg carries after it: a
+  // re-INVITE sent over the un-ACKed 2xx is answered 491 (§14.1) and its ACK is
+  // that transaction's own (§17.1.1.3). Pinned on the leg where the actor is
+  // the UAC (A: send INVITE, expect finals, send ACKs) and on the one where it
+  // is the UAS (B: expect INVITE, send finals, expect ACKs).
+  it("confirms the dialog on the ACK to the 2xx, not on a 491 round's ACK sent before it", () => {
+    const flow = flowOf(reInviteOverUnackedFinalFlows(), BOTH_VANTAGES)
+    for (const legId of ["A", "B"]) {
+      const onLeg = flow.steps.filter((s) => s.leg === legId)
+      const acks = onLeg.filter((s) => (s.msg.method ?? "").toUpperCase() === "ACK")
+      expect(acks.map((s) => s.msg.cseq)).toEqual([2, 1])
+      const [to491, to200] = acks
+      expect(to491!.confirms_dialog, `${legId}: the ACK to the 491`).toBeUndefined()
+      expect(to200!.confirms_dialog, `${legId}: the ACK to the 200`).toBe(true)
+      // Both ACKs run after the dialog-creating final, so both are in-dialog;
+      // the 491 and its re-INVITE are too.
+      const [invite, final] = onLeg
+      expect(invite!.in_dialog).toBeUndefined()
+      expect(final!.in_dialog).toBeUndefined()
+      expect(onLeg.slice(2).every((s) => s.in_dialog === true)).toBe(true)
+      expect(onLeg.filter((s) => s.confirms_dialog === true)).toHaveLength(1)
+    }
+  })
+
+  // A 2xx under a second To-tag to the same INVITE is a second dialog, and the
+  // UAC ACKs it too (RFC 3261 §13.2.2.4): the marker is stated once per
+  // DIALOG, so a leg answered under two tags carries it twice — on the ACK to
+  // each fork's 2xx — and not on the re-INVITE's ACK inside the second one.
+  it("confirms each fork's dialog on the ACK to its own 2xx", () => {
+    const flow = flowOf(twoForksAnsweredFlows(), BOTH_VANTAGES)
+    for (const legId of ["A", "B"]) {
+      const onLeg = flow.steps.filter((s) => s.leg === legId)
+      const acks = onLeg.filter((s) => (s.msg.method ?? "").toUpperCase() === "ACK")
+      expect(acks.map((s) => s.msg.cseq)).toEqual([1, 1, 3])
+      const [toFirst, toSecond, toReInvite] = acks
+      expect(toFirst!.confirms_dialog, `${legId}: the ACK to the first fork's 2xx`).toBe(true)
+      expect(toSecond!.confirms_dialog, `${legId}: the ACK to the second fork's 2xx`).toBe(true)
+      expect(toReInvite!.confirms_dialog, `${legId}: the re-INVITE's ACK`).toBeUndefined()
+      // The second fork's 2xx runs after the leg's first dialog-creating
+      // final, so it is in-dialog like everything behind it.
+      const secondFinal = onLeg.filter((s) => s.msg.status === 200 && s.msg["cseq-method"] === "INVITE")[1]!
+      expect(secondFinal.in_dialog).toBe(true)
+    }
   })
 })

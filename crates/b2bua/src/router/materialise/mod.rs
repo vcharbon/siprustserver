@@ -60,8 +60,8 @@ use sip_txn::Reoffer;
 use super::reclaim::{discharge_materialized_terminal, format_pb};
 use super::restore_hygiene::{sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
-use crate::event::CallEvent;
 use crate::store::{MaterialiseOrigin, ReplicaMiss};
+use b2bua_sdk::event::CallEvent;
 
 /// Which entry path is materialising: the whole axis of behaviour (spec D5).
 #[derive(Debug, Clone, Copy)]
@@ -162,7 +162,7 @@ pub(super) async fn materialise(
     if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {
         return Materialised::Resident(ctx.state.peek(call_ref).unwrap_or(call));
     }
-    ctx.timers.restore(timers, call_ref.to_string()).await;
+    ctx.timers.restore(timers, call_ref.to_string(), call.incarnation()).await;
     let seeded = ctx.txn.seed(call_ref, seeds::seeds_for(&call)).await.unwrap_or(0);
     match origin {
         Origin::Takeover => {

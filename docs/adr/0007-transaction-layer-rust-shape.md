@@ -24,8 +24,8 @@ txn. At 50K concurrent calls that is ~100–150K timer tasks — viable but heav
 on scheduler bookkeeping and memory.
 
 **Chosen:** a single [`tokio_util::time::DelayQueue`] holds every pending SIP
-timer, keyed by branch. One driver pops due timers. Memory is flat in the
-number of *pending* timers, not tasks, and there is a single wakeup path.
+timer, keyed by role and branch. One driver pops due timers. Memory is flat in
+the number of *pending* timers, not tasks, and there is a single wakeup path.
 
 This does **not** contradict the sip-clock ADR's "don't re-implement a worse
 timer wheel" caveat: `DelayQueue` *is* tokio's timer wheel (it rides
@@ -74,24 +74,44 @@ proxy's path. The single-writer property the dispatcher provides downstream is,
 *at this layer*, already provided structurally by the actor (X2). `SipRouter` /
 `PerCallDispatcher` land with the call/rules slices.
 
+## Decision X4 — transaction identity: one map per role, the §17 match rules
+
+A request matches only a server transaction and a response only a client one,
+so the actor keeps one map per role. A client transaction is keyed by its
+branch; a response matches it on branch and CSeq method (§17.1.3). A server
+transaction is keyed by the request's top-Via branch, sent-by and method, an
+ACK naming its INVITE's transaction and a CANCEL its INVITE's (§17.2.3, §9.2).
+A request that comes back to the node that sent it, with no other hop's Via
+on top, therefore opens a server transaction beside its sender's client one.
+
+- **Sent-by** compares the host case-insensitively and the port as written:
+  an omitted port is not an explicit 5060, as an omitted default component
+  does not match an explicit one in a URI (§19.1.4). `received`, `rport` and
+  the transport are no part of it, so a hop's §18.2.1 stamping leaves a copy
+  matching. The comparison lives in `sip-message` (`SentByRef`, ADR-0025).
+- **Collisions.** Two senders that pick one branch are two transactions —
+  §17.2.3 compares the sent-by because branch uniqueness (§8.1.1.7) holds per
+  UA only. A sender that reuses a branch for another method is read the same
+  way: §17.2.3 names the method among the match conditions, so the second
+  request is a new transaction, not a retransmission. Each gets the whole
+  §17.2 behaviour, and a CANCEL matches only the INVITE of its own sent-by.
+- **Cost.** A message is matched by an identity borrowed from it: one hash
+  lookup, no allocation. Opening a server transaction copies its key into the
+  map, the call index and each of its timers.
+
 ## Deferred (with justification)
 
-- **Tier-3 overload admission gate** (`overload.shouldAdmit` + stateless 503 on
-  new INVITEs) — depends on `OverloadController` / `AppConfig` (b2bua slice).
-  The transport-level **Tier-1** pre-ingress brake is already in sip-net; this
-  Tier-3 gate, and the `buildStatelessReject503Buffer` / `isEmergencyRequest`
-  helpers it needs, defer with their dependencies. This layer admits
-  unconditionally for now.
-  *Amendment (2026-08-01):* both tiers shipped in `b2bua`; the byte templater
-  was dropped for one shared reject, `b2bua::overload::build_reject_new_call_503`.
 - **`transactionBreakdown` gauge** (per-(method,role,state) walk of the map) —
   observability not asserted by the ported tests; the `method` field is carried
-  so it is a pure addition later. `messagesProcessed` / inbound+outbound byte
-  counters **are** ported.
+  so it is a pure addition later.
 - **Tracing / OTel span re-parenting** (the `forkDetachedInScope` /
   `DETACHED_PARENT` machinery, `ForkSiteTracker`) — an Effect-tracer artefact
-  with no tokio analogue; send errors are currently swallowed silently (no
-  tracing dep yet).
+  with no tokio analogue; a send error is counted
+  (`b2bua_txn_send_errors_total`), not traced.
+
+New-call admission is not this layer's: it is the admission ladder above it
+(`b2bua::admission`, ADR-0037). This layer judges only the backlog rung
+(ADR-0037 item 6) and answers a copy of an INVITE the node already refused.
 - **`send` legacy combined wrapper** — the source kept it only for incremental
   call-site migration; the Rust API ships `send_request`/`send_response`/
   `send_raw` directly.
@@ -102,6 +122,14 @@ proxy's path. The single-writer property the dispatcher provides downstream is,
 the message slice) land here as `IdGen` — a small **injectable value** (not a
 trait), mirroring the clock seam: `IdGen::seeded(seed)` for deterministic tests,
 `IdGen::from_entropy()` in production.
+
+A response is matched to its client transaction by branch and CSeq method
+(§17.1.3), so identifiers must be unguessable off-path: each is HMAC-SHA256
+over a counter, keyed from the OS RNG in production (the seed is the key in
+tests). The response's source is not compared with the transaction's
+destination: RFC 3261 §18.1.2 does not ask it, a NAT, load balancer or
+multi-homed peer answers from another address, and the on-path host left able
+to forge can spoof the source too.
 
 ## No property / parity tests
 

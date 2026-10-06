@@ -51,7 +51,7 @@
       }
     },
     "family": "transparent",
-    "id": "capture_04ab13c3-66b3-42a1-b0e2-ef618188ab2f.pcap.gz-auto",
+    "id": "capture_transparent-intl-forms.pcap.gz-auto",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -63,9 +63,9 @@
       "call_groups": [
         0
       ],
-      "capture": "capture_04ab13c3-66b3-42a1-b0e2-ef618188ab2f.pcap.gz"
+      "capture": "capture_transparent-intl-forms.pcap.gz"
     },
-    "title": "capture_04ab13c3-66b3-42a1-b0e2-ef618188ab2f.pcap.gz basic call (groups 0)",
+    "title": "capture_transparent-intl-forms.pcap.gz basic call (groups 0)",
     "variant": "repro"
   },
   "deviations": [
@@ -124,11 +124,11 @@
             "value": "supported"
           },
           {
-            "name": "P-Identifier",
-            "value": "112233319"
+            "name": "X-Vendor-Id",
+            "value": "119900009"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -140,8 +140,8 @@
             "value": "<tel:0009002>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "INVITE",
@@ -212,11 +212,11 @@
             "value": "supported"
           },
           {
-            "name": "P-Identifier",
-            "value": "112233319"
+            "name": "X-Vendor-Id",
+            "value": "119900009"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -225,15 +225,15 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900002@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900002@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           },
           {
-            "name": "P-HKH-PANI",
-            "value": "xDSL;line-id=00000000000000000000;cc=33;oc=55;lac=99830;ali=0000000000"
+            "name": "X-Vendor-Network",
+            "value": "xDSL;x-param=1"
           }
         ],
         "method": "INVITE"
@@ -289,8 +289,8 @@
             "value": "icid-value=exampleicid0300000000000000000000000000000000000000000000;term-ioi=ims2.example.net"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=600;text=\"Busy everywhere\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@carrier2.example.net>;cause=600"
           }
         ],
         "reason": "Busy everywhere",
@@ -350,12 +350,12 @@
             "value": "icid-value=exampleicid0300000000000000000000000000000000000000000000;term-ioi=ims2.example.net"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=600;text=\"Busy everywhere\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@carrier2.example.net>;cause=600"
           },
           {
-            "name": "P-HKH-PANI",
-            "value": "xDSL;line-id=00000000000000000000;cc=33;oc=55;lac=99830;ali=0000000000"
+            "name": "X-Vendor-Network",
+            "value": "xDSL;x-param=1"
           }
         ],
         "reason": "Busy everywhere",
@@ -409,7 +409,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900001"
+      "observed": "+15550900001"
     }
   ],
   "legs": [

@@ -4,29 +4,33 @@
  * platforms are different UACs, and a captured platform that under-ACKed states
  * its own non-compliance rather than what the run will see.
  *
- * The count is the FINAL's own ladder, and nothing on the far leg puts an ACK
- * here: a B2BUA owes one ACK per final it RECEIVES on this leg (RFC 3261
- * §13.2.2.4 for a 2xx, §17.1.1.3 for a non-2xx), so N ACKs arriving from the
- * far leg draw none of their own.
+ * The count is the FINAL's own ladder: a B2BUA owes one ACK per final it
+ * RECEIVES on this leg (RFC 3261 §13.2.2.4 for a 2xx, §17.1.1.3 for a non-2xx),
+ * so N ACKs arriving from the far leg for ONE final draw one datagram here and
+ * not N.
  *
- * **Composed on arrival.** An ACK carrying no body is one the stack can form
- * the moment the final lands — in-dialog or not — so every copy of that final
- * draws one back. Only an ACK owing the ANSWER to a delayed offer (RFC 3261
- * §13.2.1) waits on the far leg: a copy arriving inside that wait is answered
- * by the single ACK that follows it, and only a copy landing once the ACK
- * exists draws one of its own.
+ * **The ACK to a 2xx is the acknowledging peer's own, relayed.** RFC 3261
+ * §13.2.2.4 gives the UAC core ONE ACK per 2xx and re-passes THAT ACK for every
+ * copy, so the ACK this leg owes goes out when the far leg's arrives — initial
+ * INVITE or re-INVITE, offer in the INVITE or delayed offer, body or none. A
+ * copy landing inside that wait is answered by the single ACK that follows it;
+ * a copy landing once the ACK exists draws a re-send of that datagram.
  *
  * **Displaced by the next INVITE.** The stack holds ONE emitted ACK per leg,
  * reset on every new INVITE transaction (§6.1), so a copy landing once the SUT
  * has opened a later transaction on that leg answers a transaction the dialog
- * no longer holds an ACK for and draws none.
+ * holds no ACK for and draws none. Only the band between the ACK and that reset
+ * draws.
+ *
+ * **Composed on arrival.** An ACK to a NON-2xx final is the client
+ * transaction's own (§17.1.1.3), composed from the final itself hop by hop, so
+ * every copy of that final draws one back.
  *
  * The SEND half is the scripted actor's own behaviour and stays as captured: a
  * caller that holds its ACK, or answers three copies with one, is modelling a
  * peer, and a peer's non-compliance is the document's to state.
  */
-import { Flows, Tokens } from "@sip/contracts"
-import { type ClassName, rungIntervalsMs } from "@sip/contracts/schedules"
+import { Flows, Schedules, Tokens } from "@sip/contracts"
 import type { StepDraft } from "./draft.js"
 import type { StepSource } from "./flowsteps.js"
 
@@ -58,9 +62,9 @@ export const stampDrawnAckCounts = (
     const final = answeredInviteFinal(flows, steps, sources, i)
     if (final === undefined) continue
     const ladder = steps[final]!.retransmits ?? 0
-    const drawn = composesOnArrival(step)
-      ? ladder - displacedCopies(flows, steps, sources, final)
-      : ladder - heldCopies(steps[final]!, step)
+    const drawn = composesOnArrival(steps[final]!)
+      ? ladder
+      : drawingCopies(flows, steps, sources, final, step)
     const captured = step.retransmits ?? 0
     if (drawn === captured) continue
     if (drawn === 0) delete steps[i]!.retransmits
@@ -77,33 +81,54 @@ export const stampDrawnAckCounts = (
 }
 
 /**
- * Whether the stack can form this ACK the moment the final arrives: the one
- * carrying no body, which it composes from the dialog alone. Only an ACK owing
- * the answer to a delayed offer (RFC 3261 §13.2.1) is composed from the far
- * leg's and does not exist until that one lands.
+ * Whether the stack forms the ACK to `final` the moment it arrives: the ACK to a
+ * NON-2xx final, which RFC 3261 §17.1.1.3 gives the client transaction and
+ * which it composes from the final itself.
  *
- * Whether the ACK CONFIRMS the dialog says nothing about this: a re-INVITE's
- * ACK is as composable as an initial one when neither owes a body, and our
- * stack mints the ACK's client transaction on taking either 2xx.
+ * The ACK to a 2xx is the acknowledging peer's own, relayed (§13.2.2.4), so it
+ * does not exist until that one lands. The final's STATUS decides it and
+ * nothing else: not the body the ACK carries, and not whether it CONFIRMS the
+ * dialog.
  */
-const composesOnArrival = (ack: StepDraft): boolean => {
-  const body = ack.msg.body
-  return body === undefined || ("mode" in body && body.mode === "absent")
-}
+const composesOnArrival = (final: StepDraft): boolean => !isSuccess(final)
+
+/** Whether the final is a 2xx, which is what decides whose ACK answers it. */
+const isSuccess = (final: StepDraft): boolean =>
+  final.msg.status !== undefined && final.msg.status < 300
+
+/**
+ * How many of `final`'s copies draw an ACK of their own: the band between the
+ * ACK this leg relayed and the reset a later INVITE transaction performs.
+ *
+ * Each copy sits in exactly one of three places — ahead of the ACK, where the
+ * single ACK that follows answers it; between the ACK and the reset, where the
+ * retained datagram is re-sent; or past the reset, where the dialog holds no
+ * ACK for the transaction. {@link heldCopies} is the leading run and
+ * {@link displacedCopies} the trailing one, so the clamp states an empty band
+ * rather than a negative count.
+ */
+const drawingCopies = (
+  flows: Flows.FlowsDoc,
+  steps: ReadonlyArray<StepDraft>,
+  sources: ReadonlyArray<StepSource>,
+  final: number,
+  ack: StepDraft
+): number =>
+  Math.max(
+    0,
+    (steps[final]!.retransmits ?? 0) -
+      heldCopies(steps[final]!, ack) -
+      displacedCopies(flows, steps, sources, final)
+  )
 
 /**
  * The wait before each of `final`'s `rungs` repeats, rung 1 first: the gaps
  * the document states where the capture measured them (§6.9), otherwise the
  * RFC's schedule for the final's class — the one table `sip-retransmit` walks
- * (ADR-0032 X1), read as data rather than walked again here. A count longer
- * than either list repeats the last gap, as `Schedule::exact` does past its
- * list: steady pacing rather than a class the step never chose.
+ * (ADR-0032 X1), read as data rather than walked again here.
  */
-const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> => {
-  const stated = final.retransmit_intervals_ms
-  const gaps = stated !== undefined && stated.length > 0 ? stated : rungIntervalsMs(classOf(final))
-  return Array.from({ length: rungs }, (_, r) => gaps[Math.min(r, gaps.length - 1)]!)
-}
+const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> =>
+  Schedules.rungGapsMs(classOf(final), rungs, final.retransmit_intervals_ms)
 
 /**
  * The retransmission class the RFC puts on the final's emitter, read the way
@@ -114,17 +139,19 @@ const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> => {
  * states no status is read as the non-2xx one: the two pace identically, and
  * a final with no status is a document lint has already refused.
  */
-const classOf = (final: StepDraft): ClassName =>
-  final.msg.status !== undefined && final.msg.status < 300 ? "final-2xx" : "invite-server-final"
+const classOf = (final: StepDraft): Schedules.ClassName =>
+  isSuccess(final) ? "final-2xx" : "invite-server-final"
 
 /**
  * How many of `final`'s repeats landed before `ack` went out, and 0 wherever
  * the document states no coordinate to compare.
  *
- * The rungs are {@link rungGapsMs}: the final's own measured pacing where it
- * has one, the class's schedule where it has none. A rung at the ACK's own
- * instant is not held: the ACK exists, so the copy is one the platform
- * re-passes.
+ * Measured off the two `observed` instants, because the wait is the far party's
+ * own ACK latency: the actor that supplies that ACK is scripted from the same
+ * capture, so what the capture measured is what the run waits. The rungs are
+ * {@link rungGapsMs}: the final's own measured pacing where it has one, the
+ * class's schedule where it has none. A rung at the ACK's own instant is not
+ * held — the ACK exists, so the copy is one the platform re-passes.
  */
 const heldCopies = (final: StepDraft, ack: StepDraft): number => {
   const rungs = final.retransmits ?? 0
@@ -147,9 +174,8 @@ const heldCopies = (final: StepDraft, ack: StepDraft): number => {
  * The stack's emitted ACK is held per leg and reset on every new INVITE
  * transaction (§6.1), so a copy arriving past that reset answers a transaction
  * the dialog holds no ACK for. Paced off the document's own declared timeline,
- * which is what the run follows: the capture's instants say nothing here, an
- * ACK composed on receipt having moved the re-INVITE ahead of a repeat the
- * source platform placed behind it.
+ * which is what the run follows: when the SUT opens that later transaction is
+ * the document's `delay` graph, not an instant the source platform measured.
  */
 const displacedCopies = (
   flows: Flows.FlowsDoc,
@@ -226,7 +252,8 @@ const projectMs = (steps: ReadonlyArray<StepDraft>): ReadonlyArray<number> => {
  * ACK, so a re-INVITE's own final is never mistaken for the initial one's.
  *
  * Every final, not only a 2xx: which of the two ACKs a caller is looking at is
- * exactly what the final's STATUS says, and both oblige one ACK per copy.
+ * exactly what the final's STATUS says, and {@link composesOnArrival} reads it
+ * off the step this returns.
  */
 export const answeredInviteFinal = (
   flows: Flows.FlowsDoc,

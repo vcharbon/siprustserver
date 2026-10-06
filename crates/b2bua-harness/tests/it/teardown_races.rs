@@ -5,18 +5,17 @@
 //! hold EXACTLY ONCE — never a double-decrement, never a stranded slot. A real
 //! `LimiterServer` is wired and `current_total` must land on 0.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -30,10 +29,8 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)
@@ -50,7 +47,7 @@ fn route_limited(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn CallDec
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -73,6 +70,7 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -96,9 +94,7 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released exactly once on the BYE glare");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -119,6 +115,7 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -144,9 +141,7 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released after the re-INVITE/BYE crossing");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -159,7 +154,7 @@ async fn establish_call_both_sides(
     alice: &scenario_harness::Agent,
     bob: &scenario_harness::Agent,
     b2bua: &B2buaSut,
-    store: &Arc<WindowStore>,
+    store: &Arc<CallStore>,
 ) -> (scenario_harness::Dialog, scenario_harness::Dialog) {
     let mut call = alice.invite(bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;

@@ -23,10 +23,11 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
 
 | Helper | What it does |
 |---|---|
-| `Harness::advance(d)` | Advances in 100 ms chunks (`testkit::advance_in_100ms_chunks`). Call it *between* protocol events, after the message just sent has been `expect`ed. |
-| `sip_clock::testkit::{advance_in_chunks, settle, pump}` | The shared primitives. `settle` yields (no time movement); `pump` = settle → chunked advance → settle. |
+| `Harness::advance(d)` | `testkit::advance_settled(d)`: every timer due inside the span fires at its own instant and the work it starts runs to idle before time moves on, so a detached request is answered at its wire instant, inside its budget. Call it *between* protocol events, after the message just sent has been `expect`ed. |
+| `sip_clock::testkit::{advance_settled, settle, pump}` | The shared primitives. `advance_settled` sleeps the caller and lets tokio's auto-advance walk the due timers; `settle` yields (no time movement); `pump(d)` = `ceil(d/100 ms) + 1` settled 100 ms chunks, so work due inside a chunk runs at its own instant and a harness can sample after each chunk. |
+| `sip_clock::testkit::run_paused_within(wall, scenario)` | Runs a scenario on its own paused runtime, `None` when it has not finished after `wall` of real time: the bound for a test whose failure mode is a task that never goes idle. |
 | `b2bua_harness::settle_until(cond)` | Bounded yield-poll to drain async teardown (CDR write, reap) — moves no simulated time. |
-| `FailoverHarness::advance(d)` | = `testkit::pump(d)` — drives the SIP *and* replication planes. |
+| `FailoverHarness::advance(d)` | = `testkit::pump_sampled(d)` — drives the SIP *and* replication planes, sampling the views ledger after each chunk. Its granularity is 200 ms at least; a test that must stop at one instant steps `advance_settled` directly. |
 | `FailoverHarness::pump_until(step, max, ready)` | Fine-grained pump toward a deadline you can't compute; prefer it over guessing one big advance. |
 | `FailoverHarness::{settle_terminal, settle_lossy_cleanup, linger_peers}` | Teardown settles past keepalive/TTL windows; keep peer sockets draining post-teardown (avoids 481-relay-style teardown races). |
 
@@ -35,7 +36,7 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
 1. **Pause the clock for anything timed.** A purely synchronous message flow
    may run unpaused, but any test that asserts on a timer, timeout, or
    interval must be `start_paused = true` and advance explicitly. (Also the
-   lane policy: a default-lane test must not need >60 s of real clock — see
+   lane policy: a real-clock test of 1 s or more leaves the default lane — see
    CLAUDE.md.)
 
 2. **Advance *between* protocol steps, exactly to the deadline you want to
@@ -46,7 +47,7 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
 
 3. **Never feed a paused test a real wall-clock signal.** Canonical flake:
    the failover harness rode the live ELU sampler (a real busy-fraction) under
-   a paused clock, so at cold start the Tier-3 overload gate shed the very
+   a paused clock, so at cold start the panic-ELU rung shed the very
    first INVITE with a 503. Every environmental signal (ELU, health, load)
    must be injected in its simulated form (e.g. `spawn_with_overload` with a
    simulated ELU source).
@@ -59,14 +60,14 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
    scenario-harness 100 ms — traces show `received = sent + 100`;
    failover-harness 1 ms.)
 
-5. **Paused-clock tests are exempt from the 60 s wall-clock rule but are NOT
-   free.** Their cost is CPU (timer churn + recorded-trace scans) and it
-   compounds super-linearly with per-sim-second traffic. Concrete case: one
+5. **Paused-clock tests stay in the default lane whatever their length, but
+   are NOT free.** Their cost is CPU (timer churn + recorded-trace scans) and
+   it compounds super-linearly with per-sim-second traffic. Concrete case: one
    keepalive cell (~700 sim-seconds) with a 1 s OPTIONS probe cadence burned
-   ~420 s of CPU; at 10 s cadence, ~10 s. Before `#[ignore]`-ing a slow
-   paused-clock test, cut the churn at its source (probe/keepalive cadence,
-   traffic volume) — slower cadences are semantics-preserving wherever the
-   test pumps for a condition instead of counting ticks.
+   ~420 s of CPU; at 10 s cadence, ~10 s. A slow paused-clock test is never
+   moved to the slow lane: cut the churn at its source (probe/keepalive
+   cadence, traffic volume) — slower cadences are semantics-preserving wherever
+   the test pumps for a condition instead of counting ticks.
 
 6. **Don't hand-roll timer drivers.** Use `b2bua::timers::TimerService`. If
    you genuinely must roll one, copy its shape — **epoch as the correctness
@@ -104,4 +105,6 @@ For *which harness* to use, see [harness-layers.md](harness-layers.md).
 | Response processed one turn late; cancel loses to the timer | Zero transit delay reintroduced somewhere (rule 4) |
 | Cold-start 503 / shed in a paused test | A real wall-clock signal leaked in (rule 3) |
 | Call died during an advance that should have been quiet | One advance leapt two deadlines (rule 2) |
+| A request sent inside an advance times out although its peer answers within the budget | A raw `tokio::time::advance` or a fixed-chunk advance moved time past work still in flight; use `Harness::advance` |
+| `Harness::advance` / `pump` never returns | A task that never goes idle (a `yield_now` loop, a `watch` clone whose `changed()` returns at once on a value already read, a `select!` arm on `recv()` of a closed channel without a `Some(..)` pattern) holds the auto-advance; bound the reproduction with `run_paused_within` |
 | Teardown assertion flakes (481s, missing 200s) | Peers closed too early — use `settle_terminal` / `linger_peers` |

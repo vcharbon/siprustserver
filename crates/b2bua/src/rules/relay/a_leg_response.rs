@@ -1,9 +1,10 @@
 //! The UAS response the B2BUA mints on the a-leg's inbound INVITE (toward the
 //! originator), on that INVITE's own server transaction — and the one seam
-//! where a second final on that transaction is refused.
+//! where a second final, or a provisional after the final, on that
+//! transaction is refused.
 
 use call::Call;
-use sip_message::generators::{self, response_states_contact, GenerateResponseOpts};
+use sip_message::generators::{self, response_states_own_contact, GenerateResponseOpts};
 use sip_message::header::{self, MediaType};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
@@ -14,13 +15,15 @@ use crate::effects::{
 
 /// Build a UAS response on the a-leg's inbound INVITE (toward alice). `to_tag`
 /// pins the stable a-facing dialog tag; `contact` is stamped only where
-/// [`response_states_contact`] states it for an INVITE response; `provenance`
+/// [`response_states_own_contact`] states it for an INVITE response (a 3xx /
+/// 485's retry targets ride in `extra_headers`); `provenance`
 /// says whose response it is — a callee's forwarded, or this stack's own.
 ///
 /// A final (≥ 200) is admitted once per transaction (RFC 3261 §17.2.1): the
 /// first records itself as [`call::Leg::invite_final_sent`]; any later one is
 /// refused — `None`, nothing built — and reported as
-/// [`BufferedObservabilityEffect::SecondFinalRefused`]. A provisional passes.
+/// [`BufferedObservabilityEffect::SecondFinalRefused`]. A provisional passes
+/// only while the transaction carries no final ([`provisional_after_final`]).
 #[allow(clippy::too_many_arguments)]
 pub fn response_to_a_leg(
     call: &mut Call,
@@ -35,6 +38,7 @@ pub fn response_to_a_leg(
     incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
     provenance: Provenance,
+    author: super::sdp_session::Author<'_>,
 ) -> Option<OutboundSipEffect> {
     if status >= 200 {
         if let Some(carried) = call.a_leg.invite_final_sent {
@@ -48,10 +52,24 @@ pub fn response_to_a_leg(
             return None;
         }
         call.a_leg.invite_final_sent = Some(status);
+    } else if provisional_after_final(call, fx, status) {
+        return None;
     }
+    let a_leg = call.a_leg.leg_id.clone();
+    let body = super::sdp_session::continue_on_leg(
+        call,
+        &a_leg,
+        None,
+        author,
+        super::sdp_session::Carried::of(&Method::Invite, Some(status), false),
+        body,
+        content_type.as_ref(),
+        // An opening description (the INVITE's own responses) consults no policy.
+        &crate::config::AsWritten,
+    );
     let opts = GenerateResponseOpts {
         to_tag,
-        contact: contact.filter(|_| response_states_contact(&Method::Invite, status)),
+        contact: contact.filter(|_| response_states_own_contact(&Method::Invite, status)),
         body,
         content_type,
         extra_headers,
@@ -71,4 +89,23 @@ pub fn response_to_a_leg(
         leg_id: Some("a".to_string()),
         provenance,
     })
+}
+
+/// Whether a provisional of `status` toward the a-leg's initial INVITE is
+/// refused: that transaction already sent its final, and a completed INVITE
+/// server transaction emits no further provisional (RFC 3261 §13.3.1.1 /
+/// §17.2.1). A refusal is reported as
+/// [`BufferedObservabilityEffect::ProvisionalAfterFinalRefused`]. The
+/// executors that would mint one ask here first, so a refused provisional
+/// touches no dialog tag and no reliable-provisional ladder on the way.
+pub fn provisional_after_final(call: &Call, fx: &mut HandlerEffects, status: u16) -> bool {
+    let Some(carried) = call.a_leg.invite_final_sent else { return false };
+    tracing::warn!(
+        call_ref = %call.call_ref,
+        status,
+        carried,
+        "provisional to the a-leg INVITE after its final refused"
+    );
+    fx.buffered.push(BufferedObservabilityEffect::ProvisionalAfterFinalRefused { status, carried });
+    true
 }

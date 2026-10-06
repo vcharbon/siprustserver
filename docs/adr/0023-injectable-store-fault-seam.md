@@ -4,9 +4,8 @@
 
 ## Context
 
-The B2B callflow specs carry a family of "dialog KO" cases modeling a
-reference implementation's Redis dialog-store outages: the dialog/call lookup
-fails during the initial INVITE, during an established-call BYE, or during an
+A B2BUA that keeps its dialogs in an external store meets that store's
+outages: the dialog/call lookup fails during the initial INVITE, during an established-call BYE, or during an
 audit (keepalive) cycle, each with a defined outcome. Nothing here could be
 exercised, and the product-side semantics were **undefined**, not merely
 untested:
@@ -28,7 +27,7 @@ lookups *fallible* by consulting a probe before the map read.
 `b2bua::store::faults` provides:
 
 - **`FaultInjectingCallStore`** — a decorator over any `Arc<dyn CallStore>`;
-  each op (`get_call`/`put_call`/`delete_call`/`refresh_call`/`get_index`/
+  each op (`get_call`/`put_call`/`delete_call`/`get_index`/
   `scan_calls`) can be made to return `StoreError::Backend`.
 - **`StoreFaults`** — the shared, clone-cheap control handle: atomic per-path
   switches (`arm`/`disarm`, one `StoreFaultPoint` per decorator op and per live
@@ -46,7 +45,7 @@ The seam is generic: no callflow-specific logic, only "this read fails now".
 
 | Path (probe point) | Semantics |
 |---|---|
-| Initial INVITE (`LiveInitialInvite`) | **Fail closed: 500** `Server Internal Error` final through the INVITE server txn; **no call created**, nothing leaked (the per-call dispatch ephemera is reclaimed via the orphan teardown, exactly like the Tier-3 overload reject). Composes with ADR-0022: the caller who heard the auto-100 always gets a final. Probed *before* the retransmit `peek` — a faulted store cannot answer "does this dialog already exist", so its answer is not trusted. |
+| Initial INVITE (`LiveInitialInvite`) | **Fail closed: 500** `Server Internal Error` final through the INVITE server txn; **no call created**, nothing leaked (the per-call dispatch ephemera is reclaimed via the orphan teardown). Composes with ADR-0022: the caller who heard the auto-100 always gets a final. Probed *before* the retransmit `peek` — a faulted store cannot answer "does this dialog already exist", so its answer is not trusted. |
 | In-dialog request — BYE, re-INVITE, … (`LiveInDialog`) | **Fail closed: 500** to that request; the call and its state stay **untouched**. Deliberately distinct from the `481` lookup-*miss* (the call may well exist; the store just cannot say). A retry after the store recovers proceeds normally. ACK is never answered (RFC 3261 §17) — dropped, as the orphan path drops it. |
 | Audit/keepalive timer (`LiveAudit`) | **Fail open**: skip the probe cycle, keep the call up, and **re-arm** the `Keepalive` timer at the config cadence so liveness detection resumes next interval. A store fault alone must never tear down an established call — the protected-calls invariant ([ha-acceptance.md](../testing/ha-acceptance.md)). Observable via `b2bua_store_fault_audit_skipped_total`. |
 
@@ -85,7 +84,7 @@ both halves. `B2buaSpawnParams` carries both as defaulted `Option`s;
 
 ## Consequences
 
-- The downstream dialog-KO spec cases become mechanical: Scene + armed
+- Dialog-store outage tests become mechanical: Scene + armed
   `StoreFaults` + assert the defined outcome
   (`b2bua-harness/tests/store_fault.rs` pins all three semantics).
 - Two new counters: `b2bua_store_fault_rejected_total` (fail-closed 500s) and

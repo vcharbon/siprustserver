@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!--
+  Capacity-ramp UAC, non-emergency half: INVITE / 180 / 200 / ACK / 5 s hold /
+  BYE. No Resource-Priority, so the B2BUA admission gate may shed it. The 5 s
+  hold keeps concurrency near (ring + 5 s) x rate.
+  Response time 1 is INVITE to the first 180: the setup latency through the SUT,
+  with the callee's ring left out. A 503 with Retry-After is the SUT's
+  admission refusing the new call: it is ACKed and the call ends counted on
+  GenericCounter1, so the stat file keeps completed calls (successful minus
+  GenericCounter1), shed calls and failures apart. A 503 without Retry-After
+  fails the call, as any final other than 200 does (SIPp ACKs a non-2xx final
+  it did not expect). Both recv waits are bounded
+  at 64*T1 (RFC 3261 Timer B) so a lost call fails in 32 s, not at -recv_timeout.
+  SIPp times a wait on the recv the call stands on, and the call moves along an
+  optional group as its messages arrive, so every recv of a group carries the
+  bound: the INVITE fails 32 s after its last provisional.
+-->
+<scenario name="UAC capacity short-hold, non-emergency">
+
+  <send retrans="500" start_rtd="1">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      X-Api-Call: {"destination":{"host":"[field0]","port":5060}}
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: capacity short-hold
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" timeout="32000"/>
+  <recv response="180" optional="true" rtd="1" timeout="32000"/>
+  <recv response="503" optional="true" next="shed" timeout="32000">
+    <action>
+      <ereg regexp="[0-9]+" search_in="hdr" header="Retry-After:" check_it="true" assign_to="retry_after"/>
+    </action>
+  </recv>
+  <recv response="200" rrs="true" timeout="32000"/>
+
+  <send>
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- The hold lasts hold_ms from the ACK and answers every in-dialog OPTIONS
+       (RFC 3261 section 11). The first wait covers the whole hold; after an
+       answered OPTIONS the rest runs off the clock in 1 s steps, so a probe
+       ends the call at most 1 s late and never restarts the hold. `hold_ms`
+       and the first timeout are one value.
+       The answer sits after the step loop: a step that `_unexp.main` resumes
+       re-enters through the deadline check, never through a second answer. -->
+  <nop>
+    <action>
+      <assign assign_to="hold_ms" value="5000"/>
+      <gettimeofday assign_to="hold_t0_s,hold_t0_us"/>
+    </action>
+  </nop>
+  <recv request="OPTIONS" crlf="true" timeout="5000" ontimeout="hold_done" next="hold_options"/>
+  <label id="hold_left"/>
+  <nop>
+    <action>
+      <gettimeofday assign_to="hold_s,hold_us"/>
+      <subtract assign_to="hold_s" variable="hold_t0_s"/>
+      <multiply assign_to="hold_s" value="1000"/>
+      <subtract assign_to="hold_us" variable="hold_t0_us"/>
+      <divide assign_to="hold_us" value="1000"/>
+      <add assign_to="hold_s" variable="hold_us"/>
+      <test assign_to="hold_over" variable="hold_s" compare="greater_than_equal" variable2="hold_ms"/>
+    </action>
+  </nop>
+  <nop test="hold_over" next="hold_done"/>
+  <recv request="OPTIONS" crlf="true" timeout="1000" ontimeout="hold_left"/>
+  <label id="hold_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold_left"/>
+  <label id="hold_done"/>
+
+  <send retrans="500">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      [routes]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- An in-dialog OPTIONS crossing the BYE is answered 200 once the BYE
+       completes: the dialog stands until the BYE's final response (RFC 3261
+       section 15.1.1), and SIPp sends nothing while its BYE is retransmitting.
+       The OPTIONS is captured without leaving the wait, so the BYE's 200 that
+       follows it on the wire still finds the call on its recv. The capture
+       takes the first run of adjacent Via (or v:) rows and of Record-Route
+       rows, and From / To / CSeq by their full names, in any case. -->
+  <label id="options_wait1"/>
+  <recv request="OPTIONS" optional="true" crlf="true" timeout="32000" next="options_wait1">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
+  <recv response="200" crlf="true"/>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
+
+  <nop next="end"/>
+
+  <!-- The admission shed: the SUT refused the new call with a 503 carrying
+       Retry-After, as every admission rung does. The ACK takes the INVITE's branch
+       (RFC 3261 section 17.1.1.3) and the call ends counted on GenericCounter1,
+       apart from the calls that completed and from the failures. A 503 without
+       Retry-After is authored on the call path: the recv above fails the call
+       (FailedRegexpHdrNotFound), the call still ACKs it here and ends without
+       reaching the counter. -->
+  <label id="shed"/>
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-18];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+    <action>
+      <strcmp assign_to="retry_after_cmp" variable="retry_after" value=""/>
+      <test assign_to="shed_counted" variable="retry_after_cmp" compare="not_equal" value="0"/>
+    </action>
+  </send>
+  <nop test="shed_counted" next="shed_counted"/>
+  <nop next="end"/>
+  <label id="shed_counted"/>
+  <nop counter="1" next="end"/>
+
+  <!-- SIPp runs a call one step per loop turn and reads its socket in between:
+       a request that lands while the call stands on a send or a nop (the step
+       after a hold timeout), or that no recv at hand expects (a BYE mid-hold),
+       comes here. An OPTIONS is answered and the call resumes the step it stood
+       on. A BYE is answered and the call ends failed, as test_doesnt_match:
+       SIPp's own unexpected-BYE handling (200, unexpected_msg) does not run
+       while this hook exists. Anything else is unexpected here too and fails
+       the call. -->
+  <label id="_unexp.main"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
+  <recv request="BYE" crlf="true"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="end">
+    <action>
+      <assign assign_to="sut_ended_call" value="1"/>
+      <test variable="sut_ended_call" compare="equal" value="0" check_it="true"/>
+    </action>
+  </nop>
+  <label id="unexp_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+  <label id="end"/>
+
+  <Reference variables="opt_via_row,opt_rr_row,retry_after"/>
+  <ResponseTimeRepartition value="2, 5, 10, 20, 50, 100, 200, 500, 1000"/>
+  <CallLengthRepartition value="1000, 5000, 10000, 15000, 30000, 60000"/>
+</scenario>

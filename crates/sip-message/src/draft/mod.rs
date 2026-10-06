@@ -8,7 +8,7 @@
 //!
 //! One engine serves both directions: the entry list, the functional updates,
 //! the list views and the render pass are written once, and
-//! [`StartKind`](start::StartKind) contributes only the start line, the
+//! [`StartKind`] contributes only the start line, the
 //! mandatory header set and the frozen message type.
 
 mod edit;

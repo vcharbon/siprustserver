@@ -18,6 +18,12 @@ thiserror = { workspace = true }
 # The class a replicated ladder paces by (ADR-0032 X3); `serde` so it rides the body.
 sip-retransmit = { path = "../sip-retransmit", features = ["serde"] }
 
+[features]
+# `CallLimiterState::from_parts`, for tests that set an exact admission state.
+testkit = []
+
 [dev-dependencies]
+# The crate's own integration tests build exact admission states.
+call = { path = ".", features = ["testkit"] }
 proptest = { workspace = true }
 base64 = { workspace = true }

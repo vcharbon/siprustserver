@@ -194,6 +194,9 @@ spec:
             # one unresolved neighbour can pin (16 KiB, set by vip-loopback).
             # The kernel clamps at the host's net.core.wmem_max (host preflight).
             - { name: PROXY_UDP_SNDBUF, value: "4194304" }
+            # SO_RCVBUF on every signalling socket; clamped at the host's
+            # net.core.rmem_max. Overflow is sip_proxy_udp_kernel_rx_dropped_total.
+            - { name: PROXY_UDP_RCVBUF, value: "4194304" }
             # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS UNSET →
             # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }

@@ -3,13 +3,13 @@
 //! B2BUA-minted local tag. Relay itself does NOT live here — see
 //! [`super::relay_response`] / [`super::relay_request`].
 
-use call::helpers::{find_by_b_tag, set_leg_state};
-use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog};
+use call::helpers::{add_tag_mapping, find_by_b_tag, set_leg_state};
+use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog, TagMapping};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
-use crate::rules::model::RuleContext;
 use crate::rules::relay;
+use b2bua_sdk::model::RuleContext;
 
 use super::ActionExecutor;
 
@@ -190,41 +190,35 @@ impl ActionExecutor<'_> {
                 }
                 // One dialog survives confirmation (model: "one survives after
                 // confirmed") — drop the losing forks so per-call state is bounded.
+                // The session it carries becomes the leg's.
+                relay::adopt_confirmed_dialog(leg, idx);
                 let winner = leg.dialogs.remove(idx);
                 leg.dialogs = vec![winner];
             }
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
-            // RFC 3261 §13.2.2.4: taking a 2xx mints the ACK's client transaction,
-            // so every 2xx copy is re-ACKed on this one branch
-            // (`re-ack-retransmitted-2xx`). Minted only when the ACK owes no answer
-            // body; a delayed-offer INVITE's ACK is composable only once the
-            // caller's own ACK supplies the answer.
-            //
-            // The relay-ACK obligation is armed for the caller's ACK CSeq
-            // REGARDLESS: confirming a dialog cannot know who will compose the
-            // ACK — `ack_on_answer` composes it here for a plain answered call,
-            // several service rules compose their own, and a rule that composes
-            // none (an MRF-answered callee) still needs the caller's relayed on.
-            // Whichever emission wins discharges it (`ack_leg`).
+            // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own,
+            // relayed — arm the obligation for the CSeq that ACK will carry.
+            // Its emission mints the ACK's client transaction and retains the
+            // branch every later copy of the 2xx is re-ACKed on
+            // (`re-ack-retransmitted-2xx`), so no branch exists until then.
             if let Some(d) = leg.dialogs.first_mut() {
-                if d.ext.ack_branch.is_none() && relay::acked_invite_carries_offer(d) {
-                    d.ext.ack_branch = Some(self.id_gen.new_branch());
-                }
                 d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
             }
         }
-        // Reuse the a-facing tag pre-seeded for this callee (relayFirst18x's
-        // `force-tag-consistency`) so the 200 OK To-tag matches the first 180.
+        // The a-facing tag this callee dialog is mapped to: the one its relayed
+        // provisional minted, or the fresh one `MapUnshownDialog` gave a dialog
+        // the caller was never shown.
         let preferred = find_by_b_tag(call, leg_id, &remote_tag_clone).map(|m| m.a_tag.clone());
         self.ensure_a_dialog_with(call, preferred.clone());
         // When a *non-first* fork wins, the a-dialog was already created under
-        // the first fork's primary tag; adopt the winning fork's a-face tag so
-        // the confirmed a-dialog matches the To-tag the caller saw on the 2xx
-        // (and any B2BUA-originated a-facing in-dialog request uses it).
-        if let (Some(pref), Some(d)) = (preferred, call.a_leg.dialogs.first_mut()) {
-            if !pref.is_empty() {
-                d.sip.local_tag = pref;
+        // the first fork's primary tag; the confirmed a-dialog takes the winning
+        // fork's a-face tag, the one the caller saw on the 2xx. Only a live
+        // answer re-identifies her dialog: a 2xx learned for a reap on a call
+        // already ending leaves the tag she rang on.
+        if let Some(pref) = preferred.filter(|p| !p.is_empty()) {
+            if call.state == call::CallModelState::Active {
+                adopt_a_tag(call, &pref);
             }
         }
         // Keep the answer SDP relayed toward alice on the 2xx as the a-dialog's
@@ -270,6 +264,26 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// Map a callee early dialog no provisional showed the caller to a fresh
+    /// a-facing To-tag ([`b2bua_sdk::model::RuleAction::MapUnshownDialog`]):
+    /// its 2xx then opens a caller dialog of its own (RFC 3261 §12.1.2) — the
+    /// relay reads the tag off the map, `confirm_dialog` adopts it. A dialog
+    /// already mapped keeps the tag it was shown under; a tagless one names no
+    /// dialog (§12.1.2 requires the tag) and is left to the primary.
+    pub(super) fn map_unshown_dialog(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) {
+        if b_tag.is_empty() || find_by_b_tag(call, b_leg_id, b_tag).is_some() {
+            return;
+        }
+        *call = add_tag_mapping(
+            call.clone(),
+            TagMapping {
+                a_tag: self.id_gen.new_tag(),
+                b_leg_id: b_leg_id.to_string(),
+                b_tag: b_tag.to_string(),
+            },
+        );
+    }
+
     /// Ensure the a-leg has a dialog with a stable B2BUA-minted local tag; return
     /// that tag (the To-tag presented to alice on every a-facing response).
     pub(super) fn ensure_a_dialog(&self, call: &mut Call) -> String {
@@ -302,13 +316,14 @@ impl ActionExecutor<'_> {
         // two), same as the b-leg path above.
         let route_set = self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
         let cseq = a_invite.cseq().seq() as i64;
+        let (local_uri, remote_uri) = relay::uas_addresses(&a_invite);
         let dialog = Dialog {
             sip: StackDialog {
                 call_id: call.a_leg.call_id.clone(),
                 local_tag: tag.clone(),
                 remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: a_invite.to().uri().to_string(),
-                remote_uri: from.uri().to_string(),
+                local_uri,
+                remote_uri,
                 remote_target,
                 local_cseq: cseq,
                 route_set,
@@ -322,6 +337,7 @@ impl ActionExecutor<'_> {
                 pending_reinvite_2xx: None,
                 answered_2xx: None,
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         };
@@ -360,6 +376,22 @@ impl ActionExecutor<'_> {
                 fallback
             }
         }
+    }
+}
+
+/// Re-identify the caller's dialog under `tag`: the one a-dialog takes it as
+/// its local tag and every mapping of the tag it held before is retired, so a
+/// request the caller sends under the abandoned tag matches no dialog and
+/// draws `481` (RFC 3261 §12.2.2) instead of landing on the answered session.
+/// The wire shows a second dialog; the model holds one, re-tagged.
+pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
+    let Some(d) = call.a_leg.dialogs.first_mut() else { return };
+    if d.sip.local_tag == tag {
+        return;
+    }
+    let old = std::mem::replace(&mut d.sip.local_tag, tag.to_string());
+    if !old.is_empty() {
+        call.tag_map.retain(|m| m.a_tag != old);
     }
 }
 

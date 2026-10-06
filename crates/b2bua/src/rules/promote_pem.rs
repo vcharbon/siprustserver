@@ -18,11 +18,12 @@ use sip_message::sdp_media_equivalent;
 use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
-use super::model::{
-    Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
-    SERVICE_LAYER,
-};
 use super::relay;
+use b2bua_sdk::model::{
+    Body, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
+    TimerDelay, SERVICE_LAYER,
+};
+use b2bua_sdk::provisional::originator_final_sent;
 
 fn rule(
     id: &'static str,
@@ -63,13 +64,15 @@ fn window_open(ctx: &RuleContext) -> bool {
 
 /// Allow + Supported + Accept header updates for messages we mint toward
 /// Alice: the originator face's set (declared, else Bob's own relayed
-/// advertisement, else no line) narrowed by `100rel` — the one claim this
-/// service must never make, since Alice saw no reliable provisional from us.
-/// Every mint point of the call therefore advertises the same set but for
-/// that narrowing.
+/// advertisement, else no line) narrowed by the two claims this service must
+/// never make: `100rel`, since Alice saw no reliable provisional from us, and
+/// `timer`, since the synthetic 200 states no interval and the strategy
+/// withholds the timer from Bob (RFC 4028 §7.2). Every mint point of the call
+/// therefore advertises the same set but for that narrowing.
 fn a_facing_advert(features: Option<&FeatureActivations>, received: &[SipHeader]) -> Vec<Entry> {
     capabilities::relaying_in(features, Face::Originator, received)
         .without_option_tag("100rel")
+        .without_option_tag("timer")
         .entries()
         .to_vec()
 }
@@ -85,7 +88,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             &[],
             Match::response().method("INVITE").status_code(183).direction(Direction::FromB).filter(
                 |ctx| {
-                    if !promote_pem_active(ctx) || promoted(ctx) {
+                    // A promotion answers the caller: none once her INVITE
+                    // transaction carries its final (RFC 3261 §17.2.1) — a
+                    // leg ringing then is the core's to absorb.
+                    if !promote_pem_active(ctx) || promoted(ctx) || originator_final_sent(&ctx.call)
+                    {
                         return false;
                     }
                     match ctx.response() {
@@ -244,15 +251,14 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     disposition: Some(LegDisposition::Bridged),
                 });
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                actions.push(RuleAction::AckLeg {
-                    leg_id: b.clone(),
-                    body: Vec::new(),
-                    content_type: None,
-                });
+                actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: None });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
-                        actions.push(RuleAction::DestroyLeg { leg_id: other.leg_id.clone() });
+                        actions.push(RuleAction::DestroyLeg {
+                            leg_id: other.leg_id.clone(),
+                            headers: vec![],
+                        });
                     }
                 }
                 actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{b}") });
@@ -286,7 +292,10 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let next_cseq = a_dialog_cseq + 1;
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
-                    body: final_sdp.to_vec(),
+                    body: Some(
+                        Body::from_leg(final_sdp.to_vec(), ctx.source_leg_id.to_string())
+                            .described_by(resp.headers()),
+                    ),
                     add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
                 });
                 actions.push(RuleAction::AddCdrEvent {
@@ -323,11 +332,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }
                 if resp.status() < 300 {
                     return ok(vec![
-                        RuleAction::AckLeg {
-                            leg_id: "a".to_string(),
-                            body: Vec::new(),
-                            content_type: None,
-                        },
+                        RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Answer,
                             leg_id: "a".to_string(),
@@ -355,7 +360,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
-        // ── Rule 5: reject A re-INVITE/UPDATE during window → 491 ────────────
+        // ── Rule 5: reject A re-INVITE/UPDATE during window → 491, or the §14.2 /
+        // RFC 3311 §5.2 refusal where an offer of alice's is open ─────────────
         rule(
             "promote-reject-a-reinvite-update",
             &[],
@@ -363,14 +369,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 .methods(&["INVITE", "UPDATE"])
                 .direction(Direction::FromA)
                 .filter(|ctx| promote_pem_active(ctx) && window_open(ctx)),
-            |_ctx| {
-                ok(vec![RuleAction::Respond {
-                    status: 491,
-                    reason: "Request Pending".to_string(),
-                    body: vec![],
-                    content_type: None,
-                }])
-            },
+            |ctx| ok(vec![super::pending_refusal::refuse_pending(ctx)]),
         ),
         // ── Rule 6: reject A INFO/MESSAGE during window → 488 ────────────────
         rule(
@@ -458,8 +457,8 @@ fn max_duration(ctx: &RuleContext) -> i64 {
 mod tests {
     //! What the promotion advertises toward Alice: the same set every other
     //! mint point of the call resolves — declared, else Bob's own relayed
-    //! advertisement, else the stack set — minus `100rel`, which this service
-    //! never claims.
+    //! advertisement, else the stack set — minus `100rel` and `timer`, which
+    //! this service never claims.
     use super::*;
     use call::features::{
         AdvertiseCapabilitiesFeature, AdvertisedCapabilities, KeepaliveActivation,
@@ -500,9 +499,11 @@ mod tests {
             refer: None,
             relay_first_18x_to_180: None,
             no_answer_timeout_sec: None,
-            call_limiters: None,
             charging_vector: None,
             withhold_option_tags: None,
+            stated_headers: None,
+            uncharged_media_legs: false,
+            withhold_on_relayed_provisionals: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: Some(AdvertisedCapabilities {
                     allow: Some(allow.iter().map(|s| s.to_string()).collect()),
@@ -525,38 +526,45 @@ mod tests {
     }
 
     /// Bob's own advertisement travels to Alice verbatim, so the promoted 200
-    /// states what the generic relay would have stated — `100rel` excepted.
+    /// states what the generic relay would have stated — `100rel` and `timer`
+    /// excepted.
     #[test]
-    fn bobs_advertisement_reaches_alice_but_never_100rel() {
+    fn bobs_advertisement_reaches_alice_but_never_100rel_or_timer() {
         let (allow, supported) = advert_relaying(
             None,
             &received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer, foo")]),
         );
         assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE"));
-        assert_eq!(supported.as_deref(), Some("timer, foo"));
+        assert_eq!(supported.as_deref(), Some("foo"));
     }
 
     /// The advertised set does not depend on which rule minted the message:
     /// the service resolves what every other mint point resolves, and the one
-    /// deliberate difference is the tag it may not claim.
+    /// deliberate difference is the two tags it may not claim.
     #[test]
     fn the_service_advertises_what_every_other_mint_point_resolves() {
         let from_bob = received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer")]);
         let generic = capabilities::relaying_in(None, Face::Originator, &from_bob);
         let (allow, supported) = advert_relaying(None, &from_bob);
         assert_eq!(allow, generic.allow_text());
-        assert_eq!(supported, generic.without_option_tag("100rel").supported_text());
+        assert_eq!(
+            supported,
+            generic.without_option_tag("100rel").without_option_tag("timer").supported_text()
+        );
     }
 
-    /// The declaration wins — and `100rel` is dropped from it even when the
-    /// call declares it, because Alice saw no reliable provisional from us.
+    /// The declaration wins — and `100rel` and `timer` are dropped from it even
+    /// when the call declares them: Alice saw no reliable provisional from us,
+    /// and the promoted 200 states no session interval.
     #[test]
-    fn a_declared_set_wins_and_never_claims_100rel() {
-        let features =
-            features_declaring(&["INVITE", "ACK", "CANCEL", "BYE"], &["100rel", "timer"]);
+    fn a_declared_set_wins_and_never_claims_100rel_or_timer() {
+        let features = features_declaring(
+            &["INVITE", "ACK", "CANCEL", "BYE"],
+            &["100rel", "timer", "replaces"],
+        );
         let (allow, supported) =
             advert_relaying(Some(&features), &received(&[("Allow", "MESSAGE")]));
         assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
-        assert_eq!(supported.as_deref(), Some("timer"));
+        assert_eq!(supported.as_deref(), Some("replaces"));
     }
 }

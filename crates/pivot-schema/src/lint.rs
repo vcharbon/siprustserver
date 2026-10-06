@@ -25,6 +25,7 @@ mod routing_rules;
 mod scoping_rules;
 mod strings;
 mod subset;
+mod transactions;
 mod violation_rules;
 
 use std::collections::{BTreeMap, BTreeSet};

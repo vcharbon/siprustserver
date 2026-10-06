@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
+use sip_message::parser::SipParserLimits;
 use sip_message::{SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
@@ -25,7 +26,7 @@ use crate::strategies::forward_all::ForwardAllStrategy;
 use crate::RoutingStrategy;
 
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 const W1: &str = "10.0.0.1";
 const W2: &str = "10.0.0.2";
 
@@ -235,4 +236,66 @@ Content-Length: 0\r\n\r\n"
         outcome.target, None,
         "the ACK to a self-generated non-2xx final must be absorbed at this hop"
     );
+}
+
+/// A pre-RFC-3261 upstream's message: no `branch` on its top Via. The
+/// §8.1.1.7 magic-cookie gate is a wire-grammar rule, so it is hydrated
+/// rather than read off the wire.
+fn branchless(raw: &str) -> SipMessage {
+    let limits = SipParserLimits { wire_grammar: false, ..SipParserLimits::default() };
+    CustomParser::with_limits(limits).parse(raw.as_bytes()).unwrap()
+}
+
+fn branchless_ack(route: &str) -> SipMessage {
+    branchless(&format!(
+        "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
+Call-ID: legacy-ack@test\r\n\
+CSeq: 1 ACK\r\n\
+{route}Content-Length: 0\r\n\r\n"
+    ))
+}
+
+// With no branch to tell a non-2xx ACK from a 2xx one, the hop decision falls
+// back on the route set: the route-less ACK follows the 486's hop, while one
+// carrying a Route (as a 2xx ACK carries the dialog's) takes the normal ladder.
+#[tokio::test]
+async fn a_branchless_non_2xx_ack_follows_the_final_only_without_a_route() {
+    let core = core().await;
+    let invite = branchless(&format!(
+        "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: legacy-ack@test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@{UAC}:5060>\r\n\
+Content-Length: 0\r\n\r\n"
+    ));
+    core.route_request(&invite, src()).await;
+    let SipMessage::Response(busy) = branchless(&format!(
+        "SIP/2.0 486 Busy Here\r\n\
+Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
+Via: SIP/2.0/UDP {UAC}:5060\r\n\
+From: <sip:alice@{UAC}>;tag=tag-a\r\n\
+To: <sip:bob@10.0.0.50>;tag=callee-1\r\n\
+Call-ID: legacy-ack@test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n"
+    )) else {
+        panic!("expected response")
+    };
+    core.handle_response(busy, worker_src()).await;
+
+    let routed = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
+    let out = core.route_request(&branchless_ack(&routed), src()).await;
+    assert_ne!(out.decision, RoutingDecisionKind::AckHop, "a routed ACK takes the ladder");
+
+    let out = core.route_request(&branchless_ack(""), src()).await;
+    assert_eq!(out.decision, RoutingDecisionKind::AckHop);
+    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "to where the 486 came from");
 }

@@ -12,7 +12,16 @@ $SF capture.pcap --list                       # one line per call
 $SF capture.pcap --call-id 7f3a --full        # ladders with raw messages
 $SF /var/capture-ring/ --final-status none    # a directory of ring files
 $SF capture.pcap --json > capture.flows.json  # the whole model, schema 5
+$SF ring0.pcap ring1.pcap --contiguous 60000 --json   # one capture in two files
 ```
+
+Several inputs read as one datagram stream in the given order (a directory's
+ring files oldest first by mtime), so a fragment can straddle a file boundary.
+`--contiguous <max-gap-ms>` states that the inputs ARE one capture — the
+consecutive files of one tap — and refuses them (exit 2, both files named)
+when one overlaps the one before it, starts more than the gap after it, or
+was given out of time order. Without it nothing is checked: a directory of
+unrelated captures is a valid corpus.
 
 ## Review mode: the RFC rules on the selected calls
 
@@ -50,6 +59,23 @@ The review runs over every selected group whatever `--limit` prints.
 Capture-stack duplicates (same bytes within 200 ms) are collapsed at ingest and
 counted as `capture-dups`; a transaction's own retransmissions are marked and
 skipped by the rules. Neither is a flag.
+
+A merged capture whose probes' clocks disagree by more than that is aligned
+first (`align.rs`). No window can do it: a clock offset lands anywhere in the
+T1 ladder's own range (0.5, 1, 2, 4, 8, 16 s), and a wider window is cumulative
+— reaching one offset swallows every smaller ladder gap with it. The probe id
+can, because a probe never writes one packet twice. So the offset between two
+probes is measured on the datagrams both wrote, the k-th copy on one against
+the k-th on the other (a ladder both saw yields the clock's offset, never the
+ladder's gap), and stands on three agreeing deltas at least, one of them an ACK
+or a response to a non-INVITE — a class with no retransmission timer of its
+own, so its two copies are one packet and not a ladder whose first emission
+one probe saw and whose rung the other saw (three such requests agree at T1 as
+tightly as two clocks do). A clock that steps mid-capture is measured stretch
+by stretch. The later clock is rebased, its probe-only messages with it, and
+the copies collapse as capture-stack duplicates. Each stretch is one
+`# aligned-probe=… reference=… from-us=… offset-ms=… pairs=…` line and a
+`flow_stats.aligned_probes` entry of the document, a zero stretch included.
 
 ## A document back into a capture
 

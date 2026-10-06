@@ -7,11 +7,16 @@
 //!     any b-leg is rewritten into a bare 180 (no SDP, no `100rel`) toward A and
 //!     the call advances to `Suppressing`.
 //!   - **`Suppressing`** — the first 18x is out (as a bare 180). Later 18x
-//!     across every b-leg follow the `relay18x.messages` policy (default FIRST:
+//!     across every b-leg follow the `Relay18xMessages` policy (default FIRST:
 //!     all suppressed; ALL: each relayed downgraded; ONE_PER_VALUE: one per
 //!     distinct upstream status value) — every relayed one reuses the first
-//!     180's To-tag, and so does the 200 OK, so the caller sees one stable
-//!     callee identity across forking/failover.
+//!     180's To-tag, so the caller holds one early dialog whichever fork rings.
+//!     The 200 OK answers under the tag of the caller dialog its callee dialog
+//!     was shown as: the dialog behind a relayed 180 keeps that tag; a callee
+//!     dialog the caller was never shown (a suppressed fork, a rerouted leg)
+//!     opens a caller dialog of its own under a fresh tag (RFC 3261 §12.1.2) —
+//!     on the wire a second dialog; in the model the one a-dialog re-identified,
+//!     the abandoned tag's mappings retired (`adopt_a_tag`).
 //!
 //! Its cursor is a read-only **projection** (see [`project_cursor`], mirroring the
 //! `global-call` / `transfer` projections) of two authoritative facts that already
@@ -38,16 +43,17 @@
 //! registry (`b2bua-runner::compose_services`) so `docs/sm/relayFirst18x.md` is
 //! generated from the same declared `active_states`/`transitions`/`effects`.
 
+use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::{build_answer_from_offer, BuildAnswerOptions, Method, SdpBuildResult};
+use sip_message::{answer_reoffer_both_ways, Method};
 
-use super::model::{
+use super::relay;
+use b2bua_sdk::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
     TimerDelay,
 };
-use super::relay;
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
@@ -116,7 +122,7 @@ define_service! {
         // Wins over CORE `relay-provisional` by SERVICE_LAYER. On the first 18x:
         // relay a bare 180 (minting the a-facing tag + seeding the tag map, in the
         // `RelayFirstBare180` executor) and advance to `Suppressing`. Later 18x
-        // follow the `relay18x.messages` policy (Routing API `Relay18x.messages`):
+        // follow the `Relay18xMessages` policy:
         // FIRST (default) suppresses them all; ALL relays each one (downgraded to
         // a bare 180 under the SAME stored a-facing tag — the mask stays one
         // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
@@ -124,7 +130,11 @@ define_service! {
         // by the B2BUA itself (alice never saw it), once per provisional — the
         // responder's §3 retransmission of one is discarded (RFC 3262 §4);
         // `fake-prack` caches bob's SDP per `(leg, To-tag)` dialog — strictly,
-        // one cache per fork.
+        // one cache per fork. Once alice's INVITE transaction sent its final
+        // no 18x is shown to her at all, first or later, whatever the
+        // policy (RFC 3261 §13.3.1.1 / §17.2.1): a leg ringing then is
+        // suppressed with what it is owed. A provisional on a leg that
+        // already took its final answers nothing and is no candidate here.
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -137,6 +147,7 @@ define_service! {
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(1)
+                .leg_states(&[LegState::Trying, LegState::Early])
                 .direction(Direction::FromB),
             handle: |ctx| {
                 let resp = ctx.response()?;
@@ -161,43 +172,42 @@ define_service! {
                     invite_cseq,
                     b_tag: b_tag.to_string(),
                 });
-                // fake-prack: cache bob's SDP per dialog when 100rel is in play.
-                let cache_action = if fake_prack && rseq.is_some() && !resp.body().is_empty() {
-                    Some(RuleAction::CacheSdpOnLegDialog {
-                        leg_id: leg.clone(),
-                        b_tag: b_tag.to_string(),
-                        body: resp.body().to_vec(),
-                    })
-                } else {
-                    None
+                // fake-prack: cache bob's SDP per dialog when 100rel is in play —
+                // the description alone, wherever the body framed it.
+                let cache_action = match resp.sdp() {
+                    Some(sdp) if fake_prack && rseq.is_some() => {
+                        Some(RuleAction::CacheSdpOnLegDialog {
+                            leg_id: leg.clone(),
+                            b_tag: b_tag.to_string(),
+                            body: sdp.to_vec(),
+                        })
+                    }
+                    _ => None,
                 };
 
-                if ctx.call.relay_first_18x_first_relayed() {
-                    // Subsequent 18x — the `relay18x.messages` policy decides
+                let caller_answered = originator_final_sent(&ctx.call);
+                if ctx.call.relay_first_18x_first_relayed() || caller_answered {
+                    // Subsequent 18x — the `Relay18xMessages` policy decides
                     // whether it is relayed again (downgraded, under the stored
-                    // a-facing tag) or suppressed. Either way it is PRACKed +
-                    // cached (per-fork dialog state is policy-independent).
-                    let relay_again = match ctx.call.relay_first_18x_messages() {
-                        call::features::Relay18xMessages::All => true,
-                        call::features::Relay18xMessages::First => false,
-                        call::features::Relay18xMessages::OnePerValue => {
-                            !ctx.call.relay_first_18x_value_relayed(resp.status())
-                        }
-                    };
+                    // a-facing tag) or suppressed; an answered caller is shown
+                    // none. Either way it is PRACKed + cached (per-fork dialog
+                    // state is policy-independent).
+                    let relay_again = !caller_answered
+                        && match ctx.call.relay_first_18x_messages() {
+                            call::features::Relay18xMessages::All => true,
+                            call::features::Relay18xMessages::First => false,
+                            call::features::Relay18xMessages::OnePerValue => {
+                                !ctx.call.relay_first_18x_value_relayed(resp.status())
+                            }
+                        };
                     if !relay_again {
-                        let mut actions = Vec::new();
-                        if let Some(a) = prack_action {
-                            actions.push(a);
-                        }
+                        // The suppressed provisional's due — Early, PRACK,
+                        // CDR — plus the fake-prack cache, which keys on the
+                        // early dialog the PRACK registers.
+                        let mut actions = absorbed_provisional_actions(ctx);
                         if let Some(a) = cache_action {
                             actions.push(a);
                         }
-                        actions.push(RuleAction::AddCdrEvent {
-                            event_type: CdrEventType::Provisional,
-                            leg_id: leg,
-                            status_code: Some(resp.status() as i64),
-                            reason: None,
-                        });
                         return ok(actions);
                     }
                     // Relay-again falls through to the RelayFirstBare180 branch:
@@ -233,16 +243,20 @@ define_service! {
                 ok(actions)
             },
         },
-        // ── force-tag-consistency — reuse the stored To-tag on 200 OK ────────
+        // ── answering-dialog-identity — which caller dialog the 200 OK lands in ─
         //
-        // Composes with CORE `confirm-dialog`: pre-seed the tag map with the
-        // stored a-facing tag so the 200 OK To-tag matches the first 180, and
-        // (fake-prack) stage the winning dialog's cached SDP into the relayed 200.
-        // The engine is first-match-wins, so when this rule acts it must replay
+        // Composes with CORE `confirm-dialog`: the callee dialog the 2xx confirms
+        // decides the a-facing tag. Shown to the caller (a relayed 180 mapped
+        // it): nothing to add, the map already names that 180's tag. Never
+        // shown, while a bare 180 pinned another dialog: `MapUnshownDialog`
+        // mints a fresh tag first, so the 200 opens a second caller dialog (RFC
+        // 3261 §12.1.2) instead of re-tagging the one she rang on. (fake-prack)
+        // stage the winning dialog's cached SDP into the relayed 200. The engine
+        // is first-match-wins, so when this rule acts it must replay
         // `confirm-dialog`'s action sequence itself (see `confirm_dialog_actions`);
-        // when it has nothing to pre-seed it declines (`None`) and `confirm-dialog`
-        // (CORE, ranked just below) handles the 2xx. No cursor move — the call
-        // bridges via the `global-call` machine; the masking property persists.
+        // with nothing to add it declines (`None`) and `confirm-dialog` (CORE,
+        // ranked just below) handles the 2xx. No cursor move — the call bridges
+        // via the `global-call` machine; the masking property persists.
         // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`):
         // it defers to CORE `cancel-200-crossing`, which reaps
         // the abandoned callee (ACK+BYE) instead of bridging it to a caller the
@@ -251,12 +265,12 @@ define_service! {
         // `re-ack-retransmitted-2xx` (RFC 3261 §13.2.2.4) and the answer path
         // never re-runs.
         sm_rule! {
-            id: "force-tag-consistency",
+            id: "answering-dialog-identity",
             machine: RELAY_FIRST_18X_MACHINE,
             active: [ Phase::Masking, Phase::Suppressing ],
             transitions: [],
             effects: [
-                Effect::Relay { label: "200 OK → A (reuse stored To-tag; fake-prack: inject cached SDP)" },
+                Effect::Relay { label: "200 OK → A (shown dialog: the 180's To-tag; unshown: a fresh one; fake-prack: inject cached SDP)" },
                 Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
                 Effect::GuardTimer { timer: TimerType::NoAnswer, label: "cancel B no-answer" },
                 Effect::GuardTimer { timer: TimerType::GlobalDuration, label: "arm max-duration" },
@@ -274,22 +288,29 @@ define_service! {
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = Vec::new();
 
-                if let Some(stored) = ctx.call.relay_first_18x_stored_a_tag() {
-                    actions.push(RuleAction::AddTagMapping {
-                        a_tag: stored.to_string(),
+                // `first_relayed` scopes the fresh tag to a dialog pinned by
+                // THIS machine's bare 180: an a-dialog another service pinned
+                // (an MRF early-media 183) is that service's to re-identify.
+                // A tagless 2xx names no dialog (§12.1.2) and takes the primary.
+                let shown = b_tag.is_empty() || ctx.call.find_by_b_tag(&leg, &b_tag).is_some();
+                if !shown && ctx.call.relay_first_18x_first_relayed() {
+                    actions.push(RuleAction::MapUnshownDialog {
                         b_leg_id: leg.clone(),
                         b_tag: b_tag.to_string(),
                     });
                 }
 
-                if is_fake_prack(ctx) {
+                // fake-prack: a 2xx with no description gives alice the one
+                // this dialog's exchange left for her; a 2xx with its own is
+                // relayed as it is.
+                if is_fake_prack(ctx) && resp.sdp().is_none() {
                     let cached = ctx.call.cached_sdp_for_leg_dialog(&leg, &b_tag)
                         .map(|b| b.to_vec());
                     match cached {
                         Some(b) if !b.is_empty() => {
                             actions.push(RuleAction::SetPolicyUpdateBody { body: b });
                         }
-                        _ if resp.body().is_empty() => {
+                        _ => {
                             // No cache AND bob's 200 has no body — surface a CDR
                             // marker (alice's call may break: no SDP at confirm).
                             actions.push(RuleAction::AddCdrEvent {
@@ -299,7 +320,6 @@ define_service! {
                                 reason: Some("fake-prack:200-ok-no-sdp".to_string()),
                             });
                         }
-                        _ => {} // bob repeated SDP in 200 → relay as-is.
                     }
                 }
 
@@ -339,9 +359,13 @@ define_service! {
         // ── fake-prack: locally answer a b-leg UPDATE under the mask (wins
         // over `relay-update`) ──────────────────────────────────────────────
         // Under the mask alice has no committed bob-SDP to negotiate against, so
-        // the B2BUA answers bob's UPDATE itself: a skeleton-fit answer derived
-        // from alice's INVITE offer (488 on no codec intersection), advancing the
-        // cached SDP to bob's offer; a bodyless refresh is answered 200 bare.
+        // the B2BUA answers bob's offer itself, as alice would: her INVITE
+        // description answering it (RFC 3264 §6, bob's preferred common format
+        // per stream, the next version of her session in that early dialog);
+        // and caches, for a 2xx without a description, alice's offer answered
+        // from bob's (his preferred format, his origin). 488 where she can
+        // accept no stream of it (RFC 3311 §5.2) or either is not a
+        // description; a bodyless refresh is answered 200 bare.
         // `is_fake_prack_masking` scopes this to that window — once the a-leg is
         // confirmed a b-leg UPDATE is an ordinary in-dialog request and falls
         // through to CORE `relay-update`. The FromA sibling's `leg_states` gate
@@ -353,8 +377,8 @@ define_service! {
             active: [ Phase::Masking, Phase::Suppressing ],
             transitions: [],
             effects: [
-                Effect::Respond { status: 200, label: "200 OK → B (local skeleton-fit answer)" },
-                Effect::Respond { status: 488, label: "488 → B (no codec intersection)" },
+                Effect::Respond { status: 200, label: "200 OK → B (alice's offer answering bob's)" },
+                Effect::Respond { status: 488, label: "488 → B (no stream alice can accept)" },
             ],
             matcher: Match::request()
                 .method("UPDATE")
@@ -365,35 +389,53 @@ define_service! {
                 let b_tag = req.from().tag().map(str::to_owned).unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
 
-                if req.body().is_empty() {
+                // An UPDATE carrying no description offers nothing to answer.
+                let Some(offer) = req.sdp() else {
                     return ok(vec![RuleAction::Respond {
                         status: 200,
                         reason: "OK".to_string(),
                         body: vec![],
                         content_type: None,
                     }]);
-                }
-
-                let alice_body = &ctx.call.a_leg_invite().body;
-                let options = BuildAnswerOptions {
-                    local_ip: ctx.config.sip_local_ip.clone(),
-                    now_ms: ctx.now_ms,
                 };
-                match build_answer_from_offer(req.body(), Some(alice_body), &options) {
-                    SdpBuildResult::Ok(body) => ok(vec![
+
+                // Bob is answered out of the offer HE was sent, under the next
+                // version of that session in this early dialog (RFC 3264 §8);
+                // alice's 200 answers the offer SHE made; the two agree, or
+                // bob is refused (`answer_reoffer_both_ways`).
+                let b_leg = ctx.call.b_legs().iter().find(|l| l.leg_id == leg);
+                let sent = b_leg.and_then(|l| {
+                    l.dialogs
+                        .iter()
+                        .filter(|d| d.sip.remote_tag == b_tag)
+                        .chain(&l.dialogs)
+                        .find_map(relay::acked_invite)
+                });
+                let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));
+                let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
+                let both = sent
+                    .as_ref()
+                    .and_then(|r| r.sdp())
+                    .zip(caller.sdp())
+                    .zip(origin)
+                    .and_then(|((sent, original), o)| {
+                        answer_reoffer_both_ways(offer, sent, original, &o)
+                    });
+                match both {
+                    Some(both) => ok(vec![
                         RuleAction::Respond {
                             status: 200,
                             reason: "OK".to_string(),
-                            body,
+                            body: both.to_reofferer,
                             content_type: Some("application/sdp".to_string()),
                         },
                         RuleAction::CacheSdpOnLegDialog {
                             leg_id: leg,
                             b_tag: b_tag.to_string(),
-                            body: req.body().to_vec(),
+                            body: both.to_offerer,
                         },
                     ]),
-                    _ => ok(vec![RuleAction::Respond {
+                    None => ok(vec![RuleAction::Respond {
                         status: 488,
                         reason: "Not Acceptable Here".to_string(),
                         body: vec![],
@@ -405,12 +447,10 @@ define_service! {
         // ── fake-prack: locally answer a-leg early-dialog **bodyless** UPDATE ─
         // A no-body UPDATE (session-timer / dialog refresh, RFC 4028) carries no
         // offer to negotiate, so answer 200 OK locally — do NOT wake the b-leg.
-        // An UPDATE that carries an SDP *offer* is deliberately NOT matched here
-        // (`is_fake_prack_bodyless_update`): answering it with a bodyless 200
-        // would strand alice's offer (RFC 3264 §5). It falls through to CORE
-        // `relay-update`, which forwards the offer to the b-leg early dialog and
-        // relays the callee's real answer back — the RFC 3311 §5.1 normal case.
-        // (early state only; after merge, normal in-dialog UPDATE relay applies.)
+        // An UPDATE carrying an offer is not matched here: under the mask alice
+        // saw only an unreliable bare 180, so her INVITE offer is unanswered and
+        // CORE `update-glare` refuses her offer 500 (RFC 3311 §5.2). (Early state
+        // only; after merge, normal in-dialog UPDATE relay applies.)
         sm_rule! {
             id: "fake-prack-handle-update-from-a",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -473,7 +513,7 @@ pub fn project_cursor(call: &mut Call) {
     }
 }
 
-/// Replay `confirm-dialog`'s action sequence (the `force-tag-consistency` rule
+/// Replay `confirm-dialog`'s action sequence (the `answering-dialog-identity` rule
 /// composes with it: it wins the 2xx match, so it must emit confirm-dialog's
 /// effects itself). Kept in sync with the CORE `confirm-dialog` rule
 /// (`defaults::core_rules`). The §13.3.1.4 un-ACKed-2xx ladder is no rule's
@@ -494,10 +534,9 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         RuleAction::Merge { leg_a: a, leg_b: b.clone() },
         RuleAction::RelayToPeer { transform: MessageTransform::default() },
     ];
-    // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on receipt, after the
-    // caller has its answer — the masking service changes who the caller sees,
-    // never who owes the callee its ACK.
-    actions.extend(relay::ack_on_answer(ctx, &b));
+    // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own, relayed —
+    // the masking service changes who the caller sees, never whose ACK the
+    // callee gets.
     actions.extend(vec![
         RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
         RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },

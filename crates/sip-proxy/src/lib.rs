@@ -5,8 +5,8 @@
 //! signed Record-Route cookie, and tracks worker liveness with OPTIONS health
 //! probes. It does **not** use the transaction layer's FSMs: the branch it
 //! pushes on its Via is a function of the message (RFC 3261 §16.11,
-//! `branch`), and the CANCEL/ACK hop is a proxy-local
-//! `(Call-ID|From-tag|CSeq#)` LRU ([`cancel_lru`]). It reuses `sip-txn::IdGen`
+//! `branch`), and the CANCEL/ACK hop is a proxy-local LRU keyed on the
+//! INVITE transaction as received ([`cancel_lru`]). It reuses `sip-txn::IdGen`
 //! for the To-tag of its own finals and `sip-clock::Clock` for timestamps.
 //! See [ADR-0009](../../docs/adr/0009-front-proxy-rust-shape.md).
 //!

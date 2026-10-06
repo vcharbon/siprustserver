@@ -8,8 +8,9 @@
 //!     neither answered it promptly nor said it was trying.
 //!   - [`NoTarget404`] (§16.3) charges the proxy itself: a request it resolved
 //!     no target for is answered 404, not some other error.
-//!   - [`StrictRouteRewriteHandled`] (§16.4) charges the proxy that took a
-//!     strict-routed request and forwarded it without the Request-URI swap.
+//!   - [`StrictRouteRewriteHandled`] (§16.4, §16.6 step 6) charges the proxy
+//!     that took a strict-routed request and forwarded it without the
+//!     Request-URI rewrite.
 //!   - [`StrictRouteShuffleOnSend`] (§16.6 step 6) charges the hop whose own
 //!     outbound request still states a strict route at the top of its Route
 //!     set — the send-side twin of the rule above.
@@ -30,7 +31,6 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
-use super::branch::{BranchKey, BranchReading};
 use super::Obligation;
 
 /// **RFC 3261 §16.7 step 5 — a stateful proxy absorbs the downstream 100.** A
@@ -318,28 +318,36 @@ impl Obligation for NoTarget404 {
     }
 }
 
-/// **RFC 3261 §16.4 — a strict-routed request is rewritten before it is
-/// forwarded.** A topmost Route without `;lr` is a pre-loose-routing hop that
-/// expects to be addressed in the Request-URI: the proxy moves that URI into
-/// the request line (and its own former Request-URI onto the tail of the Route
-/// set) before forwarding. Forwarded verbatim, the request reaches a hop that
-/// is not the one the URI named.
+/// **RFC 3261 §16.4 / §16.6 step 6 — a strict-routed request is rewritten
+/// before it is forwarded.** A Route without `;lr` is a pre-loose-routing hop
+/// that expects to be addressed in the Request-URI. Two shapes reach a proxy:
 ///
-/// **The occasion is one request an endpoint TOOK whose FIRST Route is
-/// strict.** Nothing else is: a loose first route is the §16.12 path this rule
-/// says nothing about, and a request with no Route set states no path to
-/// rewrite. A vantage carrying no header block for the request cannot say
-/// whether it was strict-routed at all, so it opens no occasion either —
-/// unreadable bytes here withhold the OCCASION, where elsewhere in this crate
-/// they withhold only the verdict.
+/// - **addressed to it**: its Request-URI names the proxy (a peer
+///   strict-routed to the URI the proxy record-routed, §12.2.1.1) under no
+///   loose top Route naming the proxy, which is loose routing. §16.4 has
+///   the proxy take the LAST Route as Request-URI; §16.6 step 6 then lifts the
+///   next Route into it if that one is strict too.
+/// - **a strict first Route**, once a loose top Route naming the proxy is
+///   popped: the proxy moves that URI into the request line (and its own
+///   former Request-URI onto the tail of the Route set).
+///
+/// Forwarded without the rewrite, the request reaches a hop that is not the
+/// one the route set named.
+///
+/// **The occasion is one request an endpoint TOOK in one of those shapes.**
+/// Nothing else is: a loose first route is the §16.12 path this rule says
+/// nothing about, and a request with no Route set states no path to rewrite. A
+/// vantage carrying no header block for the request cannot say whether it was
+/// strict-routed at all, so it opens no occasion either — unreadable bytes
+/// here withhold the OCCASION, where elsewhere in this crate they withhold only
+/// the verdict.
 ///
 /// **Discharge is the emitter's own forward of that transaction**: a request
-/// of the same method it sent on the same branch, carrying the strict Route URI
-/// as its Request-URI. Correlating on the branch the INCOMING request named is
-/// what pairs a verbatim forward with what it should have rewritten; a proxy
-/// that mints a fresh branch (§16.6) forwards a request this rule cannot pair,
-/// and a §16.4 rewrite is judged against the copy that stayed on the branch.
-/// Having forwarded NOTHING on it is the violation the tripwire is for.
+/// of the same method it sent on the same call whose Via stack carries the
+/// branch the INCOMING request named — on top when it stayed on the branch,
+/// under the proxy's own Via when it forwarded statefully (§16.6 step 8) —
+/// with the URI the rewrite owes as its Request-URI. Having forwarded NOTHING
+/// is the violation the tripwire is for.
 ///
 /// Charges the endpoint that TOOK the strict-routed request — §16.4 is proxy
 /// behaviour, and a UA that receives one forwards nothing at all, which is why
@@ -352,7 +360,6 @@ impl Obligation for StrictRouteRewriteHandled {
     }
 
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let seen = BranchReading::of(wire.msgs);
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.repeat {
@@ -366,10 +373,10 @@ impl Obligation for StrictRouteRewriteHandled {
             let Some(head) = msg.head.as_deref() else { continue };
             // A row no reader accepts belongs to the grammar rules, not here.
             let Some(routes) = sniff::route_uris(head, "route") else { continue };
-            let Some(first_route) = routes.first().filter(|r| !r.loose) else { continue };
             // The proxy is the endpoint the request arrived AT: it owes the
             // rewritten forward.
             let proxy = msg.dst.as_str();
+            let Some(owed) = owed_request_uri(head, &routes, proxy) else { continue };
             // The occasion rests on the request the proxy TOOK: that is where
             // the rewrite was owed.
             let finding = |decision| Finding {
@@ -381,46 +388,77 @@ impl Obligation for StrictRouteRewriteHandled {
                 anchor: mi,
                 decision,
             };
-            let forwarded = seen
-                .at(&BranchKey { emitter: proxy, call_id: msg.call_id.as_str(), branch })
-                .and_then(|b| b.first_sent(method));
-            let Some(forwarded) = forwarded else {
-                out.push(finding(Decision::Violated(Evidence::StrictRouteNotRewritten {
+            let violated = |forwarded_request_uri: String| {
+                Decision::Violated(Evidence::StrictRouteNotRewritten {
                     strict_route_msg: mi,
                     strict_route_hop: msg.hop,
                     strict_route_ts_us: msg.at_us,
                     method: method.to_string(),
                     branch: branch.to_string(),
-                    first_route: first_route.uri.clone(),
-                    forwarded_request_uri: String::new(),
-                })));
+                    first_route: owed.clone(),
+                    forwarded_request_uri,
+                })
+            };
+            let forwarded = wire.msgs.iter().skip(mi + 1).find(|m| {
+                !m.repeat
+                    && m.src == msg.dst
+                    && m.call_id == msg.call_id
+                    && m.is_request(method)
+                    && m.head
+                        .as_deref()
+                        .is_some_and(|h| sniff::via_branches(h).iter().any(|b| b == branch))
+            });
+            let Some(forwarded) = forwarded else {
+                out.push(finding(violated(String::new())));
                 continue;
             };
-            let sent_uri =
-                wire.msgs[forwarded.msg].head.as_deref().and_then(sniff::request_uri_facts);
+            let sent_uri = forwarded.head.as_deref().and_then(sniff::request_uri_facts);
             let Some(sent_uri) = sent_uri else {
                 out.push(finding(Decision::Undecidable(
                     "the forward's Request-URI is unreadable at this vantage",
                 )));
                 continue;
             };
-            if sent_uri.uri == first_route.uri {
+            if sent_uri.uri == owed {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
-            out.push(finding(Decision::Violated(Evidence::StrictRouteNotRewritten {
-                strict_route_msg: mi,
-                strict_route_hop: msg.hop,
-                strict_route_ts_us: msg.at_us,
-                method: method.to_string(),
-                branch: branch.to_string(),
-                first_route: first_route.uri.clone(),
-                forwarded_request_uri: sent_uri.uri,
-            })));
+            out.push(finding(violated(sent_uri.uri)));
         }
         out.sort_by_key(|f| f.anchor);
         out
     }
+}
+
+/// The Request-URI a proxy at `proxy` owes the forward of a request carrying
+/// `head` and `routes`, or `None` where the request is not strict-routed.
+///
+/// - Addressed to the proxy (§16.4): its Request-URI names the proxy — a URI
+///   the proxy record-routed, `;lr` or not, since a strict-routing peer
+///   addresses whatever URI it was given — no loose top Route names the
+///   proxy, and the last Route is not loose: a strict-routed request carries
+///   the remote target last (§12.2.1.1). That target is owed; a strict Route
+///   left first takes its place (§16.6 step 6).
+/// - Otherwise a loose top Route naming the proxy is popped (§16.4), and the
+///   first Route left is owed the Request-URI when it is strict (§16.6 step 6).
+fn owed_request_uri(head: &[u8], routes: &[sniff::UriFacts], proxy: &str) -> Option<String> {
+    let at_proxy = |host: &str, port: u16| {
+        super::dialog::wire_addr(proxy).is_some_and(|(h, p)| h == host && p == port)
+    };
+    let loose_to_proxy = routes.first().is_some_and(|r| r.loose && at_proxy(&r.host, r.port));
+    let target_last = routes.last().is_some_and(|r| !r.loose);
+    let addressed = !loose_to_proxy
+        && target_last
+        && sniff::request_uri_facts(head).is_some_and(|uri| at_proxy(&uri.host, uri.port));
+    if addressed {
+        let (last, rest) = routes.split_last()?;
+        return Some(match rest.first() {
+            Some(next) if !next.loose => next.uri.clone(),
+            _ => last.uri.clone(),
+        });
+    }
+    let left = if loose_to_proxy { &routes[1..] } else { routes };
+    left.first().filter(|r| !r.loose).map(|r| r.uri.clone())
 }
 
 /// One INVITE transaction as the endpoint that OPENED it saw it. Spelled out as
@@ -517,15 +555,18 @@ impl<'a> Reading<'a> {
 /// Where the route set's first URI carries no `;lr` it is a strict route, and
 /// step 6.b has the forwarding element push the current Request-URI to the
 /// bottom of the Route list and lift that first Route URI into the
-/// Request-URI. A request already on the wire cannot replay the pre-swap state,
-/// so what is read is the structural indicator the swap leaves behind: after
-/// it, the topmost Route is no longer the strict hop.
+/// Request-URI. After the swap the topmost Route may still lack `;lr` — the
+/// Request-URI it pushed down is typically a Contact — so a strict topmost
+/// Route is judged against the request the hop forwarded, when this vantage
+/// carried it (the received top-Via branch in the sent Via stack): the swap
+/// ran when the sent Request-URI is the one that request owed — the first
+/// strict Route left once §16.4 processed it.
+/// Otherwise a topmost strict route either means the swap never ran, or that
+/// the next hop is itself a strict-route target that survived it; both are
+/// worth surfacing, and the sender is the party that would have run the swap.
 ///
 /// The occasion is one fresh request the endpoint SENT that states a Route set
-/// at all — a request with none is not routed through anything. A topmost
-/// strict route on it either means the swap never ran, or that the next hop is
-/// itself a strict-route target that survived it; both are worth surfacing, and
-/// the sender is the party that would have run the swap.
+/// at all — a request with none is not routed through anything.
 ///
 /// A Route row no reader accepts opens NO occasion: nothing can say what the
 /// route set was, and the grammar rules own the malformed row.
@@ -546,7 +587,7 @@ impl Obligation for StrictRouteShuffleOnSend {
             let Some(head) = msg.head.as_deref() else { continue };
             let Some(routes) = sniff::route_uris(head, "Route") else { continue };
             let Some(first) = routes.first() else { continue };
-            let decision = if first.loose {
+            let decision = if first.loose || swapped(wire.msgs, mi, head) {
                 Decision::Compliant
             } else {
                 Decision::Violated(Evidence::HeaderValueRejected {
@@ -573,6 +614,28 @@ impl Obligation for StrictRouteShuffleOnSend {
         }
         out
     }
+}
+
+/// Whether the request at `mi` (header block `head`) is the §16.6 step 6 swap
+/// of a request its sender took: that request rides below the sender's own
+/// Via, and the sent Request-URI is the one [`owed_request_uri`] names for it.
+fn swapped(msgs: &[Msg], mi: usize, head: &[u8]) -> bool {
+    let sent = &msgs[mi];
+    let Some(request_uri) = sniff::request_uri_facts(head) else { return false };
+    let below = sniff::via_branches(head);
+    let below = below.get(1..).unwrap_or_default();
+    let taken = msgs[..mi].iter().rev().find(|taken| {
+        !taken.repeat
+            && taken.dst == sent.src
+            && taken.call_id == sent.call_id
+            && matches!((&taken.kind, &sent.kind),
+                (Kind::Request { method: a }, Kind::Request { method: b }) if a.eq_ignore_ascii_case(b))
+            && taken.via_branch.as_deref().is_some_and(|b| below.iter().any(|v| v == b))
+    });
+    let Some(taken_head) = taken.and_then(|t| t.head.as_deref()) else { return false };
+    let Some(routes) = sniff::route_uris(taken_head, "Route") else { return false };
+    owed_request_uri(taken_head, &routes, sent.src.as_str())
+        .is_some_and(|owed| owed == request_uri.uri)
 }
 
 #[cfg(test)]
@@ -990,6 +1053,116 @@ mod tests {
         );
     }
 
+    /// A request strict-routed TO the proxy (§12.2.1.1: its Request-URI is the
+    /// proxy's Record-Route URI) is forwarded with its last Route as the
+    /// Request-URI (§16.4), under the proxy's own Via (§16.6 step 8).
+    #[test]
+    fn a_request_addressed_to_the_proxy_takes_its_last_route() {
+        let taken =
+            |route: &str| routed(1_000, ALICE, PROXY, "z9hG4bK-in", &format!("sip:{PROXY}"), route);
+        let forward = |request_uri: &str, route: &str| {
+            let mut m = routed(2_000, PROXY, BOB, "z9hG4bK-out", request_uri, route);
+            let head = String::from_utf8(m.head.take().unwrap()).unwrap().replace(
+                "branch=z9hG4bK-out\r\n",
+                "branch=z9hG4bK-out\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-in\r\n",
+            );
+            m.head = Some(head.into_bytes());
+            m
+        };
+        let target = "Route: <sip:bob@h>\r\n";
+        let swapped = [taken(target), forward("sip:bob@h", "")];
+        let f = strict(&swapped);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+
+        let verbatim = [taken(target), forward(&format!("sip:{PROXY}"), target)];
+        let f = strict(&verbatim);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let Decision::Violated(Evidence::StrictRouteNotRewritten {
+            first_route,
+            forwarded_request_uri,
+            ..
+        }) = &f[0].decision
+        else {
+            panic!("strict-route evidence: {:?}", f[0].decision)
+        };
+        assert_eq!(first_route, "sip:bob@h", "the last Route is owed");
+        assert_eq!(forwarded_request_uri, &format!("sip:{PROXY}"));
+
+        // A strict next hop left in the set takes the target's place (§16.6
+        // step 6), the target riding the tail.
+        let two = "Route: <sip:next@h>\r\nRoute: <sip:bob@h>\r\n";
+        let f = strict(&[taken(two), forward("sip:next@h", target)]);
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
+    /// A Request-URI at the proxy's own address under a loose Route naming the
+    /// proxy is loose routing (§16.4 pops that Route), not a strict route: a
+    /// preloaded outbound proxy serving the domain (§8.1.2), or an element
+    /// whose Contact names itself.
+    #[test]
+    fn a_loose_route_to_the_proxy_itself_is_no_occasion() {
+        let route = format!("Route: <sip:{PROXY};lr>\r\n");
+        for request_uri in [format!("sip:bob@{PROXY}"), format!("sip:bob@{PROXY};x=1")] {
+            let taken = routed(1_000, ALICE, PROXY, "z9hG4bK-in", &request_uri, &route);
+            let forward = routed(2_000, PROXY, BOB, "z9hG4bK-in", &format!("sip:bob@{BOB}"), "");
+            let f = strict(&[taken, forward]);
+            assert!(f.is_empty(), "loose routing to {request_uri} is no strict occasion: {f:?}");
+        }
+    }
+
+    /// A Request-URI at the proxy's address over a Route set that ends in a
+    /// loose entry is loose routing toward that entry: a strict-routed request
+    /// carries the remote target, never a loose route, last (§12.2.1.1).
+    #[test]
+    fn a_route_set_ending_loose_is_no_strict_occasion() {
+        let loose_next = "Route: <sip:p2@127.0.0.1:5096;lr>\r\n";
+        let taken =
+            routed(1_000, ALICE, PROXY, "z9hG4bK-in", &format!("sip:bob@{PROXY}"), loose_next);
+        let forward =
+            routed(2_000, PROXY, BOB, "z9hG4bK-in", &format!("sip:bob@{PROXY}"), loose_next);
+        let f = strict(&[taken, forward]);
+        assert!(f.is_empty(), "loose routing past the proxy opened a strict occasion: {f:?}");
+    }
+
+    /// An RFC 2543 UA strict-routes to a loose proxy's own `;lr` Record-Route
+    /// URI: the Request-URI names the proxy and no loose top Route does, so
+    /// §16.4 owes the last Route as the forward's Request-URI, and an
+    /// unrewritten forward is charged. With a loose router left in the Route
+    /// set the owed URI is still the target, which only §16.4 names.
+    #[test]
+    fn a_strict_route_to_the_proxys_own_loose_uri_is_rewritten() {
+        let own = format!("sip:{PROXY};lr");
+        let target = "Route: <sip:bob@h>\r\n";
+        let taken = |route: &str| routed(1_000, ALICE, PROXY, "z9hG4bK-in", &own, route);
+        let forward = |request_uri: &str, route: &str| {
+            let mut m = routed(2_000, PROXY, BOB, "z9hG4bK-out", request_uri, route);
+            let head = String::from_utf8(m.head.take().unwrap()).unwrap().replace(
+                "branch=z9hG4bK-out\r\n",
+                "branch=z9hG4bK-out\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-in\r\n",
+            );
+            m.head = Some(head.into_bytes());
+            m
+        };
+
+        let f = strict(&[taken(target), forward(&own, target)]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let Decision::Violated(Evidence::StrictRouteNotRewritten { first_route, .. }) =
+            &f[0].decision
+        else {
+            panic!("an unrewritten forward is charged: {:?}", f[0].decision)
+        };
+        assert_eq!(first_route, "sip:bob@h", "§16.4: the last Route is owed");
+
+        let via_loose = "Route: <sip:p2@h;lr>\r\nRoute: <sip:bob@h>\r\n";
+        let f = strict(&[taken(via_loose), forward(&own, via_loose)]);
+        assert_eq!(f.len(), 1, "a loose router before the target hides no occasion: {f:?}");
+        assert!(matches!(f[0].decision, Decision::Violated(_)), "{:?}", f[0].decision);
+
+        let f = strict(&[taken(via_loose), forward("sip:bob@h", "Route: <sip:p2@h;lr>\r\n")]);
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
     /// The header block is what says a request was strict-routed at all: a
     /// vantage that carried none opens NO occasion, rather than an undecidable
     /// one against every request on the wire.
@@ -1143,6 +1316,131 @@ mod tests {
         assert_eq!(header, "Route");
         assert!(value.contains("proxy@127.0.0.1"), "{value}");
         assert!(expected.contains(";lr"), "{expected}");
+    }
+
+    /// The swap leaves the request it pushed down at the top of the Route set:
+    /// paired with the request the hop took, a Request-URI that is a strict
+    /// route that request named is the swap having run.
+    #[test]
+    fn a_swapped_forward_paired_with_what_it_took_is_compliant() {
+        let taken = |route: &str| {
+            let mut m = forwarded(route);
+            m.src = "127.0.0.1:5050".to_string();
+            m.dst = ALICE.to_string();
+            m.via_branch = Some("z9hG4bK-r".to_string());
+            m
+        };
+        let sent = |request_uri: &str| {
+            let head = format!(
+                "INVITE {request_uri} SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-fwd\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5050;branch=z9hG4bK-r\r\n\
+                 Route: <sip:bob@127.0.0.1:5070>\r\n\
+                 From: <sip:alice@127.0.0.1>;tag=at\r\n\
+                 To: <sip:bob@127.0.0.1>\r\n\
+                 Call-ID: c1\r\n\
+                 CSeq: 1 INVITE\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            let mut m = invite(2_000, 1);
+            m.via_branch = Some("z9hG4bK-fwd".to_string());
+            m.head = Some(head.into_bytes());
+            m
+        };
+        let strict_hop = "<sip:strict@127.0.0.1>";
+        let f = shuffle(&[taken(strict_hop), sent("sip:strict@127.0.0.1")]);
+        let swap = f.iter().find(|f| f.anchor == 1).expect("the forward is an occasion");
+        assert!(matches!(swap.decision, Decision::Compliant), "{:?}", swap.decision);
+
+        let f = shuffle(&[taken(strict_hop), sent("sip:other@127.0.0.1")]);
+        let swap = f.iter().find(|f| f.anchor == 1).expect("the forward is an occasion");
+        assert!(matches!(swap.decision, Decision::Violated(_)), "not the route it named");
+    }
+
+    /// A request `src` sent `dst` on Via `branches` (top first), carrying
+    /// `routes`.
+    fn hop_msg(
+        at_us: u64,
+        src: &str,
+        dst: &str,
+        request_uri: &str,
+        branches: &[&str],
+        routes: &[&str],
+    ) -> Msg {
+        let mut head = format!("INVITE {request_uri} SIP/2.0\r\n");
+        for (i, branch) in branches.iter().enumerate() {
+            head += &format!("Via: SIP/2.0/UDP 127.0.0.1:{};branch={branch}\r\n", 6000 + i);
+        }
+        for route in routes {
+            head += &format!("Route: {route}\r\n");
+        }
+        head += "From: <sip:alice@127.0.0.1>;tag=at\r\nTo: <sip:bob@127.0.0.1>;tag=bt\r\n\
+                 Call-ID: c1\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
+        let mut m = hop_request(at_us, src, dst, branches[0], 2);
+        m.head = Some(head.into_bytes());
+        m
+    }
+
+    const HOP: &str = "127.0.0.1:5080";
+    const S1: &str = "<sip:s1@127.0.0.1:5095>";
+    const S2: &str = "<sip:s2@127.0.0.1:5096>";
+    const TARGET: &str = "<sip:bob@127.0.0.1:5070>";
+
+    /// What `HOP` forwarded on the branch it took, sent to s2.
+    fn forward_of(request_uri: &str, routes: &[&str]) -> Msg {
+        hop_msg(2_000, HOP, "127.0.0.1:5096", request_uri, &["z9hG4bK-out", "z9hG4bK-in"], routes)
+    }
+
+    fn violated_at(f: &[Finding], anchor: usize) -> bool {
+        f.iter().any(|f| f.anchor == anchor && matches!(f.decision, Decision::Violated(_)))
+    }
+
+    /// §16.6 step 6 lifts the FIRST strict Route, not any one of them.
+    #[test]
+    fn a_shuffle_lifting_a_later_strict_route_is_violated() {
+        let taken =
+            hop_msg(1_000, ALICE, HOP, "sip:bob@127.0.0.1:5070", &["z9hG4bK-in"], &[S1, S2]);
+        let sent = forward_of("sip:s2@127.0.0.1:5096", &[S1, TARGET]);
+        assert!(violated_at(&shuffle(&[taken, sent]), 1), "the wrong strict route was lifted");
+    }
+
+    /// The §16.4 rewrite ran but the step 6 swap did not: the strict hop left
+    /// on top was owed the Request-URI.
+    #[test]
+    fn a_skipped_shuffle_after_the_strict_route_restore_is_violated() {
+        let taken =
+            hop_msg(1_000, ALICE, HOP, &format!("sip:{HOP}"), &["z9hG4bK-in"], &[S2, TARGET]);
+        let sent = forward_of("sip:bob@127.0.0.1:5070", &[S2]);
+        assert!(violated_at(&shuffle(&[taken, sent]), 1), "the swap never ran");
+    }
+
+    /// The proxy pops its own loose Route (§16.4), and the first strict Route
+    /// left is owed the Request-URI: both strict-route rules charge lifting
+    /// another one.
+    #[test]
+    fn a_wrong_lift_after_popping_its_own_loose_route_is_violated() {
+        let own = format!("<sip:{HOP};lr>");
+        let taken = hop_msg(
+            1_000,
+            ALICE,
+            HOP,
+            "sip:bob@127.0.0.1:5070",
+            &["z9hG4bK-in"],
+            &[own.as_str(), S1, S2],
+        );
+        let sent = forward_of("sip:s2@127.0.0.1:5096", &[S1, TARGET]);
+        let msgs = [taken, sent];
+        assert!(violated_at(&shuffle(&msgs), 1), "shuffle-on-send charges the wrong lift");
+        let rewrite = StrictRouteRewriteHandled.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
+        assert!(violated_at(&rewrite, 0), "the rewrite was owed s1: {rewrite:?}");
+
+        let right = forward_of("sip:s1@127.0.0.1:5095", &[S2, TARGET]);
+        let msgs = [msgs[0].clone(), right];
+        let rewrite = StrictRouteRewriteHandled.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
+        assert!(
+            rewrite.iter().any(|f| f.anchor == 0 && matches!(f.decision, Decision::Compliant)),
+            "{rewrite:?}"
+        );
     }
 
     /// A request stating no route set is routed through nothing, and a vantage

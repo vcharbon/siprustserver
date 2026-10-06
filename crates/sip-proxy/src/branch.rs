@@ -19,14 +19,17 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
     let mut hasher = Sha256::new();
     let top = req.top_via();
     match top.branch().filter(|b| b.starts_with(BRANCH_MAGIC_COOKIE)) {
-        // Call-ID, From tag and CSeq number ride beside the received branch
-        // (fed below): identical across a request, its retransmissions, its
-        // CANCEL and its non-2xx ACK, so §16.11's mapping holds — while an
-        // upstream that spends one branch token twice (§8.1.1.7 violated
-        // across a restart) still gets two transactions, not one merged.
+        // The received sent-by, Call-ID, From tag and CSeq number ride beside
+        // the received branch (the last three fed below): identical across a
+        // request, its retransmissions, its CANCEL and its non-2xx ACK, so
+        // §16.11's mapping holds — while one branch token from two senders
+        // (two transactions, §17.2.3), or spent twice by one upstream across
+        // a restart (§8.1.1.7 violated), still maps to two branches.
         Some(received) => {
             field(&mut hasher, COOKIED_VIA);
             field(&mut hasher, received);
+            let _ = top.sent_by_ref().write_canonical(&mut HashText(&mut hasher));
+            hasher.update([0u8]);
         }
         // §16.11's alternate input set for a pre-RFC-3261 upstream, which
         // carries no branch to derive from. Its non-2xx ACK hashes APART from
@@ -54,6 +57,16 @@ pub(crate) fn stateless_branch(req: &SipRequest) -> String {
         let _ = write!(branch, "{byte:02x}");
     }
     branch
+}
+
+/// Text written straight into the hash, for a writer that renders a field.
+struct HashText<'a>(&'a mut Sha256);
+
+impl std::fmt::Write for HashText<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.update(s.as_bytes());
+        Ok(())
+    }
 }
 
 /// Absorb one input field, NUL-terminated: no value fed here can contain a

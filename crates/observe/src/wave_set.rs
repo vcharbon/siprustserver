@@ -4,10 +4,13 @@
 //! A call site records against a key — the dead peer, the failing target, the
 //! shed reason — and the set emits through the closure it was built with, so
 //! each site owns its own field vocabulary while the aggregation rules stay in
-//! one place. On a rising edge the set spawns ONE task for that episode which
-//! polls at the summary cadence and exits at the falling edge; a process with
-//! no runtime (a synchronous unit test) simply loses the periodic and the
-//! falling line, never the rising or the recorded totals.
+//! one place. A site that names an example in its lines records it as the
+//! episode's payload, so every line reads its own episode's example and the
+//! example is freed with the key. On a rising edge the set spawns ONE task
+//! for that episode which polls at the summary cadence and exits at the
+//! falling edge; a process with no runtime (a synchronous unit test) simply
+//! loses the periodic and the falling line, never the rising or the recorded
+//! totals.
 //!
 //! [`WaveSet::is_active`] is a single relaxed atomic load: a hot path that only
 //! needs to report a *recovery* (an admit after a shed, a success after an
@@ -36,21 +39,46 @@ use crate::wave::{Edge, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMM
 /// than growing without limit; closed keys free their slot.
 pub const MAX_KEYS: usize = 128;
 
-/// What a [`WaveSet`] does with a due line.
-type Emit = dyn Fn(&str, &WaveReport) + Send + Sync;
+/// What a [`WaveSet`] does with a due line: the key, the line, and the
+/// payload of the episode that owes it.
+type Emit<P> = dyn Fn(&str, &WaveReport, &P) + Send + Sync;
 
-/// A keyed family of [`Wave`]s sharing one emission shape.
-pub struct WaveSet {
+/// One key's episode: its state machine and the payload of its latest event,
+/// set before the event reaches the state machine, so an open episode always
+/// has one. A slot holds exactly one episode; the driver retires it at the
+/// falling edge, in the same critical section that removes it from the map.
+struct Slot<P> {
+    wave: Wave,
+    payload: Option<P>,
+    retired: bool,
+}
+
+type SlotRef<P> = Arc<Mutex<Slot<P>>>;
+
+/// What one driver step found.
+enum Step<P> {
+    /// Nothing due yet.
+    Quiet,
+    /// A line is due, with the payload of the episode that owes it.
+    Due(WaveReport, Option<P>),
+    /// The episode the driver was spawned for is over.
+    Gone,
+}
+
+/// A keyed family of [`Wave`]s sharing one emission shape. Each episode
+/// carries a payload `P` (the latest one recorded), which every line of that
+/// episode is emitted with and which is freed with the episode's key.
+pub struct WaveSet<P = ()> {
     summary_every: Duration,
     idle_close_after: Duration,
-    emit: Arc<Emit>,
-    waves: Mutex<HashMap<String, Arc<Mutex<Wave>>>>,
+    emit: Arc<Emit<P>>,
+    waves: Mutex<HashMap<String, SlotRef<P>>>,
     /// Open episodes that have not yet been told they recovered — the cheap
     /// "is anything still burning?" flag.
     active: Arc<AtomicUsize>,
 }
 
-impl WaveSet {
+impl WaveSet<()> {
     /// Build with the default 5 s cadence and idle window.
     pub fn new(emit: impl Fn(&str, &WaveReport) + Send + Sync + 'static) -> Arc<Self> {
         Self::with_intervals(DEFAULT_SUMMARY_EVERY, DEFAULT_IDLE_CLOSE_AFTER, emit)
@@ -61,6 +89,28 @@ impl WaveSet {
         summary_every: Duration,
         idle_close_after: Duration,
         emit: impl Fn(&str, &WaveReport) + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Self::build(summary_every, idle_close_after, move |key, report, _: &()| emit(key, report))
+    }
+
+    /// Record one event of `counter` against `key`; see
+    /// [`record_with`](WaveSet::record_with).
+    pub fn record(self: &Arc<Self>, key: &str, counter: &'static str, n: u64) {
+        self.record_with(key, counter, n, ());
+    }
+}
+
+impl<P: Clone + Send + 'static> WaveSet<P> {
+    /// Build a set whose episodes carry a payload, with the default 5 s
+    /// cadence and idle window.
+    pub fn with_payload(emit: impl Fn(&str, &WaveReport, &P) + Send + Sync + 'static) -> Arc<Self> {
+        Self::build(DEFAULT_SUMMARY_EVERY, DEFAULT_IDLE_CLOSE_AFTER, emit)
+    }
+
+    fn build(
+        summary_every: Duration,
+        idle_close_after: Duration,
+        emit: impl Fn(&str, &WaveReport, &P) + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             summary_every,
@@ -78,45 +128,78 @@ impl WaveSet {
         self.active.load(Ordering::Relaxed) > 0
     }
 
-    /// Record one event of `counter` against `key`, emitting whatever line that
-    /// makes due. An event landing on a key whose close is armed revives that
-    /// episode silently. Ignored once [`MAX_KEYS`] episodes are open.
-    pub fn record(self: &Arc<Self>, key: &str, counter: &'static str, n: u64) {
-        let wave = {
-            let mut waves = self.waves.lock().unwrap();
-            match waves.get(key) {
-                Some(w) => w.clone(),
-                None => {
-                    if waves.len() >= MAX_KEYS {
-                        return;
-                    }
-                    let w =
-                        Arc::new(Mutex::new(Wave::new(self.summary_every, self.idle_close_after)));
-                    waves.insert(key.to_string(), w.clone());
-                    w
-                }
+    /// Record one event of `counter` against `key`, `payload` becoming the
+    /// episode's payload, and emit whatever line that makes due. An event
+    /// landing on a key whose close is armed revives that episode silently.
+    /// Ignored once [`MAX_KEYS`] episodes are open.
+    pub fn record_with(self: &Arc<Self>, key: &str, counter: &'static str, n: u64, payload: P) {
+        let mut payload = Some(payload);
+        loop {
+            let Some(slot) = self.slot_for(key) else { return };
+            if self.record_into(key, &slot, counter, n, &mut payload) {
+                return;
             }
-        };
-        // Both `active` increments happen under the wave lock, so a concurrent
+        }
+    }
+
+    /// The key's live slot, inserted fresh when absent; `None` once
+    /// [`MAX_KEYS`] episodes are open.
+    fn slot_for(&self, key: &str) -> Option<SlotRef<P>> {
+        let mut waves = self.waves.lock().unwrap();
+        if let Some(slot) = waves.get(key) {
+            return Some(slot.clone());
+        }
+        if waves.len() >= MAX_KEYS {
+            return None;
+        }
+        let slot = Arc::new(Mutex::new(Slot {
+            wave: Wave::new(self.summary_every, self.idle_close_after),
+            payload: None,
+            retired: false,
+        }));
+        waves.insert(key.to_string(), slot.clone());
+        Some(slot)
+    }
+
+    /// Apply one event to `slot`, emitting the line it owes. Returns `false`,
+    /// with `payload` untouched, when the driver retired the slot after
+    /// [`slot_for`](WaveSet::slot_for) returned it: the event belongs to the
+    /// key's next episode.
+    fn record_into(
+        self: &Arc<Self>,
+        key: &str,
+        slot: &SlotRef<P>,
+        counter: &'static str,
+        n: u64,
+        payload: &mut Option<P>,
+    ) -> bool {
+        // Both `active` increments happen under the slot lock, so a concurrent
         // recovery on this key cannot decrement a count this call has not
         // added yet: every `+1` here is matched by exactly one `-1` in
         // `recovered` or `finish`.
-        let (report, generation) = {
-            let mut w = wave.lock().unwrap();
-            if w.is_close_requested() {
+        let (report, payload) = {
+            let mut s = slot.lock().unwrap();
+            if s.retired {
+                return false;
+            }
+            if s.wave.is_close_requested() {
                 self.active.fetch_add(1, Ordering::Relaxed);
             }
-            let report = w.record(counter, n);
+            s.payload = payload.take();
+            let report = s.wave.record(counter, n);
             if matches!(&report, Some(r) if r.edge == Edge::Rising) {
                 self.active.fetch_add(1, Ordering::Relaxed);
             }
-            (report, w.generation())
+            let Some(report) = report else { return true };
+            (report, s.payload.clone())
         };
-        let Some(report) = report else { return };
         if report.edge == Edge::Rising {
-            self.spawn_driver(key.to_string(), wave, generation);
+            self.spawn_driver(key.to_string(), slot.clone());
         }
-        (self.emit)(key, &report);
+        if let Some(payload) = payload {
+            (self.emit)(key, &report, &payload);
+        }
+        true
     }
 
     /// Report that `key` recovered: arm its falling edge without emitting one,
@@ -126,10 +209,10 @@ impl WaveSet {
         if !self.is_active() {
             return;
         }
-        let wave = self.waves.lock().unwrap().get(key).cloned();
-        let Some(wave) = wave else { return };
-        let mut w = wave.lock().unwrap();
-        if w.request_close() {
+        let slot = self.waves.lock().unwrap().get(key).cloned();
+        let Some(slot) = slot else { return };
+        let mut s = slot.lock().unwrap();
+        if s.wave.request_close() {
             self.release_active();
         }
     }
@@ -140,23 +223,36 @@ impl WaveSet {
         if !self.is_active() {
             return;
         }
-        let waves: Vec<Arc<Mutex<Wave>>> = self.waves.lock().unwrap().values().cloned().collect();
-        for wave in waves {
-            let mut w = wave.lock().unwrap();
-            if w.request_close() {
+        let slots: Vec<SlotRef<P>> = self.waves.lock().unwrap().values().cloned().collect();
+        for slot in slots {
+            let mut s = slot.lock().unwrap();
+            if s.wave.request_close() {
                 self.release_active();
             }
         }
     }
 
-    /// Emit a falling edge and free the key's slot. `was_active` says whether
-    /// the episode still counted against [`is_active`](WaveSet::is_active).
-    fn finish(&self, key: &str, report: &WaveReport, was_active: bool) {
-        self.waves.lock().unwrap().remove(key);
+    /// One driver step for `slot`. On the falling edge the slot is retired
+    /// and its key removed in one critical section (map lock, then slot lock),
+    /// so a concurrent record either revives this episode or opens the next
+    /// one, never both.
+    fn drive(&self, key: &str, slot: &SlotRef<P>) -> Step<P> {
+        let mut waves = self.waves.lock().unwrap();
+        let mut s = slot.lock().unwrap();
+        if s.retired || !s.wave.is_open() {
+            return Step::Gone;
+        }
+        let was_active = !s.wave.is_close_requested();
+        let Some(report) = s.wave.poll() else { return Step::Quiet };
+        if report.edge != Edge::Falling {
+            return Step::Due(report, s.payload.clone());
+        }
+        s.retired = true;
+        waves.remove(key);
         if was_active {
             self.release_active();
         }
-        (self.emit)(key, report);
+        Step::Due(report, s.payload.take())
     }
 
     /// Give back one burning episode. Saturating: `is_active` must never wrap
@@ -168,7 +264,7 @@ impl WaveSet {
 
     /// Drive one episode's periodic summary and idle close. Exits at the
     /// falling edge, or as soon as the episode it was spawned for is gone.
-    fn spawn_driver(self: &Arc<Self>, key: String, wave: Arc<Mutex<Wave>>, generation: u64) {
+    fn spawn_driver(self: &Arc<Self>, key: String, slot: SlotRef<P>) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -177,20 +273,17 @@ impl WaveSet {
         handle.spawn(async move {
             loop {
                 tokio::time::sleep(period).await;
-                let (report, was_active) = {
-                    let mut w = wave.lock().unwrap();
-                    if w.generation() != generation || !w.is_open() {
-                        return;
-                    }
-                    let was_active = !w.is_close_requested();
-                    (w.poll(), was_active)
+                let (report, payload) = match set.drive(&key, &slot) {
+                    Step::Quiet => continue,
+                    Step::Gone => return,
+                    Step::Due(report, payload) => (report, payload),
                 };
-                let Some(report) = report else { continue };
+                if let Some(payload) = payload {
+                    (set.emit)(&key, &report, &payload);
+                }
                 if report.edge == Edge::Falling {
-                    set.finish(&key, &report, was_active);
                     return;
                 }
-                (set.emit)(&key, &report);
             }
         });
     }
@@ -301,6 +394,88 @@ mod tests {
         assert_eq!(lines[2].1, Edge::Falling);
         assert_eq!(lines[2].2, 2_000, "the falling edge totals every shed");
         assert!(!set.is_active());
+    }
+
+    /// Lines of a payload-carrying set: key, edge, the episode's payload.
+    type PayloadLines = Arc<Mutex<Vec<(String, Edge, &'static str)>>>;
+
+    fn capturing_payloads() -> (Arc<WaveSet<&'static str>>, PayloadLines) {
+        let seen = PayloadLines::default();
+        let sink = seen.clone();
+        let set = WaveSet::with_payload(move |key, report, payload: &&'static str| {
+            sink.lock().unwrap().push((key.to_string(), report.edge, payload));
+        });
+        (set, seen)
+    }
+
+    /// A record that looked its key's slot up just before the driver closed
+    /// that episode does not land on the closed episode: it is refused there
+    /// and opens the key's next episode, which owns its payload and its slot.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_racing_the_close_opens_the_next_episode_with_its_own_payload() {
+        let (set, seen) = capturing_payloads();
+        set.record_with("k", "events", 1, "old");
+        tokio::task::yield_now().await;
+
+        let raced = set.slot_for("k").expect("the key is open");
+        tokio::time::advance(DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+        let mut payload = Some("new");
+        assert!(
+            !set.record_into("k", &raced, "events", 1, &mut payload),
+            "a closed episode refuses the racing event",
+        );
+        set.record_with("k", "events", 1, payload.expect("a refused event keeps its payload"));
+        set.record_with("k", "events", 1, "newer");
+        tokio::task::yield_now().await;
+        tokio::time::advance(DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = seen.lock().unwrap().clone();
+        let k = || "k".to_string();
+        assert_eq!(
+            lines,
+            [
+                (k(), Edge::Rising, "old"),
+                (k(), Edge::Falling, "old"),
+                (k(), Edge::Rising, "new"),
+                (k(), Edge::Falling, "newer"),
+            ],
+        );
+        assert!(!set.is_active());
+        assert!(set.waves.lock().unwrap().is_empty(), "a closed episode frees its key");
+    }
+
+    /// An event recorded from the falling line itself — the earliest a record
+    /// can follow a close — opens a new episode with its own payload.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_from_the_falling_line_opens_a_new_episode() {
+        let seen = PayloadLines::default();
+        let sink = seen.clone();
+        let this: Arc<std::sync::OnceLock<std::sync::Weak<WaveSet<&'static str>>>> = Arc::default();
+        let reenter = this.clone();
+        let set = WaveSet::with_payload(move |key, report, payload: &&'static str| {
+            sink.lock().unwrap().push((key.to_string(), report.edge, payload));
+            if report.edge == Edge::Falling && *payload == "old" {
+                if let Some(set) = reenter.get().and_then(std::sync::Weak::upgrade) {
+                    set.record_with(key, "events", 1, "new");
+                }
+            }
+        });
+        let _ = this.set(Arc::downgrade(&set));
+
+        set.record_with("k", "events", 1, "old");
+        tokio::task::yield_now().await;
+        tokio::time::advance(DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = seen.lock().unwrap().clone();
+        let k = || "k".to_string();
+        assert_eq!(
+            lines,
+            [(k(), Edge::Rising, "old"), (k(), Edge::Falling, "old"), (k(), Edge::Rising, "new")],
+        );
+        assert!(set.is_active(), "the new episode is burning");
     }
 
     /// The key bound holds against an unbounded key source, and a key that has

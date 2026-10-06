@@ -1,5 +1,6 @@
-//! The open **obligation** vocabulary (ADR-0020 X7) — extracted verbatim from
-//! the hardcoded limiter/CDR blocks of `invariants::enforce`.
+//! The open **obligation** vocabulary (ADR-0020 X7): the kinds
+//! `invariants::enforce` settles at a call's terminal, the limiter release and
+//! the CDR among them.
 //!
 //! An obligation is a per-call consequence that must be discharged **exactly
 //! once** at release, **derivable from the persisted [`Call`] snapshot alone**
@@ -10,14 +11,14 @@
 //!   its `ext` slices). Closures and runtime registries are unrepresentable
 //!   here by design: the same derivation must produce the same obligations
 //!   from a snapshot rehydrated on another node after reclaim.
-//! - **total over history** — tolerate snapshots written before the kind
-//!   existed (serde defaults / `Option` fields).
+//! - **total over the call's life** — tolerate a snapshot taken before the
+//!   kind's state was ever written (`None` / empty fields).
 //! - **skip-aware** — entries carrying no real allocation are skipped at
-//!   derive time (the fail-open limiter precedent).
+//!   derive time (the limiter precedent: a call that sent no admit).
 //! - **idempotent** — `settle` appends only what `effects` does not already
 //!   discharge, so a rule that emitted its own cleanup is not doubled, and
 //!   settling twice is a no-op. Dedupe semantics are kind-local (the limiter's
-//!   `(limiter_id, window)` key vs the CDR's single flag), which is why
+//!   one release per call vs the CDR's single flag), which is why
 //!   derive/dedupe/append live together in one `settle` pass instead of a
 //!   framework-owned key round-trip.
 //!
@@ -30,9 +31,9 @@
 //! funnels through.
 
 use call::Call;
-use std::collections::HashSet;
 
-use crate::effects::{BufferedObservabilityEffect, HandlerEffects, SoftBoundedEffect};
+use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
+use crate::limiter::call::LimiterObligations;
 
 /// One owed release, as data — the pure audit view ([`ObligationSet::owed`])
 /// used for logging and tests; the discharging side effect is expressed through
@@ -42,7 +43,7 @@ pub struct Obligation {
     /// Stable kind id ("limiter", "cdr", …) — metrics labels / audit lines only.
     pub kind: &'static str,
     /// Dedupe key, unique within `kind` for one call
-    /// (limiter: `"{limiter_id}:{origin_window}"`; cdr: `"cdr"`).
+    /// (limiter: the call's limiter key; cdr: `"cdr"`).
     pub key: String,
 }
 
@@ -71,7 +72,7 @@ pub struct ObligationSet {
 }
 
 impl ObligationSet {
-    /// The two core kinds, in this order: [`LimiterObligations`],
+    /// The two core kinds, in this order: `LimiterObligations`,
     /// [`CdrObligation`].
     pub fn core() -> Self {
         Self { kinds: vec![Box::new(LimiterObligations), Box::new(CdrObligation)] }
@@ -95,53 +96,6 @@ impl ObligationSet {
     /// Pure audit view across all kinds.
     pub fn owed(&self, call: &Call) -> Vec<Obligation> {
         self.kinds.iter().flat_map(|k| k.owed(call)).collect()
-    }
-}
-
-/// Kind `"limiter"` — every recorded hold is decremented exactly once on
-/// termination (the strong INCR↔DECR invariant). Fail-open admissions
-/// (`increment_succeeded == Some(false)`) carry no real increment, so they are
-/// skipped. Dedupes against any release a rule already emitted. Verbatim
-/// extraction of the former `invariants::enforce` limiter block.
-pub struct LimiterObligations;
-
-impl ObligationKind for LimiterObligations {
-    fn id(&self) -> &'static str {
-        "limiter"
-    }
-
-    fn settle(&self, call: &Call, effects: &mut HandlerEffects) {
-        let already: HashSet<(String, i64)> = effects
-            .soft
-            .iter()
-            .map(|SoftBoundedEffect::DecrementLimiter { limiter_id, window }| {
-                (limiter_id.clone(), *window)
-            })
-            .collect();
-        for entry in &call.limiter_entries {
-            if entry.increment_succeeded == Some(false) {
-                continue;
-            }
-            let key = (entry.limiter_id.clone(), entry.origin_window);
-            if already.contains(&key) {
-                continue;
-            }
-            effects.soft.push(SoftBoundedEffect::DecrementLimiter {
-                limiter_id: entry.limiter_id.clone(),
-                window: entry.origin_window,
-            });
-        }
-    }
-
-    fn owed(&self, call: &Call) -> Vec<Obligation> {
-        call.limiter_entries
-            .iter()
-            .filter(|e| e.increment_succeeded != Some(false))
-            .map(|e| Obligation {
-                kind: "limiter",
-                key: format!("{}:{}", e.limiter_id, e.origin_window),
-            })
-            .collect()
     }
 }
 

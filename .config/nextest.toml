@@ -1,0 +1,44 @@
+# cargo-nextest: the runner of `just test` and `just test-slow`. Every test is
+# its own process, and one pool of `test-threads` runs the tests of every
+# binary at once. Doc tests are not nextest's: the lanes run them with
+# `cargo test --doc`.
+#
+# The thread count is this file's: nextest ignores RUST_TEST_THREADS, and each
+# test process runs a single test. `NEXTEST_TEST_THREADS` or `-j` override it
+# for one run.
+
+[test-groups]
+# Real-clock loadgen smoke runs bind loopback UDP and burst a driver against an
+# in-process SUT; more than four at once starve their calls past the recv and
+# retransmit windows on a loaded host. The in-process `DRIVERS` semaphore of
+# `crates/loadgen/tests/it/smoke.rs` bounds the same under plain `cargo test`.
+loadgen-smoke = { max-threads = 4 }
+
+# The default lane (`just test`): fake-clock tests and real-clock tests under
+# 1 s (CLAUDE.md "Test-runtime policy"). A test still running at 30 s is
+# reported slow and killed at 2 min: nothing in this lane comes near that.
+[profile.default]
+test-threads = 16
+fail-fast = false
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 4 }
+status-level = "slow"
+final-status-level = "slow"
+
+[[profile.default.overrides]]
+filter = 'package(loadgen) & binary(it) & test(/^smoke::/)'
+test-group = "loadgen-smoke"
+
+[profile.default.junit]
+path = "junit.xml"
+
+# The slow lane (`just test-slow`, `--run-ignored only`): real-clock tests of
+# 1 s or more and every loadgen test. Reported slow at 1 min, killed at 10.
+[profile.slow]
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# A verification run that reads the JUnit report back: a passing test's output
+# is kept, so a test process that exited 0 before libtest printed its result
+# can be told from a pass.
+[profile.verify.junit]
+store-success-output = true

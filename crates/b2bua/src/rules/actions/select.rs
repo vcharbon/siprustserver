@@ -7,7 +7,7 @@ use sip_message::generators::InDialogMethod;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
-use crate::rules::model::RuleContext;
+use b2bua_sdk::model::RuleContext;
 
 use call::helpers::find_pending_request;
 

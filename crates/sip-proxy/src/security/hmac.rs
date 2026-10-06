@@ -124,8 +124,8 @@ impl HmacKeyProvider for StaticHmacKeyProvider {
             return false;
         };
         // Exactly the canonical truncation — a shorter prefix would shrink the
-        // forgery space (1 byte = a 256-guess cookie), and only the caller's
-        // own length check used to stand in the way.
+        // forgery space (1 byte = a 256-guess cookie), so the check lives here,
+        // not only in the caller.
         if mac_prefix.len() != TRUNCATED_MAC_BYTES {
             return false;
         }

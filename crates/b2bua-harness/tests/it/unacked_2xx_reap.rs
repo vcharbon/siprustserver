@@ -16,6 +16,12 @@
 //!   (b) at the ACK-timeout deadline, **BYE the a-leg AND tear down the b-leg**
 //!       (BYE to bob), driving `active_calls` back to 0.
 //!
+//! §13.2.2.4's "after acknowledging … MUST terminate with a BYE" orders (b) on
+//! the other face: a dialog whose 2xx this stack can acknowledge alone gets the
+//! ACK first, then the BYE — the callee's for the call's own answer, the
+//! caller's for a relayed callee re-INVITE she answered. A delayed-offer dialog
+//! gets the BYE alone — its ACK owes the answer only the silent peer could supply.
+//!
 //! Paused-clock; the harness pins a short `ack_timeout_sec` so the give-up
 //! deadline is reached in a handful of `advance`s (CLAUDE.md test-runtime policy:
 //! cut churn at the source — the window, not real time).
@@ -25,12 +31,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::{Harness, RunReport, WaiverScope};
 use sip_message::{CustomParser, Method, SipMessage, SipParser};
 use sip_retransmit::{Class, Ladder, Schedule};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+const REOFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
+const REANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30001 RTP/AVP 0\r\n";
 
 /// The harness-pinned ACK-timeout (set via `tune` below). RFC's 64·T1 is 32 s;
 /// the harness uses a compact window so the paused-clock advances stay cheap.
@@ -41,8 +49,8 @@ const ACK_TIMEOUT_SEC: i64 = 6;
 async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     let h = Harness::new("b2bua-unacked-2xx-reap");
     // ONE knowingly-unmet §13.2.2.4 obligation, and it is alice's: her silence IS
-    // the reap under test. The b-leg keeps its own — the SUT ACKs bob on receipt
-    // of his 200, so nothing there waits on the caller.
+    // the reap under test. The b-leg keeps its own — the give-up composes bob's
+    // ACK before the BYE, since the INVITE this stack sent him carried the offer.
     h.allow_violation(
         "no-ack-to-dialog-creating-2xx",
         "alice deliberately never ACKs — the reap under test",
@@ -58,9 +66,9 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-                            // bob is ACKed regardless: the ACK for his 2xx is drawn by the response the
-                            // UAC core received, not by anything alice does (§13.2.2.4).
-    bob.receive("ACK").await;
+    let b_leg_invite_cseq = uas.request().cseq().seq();
+    let bob_tag = uas.dialog().local_tag().to_string();
+    let b_leg_call_id = uas.request().call_id().as_str().to_string();
 
     assert_eq!(
         b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
@@ -98,10 +106,19 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     // she receives is the give-up BYE (the BYE client txn retransmits, so one is
     // still in flight after the drain).
     alice.drain().await;
+    // §13.2.2.4: "after acknowledging … MUST terminate with a BYE" — the callee
+    // sees the ACK for his 2xx FIRST, bare, on that INVITE's CSeq and in his own
+    // dialog, and the BYE after it.
+    let give_up_ack = bob.receive("ACK").await;
+    let ack = give_up_ack.request();
+    assert!(ack.body().is_empty(), "the give-up ACK owes no answer: the offer was in the INVITE");
+    assert_eq!(ack.cseq().seq(), b_leg_invite_cseq, "the ACK echoes the INVITE's CSeq");
+    assert_eq!(ack.to().tag(), Some(bob_tag.as_str()), "in the callee's own dialog");
+    assert_eq!(ack.call_id().as_str(), b_leg_call_id, "on the b-leg's Call-ID");
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The third rung (at 3.5 s) fell inside the 6 s bound; the fourth (7.5 s)
@@ -181,7 +198,6 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     // ── Past Timer L, well short of the deadline: the ladder has ceased and
     //    the deployment has not yet acted ──
@@ -198,9 +214,10 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     h.advance(Duration::from_secs(9)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -257,7 +274,6 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     // Short of Timer L the call stands; at it the session ends on both legs.
     h.advance(Duration::from_secs(31)).await;
@@ -270,9 +286,10 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     h.advance(Duration::from_secs(1)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -350,14 +367,14 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let records = b2bua.cdr_records();
@@ -369,6 +386,232 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
         "and the framework still ended the session under the CORE marker: {reasons:?}",
     );
 
+    let _report = h.finish().await;
+}
+
+/// The delayed-offer counter-case to the give-up ACK: alice's INVITE carried no
+/// offer, so the ACK for bob's 2xx owes the answer only her own ACK supplies
+/// (RFC 3264 §4). This stack cannot compose it, so bob gets the BYE alone and
+/// his 2xx stays un-ACKed — his own §13.3.1.4 ladder is what covered the wait.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
+    let h = Harness::new("b2bua-unacked-2xx-delayed-offer-give-up");
+    // Both un-ACKed 2xx are the scenario: alice's silence leaves the answer
+    // relayed to her un-ACKed, and the callee's delayed-offer 2xx can only be
+    // acknowledged by her own ACK (RFC 3264 §4), which never came.
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs, so neither her answer nor the callee's \
+             delayed-offer 2xx — whose ACK owes the answer only she could supply — is \
+             acknowledged; that silence is the give-up under test",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5064").await;
+    let bob = h.agent("bob", "127.0.0.1:5074").await;
+    let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5084", 5074, ACK_TIMEOUT_SEC).await;
+
+    // ── alice INVITEs bodyless: the offer is bob's to make ───────────────────
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(uas.request().body().is_empty(), "the offerless INVITE reached bob with a body");
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await; // alice receives the offer — and deliberately stays silent.
+
+    // ── At the deadline: the BYE, and only the BYE, reaches the callee ───────
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    let mut bob_bye = bob.receive("BYE").await;
+    bob_bye.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 0, "a delayed-offer b-leg cannot be ACKed by this stack");
+}
+
+/// A route that drops the caller's offer mints the callee's INVITE offerless:
+/// the give-up treats that b-leg as the delayed offer it is (RFC 3264 §4), by
+/// the INVITE that left, not the one that came in — BYE alone, no bare ACK.
+#[tokio::test(start_paused = true)]
+async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
+    use b2bua::decision::test_adapter::route_to;
+    use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
+
+    let h = Harness::new("b2bua-unacked-2xx-dropped-offer-give-up");
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs, so neither her answer nor the callee's \
+             2xx to the offerless INVITE the route minted — whose ACK owes an answer only \
+             she could supply — is acknowledged; that silence is the give-up under test",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to("127.0.0.1", 5073);
+                r.update_body = BodyUpdate::Drop;
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.ack_timeout_sec = ACK_TIMEOUT_SEC)
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(uas.request().body().is_empty(), "the route dropped the offer");
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 0, "the callee's INVITE carried no offer: no bare ACK answers his");
+}
+
+/// An INVITE whose body frames no session description is a delayed offer too
+/// (RFC 5621 §3.1): the give-up after the callee's 2xx is the BYE alone, no
+/// bare ACK, whatever else the body carried.
+#[tokio::test(start_paused = true)]
+async fn a_body_without_a_description_gets_the_give_up_bye_with_no_ack() {
+    use b2bua::decision::test_adapter::route_to;
+    use b2bua::decision::{BodyUpdate, NewCallResponse, ScriptedDecisionEngine};
+    use sip_message::MultipartPart;
+
+    let h = Harness::new("b2bua-unacked-2xx-no-description-give-up");
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs the callee's 2xx to an INVITE whose body \
+             carried no description — its ACK owes an answer only she could supply; that \
+             silence is the give-up under test",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to("127.0.0.1", 5073);
+                r.update_body = BodyUpdate::AttachParts(vec![MultipartPart::new(
+                    "application/pidf+xml",
+                    b"<presence/>".to_vec(),
+                )]);
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| c.ack_timeout_sec = ACK_TIMEOUT_SEC)
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
+
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(uas.request().body().as_ref(), b"<presence/>", "a body, but no offer");
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 0, "the callee's INVITE carried no offer: no bare ACK answers his");
+}
+
+/// The mirrored face: the CALLEE re-INVITEs with an offer, the caller answers,
+/// and the callee never ACKs. The 2xx relayed to him ladders on his face and
+/// gives up; the caller's 2xx is one this stack took as UAC on a re-INVITE it
+/// sent carrying the offer, so its ACK is composable alone — she gets the ACK
+/// first, bare and on the re-INVITE's CSeq, then the BYE.
+#[tokio::test(start_paused = true)]
+async fn a_silent_callee_reinvite_gives_up_with_the_callers_2xx_acked_first() {
+    let h = Harness::new("b2bua-unacked-reinvite-2xx-caller-acked");
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+    let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5083", 5073, ACK_TIMEOUT_SEC).await;
+
+    // ── an answered call, both ACKs in ─────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let alice_tag = alice_dialog.local_tag().to_string();
+    let a_leg_call_id = call.call_id();
+
+    // ── bob re-INVITEs with an offer, alice answers, bob stays silent ────────
+    let mut bob_dialog = uas.dialog();
+    let mut reinv = bob_dialog.reinvite(Some(REOFFER)).await;
+    let mut alice_reinv = alice.receive("INVITE").await;
+    let a_leg_reinvite_cseq = alice_reinv.request().cseq().seq();
+    alice_reinv.respond(200, "OK").with_sdp(REANSWER).await;
+    reinv.expect(200).await; // bob has the answer — and deliberately never ACKs.
+
+    // ── at the deadline: alice is ACKed, then both faces get the BYE ─────────
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64 + 1)).await;
+    bob.drain().await; // the laddered 2xx copies
+    let give_up_ack = alice.receive("ACK").await;
+    let ack = give_up_ack.request();
+    assert!(
+        ack.body().is_empty(),
+        "the give-up ACK owes no answer: the re-INVITE carried the offer"
+    );
+    assert_eq!(ack.cseq().seq(), a_leg_reinvite_cseq, "the ACK echoes the re-INVITE's CSeq");
+    assert_eq!(ack.to().tag(), Some(alice_tag.as_str()), "in the caller's own dialog");
+    assert_eq!(ack.call_id().as_str(), a_leg_call_id, "on the a-leg's Call-ID");
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    assert_eq!(
+        b2bua.metrics().repeat_give_ups_total("ack-of-2xx"),
+        1,
+        "one give-up: bob's re-INVITE ACK never came"
+    );
     let _report = h.finish().await;
 }
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Goal-3 (S11) HA-replication CHAOS suite for the Rust SIP SUT on kind.
+# HA-replication CHAOS suite for the Rust SIP SUT on kind.
 #
 # This is the real-clock, real-TCP, real-k8s acceptance for peer-to-peer call
 # replication (ADR-0011): it stands up the full stack WITH replication enabled,
 # drives long-hold dialogs through the proxy, KILLS the worker holding a dialog
 # mid-call, and asserts the dialog SURVIVES — the in-dialog BYE lands on the
 # backup worker (which holds the replica) and is answered 200. That is "call
-# survival + convergence", the goal-3 bar.
+# survival + convergence", the HA acceptance bar.
 #
 # It is deliberately a SHELL script (not a `cargo test`): a real kind cluster +
 # image builds are slow and WSL2-flaky, so it must not gate `cargo test
@@ -29,21 +29,19 @@
 #   PASS_THRESHOLD=90  min % successful calls to PASS (best-effort failover, X5)
 #   KEEP=1             leave the cluster up after the run (default tear down off)
 #
-# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# >>> SOURCEABLE LIBRARY <<<
 # This file doubles as a function library: all logic lives in functions and the
 # subcommand dispatch is chaos_main(), executed ONLY when the script is run
 # directly. A downstream overlay (living in a DIFFERENT directory) can set knobs,
 # `source /path/to/deploy/k8s/chaos.sh` (executes nothing), then call/override
 # the primitives (kill_worker, kill_proxy, peak, cpu_starve*, assert_survival,
-# wait_brought_back, ...) or dispatch via `chaos_main kill`. The formerly-inline
-# kill/assert kubectl targets are parameterized (defaults reproduce the
-# historical behaviour exactly):
+# wait_brought_back, ...) or dispatch via `chaos_main kill`. The kill/assert
+# kubectl targets are parameterized (the defaults target this repo's manifests):
 #   WORKER_SELECTOR / WORKER_STS / WORKER_CONTAINER     worker pods / workload / container
 #   PROXY_SELECTOR / PROXY_DEPLOY / PROXY_VRRP_CONTAINER proxy pods / workload / VIP owner
 #   LIMITER_SELECTOR / LIMITER_DEPLOY
-# UAC streams are docker containers on the sipext bridge (lib/sipext-gen.sh) —
-# the old UAC_SELECTOR/ORPHAN_SELECTOR pod selectors and the 40-sipp-uac-job
-# template (MANIFEST_DIR) are retired; streams are addressed by container name.
+# UAC streams are docker containers on the sipext bridge (lib/sipext-gen.sh),
+# addressed by container name, not by pod selector.
 # NOTE: the cluster-lifecycle helpers are namespaced chaos_up/chaos_deploy/
 # chaos_down (they shell out to run.sh) so they never collide with run.sh's own
 # up/deploy/down when an overlay sources BOTH files.
@@ -51,8 +49,8 @@
 # Shares cluster name `sip-e2e` (WSL one-cluster switch) — see README/run.sh.
 set -euo pipefail
 # Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
-# into any script sourcing this library — issue 025); every path below that used
-# to be cwd-relative is now anchored on $K8S_DIR instead.
+# into any script sourcing this library); every path below is anchored on
+# $K8S_DIR, never cwd-relative.
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-sip-test}"
@@ -63,11 +61,10 @@ PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 SCENARIO="uac-hold-failover.xml"
 JOB="sipp-uac-failover"
 
-# Kill-target / assert knobs (issue 025): the label selectors, workload names and
-# container names the chaos primitives act on — extracted from the formerly-
-# inline kubectl calls so a downstream overlay can retarget them. KILL_TARGET/
-# STARVE_TARGET pick the POD; these pick the POPULATION each primitive
-# selects/waits on. Defaults reproduce the historical behaviour exactly.
+# Kill-target / assert knobs: the label selectors, workload names and container
+# names the chaos primitives act on, so a downstream overlay can retarget them.
+# KILL_TARGET/STARVE_TARGET pick the POD; these pick the POPULATION each
+# primitive selects/waits on. Defaults target this repo's manifests.
 WORKER_SELECTOR="${WORKER_SELECTOR:-app=b2bua-worker}"       # worker pod label
 WORKER_STS="${WORKER_STS:-statefulset/b2bua-worker}"         # worker workload (rollout gate)
 WORKER_CONTAINER="${WORKER_CONTAINER:-b2bua-worker}"         # container cpu_starve throttles
@@ -76,8 +73,8 @@ PROXY_DEPLOY="${PROXY_DEPLOY:-deploy/sip-front-proxy}"       # proxy workload (r
 PROXY_VRRP_CONTAINER="${PROXY_VRRP_CONTAINER:-keepalived}"   # sidecar that owns the VIP
 LIMITER_SELECTOR="${LIMITER_SELECTOR:-app=call-limiter}"     # limiter pod label
 LIMITER_DEPLOY="${LIMITER_DEPLOY:-deploy/call-limiter}"      # limiter workload (rollout gate)
-# UAC_SELECTOR / ORPHAN_SELECTOR are RETIRED: UAC streams are docker containers
-# on sipext now, addressed by NAME ($JOB / $ORPHAN_JOB), not pod label.
+# UAC streams are docker containers on sipext, addressed by NAME ($JOB /
+# $ORPHAN_JOB), not pod label.
 
 # Replication ON, ≥2 workers so a primary + backup live on different app nodes.
 export REPL_ENABLE=1
@@ -91,6 +88,7 @@ source "$K8S_DIR/lib/net-env.sh"
 # 40-sipp-uac-job.yaml renders). Sourced AFTER net-env.sh.
 source "$K8S_DIR/lib/sipext-gen.sh"
 source "$K8S_DIR/lib/kube-env.sh"   # pin every kubectl to context kind-$CLUSTER
+source "$K8S_DIR/lib/pod-faults.sh" # freeze / reject / delay a pod, stop a node
 LIMITER_CAP="${LIMITER_CAP:-20}"
 export LIMITER_CAP
 # Docker resource caps for the transient chaos/abuse/orphan/peak/failover UAC
@@ -229,17 +227,19 @@ sip_chaos_active{type=\"peak\"} 0"
 
 # CHAOS: cpu_starve — make ONE b2bua worker pod overloaded by SHRINKING the CPU
 # available to its container (NOT by piling on traffic). This is the faithful
-# "the platform itself is overloaded" lever: the old `peak` event just added
-# 200cps of NEW INVITEs, which saturated the SIPp generators long before it
-# stressed the platform, so the SUT's overload tiers never actually engaged. CPU
+# "the platform itself is overloaded" lever: adding 200cps of NEW INVITEs (the
+# `peak` event) saturates the SIPp generators long before it stresses the
+# platform, so the SUT's overload protection never engages. CPU
 # scarcity DOES engage them — the worker's ELU sampler (a 100ms tokio interval
-# whose reading is its own scheduling lag, crates/b2bua/src/overload.rs) lands
-# chronically late under a tight CPU quota, the published `elu` EWMA climbs past
-# B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75), and the Tier-3 admission gate
-# (overload.should_admit) starts returning the stateless `503 overload` for NEW
-# NON-emergency INVITEs while ALWAYS admitting emergency ones (Resource-Priority
-# esnet.0) and NEVER touching established in-dialog requests (re-INVITE/BYE/in-
-# dialog OPTIONS are not gated). That is exactly the trio the experiment asserts:
+# whose reading is its own scheduling lag, crates/b2bua/src/overload/sampler.rs)
+# lands chronically late under a tight CPU quota, the published `elu` EWMA climbs
+# past B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75), and the panic-ELU rung of the
+# admission ladder (crates/b2bua/src/admission) answers NEW NON-emergency
+# INVITEs 503 through their server transaction, while it admits emergency ones
+# (Resource-Priority esnet.0) and never judges in-dialog requests (re-INVITE/
+# BYE/in-dialog OPTIONS). Only the capacity, backlog and shed rungs refuse an
+# emergency call, at their emergency ceilings, which cpu_starve does not reach.
+# That is exactly the trio the experiment asserts:
 #   (1) in-dialog calls unaffected, (2) new calls MAY be rejected, (3) but only
 #   non-emergency ones.
 #
@@ -259,9 +259,9 @@ sip_chaos_active{type=\"peak\"} 0"
 # so the pod stays IN the LB (a pod that drops out reroutes new calls to the
 # healthy worker and the gate is never exercised). EXPECT TO CALIBRATE on the
 # first live run — too tight drops /ready (looks like a kill, not an overload);
-# too loose never crosses 0.75 ELU. Watch b2bua_overload_rejected_total rise and
+# too loose never crosses 0.75 ELU. Watch b2bua_new_calls_total{reason="panic_elu"} rise and
 # the worker stay Ready; nudge STARVE_QUOTA_US until both hold.
-# Defaults CALIBRATED 2026-06-20 on the default endurance profile (long@5,
+# Defaults CALIBRATED on the default endurance profile (long@5,
 # short 50em+50ne, reinvite@5, limiter@2; 2 workers on 24-core nodes). A worker
 # draws ~0.22 core at that baseline and ~0.33 under the +120cps non-emergency
 # peak the `overload` combo adds. 0.30 core (30000/100000) is JUST BELOW that
@@ -434,16 +434,16 @@ orphan_kill() {
   sleep "$ORPHAN_BUILD_SECS"   # let ~ORPHAN_CAPS*ORPHAN_BUILD_SECS dialogs establish
   log "CHAOS: abruptly killing the orphan UAC mid-call (dialogs orphaned on the B2BUA)"
   # docker rm -f = SIGKILL + remove: no BYE, no restart-policy resurrection —
-  # the same abruptness as the old --grace-period=0 pod delete.
+  # the same abruptness as a --grace-period=0 pod delete.
   sipext_sipp_uac_rm "$ORPHAN_JOB"
   push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
 }
 
 # CHAOS: kill the (single-replica) shared call-limiter. It is a SPOF for the
-# limiter FUNCTION only: while it is down the b2bua fails OPEN (admits with no
-# holds, 150ms budget), so calls keep flowing — the cap simply stops being
+# limiter FUNCTION only: while it is down the b2bua fails OPEN (the call runs
+# uncounted, 150ms budget), so calls keep flowing — the cap simply stops being
 # enforced. The Deployment (strategy: Recreate) brings a fresh, empty pod back;
-# active calls' refresh timers re-populate its counters within ~LIMITER_WINDOW.
+# the counted calls re-register their sets on their next refresh (ADR-0040).
 limiter_kill() {
   log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
   push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'
@@ -457,24 +457,157 @@ limiter_kill() {
 # CHAOS: a NETWORK interruption to the shared call-limiter WITHOUT killing it.
 # `tc netem loss 100%` on the limiter pod's eth0 black-holes all traffic for
 # NETCUT_SECS, so worker->limiter admits/releases/refreshes time out (150ms
-# budget) and the b2bua fails open — same observable effect as a kill but the
-# pod (and its in-memory counters) stay intact, so on restore the counters are
-# still warm. Requires NET_ADMIN + iproute2 (set on 50-call-limiter / image).
+# budget) and the b2bua fails open. The kubelet's probes are cut too, so a
+# netcut longer than the liveness budget (3 x 10 s) also restarts the limiter's
+# container; the pod's netns outlives that restart, and the fault is applied and
+# undone in it from the node (lib/pod-faults.sh), never through the container.
 NETCUT_SECS="${NETCUT_SECS:-60}"
 limiter_netcut() {
-  local pod
-  pod="$(kubectl -n "$NS" get pod -l "$LIMITER_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  if [ -z "$pod" ]; then log "limiter_netcut: no call-limiter pod found"; return; fi
-  log "CHAOS: limiter_netcut — 100% packet loss on $pod eth0 for ${NETCUT_SECS}s (pod stays up)"
-  push_metric 'sip_chaos_event{type="limiter_netcut",phase="start"} 1
-sip_chaos_active{type="limiter_netcut"} 1'
-  kubectl -n "$NS" exec "$pod" -- tc qdisc add dev eth0 root netem loss 100% >/dev/null 2>&1 \
-    || warn "limiter_netcut: tc add failed (NET_ADMIN/iproute2 present?)"
-  sleep "$NETCUT_SECS"
-  kubectl -n "$NS" exec "$pod" -- tc qdisc del dev eth0 root >/dev/null 2>&1 || true
-  log "limiter_netcut: removed netem on $pod (connectivity restored)"
-  push_metric 'sip_chaos_event{type="limiter_netcut",result="pass"} 1
-sip_chaos_active{type="limiter_netcut"} 0'
+  timed_pod_fault "$LIMITER_SELECTOR" pf_loss "$NETCUT_SECS" pf_undelay limiter_netcut
+}
+
+# ── Faults of the call path's shared dependencies (the limiter, the CDR
+# broker, the node hosting them). Each fault is timed and undone by its own
+# primitive; chaos_cleanup undoes whatever an interrupted caller left behind.
+LIMITER_PORT="${LIMITER_PORT:-8080}"
+LIMITER_REJECT_SECS="${LIMITER_REJECT_SECS:-60}"
+LIMITER_SLOW_SECS="${LIMITER_SLOW_SECS:-60}"
+LIMITER_SLOW_MS="${LIMITER_SLOW_MS:-300}"          # above the workers' limiter budget (LIMITER_TIMEOUT_MS)
+# Well under the limiter's liveness budget (3 x 10 s): a longer freeze is a
+# kubelet restart (limiter_freeze notes one).
+LIMITER_FREEZE_SECS="${LIMITER_FREEZE_SECS:-15}"
+BROKER_SELECTOR="${BROKER_SELECTOR:-app=rabbitmq}"
+# Under the broker's liveness budget (3 x 30 s, 15 s timeout).
+BROKER_FREEZE_SECS="${BROKER_FREEZE_SECS:-45}"
+INFRA_NODE_SELECTOR="${INFRA_NODE_SELECTOR:-tier=infra}"
+INFRA_HOLD_S="${INFRA_HOLD_S:-120}"
+INFRA_BACK_TIMEOUT="${INFRA_BACK_TIMEOUT:-300}"
+
+# Run fault $2 on the live pod of selector $1 for $3 seconds, then undo it ($4).
+# Returns 0, 1 when the fault could not be applied (no pod, apply failed: the
+# event did not happen), or 2 when it could not be undone (chaos_cleanup and
+# chaos_verify_clean must then clear and prove it).
+timed_pod_fault() { # $1 selector  $2 apply fn  $3 secs  $4 undo fn  $5 event type  [$6 apply arg]
+  local pod rc=0; pod="$(pf_pod_of "$1")"
+  [ -n "$pod" ] || { warn "$5: no live pod for $1"; return 1; }
+  log "CHAOS: $5 on $pod for ${3}s"
+  push_metric "sip_chaos_event{type=\"$5\",phase=\"start\"} 1
+sip_chaos_active{type=\"$5\"} 1"
+  "$2" "$pod" ${6:+"$6"} || { warn "$5: applying the fault to $pod failed"; return 1; }
+  pf_sleep "$3"
+  "$4" "$pod" || { warn "$5: undoing the fault on $pod failed (chaos_cleanup clears it)"; rc=2; }
+  [ "$rc" = 0 ] && log "$5: $pod restored"
+  push_metric "sip_chaos_active{type=\"$5\"} 0"
+  return "$rc"
+}
+
+# CHAOS: graceful limiter restart (SIGTERM, a new pod with empty counters).
+limiter_restart() {
+  log "CHAOS: limiter_restart — rollout restart of $LIMITER_DEPLOY (graceful, new pod)"
+  push_metric 'sip_chaos_event{type="limiter_restart",phase="start"} 1'
+  kubectl -n "$NS" rollout restart "$LIMITER_DEPLOY" >/dev/null
+  kubectl -n "$NS" rollout status "$LIMITER_DEPLOY" --timeout=120s || warn "limiter_restart: rollout not complete"
+}
+# CHAOS: the limiter refuses connections (TCP RST): the fast-failure path.
+limiter_reject() {
+  timed_pod_fault "$LIMITER_SELECTOR" pf_reject_tcp "$LIMITER_REJECT_SECS" pf_unreject limiter_reject "$LIMITER_PORT"
+}
+# CHAOS: the limiter answers, but later than the workers wait for it.
+limiter_slow() {
+  timed_pod_fault "$LIMITER_SELECTOR" pf_delay "$LIMITER_SLOW_SECS" pf_undelay limiter_slow "$LIMITER_SLOW_MS"
+}
+# CHAOS: the limiter hangs: sockets open, no reply. A container restart during
+# the freeze (the kubelet's liveness verdict) is noted: the event then covered
+# a restart too.
+limiter_freeze() {
+  local pod r0 r1 rc
+  pod="$(pf_pod_of "$LIMITER_SELECTOR")"
+  r0="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
+  timed_pod_fault "$LIMITER_SELECTOR" pf_freeze "$LIMITER_FREEZE_SECS" pf_thaw limiter_freeze; rc=$?
+  r1="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
+  [ "${r1:-0}" != "${r0:-0}" ] && warn "limiter_freeze: the limiter's container restarted during the freeze ($r0 -> $r1)"
+  return "$rc"
+}
+# CHAOS: the broker hangs: connections open, no frame read or sent.
+broker_freeze() {
+  timed_pod_fault "$BROKER_SELECTOR" pf_freeze "$BROKER_FREEZE_SECS" pf_thaw broker_freeze
+}
+
+# CHAOS: lose the node(s) of INFRA_NODE_SELECTOR for INFRA_HOLD_S, then bring
+# them back and wait until every pod bound to them is Ready again. Sets
+# INFRA_OUTAGE_S (stop to all Ready; empty when they did not come back) and
+# INFRA_NOTREADY_SEEN (1 once the API server reported a stopped node NotReady:
+# the proof the fault took). Returns 1 when no node could be stopped, 2 when a
+# node or its pods did not come back.
+INFRA_OUTAGE_S=""; INFRA_NOTREADY_SEEN=0
+infra_node_kill() {
+  local nodes n t0 deadline pending stopped=0
+  nodes="$(pf_nodes_of "$INFRA_NODE_SELECTOR")"
+  [ -n "$nodes" ] || { warn "infra_node_kill: no node labelled $INFRA_NODE_SELECTOR"; return 1; }
+  INFRA_OUTAGE_S=""; INFRA_NOTREADY_SEEN=0; t0=$(date +%s)
+  log "CHAOS: infra_node_kill — stopping $(echo "$nodes" | tr '\n' ' ')for ${INFRA_HOLD_S}s"
+  push_metric 'sip_chaos_event{type="infra_node_kill",phase="start"} 1
+sip_chaos_active{type="infra_node_kill"} 1'
+  for n in $nodes; do
+    if pf_node_stop "$n"; then stopped=1; else warn "infra_node_kill: docker stop $n failed"; fi
+  done
+  [ "$stopped" = 1 ] || return 1
+  deadline=$(( t0 + INFRA_HOLD_S ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ "$INFRA_NOTREADY_SEEN" = 0 ]; then
+      for n in $nodes; do
+        [ "$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ] \
+          || INFRA_NOTREADY_SEEN=1
+      done
+    fi
+    pf_sleep 5
+  done
+  for n in $nodes; do pf_node_start "$n" "$INFRA_BACK_TIMEOUT" || { warn "infra_node_kill: $n not Ready"; return 2; }; done
+  push_metric 'sip_chaos_active{type="infra_node_kill"} 0'
+  deadline=$(( t0 + INFRA_HOLD_S + INFRA_BACK_TIMEOUT ))
+  while :; do
+    pending=""
+    for n in $nodes; do
+      pending+="$(kubectl -n "$NS" get pods --field-selector "spec.nodeName=$n" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+        | awk '$2 != "True" { printf "%s ", $1 }')"
+    done
+    [ -z "$pending" ] && break
+    [ "$(date +%s)" -lt "$deadline" ] || { warn "infra_node_kill: not Ready in time: $pending"; return 2; }
+    sleep 2
+  done
+  INFRA_OUTAGE_S=$(( $(date +%s) - t0 ))
+  log "infra_node_kill: node(s) and their pods back ${INFRA_OUTAGE_S}s after the stop"
+}
+
+# Undo every fault the primitives above can leave behind: a stopped kind node
+# of this cluster, a frozen, rejecting or delayed limiter or broker (a netem set
+# by limiter_netcut included). Idempotent; safe with nothing to undo.
+chaos_cleanup() {
+  local n
+  for n in $(pf_stopped_nodes "${CLUSTER:-sip-e2e}"); do
+    log "chaos_cleanup: starting stopped node $n"; pf_node_start "$n" "$INFRA_BACK_TIMEOUT" || warn "chaos_cleanup: $n not Ready"
+  done
+  pf_clear_pod "$LIMITER_SELECTOR"
+  pf_clear_pod "$BROKER_SELECTOR"
+  push_metric 'sip_chaos_active{type="limiter_netcut"} 0'
+}
+
+# Prove chaos_cleanup left nothing: no stopped kind node of this cluster, and no
+# netem, REJECT rule or frozen cgroup on any live limiter or broker pod. Prints
+# the residue ("<pod|node> <what>", one per line) and fails when there is any.
+chaos_verify_clean() {
+  local n sel pod what bad=""
+  for n in $(pf_stopped_nodes "${CLUSTER:-sip-e2e}"); do bad+="$n stopped"$'\n'; done
+  for sel in "$LIMITER_SELECTOR" "$BROKER_SELECTOR"; do
+    for pod in $(kubectl -n "$NS" get pod -l "$sel" \
+        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null | awk '$0 ~ /^ / { print $1 }'); do
+      for what in $(pf_pod_residue "$pod"); do bad+="$pod $what"$'\n'; done
+    done
+  done
+  [ -z "$bad" ] && return 0
+  printf '%s' "$bad"
+  return 1
 }
 
 # CHAOS: cut_external_plane — sever the CURRENT VRRP master's edge node from
@@ -616,20 +749,21 @@ wait_brought_back() {
 }
 
 # Assert the brought-back worker actually RE-PULLED state from its peer (not just
-# came up empty): its repl_pull_applied counter must be > 0. A fresh worker that
-# reclaims its calls on reboot drains the peer's compacted changelog — zero here
-# means re-hydration silently delivered nothing (the goal-3 failure mode).
+# came up empty): the replication ops it applied (b2bua_repl_applied_total, every
+# flow, peer and op summed) must be > 0. A fresh worker that reclaims its calls
+# on reboot drains the peer's compacted changelog — zero here means
+# re-hydration silently delivered nothing (the HA failure mode).
 assert_rehydrated() {
-  log "asserting $KILL_TARGET re-pulled state from its peer (repl_pull_applied > 0)"
+  log "asserting $KILL_TARGET re-pulled state from its peer (repl_applied > 0)"
   local pf applied
   kubectl -n "$NS" port-forward "$KILL_TARGET" 19091:9091 >/dev/null 2>&1 &
   pf=$!
   sleep 3
   applied="$(curl -s --max-time 4 localhost:19091/metrics 2>/dev/null \
-    | grep -aE '^b2bua_repl_pull_applied_total ' | grep -oE '[0-9]+$' | tail -1)"
+    | awk '/^b2bua_repl_applied_total[{ ]/ { n += $NF } END { printf "%d", n }')"
   kill "$pf" 2>/dev/null || true
   applied="${applied:-0}"
-  printf '  %s repl_pull_applied_total = %s\n' "$KILL_TARGET" "$applied" >&2
+  printf '  %s repl_applied_total = %s\n' "$KILL_TARGET" "$applied" >&2
   if [ "$applied" -gt 0 ]; then
     ok "bring-back re-hydration: $KILL_TARGET re-pulled $applied entries from its peer"
   else
@@ -658,7 +792,7 @@ bringback() {
   assert_rehydrated
   # (3) the recreated pod has a fresh IP, but the proxy now discovers workers from
   # k8s EndpointSlices (ADR-0012 D4): the informer picks up the new IP on its own,
-  # so NO proxy redeploy is needed (this used to re-bake PROXY_WORKERS). Just
+  # so NO proxy redeploy is needed. Just
   # re-gate readiness before driving traffic again.
   wait_ready
   # (4) batch-2: NEW dialogs on the recovered topology must all succeed.
@@ -676,7 +810,7 @@ bringback() {
 }
 
 # Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
-# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+# direct CLI use) depends on: names and behaviour are FROZEN.
 chaos_main() {
   local cmd="${1:-failover}"; shift || true
   case "$cmd" in
@@ -694,12 +828,20 @@ chaos_main() {
     orphankill) orphan_kill ;;
     limiterkill) limiter_kill ;;
     limiternetcut) limiter_netcut ;;
+    limiterrestart) limiter_restart ;;
+    limiterreject) limiter_reject ;;
+    limiterslow) limiter_slow ;;
+    limiterfreeze) limiter_freeze ;;
+    verifyclean) chaos_verify_clean ;;
+    brokerfreeze) broker_freeze ;;
+    infranodekill) infra_node_kill ;;
+    cleanup)   chaos_cleanup ;;
     cutext)    cut_external_plane ;;
     abuse)     case "${1:-up}" in up) abuse_up ;; down) abuse_down ;; *) fail "usage: $0 abuse {up|down}" ;; esac ;;
     recover)   wait_brought_back; assert_rehydrated ;;
     assert)    assert_survival ;;
     down)      chaos_down ;;
-    *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|cutext|abuse {up|down}|recover|assert|down}" ;;
+    *) fail "usage: $0 {failover|bringback|up|deploy|kill|proxykill|peak|cpustarve|cpustarveall|overload|overloadall|orphankill|limiterkill|limiternetcut|limiterrestart|limiterreject|limiterslow|limiterfreeze|brokerfreeze|infranodekill|cleanup|cutext|abuse {up|down}|recover|assert|down}" ;;
   esac
 }
 

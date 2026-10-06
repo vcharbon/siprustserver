@@ -103,9 +103,9 @@ mod tests {
 
     #[test]
     fn parses_and_classifies() {
-        let f = FaceCidrs::parse("10.244.0.0/16, 172.20.0.0/16").unwrap();
+        let f = FaceCidrs::parse("10.244.0.0/16, 192.0.2.0/24").unwrap();
         assert!(f.contains_ip("10.244.3.7".parse().unwrap()));
-        assert!(f.contains_ip("172.20.255.250".parse().unwrap()));
+        assert!(f.contains_ip("192.0.2.250".parse().unwrap()));
         assert!(!f.contains_ip("192.168.60.10".parse().unwrap()));
         assert!(!f.contains_ip("10.245.0.1".parse().unwrap()));
     }

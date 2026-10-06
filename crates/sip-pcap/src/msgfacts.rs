@@ -5,14 +5,13 @@
 //! Every read goes through `sip-message`; this module never looks at header or
 //! body bytes itself — the RFC 2046 boundary walk lives beside its compose
 //! mirror in `sip_message::multipart`, and this module keeps only the
-//! projection into [`PartJson`].
+//! projection into the document.
 
-use sip_message::header::{HeaderName, HeaderValue, MediaType, ParamValue, Uri, Wire};
+use sip_message::header::{HeaderName, HeaderValue, ParamValue, Uri, Wire};
 use sip_message::{header, SipMessage, SipStr};
 
 use crate::doc::{
-    BodyJson, DialogRef, HeaderJson, Identities, Identity, MsgJson, PartHeaderJson, PartJson,
-    ReferToJson, ViaJson,
+    BodyJson, DialogRef, HeaderJson, Identities, Identity, MsgJson, ReferToJson, ViaJson,
 };
 
 /// Compute every enrichment field of `msg` and write it onto `out`.
@@ -23,7 +22,7 @@ pub fn apply(msg: &SipMessage, allow: &[HeaderName], out: &mut MsgJson) {
     out.rseq = msg.raw(HeaderName::RSeq).next().map(|v| v.trim().to_string());
     out.replaces = replaces_of(msg);
     out.refer_to = refer_to_of(msg);
-    out.body = body_layout(msg);
+    out.body = BodyJson::of(msg);
 }
 
 fn via_chain(msg: &SipMessage) -> Vec<ViaJson> {
@@ -104,44 +103,6 @@ fn dialog_ref(r: header::Replaces) -> DialogRef {
     }
 }
 
-fn body_layout(msg: &SipMessage) -> Option<BodyJson> {
-    let body = msg.body();
-    if body.is_empty() {
-        return None;
-    }
-    let content_type = msg.header::<MediaType>().and_then(Result::ok);
-    let media_type = content_type.as_ref().map(|ct| ct.token().to_string()).unwrap_or_default();
-    let boundary = content_type
-        .as_ref()
-        .and_then(|ct| ct.param("boundary"))
-        .and_then(ParamValue::as_str)
-        .map(str::to_string);
-    Some(BodyJson {
-        content_type: media_type,
-        len: body.len(),
-        parts: boundary
-            .map(|b| {
-                sip_message::decompose_multipart(body, &b).into_iter().map(part_json).collect()
-            })
-            .unwrap_or_default(),
-    })
-}
-
-/// One located part, projected into the document schema.
-fn part_json(part: sip_message::LocatedPart) -> PartJson {
-    PartJson {
-        content_type: part.content_type,
-        content_id: part.content_id,
-        headers: part
-            .headers
-            .into_iter()
-            .map(|(name, value)| PartHeaderJson { name, value })
-            .collect(),
-        offset: part.offset,
-        len: part.len,
-    }
-}
-
 fn render(f: impl FnOnce(&mut Wire)) -> String {
     let mut w = Wire::new();
     f(&mut w);
@@ -183,18 +144,18 @@ mod tests {
         out
     }
 
-    const REFER: &[u8] = b"REFER sip:+33123@h SIP/2.0\r\n\
+    const REFER: &[u8] = b"REFER sip:+1555123@h SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bK2;received=10.0.0.9\r\n\
 v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 Max-Forwards: 70\r\n\
-From: <sip:0033900@h>;tag=f1\r\n\
-To: <sip:+33123@h;npdi>\r\n\
+From: <sip:001555900@h>;tag=f1\r\n\
+To: <sip:+1555123@h;npdi>\r\n\
 Call-ID: refer-1\r\n\
 CSeq: 2 REFER\r\n\
 P-Asserted-Identity: <tel:+41319852573>\r\n\
 X-Api-Call: call-9\r\n\
 x-api-call: call-10\r\n\
-Refer-To: <sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>\r\n\
+Refer-To: <sip:+1555456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>\r\n\
 l: 0\r\n\r\n";
 
     /// The Via chain reads top-first, compact spellings included, with the
@@ -226,7 +187,11 @@ l: 0\r\n\r\n";
             vec![
                 ("X-Api-Call", None, "call-9"),
                 ("X-Api-Call", Some("x-api-call"), "call-10"),
-                ("Refer-To", None, "<sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"),
+                (
+                    "Refer-To",
+                    None,
+                    "<sip:+1555456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"
+                ),
                 // `l` resolved to Content-Length before the projection saw it.
                 ("Content-Length", None, "0"),
             ]
@@ -239,12 +204,12 @@ l: 0\r\n\r\n";
     #[test]
     fn identities_normalize_users_beside_the_raw_uris() {
         let m = facts(REFER, &[]);
-        assert_eq!(m.identities.from.uri, "sip:0033900@h");
-        assert_eq!(m.identities.from.digits.as_deref(), Some("33900"));
-        assert_eq!(m.identities.to.uri, "sip:+33123@h;npdi");
-        assert_eq!(m.identities.to.user.as_deref(), Some("+33123"));
-        assert_eq!(m.identities.to.digits.as_deref(), Some("33123"));
-        assert_eq!(m.identities.ruri.as_ref().unwrap().digits.as_deref(), Some("33123"));
+        assert_eq!(m.identities.from.uri, "sip:001555900@h");
+        assert_eq!(m.identities.from.digits.as_deref(), Some("1555900"));
+        assert_eq!(m.identities.to.uri, "sip:+1555123@h;npdi");
+        assert_eq!(m.identities.to.user.as_deref(), Some("+1555123"));
+        assert_eq!(m.identities.to.digits.as_deref(), Some("1555123"));
+        assert_eq!(m.identities.ruri.as_ref().unwrap().digits.as_deref(), Some("1555123"));
         assert_eq!(m.identities.pai.len(), 1);
         assert_eq!(m.identities.pai[0].digits.as_deref(), Some("41319852573"));
     }
@@ -254,7 +219,7 @@ l: 0\r\n\r\n";
     fn refer_to_resolves_its_escaped_replaces() {
         let m = facts(REFER, &[]);
         let refer = m.refer_to.expect("REFER carries a Refer-To");
-        assert_eq!(refer.target.digits.as_deref(), Some("33456"));
+        assert_eq!(refer.target.digits.as_deref(), Some("1555456"));
         let replaces = refer.replaces.expect("attended transfer names a dialog");
         assert_eq!(replaces.call_id, "abc@h");
         assert_eq!(replaces.to_tag.as_deref(), Some("tt"));
@@ -312,7 +277,7 @@ Content-Length: {}\r\n\r\n{body}",
         assert_eq!(b.content_type, "multipart/mixed");
         assert_eq!(b.len, body.len());
         assert_eq!(b.parts.len(), 2);
-        let slice = |p: &PartJson| &body.as_bytes()[p.offset..p.offset + p.len];
+        let slice = |p: &crate::doc::PartJson| &body.as_bytes()[p.offset..p.offset + p.len];
         assert_eq!(b.parts[0].content_type, "application/sdp");
         assert_eq!(b.parts[0].content_id, None);
         assert!(b.parts[0].headers.is_empty());

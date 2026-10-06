@@ -122,9 +122,9 @@ services:
       - http_proxy=
       - https_proxy=
       - no_proxy=
-      # NOTE: the plugin is now baked into the image at build time (Dockerfile);
-      # the old runtime GF_INSTALL_PLUGINS=victoriametrics-logs-datasource was the
-      # crash-loop cause on a host that cannot reach grafana.com — removed.
+      # NOTE: the plugin is baked into the image at build time (Dockerfile); a
+      # runtime GF_INSTALL_PLUGINS crash-loops on a host that cannot reach
+      # grafana.com.
       # Trim background work on a dev instance: no phone-home/update checks and
       # no alerting engine (we only ever look at dashboards live).
       - GF_ANALYTICS_REPORTING_ENABLED=false

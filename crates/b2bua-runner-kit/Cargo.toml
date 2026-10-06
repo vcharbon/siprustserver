@@ -10,6 +10,8 @@ description = "Reusable B2BUA runner composition: the env -> config -> bind -> d
 workspace = true
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
+jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }
 # Real HTTP transport for the default call-limiter client (LIMITER_URL).
@@ -26,3 +28,32 @@ sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# The RabbitMQ CDR sink (cdr_rabbitmq.rs): lapin is runtime-agnostic, the two
+# trait shims bind it to the running tokio runtime, serde_json encodes the CDR.
+lapin = { workspace = true }
+tokio-executor-trait = { workspace = true }
+tokio-reactor-trait = { workspace = true }
+serde_json = { workspace = true }
+# Replication from env (replication.rs): the real TCP transport and the
+# membership seam with the kube EndpointSlice informer for in-cluster discovery.
+repl-net = { path = "../repl-net" }
+topology = { path = "../topology", features = ["kube"] }
+# The in-cluster client K8sMembership watches through.
+kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
+# rustls 0.23 has no compile-time default CryptoProvider and kube's `rustls-tls`
+# picks none: `ring` is installed before the kube client's first handshake.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+sip-message = { path = "../sip-message" }
+# The simulated load sampler the /metrics body test builds the overload signal with.
+load-shed = { path = "../load-shed" }
+# The limiter client's boot and re-resolve tests run a real limiter server on
+# the simulated HTTP network under the paused clock.
+call-limiter = { path = "../call-limiter" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+tokio = { workspace = true, features = ["test-util"] }
+# The scripted AMQP 0-9-1 broker the CDR sink's delivery tests run against
+# (tests/support/fake_broker.rs): lapin's own frame codec, so the wire is the
+# client's.
+amq-protocol = { version = "7", default-features = false }

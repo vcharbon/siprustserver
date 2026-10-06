@@ -1,7 +1,7 @@
 /**
  * A relayed provisional crosses the vantage TWICE — arriving on the leg it was
  * sent to, leaving on the leg it is relayed to — and the document has to say the
- * same thing about both halves (§6.9, issue 116).
+ * same thing about both halves (§6.9).
  *
  * An unreliable provisional rides no timer, so it does not retransmit: a
  * platform that rings twice has SENT TWICE, and a B2BUA relays each one as it
@@ -37,6 +37,7 @@
  * consumption, and the second relay keeps its header comparison instead of
  * going unreferenced. `relayed-provisional-expect-derived` names each one.
  */
+import { Wire } from "@sip/contracts"
 import type { ResourceFile } from "./bodies.js"
 import { relayOriginOf, type StepTiming } from "./delay.js"
 import type { StepDraft } from "./draft.js"
@@ -98,7 +99,7 @@ const canonical = (value: unknown, textOf: (ref: string) => string | undefined):
 }
 
 const shaper = (resources: ReadonlyArray<ResourceFile>) => {
-  const byPath = new Map(resources.map((r) => [r.relPath, r.text]))
+  const byPath = new Map(resources.map((r) => [r.relPath, Wire.base64Of(r.bytes)]))
   const textOf = (ref: string): string | undefined => byPath.get(ref)
   return (step: StepDraft): string => JSON.stringify(canonical(step.msg, textOf))
 }

@@ -6,8 +6,9 @@
 //! of truth, as the migration's recording-first design intends.
 
 pub mod html;
+pub mod http;
+pub mod http_verdict;
 pub mod project;
-pub mod svg;
 pub mod text;
 pub mod wire;
 
@@ -15,26 +16,31 @@ use std::path::{Path, PathBuf};
 
 use crate::run::RunReport;
 
-/// Project a finished run into the neutral [`seq_report::SeqDoc`] with the
-/// pure RFC cross-message anomaly fold, for callers that persist it (the E2E
-/// `result.json`, ADR-0018 Phase F — its `rfc` field republishes these
-/// anomalies as RFC findings, so failed expects stay out) and draw it later
-/// via `seq_report::render_svg`/`render_html`.
+/// Project a finished run into the neutral [`seq_report::SeqDoc`] — the SIP
+/// rows, the HTTP exchanges, the RFC cross-message anomaly fold and the
+/// report's extra anomalies — for callers that persist it (the E2E
+/// `result.json`, ADR-0018, whose `rfc` field keeps the rule-sourced
+/// findings only) and draw it later via `seq_report::render_svg`/`render_html`.
+/// Failed expects stay out.
 pub fn seq_doc(report: &RunReport) -> seq_report::SeqDoc {
     let entries = report.entries();
     let scenario = report.scenario();
-    project::sip_doc(
+    let mut anomalies = cross_message_anomalies(report);
+    anomalies.extend(report.extra_anomalies.iter().cloned());
+    let doc = project::sip_doc(
         &report.scenario_name,
         report.description.as_deref(),
         &entries,
         &scenario,
         report.passed(),
-        &cross_message_anomalies(report),
-    )
+        &anomalies,
+    );
+    http::with_rows(doc, &report.http_entries(), &scenario.lanes)
 }
 
 /// The extra (non-recorder) anomalies the WRITTEN artifacts carry: the RFC
-/// cross-message fold plus every FAILED `ExpectOutcome` rendered as a gating
+/// cross-message fold, the report's extra anomalies, plus every FAILED
+/// `ExpectOutcome` rendered as a gating
 /// anomaly — so the artifacts state WHY a run is `FAIL` (the Drop-path writer
 /// pushes the panic message as a failed expect; a data-DSL mismatch lists what
 /// was expected vs received). Passing outcomes add nothing. [`write_all`]-only:
@@ -42,6 +48,7 @@ pub fn seq_doc(report: &RunReport) -> seq_report::SeqDoc {
 /// `result.json` `rfc` field) publish the doc anomalies AS RFC findings.
 fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
     let mut anomalies = cross_message_anomalies(report);
+    anomalies.extend(report.extra_anomalies.iter().cloned());
     anomalies.extend(report.expects.iter().filter(|e| !e.passed).map(|e| {
         seq_report::Anomaly {
             check: "expect".to_string(),
@@ -95,11 +102,13 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
         .collect()
 }
 
-/// Render and write all three artifacts for a run under `out_dir`:
-/// `<name>.svg`, `<name>.html`, `<name>.global.txt`, and `<net>/<agent>.txt`
-/// per endpoint. Returns the paths written.
+/// Render and write the artifacts of a run under `out_dir`: `<name>.svg` and
+/// `<name>.html` (one doc, the SIP and HTTP planes), `<name>.global.txt`,
+/// `<net>/<agent>.txt` per endpoint and `service/<name>.txt` per recorded
+/// HTTP service. Returns the paths written.
 pub fn write_all(report: &RunReport, out_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let entries = report.entries();
+    let http = report.http_entries();
     let scenario = report.scenario();
     let passed = report.passed();
     let name = &report.scenario_name;
@@ -110,17 +119,18 @@ pub fn write_all(report: &RunReport, out_dir: &Path) -> std::io::Result<Vec<Path
     std::fs::create_dir_all(out_dir)?;
     let mut written = Vec::new();
 
-    let svg_doc = svg::render(&entries, &scenario.lanes, scenario.transport_kind);
+    let doc = project::sip_doc(name, desc, &entries, &scenario, passed, &extra_anomalies);
+    let doc = http::with_rows(doc, &http, &scenario.lanes);
+
     let svg_path = out_dir.join(format!("{name}.svg"));
-    std::fs::write(&svg_path, svg_doc)?;
+    std::fs::write(&svg_path, seq_report::render_svg(&doc))?;
     written.push(svg_path);
 
-    let html_doc = html::render(name, desc, &entries, &scenario, passed, &extra_anomalies);
     let html_path = out_dir.join(format!("{name}.html"));
-    std::fs::write(&html_path, html_doc)?;
+    std::fs::write(&html_path, seq_report::render_html(&doc))?;
     written.push(html_path);
 
-    let texts = text::render(name, desc, &entries, &scenario, passed, &extra_anomalies);
+    let texts = text::render(name, desc, &entries, &http, &scenario, passed, &extra_anomalies);
     written.extend(texts.write_to(out_dir)?);
 
     Ok(written)

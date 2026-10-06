@@ -1,4 +1,4 @@
-//! ADR-0016 slice 8 capstone — the out-of-tree `announcement` early-media
+//! ADR-0016 — the out-of-tree `announcement` early-media
 //! service, exercised end to end through a real `B2buaCore`.
 //!
 //! `announcement` depends on `b2bua-sdk` alone (no `b2bua`), and is injected
@@ -126,6 +126,8 @@ async fn announcement_happy_path() {
     dest.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -151,18 +153,20 @@ async fn announcement_mrf_rejects() {
     let failed = call.expect(503).await;
     assert_eq!(failed.status(), 503);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
     assert_eq!(b2bua.active_calls(), 0, "the call is reaped");
 }
 
-// ── Reject-teardown AFTER the media leg answered (regression).
+// ── Reject-teardown AFTER the media leg answered.
 // The MRF answers (alice gets 183 early media, a parked *unadopted* media leg),
 // then the clip fails (MSCML <response> non-2xx). The service rejects the caller
 // with a 4xx on its early dialog and terminates. The caller never got a 2xx, so
-// the a-leg must be resolved by that 4xx — NOT BYE'd. Before the generic fix,
-// `confirm-dialog` on the media 200 spuriously marked the a-leg `Confirmed`, so
-// `BeginTermination` tried to BYE a dialog alice never established → undeliverable
-// BYE, the call stranded in `Terminating`, and its CDR never flushed.
+// the a-leg must be resolved by that 4xx — NOT BYE'd. Were `confirm-dialog` on
+// the media 200 to mark the a-leg `Confirmed`, `BeginTermination` would BYE a
+// dialog alice never established → undeliverable BYE, the call stranded in
+// `Terminating`, and its CDR never flushed.
 #[tokio::test]
 async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     let h = Harness::with_transit_delay("announcement-clip-fails", 1);
@@ -202,29 +206,30 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     // Only the (confirmed) media leg is BYE'd by the teardown.
     mrf.receive("BYE").await.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
 }
 
-// ── Post-reject crossing BYE (regression). Same reject-teardown
-// as above, but the MRF's own BYE crosses the b2bua's teardown BYE on the wire.
-// Before the fix, the reject turn left the a-leg unresolved (`RelayFailureToALeg`/
-// `RespondToALeg` are wire-only, and `BeginTermination`'s a-leg arm only set
-// `ByeDisposition::None`), so the turn consuming the crossing BYE reached
-// `→ terminated` with a "still-unanswered" a-leg and the ADR-0022 invariant
-// re-answered a spurious 503 (INVITE) — a second final on an already-rejected
-// INVITE. Now `BeginTermination` resolves the just-answered a-leg to
-// `Terminated`, and the invariant stays a pure safety net.
+// ── Post-reject crossing BYE. Same reject-teardown as above, but the MRF's own
+// BYE crosses the b2bua's teardown BYE on the wire. `RelayFailureToALeg`/
+// `RespondToALeg` are wire-only, so `BeginTermination` resolves the just-answered
+// a-leg to `Terminated`; left unresolved, the turn consuming the crossing BYE
+// would reach `→ terminated` with a "still-unanswered" a-leg and the ADR-0022
+// invariant would re-answer a spurious 503 (INVITE) — a second final on an
+// already-rejected INVITE. The invariant stays a pure safety net.
 //
 // Two assertion lanes, deliberately:
 //  - the CDR must NOT carry the `unanswered_at_termination` 503 synthesis —
-//    this is the discriminating check (pre-fix it fails);
+//    this is the discriminating check;
 //  - the wire must show exactly one final toward the caller. In this compact
-//    flow the a-leg INVITE server txn is still `Completed` when the spurious
-//    503 fires, so sip-txn's idempotence backstop absorbs the wire copy — but
-//    in a long early-media flow (RBT max-duration; the txn swept at ~193 s)
-//    `do_send_response` falls through to a RAW send and the 503 reaches the
-//    caller, which is how a downstream observed it. State must be right, not
+//    flow the a-leg INVITE server txn is still `Completed` when a spurious
+//    503 would fire, so sip-txn's idempotence backstop absorbs the wire copy —
+//    but in a long early-media flow (a ringback tone held to its max duration;
+//    the txn swept at ~193 s) `do_send_response` falls through to a RAW send
+//    and the 503 reaches the caller. State must be right, not
 //    backstop-dependent.
 #[tokio::test]
 async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
@@ -273,7 +278,7 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
     let alice_addr = alice.addr();
     let report = h.finish().await;
 
-    // THE regression (discriminating check): the a-leg was resolved by its
+    // The discriminating check: the a-leg was resolved by its
     // just-sent 4xx, so the ADR-0022 `unanswered_at_termination` 503 synthesis
     // must not fire — not into the CDR, and not toward the wire.
     let cdrs = b2bua.cdr_records();
@@ -303,6 +308,7 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
         vec![480],
         "exactly one final (the 480) toward the caller — no spurious second final",
     );
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -336,5 +342,7 @@ async fn announcement_caller_cancels_mid_clip() {
     // no announcement rule is involved (the generic termination reaps it).
     mrf.receive("BYE").await.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

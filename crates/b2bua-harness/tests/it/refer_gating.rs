@@ -1,4 +1,4 @@
-//! REFER gating scenarios (slice 5d). Port of `tests/scenarios/refer-gating.ts`.
+//! REFER gating scenarios. Port of `tests/scenarios/refer-gating.ts`.
 //!
 //! Verification slice for the two gating regimes (slice5-refer-design.md §5):
 //!
@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -27,8 +27,8 @@ use sip_message::header::{Contact, Event, HeaderValue, MediaType, ParamValue, Su
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // A's re-INVITE offer (a distinct media port so the relayed body is recognisable).
-const AREINVITE: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
-const AREINVITE_ANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const AREINVITE: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const AREINVITE_ANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const DTMF: &str = "Signal=5\r\nDuration=160\r\n";
 
@@ -146,6 +146,8 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -216,6 +218,8 @@ async fn refer_gating_a_reinvite_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -287,6 +291,8 @@ async fn refer_gating_a_reinvite_c_realigning() {
     alice_bye.expect(200).await;
 
     let _ = &mut charlie_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -359,6 +365,8 @@ async fn refer_gating_a_info_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -429,6 +437,8 @@ async fn refer_gating_a_info_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -494,6 +504,8 @@ async fn refer_gating_b_info_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -556,6 +568,8 @@ async fn refer_gating_second_refer_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -628,5 +642,7 @@ async fn refer_gating_second_refer_c_realigning() {
     alice_bye.expect(200).await;
 
     let _ = &mut charlie_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

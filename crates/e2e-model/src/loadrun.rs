@@ -3,7 +3,7 @@
 //! render a load run beside a functional Campaign run without re-deriving
 //! anything from Prometheus scrapes or the HTML report.
 //!
-//! The loadgen [`Reporter`] writes one of these next to `index.html` on every
+//! The loadgen `Reporter` writes one of these next to `index.html` on every
 //! periodic report rewrite AND at run end; the e2e-web `Load runs` section reads
 //! it back (JSON-first — the HTML detail page is a pure projection of this doc,
 //! so the two can never drift). Every path in it is **relative** to the run
@@ -207,7 +207,7 @@ mod tests {
                 started_ms: 1_000,
                 finished_ms: 61_000,
                 finished: true,
-                target: "172.20.255.250:5060".to_string(),
+                target: "192.0.2.250:5060".to_string(),
                 cps: 20.0,
                 duration_secs: 60,
                 max_in_flight: 2000,

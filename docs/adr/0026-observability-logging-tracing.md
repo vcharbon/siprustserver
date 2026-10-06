@@ -143,7 +143,7 @@ mistyped its rate does not look like a call that asked for nothing.
 
 The engine force-enable is a `trace: bool` on `RouteDecision` — the treatment
 that carries a call forward, and therefore the one that can turn its trace on.
-`#[serde(default)]`, so an engine that never heard of tracing is unchanged.
+`false` leaves the call to the sampler, so an engine that never sets it is unchanged.
 
 #### Correlation ids
 

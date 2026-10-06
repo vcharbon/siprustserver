@@ -2,8 +2,7 @@
 //! the one pending INVITE transaction it matches: cancelling a re-INVITE ends
 //! that renegotiation — 487 to the re-INVITE, CANCEL relayed to the peer's
 //! pending relayed re-INVITE — and leaves the established dialog and the call
-//! intact. Pre-fix, `handle-cancel` unconditionally `BeginTermination`d on ANY
-//! CANCEL, so an in-dialog CANCEL killed the whole call.
+//! intact: an in-dialog CANCEL never begins termination of the whole call.
 //!
 //! ```text
 //!   cancel_reinvite_ends_renegotiation_keeps_call
@@ -15,6 +14,10 @@
 //!       bob answers 200 while the CANCEL is still held → the CANCEL dies
 //!       with the answered txn (never on the wire); B2BUA ACKs bob, relays
 //!       nothing to alice (she has her 487) → call still up
+//!   callee_cancel_reinvite_ends_renegotiation_keeps_call
+//!       the mirror from the called side: bob re-INVITEs, then CANCELs; the
+//!       CANCEL names bob's dialog tag as its From-tag and reaches the call
+//!       through the outgoing leg's dialog
 //!   cancel_after_reinvite_answered_is_200_and_keeps_call
 //!       the re-INVITE was already answered end-to-end → late CANCEL gets 200
 //!       (txn layer, §9.2 / RFC 6026 §7.1), call untouched
@@ -115,9 +118,55 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
         cdrs[0].events
     );
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
+    let _report = h.finish().await;
+}
+
+/// bob (the called side) re-INVITEs and CANCELs before alice answers. The
+/// CANCEL carries bob's From-tag, the remote tag of the outgoing leg's dialog,
+/// and resolves to the call by it: the B2BUA CANCELs the re-INVITE it relayed
+/// to alice and keeps the call up.
+#[tokio::test]
+async fn callee_cancel_reinvite_ends_renegotiation_keeps_call() {
+    let h = Harness::with_transit_delay("b2bua-reinvite-cancel-callee", 0);
+    let alice = h.agent("alice", "127.0.0.1:5064").await;
+    let bob = h.agent("bob", "127.0.0.1:5074").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    let mut reinv = bob_dialog.reinvite(Some(REANSWER)).await;
+    let mut alice_reinv_uas = alice.receive("INVITE").await;
+    let relayed_reinvite = alice_reinv_uas.request().clone();
+
+    let mut cxl = reinv.cancel().await;
+    cxl.expect(200).await;
+    reinv.expect(487).await;
+
+    alice_reinv_uas.respond(100, "Trying").await;
+    let mut alice_cxl =
+        alice.try_receive("CANCEL").await.expect("the B2BUA CANCELs the re-INVITE it relayed");
+    assert_eq!(alice_cxl.request().cseq().seq(), relayed_reinvite.cseq().seq());
+    alice_cxl.respond(200, "OK").await;
+    alice_reinv_uas.respond(487, "Request Terminated").await;
+    alice.receive("ACK").await;
+    assert_eq!(b2bua.active_calls(), 1, "re-INVITE CANCEL must not tear the call down");
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.cdr_records().len() == 1 && b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -179,7 +228,7 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -237,7 +286,7 @@ async fn cancel_after_reinvite_answered_is_200_and_keeps_call() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

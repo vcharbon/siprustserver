@@ -1,7 +1,7 @@
 //! Ringing held PAST the default 158 s initial-INVITE bound.
 //!
 //! With `invite_txn_timeout_sec` raised into the telephony range the b-leg
-//! client transaction must keep the callee ringing beyond the old const: the
+//! client transaction must keep the callee ringing beyond 158 s: the
 //! app deadline (SetupTimeout / a route-supplied NoAnswer, both strictly under
 //! the configured bound) owns the give-up ordering — clean CANCEL→487→ACK on
 //! the b-leg, exactly ONE final to the caller — and an answer landing after
@@ -39,7 +39,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
 
-    // 200 s of ringing — well past the old 158 s const. The raised bound must
+    // 200 s of ringing — well past the 158 s default. The raised bound must
     // hold: no transaction-layer CANCEL toward bob, call still in setup.
     s.h.advance(Duration::from_secs(200)).await;
     assert!(
@@ -61,8 +61,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     uas.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let alice_addr = s.alice.addr();
@@ -91,7 +90,7 @@ async fn answer_after_158s_establishes_end_to_end() {
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
 
-    // Ring ~200 s (past the old 158 s const), then answer — inside both the
+    // Ring ~200 s (past the 158 s default), then answer — inside both the
     // 350 s setup deadline and the 400 s transaction bound.
     s.h.advance(Duration::from_secs(200)).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -106,8 +105,7 @@ async fn answer_after_158s_establishes_end_to_end() {
     );
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     s.finish().await;
 }
@@ -171,8 +169,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
         "caller's INVITE resolves at the clamped no-answer deadline",
     );
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let alice_addr = s.alice.addr();

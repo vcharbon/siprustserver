@@ -8,14 +8,14 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, StackDialog,
 };
-use sip_message::header::HeaderName;
+use sip_message::header::{HeaderName, MediaType};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts,
     MessageTemplate, SipHeader, SipMessage,
 };
 
 use super::client_invite::ClientInvite;
-use super::ua::{from_of, to_of, uri_of};
+use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
 
 /// Builder for an outgoing INVITE (lets the SDP offer be attached fluently).
@@ -27,6 +27,8 @@ pub struct Invite<'a> {
     /// captured payload emitted verbatim, its Content-Type carried as a frozen
     /// header rather than stamped by the generator.
     template_body: Option<Vec<u8>>,
+    /// The media type [`with_body`](Self::with_body) states for its bytes.
+    content_type: Option<MediaType>,
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp so a captured bodyless-typed / non-SDP payload
     /// replays with the Content-Type the capture actually had (none).
@@ -54,6 +56,11 @@ pub struct Invite<'a> {
     /// A declared `delayed-automatic` deviation carried onto the
     /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
     delayed_automatic: Option<DelayedAutomatic>,
+    /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
+    identity: Option<(String, String)>,
+    /// The INVITE's CSeq number; `None` is 1. A retry of an earlier INVITE
+    /// under the same identity states the next one (RFC 3261 §8.1.3.5).
+    cseq: Option<u32>,
 }
 
 impl<'a> Invite<'a> {
@@ -62,6 +69,7 @@ impl<'a> Invite<'a> {
             caller,
             peer,
             sdp: None,
+            content_type: None,
             template_body: None,
             suppress_default_ct: false,
             name_forms: vec![],
@@ -73,12 +81,22 @@ impl<'a> Invite<'a> {
             request_uri: None,
             max_forwards: None,
             delayed_automatic: None,
+            identity: None,
+            cseq: None,
         }
     }
 
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Attach a body of any media type, byte-exact — a `multipart/mixed`
+    /// offer framing SDP beside another part, a non-SDP payload.
+    pub fn with_body(mut self, content_type: &str, bytes: Vec<u8>) -> Self {
+        self.template_body = Some(bytes);
+        self.content_type = Some(media_type(content_type));
         self
     }
 
@@ -134,7 +152,7 @@ impl<'a> Invite<'a> {
         self
     }
 
-    /// Override the From URI (e.g. `"sip:+33123456789@example.com"`) — drives
+    /// Override the From URI (e.g. `"sip:+15551234567@example.com"`) — drives
     /// From from Test-case input instead of the default `sip:caller@ip`.
     pub fn from(mut self, uri: impl Into<String>) -> Self {
         self.from_uri = Some(uri.into());
@@ -162,6 +180,21 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// Create the dialog under `call_id` and From tag `from_tag` instead of the
+    /// ones the caller mints, so a peer bound to them before the dial knows
+    /// the dialog. The test owns their uniqueness (RFC 3261 §8.1.1.4, §19.3).
+    pub fn identity(mut self, call_id: impl Into<String>, from_tag: impl Into<String>) -> Self {
+        self.identity = Some((call_id.into(), from_tag.into()));
+        self
+    }
+
+    /// State the INVITE's CSeq number: a retry under an earlier INVITE's
+    /// identity carries the next one (RFC 3261 §8.1.3.5).
+    pub fn cseq(mut self, cseq: u32) -> Self {
+        self.cseq = Some(cseq);
+        self
+    }
+
     /// Send the initial INVITE to `proxy` instead of directly to the peer (the
     /// Request-URI still targets the peer). Used to drive an LB/record-routing
     /// proxy; subsequent in-dialog requests then follow the route set learned
@@ -177,8 +210,9 @@ impl<'a> Invite<'a> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let call_id = format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip());
-        let from_tag = caller.tag();
+        let (call_id, from_tag) = self.identity.clone().unwrap_or_else(|| {
+            (format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()), caller.tag())
+        });
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
         let request_uri = self.request_uri.clone().unwrap_or_else(|| {
@@ -192,7 +226,7 @@ impl<'a> Invite<'a> {
             call_id: call_id.clone(),
             from: Some(from_of(&from_uri, &from_tag)),
             to: Some(to_of(&to_uri)),
-            cseq: 1,
+            cseq: self.cseq.unwrap_or(1),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(self.max_forwards.unwrap_or(70)),
@@ -203,7 +237,7 @@ impl<'a> Invite<'a> {
                 .clone()
                 .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
                 .unwrap_or_default(),
-            content_type: None,
+            content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
         };
         let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);
@@ -222,7 +256,8 @@ impl<'a> Invite<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        caller.send_wire(&emitted_wire(&msg, &headers), wire_dst).await;
+        let invite_wire = emitted_wire(&msg, &headers);
+        caller.send_wire(&invite_wire, wire_dst).await;
 
         let dialog = StackDialog {
             call_id,
@@ -231,7 +266,7 @@ impl<'a> Invite<'a> {
             local_uri: from_uri,
             remote_uri: to_uri,
             remote_target: request_uri,
-            local_cseq: 1,
+            local_cseq: self.cseq.unwrap_or(1),
             route_set: vec![],
         };
         ClientInvite {
@@ -239,6 +274,7 @@ impl<'a> Invite<'a> {
             fallback_addr: peer.addr,
             wire_dst,
             original_invite: invite,
+            invite_wire,
             dialog,
             fork_cseq: HashMap::new(),
             delayed_automatic: self.delayed_automatic,

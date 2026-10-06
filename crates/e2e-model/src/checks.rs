@@ -1,4 +1,4 @@
-//! The **check engine** (ADR-0019, Phase E): evaluate a Test case's declarative
+//! The **check engine** (ADR-0019): evaluate a Test case's declarative
 //! checks post-call over the recorded trace — the same recording the RFC audit
 //! rules gate — so fake and real infra shapes yield byte-identical verdicts.
 //!

@@ -21,7 +21,7 @@ use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, S
 use crate::ProxyMetrics;
 
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 
 /// Strategy double whose selection always fails with the given error — drives
 /// `reply_select_failure` through the public routing path.
@@ -43,6 +43,9 @@ impl RoutingStrategy for FailingSelect {
         DecodeResult::Unknown { is_emergency: false }
     }
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+        None
+    }
+    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
         None
     }
 }

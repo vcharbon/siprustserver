@@ -190,19 +190,19 @@ list stays one file by design, like the `define_service!` index.
 Tests don't have a public API, so the discoverability payoff is small; scrub
 comments and split only when navigation genuinely hurts.
 
-- [ ] `crates/loadgen/tests/smoke.rs` (2562), `crates/b2bua/tests/rules.rs`
-  (2324), `crates/failover-harness/tests/failover.rs` (1490) +
+- [ ] `crates/loadgen/tests/it/smoke.rs` (2562), `crates/b2bua/tests/it/rules.rs`
+  (2324), `crates/failover-harness/tests/it/failover.rs` (1490) +
   `call_terminate_on_backup.rs` (833) + `limiter_ha.rs` (780),
   `crates/b2bua/src/repl/real_transport_tests.rs` (1227) and the repl
   `s*_tests.rs` files (643/547/523/502),
-  `crates/sip-message/tests/generators.rs` (1041),
-  `crates/scenario-harness/tests/template_emission.rs` (987),
-  `crates/loadgen/tests/fake_net.rs` (851),
-  `crates/sip-txn/tests/fsm.rs` (818),
+  `crates/sip-message/tests/it/generators.rs` (1041),
+  `crates/scenario-harness/tests/it/template_emission.rs` (987),
+  `crates/loadgen/tests/it/fake_net.rs` (851),
+  `crates/sip-txn/tests/it/fsm.rs` (818),
   `crates/call/tests/common/mod.rs` (765) + `codec_roundtrip.rs` (601),
   `crates/b2bua-harness/tests/refer_gating.rs` (624) +
   `update_matrix.rs` (501) + `proxy_b2bua.rs` + `basic_call_media.rs`
-  (TS-port comments), `crates/sip-proxy/tests/health_probe_late_reply.rs`
+  (TS-port comments), `crates/sip-proxy/tests/it/health_probe_late_reply.rs`
   (540) + `load_balancer.rs` (535), the rest of the >500 L test files.
 
 ## Open notes carried forward

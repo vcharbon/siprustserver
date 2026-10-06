@@ -18,6 +18,8 @@ mod trace_seam;
 #[cfg(test)]
 mod ack_hop_tests;
 #[cfg(test)]
+mod cancel_route_tests;
+#[cfg(test)]
 mod cookie_identity_tests;
 #[cfg(test)]
 mod reject_metric_tests;
@@ -68,8 +70,8 @@ impl ProxyCore {
         let SipMessage::Request(req) = &msg else { return };
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         // Method::as_str() is already canonical-uppercase for known methods
-        // (Method::from_wire normalized at parse time); unknown tokens match
-        // no routing branch and land in the bounded `other` metric slot.
+        // (Method::from_wire normalized at parse time); an extension method
+        // keeps its own row under the family's cap, `_overflow` past it.
         self.metrics.record_request(req.method().as_str());
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)

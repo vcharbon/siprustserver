@@ -1,7 +1,7 @@
 //! The subscribed release-event decision seam + the established-call reroute
 //! treatment:
 //!
-//!   1. UNSUBSCRIBED max-duration expiry → today's local teardown, and the
+//!   1. UNSUBSCRIBED max-duration expiry → the local teardown, and the
 //!      engine's `call_release` is NEVER consulted (even with a
 //!      callback_context — the subscription is the gate).
 //!   2. Subscribed + engine says `Release` → same local teardown, and the
@@ -10,8 +10,9 @@
 //!   3. Subscribed + engine says `Route` → the CONNECTED call is rerouted:
 //!      replacement b-leg dialed (A's offer), answered, ACKed; the a-leg is
 //!      re-INVITEd onto the new answer SDP; the old b-leg is BYEd; the call
-//!      continues and a normal hangup works. Limiter parity: the reroute
-//!      route's `call_limiter` holds are admitted and released.
+//!      continues and a normal hangup works. The reroute route's
+//!      `call_limiter` holds replace the original route's and are released
+//!      at hangup.
 //!   4. The reroute route OWNS the follow-up policy: its features re-arm the
 //!      GlobalDuration cap and its (empty) `subscriptions` replace the
 //!      original registry, so the SECOND expiry tears down locally with no
@@ -19,6 +20,7 @@
 //!   5. A hung / erroring `call_release` falls back to local teardown,
 //!      bounded by the decision deadline — no wedged call.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,14 +28,16 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
-    CallLimiterEntry, CallReleaseRequest, CallReleaseResponse, NewCallResponse, ReleaseOutcome,
+    CallReleaseRequest, CallReleaseResponse, NewCallResponse, ReleaseOutcome,
     ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
+
+use crate::common::sdp::apart_from_origin;
 use call::{DecisionKind, ReleaseEventKind};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -42,7 +46,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 // The announcement / MRF target's answer (the SDP the a-leg must be realigned to).
 const MRF_ANSWER: &str = "v=0\r\no=mrf 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
-const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+const ALICE_REALIGN: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
@@ -50,30 +54,21 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    // A 1 s fail-open budget (vs the 150 ms other suites use): the reroute
-    // admit runs inside the release fire-and-forget task, which is woken by a
-    // timer INSIDE a big `h.advance` — the harness advances in 100 ms chunks,
-    // so a 150 ms budget can expire between chunks before the simulated HTTP
-    // round-trip is delivered (a paused-clock pumping artifact, not SUT).
-    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_secs(1)))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// Re-answer a Timer-A retransmit of the replacement-leg INVITE as a real UAS
 /// would — the SAME 200 (same To-tag, same SDP), a faithful RFC 3261 §17.2.1
-/// 2xx retransmission. The release fold pipeline (timer fire → consult →
-/// re-entry → CreateLeg) spans several 100 ms pump chunks under the paused
-/// clock, so the b-leg INVITE's first 500 ms retransmit usually beats the
-/// test's 200; answering it with a FRESH tag (what `receive_tolerating`'s
+/// 2xx retransmission. The b-leg INVITE's first 500 ms retransmit can beat
+/// the test's 200; answering it with a FRESH tag (what `receive_tolerating`'s
 /// auto-200 does) would fabricate a phantom fork dialog and trip the
 /// `unacked-2xx-not-cleared` audit. Non-blocking: if no retransmit is
 /// queued (timing shifted), this is a no-op — the ACK cannot be queued yet
@@ -117,7 +112,10 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
             .fallback(move |_req| NewCallResponse::Route(route_with_cap(5070, false)))
             .on_release(move |_req| {
                 c.fetch_add(1, Ordering::SeqCst);
-                ReleaseOutcome::Respond(CallReleaseResponse::Release { label: None })
+                ReleaseOutcome::Respond(CallReleaseResponse::Release {
+                    label: None,
+                    service_ext: Default::default(),
+                })
             })
             .build(),
     );
@@ -141,7 +139,7 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
     // Local teardown as today: both legs BYEd, max_duration CDR, no consult.
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     assert_eq!(
@@ -180,6 +178,7 @@ async fn subscribed_release_consults_engine_then_tears_down() {
                 cap.lock().unwrap().push(req.clone());
                 ReleaseOutcome::Respond(CallReleaseResponse::Release {
                     label: Some("hangup".into()),
+                    service_ext: Default::default(),
                 })
             })
             .build(),
@@ -204,7 +203,7 @@ async fn subscribed_release_consults_engine_then_tears_down() {
     // Engine said Release → the same local teardown as the unsubscribed path.
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let reqs = captured.lock().unwrap();
@@ -252,14 +251,14 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_with_cap(5072, true);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 10 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 10 }];
                 NewCallResponse::Route(r)
             })
             .on_release(move |_req| {
                 // Reroute the released call to the announcement target, with
                 // its own limiter hold (output parity: admitted + released).
                 let mut r = route_to("127.0.0.1", 5092);
-                r.call_limiter = vec![CallLimiterEntry { id: "announce-cap".into(), limit: 10 }];
+                r.call_limiter = vec![LimiterEntry { id: "announce-cap".into(), limit: 10 }];
                 r.label = Some("announce".into());
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
@@ -267,6 +266,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -288,13 +288,16 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // ── the cap expires; the engine converts release → reroute ─────────────
     h.advance(Duration::from_secs(61)).await;
 
-    // Replacement b-leg toward the MRF carries A's original offer.
+    // Replacement b-leg toward the MRF carries A's original offer. It rings
+    // first: A's INVITE transaction answered a minute ago, so the ring reaches
+    // her as nothing and is accounted on the replacement leg.
     let mut mrf_uas = mrf.receive("INVITE").await;
     assert_eq!(
         String::from_utf8_lossy(mrf_uas.request().body()),
         OFFER,
         "replacement INVITE carries A's INVITE-snapshot offer",
     );
+    mrf_uas.respond(180, "Ringing").await;
     mrf_uas.respond(200, "OK").with_sdp(MRF_ANSWER).await;
     absorb_invite_retransmit(&mrf, &mrf_uas, MRF_ANSWER).await;
     mrf.receive("ACK").await;
@@ -302,8 +305,8 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // The a-leg is re-INVITEd onto the MRF's answer SDP (the bridge).
     let mut a_realign = alice.receive("INVITE").await;
     assert_eq!(
-        String::from_utf8_lossy(a_realign.request().body()),
-        MRF_ANSWER,
+        apart_from_origin(&String::from_utf8_lossy(a_realign.request().body())),
+        apart_from_origin(MRF_ANSWER),
         "a-leg realign re-INVITE offers the replacement leg's answer SDP",
     );
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
@@ -312,9 +315,11 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // The displaced original b-leg is BYEd.
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    // Limiter parity: the reroute's hold was admitted alongside the original.
-    settle_until(|| store.stats().current_total == 2).await;
-    assert_eq!(store.stats().current_total, 2, "trunk-A + announce-cap holds live");
+    // The reroute's route owns the call's holds: its announce-cap hold
+    // replaces the original route's trunk-A hold.
+    settle_until(|| store.held("trunk-A") == 0 && store.held("announce-cap") == 1).await;
+    assert_eq!(store.held("trunk-A"), 0, "the replaced route's trunk-A hold is released");
+    assert_eq!(store.held("announce-cap"), 1, "the reroute's announce-cap hold is live");
 
     // ── the rerouted call continues; a normal hangup works ────────────────
     h.advance(Duration::from_secs(5)).await;
@@ -323,8 +328,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     alice_bye.expect(200).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "both holds released at hangup");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -333,6 +337,19 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         cdrs[0].events.iter().any(|e| e.reason.as_deref() == Some("release-reroute-completed")),
         "CDR records the completed reroute: {:?}",
         cdrs[0].events,
+    );
+    assert!(
+        cdrs[0].events.iter().any(|e| e.event_type == call::CdrEventType::Provisional
+            && e.leg_id == "b-2"
+            && e.status_code == Some(180)),
+        "the replacement leg's ring is accounted on the CDR: {:?}",
+        cdrs[0].events,
+    );
+    let alice_lines: Vec<String> = alice.wire_view().iter().map(|e| e.start_line()).collect();
+    let answered_at = alice_lines.iter().position(|l| l.starts_with("SIP/2.0 200")).unwrap();
+    assert!(
+        !alice_lines[answered_at + 1..].iter().any(|l| l.starts_with("SIP/2.0 1")),
+        "the answered caller is shown no provisional: {alice_lines:?}",
     );
     // The decision log: the initial route, then the release consult's
     // reroute with its label; the completion event is stamped under it.
@@ -348,6 +365,83 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         .find(|e| e.reason.as_deref() == Some("release-reroute-completed"))
         .unwrap();
     assert_eq!(completed.decision_ordinal, 2);
+
+    let _ = h.finish().await;
+}
+
+// ── 3b. the displaced callee's BYE crosses ours: the rerouted call survives ──
+
+/// A dialog this stack already ended is not a party of the session any more.
+/// When the displaced b-leg's own BYE crosses ours and it answers ours `481`
+/// (RFC 3261 §15.1.2), that BYE ends its dialog alone: the a-leg and the
+/// replacement leg stay connected and the call ends on the a-leg's own hangup.
+#[tokio::test(start_paused = true)]
+async fn rerouted_call_survives_displaced_callee_bye_crossing_ours() {
+    let h = Harness::new("release-reroute-displaced-bye-cross");
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let mrf = h.agent("mrf", "127.0.0.1:5096").await;
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| NewCallResponse::Route(route_with_cap(5076, true)))
+            .on_release(move |_req| {
+                let mut r = route_to("127.0.0.1", 5096);
+                r.label = Some("announce".into());
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    // ── establish A↔B ───────────────────────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    // ── the cap expires; the engine converts release → reroute ─────────────
+    h.advance(Duration::from_secs(61)).await;
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_ANSWER).await;
+    absorb_invite_retransmit(&mrf, &mrf_uas, MRF_ANSWER).await;
+    mrf.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+
+    // ── the displaced b-leg is BYEd; bob hangs up at the same instant ──────
+    let mut our_bye = bob.receive("BYE").await;
+    let mut bob_bye = bob_dialog.bye().await;
+    our_bye.respond(481, "Call/Transaction Does Not Exist").await;
+    bob_bye.expect(200).await;
+
+    // THE assertion: bob's BYE ended his dialog alone. A paused clock, so 50 ms
+    // is exact: a wrongly-sent BYE lands within one transit hop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(alice.drain().await, 0, "the a-leg receives nothing (RFC 3261 §15.1.2)");
+    assert_eq!(mrf.drain().await, 0, "the replacement leg receives nothing (RFC 3261 §15.1.2)");
+    assert_eq!(b2bua.active_calls(), 1, "the rerouted call stays up");
+
+    // ── the rerouted call continues; a normal hangup works ────────────────
+    h.advance(Duration::from_secs(5)).await;
+    let mut alice_bye = alice_dialog.bye().await;
+    mrf.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the rerouted call");
 
     let _ = h.finish().await;
 }
@@ -410,7 +504,7 @@ async fn reroute_route_rearms_cap_and_owns_subscriptions() {
     h.advance(Duration::from_secs(61)).await;
     alice.receive("BYE").await.respond(200, "OK").await;
     mrf.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         consults.load(Ordering::SeqCst),
@@ -457,7 +551,7 @@ async fn hung_release_consult_falls_back_to_local_teardown_within_deadline() {
 
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -500,7 +594,7 @@ async fn erroring_release_consult_falls_back_to_local_teardown() {
 
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;

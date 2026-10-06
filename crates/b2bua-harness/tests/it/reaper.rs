@@ -3,7 +3,7 @@
 //!
 //! Matrix rows covered here (the ledger semantics — monotonic stamps,
 //! takeover exclusion, reclaim re-stamping — are unit-pinned in
-//! `b2bua/tests/reaper_ledger.rs`; the verdict confirm matrix incl. the
+//! `b2bua/tests/it/reaper_ledger.rs`; the verdict confirm matrix incl. the
 //! no-resurrection rule is unit-pinned in `b2bua::reaper::tests`):
 //! - **stale Active call** (lost timers / dropped events) → swept + reaped;
 //! - **handler panic, strike 1** → `fatal-error` verdict through the normal
@@ -136,7 +136,7 @@ async fn stale_active_call_is_swept_and_reaped() {
         "the CDR names the reap: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert!(b2bua.metrics().reaper_verdicts_total() >= 1);
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 0, "rules path was healthy");
@@ -161,8 +161,8 @@ async fn handler_panic_strike1_reaps_via_rules() {
 
     let mut dialog = establish(&alice, &bob, b2bua.addr).await;
 
-    // The INFO trips the panicking probe rule: pre-ADR-0020 this leaked the
-    // call forever with zero CDR; now it is strike 1 → fatal-error → reaped.
+    // The INFO trips the panicking probe rule: strike 1 → fatal-error → reaped
+    // with its CDR (ADR-0020), never leaked.
     let _txn = dialog.request(InDialogMethod::Info, None).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
@@ -173,7 +173,7 @@ async fn handler_panic_strike1_reaps_via_rules() {
         "the CDR names the panic: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 1);
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 0, "strike 1 stays on the rules path");
@@ -208,7 +208,7 @@ async fn second_panic_discharges_outside_the_rules() {
         "the CDR names the discharge: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 2, "both panics observed");
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 1, "the strike-2 bypass fired");
@@ -256,7 +256,7 @@ async fn wedged_setup_is_aborted_and_reaped() {
         reasons.iter().any(|r| r == "reaper-stale" || r == "handler-panic"),
         "the CDR names the forced reap: {reasons:?}"
     );
-    // ADR-0022: the reap is no longer silent toward the caller — the
+    // ADR-0022: the reap is not silent toward the caller — the
     // `→ terminated` funnel answers the still-unanswered a-leg INVITE with a
     // 503 through its (still-live, < 193 s) server txn. Late, but alice is
     // released instead of stranded on 100-then-silence.
@@ -265,7 +265,7 @@ async fn wedged_setup_is_aborted_and_reaped() {
         reasons.iter().any(|r| r == "unanswered_at_termination"),
         "the CDR records the synthesized final: {reasons:?}"
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert!(b2bua.metrics().reaper_verdicts_total() >= 3, "escalation ladder ran");
 

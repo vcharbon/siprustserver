@@ -4,6 +4,9 @@
 //!
 //! A [`MuxCore`] owns a small, fixed set of **named endpoints**, each = exactly
 //! one datagram endpoint on the underlying fabric with a dispatcher recv-loop.
+//! Endpoint specs sharing an address share its one endpoint (the shared
+//! caller/callee layout, for a SUT that returns each new leg to the ip:port
+//! that originated the call).
 //! The fabric is a [`SignalingNetwork`] seam: real UDP by default
 //! ([`MuxCore::bind`]), or any other impl — notably the simulated network under
 //! the paused-clock test lane — via [`MuxCore::bind_on`]. Each endpoint
@@ -14,9 +17,9 @@
 //!
 //! # Module map
 //!
-//! - [`correlation`] — how the per-call token travels through the SUT
-//!   (pluggable per run: relayed header, or To-user).
-//! - [`demux`] — the inbound path. Precedence per datagram: (1) **known
+//! - `correlation` — how the per-call token travels through the SUT
+//!   (pluggable per run: relayed header, To-user, or the caller's From user).
+//! - `demux` — the inbound path. Precedence per datagram: (1) **known
 //!   Call-ID** (our UAC dialog, or a UAS dialog after its first request) — this
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
 //!   cooperation; (2) **correlation token** — an initial INVITE spawning a new
@@ -25,14 +28,30 @@
 //!   call by the scenario's [`LegPicker`] (compiled shapes) or consumable
 //!   [`ClaimRule`]s (data-driven scenarios); (3) orphan
 //!   (count + bounded-sample + drop — never queued, never silent).
-//! - [`endpoint`] — the per-call [`SignalingNetwork`] view ([`MuxNetwork`]) and
+//! - `endpoint` — the per-call [`SignalingNetwork`] view ([`MuxNetwork`]) and
 //!   each leg's endpoint. Every per-call endpoint deregisters its keys on
 //!   `Drop`; a reaper sweeps pending-UAS entries whose leg never arrived.
-//! - [`loss`] — per-call loss injection: the network layer's
+//! - `loss` — per-call loss injection: the network layer's
 //!   [`sip_net::RandomLoss`] + the deterministic, test-owned [`TargetedDrop`].
-//! - [`retransmit`] — opt-in per-call SIP transaction engine (Timer A/E/G)
+//! - `retransmit` — opt-in per-call SIP transaction engine (Timer A/E/G)
 //!   recovering modeled loss.
-//! - [`stats`] — process-wide counters + Prometheus rendering.
+//! - `stats` — process-wide counters + Prometheus rendering.
+//!
+//! # Key lifetime (shared sockets, reused keys)
+//!
+//! A SUT may still retransmit a leg of a call after that call ended, so a key
+//! and its Call-IDs are never handed on blindly:
+//! - a Call-ID a call's endpoint releases is held back for [`RELEASE_HOLD`]
+//!   (64·T1): an INVITE on it is a `released` orphan, never token-routed;
+//! - a call that has a caller accepts legs only once that caller has sent its
+//!   INVITE; a leg before it is an `early` orphan;
+//! - a from-user key whose call ended not ok cools for [`RELEASE_HOLD`]
+//!   ([`MuxCore::release_key`]); a bind claiming it meanwhile fails with
+//!   `BindErrorReason::HeldBack`, checked under the registry lock in the step
+//!   that would claim it. A key whose call ended ok is reusable at once.
+//!
+//! A new INVITE on a Call-ID a caller owns (a SUT reusing the dialog's Call-ID
+//! for a new leg, against RFC 3261 §8.1.1.4) is a `call_id_reuse` orphan.
 //!
 //! Recording sits *after* the UDP/demux layer, per sampled call: the existing
 //! `AgentBinder::with_network(mux, …, record)` wraps a per-call endpoint with
@@ -50,15 +69,17 @@ pub use endpoint::{CallRouting, MuxNetwork};
 // The data-driven claim rules live in their shared home, `scenario-harness`
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
 pub use loss::{DropDir, TargetedDrop};
+pub use retransmit::RELEASE_HOLD;
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
+pub(crate) use stats::OrphanReason;
 
 use loss::DropModel;
 use retransmit::CallTxns;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -113,6 +134,8 @@ pub(in crate::mux) enum Key {
 /// optional retransmit engine (present iff `--auto-retransmit` is on for the call).
 #[derive(Clone)]
 pub(in crate::mux) struct Delivery {
+    /// Whether the dialog is a caller's own (its Call-ID minted by the caller).
+    pub(in crate::mux) caller: bool,
     pub(in crate::mux) queue: Arc<PacketQueue>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
@@ -164,12 +187,62 @@ pub(in crate::mux) struct CallSlot {
     /// legs are swept.
     pub(in crate::mux) arrived: bool,
     pub(in crate::mux) deadline: Instant,
+    /// The owning call's caller state: legs wait for its INVITE.
+    pub(in crate::mux) gate: Arc<CallGate>,
+}
+
+/// One call's caller state, shared by every endpoint its [`MuxNetwork`] binds.
+#[derive(Default)]
+pub(in crate::mux) struct CallGate {
+    /// The call bound a caller endpoint.
+    pub(in crate::mux) has_caller: AtomicBool,
+    /// The call's caller has sent its INVITE.
+    pub(in crate::mux) invite_sent: AtomicBool,
+}
+
+impl CallGate {
+    /// Whether the call accepts legs: it has no caller, or its caller has sent
+    /// its INVITE (a leg before that belongs to an earlier call on the key).
+    pub(in crate::mux) fn open(&self) -> bool {
+        !self.has_caller.load(Ordering::Relaxed) || self.invite_sent.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Default)]
 pub(in crate::mux) struct SocketRegistry {
     pub(in crate::mux) by_call_id: HashMap<String, Delivery>,
     pub(in crate::mux) by_token: HashMap<String, CallSlot>,
+    /// Call-IDs released by finished calls, until their hold deadline.
+    released: HashMap<String, Instant>,
+    /// The same holds in deadline order, so expiry pops only what expired.
+    released_order: VecDeque<(Instant, String)>,
+}
+
+impl SocketRegistry {
+    /// Hold `call_id` back until `deadline` (deadlines arrive in order: every
+    /// hold is the same length from its release).
+    pub(in crate::mux) fn release(&mut self, call_id: String, deadline: Instant) {
+        self.released.insert(call_id.clone(), deadline);
+        self.released_order.push_back((deadline, call_id));
+    }
+
+    /// Whether `call_id` is held back at `now`.
+    pub(in crate::mux) fn is_released(&self, call_id: &str, now: Instant) -> bool {
+        self.released.get(call_id).is_some_and(|deadline| *deadline > now)
+    }
+
+    /// Drop the holds that expired by `now`, touching only those.
+    pub(in crate::mux) fn expire_released(&mut self, now: Instant) {
+        while let Some((deadline, _)) = self.released_order.front() {
+            if *deadline > now {
+                break;
+            }
+            let (_, call_id) = self.released_order.pop_front().expect("front exists");
+            if self.released.get(&call_id).is_some_and(|d| *d <= now) {
+                self.released.remove(&call_id);
+            }
+        }
+    }
 }
 
 /// One defined endpoint = one fabric endpoint + dispatcher + per-socket registry.
@@ -193,6 +266,10 @@ pub struct MuxCore {
     pub(in crate::mux) endpoints: HashMap<SocketAddr, Arc<MuxSocket>>,
     stats: Arc<MuxStats>,
     pub(in crate::mux) pending_ttl: Duration,
+    /// Requested spec address → the bound local address.
+    bound: HashMap<SocketAddr, SocketAddr>,
+    /// From-user keys whose call ended not ok, until their hold deadline.
+    cooling: Arc<Mutex<HashMap<String, Instant>>>,
     /// Mints each per-call [`MuxNetwork`]'s owner id — the call-instance scope
     /// that keeps token slots (and their claims) from ever spanning two calls.
     call_seq: AtomicU64,
@@ -240,6 +317,12 @@ impl MuxCore {
     /// harness) to run the REAL driver + mux + demux + loss-model stack under a
     /// paused clock with no real sockets; the loss/retransmit knobs sit ABOVE
     /// this seam and behave identically on either fabric.
+    ///
+    /// Each distinct REQUESTED address is bound once: specs naming one address
+    /// (a shared caller/callee layout, port 0 included) share its endpoint, and
+    /// the FIRST spec's role is that endpoint's default for binds a call's
+    /// [`CallRouting`] leaves undeclared. [`local_addr`](Self::local_addr)
+    /// resolves a requested address to the bound one.
     pub async fn bind_on(
         fabric: &dyn SignalingNetwork,
         specs: Vec<EndpointSpec>,
@@ -251,7 +334,11 @@ impl MuxCore {
     ) -> std::io::Result<Arc<Self>> {
         let stats = Arc::new(MuxStats::new(orphan_sample_cap));
         let mut endpoints = HashMap::new();
+        let mut bound = HashMap::new();
         for spec in specs {
+            if bound.contains_key(&spec.addr) {
+                continue;
+            }
             let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
                 fabric.bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX)).await.map_err(
                     |e| std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message)),
@@ -274,19 +361,60 @@ impl MuxCore {
                 }
             });
             endpoints.insert(local, mux);
+            bound.insert(spec.addr, local);
         }
+        let cooling = Arc::new(Mutex::new(HashMap::new()));
         let reaper = tokio::spawn(demux::reap_loop(
             endpoints.values().cloned().collect::<Vec<_>>(),
             stats.clone(),
             pending_ttl,
+            cooling.clone(),
         ));
         Ok(Arc::new(Self {
             endpoints,
             stats,
             pending_ttl,
+            bound,
+            cooling,
             call_seq: AtomicU64::new(0),
             _reaper: reaper,
         }))
+    }
+
+    /// The local address the endpoint requested at `requested` is bound on
+    /// (they differ for a port-0 request); `None` when no spec requested it.
+    pub fn local_addr(&self, requested: SocketAddr) -> Option<SocketAddr> {
+        self.bound.get(&requested).copied()
+    }
+
+    /// Release a from-user `key` as its call ends. A call that ended not ok
+    /// may leave a leg outstanding at the SUT, so its key cools for
+    /// [`RELEASE_HOLD`]; a clean call leaves none, so its key is free at once.
+    pub fn release_key(&self, key: &str, clean: bool) {
+        let mut g = self.cooling.lock().unwrap();
+        if clean {
+            g.remove(key);
+        } else {
+            g.insert(key.to_string(), Instant::now() + RELEASE_HOLD);
+        }
+    }
+
+    /// Whether `key` is cooling (its previous call ended not ok within
+    /// [`RELEASE_HOLD`]); a `true` is counted in `key_cooling`.
+    pub fn key_cooling(&self, key: &str) -> bool {
+        let mut g = self.cooling.lock().unwrap();
+        let cooling = match g.get(key) {
+            Some(deadline) if *deadline > Instant::now() => true,
+            Some(_) => {
+                g.remove(key);
+                false
+            }
+            None => false,
+        };
+        if cooling {
+            self.stats.key_cooling.fetch_add(1, Ordering::Relaxed);
+        }
+        cooling
     }
 
     /// All bound endpoint addresses (handy for tests).
@@ -349,11 +477,12 @@ impl MuxCore {
         }
         MuxNetwork {
             core: self.clone(),
-            owner: self.call_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            owner: self.call_seq.fetch_add(1, Ordering::Relaxed),
             token: routing.token,
             dispense,
             pickers: routing.pickers,
             cursor: Mutex::new(HashMap::new()),
+            gate: Arc::new(CallGate::default()),
             drop_rate,
             retransmit,
             drop_seed: AtomicU64::new(seed | 1),

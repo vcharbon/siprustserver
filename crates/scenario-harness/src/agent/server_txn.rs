@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
 };
-use sip_message::header::{self, HeaderName, HeaderValue};
+use sip_message::header::{self, HeaderName, HeaderValue, MediaType};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts,
     MessageTemplate, Mismatch, SipHeader, SipMessage, SipRequest,
@@ -17,6 +17,7 @@ use super::addressing::{next_hop, top_via_addr, top_via_branch};
 use super::dialog::Dialog;
 use super::rr_fold::{fold_record_routes, RecordRouteFold};
 use super::step::{unwrap_step, StepError};
+use super::ua::media_type;
 use super::Agent;
 
 /// UAS-side transaction for a received request. `respond` echoes Via/From/To/
@@ -98,6 +99,7 @@ impl ServerTxn {
             reason: reason.to_string(),
             sdp: None,
             template_body: None,
+            content_type: None,
             suppress_default_ct: false,
             name_forms: vec![],
             remote_emits: vec![],
@@ -310,6 +312,8 @@ pub struct Respond<'a> {
     /// captured payload emitted verbatim, its Content-Type carried as a frozen
     /// header rather than stamped by the generator.
     template_body: Option<Vec<u8>>,
+    /// The media type [`with_body`](Self::with_body) states for its bytes.
+    content_type: Option<MediaType>,
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp (see [`Invite::template`](super::Invite::template)).
     suppress_default_ct: bool,
@@ -326,6 +330,14 @@ pub struct Respond<'a> {
 impl<'a> Respond<'a> {
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Attach a body of any media type, byte-exact — a `multipart/mixed`
+    /// answer framing SDP beside another part, a non-SDP payload.
+    pub fn with_body(mut self, content_type: &str, bytes: Vec<u8>) -> Self {
+        self.template_body = Some(bytes);
+        self.content_type = Some(media_type(content_type));
         self
     }
 
@@ -451,7 +463,7 @@ impl<'a> Respond<'a> {
                 .clone()
                 .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
                 .unwrap_or_default(),
-            content_type: None,
+            content_type: self.content_type.clone(),
             extra_headers,
             incoming_source: None,
         };

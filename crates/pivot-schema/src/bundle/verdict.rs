@@ -99,7 +99,7 @@ pub enum Failure {
     ExpectTimedOut { step: String, leg: String, gated_on: String, within_ms: u64 },
     /// A datagram arrived on the leg that the armed expect does not match, and
     /// no background policy answers it. Neither absorbed nor tolerated (§14
-    /// item 4, K2). `reason` is the closest gate's own words for the refusal.
+    /// item 4). `reason` is the closest gate's own words for the refusal.
     UnmatchedDatagram {
         step: String,
         leg: String,
@@ -118,6 +118,10 @@ pub enum Failure {
     /// A datagram arrived during the settle window of a flow that had COMPLETED:
     /// the document scripted nothing more, and something came anyway.
     DatagramAfterFlow { leg: String, arrived: Arrived },
+    /// A non-2xx final a scripted leg sent to an INVITE drew no ACK inside
+    /// Timer H (RFC 3261 §17.2.1): the system owed one on the INVITE's branch
+    /// (§17.1.1.3) and its transaction never completed.
+    FinalUnacknowledged { leg: String, status: u16, cseq: u32 },
     /// An inline or postcondition check did not hold.
     CheckFailed { site: String, field: String, op: String, expected: String, observed: String },
     /// A `${…}` could not be resolved at the moment it was read.
@@ -240,6 +244,10 @@ impl std::fmt::Display for Failure {
             Failure::DatagramAfterFlow { leg, arrived } => {
                 write!(f, "leg {leg}: {arrived} arrived after the flow completed")
             }
+            Failure::FinalUnacknowledged { leg, status, cseq } => write!(
+                f,
+                "leg {leg}: the {status} to INVITE CSeq {cseq} drew no ACK inside Timer H"
+            ),
             Failure::CheckFailed { site, field, op, expected, observed } => write!(
                 f,
                 "{site}: check {field} {op} {expected:?} — observed {observed:?}"
@@ -539,6 +547,11 @@ pub struct RunVerdict {
     /// Expect steps released without arriving because they were `optional`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub released_optional: Vec<String>,
+    /// Required expect steps a final on their own transaction retired: the
+    /// status it carried was charged on them, and no other rides that
+    /// transaction again (RFC 3261 §17.1.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
     /// The RFC violations the document declares, each with whether it gates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rfc_violations: Vec<ViolationNote>,
@@ -577,6 +590,11 @@ pub struct RunVerdict {
     /// (§9.2). A document that declares none is absent from this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<TimingNote>,
+    /// What the lane states about how it ran the case, by name (which service
+    /// answered it, and why), so a sweep can count it. Echoed, never
+    /// interpreted; the status above is computed from `failures` alone.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lane_facts: std::collections::BTreeMap<String, String>,
 }
 
 impl RunVerdict {
@@ -591,6 +609,7 @@ impl RunVerdict {
             branches: std::collections::BTreeMap::new(),
             completed_steps: Vec::new(),
             released_optional: Vec::new(),
+            retired: Vec::new(),
             rfc_violations: Vec::new(),
             must_fail: Vec::new(),
             tolerated: Vec::new(),
@@ -599,6 +618,7 @@ impl RunVerdict {
             waived: Vec::new(),
             retransmits: Vec::new(),
             timings: Vec::new(),
+            lane_facts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -683,6 +703,18 @@ mod tests {
         // The status is a statement about gating checks; an informative finding
         // is not one of them.
         assert!(verdict.passed());
+    }
+
+    /// What the lane states about how it ran the case survives the bundle
+    /// form, and a verdict stating nothing writes no field.
+    #[test]
+    fn the_lanes_facts_are_written_only_when_stated() {
+        let mut verdict = RunVerdict::ok("c", "upstream-fake");
+        assert!(!serde_json::to_string(&verdict).unwrap().contains("lane_facts"));
+        verdict.lane_facts.insert("service".into(), "scripted".into());
+        let text = serde_json::to_string(&verdict).unwrap();
+        assert!(text.contains(r#""lane_facts":{"service":"scripted"}"#), "{text}");
+        assert_eq!(serde_json::from_str::<RunVerdict>(&text).unwrap(), verdict);
     }
 
     fn violation(emitter: &str) -> crate::violation::RfcViolation {

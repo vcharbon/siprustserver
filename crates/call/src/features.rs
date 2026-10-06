@@ -12,6 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::header_update::SipHeaderUpdates;
+
 /// Platform-mandatory keepalive activation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeepaliveActivation {
@@ -41,7 +43,6 @@ pub enum MaxDurationAnchor {
 pub struct PlatformActivations {
     /// Overall call ceiling (seconds). Adapter supplies; platform caps it.
     pub max_duration_sec: i64,
-    #[serde(default)]
     pub max_duration_anchor: MaxDurationAnchor,
     pub keepalive: KeepaliveActivation,
 }
@@ -81,8 +82,7 @@ pub enum RelayFirst18xStrategy {
 
 /// `relayFirst18xTo180` messages policy — WHICH 18x messages are relayed
 /// toward the caller (each relayed one is downgraded per the machine's rules;
-/// this only picks how many). Wire values of the Routing API `Relay18x.messages`
-/// field (`ALL` / `FIRST` / `ONE_PER_VALUE`).
+/// this only picks how many). Wire values `ALL` / `FIRST` / `ONE_PER_VALUE`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Relay18xMessages {
@@ -100,10 +100,7 @@ pub enum Relay18xMessages {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayFirst18xTo180Feature {
     pub strategy: RelayFirst18xStrategy,
-    /// Which 18x messages are relayed (Routing API `Relay18x.messages`).
-    /// Defaults to [`Relay18xMessages::First`] — today's behavior — and the
-    /// serde default keeps old replicated bodies decoding unchanged.
-    #[serde(default)]
+    /// Which 18x messages are relayed.
     pub messages: Relay18xMessages,
 }
 
@@ -123,17 +120,15 @@ pub struct RelayFirst18xTo180Feature {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvertisedCapabilities {
     /// Accepted methods, e.g. `["INVITE", "ACK", "CANCEL", "BYE"]`.
-    #[serde(default)]
     pub allow: Option<Vec<String>>,
     /// Understood option tags, e.g. `["timer"]`.
-    #[serde(default)]
     pub supported: Option<Vec<String>>,
 }
 
 /// Optional per-face capability-advertisement arm. The two faces of a
 /// back-to-back UA are independent so an asymmetric bridge can advertise a
 /// narrow set toward one domain and the full set toward the other; an absent
-/// face advertises the stack default, which is today's behaviour.
+/// face advertises the stack default.
 ///
 /// Scope of the declaration: the messages the stack MINTS — the INVITE it
 /// originates, the INVITE 2xx it returns to the originator, and the re-INVITEs
@@ -144,10 +139,8 @@ pub struct AdvertisedCapabilities {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvertiseCapabilitiesFeature {
     /// Advertised on messages the stack sends toward the originator (a-leg).
-    #[serde(default)]
     pub toward_originator: Option<AdvertisedCapabilities>,
     /// Advertised on messages the stack sends toward an originated leg (b-leg).
-    #[serde(default)]
     pub toward_originated: Option<AdvertisedCapabilities>,
 }
 
@@ -155,20 +148,19 @@ pub struct AdvertiseCapabilitiesFeature {
 /// `P-Charging-Vector` on every leg it ORIGINATES, so the records of the two
 /// operators either side of it match on one identifier. A vector the originator
 /// sent is relayed unchanged whether or not this arm is present — an identifier
-/// re-minted mid-path breaks the correlation it exists for.
+/// re-minted mid-path breaks the correlation it exists for. A call whose
+/// decision states the header for the leg's INVITE ([`StatedHeaders::states`])
+/// mints none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChargingVectorFeature {
     /// The element the identifier is generated at (`icid-generated-at`).
     /// Absent — the stack's own SIP address.
-    #[serde(default)]
     pub generated_at: Option<String>,
-}
-
-/// One entry in the optional `callLimiters` feature arm.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CallLimiterFeatureEntry {
-    pub id: String,
-    pub limit: i64,
+    /// The re-INVITEs the stack sends on its own behalf carry the vector of the
+    /// leg they travel: the one that leg's dialog-creating INVITE carried, none
+    /// where it carried none. Off — they carry none.
+    #[serde(default)]
+    pub in_dialog_invites: bool,
 }
 
 /// Closed feature-activation union: mandatory `platform` + optional arms.
@@ -178,16 +170,11 @@ pub struct FeatureActivations {
     pub refer: Option<ReferFeature>,
     pub relay_first_18x_to_180: Option<RelayFirst18xTo180Feature>,
     pub no_answer_timeout_sec: Option<i64>,
-    pub call_limiters: Option<Vec<CallLimiterFeatureEntry>>,
     /// Per-face `Allow`/`Supported` advertisement. Absent — and absent for one
-    /// face — means "advertise the stack default there". `#[serde(default)]` so
-    /// a body encoded before this arm decodes as no declaration.
-    #[serde(default)]
+    /// face — means "advertise the stack default there".
     pub advertise_capabilities: Option<AdvertiseCapabilitiesFeature>,
     /// RFC 7315 §5.6 charging correlation on originated legs. Absent means the
-    /// stack stamps none. `#[serde(default)]` so a body encoded before this arm
-    /// decodes as no activation.
-    #[serde(default)]
+    /// stack stamps none.
     pub charging_vector: Option<ChargingVectorFeature>,
     /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
     /// `Supported` set would ride the originated INVITE is narrowed by these
@@ -197,20 +184,92 @@ pub struct FeatureActivations {
     /// never offers `100rel` leaves 18x relay untouched. The declaration is a
     /// call-lifetime LATCH:
     /// every applied route's list unions into the standing one
-    /// ([`FeatureActivations::latch_withheld_option_tags`], run by
+    /// ([`FeatureActivations::latch_call_lifetime`], run by
     /// `apply_route` and `SetFeatures`), so a failover route whose decision
-    /// does not restate it cannot restore a withheld tag. `#[serde(default)]`
-    /// so a body encoded before this arm decodes as no withhold.
-    #[serde(default)]
+    /// does not restate it cannot restore a withheld tag.
     pub withhold_option_tags: Option<Vec<String>>,
+    /// The header statements the call's decision makes on the messages the
+    /// stack sends, by scope ([`StatedHeaders`]); `None` — it states none.
+    /// Each decision's own: a later route's features replace it, `None`
+    /// included.
+    pub stated_headers: Option<StatedHeaders>,
+    /// The deployment leaves media legs ([`crate::LegKind::Media`]) uncharged:
+    /// a media leg's INVITE carries no `P-Charging-Vector`, neither minted nor
+    /// relayed, unless the decision states one for it. `false` charges a media
+    /// leg like any originated leg.
+    #[serde(default)]
+    pub uncharged_media_legs: bool,
+    /// Header names left behind on every provisional response to the
+    /// originator's INVITE that the stack relays toward the originator: the
+    /// decision's narrowing of relay transparency for this call, beside the
+    /// deployment's relay policy. It removes a relayed line
+    /// only, never one a decision states. Each decision's own: a later route's
+    /// features replace it. `None` — nothing is left behind.
+    #[serde(default)]
+    pub withhold_on_relayed_provisionals: Option<Vec<String>>,
+}
+
+/// A decision's header statements, one set per scope, each applied to every
+/// message of its scope the stack sends, the wider scope first and the
+/// narrower resolved against its result ([`crate::header_update::HeaderUpdate`]).
+/// No scope reaches a media leg ([`crate::LegKind::Media`]) or what the
+/// transaction layer builds on its own: a `100 Trying`, a CANCEL's `200`, the
+/// `487` answering the cancelled INVITE, the ACK of a non-2xx final.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatedHeaders {
+    /// The initial INVITE of every leg the call originates.
+    pub launched_invite: SipHeaderUpdates,
+    /// Every final response to the originator's initial INVITE the stack
+    /// sends; the transaction layer's own `487` is none of them.
+    pub originator_finals: SipHeaderUpdates,
+    /// Every message on the originator's leg and on every leg the call
+    /// originates, requests and responses, in both directions. A scope above
+    /// stating the same name is resolved against what this one left.
+    pub every_message: SipHeaderUpdates,
+    /// Legs with a set of their own, by leg id: every message of such a leg
+    /// takes that set in place of the call's, for the call's whole life.
+    pub legs: std::collections::BTreeMap<String, StatedHeaders>,
+    /// The set this one tentatively replaced: when the call's termination
+    /// begins while it is held, the call takes it back (keeping the per-leg
+    /// sets), so the teardown carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverts_to: Option<Box<StatedHeaders>>,
+}
+
+impl StatedHeaders {
+    /// True iff no scope states anything.
+    pub fn is_empty(&self) -> bool {
+        self.launched_invite.is_empty()
+            && self.originator_finals.is_empty()
+            && self.every_message.is_empty()
+            && self.legs.is_empty()
+            && self.reverts_to.is_none()
+    }
+
+    /// The set `leg_id` takes: its own, else the call's.
+    pub fn of_leg(&self, leg_id: &str) -> &StatedHeaders {
+        self.legs.get(leg_id).unwrap_or(self)
+    }
+
+    /// True iff an originated leg's INVITE takes a statement of `name`.
+    pub fn states(&self, name: &str) -> bool {
+        [&self.launched_invite, &self.every_message]
+            .iter()
+            .any(|set| set.keys().any(|stated| stated.eq_ignore_ascii_case(name)))
+    }
 }
 
 impl FeatureActivations {
-    /// The withhold latch: union `previous`'s withheld option tags into this
-    /// route's declaration. A route can widen the withhold; none can restore a
-    /// withheld tag — the property belongs to the call, not to the leg the
-    /// declaring route dialled.
-    pub fn latch_withheld_option_tags(&mut self, previous: Option<&FeatureActivations>) {
+    /// The call-lifetime latch, run where a route's features replace the
+    /// standing ones: the withheld option tags union (a route can widen the
+    /// withhold; none can restore a withheld tag). The property belongs to the
+    /// call, not to the leg the declaring route dialled.
+    pub fn latch_call_lifetime(&mut self, previous: Option<&FeatureActivations>) {
+        self.latch_withheld_option_tags(previous);
+    }
+
+    fn latch_withheld_option_tags(&mut self, previous: Option<&FeatureActivations>) {
         let standing = previous.and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]);
         if standing.is_empty() {
             return;
@@ -238,10 +297,12 @@ mod tests {
             refer: None,
             relay_first_18x_to_180: None,
             no_answer_timeout_sec: None,
-            call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
             withhold_option_tags: withheld.map(|w| w.iter().map(|t| t.to_string()).collect()),
+            stated_headers: None,
+            uncharged_media_legs: false,
+            withhold_on_relayed_provisionals: None,
         }
     }
 
@@ -252,23 +313,49 @@ mod tests {
     #[test]
     fn the_withhold_latch_unions_and_never_narrows() {
         let mut inherited = features(None);
-        inherited.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        inherited.latch_call_lifetime(Some(&features(Some(&["100rel"]))));
         assert_eq!(
             inherited.withhold_option_tags.as_deref(),
             Some(["100rel".to_string()].as_slice())
         );
 
         let mut widened = features(Some(&["timer", "100REL"]));
-        widened.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        widened.latch_call_lifetime(Some(&features(Some(&["100rel"]))));
         assert_eq!(
             widened.withhold_option_tags.as_deref(),
             Some(["timer".to_string(), "100REL".into()].as_slice()),
         );
 
         let mut untouched = features(None);
-        untouched.latch_withheld_option_tags(Some(&features(None)));
+        untouched.latch_call_lifetime(Some(&features(None)));
         assert_eq!(untouched.withhold_option_tags, None);
-        untouched.latch_withheld_option_tags(None);
+        untouched.latch_call_lifetime(None);
         assert_eq!(untouched.withhold_option_tags, None);
+    }
+
+    /// A route's stated headers are its own: a later route stating none
+    /// leaves the call with none.
+    #[test]
+    fn the_stated_headers_are_not_latched() {
+        let mut standing = features(None);
+        let mut set = StatedHeaders::default();
+        set.every_message.insert("X-A".into(), crate::header_update::HeaderUpdate::line("1"));
+        standing.stated_headers = Some(set);
+        let mut later = features(None);
+        later.latch_call_lifetime(Some(&standing));
+        assert_eq!(later.stated_headers, None);
+    }
+
+    #[test]
+    fn states_reads_the_launched_invite_and_every_message_scopes() {
+        use crate::header_update::HeaderUpdate;
+        let mut set = StatedHeaders::default();
+        assert!(set.is_empty());
+        set.originator_finals.insert("X-Final".into(), HeaderUpdate::line("1"));
+        assert!(!set.states("x-final"), "a final is no INVITE");
+        set.every_message.insert("P-Charging-Vector".into(), HeaderUpdate::Remove);
+        set.launched_invite.insert("X-Launch".into(), HeaderUpdate::Add(vec!["1".into()]));
+        assert!(set.states("p-charging-vector") && set.states("X-LAUNCH"));
+        assert!(!set.is_empty());
     }
 }

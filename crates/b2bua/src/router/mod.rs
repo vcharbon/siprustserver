@@ -3,29 +3,41 @@
 //! handler body to the per-call FIFO, and interprets the typed effects in the
 //! fixed order (persist → critical → outbound → soft → buffered).
 //!
-//! One concern per submodule: [`resolve`] keys events to calls, [`ingress`] is
-//! the pre-dispatch pipeline, [`process`] the per-call handler body,
-//! [`interpret`] the effect interpreter, [`callouts`] the fire-and-forget
-//! async-HTTP folds, [`materialise`] the one path a stored replica takes to
-//! become the live copy this node serves (takeover or reclaim), [`reclaim`]
+//! One concern per submodule: `resolve` keys events to calls, `ingress` is
+//! the pre-dispatch pipeline, `admit` a new INVITE's router rungs of the
+//! admission ladder, `process` the per-call handler body,
+//! `interpret` the effect interpreter, `callouts` the fire-and-forget
+//! async-HTTP folds, `materialise` the one path a stored replica takes to
+//! become the live copy this node serves (takeover or reclaim), `reclaim`
 //! the replication reclaim/discharge funnels,
-//! [`restore_hygiene`] the replicated-timer restore seam, [`release`] the one
-//! per-call teardown executor, [`responses`] the locally-authored response
-//! builders, and [`peer_metrics`] per-peer failure attribution.
+//! `restore_hygiene` the replicated-timer restore seam, `release` the one
+//! per-call teardown executor, `responses` the locally-authored response
+//! builders, `peer_metrics` per-peer failure attribution, `turn` the
+//! item offered to a call's queue, `owed` what a request whose body never
+//! ran is owed, and `unroutable` the answer and accounting of an event
+//! naming no call.
 
+mod admit;
+#[cfg(test)]
+mod answer_deadline_tests;
 mod callouts;
 mod ingress;
 mod interpret;
 mod materialise;
+mod owed;
 mod peer_metrics;
 mod process;
 mod reclaim;
 mod release;
 mod resolve;
+#[cfg(test)]
+mod resolve_tests;
 mod responses;
 mod restore_hygiene;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
+mod turn;
+mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
@@ -43,8 +55,7 @@ use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
 use crate::decision::CallDecisionEngine;
 use crate::dispatch::PerCallDispatcher;
-use crate::event::CallEvent;
-use crate::limiter::CallLimiter;
+use crate::limiter::LimiterWorker;
 use crate::metrics::B2buaMetrics;
 use crate::obligations::ObligationSet;
 use crate::overload::OverloadSignal;
@@ -52,6 +63,7 @@ use crate::repl::Readiness;
 use crate::rules::{RuleDefinition, ServiceDef};
 use crate::store::{CallState, StoreFaults};
 use crate::timers::TimerService;
+use b2bua_sdk::event::CallEvent;
 
 /// Host-injected capability for the generic service-authorable async-HTTP
 /// callback ([`RuleAction::ServiceHttpRequest`](crate::rules::RuleAction)). A
@@ -59,10 +71,11 @@ use crate::timers::TimerService;
 /// the same `http_net::HttpTransport` seam the limiter rides carries the request
 /// (real `reqwest` in the runner, the simulated fabric in tests). The caller
 /// owns the fail-safe budget: `default_timeout` bounds any request that omits a
-/// per-request `timeout_ms`. Mirrors [`limiter_http`](crate::limiter_http)'s
+/// per-request `timeout_ms`. Mirrors [`limiter::http`](crate::limiter::http)'s
 /// transport+addr+timeout shape. `None` on [`B2buaDeps`](crate::B2buaDeps) →
-/// today's behaviour (a service that fires the effect still gets an
-/// `outcome:"error"` re-entry, never a stranded machine).
+/// a service that fires the effect gets an `outcome:"error"` re-entry.
+/// `default_timeout` also sets the answer deadline of such a request (ADR-0039).
+#[derive(Clone)]
 pub struct AdaptationHttpPort {
     /// The pluggable HTTP transport (binary-safe: `HttpRequest`/`HttpResponse`
     /// bodies are `Vec<u8>`).
@@ -87,9 +100,14 @@ pub struct RouterCtx {
     pub wire_faults: crate::wire_faults::WireFaults,
     pub txn: TransactionLayer,
     pub timers: TimerService,
-    pub dispatcher: PerCallDispatcher,
+    pub(crate) dispatcher: PerCallDispatcher<turn::Turn>,
+    /// Hears a call past its lifetime cap or at its overflow ceiling, as the
+    /// dispatcher's offers state them.
+    pub reaper: crate::reaper::Reaper,
     pub decision: Arc<dyn CallDecisionEngine>,
-    pub limiter: Arc<dyn CallLimiter>,
+    /// The worker's one handle on its call limiter: every admit, release
+    /// and refresh, none of which a call waits on beyond the admit bound.
+    pub limiter: LimiterWorker,
     pub cdr: Arc<dyn CdrWriter>,
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,
@@ -102,30 +120,44 @@ pub struct RouterCtx {
     pub services: Arc<Vec<ServiceDef>>,
     pub metrics: B2buaMetrics,
     /// The obligation registry (ADR-0020 X7) — what every call owes at release
-    /// (the CDR, the limiter decrements), derived from the snapshot by
+    /// (the CDR, the limiter release), derived from the snapshot by
     /// `invariants::enforce` on each `→ Terminated` transition.
     pub obligations: Arc<ObligationSet>,
-    /// Self-reported readiness driving the OPTIONS health responder (S7). The
-    /// default/legacy path uses [`Readiness::always_ready`] → always 200.
+    /// Self-reported readiness driving the OPTIONS health responder. The
+    /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
     /// Worker-side overload signal stamped on every OPTIONS-200 reply as
     /// `X-Overload: v=1; elu=…; gc=…; adm=…`. The front proxy's ELU-band AIMD
     /// (`sip_proxy::load_observer`) consumes it; the EWMAs advance only while a
-    /// sampler task drives [`OverloadSignal::sample`].
+    /// sampler task drives [`OverloadSignal::sample`]. The panic-ELU and CPS
+    /// bucket rungs read it; the run loop is the bucket's only taker.
     pub overload: OverloadSignal,
-    /// Re-entrant event sink: fire-and-forget work (the async `/call/refer`
-    /// round-trip) folds its result back into the router by sending a
-    /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —
-    /// keeping re-entry single-threaded and out of a non-`Send` async cycle.
+    /// Memory admission gate (ADR-0037): the capacity rung's ceilings and
+    /// RSS sample. The overload sampler task samples it.
+    pub capacity: crate::capacity::CapacityGate,
+    /// The worker's refusals of new INVITEs: the one answer every admission
+    /// rung sends, and the memo the brake and the transaction layer share.
+    pub refusals: crate::admission::Refusals,
+    /// New calls admitted at ingress and not born yet: the capacity rung
+    /// counts them as calls.
+    pub(crate) unborn: admit::Unborn,
+    /// Re-entrant event sink: fire-and-forget work folds its result back into
+    /// the router by sending a `CallEvent::InternalEvent` here, which `run`
+    /// consumes via `on_event` — keeping re-entry single-threaded and out of a
+    /// non-`Send` async cycle. A sender sends only a reaper verdict or one
+    /// answer per request the call sent: every internal event waits past all
+    /// of the call's dispatch bounds (`dispatch::class`).
     pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
     /// Keepalive-timeout burst aggregation keyed by the failed leg's egress hop
     /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
     /// summaries, falling-edge totals — not one line per dead call.
     pub keepalive_waves: Arc<observe::WaveSet>,
+    /// Events that resolved to no call, aggregated per class (ADR-0026).
+    pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
     /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
-    /// `None` reproduces today's behaviour (the `ServiceHttpRequest` dispatch
-    /// arm then folds an `outcome:"error"` re-entry instead of hitting a wire).
+    /// `None` → the `ServiceHttpRequest` dispatch arm folds an `outcome:"error"`
+    /// re-entry instead of hitting a wire.
     pub adaptation_http: Option<Arc<AdaptationHttpPort>>,
 }
 
@@ -159,35 +191,50 @@ pub enum ReplCommand {
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
+/// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
+/// passes `None` and the loop never polls for one.
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
-    mut repl_rx: mpsc::UnboundedReceiver<ReplCommand>,
+    mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
+    // A timer or re-entry channel whose senders are all gone retires its arm
+    // instead of resolving `None` on every poll.
+    let (mut timers_open, mut reentry_open) = (true, true);
     loop {
         tokio::select! {
             ev = txn_rx.recv() => match ev {
                 Some(ev) => ingress::on_event(&ctx, CallEvent::from_txn(ev)).await,
                 None => break,
             },
-            ev = timer_rx.recv() => {
-                if let Some(ev) = ev {
-                    ingress::on_event(&ctx, ev).await;
-                }
+            ev = timer_rx.recv(), if timers_open => match ev {
+                Some(ev) => ingress::on_event(&ctx, ev).await,
+                None => timers_open = false,
             },
-            ev = reentry_rx.recv() => {
-                if let Some(ev) = ev {
-                    ingress::on_event(&ctx, ev).await;
-                }
+            ev = reentry_rx.recv(), if reentry_open => match ev {
+                Some(ev) => ingress::on_event(&ctx, ev).await,
+                None => reentry_open = false,
             },
-            cmd = repl_rx.recv() => {
-                if let Some(cmd) = cmd {
-                    on_repl_command(&ctx, cmd).await;
-                }
+            cmd = next_fail_back(&mut repl_rx) => match cmd {
+                Some(cmd) => on_repl_command(&ctx, cmd).await,
+                // Retires the arm if every sender is gone, instead of resolving
+                // `None` on every poll; no current wiring reaches it (the
+                // supervisor the router's readiness holds keeps a sender).
+                None => repl_rx = None,
             },
         }
+    }
+}
+
+/// The next fail-back command; pending forever when no receiver exists.
+async fn next_fail_back(
+    rx: &mut Option<mpsc::UnboundedReceiver<ReplCommand>>,
+) -> Option<ReplCommand> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 

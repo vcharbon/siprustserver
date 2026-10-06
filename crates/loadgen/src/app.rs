@@ -43,7 +43,8 @@ use crate::{
 /// passed explicitly, the discriminator for the flag-overrides-profile
 /// precedence). Fields are `pub` so a downstream bin may also construct one
 /// programmatically; a field set that way only overrides a `--load-profile`
-/// value if its clap id is inserted into [`Args::explicit`].
+/// value if its clap id is inserted into
+/// [`Args::explicit`](field@Args::explicit).
 #[derive(Parser)]
 #[command(name = "loadgen", about = "SIP load generator (multiplexed SIPp substitute)")]
 pub struct Args {
@@ -82,14 +83,26 @@ pub struct Args {
     /// Shorthand: local host IP to bind the mux endpoints on (reachable from the SUT).
     #[arg(long, default_value = "127.0.0.1")]
     pub bind_ip: IpAddr,
-    /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2.
+    /// Shorthand: base UDP port: alice/uac=base, bob/uas=base+1, charlie/refer=base+2
+    /// (all three = base under `--shared-socket`).
     #[arg(long, default_value_t = 6000)]
     pub base_port: u16,
+    /// Shorthand: bind alice, bob and charlie on ONE socket (`base_port`), for a
+    /// SUT that sends each new leg back to the ip:port that originated the call.
+    /// An `--endpoint-config` giving the roles one address is the explicit form.
+    /// Independent of `--correlate`. Ignored when `--endpoint-config` is set.
+    #[arg(long, default_value_t = false)]
+    pub shared_socket: bool,
     /// Correlation strategy: how the per-call token travels through the SUT.
     /// `header` (default): a transparent header the SUT must RELAY onto every
     /// leg (`--correlation-header`/`--correlation-template`; our b2bua:
     /// `B2BUA_RELAY_HEADERS`). `to-user`: the token IS the To-header user-part —
-    /// survives any SIP-correct B2BUA with zero SUT cooperation.
+    /// survives any SIP-correct B2BUA with zero SUT cooperation. `from-user`:
+    /// the token IS the From URI user of the attached case's resolved caller,
+    /// for a SUT that keeps the calling party's number on every leg; every mix
+    /// entry needs a case (checked at startup), and a call whose resolved From
+    /// has no user, or whose number a concurrent call holds, is counted
+    /// `rejected` before any datagram.
     #[arg(long, default_value = "header")]
     pub correlate: String,
     /// Correlation header name (the `header` strategy): the transparent
@@ -99,7 +112,7 @@ pub struct Args {
     /// Correlation header VALUE template with a `${token}` placeholder, so the
     /// token can ride a structured header — e.g. `"${token};encoding=hex"` for
     /// User-to-User, `"icid-value=${token}"` for P-Charging-Vector. Default:
-    /// the bare token (byte-for-byte the historic behaviour).
+    /// the bare token.
     #[arg(long, default_value = "${token}")]
     pub correlation_template: String,
     /// Override the token-extraction regex (FIRST capture group = the token).
@@ -218,9 +231,10 @@ pub struct Args {
 impl Args {
     /// Parse from the process command line (exiting on error, like
     /// `clap::Parser::parse`), additionally recording each explicitly-passed
-    /// flag in [`Args::explicit`]. This inherent method shadows the trait
-    /// method on purpose — parsing through the trait would lose the
-    /// explicit-flag set and every field would defer to a `--load-profile`.
+    /// flag in [`Args::explicit`](field@Args::explicit). This inherent method
+    /// shadows the trait method on purpose — parsing through the trait would
+    /// lose the explicit-flag set and every field would defer to a
+    /// `--load-profile`.
     pub fn parse() -> Self {
         Self::parse_from(std::env::args_os())
     }
@@ -289,10 +303,12 @@ fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConfig {
         }
         return cfg;
     }
+    let port =
+        |offset: u16| if args.shared_socket { args.base_port } else { args.base_port + offset };
     let roles: std::collections::BTreeMap<String, SocketAddr> = [
-        ("alice".to_string(), (args.bind_ip, args.base_port).into()),
-        ("bob".to_string(), (args.bind_ip, args.base_port + 1).into()),
-        ("charlie".to_string(), (args.bind_ip, args.base_port + 2).into()),
+        ("alice".to_string(), (args.bind_ip, port(0)).into()),
+        ("bob".to_string(), (args.bind_ip, port(1)).into()),
+        ("charlie".to_string(), (args.bind_ip, port(2)).into()),
         ("lb".to_string(), args.target),
     ]
     .into();
@@ -303,6 +319,41 @@ fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConfig {
         recv_timeout_ms,
         transit_delay_ms: 0,
         egress: args.route_pin_to_uas.then_some(e2e_model::EgressPolicySpec::ApiCallPin),
+    }
+}
+
+/// The run's [`Correlation`] from `--correlate` and the header knobs.
+fn correlation(args: &Args) -> Result<Correlation, String> {
+    match args.correlate.as_str() {
+        "header" => Correlation::header_templated(
+            args.correlation_header.clone(),
+            args.correlation_template.clone(),
+            args.correlation_extract.as_deref(),
+        )
+        .map_err(|e| format!("bad correlation config: {e}")),
+        "to-user" | "to_user" => Ok(Correlation::to_user()),
+        "from-user" | "from_user" => Ok(Correlation::from_user()),
+        other => Err(format!(
+            "unknown --correlate {other:?} (expected `header`, `to-user` or `from-user`)"
+        )),
+    }
+}
+
+/// From-user correlation takes each call's key from its attached case's
+/// resolved caller, so every mix entry must carry a case. `Err` names the
+/// entries without one.
+pub fn check_from_user_mix(correlation: &Correlation, mix: &[MixEntry]) -> Result<(), String> {
+    if !correlation.is_from_user() {
+        return Ok(());
+    }
+    let caseless: Vec<&str> = mix.iter().filter(|e| e.case.is_none()).map(|e| e.id).collect();
+    if caseless.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--correlate from-user needs a case (--case or case=) on every mix entry; \
+             none on {caseless:?}"
+        ))
     }
 }
 
@@ -536,23 +587,14 @@ pub async fn run_with_inputs(
             .collect()
     };
 
-    let correlation = match args.correlate.as_str() {
-        "header" => Correlation::header_templated(
-            args.correlation_header.clone(),
-            args.correlation_template.clone(),
-            args.correlation_extract.as_deref(),
-        )
-        .unwrap_or_else(|e| panic!("bad correlation config: {e}")),
-        "to-user" | "to_user" => Correlation::to_user(),
-        other => panic!("unknown --correlate {other:?} (expected `header` or `to-user`)"),
-    };
+    let correlation = correlation(&args).unwrap_or_else(|e| panic!("{e}"));
+    check_from_user_mix(&correlation, &scenarios).unwrap_or_else(|e| panic!("{e}"));
 
     // The ONE environment-axis document (authored file or flag-synthesized):
     // endpoint binds + SUT ingress + recv bound + egress policy.
     let endpoint = endpoint_config(&args, recv_timeout_ms);
-    let uac = endpoint.addr("alice");
-    let uas = endpoint.addr("bob");
-    let refer = endpoint.addr("charlie");
+    let (uac, uas, refer) =
+        (endpoint.addr("alice"), endpoint.addr("bob"), endpoint.addr("charlie"));
     let via = endpoint.addr("lb");
     let egress = endpoint.egress_policy();
     let recv_timeout = endpoint.recv_timeout();
@@ -570,6 +612,9 @@ pub async fn run_with_inputs(
         clock.clone(),
     )
     .await?;
+    // The transport addresses the bound endpoints (a port-0 request resolves).
+    let bound = |requested| core.local_addr(requested).expect("every role's address is bound");
+    let (uac, uas, refer) = (bound(uac), bound(uas), bound(refer));
 
     let transport = Arc::new(MuxTransport {
         core: core.clone(),
@@ -616,6 +661,7 @@ pub async fn run_with_inputs(
             .with_phase_tolerance(Duration::from_millis(args.chaos_phase_tolerance_ms)),
     );
 
+    reporter.declare_scenarios(scenarios.iter().map(|entry| entry.id));
     let driver = Driver::new(cfg, scenarios, reporter.clone(), transport).with_chaos(chaos.clone());
     // The live rate handle (seeded from `--cps` / the profile): `POST /rate`
     // re-targets it and the governor re-anchors its grid; exported as the
@@ -630,14 +676,7 @@ pub async fn run_with_inputs(
     let metrics_chaos = chaos.clone();
     let metrics_rate = rate.clone();
     let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
-        format!(
-            "{}{}{}{}{}",
-            metrics_reporter.render_prometheus(),
-            metrics_core.render_prometheus(),
-            metrics_chaos.render_prometheus(),
-            target_cps_metric(&metrics_rate),
-            process_memory_metrics(),
-        )
+        metrics_body(&metrics_reporter, &metrics_core, &metrics_chaos, &metrics_rate)
     });
     let metrics_addr = args.metrics_addr;
     let server_chaos = chaos.clone();
@@ -736,43 +775,40 @@ fn egress_label(egress: &crate::EgressPolicy) -> String {
 fn mux_canaries(core: &MuxCore) -> Canaries {
     use std::sync::atomic::Ordering;
     let s = core.stats();
-    let orphans = s.orphan_no_header.load(Ordering::Relaxed)
-        + s.orphan_unknown_token.load(Ordering::Relaxed)
-        + s.orphan_stray.load(Ordering::Relaxed);
+    let orphans = s.orphans_total();
     let drops = s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
     Canaries { orphans, drops, ..Canaries::default() }
 }
 
-/// The current offered-rate target as a Prometheus gauge (`loadgen_target_cps`),
-/// so the dashboard shows what `POST /rate` last set (and `0` while paused).
-fn target_cps_metric(rate: &RateHandle) -> String {
-    format!(
-        "# HELP loadgen_target_cps Current offered call-rate target (calls/s; 0 = paused).\n\
-         # TYPE loadgen_target_cps gauge\n\
-         loadgen_target_cps {}\n",
-        rate.cps()
-    )
+/// The `/metrics` body, every family of [`crate::CATALOGUE`]: the
+/// reporter's series, the mux's, the chaos markers, the offered-rate target
+/// (what `POST /rate` last set, `0` while paused) and a process
+/// resident-memory canary — the load generator holds per-call recording
+/// buffers while full recording is on, so the endurance dashboard watches it
+/// to catch a recording-memory blow-up early.
+pub fn metrics_body(
+    reporter: &Reporter,
+    core: &MuxCore,
+    chaos: &ChaosLog,
+    rate: &RateHandle,
+) -> String {
+    let mut out = reporter.render_prometheus();
+    out.push_str(&core.render_prometheus());
+    out.push_str(&chaos.render_prometheus());
+    crate::catalogue::TARGET_CPS.render_value(&mut out, rate.cps());
+    let rss = resident_memory_bytes().map_or("NaN".to_string(), |b| b.to_string());
+    crate::catalogue::PROCESS_RESIDENT_MEMORY.render_value(&mut out, rss);
+    out
 }
 
-/// A process resident-memory canary in Prometheus format, read from
-/// `/proc/self/statm` (field 2 = resident pages × page size). The load generator
-/// holds per-call recording buffers while full recording is on, so the endurance
-/// dashboard watches this to catch a recording-memory blow-up early. Returns an
-/// empty string off Linux / if the file is unreadable (best effort).
-fn process_memory_metrics() -> String {
-    let rss = std::fs::read_to_string("/proc/self/statm")
+/// The process's resident memory from `/proc/self/statm` (field 2 =
+/// resident pages × page size); `None` off Linux or if unreadable.
+fn resident_memory_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1).map(|w| w.to_string()))
         .and_then(|pages| pages.parse::<u64>().ok())
-        .map(|pages| pages.saturating_mul(4096));
-    match rss {
-        Some(bytes) => format!(
-            "# HELP loadgen_process_resident_memory_bytes Load generator RSS.\n\
-             # TYPE loadgen_process_resident_memory_bytes gauge\n\
-             loadgen_process_resident_memory_bytes {bytes}\n"
-        ),
-        None => String::new(),
-    }
+        .map(|pages| pages.saturating_mul(4096))
 }
 
 #[cfg(test)]
@@ -782,6 +818,7 @@ mod tests {
     /// `Args::parse_from` records exactly the explicitly-passed flags — the
     /// discriminator the flag-overrides-profile precedence keys off.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn parse_records_explicit_flags() {
         let args = Args::parse_from(["loadgen", "--cps", "30", "--drop"]);
         assert!(args.explicit("cps"));
@@ -790,5 +827,52 @@ mod tests {
         assert!(!args.explicit("drop_rate"));
         assert_eq!(args.cps, 30.0);
         assert!(args.drop);
+    }
+
+    /// `--shared-socket` synthesizes one address for alice, bob and charlie:
+    /// the base port, on the bind IP.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn shared_socket_binds_every_role_on_the_base_port() {
+        let args = Args::parse_from(["loadgen", "--shared-socket", "--base-port", "7400"]);
+        let cfg = endpoint_config(&args, 5000);
+        let base: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        for role in ["alice", "bob", "charlie"] {
+            assert_eq!(cfg.addr(role), base, "{role} binds the shared base port");
+        }
+    }
+
+    /// `--correlate from-user` selects the From-user strategy (nothing stamped).
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn correlate_from_user_selects_the_from_user_strategy() {
+        let args = Args::parse_from(["loadgen", "--correlate", "from-user"]);
+        let stamp = correlation(&args).map(|c| c.stamp("+1555010"));
+        assert!(
+            matches!(stamp, Ok(crate::CorrelationStamp::FromUser)),
+            "from-user must select the From-user stamp, got {stamp:?}"
+        );
+    }
+
+    /// From-user correlation refuses a mix with a case-less entry at startup;
+    /// other strategies accept it.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn from_user_mix_needs_a_case_on_every_entry() {
+        let registry = ShapeRegistry::with_defaults();
+        let inputs = ScenarioInputs::default();
+        let entry = |id| MixEntry::by_id(&registry, id, &inputs, 1.0).unwrap();
+        let case: e2e_model::TestCase = serde_json::from_str(
+            r#"{ "id": "c", "compatibleShapes": ["basic_call"],
+                 "input": { "core": { "from": "sip:+15550100@pool.example" } } }"#,
+        )
+        .unwrap();
+        let case = Arc::new(LoadCase::new(case, &Default::default(), 1).unwrap());
+
+        let mix = vec![entry("basic_call").with_case(Some(case)), entry("reinvite")];
+        let err = check_from_user_mix(&Correlation::from_user(), &mix).unwrap_err();
+        assert!(err.contains("reinvite") && !err.contains("basic_call"), "{err}");
+        assert!(check_from_user_mix(&Correlation::from_user(), &mix[..1]).is_ok());
+        assert!(check_from_user_mix(&Correlation::to_user(), &mix).is_ok());
     }
 }

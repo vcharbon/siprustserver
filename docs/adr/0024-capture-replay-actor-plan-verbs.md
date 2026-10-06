@@ -353,7 +353,7 @@ sampling does not apply to it.
 - **Templated PRACK.** A frozen `RAck` cannot reference the live dialog's
   RSeq/CSeq; PRACK stays a stack automatic.
 
-## Amendment — scripted CANCEL reception (2026-07-23, request 053)
+## Amendment — scripted CANCEL reception (2026-07-23)
 
 The "ACK and CANCEL are stack automatics, never parked" rule gains ONE carved
 exception on the reception side; ACK and every CANCEL *emission* automatic are

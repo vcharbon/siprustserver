@@ -39,13 +39,13 @@
 //! publishes its progress on a `watch` channel the supervisor mirrors; a
 //! re-spawned puller is seeded from the retained W so it resumes.
 //!
-//! ## Introspection (for tests / S7 readiness) — Reclaim-scoped
+//! ## Introspection (for tests / readiness) — Reclaim-scoped
 //! [`is_current`](ReplicationSupervisor::is_current) /
 //! [`all_current`](ReplicationSupervisor::all_current) /
 //! [`bootstrap_complete`](ReplicationSupervisor::bootstrap_complete) /
 //! [`watermark`](ReplicationSupervisor::watermark) all read the **Reclaim** flow
 //! — readiness depends on reclaiming our own partition, never on backing up
-//! others. S7's readiness state machine consumes `all_current`/`all_bootstrapped`.
+//! others. The readiness state machine consumes `all_current`/`all_bootstrapped`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -116,7 +116,7 @@ struct FlowState {
     /// The retained watermark — authoritative, survives the puller task. Seeded
     /// into the next puller on re-spawn.
     watermark: Watermark,
-    /// Sticky current flag — retained across Park (never cleared, Decision 6).
+    /// Sticky current flag — retained across Park (never cleared, ADR-0011 X6).
     current: bool,
     /// Sticky bootstrap-complete flag (X5) — retained across Park. Set when the
     /// puller hit the first catch-up `Noop`, the hard timer fired, or it resumed
@@ -130,7 +130,7 @@ struct FlowState {
     reset_gen: u64,
     /// Sticky: this flow was reached by a successful `connect` at least once. An
     /// unreachable peer (never connected) that goes bootstrap-complete only by the
-    /// hard timer must NOT pin readiness NotReady (Decision 4 — liveness).
+    /// hard timer must NOT pin readiness NotReady (ADR-0011 X5 — liveness).
     ever_connected: bool,
 }
 
@@ -171,7 +171,7 @@ impl FlowState {
     }
 
     /// True iff this flow is current OR was never reachable and best-effort
-    /// completed (the readiness predicate, Decision 4). A reachable-then-blipped
+    /// completed (the readiness predicate, ADR-0011 X5). A reachable-then-blipped
     /// flow keeps the strict gate (sticky `current`).
     fn ready(&self) -> bool {
         self.current || (self.bootstrap_complete && !self.ever_connected)
@@ -259,6 +259,9 @@ struct SupervisorInner {
     /// (the live `B2buaCore` does, before `start`); the sim/test supervisors leave
     /// it unset so pullers drive the store only.
     repl_tx: Mutex<Option<mpsc::UnboundedSender<crate::router::ReplCommand>>>,
+    /// The memory admission gate handed to every spawned puller (ADR-0037).
+    /// `None` until [`set_capacity`](ReplicationSupervisor::set_capacity).
+    capacity: Mutex<Option<crate::capacity::CapacityGate>>,
     /// Set once the Reclaim flows are all ready and the Backup streams may open
     /// (ADR-0014 boot order). Latched true; subsequent reconciles spawn Backup
     /// pullers for any newly-added peer.
@@ -336,6 +339,7 @@ impl ReplicationSupervisor {
                 metrics,
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
+                capacity: Mutex::new(None),
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
@@ -352,16 +356,22 @@ impl ReplicationSupervisor {
         *self.inner.repl_tx.lock().unwrap() = Some(tx);
     }
 
+    /// Wire the memory admission gate whose backup ceilings every puller
+    /// applies (ADR-0037). Call **before** [`start`](Self::start).
+    pub fn set_capacity(&self, gate: crate::capacity::CapacityGate) {
+        *self.inner.capacity.lock().unwrap() = Some(gate);
+    }
+
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
     /// step with membership, and run the backup-deferral gate that opens the
     /// Backup streams once the Reclaim flows are ready.
     ///
     /// Both the boot snapshot and every subsequent wakeup (delta, `Lagged`
     /// overflow, or periodic tick) flow through one idempotent
-    /// [`reconcile_from_snapshot`](Self::reconcile_from_snapshot) — the shared
-    /// [`topology::spawn_membership_reconcile`] driver owns the subscribe-before-
-    /// snapshot ordering, the 5 s safety-net ticker, and the non-fatal `Lagged`
-    /// handling (ADR-0012 D1/D2).
+    /// `reconcile_from_snapshot` — the shared
+    /// [`topology::spawn_membership_reconcile`] driver owns the
+    /// subscribe-before-snapshot ordering, the 5 s safety-net ticker, and the
+    /// non-fatal `Lagged` handling (ADR-0012 D1/D2).
     pub fn start(&self, membership: Arc<dyn Membership>) {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
         if membership.observes_self() {
@@ -412,17 +422,20 @@ impl ReplicationSupervisor {
             }
             self.sync();
             // Only a ready member gates the latch (`desired_ordinals`): a member
-            // that is present but not ready is pulled, never waited on.
+            // that is present but not ready is pulled, never waited on. Each
+            // status is marked seen before it is read, under the one lock, so
+            // the wait below wakes on every status published after the mark.
             let (ready, receivers) = {
-                let peers = self.inner.peers.lock().unwrap();
+                let mut peers = self.inner.peers.lock().unwrap();
+                let receivers: Vec<watch::Receiver<PullerStatus>> = desired
+                    .iter()
+                    .filter_map(|p| peers.get(&p.ordinal).and_then(|e| seen(&e.reclaim)))
+                    .collect();
+                fold(&mut peers);
                 let ready = desired
                     .iter()
                     .filter(|p| p.ready)
                     .all(|p| peers.get(&p.ordinal).is_some_and(|e| e.reclaim.ready()));
-                let receivers: Vec<watch::Receiver<PullerStatus>> = desired
-                    .iter()
-                    .filter_map(|p| peers.get(&p.ordinal).and_then(|e| e.reclaim.status_rx.clone()))
-                    .collect();
                 (ready, receivers)
             };
             if ready {
@@ -587,6 +600,10 @@ impl ReplicationSupervisor {
             Some(tx) => puller.with_repl_sink(tx),
             None => puller,
         };
+        let puller = match self.inner.capacity.lock().unwrap().clone() {
+            Some(gate) => puller.with_capacity(gate),
+            None => puller,
+        };
         let (cancel_tx, cancel_rx) = watch::channel(false);
         flow.status_rx = Some(status_rx);
         flow.cancel_tx = Some(cancel_tx);
@@ -619,11 +636,7 @@ impl ReplicationSupervisor {
     /// Fold every running puller's published status into the retained map. Tests
     /// call this (or any retained read) after advancing the clock.
     fn sync(&self) {
-        let mut peers = self.inner.peers.lock().unwrap();
-        for entry in peers.values_mut() {
-            entry.reclaim.absorb();
-            entry.backup.absorb();
-        }
+        fold(&mut self.inner.peers.lock().unwrap());
     }
 
     /// Is `peer`'s **Reclaim** flow current (its sticky current flag set)? Folds
@@ -663,13 +676,13 @@ impl ReplicationSupervisor {
         })
     }
 
-    /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (S7
+    /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (The
     /// readiness gate.) Empty set → `true`. Peers that have left membership or
     /// are present but not ready are excluded
-    /// ([`desired_ordinals`](Self::desired_ordinals)) so neither a parked entry
+    /// (`desired_ordinals`) so neither a parked entry
     /// nor a pulled-not-ready one can pin readiness. A peer that is bootstrap-
     /// complete only via the hard timer and was **never reached** does NOT block
-    /// readiness (per Decision 4 a node must boot and serve even when peers are
+    /// readiness (per ADR-0011 X5 a node must boot and serve even when peers are
     /// unreachable). A reachable-then-blipped peer **still desired** keeps the
     /// strict gate (sticky `current`).
     pub fn all_current(&self) -> bool {
@@ -708,10 +721,10 @@ impl ReplicationSupervisor {
         self.inner.membership.lock().unwrap().as_ref().is_some_and(|m| m.synced())
     }
 
-    /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (S7
+    /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (The
     /// readiness gate.) Empty set → `true`. Peers that have left membership or
     /// are present but not ready are excluded
-    /// ([`desired_ordinals`](Self::desired_ordinals)) so neither a parked entry
+    /// (`desired_ordinals`) so neither a parked entry
     /// nor a pulled-not-ready one can pin readiness.
     pub fn all_bootstrapped(&self) -> bool {
         self.sync();
@@ -778,16 +791,11 @@ impl ReplicationSupervisor {
     /// status as it ticks. Returns once current; the caller drives the clock.
     pub async fn await_current(&self, peer: &str) {
         loop {
+            // Marked seen before the read, so the wait wakes on the next status.
+            let rx = self.inner.peers.lock().unwrap().get(peer).and_then(|e| seen(&e.reclaim));
             if self.is_current(peer) {
                 return;
             }
-            let rx = self
-                .inner
-                .peers
-                .lock()
-                .unwrap()
-                .get(peer)
-                .and_then(|e| e.reclaim.status_rx.clone());
             match rx {
                 Some(mut rx) => {
                     if rx.changed().await.is_err() {
@@ -800,12 +808,31 @@ impl ReplicationSupervisor {
     }
 }
 
+/// Fold every running puller's published status into `peers`.
+fn fold(peers: &mut HashMap<String, PeerEntry>) {
+    for entry in peers.values_mut() {
+        entry.reclaim.absorb();
+        entry.backup.absorb();
+    }
+}
+
+/// A copy of `flow`'s status receiver with its current status marked seen, so
+/// its `changed()` waits for the next publication. `None` while Parked.
+fn seen(flow: &FlowState) -> Option<watch::Receiver<PullerStatus>> {
+    flow.status_rx.clone().map(|mut rx| {
+        rx.mark_unchanged();
+        rx
+    })
+}
+
 /// Wait until **any** of `receivers` publishes a status change, or `fallback`
 /// elapses — whichever first. Used by the backup-deferral gate so it re-checks
 /// Reclaim readiness the instant a puller advances, without a full poll interval
-/// of latency. A short-lived forwarder task per receiver (aborted on return)
-/// avoids needing a `select_all` combinator; the gate is one-shot, so this runs
-/// only during boot until the Backup streams open.
+/// of latency. Each receiver must be marked seen at the status the caller read
+/// ([`seen`]). A receiver whose puller has ended never wakes it, so once none can
+/// publish the wait is the `fallback` poll. A short-lived forwarder task per
+/// receiver (aborted on return) avoids needing a `select_all` combinator; the
+/// gate is one-shot, so this runs only during boot until the Backup streams open.
 async fn await_any_change_or_poll(
     receivers: Vec<watch::Receiver<PullerStatus>>,
     fallback: Duration,
@@ -827,9 +854,10 @@ async fn await_any_change_or_poll(
         })
         .collect();
     drop(tx);
+    // `None` (every forwarder ended without a change) disables its branch.
     tokio::select! {
         _ = tokio::time::sleep(fallback) => {}
-        _ = rx.recv() => {}
+        Some(()) = rx.recv() => {}
     }
     for h in handles {
         h.abort();

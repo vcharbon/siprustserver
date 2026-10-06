@@ -164,6 +164,12 @@ pub struct RunConfig {
     /// field reads.
     #[serde(default, skip_serializing_if = "MediaMode::is_rebooked")]
     pub media: MediaMode,
+    /// The dialog-identity nonce the lane seeds this run's Call-IDs, tags and
+    /// branches from, so the lane knows the ids its dials carry before the run
+    /// starts. Absent, the interpreter mints one per run. Two runs sharing a
+    /// system under test never share one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_nonce: Option<String>,
 }
 
 impl RunConfig {
@@ -183,7 +189,15 @@ impl RunConfig {
             check_scoping: BTreeMap::new(),
             known_bugs: BTreeSet::new(),
             media: MediaMode::Rebooked,
+            identity_nonce: None,
         }
+    }
+
+    /// Seed the run's dialog identities from `nonce` (see
+    /// [`identity_nonce`](Self::identity_nonce)).
+    pub fn with_identity_nonce(mut self, nonce: impl Into<String>) -> Self {
+        self.identity_nonce = Some(nonce.into());
+        self
     }
 
     /// State what the media plane did to this run's session descriptions.
@@ -309,6 +323,18 @@ mod tests {
         assert_eq!(serde_json::from_str::<RunConfig>(&text).unwrap(), unbound);
     }
 
+    /// A lane-seeded identity nonce survives the bundle form; a run that seeds
+    /// none writes no field.
+    #[test]
+    fn a_seeded_identity_nonce_is_written_and_an_unseeded_run_writes_none() {
+        let minted = RunConfig::new("upstream-fake", ClockMode::Virtual, "h:1");
+        assert!(!serde_json::to_string(&minted).unwrap().contains("identity_nonce"));
+        let seeded = minted.with_identity_nonce("n1");
+        let text = serde_json::to_string(&seeded).unwrap();
+        assert!(text.contains(r#""identity_nonce":"n1""#), "{text}");
+        assert_eq!(serde_json::from_str::<RunConfig>(&text).unwrap(), seeded);
+    }
+
     /// The media mode is written only when it is not the default, and a bundle
     /// stating none reads as rebooked.
     #[test]
@@ -365,8 +391,8 @@ mod tests {
         // moves what it may burn.
         assert_eq!(paused.wall_ceiling_ms(0, 32_000), paused.wall_ceiling_ms(282_000, 32_000));
 
-        // A real clock sleeps them: the longest capture in the corpus clears its
-        // own span and its settle budget, and a longer one gets a wider ceiling.
+        // A real clock sleeps them: a long capture clears its own span and its
+        // settle budget, and a longer one gets a wider ceiling.
         assert!(real.wall_ceiling_ms(282_000, 32_000) > 282_000 + 32_000);
         assert!(real.wall_ceiling_ms(282_000, 32_000) > real.wall_ceiling_ms(119_000, 32_000));
 

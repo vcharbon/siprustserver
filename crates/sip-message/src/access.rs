@@ -112,6 +112,14 @@ macro_rules! core_read_surface {
                 &self.core().body
             }
 
+            /// The session description this message carries, bare under
+            /// `application/sdp` or framed in a `multipart/…` body (RFC 5621
+            /// §3.1); `None` where it carries none.
+            pub fn sdp(&self) -> Option<&[u8]> {
+                let ct = self.header::<header::MediaType>()?.ok()?;
+                crate::multipart::sdp_range(&ct, self.body()).map(|r| &self.body()[r])
+            }
+
             /// The datagram this message is — received or rendered at freeze.
             pub fn image(&self) -> &Bytes {
                 &self.core().image

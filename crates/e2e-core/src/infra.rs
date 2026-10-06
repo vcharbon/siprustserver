@@ -81,7 +81,7 @@ impl InfraRuntime {
         self.agents.get(role).unwrap_or_else(|| panic!("infra has no agent for role {role:?}"))
     }
 
-    /// Label a message `role` just received with a canonical [`Anchor`]
+    /// Label a message `role` just received with a canonical [`Anchor`](crate::shape::Anchor)
     /// (ADR-0019) — e.g. `rt.anchor("bob1", Anchor::InitialInvite,
     /// uas.request())`. Surfaced on the [`RunReport`] for the check engine.
     pub fn anchor(
@@ -157,7 +157,10 @@ impl InfraRuntime {
     /// — a gating RFC violation must fail the cell, but crashing it would
     /// throw away the diagram and findings table a human needs to see why.
     /// Keeps the SUT guards alive across `finish()` (the recording snapshot is
-    /// read first), then drops them.
+    /// read first), then drops them. An in-process b2bua SUT must have reaped
+    /// every call and released every limiter hold
+    /// ([`B2buaSut::assert_fully_reaped`]); a leak is a gating anomaly on the
+    /// report, so the cell fails with its diagram and findings.
     pub async fn finish(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         // Drain already-due in-flight deliveries (SUT teardown, final 200s, CDR)
         // before the snapshot — the generic analogue of b2bua-harness
@@ -167,14 +170,43 @@ impl InfraRuntime {
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        let leak = match &self._b2bua {
+            Some(b2bua) => reaped_check(b2bua).await,
+            None => None,
+        };
         let InfraRuntime { harness, agents, _proxy, _b2bua, _register_proxy, .. } = self;
-        let (report, gate) = harness.finish_collecting().await;
+        let (mut report, gate) = harness.finish_collecting().await;
+        report.extra_anomalies.extend(leak);
         drop(agents);
         drop(_proxy);
         drop(_b2bua);
         drop(_register_proxy);
         (report, gate)
     }
+}
+
+/// Settle `b2bua` until every call is reaped and run its reaped check; a
+/// failure is the gating anomaly the report carries.
+async fn reaped_check(b2bua: &B2buaSut) -> Option<seq_report::Anomaly> {
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b2bua.assert_fully_reaped();
+    }))
+    .err()?;
+    let detail = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| failure.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "the reaped check failed".to_string());
+    Some(seq_report::Anomaly {
+        check: "sut.fullyReaped".to_string(),
+        detail,
+        lane: None,
+        endpoint: Some("b2bua".to_string()),
+        advisory: Some(false),
+        row_seqs: Vec::new(),
+        rule_sourced: false,
+    })
 }
 
 /// A compiled Infra shape — builds an [`InfraRuntime`] for a given Endpoint config.
@@ -273,7 +305,7 @@ impl InfraShape for FakeLsbcB2bua {
             // REFER blind-transfer authorization (the `transfer-refer-media`
             // shape): the scripted `/call/refer` backend keyed on the REFER's
             // `X-Api-Call.refer_key` / `destination`, paired with the routes'
-            // `features.refer` arm above — without the arm this platform would
+            // `features.refer` arm above — without the arm the B2BUA would
             // relay the REFER on instead of consulting. Inert for the other
             // shapes (they never REFER); composes with the failover wiring.
             .on_refer(default_call_refer)
@@ -408,7 +440,7 @@ impl InfraShape for FakeRegisterProxy {
 }
 
 /// A **real**-transport infra: agents on `RealSignalingNetwork` under a wall
-/// clock, via the [`Harness::with_network_and_clock`] seam (ADR-0018, Phase A).
+/// clock, via the [`Harness::with_network_and_clock`] seam (ADR-0018).
 /// No SUT is spawned — `sut_ingress` points at bob1, so `basic-call` becomes a
 /// direct peer call. This is the in-CI proof that the *same* shape body runs over
 /// real sockets + real time; the external-kind-cluster infra is the same seam

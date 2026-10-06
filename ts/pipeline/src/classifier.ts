@@ -45,6 +45,8 @@ export interface DocumentShape {
    * stated here.
    */
   readonly unackedFinals: ReadonlyArray<UnackedFinal>
+  /** How many calls the document plays. */
+  readonly calls: number
   /**
    * EVERY step the flow states, in flow order — the choreography itself, so a
    * deployment can read a document question its rules have not asked before
@@ -55,6 +57,26 @@ export interface DocumentShape {
    * was observed, this says what the document states there and around it.
    */
   readonly steps: ReadonlyArray<DocumentStep>
+  /**
+   * Every attempt of every call, in each call's chain order: the leg it rang
+   * and the final and cause the document states for it. A pure projection of
+   * the pivot's `calls[].attempts`, so a rule can tell a caller final the
+   * routing decision was consulted on from one it was not.
+   */
+  readonly attempts: ReadonlyArray<DocumentAttempt>
+}
+
+/** One attempt of a call, as the document states it. */
+export interface DocumentAttempt {
+  readonly call: string
+  /** The call's caller leg. */
+  readonly callerLeg: string
+  /** The leg the attempt rang. */
+  readonly leg: string
+  /** The final that ended the attempt at its own vantage; absent where the document states none. */
+  readonly status?: number
+  /** The document's cause for the attempt's end (`external:486`, `no-answer`, ...). */
+  readonly cause?: string
 }
 
 /**
@@ -88,6 +110,10 @@ export interface DocumentStep {
   readonly optional: boolean
   /** The step rides an established dialog. */
   readonly inDialog: boolean
+  /** The message carries a session description (RFC 3264), bare or in a multipart. */
+  readonly sdp?: true
+  /** A provisional the document states as reliable: `RSeq`, or `Require: 100rel` (RFC 3262). */
+  readonly reliable?: true
 }
 
 /** One scripted INVITE final the flow states no ACK expectation for. */
@@ -120,6 +146,19 @@ export interface RunShape {
   readonly legs: number
   /** Legs carrying a BYE the SYSTEM sent — legs it tore down itself. */
   readonly legsTornDownBySystem: number
+  /**
+   * By leg, the `RSeq` of every reliable provisional the leg's scripted actor
+   * sent, in run order (RFC 3262 §7.1): the numbers a PRACK on that leg can
+   * acknowledge. A leg that sent none has no entry.
+   */
+  readonly sentRSeqs: ReadonlyMap<string, ReadonlyArray<number>>
+  /**
+   * By leg, the headers of the dialog-creating INVITE the recording holds on
+   * that leg, either direction, as it crossed the wire: the address a dialog's
+   * later requests restate (RFC 3261 §12.2.1.1) and the set its re-INVITEs
+   * repeat. A leg that recorded none has no entry.
+   */
+  readonly openers: ReadonlyMap<string, ReadonlyArray<{ readonly name: string; readonly value: string }>>
 }
 
 /** What one lane's rule lists say about one probe. */

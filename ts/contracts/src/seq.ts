@@ -7,16 +7,16 @@
  * never the canonical sorted formatter — so every type here carries an ordered
  * builder that lays its keys out the way Rust declares them.
  *
- * `RowKind` is an externally tagged Rust enum: the two arrow planes ride as
- * `{"sip":{"delivered":…}}` / `{"repl":{…}}` and the lifecycle band as the bare
- * string `"lifecycle"`.
+ * `RowKind` is an externally tagged Rust enum: the three arrow planes ride as
+ * `{"sip":{"delivered":…}}` / `{"repl":{…}}` / `{"http":{…}}` and the lifecycle
+ * band as the bare string `"lifecycle"`.
  */
 import * as Schema from "effect/Schema"
 import { nullable } from "./serde.js"
 import { STRICT } from "./strict.js"
 
 /** What an actor lane represents — drives its styling/label decoration, not its position. */
-export const LaneKind = Schema.Literals(["ua", "sut", "node"])
+export const LaneKind = Schema.Literals(["ua", "sut", "node", "service"])
 export type LaneKind = typeof LaneKind.Type
 
 /** One diagram column. `id` is the stable key rows reference. */
@@ -37,18 +37,23 @@ export interface SipRow extends Schema.Schema.Type<typeof SipRow> {}
 export const ReplRow = Schema.Struct({ repl: Schema.Struct({ delivered: Schema.Boolean }) })
 export interface ReplRow extends Schema.Schema.Type<typeof ReplRow> {}
 
+/** An HTTP request or reply. `delivered` is false when no reply came back or no service took it. */
+export const HttpRow = Schema.Struct({ http: Schema.Struct({ delivered: Schema.Boolean }) })
+export interface HttpRow extends Schema.Schema.Type<typeof HttpRow> {}
+
 /** An operator/chaos event — rendered as a full-width band, not an arrow. */
 export const LifecycleRow = Schema.Literal("lifecycle")
 export type LifecycleRow = typeof LifecycleRow.Type
 
 /** Which plane a row belongs to. */
-export const RowKind = Schema.Union([SipRow, ReplRow, LifecycleRow])
+export const RowKind = Schema.Union([SipRow, ReplRow, HttpRow, LifecycleRow])
 export type RowKind = typeof RowKind.Type
 
 /** Whether a message-plane row was observed delivered; a lifecycle band has no delivery. */
 export const rowDelivered = (kind: RowKind): boolean | undefined => {
   if (kind === "lifecycle") return undefined
-  return "sip" in kind ? kind.sip.delivered : kind.repl.delivered
+  if ("sip" in kind) return kind.sip.delivered
+  return "http" in kind ? kind.http.delivered : kind.repl.delivered
 }
 
 /**

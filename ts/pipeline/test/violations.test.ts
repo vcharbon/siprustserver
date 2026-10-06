@@ -5,7 +5,7 @@
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import { Violation } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { caseCallIds } from "../src/cut.js"
+import { caseCallIds, correlate } from "../src/cut.js"
 import { synthesize } from "../src/flowsteps.js"
 import type { Vantage } from "../src/selection.js"
 import { build } from "../src/topology.js"
@@ -51,7 +51,7 @@ const stamp = (
     registry,
     capture: CAPTURE,
     flows,
-    callIds: caseCallIds(flows, sut, legs, derivesOnePrefix),
+    callIds: caseCallIds(flows, sut, legs, correlate(flows, derivesOnePrefix)),
     sources: flow.sources,
     steps: flow.steps,
     legs: layout.legs

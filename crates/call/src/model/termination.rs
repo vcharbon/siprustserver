@@ -49,8 +49,8 @@ pub enum TerminationCause {
     MaxDuration,
     /// A deadline, by kind.
     Timeout(TimeoutKind),
-    /// The stack refused the call on its own account: a limiter, the target
-    /// admission, a spent hop budget, a malformed INVITE, an unreadable or
+    /// The stack refused the call on its own account: a limiter, the destination
+    /// allow-list, a spent hop budget, a malformed INVITE, an unreadable or
     /// unanswered decision.
     Admission,
     /// The per-call message cap.

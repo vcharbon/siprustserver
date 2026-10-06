@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(to_tag, "t2", "same INVITE, different dialog, different obligation");
     }
 
-    /// The corpus shape, and the reason a hop is not a UAC: one Call-ID across
+    /// A common topology, and the reason a hop is not a UAC: one Call-ID across
     /// a proxy that does NOT record-route, captured on both of its wires. The
     /// caller ACKs the far UAS DIRECTLY, so the proxy never sees the ACK for a
     /// 2xx it demonstrably relayed. Charging it would charge the one box on the
@@ -244,11 +244,10 @@ mod tests {
         assert!(!hits[0].relayed);
     }
 
-    /// The reference platform's own shape, and the one the ruling of
-    /// 2026-08-23 names: a B2BUA re-originates the call on a b-leg of its own,
-    /// takes the 200 that confirms that dialog through a proxy, and then says
-    /// NOTHING — no ACK, no BYE — while the capture goes on recording its a-leg
-    /// for another twenty seconds.
+    /// A B2BUA that re-originates the call on a b-leg of its own, takes the 200
+    /// that confirms that dialog through a proxy, and then says NOTHING — no ACK,
+    /// no BYE — while the capture goes on recording its a-leg for another twenty
+    /// seconds (RFC 3261 §13.2.2.4 owes the ACK).
     fn re_originated_b_leg(id: &str, ack: bool) -> Vec<crate::Datagram> {
         const SBC: &str = "10.0.0.5:5060";
         let a = format!("a-{id}");

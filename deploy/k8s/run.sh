@@ -4,29 +4,29 @@
 #   sipp UAC (docker, sipext bridge) -> sip-front-proxy (tier=edge, dual-faced,
 #   LB+HMAC stickiness) -> b2bua-worker pool (tier=app) -> sipp UAS (docker,
 #   sipext bridge). All generators are plain docker containers on the no-NAT
-#   $SIPEXT_NET bridge (sipext dual-plane layout — tier=load kind nodes GONE);
+#   $SIPEXT_NET bridge (sipext dual-plane layout — no tier=load kind nodes);
 #   they dial the EXTERNAL VIP ${SIPEXT_TARGET}:${SIP_PORT}.
 #
 # Deliberately minimal: deploy-all, run SIPp at a list of CAPS, sample per-pod
-# CPU% + RSS from /proc, tear down. As of S11 the cluster topology
-# (./cluster.yaml), the SIPp build context (./sipp/Dockerfile) and the SIPp
-# scenarios (./sipp/scenarios/) are VENDORED COPIES (no longer symlinks into the
-# sibling sipjsserver checkout) so the Rust SUT runner stands alone and the two
-# can diverge — especially the endurance/chaos scenarios. Reuses the SAME kind
-# cluster name (`sip-e2e`).
+# CPU% + RSS from /proc, tear down. The cluster topology (./cluster.yaml), the
+# SIPp build context (./sipp/Dockerfile) and the SIPp scenarios
+# (./sipp/scenarios/) are VENDORED COPIES so the Rust SUT runner stands alone and
+# may diverge from sipjsserver's — especially the endurance/chaos scenarios.
+# Reuses the SAME kind cluster name (`sip-e2e`).
 #
 # >>> ONE-CLUSTER CONSTRAINT <<<
 # Only one kind cluster runs at a time on the host. `up` is NON-DESTRUCTIVE: if a
 # `sip-e2e` cluster already exists it REFUSES rather than wiping it, so a cluster
 # left behind by a failed run survives for analysis. Destruction is explicit —
 # `down` — and `up` never auto-tears-down on failure either. To reclaim the host
-# for the other SUT (the old one-shot "stop the other, run this" switch), run
+# for the other SUT (a one-shot "stop the other, run this" switch), run
 # `./run.sh down` first, or `FORCE_RECREATE=1 ./run.sh up` to delete+recreate.
 #
 # Usage:
 #   ./run.sh up                      # (re)create cluster + build/load images + observability
 #   ./run.sh deploy                  # apply uas + workers + proxy, wait ready
 #   ./run.sh obs                     # (re)deploy observability stack only (idempotent)
+#   ./run.sh obs-check               # every series the deployed stack must have is in VM
 #   ./run.sh caps 200 30             # 200 cps for 30s, sample CPU/mem
 #   ./run.sh sweep 30 50 100 200 400 # run a list of caps, 30s sampling each
 #   ./run.sh all 30 50 100 200 400   # up + deploy + sweep (leaves cluster up)
@@ -34,7 +34,7 @@
 #   ./run.sh down                    # delete the cluster (the ONLY destroy)
 #   FORCE_RECREATE=1 ./run.sh up     # delete any existing cluster, then recreate
 #
-# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# >>> SOURCEABLE LIBRARY <<<
 # This file doubles as a function library: all logic lives in functions and the
 # subcommand dispatch is run_main(), executed ONLY when the script is run
 # directly. A downstream overlay (living in a DIFFERENT directory) can
@@ -72,8 +72,8 @@
 #      SIP_TRACE_HEADER=1
 set -euo pipefail
 # Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
-# into any script sourcing this library — issue 025); every path below that used
-# to be cwd-relative is now anchored on $K8S_DIR instead.
+# into any script sourcing this library); every path below is anchored on
+# $K8S_DIR, never cwd-relative.
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
 
@@ -99,9 +99,9 @@ source "$K8S_DIR/lib/kube-env.sh"
 
 CLUSTER="${CLUSTER:-sip-e2e}"
 NS="${NS:-sip-test}"
-# Bring-up waits, env-overridable. Defaults bumped from the historical 120s: on a
-# loaded WSL2 host node-ready + image build/load + first rollout regularly need
-# more, and a too-short wait used to abort the whole run.
+# Bring-up waits, env-overridable. Defaults are 300s: on a loaded WSL2 host
+# node-ready + image build/load + first rollout regularly need more than 120s, and
+# a too-short wait aborts the whole run.
 KIND_WAIT="${KIND_WAIT:-300s}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
@@ -136,11 +136,17 @@ KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
 # The broker is a public image pulled + side-loaded into kind so the run is
 # offline-capable like every other image.
 RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
+# How the cdr-consumer reads a record (its CDR_PAYLOAD): `json` counts the
+# workers' JSON record and sums its duration; `opaque` counts deliveries of any
+# format, for workers publishing another encoding.
+CDR_CONSUMER_PAYLOAD="${CDR_CONSUMER_PAYLOAD:-json}"
 # PROXY_VIP/PROXY_TARGET/SIP_PORT are exported by lib/net-env.sh.
 export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABBITMQ_IMAGE
+export CDR_CONSUMER_PAYLOAD
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
-# node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
-# (re)created cluster always has scraping wired and Grafana dashboards loaded.
+# node-exporter/fluent-bit. Deployed automatically on `up`, re-applied at the
+# end of every `deploy`, and both fail when the series do not reach
+# VictoriaMetrics (obs_check), so a cluster never runs unobserved.
 # Set OBS_ENABLE=0 to skip (e.g. CI without docker compose).
 OBS_ENABLE="${OBS_ENABLE:-1}"
 OBS_DIR="${OBS_DIR:-$REPO_ROOT/deploy/observability}"
@@ -229,7 +235,7 @@ up() {
   # NON-DESTRUCTIVE by default. A cluster left over from a failed/aborted run must
   # SURVIVE so it can be analysed — destruction is explicit (`./run.sh down`). If
   # one already exists, refuse rather than silently wipe it. FORCE_RECREATE=1 opts
-  # back into the old one-shot "stop the other, run this" switch.
+  # into a one-shot "stop the other, run this" switch.
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
     if [ "${FORCE_RECREATE:-0}" = "1" ]; then
       log "FORCE_RECREATE=1 — deleting existing '$CLUSTER' cluster"
@@ -271,9 +277,13 @@ up() {
 
   # Cap each kind node's memory so the cluster can never starve the WSL2 host
   # (an uncapped node + a parallel cargo build OOM'd the host once). Pod limits
-  # still apply inside; this is the node-container backstop.
+  # still apply inside; this is the node-container backstop. A refused cap
+  # (over the budget, or an app node below its worker's limit) stops `up`:
+  # the script applies nothing when it refuses, so continuing would leave the
+  # cluster uncapped.
   log "capping kind node memory (host-starvation backstop)"
-  CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" || true
+  CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" \
+    || die "kind node memory caps refused (cap-kind-memory.sh above); the cluster is up but UNCAPPED: fix the caps and re-run cap-kind-memory.sh, or ./run.sh down"
 
   # External SIP plane: create the no-NAT sipext bridge and dual-home the two
   # tier=edge nodes (the ONLY components attached to both planes).
@@ -321,10 +331,58 @@ obs() {
   hostip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   log "deploying observability (Grafana http://127.0.0.1:${gport}${hostip:+ / http://$hostip:$gport}, VictoriaMetrics :8428)"
   "$OBS_DIR/install.sh" --bootstrap
+  obs_check cluster
+}
+
+# The series a healthy scrape of this cluster puts in VictoriaMetrics: `cluster`
+# is the in-cluster scrapers' own (kube-state-metrics, cAdvisor, node-exporter,
+# the pod scrape); `stack` adds the deployed workloads'. One selector per line.
+obs_series() { # $1 cluster|stack
+  cat <<EOF2
+kube_pod_info
+container_cpu_usage_seconds_total
+container_memory_rss
+node_cpu_seconds_total
+up{job="kubernetes-pods"}
+EOF2
+  [ "$1" = stack ] || return 0
+  cat <<EOF2
+kube_pod_info{exported_namespace="$NS"}
+container_memory_rss{namespace="$NS"}
+b2bua_active_calls{namespace="$NS"}
+limiter_admission_max{namespace="$NS"}
+cdr_consumed_total{namespace="$NS"}
+sip_proxy_requests_total{namespace="$NS"}
+EOF2
+}
+# In-cluster scrapers (vmagent, kube-state-metrics, node-exporter, fluent-bit),
+# applied idempotently: a cluster recreated or deployed without them has no series.
+obs_addons() { "$OBS_DIR/install.sh" --apply; }
+# Fail when VictoriaMetrics lacks a fresh sample of a series obs_series names.
+obs_check() { # $1 cluster|stack
+  local -a series
+  mapfile -t series < <(obs_series "$1")
+  "$OBS_DIR/check.sh" --wait "${OBS_CHECK_WAIT:-180}" "${series[@]}" && return 0
+  printf '\033[1;31m!! %s\033[0m\n' "observability: VictoriaMetrics is missing series of this cluster. Check that vmagent runs (kubectl -n observability get pods; logs deploy/vmagent) and that the host accepts the kind subnet on 8428/9428/10428 (a host firewall drops the remote write). OBS_ENABLE=0 skips observability." >&2
+  return 1
+}
+# The shared dependencies' manifests (50/55/56) run on a tier=infra node
+# (cluster.yaml): a cluster made before it has none, and they would stay Pending.
+require_infra_node() {
+  kubectl get nodes -l tier=infra -o name 2>/dev/null | grep -q . \
+    || die "no tier=infra node in cluster '$CLUSTER': it predates the infra node (cluster.yaml) — recreate it: ./run.sh down && ./run.sh up"
+}
+
+# The deploy's observability gate: scrapers applied, the stack's series landing.
+obs_ensure() {
+  [ "$OBS_ENABLE" = "1" ] || { log "OBS_ENABLE=0 — no observability gate"; return 0; }
+  obs_addons || die "observability: applying the kind-addons failed"
+  obs_check stack || die "observability: series missing after deploy (./run.sh obs-check lists them)"
 }
 
 deploy() {
   preflight
+  require_infra_node
   apply_manifest "$MANIFEST_DIR/00-namespace.yaml"
   # NOTE: the sipp-scenarios / sipp-exporter ConfigMaps are GONE — scenarios
   # and the stat exporter are bind-mounted straight into the docker-on-sipext
@@ -396,6 +454,7 @@ deploy() {
   if [ "${ISOLATION_SMOKE:-1}" = "1" ]; then
     isolation_smoke
   fi
+  obs_ensure
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
 }
@@ -480,7 +539,8 @@ sipp_uas_up() {
       --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" \
       -v "$SCENARIOS:/scenarios:ro" \
       sipp:dev sipp -sf /scenarios/uas-basic.xml -i "$ip" -p 5060 \
-        -l 60000 -recv_timeout 600000 -trace_err >/dev/null
+        -l 60000 -recv_timeout 600000 \
+        -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 >/dev/null
     printf '%s\n' "$ip" >> "$SIPEXT_GEN_DIR/uas-targets.csv"
     log "sipp-uas-$i up at $ip (docker, sipext)"
   done
@@ -616,7 +676,7 @@ caps() {
   local max_calls=$(( cps * (secs+20) ))
   local maxc="${MAX_CONCURRENT:-$(( cps * 600 ))}"
   log "cap=$cps: launching UAC stream $name (${secs}s), ramp ${ramp}s, sample ${sample}s"
-  # Docker caps from the legacy k8s knobs: the old LIMITS map to --cpus/--memory
+  # Docker caps from the k8s-style knobs: the LIMITS map to --cpus/--memory
   # (requests were a k8s scheduler reservation — no docker analog). The per-run
   # stats dir under $RESULTS keeps the stat CSV after the container is reaped.
   UAC_CPU_LIM="${UAC_CPU_LIM:-8}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}" \
@@ -687,13 +747,14 @@ down() {
 }
 
 # Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
-# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+# direct CLI use) depends on: names and behaviour are FROZEN.
 run_main() {
   local cmd="${1:-}"; shift || true
   case "$cmd" in
     up)     up ;;
     deploy) deploy ;;
     obs)    obs ;;
+    obs-check) obs_check stack ;;
     caps)   caps "$@" ;;
     sweep)  sweep "$@" ;;
     all)    up; deploy; sweep "$@" ;;
@@ -703,7 +764,7 @@ run_main() {
     sipext-up) sipext_up ;;
     uas-up) sipp_uas_up ;;
     down)   down ;;
-    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|isolation-smoke|sipext-up|uas-up|down}" ;;
+    *) die "usage: $0 {up|deploy|obs|obs-check|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|isolation-smoke|sipext-up|uas-up|down}" ;;
   esac
 }
 

@@ -18,7 +18,7 @@
 //! (`add-tag-mapping`/`find-by-a-tag`), per-dialog CSeq sequences
 //! (RFC 3261 §12.2.1.1), and the RAck CSeq rewrite (RFC 3262 §7.2).
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq};
@@ -165,6 +165,8 @@ async fn prack_forking_two_early_dialogs() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -266,5 +268,7 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
         .count();
     assert_eq!(relayed, 2, "the callee saw {relayed} PRACKs — one per fork, and no stray");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

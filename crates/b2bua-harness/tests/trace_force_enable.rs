@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! End-to-end: the decision engine turns a call's trace on, and the call is
 //! BACKFILLED (ADR-0026 §3).
 //!
@@ -19,18 +20,18 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 
 /// A gate whose configured rate is zero: no draw ever wins, so only a
 /// force-enable can open a span.
 fn sample_nothing_by_default() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 0.0, 200, RateDraw::seeded(5), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 0.0, 200, RateDraw::seeded(5), activation_bucket(0)),
         false,
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_engine_force_enable_activates_and_backfills_the_call() {
     sample_nothing_by_default();
     let (_log_guard, log) = observe::test_buffer();
@@ -78,6 +79,7 @@ async fn an_engine_force_enable_activates_and_backfills_the_call() {
     // ── …and everything after it ────────────────────────────────────────────
     assert!(!log.matching("kind=rule.fired").is_empty(), "the call keeps recording once traced");
 
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call");
 

@@ -27,9 +27,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // The shipped load bodies are COMPOSED through the callshapes pipeline algebra
-// (callshapes program phase B) — same ids, same downstream contract as the
-// historic hand-written `scenario_harness::actor::scenarios` bodies they
-// regenerate.
+// — same ids, same downstream contract as the
+// hand-written `scenario_harness::actor::scenarios` bodies.
 use callshapes::shapes as cs;
 use scenario_harness::actor::ActorScenario;
 
@@ -70,9 +69,8 @@ pub type LoadFactory = Arc<dyn Fn(&ScenarioInputs) -> Scenario + Send + Sync>;
 /// One **named callee leg** of a load shape: which receiver the load driver
 /// binds on the shared UAS socket and which R-URI user-part prefixes select it
 /// there. Generalizes the closed `needs_bob2`/`needs_charlie` label list — an
-/// open-registry shape's legs arrive under number-plan digits (`+041…`,
-/// `0491…`), never under the agent name, so label and prefix must be declared
-/// independently.
+/// open-registry shape's legs arrive under dialled R-URI digits, never under
+/// the agent name, so label and prefix must be declared independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LegSpec {
     /// Agent name the load body binds/choreographs against (`"bob"`, `"mrf"`,
@@ -81,21 +79,21 @@ pub struct LegSpec {
     pub role: &'static str,
     /// R-URI user-part prefixes that select this leg on the shared UAS socket.
     /// Longest match wins across ALL legs' prefixes (a transfer target
-    /// `0650033033231089055` must beat a sibling `0650033033` — the same rule
+    /// `9001100100555000111` must beat a sibling `9001100100` — the same rule
     /// `callee_group` applies), and several prefixes may select one leg (a
     /// callee reachable under more than one number form).
     pub ruri_prefixes: &'static [&'static str],
 }
 
-/// The boolean sugar's expansion targets: the historic hardcoded callee labels,
-/// role == single prefix == label, so a pre-legs shape is byte-identical on the
-/// wire.
+/// The boolean sugar's expansion targets: the default callee labels,
+/// role == single prefix == label, so a shape without `legs` is byte-identical
+/// on the wire.
 const LEG_BOB: LegSpec = LegSpec { role: "bob", ruri_prefixes: &["bob"] };
 const LEG_BOB2: LegSpec = LegSpec { role: "bob2", ruri_prefixes: &["bob2"] };
 const LEG_CHARLIE: LegSpec = LegSpec { role: "charlie", ruri_prefixes: &["charlie"] };
 
 impl LegSpec {
-    /// The historic `[bob(, bob2)(, charlie)]` expansion of the
+    /// The default `[bob(, bob2)(, charlie)]` expansion of the
     /// `needs_bob2`/`needs_charlie` sugar, in the load-bearing bind order.
     pub const fn historic(needs_bob2: bool, needs_charlie: bool) -> &'static [LegSpec] {
         match (needs_bob2, needs_charlie) {
@@ -217,7 +215,7 @@ impl ShapeDescriptor {
     }
 
     /// The effective callee-leg declaration the load driver binds and demuxes
-    /// from: [`legs`](Self::legs) verbatim when declared, else the historic
+    /// from: [`legs`](Self::legs) verbatim when declared, else the default
     /// `[bob(, bob2)(, charlie)]` expansion of the boolean sugar (role ==
     /// single prefix == label), so every pre-existing shape is byte-identical
     /// on the wire.
@@ -432,20 +430,18 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 fn default_shapes() -> Vec<ShapeDescriptor> {
     let mut shapes = vec![
         // ── Load: the happy-path real-call scenarios ─────────────────────────
-        // ACTOR-executed (plan §6 P3 order #7): same downstream contract
+        // ACTOR-executed: same downstream contract
         // (table §5.1).
         ShapeDescriptor::new("basic_call")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(4.0)
             .load_actor_with(|_| Arc::new(cs::basic_call(cs::default_binder()))),
-        // ACTOR-executed (plan §6 P3 order #2): same downstream contract
+        // ACTOR-executed: same downstream contract
         // (table §5.2).
         ShapeDescriptor::new("reinvite")
             .anchors(LOAD_REINVITE_ANCHORS)
             .default_weight(2.0)
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
-        // C6: N serialized re-INVITE cycles (the "10 re-INVITEs" ask). No mix
-        // weight yet — id-addressable only; phase D assigns catalog weights.
         // C6: N serialized re-INVITE cycles. Small default weight (a ×10 call
         // carries ~10× the datagrams — keep it a light share of the mix).
         ShapeDescriptor::new("reinvite10")
@@ -458,8 +454,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::crossing_bye(cs::default_binder()))),
         // C1/E3: TRUE forking — bob emits distinct-tag 18x on one INVITE txn.
-        // Only valid under the SUT's transparent CORE relay. Id-addressable
-        // only; phase D assigns catalog weights.
+        // Only valid under the SUT's transparent CORE relay.
         // NOTE: `forked_loser_late_200` is intentionally NOT registered — a
         // terminating B2BUA absorbs the loser's late 2xx, so it can't be
         // exercised through a SUT (see the shape's doc; SUT-less machinery
@@ -483,8 +478,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
-        // The first ACTOR-executed shape (plan §4.5 — the redesign's exemplar):
-        // per-endpoint reactive actors + the ack-gated settle barrier replace
+        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier replace
         // the one serialized coroutine. Same id, same anchors, same downstream
         // contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
         ShapeDescriptor::new("refer")
@@ -492,18 +486,18 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .default_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))),
-        // ACTOR-executed (plan §6 P3 order #3): same downstream contract
+        // ACTOR-executed: same downstream contract
         // (table §5.4).
         ShapeDescriptor::new("options_hold")
             .anchors(LOAD_CALL_ANCHORS)
             .default_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::options_hold(cs::default_binder()))),
-        // ACTOR-executed (plan §6 P3 order #4): the reactors answer SUT
+        // ACTOR-executed: the reactors answer SUT
         // keepalives on both legs during the hold (table §5.5).
         ShapeDescriptor::new("long_call")
             .anchors(LOAD_ESTABLISH_ANCHORS)
             .load_actor_with(|_| Arc::new(cs::long_call(cs::default_binder()))),
-        // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
+        // ACTOR-executed: per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.6).
         ShapeDescriptor::new("prack_update")
             .anchors(PRACK_ANCHORS)
@@ -518,17 +512,17 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .emergency()
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
         // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
-        // ACTOR-executed (plan §6 P3 order #5): same downstream contract
+        // ACTOR-executed: same downstream contract
         // (table §5.8).
         ShapeDescriptor::new("invite_reject")
             .failure_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
-        // ACTOR-executed (plan §6 P3 order #6): same downstream contract
+        // ACTOR-executed: same downstream contract
         // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
             .failure_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
-        // ACTOR-executed (plan §6 P3 order #1): per-endpoint reactors + the
+        // ACTOR-executed: per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
             .failure_weight(1.0)
@@ -549,14 +543,14 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
         // panic-on-deviation) body; the load body below drives the same flow
         // fallibly through the egress candidate list ([bob, bob2] → the
         // `X-Api-Call` routes failover plan on a pinned layout).
-        // The load body is ACTOR-executed (plan §6 P3 order #2 — establishes the
+        // The load body is ACTOR-executed (establishes the
         // reactive 100rel/PRACK machinery); the functional body stays in
         // `e2e-core`. Same downstream contract (table §5.7).
         ShapeDescriptor::new("rerouting_prack")
             .anchors(PRACK_ANCHORS)
             .needs_bob2()
             .load_actor_with(|_| Arc::new(cs::rerouting_prack(cs::default_binder()))),
-        // 047: NO-ANSWER-triggered failover — bob rings then never answers, the
+        // NO-ANSWER-triggered failover — bob rings then never answers, the
         // SUT's per-route no-answer timer CANCELs it (487) and fails over to
         // bob2, which answers plainly. Id-addressable (no default mix weight),
         // like the matrix reroute cells.
@@ -565,9 +559,9 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .needs_bob2()
             .load_actor_with(|_| Arc::new(cs::rerouting_noanswer(cs::default_binder()))),
     ];
-    // Phase D1: the DECLARED-compatibility-matrix cross-product cells
-    // (`crate::matrix`) — id-addressable, no mix weight (the default mix samples
-    // the canonical + phase-C shapes; the full matrix is addressable by id for
+    // The DECLARED-compatibility-matrix cross-product cells (`crate::matrix`) —
+    // id-addressable, no mix weight (the default mix samples the canonical +
+    // catalog shapes; the full matrix is addressable by id for
     // targeted runs and the loss soaks).
     shapes.extend(crate::matrix::generated_shapes());
     shapes
@@ -617,12 +611,12 @@ mod tests {
         let reg = ShapeRegistry::with_defaults();
         let mix: std::collections::BTreeMap<&str, f64> =
             reg.default_mix().iter().map(|d| (d.id, d.default_weight.unwrap())).collect();
-        // The historic canonical weights are unchanged (report/metrics compat).
+        // The canonical weights (report/metrics compat).
         assert_eq!(mix.get("basic_call"), Some(&4.0));
         assert_eq!(mix.get("reinvite"), Some(&2.0));
         assert_eq!(mix.get("options_hold"), Some(&1.0));
         assert_eq!(mix.get("refer"), Some(&1.0));
-        // Phase D1: the phase-C shapes now carry catalog weights.
+        // The catalog shapes carry their catalog weights.
         for (id, w) in [
             ("crossing_bye", 1.0),
             ("forked", 1.0),
@@ -655,7 +649,7 @@ mod tests {
         assert!(reg.load_scenario("nope", &inputs).is_none());
     }
 
-    /// The boolean sugar expands to the historic hardcoded label list (role ==
+    /// The boolean sugar expands to the default label list (role ==
     /// single prefix == label, bob → bob2 → charlie bind order), so every
     /// pre-legs shape drives the wire byte-identically.
     #[test]
@@ -682,15 +676,15 @@ mod tests {
 
     /// An explicit `legs` declaration wins over the boolean sugar — the open
     /// form a third-party shape uses: roles addressed on the wire by
-    /// number-plan prefixes, multiple prefixes per leg.
+    /// dialled-digit prefixes, multiple prefixes per leg.
     #[test]
     fn explicit_legs_override_the_boolean_sugar() {
-        const NK_LEGS: &[LegSpec] = &[
-            LegSpec { role: "bob", ruri_prefixes: &["+04", "0590"] },
-            LegSpec { role: "mrf", ruri_prefixes: &["0491"] },
+        const OPEN_LEGS: &[LegSpec] = &[
+            LegSpec { role: "bob", ruri_prefixes: &["+1555", "9005"] },
+            LegSpec { role: "mrf", ruri_prefixes: &["9007"] },
         ];
-        let d = ShapeDescriptor::new("nk_mrf_rbt").legs(NK_LEGS).needs_charlie();
-        assert_eq!(d.callee_legs(), NK_LEGS, "declared legs win; the sugar is ignored");
+        let d = ShapeDescriptor::new("open_mrf_rbt").legs(OPEN_LEGS).needs_charlie();
+        assert_eq!(d.callee_legs(), OPEN_LEGS, "declared legs win; the sugar is ignored");
     }
 
     #[test]

@@ -63,6 +63,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: real clock >= 1 s"]
     fn capture_produces_an_svg() {
         // Burn CPU in worker threads for the whole window so the sampler has
         // real stacks to collect.

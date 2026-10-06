@@ -1,21 +1,23 @@
 //! RFC 3261 §13.2.2.4 — the B2BUA MUST **re-ACK a retransmitted 2xx** whose
 //! first ACK was lost. The ACK for a 2xx is a UAC-**core** responsibility (a
 //! separate transaction), and the answerer re-sends its 2xx end-to-end until
-//! ACKed (up to its Timer H ≈ 32 s). So when the B2BUA's ACK to a callee is lost,
-//! the callee retransmits its 200 and the B2BUA MUST re-emit the ACK on the SAME
-//! client transaction — reusing the first ACK's Via branch + the INVITE CSeq.
+//! ACKed (up to its Timer H ≈ 32 s). So when the ACK relayed to a callee is
+//! lost, the callee retransmits its 200 and the B2BUA MUST re-pass THAT ACK on
+//! the SAME client transaction — the retained datagram, its Via branch and the
+//! INVITE CSeq.
 //!
 //! Without this, a single lost ACK strands the callee's INVITE server txn: the
 //! confirmed, bridged call is never fully reaped (leak) or times out late — a
 //! genuine SUT bug under real-network packet loss (a confirmed call dropping is
 //! always genuine, per `docs/testing/ha-acceptance.md`). This is the b-leg twin
 //! of the a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-//! to a silent caller); here the B2BUA is the ACKing party.
+//! to a silent caller); here the B2BUA is the re-passing hop.
 //!
-//! The scenario establishes a call, then bob (the callee) retransmits its 200 as
-//! though the relayed ACK never arrived. The RFC-correct B2BUA re-ACKs — a second
-//! ACK to bob, reusing the first ACK's Via branch (a *fresh* branch would mint a
-//! new transaction and never quiesce bob) — and the call still reaps cleanly. The
+//! The scenario establishes a call — the caller's ACK relayed to the callee —
+//! then bob (the callee) retransmits his 200 as though that ACK never arrived.
+//! The RFC-correct B2BUA re-ACKs — a second ACK to bob, reusing the first ACK's
+//! Via branch (a *fresh* branch would mint a new transaction and never quiesce
+//! bob) — and the call still reaps cleanly. The
 //! harness inbox dedups a same-`(Call-ID, branch, method)` retransmit, so the
 //! re-ACK is asserted on the recorded trace (not a second `receive`). This is the
 //! default-lane functional gate the slow-lane loadgen loss-soak mirrors
@@ -68,7 +70,7 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     // retransmit → SUT → re-ACK → bob, draining bob's raw inbox each step (the
     // inbox dedups the re-ACK for `receive` — same Call-ID/branch/method as the
     // first ACK — but the datagram is delivered and recorded). This is the primary
-    // gate: WITHOUT the fix no re-ACK is emitted and this stays 0.
+    // gate: a stack that does not re-ACK leaves this at 0.
     let mut re_acks = 0;
     for _ in 0..10 {
         h.advance(Duration::from_millis(100)).await;
@@ -92,7 +94,7 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -130,7 +132,7 @@ fn top_via_branch(raw: &[u8]) -> Option<String> {
 
 /// The same §13.2.2.4 obligation under an **18x-masking** strategy. The
 /// `relayFirst18x` machine stays armed for the life of the call, so its
-/// `force-tag-consistency` rule sees every b-leg INVITE 2xx — a retransmission
+/// `answering-dialog-identity` rule sees every b-leg INVITE 2xx — a retransmission
 /// included. It must leave the retransmission to CORE `re-ack-retransmitted-2xx`
 /// (which owns the confirmed leg) instead of re-running the answer path, or bob's
 /// ACK is never repaired and his 2xx ladder runs to Timer H on a bridged call.
@@ -172,7 +174,7 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -208,7 +210,7 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
 }
 
-/// The fake-prack arm of the same gate. `force-tag-consistency` declines at the
+/// The fake-prack arm of the same gate. `answering-dialog-identity` declines at the
 /// matcher, before its strategy branch, so a retransmitted 2xx never re-stages
 /// the cached SDP into a second relayed 200 — alice keeps the ONE answer she was
 /// given, body and all.
@@ -259,7 +261,7 @@ async fn retransmitted_2xx_under_fake_prack_does_not_restage_the_answer() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -342,7 +344,7 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
     );
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;

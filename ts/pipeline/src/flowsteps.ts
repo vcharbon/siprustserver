@@ -43,6 +43,7 @@ import type { ResourceFile } from "./bodies.js"
 import { classify as classifyDelays, type DelayCausality, type StepTiming } from "./delay.js"
 import type { MsgSpecDraft, StepDraft } from "./draft.js"
 import { stampDrawnAckCounts } from "./drawn-ack.js"
+import { deriveFarSideReinvites } from "./far-side-reinvite.js"
 import { stampEarlyDialogs } from "./fork.js"
 import { mirrorRelayedProvisionals } from "./mirrored-provisional.js"
 import { stampSpareProvisionals } from "./spare-provisional.js"
@@ -51,7 +52,8 @@ import type { PartsIndex } from "./parts.js"
 import { stampOverlaps } from "./race.js"
 import type { Plan } from "./plan.js"
 import { peerSide, type ActorObs, type Layout } from "./topology.js"
-import { hasHeader } from "./wire.js"
+import { inviteTransactions, type InviteTransaction } from "./transactions.js"
+import { canonicalName, hasHeader } from "./wire.js"
 
 /** The step id a generated step takes: dense, 1-based, `s<n>`. */
 export const stepId = (n: number): string => `s${n}`
@@ -65,6 +67,25 @@ export type HeaderClassifier = (name: string) => Check.CheckClass | undefined
 
 export const NO_HEADER_CLASS: HeaderClassifier = () => undefined
 
+/**
+ * Every header value a capture-side `send` step carries, keyed canonically:
+ * the evidence that a value REACHED the system under test. Case-wide and
+ * direction-blind, the reading the confrontation makes of the same document.
+ */
+const inboundValues = (steps: ReadonlyArray<StepDraft>): ReadonlyMap<string, ReadonlySet<string>> => {
+  const out = new Map<string, Set<string>>()
+  for (const step of steps) {
+    if (step.op !== "send") continue
+    for (const h of step.msg.headers ?? []) {
+      const key = canonicalName(h.name)
+      const set = out.get(key) ?? new Set<string>()
+      set.add(h.value.trim())
+      out.set(key, set)
+    }
+  }
+  return out
+}
+
 /** Provenance of one step, back to the captured message. */
 export interface StepSource {
   readonly id: string
@@ -73,6 +94,12 @@ export interface StepSource {
   readonly msgIdx: number
   readonly emits: boolean
   readonly auto: boolean
+  /**
+   * The step was derived on ANOTHER leg from the message this coordinate names
+   * (`far-side-reinvite.ts`): the coordinate is what the step is compared
+   * against, and the message it names was captured on the other leg.
+   */
+  readonly mirrored?: true
 }
 
 export interface FlowOut {
@@ -103,7 +130,15 @@ export const synthesize = (
    * platform running a rewrite mode emits one 18x by design, so its legs are
    * not one for one and the capture is missing nothing (§6.9).
    */
-  transparent18x = true
+  transparent18x = true,
+  /**
+   * Whether the replaying platform relays an in-dialog INVITE end to end, so a
+   * leg the vantage lost past its 2xx is owed the far side of the exchange the
+   * other leg holds, whichever party sent the INVITE (`far-side-reinvite.ts`).
+   * A platform that answers one itself derives nothing, and the run shows
+   * what it did.
+   */
+  relaysReinvite = false
 ): FlowOut => {
   interface Obs {
     actor: ActorObs
@@ -268,8 +303,16 @@ export const synthesize = (
     })
   }
 
+  // Before the delays, so a derived step is classified like any other — the
+  // relay it is, the answer it emits (§6.9). Every array below indexes the
+  // others, and the records hold step OBJECTS: the provisional pass renumbers
+  // behind this one, and the flag is written once every id has settled.
+  const farSide = relaysReinvite
+    ? deriveFarSideReinvites({ steps, timings, sources })
+    : { derived: [], left: [] }
+
   // Before the delays, so a derived arrival is classified like any other: the
-  // relay it is (§6.9, issue 116). Every array below indexes the others.
+  // relay it is (§6.9). Every array below indexes the others.
   const derived = transparent18x
     ? mirrorRelayedProvisionals({ resources, sources, steps, timings })
     : []
@@ -288,12 +331,51 @@ export const synthesize = (
     })
   }
 
+  if (farSide.derived.length > 0) {
+    flags.push({
+      kind: "far-side-reinvite-derived",
+      detail:
+        `${farSide.derived.length} in-dialog INVITE exchange(s) the capture holds on one leg only ` +
+        `transcribed onto the far leg: that leg's record ends at the 2xx its peer sent, so the ` +
+        `exchange the near leg carries has no counterpart there, and the replaying platform ` +
+        `relays it (§6.9). Each derived step copies the near-leg message it mirrors, coordinate ` +
+        `included: ` +
+        farSide.derived
+          .map(
+            (d) =>
+              `leg ${d.farLeg} (record ends at ${d.ended.id}): ${d.invite.id} ${d.invite.op} ` +
+              `INVITE mirrors ${d.nearInvite.id}, ${d.answer.id} ${d.answer.op} ` +
+              `${d.answer.msg.status} mirrors ${d.nearAnswer.id}` +
+              (d.ack === undefined || d.nearAck === undefined
+                ? ""
+                : `, ${d.ack.id} ${d.ack.op} ACK mirrors ${d.nearAck.id}`)
+          )
+          .join("; ")
+    })
+  }
+  if (farSide.left.length > 0) {
+    flags.push({
+      kind: "far-side-reinvite-not-derived",
+      detail:
+        `${farSide.left.length} in-dialog INVITE exchange(s) onto a leg whose record ends at its ` +
+        `2xx were NOT transcribed, and the far leg scripts nothing for the relayed INVITE: ` +
+        farSide.left.map((l) => `${l.nearInvite.id} onto leg ${l.farLeg} (${l.detail})`).join("; ")
+    })
+  }
+
   const delays = classifyDelays(timings)
   // Legs the SUT initiated: every message it sends there is a fresh transaction
   // it authored, however much of the content it propagated.
   const mintedLegs = new Set(
     layout.actorsObs.filter((a) => a.kind === "uas").map((a) => a.pivotLeg)
   )
+  const inbound = inboundValues(steps)
+  // §6.4 at header granularity: a value the capture never shows reaching the
+  // SUT was minted by the origin platform, so it is its own vocabulary (§9.1)
+  // whatever the header's name. The deployment's name classifier speaks first.
+  const classOf = (h: { name: string; value: string }): Check.CheckClass | undefined =>
+    headerClass(h.name) ??
+    (inbound.get(canonicalName(h.name))?.has(h.value.trim()) ? undefined : "origin-platform-header")
   steps.forEach((step, i) => {
     const d = delays[i]!
     step.delay = {
@@ -316,14 +398,14 @@ export const synthesize = (
         step.msg = {
           ...step.msg,
           headers: step.msg.headers.map((h) => {
-            const cls = headerClass(h.name)
+            const cls = classOf(h)
             return cls === undefined ? h : { ...h, class: cls }
           })
         }
       }
     }
   })
-  stampInDialog(steps)
+  stampInDialog(steps, sources.map((src) => capturedToTag(flows, src)))
   stampOverlaps(steps, delays.map((d) => d.derived))
 
   // After `in_dialog`, which is what says where an early dialog stops.
@@ -352,7 +434,7 @@ export const synthesize = (
         `rather than the ACKs the capture held (§6.3): ` +
         drawn
           .map((d) =>
-            `${d.step} (leg ${d.leg}, ${d.drawn} composed against ${d.final}, ` +
+            `${d.step} (leg ${d.leg}, ${d.drawn} drawn against ${d.final}, ` +
             `capture held ${d.captured})`
           )
           .join("; ")
@@ -379,6 +461,10 @@ export const synthesize = (
 
 const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
 
+/** The To-tag the captured message behind a step carries, where it carries one. */
+const capturedToTag = (flows: Flows.FlowsDoc, src: StepSource): string | undefined =>
+  flows.legs[src.origLeg]?.msgs[src.msgIdx]?.summary.to.tag ?? undefined
+
 /**
  * Mark every step that runs after its leg's DIALOG-CREATING FINAL — the first
  * 2xx to an INVITE on that leg (§6.1). Strictly after: the dialog exists once
@@ -392,11 +478,20 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * dialog (§12.2), so a 200 to a CANCEL that crossed the answer is a race and not
  * a renegotiation.
  *
- * The ACK that ANSWERS the dialog-creating final takes `confirms_dialog` beside
- * its `in_dialog` — the leg's FIRST ACK after that final, since a leg confirms
- * its dialog before it renegotiates one. Every later ACK on the leg is a
- * re-INVITE's and stays plain `in_dialog`; an ACK to a non-2xx final belongs to
- * the INVITE transaction (RFC 3261 §17.1.1.3) and takes neither marker.
+ * The ACK that ANSWERS a dialog-creating final takes `confirms_dialog` beside
+ * its `in_dialog`: the ACK that DISCHARGES that final as the leg's state holds
+ * it ({@link inviteTransactions}). A re-INVITE sent over the un-ACKed 2xx is
+ * answered 491 (RFC 3261 §14.1) and its ACK is that transaction's own
+ * (§17.1.1.3): it runs first and confirms nothing, and the 2xx's ACK behind it
+ * is the confirming one. A re-INVITE's ACK stays plain `in_dialog`; an ACK to
+ * a non-2xx final takes neither marker.
+ *
+ * The marker is stated once per DIALOG, and a dialog is the leg and the To-tag
+ * its 2xx carries (RFC 3261 §12.1.1): an INVITE answered 2xx under two tags is
+ * two dialogs, each ACKed (§13.2.2.4), so the ACK discharging the second
+ * fork's 2xx confirms too. `tags` is parallel to `steps`, the captured To-tag
+ * of each; a 2xx stating no tag keys as the leg alone, so a flow stating none
+ * is read as one dialog per leg.
  *
  * A generated flow is FLAT — `alt` is authored-only — so document order is run
  * order and one forward pass states the whole rule. A lane delta may reorder
@@ -404,16 +499,33 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * it answers, which is at or after its own leg's dialog-creating final, and it
  * moves the step OBJECT, so both markers ride along.
  */
-export const stampInDialog = (steps: Array<StepDraft>): void => {
-  const answered = new Set<string>()
+export const stampInDialog = (
+  steps: Array<StepDraft>,
+  tags: ReadonlyArray<string | undefined> = []
+): void => {
+  const { landings, discharges } = inviteTransactions(steps)
+  /** By step id, the dialog its captured message rides: the leg and the To-tag. */
+  const dialogOf = new Map(steps.map((step, i) => [step.id, `${step.leg} ${tags[i] ?? ""}`]))
+  /** Per leg, the transaction whose 2xx created the dialog. */
+  const creating = new Map<string, InviteTransaction<StepDraft>>()
   const confirmed = new Set<string>()
   for (const step of steps) {
-    if (!cancelScoped(step) && answered.has(step.leg)) step.in_dialog = true
-    if (answered.has(step.leg) && !confirmed.has(step.leg) && isAck(step)) {
-      step.confirms_dialog = true
-      confirmed.add(step.leg)
+    if (!cancelScoped(step) && creating.has(step.leg)) step.in_dialog = true
+    const discharged = discharges.get(step.id)
+    if (
+      discharged !== undefined &&
+      discharged.transaction === creating.get(step.leg) &&
+      isDialogCreatingFinal(discharged.final)
+    ) {
+      const dialog = dialogOf.get(discharged.final.id)!
+      if (!confirmed.has(dialog)) {
+        step.confirms_dialog = true
+        confirmed.add(dialog)
+      }
     }
-    if (isDialogCreatingFinal(step)) answered.add(step.leg)
+    if (isDialogCreatingFinal(step) && !creating.has(step.leg)) {
+      creating.set(step.leg, landings.get(step.id)!)
+    }
   }
 }
 
@@ -422,9 +534,6 @@ const isDialogCreatingFinal = (step: StepDraft): boolean =>
   step.msg.status >= 200 &&
   step.msg.status < 300 &&
   (step.msg["cseq-method"] ?? "").toUpperCase() === "INVITE"
-
-const isAck = (step: StepDraft): boolean =>
-  step.msg.status === undefined && (step.msg.method ?? "").toUpperCase() === "ACK"
 
 /** Whether the message belongs to a CANCEL transaction rather than to a dialog. */
 const cancelScoped = (step: StepDraft): boolean => {
@@ -487,7 +596,8 @@ const bodyStorable = (
  * Whether the final this ACK answers was a 2xx, read off the ACK's own captured
  * leg: the nearest earlier INVITE final sharing its CSeq number. A leg holding
  * no such final reads as non-2xx — a body the stack cannot place is worse than
- * a body the capture never had, and a capture missing its own final is issue 71.
+ * a body the capture never had, and a capture missing its own final is a
+ * capture defect.
  */
 const ackedFinalIs2xx = (
   flows: Flows.FlowsDoc,
@@ -552,11 +662,20 @@ const unpaced = (msg: Flows.Msg): boolean =>
  * The extractor decides `retx` and `repeat_of` together, so `retx` IMPLIES the
  * field by construction: a `retx` message carrying none is a document from a
  * producer that did not compute it. Absence is not "no repeats": it is a reason
- * to keep the old collapse and warn.
+ * to keep the retx+type+CSeq collapse and warn.
  */
-const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean =>
-  flows.schema >= Flows.EMIT_SCHEMA_VERSION &&
-  flows.legs.every((l) => l.msgs.every((m) => !m.retx || m.repeat_of !== undefined))
+const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean => {
+  const known = repeatOfCarriage.get(flows)
+  if (known !== undefined) return known
+  const carries =
+    flows.schema >= Flows.EMIT_SCHEMA_VERSION &&
+    flows.legs.every((l) => l.msgs.every((m) => !m.retx || m.repeat_of !== undefined))
+  repeatOfCarriage.set(flows, carries)
+  return carries
+}
+
+/** Answered once per document: the question walks every message, and every case of it asks. */
+const repeatOfCarriage = new WeakMap<Flows.FlowsDoc, boolean>()
 
 /**
  * The step a retransmission repeats: same leg, direction, message type AND

@@ -6,7 +6,7 @@
 //! tests, e2e) runs these compositions via the shape registry.
 //!
 //! Every constructor takes the platform [`RouteBinder`]; upstream callers pass
-//! [`EgressBinder`](crate::EgressBinder) (see [`default_binder`]).
+//! [`EgressBinder`] (see [`default_binder`]).
 
 use std::sync::Arc;
 

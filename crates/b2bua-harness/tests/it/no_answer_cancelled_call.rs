@@ -1,12 +1,11 @@
-//! The `no-answer` timer on a call the CALLER already CANCELed
-//!.
+//! The `no-answer` timer on a call the CALLER already CANCELed.
 //!
 //! Caller CANCELs the initial INVITE pre-18x and the callee answers NOTHING —
 //! ever (a callee host gone dark mid-setup). The caller's CANCEL leaves the
 //! b-leg at `state = Trying`, `disposition = Cancelling` for the whole
 //! terminating window, so a state-only spent-check reads the leg as live.
-//! Pre-fix the per-b-leg `NoAnswer` fire then ran the full failover treatment
-//! on the abandoned call: a `/calls/failure` consult (origin
+//! Unabsorbed, the per-b-leg `NoAnswer` fire would run the full failover
+//! treatment on the abandoned call: a `/call/failure` consult (origin
 //! `no_answer_timeout`) and a second final (480) on the a-leg's initial-INVITE
 //! server transaction — already finalized 487 and ACKed (RFC 3261 §17.2.1).
 //!
@@ -16,7 +15,7 @@
 //! service watchdog at the source; the executor absorbs a fire that still
 //! reaches a going-away call unless the rule is a teardown rule; and the
 //! `no-answer` spent-check (a teardown rule) absorbs the reclaim-restored
-//! shape — pinned at the rule seam in `b2bua/tests/rules.rs`. The second test
+//! shape — pinned at the rule seam in `b2bua/tests/it/rules.rs`. The second test
 //! pins the source scrub for a service watchdog; the third pins the
 //! `handle-timeout` sibling: the b-leg INVITE transaction backstop firing on
 //! a caller-CANCELed leg resolves it locally.
@@ -45,7 +44,7 @@ const NO_ANSWER_SEC: i64 = 5;
 
 /// A failover-capable scripted backend: every call routes to `port` with a
 /// `NoAnswer` ring deadline and a `callback_context` (so the `no-answer` /
-/// `handle-timeout` consult path is REACHABLE); every `/calls/failure`
+/// `handle-timeout` consult path is REACHABLE); every `/call/failure`
 /// consult increments `consults` and rejects 480 — loud on the wire if a
 /// regression ever consults for an abandoned call.
 fn failover_capable_decision(port: u16, consults: Arc<AtomicUsize>) -> Arc<dyn CallDecisionEngine> {
@@ -147,7 +146,7 @@ mod stalerestore {
 }
 
 /// Caller CANCELs pre-18x, callee fully silent forever: crossing the
-/// `NoAnswer` deadline drives NOTHING — no `/calls/failure` consult, no
+/// `NoAnswer` deadline drives NOTHING — no `/call/failure` consult, no
 /// second final on the a-leg — and the SUT's own dead-call detection (the
 /// terminating safety timer) reaps the call.
 #[tokio::test(start_paused = true)]
@@ -193,7 +192,7 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
     assert_eq!(
         consults.load(Ordering::SeqCst),
         0,
-        "no /calls/failure consult for an abandoned call"
+        "no /call/failure consult for an abandoned call"
     );
     // No second final reaches alice: her queue is empty (a regression's 480
     // would surface here as an unexpected response).
@@ -215,7 +214,7 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
             - Duration::from_secs(NO_ANSWER_SEC as u64).as_millis() as u64,
     ))
     .await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     b2bua.assert_fully_reaped();
 
@@ -302,7 +301,7 @@ async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination()
             .as_millis() as u64,
     ))
     .await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
@@ -323,7 +322,7 @@ async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination()
 /// caller already CANCELed — carol rang 180, alice CANCELed just before the
 /// backstop, and carol's txn layer answered the CANCEL but the dead app never
 /// sent the 487, so the leg sits Early + `Cancelling` when the transaction
-/// dies. The fire resolves the leg locally: no `/calls/failure` consult
+/// dies. The fire resolves the leg locally: no `/call/failure` consult
 /// (origin `transaction_timeout`), no second final on the a-leg's completed
 /// transaction, no second CANCEL toward the callee — and clearing
 /// `Cancelling` lets the deferred termination finalize at once instead of
@@ -385,9 +384,9 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
 
     // ── cross exactly the 158 s transaction backstop ─────────────────────────
     // (The terminating safety timer, armed at the CANCEL, sits at ~189 s.)
-    // Pre-fix this consulted /calls/failure and relayed its 480 onto the
-    // a-leg's completed transaction; now the leg resolves locally and
-    // finalization promotes the call immediately.
+    // The leg resolves locally — no /call/failure consult, no 480 onto the
+    // a-leg's completed transaction — and finalization promotes the call
+    // immediately.
     h.advance(Duration::from_secs(2)).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "no consult for an abandoned call");
     assert!(
@@ -399,7 +398,7 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
         "no second CANCEL toward the already-CANCELed callee",
     );
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     b2bua.assert_fully_reaped();
 

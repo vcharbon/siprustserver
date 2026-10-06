@@ -120,7 +120,7 @@ impl Agent {
     }
 
     /// Every datagram this UA received, in arrival order, each tagged with the
-    /// view it belongs to (issue 22's table, in [`crate::absorption`]).
+    /// view it belongs to (the table in [`crate::absorption`]).
     pub fn wire_view(&self) -> Vec<WireEntry> {
         self.txn.wire_view()
     }
@@ -205,7 +205,7 @@ impl Agent {
     /// **The datagram seam**, for a driver that owns its own dialog state and
     /// composes through `sip_message::generators` rather than through the
     /// fluent builders: one already-rendered datagram out, recorded exactly as
-    /// [`try_send`](Agent::try_send) records it.
+    /// `try_send` records it.
     ///
     /// Reach for it only when the caller IS the stack — a scenario interpreter
     /// sequencing arbitrary steps across legs cannot use the pull-shaped
@@ -493,6 +493,24 @@ impl Agent {
         match self.take_held_or_queued().await? {
             Ok(msg) => Some(msg),
             Err(e) => panic!("{} received an unparseable datagram: {e}", self.name),
+        }
+    }
+
+    /// [`recv_any`](Agent::recv_any) WITHOUT waiting: the next TU-visible
+    /// datagram already queued, a request wrapped in its [`ServerTxn`] so the
+    /// body can answer it — `None` when nothing is pending. A txn-owned
+    /// §17.1.1.3 hop ACK is claimed below the API, as `recv_any` claims it.
+    pub async fn take_queued_inbound(&self) -> Option<Inbound> {
+        loop {
+            match self.take_queued().await? {
+                SipMessage::Request(r) => {
+                    if self.ack_obligation_claims(&r) {
+                        continue;
+                    }
+                    return Some(Inbound::Request(ServerTxn::from_request(self.clone(), r)));
+                }
+                SipMessage::Response(r) => return Some(Inbound::Response(r)),
+            }
         }
     }
 

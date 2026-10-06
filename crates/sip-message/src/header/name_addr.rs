@@ -101,6 +101,61 @@ impl NameAddr {
         Ok(Self { display, uri, params })
     }
 
+    /// Read an identity a caller states as text: bracketed, the name-addr [`parse`]
+    /// reads; bare, an addr-spec whose every `;`-parameter is a URI parameter, the
+    /// way a Request-URI reads. The two readings differ only on a bare value's tail.
+    ///
+    /// [`parse`]: Self::parse
+    pub fn parse_identity(raw: &SipStr) -> Result<Self, SipParseError> {
+        if raw.as_str().contains('<') {
+            Self::parse(raw)
+        } else {
+            Uri::parse(&raw.trimmed()).map(Self::new)
+        }
+    }
+
+    /// Read an identity stated for a From or To whose dialog tag the reader
+    /// mints itself (RFC 3261 §8.1.1.3, §8.2.6.2): [`parse_identity`], a `tag`
+    /// header or URI parameter dropped. A `tag=` inside the userinfo or a
+    /// `?`-header value is refused: the frozen header would carry a second tag.
+    ///
+    /// [`parse_identity`]: Self::parse_identity
+    pub fn parse_untagged_identity(raw: &SipStr) -> Result<Self, SipParseError> {
+        let addr = Self::parse_identity(raw)?;
+        let uri = addr.uri();
+        if uri.user().is_some_and(|u| u.to_ascii_lowercase().contains("tag=")) {
+            return Err(SipParseError::new("a tag in the userinfo"));
+        }
+        if uri
+            .escaped_headers()
+            .any(|(_, v)| v.is_some_and(|v| v.to_ascii_lowercase().contains("tag=")))
+        {
+            return Err(SipParseError::new("a tag in a URI header"));
+        }
+        let uri = addr.uri().clone().without_param("tag");
+        Ok(addr.without_param("tag").with_uri(uri))
+    }
+
+    /// The display name a value states EXACTLY as it is written: a quoted string
+    /// keeps its quotes and its escapes, a bare one its own bytes. `None` where
+    /// the value states none. [`display`](Self::display) is the unescaped reading;
+    /// this is the spelling, for a projection that must reproduce what arrived.
+    pub fn display_as_written(raw: &SipStr) -> Option<SipStr> {
+        let value = raw.trimmed();
+        let bytes = value.as_bytes();
+        let start = skip_ws(bytes, 0);
+        if start >= bytes.len() {
+            return None;
+        }
+        if bytes[start] == b'"' {
+            let (_, after) = read_quoted(&value, start);
+            return Some(value.subspan(start, after - start));
+        }
+        let open = index_of(bytes, b'<', start)?;
+        let before = sub_trimmed(&value, start, open);
+        (!before.as_str().is_empty()).then_some(before)
+    }
+
     /// Render as `["display" ]<uri>*(";" param)`. The angle brackets are
     /// unconditional: they are always legal, and they keep a URI parameter from
     /// being read back as a header parameter.
@@ -159,9 +214,60 @@ mod tests {
         );
     }
 
+    /// The written form keeps the quotes and the escapes the value carried; an
+    /// unquoted name is its own bytes, and a bare addr-spec states none.
+    #[test]
+    fn the_display_name_as_written_keeps_its_quoting() {
+        let written = |s: &str| {
+            NameAddr::display_as_written(&SipStr::owned(s)).map(|d| d.as_str().to_owned())
+        };
+        assert_eq!(
+            written(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#).as_deref(),
+            Some(r#""Alice \"A\"""#)
+        );
+        assert_eq!(written("Bob <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
+        assert_eq!(written("  Bob  <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
+        assert_eq!(written("<sip:bob@biloxi.com>"), None);
+        assert_eq!(written("sip:bob@biloxi.com;tag=9"), None);
+        assert_eq!(written(""), None);
+    }
+
     #[test]
     fn an_unquoted_display_name_is_kept() {
         assert_eq!(parse("Bob <sip:bob@biloxi.com>").display(), Some("Bob"));
+    }
+
+    /// `parse_identity` keeps a bare value's tail on the URI; bracketed text reads
+    /// as `parse` does.
+    #[test]
+    fn an_identity_reads_a_bare_tail_as_uri_parameters() {
+        let bare =
+            NameAddr::parse_identity(&SipStr::from_static("sip:a@h;user=phone;tag=x")).unwrap();
+        assert_eq!(bare.uri().params().value("user"), Some("phone"));
+        assert_eq!(bare.uri().params().value("tag"), Some("x"));
+        assert!(bare.params().is_empty());
+        let bracketed =
+            NameAddr::parse_identity(&SipStr::from_static("\"B\" <sip:a@h;user=phone>;tag=x"))
+                .unwrap();
+        assert_eq!(bracketed.display(), Some("B"));
+        assert_eq!(bracketed.uri().params().value("user"), Some("phone"));
+        assert_eq!(bracketed.params().value("tag"), Some("x"));
+    }
+
+    /// An untagged identity drops a stated tag, bare or bracketed, and refuses
+    /// one hidden in the userinfo or a URI header.
+    #[test]
+    fn an_untagged_identity_drops_its_tag_and_refuses_a_hidden_one() {
+        let read = |raw: &'static str| NameAddr::parse_untagged_identity(&SipStr::from_static(raw));
+        let bare = read("sip:a@h;user=phone;tag=x").unwrap();
+        assert_eq!(bare.uri().params().value("tag"), None);
+        assert_eq!(bare.uri().params().value("user"), Some("phone"));
+        let bracketed = read("\"B\" <sip:a@h;user=phone>;tag=x").unwrap();
+        assert_eq!(bracketed.params().value("tag"), None);
+        assert_eq!(bracketed.display(), Some("B"));
+        assert!(read("<sip:a;tag=x@h>").is_err());
+        assert!(read("<sip:a@h?X=tag=x>").is_err());
+        assert!(read("<sip:a@h").is_err());
     }
 
     #[test]

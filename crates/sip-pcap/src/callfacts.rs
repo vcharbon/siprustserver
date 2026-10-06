@@ -15,8 +15,8 @@ use crate::doc::{GroupJson, LegJson, MethodFacts, MsgJson, MsgRef, Payload, Summ
 /// Every RETRANSMITTING class shares that ceiling — Timer B (RFC 3261
 /// §17.1.1.2), Timer F (§17.1.2.2), Timer H (§17.2.1) and a reliable
 /// provisional's own ladder (RFC 3262 §3), which reuses the final response's
-/// timers. Measured across the corpus each of them sits on T1: a median gap of
-/// 500 ms, which is the first rung and nothing else.
+/// timers. Each of them opens on T1 (500 ms by default), the first rung and
+/// nothing else.
 ///
 /// The unreliable provisional is not one of them — see
 /// [`retransmits_on_a_timer`].
@@ -31,7 +31,7 @@ pub const REPEAT_ENVELOPE_US: u64 = 32_000_000;
 /// keeps the relation, its copies DRAWN one per copy of the INVITE (§17.2.1).
 /// The capture stack is the one thing that duplicates a datagram the platform
 /// sent once, and [`crate::flow::FlowConfig::dedup_window_us`] takes that at
-/// ingest, before any relation is stated. Issue 116 measured the classes.
+/// ingest, before any relation is stated.
 fn retransmits_on_a_timer(m: &MsgJson) -> bool {
     match &m.summary {
         Summary::Response { status, .. } if *status > 100 && *status < 200 => m.rseq.is_some(),
@@ -340,7 +340,7 @@ mod tests {
 
     /// A peer that re-ACKs each retransmitted final mints a fresh branch every
     /// time, so its ACKs are not the same datagram and none of them repeats.
-    /// Ruling Q34 collapsed them onto one count to stop a ladder being encoded
+    /// A former reading collapsed them onto one count to stop a ladder being encoded
     /// twice; the byte bound withdraws that, because a count replays copies of
     /// ONE stored ACK and these differ on the wire. The platform's own 200s,
     /// re-sent unchanged, still repeat.

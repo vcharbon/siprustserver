@@ -6,7 +6,9 @@ use super::emit;
 use super::in_dialog::{route_for_in_dialog, with_dialog_identity, with_routes};
 use super::spec::{InviteClientTransactionHandle, StackDialog};
 use crate::draft::RequestDraft;
-use crate::header::{CSeq, ContentLength, HeaderName, MaxForwards, MediaType, Uri, Via};
+use crate::header::{
+    CSeq, ContentLength, HeaderName, HeaderValue, MaxForwards, MediaType, RouteEntry, Uri, Via,
+};
 use crate::method::Method;
 use crate::sip_str::SipStr;
 use crate::types::{SipHeader, SipRequest, SipResponse};
@@ -84,4 +86,62 @@ pub fn generate_ack_for_non_2xx(
     }
 
     emit::request(emit::extra_headers(draft, extra_headers).push(ContentLength::new(0)))
+}
+
+/// Build the bare ACK for a 2xx from the INVITE transaction alone — no dialog
+/// record (RFC 3261 §13.2.2.4 for a UAC core that no longer holds one). Its
+/// own transaction: the INVITE's top Via on the fresh `branch`. From and
+/// Call-ID echo the INVITE, To echoes the 2xx (its tag), CSeq is the INVITE's
+/// with method ACK. Routing follows §12.2.1.1 from what the two messages
+/// state: an in-dialog INVITE (tagged To) keeps its Route set — a re-INVITE's
+/// 2xx never changes it (§12.2.1.2) — and its Request-URI, unless the 2xx
+/// refreshes the target with a Contact and the set is loose (or empty), in
+/// which case the Contact is the Request-URI; a dialog-creating 2xx supplies
+/// the route set (its Record-Route reversed, §12.1.2) and the target (its
+/// Contact). No body: the round this ACK closes has no session left to
+/// describe (RFC 3264 §4 answers ride only where a session survives).
+pub fn generate_ack_for_2xx_from_invite(
+    original_invite: &SipRequest,
+    final_response: &SipResponse,
+    branch: &str,
+) -> SipRequest {
+    let contact = final_response.contacts().as_slice().first().map(|c| c.uri().clone());
+    let invite_routes: Vec<String> =
+        original_invite.raw_text(HeaderName::Route).map(|r| r.to_string()).collect();
+    let (uri, routes) = if original_invite.to().tag().is_some() {
+        let loose = invite_routes
+            .first()
+            .map(|first| {
+                RouteEntry::parse(&SipStr::owned(first)).is_ok_and(|e| e.uri().is_loose_route())
+            })
+            .unwrap_or(true);
+        match contact {
+            Some(target) if loose => (target, invite_routes),
+            _ => (original_invite.request_uri().clone(), invite_routes),
+        }
+    } else {
+        let route_set: Vec<String> = final_response
+            .record_route_set()
+            .map(|set| set.reversed().iter().map(HeaderValue::to_wire).collect())
+            .unwrap_or_default();
+        let target = contact.unwrap_or_else(|| original_invite.request_uri().clone());
+        route_for_in_dialog(target, &route_set)
+    };
+    let echoed_from =
+        |msg: &SipRequest, name: HeaderName| msg.raw_text(name).next().unwrap_or(SipStr::EMPTY);
+    let hop = original_invite.top_via().clone().with_branch(branch.to_string());
+
+    let mut draft = RequestDraft::new(Method::Ack, uri)
+        .push(hop)
+        .push(MaxForwards::DEFAULT)
+        .push_raw(HeaderName::From, echoed_from(original_invite, HeaderName::From))
+        .push_raw(
+            HeaderName::To,
+            final_response.raw_text(HeaderName::To).next().unwrap_or(SipStr::EMPTY),
+        )
+        .push_raw(HeaderName::CallId, echoed_from(original_invite, HeaderName::CallId))
+        .push(CSeq::new(original_invite.cseq().seq(), Method::Ack));
+    draft = with_routes(draft, &routes);
+
+    emit::request(draft.push(ContentLength::new(0)))
 }

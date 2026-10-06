@@ -21,6 +21,7 @@ pub mod repeat;
 pub mod report;
 pub mod rfc_audit;
 pub mod simulated;
+pub mod socket_stats;
 pub mod types;
 
 pub use contracts::{
@@ -39,5 +40,5 @@ pub use simulated::{SendFault, SimulatedSignalingNetwork};
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,
-    UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket, MAX_UDP_PAYLOAD,
+    SocketBuffers, UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket, MAX_UDP_PAYLOAD,
 };

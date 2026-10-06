@@ -283,9 +283,9 @@ mod absorption_end_to_end {
     use super::*;
 
     /// The headline contract: a Timer-A style INVITE retransmission never
-    /// surfaces, so the callee needs NO `receive_absorbing` list — the exact
-    /// pattern that used to require one (silent-callee duplicates queued ahead
-    /// of the ACK would make `receive("ACK")` fail with
+    /// surfaces, so the callee needs NO `receive_absorbing` list for the
+    /// pattern that would otherwise require one (silent-callee duplicates queued
+    /// ahead of the ACK would make `receive("ACK")` fail with
     /// "expected a ACK request, got INVITE").
     #[tokio::test(start_paused = true)]
     async fn invite_retransmits_absorbed_without_lists() {
@@ -361,7 +361,7 @@ mod absorption_end_to_end {
         uas.respond(200, "OK").with_sdp(OFFER).send().await;
         call.expect(200).await;
         let mut dialog = call.ack().await;
-        // The duplicate INVITE is still queued and SURFACES — absorb it the old way.
+        // The duplicate INVITE is still queued and SURFACES — absorb it by list.
         server.receive_absorbing("ACK", &["INVITE"]).await;
 
         let mut bye = dialog.bye().await;
@@ -372,8 +372,8 @@ mod absorption_end_to_end {
 }
 
 mod two_view_ladders {
-    //! One ladder per row of the classification table in [`crate::absorption`]
-    //! (issue 22), each asserting BOTH views of the same stream. Retransmission
+    //! One ladder per row of the classification table in [`crate::absorption`],
+    //! each asserting BOTH views of the same stream. Retransmission
     //! is driven explicitly on the paused clock — the harness UA runs no Timer
     //! A/E of its own, so the test IS the timer and never leaps two deadlines.
 

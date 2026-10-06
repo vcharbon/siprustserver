@@ -5,32 +5,25 @@
 //! message and event it emits is stamped with the decision's ordinal.
 //!
 //! A mark records a decision the decision layer returned AND the stack
-//! applied. A fold the callout resolved on its own — an unanswered consult, a
-//! limiter-refused reroute, the terminal limiter final — carries
-//! [`STACK_ORIGIN`] and marks nothing; a fold landing on a call already going
-//! away applies nothing and marks nothing.
+//! applied. A fold the callout resolved on its own — an unanswered consult,
+//! the terminal limiter final — carries [`STACK_AUTHORED`] and marks nothing;
+//! a fold landing on a call already going away applies nothing and marks
+//! nothing. A release reroute the limiter refuses is applied as a release:
+//! marked under the answer's label, its service slices merged.
 
 use call::helpers::mark_decision;
 use call::{Call, CallModelState, DecisionKind};
 
-use crate::event::CallEvent;
 use crate::rules::defaults::parse_label;
+use b2bua_sdk::event::CallEvent;
 
-/// The payload key a callout sets (`true`) on a fold it resolved on the
-/// stack's own account, with no decision behind it.
-pub(crate) const STACK_ORIGIN: &str = "stack_authored";
+pub(crate) use b2bua_sdk::fold_payload::{stack_authored, STACK_AUTHORED};
 
 /// The `call-failure-result` / `call-release-result` / `refer-http-result`
 /// topics and the outcomes that are decisions.
 pub(crate) const FAILURE_TOPIC: &str = "call-failure-result";
 pub(crate) const RELEASE_TOPIC: &str = "call-release-result";
 pub(crate) const REFER_TOPIC: &str = "refer-http-result";
-
-/// Whether a fold's payload carries [`STACK_ORIGIN`]: the callout resolved
-/// it on the stack's own account, no decision behind it.
-pub(crate) fn stack_authored(payload: &serde_json::Value) -> bool {
-    payload.get(STACK_ORIGIN).and_then(|v| v.as_bool()).unwrap_or(false)
-}
 
 /// Mark the decision a fold carries, if it is one the stack applies: the kind
 /// from the topic and outcome, the label from the payload, the leg from the

@@ -36,8 +36,8 @@ describe("foldBody", () => {
         over.dir ?? "a=sendrecv",
         ""
       ].join("\r\n")
-    const rebooked = { connectionAddress: true, mediaPort: true, verbatim: false }
-    const verbatim = { connectionAddress: false, mediaPort: false, verbatim: true }
+    const rebooked = { origin: true, connectionAddress: true, mediaPort: true, verbatim: false }
+    const verbatim = { origin: false, connectionAddress: false, mediaPort: false, verbatim: true }
 
     it("is true across attribute order, line endings, the `o=` floor and the masked fields", () => {
       expect(bodiesEqual("sdp", offer(), offer().replace(/\r\n/g, "\n"))).toBe(true)

@@ -24,7 +24,13 @@ pub enum CallEvent {
         matched_client_txn: bool,
     },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …).
-    Timer { timer_type: TimerType, call_ref: String, leg_id: Option<String> },
+    Timer {
+        timer_type: TimerType,
+        call_ref: String,
+        leg_id: Option<String>,
+        /// The incarnation of the call that scheduled it ([`Self::incarnation`]).
+        incarnation: Option<String>,
+    },
     /// A CANCEL matched a server INVITE txn; 200/487 already sent downstream.
     /// RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it matched:
     /// `invite_cseq` is that INVITE's CSeq number, `in_dialog` whether it was an
@@ -59,6 +65,9 @@ pub enum CallEvent {
         /// `transaction_timeout` split and the `call_failure` consult's
         /// `timeout_kind`.
         timeout_kind: TimeoutKind,
+        /// The incarnation of the call that sent the request
+        /// ([`Self::incarnation`]), from the mark on its Via.
+        incarnation: Option<String>,
     },
     /// Re-entrant internal event (async result folded back into the call).
     InternalEvent {
@@ -75,6 +84,9 @@ pub enum CallEvent {
         /// `Vec::new()` for every text-only internal event (reaper verdicts,
         /// the `/call/refer` and `/call/failure` decision results).
         body: Vec<u8>,
+        /// The incarnation of the call whose turn sent the work this event
+        /// answers ([`Self::incarnation`]).
+        incarnation: Option<String>,
     },
     /// The transaction layer reports the last transaction for a *watched* call has
     /// cleared (ADR-0014). The router uses it to self-release an acting-backup
@@ -99,7 +111,19 @@ impl CallEvent {
             } => {
                 CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers, to_tag }
             }
-            TransactionEvent::Timeout { branch, call_ref, leg_id, method, destination, kind } => {
+            TransactionEvent::Timeout {
+                branch,
+                call_ref,
+                leg_id,
+                incarnation_mark,
+                method,
+                destination,
+                kind,
+            } => {
+                let incarnation = call_ref
+                    .as_deref()
+                    .zip(incarnation_mark.as_deref())
+                    .map(|(call_ref, mark)| call::derive_incarnation(call_ref, mark));
                 CallEvent::Timeout {
                     branch,
                     call_ref,
@@ -107,10 +131,40 @@ impl CallEvent {
                     method,
                     destination,
                     timeout_kind: kind,
+                    incarnation,
                 }
             }
             TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
         }
+    }
+
+    /// The incarnation of the call this event belongs to
+    /// (`call::Call::incarnation`): a timer fire, a transaction timeout and an
+    /// internal event carry the one of the call they were armed, sent or
+    /// answered for. `None` for an event of no particular call (an inbound
+    /// message reads its incarnation off the wire) or one stamped with none,
+    /// which belongs to whichever call is live on its `call_ref`.
+    pub fn incarnation(&self) -> Option<&str> {
+        match self {
+            CallEvent::Timer { incarnation, .. }
+            | CallEvent::Timeout { incarnation, .. }
+            | CallEvent::InternalEvent { incarnation, .. } => incarnation.as_deref(),
+            CallEvent::Sip { .. }
+            | CallEvent::Cancelled { .. }
+            | CallEvent::CallQuiesced { .. } => None,
+        }
+    }
+
+    /// `self` stamped with `incarnation` where it carries an incarnation and
+    /// none is stated yet: an event a call's turn re-enters is that call's.
+    pub fn stamped(mut self, incarnation: &str) -> Self {
+        if let CallEvent::Timer { incarnation: slot, .. }
+        | CallEvent::Timeout { incarnation: slot, .. }
+        | CallEvent::InternalEvent { incarnation: slot, .. } = &mut self
+        {
+            slot.get_or_insert_with(|| incarnation.to_string());
+        }
+        self
     }
 
     /// An asynchronous trigger: a timer fire, a transaction timeout, or an
@@ -135,5 +189,46 @@ impl CallEvent {
             CallEvent::InternalEvent { .. } => "internal-event",
             CallEvent::CallQuiesced { .. } => "call-quiesced",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeout(call_ref: Option<&str>, mark: Option<&str>) -> CallEvent {
+        CallEvent::from_txn(TransactionEvent::Timeout {
+            branch: "z9hG4bK-t".into(),
+            call_ref: call_ref.map(str::to_string),
+            leg_id: Some("b-1".into()),
+            incarnation_mark: mark.map(str::to_string),
+            method: Some("INVITE".into()),
+            destination: None,
+            kind: TimeoutKind::Response,
+        })
+    }
+
+    #[test]
+    fn a_timeout_names_the_incarnation_its_via_marked() {
+        assert_eq!(timeout(Some("w0|cid|tag"), Some("k3")).incarnation(), Some("w0|cid|tag#k3"));
+        assert_eq!(timeout(Some("w0|cid|tag"), None).incarnation(), None, "unmarked");
+        assert_eq!(timeout(None, Some("k3")).incarnation(), None, "attributed to no call");
+    }
+
+    #[test]
+    fn a_re_entered_event_takes_its_turns_incarnation_unless_it_states_one() {
+        let fold = |incarnation: Option<&str>| CallEvent::InternalEvent {
+            call_ref: "w0|cid|tag".into(),
+            topic: "t".into(),
+            outcome: "o".into(),
+            payload: serde_json::Value::Null,
+            body: Vec::new(),
+            incarnation: incarnation.map(str::to_string),
+        };
+        assert_eq!(fold(None).stamped("w0|cid|tag#k").incarnation(), Some("w0|cid|tag#k"));
+        assert_eq!(
+            fold(Some("w0|cid|tag#j")).stamped("w0|cid|tag#k").incarnation(),
+            Some("w0|cid|tag#j")
+        );
     }
 }

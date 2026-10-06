@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
+use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,28 +29,30 @@ pub struct PendingRequest {
     pub source_call_id: String,
     pub source_from: String,
     pub source_to: String,
-    /// The requester's `Timestamp`, held so the response echoes the value the
-    /// request carried (RFC 3261 §8.2.6.1); absent when the request carried none.
-    #[serde(default)]
-    pub source_timestamp: Option<String>,
     pub direction: Direction,
     /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
     /// B2BUA CANCELled the outbound client transaction and the txn layer
     /// already answered the originator (200 + 487), so the target's eventual
     /// final response is resolved locally — never relayed. A crossing 2xx
     /// (target answered before the CANCEL landed) is ACKed and absorbed.
-    #[serde(default)]
     pub cancelled: bool,
     /// The originator's request offered reliable provisionals — `100rel` in its
     /// own `Require` or `Supported` (RFC 3262 §3). The request this stack built
     /// toward the target may offer it where the originator did not (a declared
     /// advertisement), so the originator's licence is recorded here: a
-    /// reliable provisional relays reliably only under it. `false` when
-    /// hydrated from a peer that recorded none: an unwitnessed offer is no
-    /// offer, so the provisional relays unreliably and this stack acknowledges
-    /// the responder itself. Trailing under the positional codec.
-    #[serde(default)]
+    /// reliable provisional relays reliably only under it; without it the
+    /// provisional relays unreliably and this stack acknowledges the responder
+    /// itself.
     pub offered_100rel: bool,
+    /// The originator's request carried a description (RFC 3264): an offer,
+    /// on an INVITE or an UPDATE. An offerless INVITE has its offer made by
+    /// the answerer.
+    #[serde(default)]
+    pub offered: bool,
+    /// The originator's request's `Timestamp` value, which the response relayed
+    /// back to it echoes (RFC 3261 §8.2.6.1); `None` where it stated none.
+    #[serde(default)]
+    pub source_timestamp: Option<String>,
 }
 
 /// RFC 3261 §12 dialog state, stack-owned. `localTag` is the B2BUA's tag on this
@@ -60,7 +63,11 @@ pub struct StackDialog {
     pub call_id: String,
     pub local_tag: String,
     pub remote_tag: String,
+    /// The local address (§12.1.1's local URI) as the dialog-creating INVITE
+    /// stated it, display name included, tag excluded: the From of every
+    /// request this side sends in the dialog.
     pub local_uri: String,
+    /// The remote address, in the same form: the To of every such request.
     pub remote_uri: String,
     /// Peer Contact URI — Request-URI for in-dialog requests (§12.2.1.1).
     pub remote_target: String,
@@ -102,22 +109,23 @@ pub struct B2buaDialogExt {
     pub ack_branch: Option<String>,
     /// In-flight re-INVITE client transaction handle on this dialog.
     pub pending_invite_txn: Option<InviteTxnHandle>,
-    /// SDP cached from a reliable 18x / UPDATE under the `fake-prack` strategy.
+    /// Under the `fake-prack` strategy, the description a 2xx without one gives
+    /// the caller: the reliable 18x's answer, or her offer answered from the
+    /// latest early UPDATE offer.
     #[serde(with = "serde_bytes")]
     pub cached_sdp: Option<Vec<u8>>,
     /// RFC 3261 §13.3.1.4 (in-dialog) — a re-INVITE 2xx this side sent that
     /// still awaits the originator's ACK, on the originator's own dialog.
     /// `None` normally; see [`Unacked2xx`].
-    #[serde(default)]
     pub pending_reinvite_2xx: Option<Unacked2xx>,
     /// CSeq (in the acknowledging peer's own sequence space) of the ACK this
     /// dialog's 2xx still awaits from that peer (RFC 3261 §13.2.2.4): armed when
-    /// the 2xx is taken, discharged by the ACK actually leaving — whether this
-    /// stack composed it on receipt or relayed the peer's. `None` = nothing owed,
-    /// so a further peer ACK is absorbed rather than put on a quiesced
+    /// the 2xx is taken, discharged by the ACK actually leaving — the peer's
+    /// relayed, or one this stack composed on its own account. `None` = nothing
+    /// owed, so a further peer ACK is absorbed rather than put on a quiesced
     /// transaction; a retransmitted 2xx re-ACKs via `ack_branch` without
-    /// consulting this.
-    #[serde(default)]
+    /// consulting this. While it is armed the dialog is in RFC 6026 *Accepted*,
+    /// so a newcomer INVITE there is glare (`invite_transaction_open`).
     pub awaited_ack_cseq: Option<i64>,
     /// RFC 3261 §13.3.1.4 — the initial-INVITE 2xx this call answered the
     /// caller with, as the exact datagram the retransmit ladder repeats
@@ -126,7 +134,6 @@ pub struct B2buaDialogExt {
     /// once the caller's ACK discharges it — retained bytes are never sent
     /// after that, and a later re-answer through the seam retains its own
     /// datagram afresh.
-    #[serde(default)]
     pub answered_2xx: Option<Unacked2xx>,
     /// RFC 3261 §13.2.2.4 — the ACK emitted on this dialog's current INVITE
     /// transaction, as the exact datagram a retransmitted 2xx re-sends
@@ -136,8 +143,13 @@ pub struct B2buaDialogExt {
     /// (RFC 3264 §4). `None` until that ACK leaves, and again once a new INVITE
     /// transaction resets it alongside `ack_branch` — the bytes belong to
     /// exactly one INVITE's ACK.
-    #[serde(default)]
     pub emitted_ack: Option<RetainedEmission>,
+    /// The session this early dialog carries where the stack has described
+    /// something inside it before its leg is confirmed: each early dialog of a
+    /// fork is its own offer/answer exchange (RFC 3261 §12.1.2, RFC 3264 §4),
+    /// and the one that confirms hands this state to its leg. `None` while the
+    /// dialog carries what the leg's opening INVITE stated.
+    pub sdp_session: Option<LegSdpSession>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.

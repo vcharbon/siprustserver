@@ -304,7 +304,7 @@ reached → `Err`. The driver's bucketing (`class.rs`) is untouched.
 ---
 
 ## 5. P2 — settle verdict + smoke  |  6. P3 — collapse every body  |  7. P4 — canary + delete
-- **P2**: verdict already includes the settle barrier; `loadgen/tests/smoke.rs`
+- **P2**: verdict already includes the settle barrier; `loadgen/tests/it/smoke.rs`
   asserts the 2nd-NOTIFY ack gate (recover + permanent-fail-names-obligation).
   Note (omission): a drop-hit call holds its `max_in_flight` permit up to 32 s —
   size the end-of-run drain (`driver.rs:377`).

@@ -24,9 +24,10 @@ use tokio::task::JoinHandle;
 use crate::fragmentation::pin_fragmentation;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
+use crate::socket_stats::{rx_dropped, socket_buffers};
 use crate::types::{
     BindError, BindErrorReason, BindUdpOpts, PreIngressAction, PreIngressHook, SendError,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    SocketBuffers, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
 
 /// Build the UDP socket every real bind stands on. socket2, always, because
@@ -35,21 +36,22 @@ use crate::types::{
 /// IP rather than fail the send) and `SO_REUSEPORT`. N reuse-port sockets on
 /// one port shard the recv path across N tasks; the kernel flow-hashes on the
 /// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
-/// ordering (INVITE→CANCEL, retransmits) is preserved. `send_buffer` is the
-/// requested `SO_SNDBUF` (`None` keeps the kernel default). Public so a test
-/// reads the options back off the very socket the bind path produces.
-pub fn build_bound_socket(
-    addr: SocketAddr,
-    reuse_port: bool,
-    send_buffer: Option<usize>,
-) -> std::io::Result<socket2::Socket> {
+/// ordering (INVITE→CANCEL, retransmits) is preserved. `SO_SNDBUF` and
+/// `SO_RCVBUF` are requested from `opts` (`None` keeps the kernel default).
+/// Public so a test reads the options back off the very socket the bind path
+/// produces.
+pub fn build_bound_socket(opts: &BindUdpOpts) -> std::io::Result<socket2::Socket> {
+    let addr = opts.addr;
     let domain = socket2::Domain::for_address(addr);
     let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
-    if reuse_port {
+    if opts.reuse_port {
         raw.set_reuse_port(true)?;
     }
-    if let Some(bytes) = send_buffer {
+    if let Some(bytes) = opts.send_buffer_bytes {
         raw.set_send_buffer_size(bytes)?;
+    }
+    if let Some(bytes) = opts.recv_buffer_bytes {
+        raw.set_recv_buffer_size(bytes)?;
     }
     pin_fragmentation(&raw, addr.is_ipv4())?;
     // tokio's reactor requires the fd non-blocking.
@@ -83,8 +85,10 @@ impl SignalingNetwork for RealSignalingNetwork {
             addr: opts.addr,
             message: e.to_string(),
         };
-        let raw = build_bound_socket(opts.addr, opts.reuse_port, opts.send_buffer_bytes)
-            .map_err(os_err)?;
+        let raw = build_bound_socket(&opts).map_err(os_err)?;
+        // `counters()` reads the kernel drop count on every snapshot; a socket
+        // that cannot answer is refused here rather than reading 0 forever.
+        rx_dropped(&raw).map_err(os_err)?;
         let socket = UdpSocket::from_std(raw.into()).map_err(os_err)?;
         let local = socket.local_addr().map_err(|e| BindError {
             reason: BindErrorReason::OsError,
@@ -257,7 +261,15 @@ impl UdpEndpoint for RealEndpoint {
     }
 
     fn counters(&self) -> UdpEndpointCounters {
-        self.counters.snapshot()
+        UdpEndpointCounters {
+            // The bind proved the socket answers `SO_MEMINFO`.
+            kernel_rx_dropped: rx_dropped(&*self.socket).unwrap_or(0),
+            ..self.counters.snapshot()
+        }
+    }
+
+    fn socket_buffers(&self) -> Option<SocketBuffers> {
+        socket_buffers(&*self.socket).ok()
     }
 
     fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {

@@ -69,9 +69,11 @@ struct Doc {
 
 impl Doc {
     /// The description a message carried, or `None` where the vantage carried
-    /// no body bytes or the bytes are not a session description.
+    /// no body bytes or the message declared no session description. A body
+    /// with no `Content-Type` declares none (RFC 3261 §20.15): `wellformed`
+    /// charges that once, and this family reads the round as it was declared.
     fn of(msg: &Msg) -> Option<Doc> {
-        let body = msg.body.as_deref()?;
+        let body = msg.sdp()?;
         let doc = sdp_doc::parse_sdp_body(body)?;
         Some(Doc { origin: sdp_doc::parse_origin(body), doc })
     }
@@ -705,10 +707,10 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
 /// left to latch on.
 ///
 /// The occasion is a 2xx an agent sent on a transaction whose request it took
-/// an offer on — `INVITE` or `UPDATE` ([`offer_answer_method`]) — and on the
+/// an offer on — `INVITE` or `UPDATE` (`offer_answer_method`) — and on the
 /// dialog that offer named, since two early dialogs number their requests
 /// independently (§12.2.1.1). It is met by a description on that 2xx, or by one
-/// that already BOUND the dialog ([`binds`]): a reliable provisional's answer
+/// that already BOUND the dialog (`binds`): a reliable provisional's answer
 /// discharges the 2xx, while early media in an unreliable provisional is a plan
 /// the peer may re-latch on (RFC 3960) and binds nothing.
 ///
@@ -781,7 +783,7 @@ impl Obligation for Final2xxAnswersTheOffer {
 /// sending to different places.
 ///
 /// The occasion is a description that BINDS — a final, or a reliable
-/// provisional ([`binds`]) — on a dialog where one already did. Early media in
+/// provisional (`binds`) — on a dialog where one already did. Early media in
 /// an unreliable provisional binds nothing: an announcement source the peer may
 /// re-latch on before the callee answers is RFC 3960's shape, not this
 /// obligation's.
@@ -903,13 +905,15 @@ impl Obligation for AnswerStreamMatchesOffer {
 
 /// **RFC 4566 §5.2 / RFC 3264 §8 — every session description an agent sends on
 /// one call describes the SAME session, and its `sess-version` counts the
-/// revisions.** `o=<username> <sess-id> <sess-version> <nettype> <addrtype>
-/// <address>` identifies it: a later description repeats all five identity
-/// fields, raises `sess-version` by exactly one when the rest of the
-/// description changed, and leaves it alone when nothing did. A changed
-/// identity makes the description a different session the peer must treat as
-/// unrelated; a version that does not track the changes leaves the peer unable
-/// to tell a re-offer from a repeat.
+/// revisions.**
+/// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
+/// identifies it: a later description repeats all five identity
+/// fields and raises `sess-version` by exactly one when the rest of the
+/// description changed. A byte-identical description may keep its version or
+/// raise it by one: §8 only has an unchanged version promise an identical
+/// description. A changed identity makes the description a different session
+/// the peer must treat as unrelated; a version that does not track the changes
+/// leaves the peer unable to tell a re-offer from a repeat.
 ///
 /// Charges the description's SENDER, against its own previous description on
 /// that call. A description whose `o=` line no reader accepts settles nothing —
@@ -946,7 +950,7 @@ impl Obligation for SdpOriginContinuity {
             let same_session = before.identifies_same_session(now);
             let body_changed = before.body_excluding_origin != now.body_excluding_origin;
             let delta = i128::from(now.session_version) - i128::from(before.session_version);
-            let ok = same_session && delta == i128::from(body_changed);
+            let ok = same_session && (delta == 1 || (delta == 0 && !body_changed));
             let decision = if ok {
                 Decision::Compliant
             } else {
@@ -1515,9 +1519,10 @@ impl Obligation for PayloadTypeMappingStable {
 /// digit string, a stream with no `c=` or no port, a non-positive `a=ptime`. A test UA accepts the body and masks the defect, so
 /// the recording is where the offer's own grammar is checked at all.
 ///
-/// **The occasion is one fresh message the endpoint sent DECLARING
-/// `application/sdp` and carrying bytes.** The declaration is what says these
-/// bytes are a description: a body under another Content-Type is not this
+/// **The occasion is one fresh message the endpoint sent DECLARING a
+/// description and carrying bytes** — `application/sdp`, or a `multipart/…`
+/// body framing an SDP part (RFC 5621 §3.1). The declaration is what says
+/// these bytes are a description: a body under another Content-Type is not this
 /// rule's to read, and a vantage carrying no head or no body opens no occasion
 /// rather than guessing at one. The grammar walk is
 /// [`sip_message::sdp::validate_offer_answer_body`]'s — this rule reads a
@@ -1535,11 +1540,7 @@ impl Obligation for SdpBodyParseable {
             if msg.repeat {
                 continue;
             }
-            let Some(head) = msg.head.as_deref() else { continue };
-            let Some(body) = msg.body.as_deref().filter(|b| !b.is_empty()) else { continue };
-            if !sniff::content_type_is(head, "application/sdp") {
-                continue;
-            }
+            let Some(body) = msg.sdp() else { continue };
             let decision = match sdp::validate_offer_answer_body(body) {
                 Ok(()) => Decision::Compliant,
                 Err(e) => Decision::Violated(Evidence::SdpBodyRejected {
@@ -1684,6 +1685,17 @@ c=IN IP4 127.0.0.1\r\n\
 t=0 0\r\n\
 m=audio 20000 RTP/AVP 0\r\n";
 
+    /// The head a synthetic message carries: `extra` lines, and the
+    /// `Content-Type` a body demands (RFC 3261 §20.15) — `application/sdp`,
+    /// which is what every description these tests carry declares.
+    fn head(extra: &str, body: Option<&str>) -> Vec<u8> {
+        let declared = match body {
+            Some(b) if !b.is_empty() => "Content-Type: application/sdp\r\n",
+            _ => "",
+        };
+        format!("X: y\r\n{extra}{declared}\r\n").into_bytes()
+    }
+
     fn req(
         at_us: u64,
         src: &str,
@@ -1706,7 +1718,7 @@ m=audio 20000 RTP/AVP 0\r\n";
             via_branch: Some(format!("z9hG4bK-{method}-{cseq}")),
             from_tag: Some("at".to_string()),
             to_tag: to_tag.map(str::to_string),
-            head: Some(b"X: y\r\n\r\n".to_vec()),
+            head: Some(head("", body)),
             body: Some(body.unwrap_or("").as_bytes().to_vec()),
         }
     }
@@ -1733,7 +1745,7 @@ m=audio 20000 RTP/AVP 0\r\n";
             via_branch: Some(format!("z9hG4bK-{method}-{cseq}")),
             from_tag: Some("at".to_string()),
             to_tag: Some("bt".to_string()),
-            head: Some(b"X: y\r\n\r\n".to_vec()),
+            head: Some(head("", body)),
             body: Some(body.unwrap_or("").as_bytes().to_vec()),
         }
     }
@@ -1848,7 +1860,7 @@ m=audio 20000 RTP/AVP 0\r\n";
     /// description BINDS (RFC 3262 §5).
     fn reliable_1xx(at_us: u64, status: u16, cseq: u32, body: Option<&str>) -> Msg {
         Msg {
-            head: Some(b"Require: 100rel\r\nRSeq: 1\r\n\r\n".to_vec()),
+            head: Some(head("Require: 100rel\r\nRSeq: 1\r\n", body)),
             ..resp(at_us, BOB, ALICE, status, cseq, "INVITE", body)
         }
     }
@@ -1863,6 +1875,38 @@ m=audio 20000 RTP/AVP 0\r\n";
         let out = run(&Final2xxAnswersTheOffer, &msgs);
         assert_eq!(out.len(), 1, "one occasion, the 2xx: {out:?}");
         assert!(matches!(out[0].decision, Decision::Compliant), "{out:?}");
+    }
+
+    /// RFC 5621 §3.1: the answer rides inside a `multipart/mixed` body beside
+    /// another part, and the reading takes the SDP part as the description.
+    #[test]
+    fn an_answer_framed_in_a_multipart_body_meets_the_offer() {
+        use sip_message::{compose_multipart, MultipartPart};
+        let framed = compose_multipart(
+            "multipart/mixed",
+            &[
+                MultipartPart::new("application/vnd.example.indata", vec![0x77, 0x15]),
+                MultipartPart::new("application/sdp", AUDIO_ANSWER.as_bytes().to_vec()),
+            ],
+        )
+        .unwrap();
+        let answer = Msg {
+            head: Some(
+                format!("X: y\r\nContent-Type: {}\r\n\r\n", framed.content_type).into_bytes(),
+            ),
+            body: Some(framed.body),
+            ..resp(2, BOB, ALICE, 200, 1, "INVITE", None)
+        };
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            answer,
+            req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        ];
+        let out = run(&Final2xxAnswersTheOffer, &msgs);
+        assert_eq!(out.len(), 1, "one occasion, the 2xx: {out:?}");
+        assert!(matches!(out[0].decision, Decision::Compliant), "{out:?}");
+        let parse = run(&SdpBodyParseable, &msgs);
+        assert!(parse.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{parse:?}");
     }
 
     #[test]
@@ -2121,7 +2165,7 @@ m=video 60790 RTP/AVP 96\r\n";
     /// description binds (RFC 3262 §5).
     fn reliable(at_us: u64, status: u16, body: Option<&str>) -> Msg {
         Msg {
-            head: Some(b"Require: 100rel\r\nRSeq: 1\r\n\r\n".to_vec()),
+            head: Some(head("Require: 100rel\r\nRSeq: 1\r\n", body)),
             ..resp(at_us, BOB, ALICE, status, 1, "INVITE", body)
         }
     }
@@ -2449,8 +2493,10 @@ m=audio 27500 RTP/AVP 8\r\n";
         assert!(!same_session);
     }
 
-    /// The version tracks the changes: a changed description owes exactly +1
-    /// and a byte-identical one owes the version it already had.
+    /// RFC 3264 §8: "If the version in the origin line does not increment, the
+    /// SDP MUST be identical to the SDP with that version number." A changed
+    /// description owes exactly +1; an identical one may keep its version or
+    /// take +1, and nothing more.
     #[test]
     fn the_version_tracks_what_the_description_says() {
         const BUMPED_TWICE: &str = "v=0\r\n\
@@ -2467,7 +2513,26 @@ a=sendonly\r\n";
         let f = violations(&SdpOriginContinuity, &msgs);
         assert_eq!(f.len(), 1, "a changed body owes exactly +1: {f:?}");
 
-        const BUMPED_FOR_NOTHING: &str = "v=0\r\n\
+        const CHANGED_UNBUMPED: &str = "v=0\r\n\
+o=alice 424242 1 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n\
+a=sendonly\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(CHANGED_UNBUMPED)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert_eq!(f.len(), 1, "a changed body under an unchanged version: {f:?}");
+        let Decision::Violated(Evidence::SdpOriginDiverged { body_changed, .. }) = &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision);
+        };
+        assert!(body_changed);
+
+        const BUMPED_UNCHANGED: &str = "v=0\r\n\
 o=alice 424242 2 IN IP4 10.0.0.1\r\n\
 s=-\r\n\
 c=IN IP4 10.0.0.1\r\n\
@@ -2475,15 +2540,36 @@ t=0 0\r\n\
 m=audio 27500 RTP/AVP 8\r\n";
         let msgs = vec![
             req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
-            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(BUMPED_FOR_NOTHING)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(BUMPED_UNCHANGED)),
         ];
         let f = violations(&SdpOriginContinuity, &msgs);
-        assert_eq!(f.len(), 1, "a byte-identical description owes an unchanged version: {f:?}");
-        let Decision::Violated(Evidence::SdpOriginDiverged { body_changed, .. }) = &f[0].decision
-        else {
-            panic!("{:?}", f[0].decision);
-        };
-        assert!(!body_changed);
+        assert!(f.is_empty(), "an identical description may take +1: {f:?}");
+
+        const REPEATED: &str = "v=0\r\n\
+o=alice 424242 1 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(REPEATED)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert!(f.is_empty(), "an identical description may keep its version: {f:?}");
+
+        const IDENTICAL_BUMPED_TWICE: &str = "v=0\r\n\
+o=alice 424242 3 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(IDENTICAL_BUMPED_TWICE)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert_eq!(f.len(), 1, "an identical description takes at most +1: {f:?}");
     }
 
     #[test]

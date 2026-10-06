@@ -1,9 +1,10 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
 //! route to the next Via (received/rport precedence); reverse-path failover of
-//! an INVITE response to the cookie's `w_bak` when the destination worker is
-//! confirmed Dead; pop the top Via entry (comma-aware); forward; remember the
-//! ACK-relay hop for a non-2xx INVITE final — the node the final arrived from
-//! (the ACK itself travels end-to-end — see `core/request`).
+//! an INVITE response to the backup of the cookie naming the destination worker
+//! when that worker is confirmed Dead; pop the top Via entry (comma-aware);
+//! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
+//! the final arrived from (the ACK itself travels end-to-end — see
+//! `core/request`).
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
@@ -16,7 +17,7 @@ use sip_message::types::SipResponse;
 use sip_message::{Method, SipMessage};
 
 use crate::addr::ProxyAddr;
-use crate::cancel_lru::call_id_cseq_key;
+use crate::cancel_lru::{ack_hop_key, invite_txn_key};
 use crate::observability::metrics::{Direction, MessageResult};
 use crate::registry::WorkerHealth;
 use crate::strategy::DecodeResult;
@@ -110,13 +111,12 @@ impl ProxyCore {
         // `Dead` from the registry's tombstone, so this branch covers it too.
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
-        let reverse_fails = cseq.method() == Method::Invite
-            && self
-                .registry
-                .lookup_by_address(&sent_by)
-                .is_some_and(|dest| dest.health == WorkerHealth::Dead);
-        if reverse_fails {
-            match self.find_own_record_route_params(&resp) {
+        let dead_worker = (cseq.method() == Method::Invite)
+            .then(|| self.registry.lookup_by_address(&sent_by))
+            .flatten()
+            .filter(|dest| dest.health == WorkerHealth::Dead);
+        if let Some(dead) = dead_worker {
+            match self.own_cookie_for(&resp, &dead.id) {
                 Some(params) => match self
                     .strategy
                     .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
@@ -185,19 +185,18 @@ impl ProxyCore {
         // primary's INVITE (see `core/request`). Short TTL: the upstream ACKs
         // within its final-retransmit window (a re-sent final refreshes it).
         if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
-            // The response echoes the request's From (tag included), so this
-            // re-builds exactly the key the INVITE was remembered under.
+            // The response echoes the request's From (tag included), and the
+            // Via below ours is the upstream's as the INVITE carried it, so
+            // this re-builds exactly the key the INVITE was remembered under.
             let call_id = resp.call_id();
             let from = resp.from();
-            let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
+            let key = invite_txn_key(next, call_id.as_str(), from.tag(), cseq.seq());
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                let upstream_branch = next.branch().unwrap_or_default().to_string();
                 self.cancel_lru.remember(
-                    &crate::cancel_lru::ack_hop_key(call_id.as_str(), from.tag(), cseq.seq()),
+                    &ack_hop_key(next, call_id.as_str(), from.tag(), cseq.seq()),
                     crate::cancel_lru::CancelEntry {
                         target: ProxyAddr::from(src),
                         branch: found.branch.clone(),
-                        upstream_branch,
                         stickiness: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
@@ -206,22 +205,24 @@ impl ProxyCore {
         }
     }
 
-    /// The params of the proxy's own Record-Route entry on a response (echoed
-    /// by the UAS per §16.6) — the stickiness cookie for reverse-path failover.
-    /// Either face's advertise is "our" Record-Route: dual-face stamps the two
-    /// halves with different hosts.
-    fn find_own_record_route_params(
+    /// The stickiness cookie for reverse-path failover toward `worker`: the
+    /// bottommost of the proxy's own Record-Route entries (either face) whose
+    /// cookie names `worker` as primary. Why the bottommost: ADR-0009 X1.
+    fn own_cookie_for(
         &self,
         resp: &SipResponse,
+        worker: &str,
     ) -> Option<crate::strategy::RouteParams> {
         resp.list::<sip_message::header::RecordRouteEntry>()
             .ok()?
             .iter()
-            .find(|entry| {
+            .rev()
+            .filter(|entry| {
                 let (host, port) = entry.uri().host_port();
                 self.is_self_addr(host, port)
             })
             .map(|entry| crate::headers::cookie_params(entry.uri()))
+            .find(|params| self.strategy.stickiness_primary(params) == Some(worker))
     }
 }
 
@@ -246,9 +247,11 @@ mod reverse_failover_tests {
 
     const W1_POD: &str = "10.244.5.8";
     const W2_POD: &str = "10.244.5.9";
+    const W3_POD: &str = "10.244.5.10";
+    const W4_POD: &str = "10.244.5.11";
     const UAC: &str = "10.244.7.13";
-    const PROXY_VIP: &str = "172.20.255.250";
-    const SNAT_NODE: &str = "172.20.0.11";
+    const PROXY_VIP: &str = "192.0.2.250";
+    const SNAT_NODE: &str = "192.0.2.11";
 
     /// Endpoint double recording every send's destination.
     #[derive(Default)]
@@ -305,10 +308,14 @@ mod reverse_failover_tests {
             DecodeResult::ForwardBackup {
                 target: ProxyAddr::new(W2_POD, 5060),
                 is_emergency: false,
+                promotion: None,
             }
         }
         fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
             None
+        }
+        fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+            params.get("w_pri").map(String::as_str)
         }
     }
 
@@ -336,6 +343,9 @@ mod reverse_failover_tests {
         }
         fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
             None
+        }
+        fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+            params.get("w_pri").map(String::as_str)
         }
     }
 
@@ -473,15 +483,154 @@ CSeq: {cseq}\r\n\
         worker_bound_200_routed("1 CANCEL", "", "")
     }
 
-    // Regression: the Dead-worker lookup was keyed on the received/rport-derived
-    // address — behind the VIP that is the SNAT node IP + ephemeral port, which
-    // matches no registry entry, so the failover branch was unreachable and a
-    // dead worker's responses were blackholed at its stale SNAT address. The
-    // worker must be identified by its Via SENT-BY (registry identity).
+    // A Dead-worker lookup keyed on the received/rport-derived address — behind
+    // the VIP that is the SNAT node IP + ephemeral port — matches no registry
+    // entry, so the failover branch is unreachable and a dead worker's responses
+    // are blackholed at its stale SNAT address. The worker must be identified by
+    // its Via SENT-BY (registry identity).
     #[tokio::test]
     async fn response_to_a_dead_worker_fails_over_to_the_backup() {
         let (core, ep) = core_with(WorkerHealth::Dead);
         core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
+    }
+
+    /// Where the cookie doubles send a backup: the pod of the worker `w_bak`
+    /// names.
+    fn pod_of(worker: &str) -> &'static str {
+        match worker {
+            "w2" => W2_POD,
+            "w4" => W4_POD,
+            other => panic!("no pod for {other}"),
+        }
+    }
+
+    /// Strategy double that fails over to the backup the decoded cookie names,
+    /// and finds none in an entry carrying no cookie.
+    struct CookieBackupStrategy;
+
+    #[async_trait]
+    impl RoutingStrategy for CookieBackupStrategy {
+        fn name(&self) -> &str {
+            "CookieBackup"
+        }
+        async fn select_for_new_dialog(
+            &self,
+            _msg: &SipMessage,
+            _opts: SelectOpts,
+        ) -> Result<ProxyAddr, SelectError> {
+            Err(SelectError::NoTarget { reason: "unused".into() })
+        }
+        async fn decode_stickiness(&self, params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+            match params.get("w_bak") {
+                Some(backup) => DecodeResult::ForwardBackup {
+                    target: ProxyAddr::new(pod_of(backup), 5060),
+                    is_emergency: false,
+                    promotion: None,
+                },
+                None => DecodeResult::Unknown { is_emergency: false },
+            }
+        }
+        fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+            None
+        }
+        fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+            params.get("w_pri").map(String::as_str)
+        }
+    }
+
+    /// w1 dead, the other workers alive, cookies decoded by
+    /// [`CookieBackupStrategy`].
+    fn spiral_core() -> (ProxyCore, Arc<CapturingEndpoint>) {
+        let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
+            WorkerEntry {
+                id: "w1".into(),
+                address: ProxyAddr::new(W1_POD, 5060),
+                health: WorkerHealth::Dead,
+                draining_since: None,
+                first_seen_at_ms: None,
+            },
+            WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
+            WorkerEntry::alive("w3", ProxyAddr::new(W3_POD, 5060)),
+            WorkerEntry::alive("w4", ProxyAddr::new(W4_POD, 5060)),
+        ]));
+        core_over(reg, Arc::new(CookieBackupStrategy), Clock::test_at(0))
+    }
+
+    /// The 200 answering w1's INVITE after it spiralled (§16.3): w1 → proxy →
+    /// a third-party proxy → this proxy again → another call. The UAS echoes
+    /// every Record-Route the request gathered, topmost first: the pair this
+    /// proxy added relaying it in (its worker-facing `;outbound` half on top),
+    /// the third party's, and the pair this proxy added relaying it out of w1
+    /// (its cookie half on top).
+    fn spiralled_invite_200(inbound_pair: &str) -> sip_message::types::SipResponse {
+        worker_bound_200_routed(
+            "1 INVITE",
+            &format!(
+                "Record-Route: {inbound_pair}\r\n\
+Record-Route: <sip:10.244.9.1:5060;lr>\r\n\
+Record-Route: <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w2;lr>, <sip:{PROXY_VIP}:5060;outbound;lr>\r\n"
+            ),
+            &format!("Contact: <sip:sipp@{UAC}:5060>\r\n"),
+        )
+    }
+
+    // A spiral puts two of this proxy's Record-Route pairs on one response.
+    // Single-face, the topmost own entry is the inbound pair's cookie-less
+    // `;outbound` half: read by position, the dead worker's response finds no
+    // cookie and is dropped.
+    #[tokio::test]
+    async fn a_spiralled_response_to_a_dead_worker_fails_over_on_its_own_cookie() {
+        let (core, ep) = spiral_core();
+        let inbound = format!(
+            "<sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;lr>"
+        );
+        core.handle_response(
+            spiralled_invite_200(&inbound),
+            format!("{W1_POD}:5060").parse().unwrap(),
+        )
+        .await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // Cross-face, both halves of the inbound pair carry its cookie, which names
+    // the worker the spiral reached (w3): read by position, w1's response goes
+    // to w3's backup. The cookie that names w1 is the one for this hop.
+    #[tokio::test]
+    async fn a_spiralled_response_to_a_dead_worker_ignores_the_other_calls_cookie() {
+        let (core, ep) = spiral_core();
+        let inbound = format!(
+            "<sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;outbound;lr>, \
+             <sip:{PROXY_VIP}:5060;w_pri=w3;w_bak=w4;lr>"
+        );
+        core.handle_response(
+            spiralled_invite_200(&inbound),
+            format!("{W1_POD}:5060").parse().unwrap(),
+        )
+        .await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // Both passes reached w1, and the alive set changed between them: the
+    // later pass recorded another backup (w4). The pair recorded relaying w1's
+    // request out is the bottom one, and its backup (w2) takes the response.
+    #[tokio::test]
+    async fn a_spiralled_response_to_a_dead_worker_reads_the_bottommost_matching_cookie() {
+        let (core, ep) = spiral_core();
+        let inbound = format!(
+            "<sip:{PROXY_VIP}:5060;outbound;lr>, <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w4;lr>"
+        );
+        core.handle_response(
+            spiralled_invite_200(&inbound),
+            format!("{W1_POD}:5060").parse().unwrap(),
+        )
+        .await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -638,7 +787,7 @@ mod hop_by_hop_tests {
 
     const UAC: &str = "10.244.7.13";
     const W1: &str = "10.0.0.1";
-    const PROXY_VIP: &str = "172.20.255.250";
+    const PROXY_VIP: &str = "192.0.2.250";
 
     // §16.7 / §16.11: 100 Trying is hop-by-hop — the worker's 100 quenched the
     // proxy→worker hop; relaying it upstream leaks the wrong scope.
@@ -678,7 +827,10 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(metrics.messages_total(), outbound_forwarded_before + 2);
         let txt = metrics.prometheus_text();
         assert!(txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"));
-        assert!(!txt.contains("outbound:forwarded"), "the 100 must not be relayed upstream");
+        assert!(
+            txt.contains("sip_messages_total{label=\"outbound:forwarded\"} 0\n"),
+            "the 100 must not be relayed upstream"
+        );
     }
 
     /// Endpoint double capturing every sent datagram's destination + bytes.
@@ -741,13 +893,13 @@ Content-Length: 0\r\n\r\n"
 
         // A full callee-shaped R-URI: user-part + `;user=phone`, as a worker's
         // b-leg INVITE carries it through the LB.
-        let invite_ruri = "sip:+0411133166602012@uas.example:6001;user=phone";
+        let invite_ruri = "sip:+155501113301000@uas.example:6001;user=phone";
         let raw_invite = format!(
             "INVITE {invite_ruri} SIP/2.0\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\
-To: <sip:+0411133166602012@uas.example>\r\n\
+To: <sip:+155501113301000@uas.example>\r\n\
 Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
@@ -774,7 +926,7 @@ Content-Length: 0\r\n\r\n"
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch={proxy_branch}\r\n\
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\
-To: <sip:+0411133166602012@uas.example>;tag=callee-1\r\n\
+To: <sip:+155501113301000@uas.example>;tag=callee-1\r\n\
 Call-ID: ackuri-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
@@ -803,7 +955,7 @@ Content-Length: 0\r\n\r\n"
 Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKackuri;rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:worker@{UAC}>;tag=w1\r\n\
-To: <sip:+0411133166602012@uas.example>;tag=callee-1\r\n\
+To: <sip:+155501113301000@uas.example>;tag=callee-1\r\n\
 Call-ID: ackuri-1@test\r\n\
 CSeq: 1 ACK\r\n\
 Content-Length: 0\r\n\r\n"

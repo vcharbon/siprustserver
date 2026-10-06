@@ -16,7 +16,7 @@
 //!
 //! Actors are concurrent *futures* joined within the one per-call task via a
 //! [`FuturesUnordered`], NOT `tokio::spawn`ed — for determinism under the paused
-//! clock and no `'static` gymnastics. [`drive_actors`] `?`s the first fatal
+//! clock and no `'static` gymnastics. `drive_actors` `?`s the first fatal
 //! actor error and otherwise parks (an actor reaching its exit cleanly must NOT
 //! collapse the join). Everything is `Send`; both lanes use plain `tokio::time`
 //! (deliberately no settle-driver abstraction).
@@ -31,12 +31,12 @@
 //! [`ActorSpec::claim`] rules. An actor that owns its endpoint outright pulls
 //! [`Agent::recv_any`](crate::Agent::recv_any) itself, unchanged.
 //!
-//! Module map: the declarative vocabulary is [`endpoint`] + [`goals`] +
-//! [`delta`] + [`observe`]; the live loop is [`runner`] with its arms in
-//! [`react`] / [`response`] / [`answer`] / [`drive`] / [`originate`] /
-//! [`script`] / [`select`] / [`accept_delta`] and its inbound fan-out in
-//! [`shared_endpoint`]; the verdict machinery is [`state`] + [`ledger`] +
-//! [`settle`]; scenario surfaces are [`spec`] + [`scenarios`].
+//! Module map: the declarative vocabulary is `endpoint` + `goals` +
+//! `delta` + `observe`; the live loop is `runner` with its arms in
+//! `react` / `response` / `answer` / `drive` / `originate` /
+//! `script` / `select` / `accept_delta` and its inbound fan-out in
+//! [`shared_endpoint`]; the verdict machinery is `state` + `ledger` +
+//! `settle`; scenario surfaces are `spec` + [`scenarios`].
 
 mod accept_delta;
 mod answer;

@@ -25,15 +25,24 @@ harness lives in a separate `crates/b2bua-harness` (X9).
 ## Decision X2 — per-call FIFO = per-call queues + worker tasks + a global semaphore
 
 A faithful port of source ADR-0004/0005, not the txn-layer actor (ADR-0007 X2).
-The dispatcher owns `callRef → bounded mpsc`; each call has one worker task that
-runs its handler bodies in strict FIFO order; a global `Semaphore` caps total
+The dispatcher owns `callRef → queue`; each call has one worker task that runs
+its handler bodies in strict FIFO order; a global `Semaphore` caps total
 in-flight handlers. Handler bodies run on spawned sub-tasks the worker awaits, so
 a panicking handler is isolated and the worker survives. cap-drop / queue-drop /
-saturation are atomic counters. Rationale: a slow handler on one call must not
-block other calls — the single actor (the txn-layer choice) would stall every
-call, which is exactly what `PerCallDispatcher` exists to prevent. `CallState`
-adds a per-`callRef` lock as a second serialization layer (uncontended under the
-dispatcher; it guards out-of-band callers like a future orphan sweep).
+saturation are atomic counters. An offer to a call's queue either queues the
+event or hands it back with why it was discarded and its owed answer — an
+answer, a forget of its transaction, or nothing — which the router renders. An
+event the protocol will not send again queues past the bounds in FIFO order
+instead, up to a per-call overflow ceiling (the queue depth); the release, the
+reaper verdicts, every timer fire, every client transaction's outcome and every
+answer to a request the call sent off its turn (ADR-0037) queue past every
+bound. Rationale: a slow handler on one call must not block other calls — the
+single actor (the txn-layer choice) would stall every call, which is exactly
+what `PerCallDispatcher` exists to prevent. `CallState` adds a per-`callRef`
+lock as a second serialization layer (uncontended under the dispatcher; it
+guards out-of-band callers like a future orphan sweep).
+
+Each event class's room, lifetime-cap counting and owed answer: one row of the dispatch table, [`dispatch/class.rs`](../../crates/b2bua/src/dispatch/class.rs).
 
 ## Decision X3 — replication-aware `CallStore` seam, in-memory impl no-ops HA
 
@@ -98,7 +107,7 @@ once, on termination, carrying the accumulated `Call.cdr_events`.
 
 Out-of-dialog OPTIONS is answered 200 OK inline so a fronting proxy's health
 probe passes. `DrainingState` / `WorkerReadiness` / `OverloadController` (the
-serving/draining/ready 200/503/silence matrix + Tier-3 admission) are a distinct
+serving/draining/ready 200/503/silence matrix + new-call admission) are a distinct
 deferred slice — see the new MIGRATION_STATUS "Draining / readiness / overload"
 line.
 
@@ -128,8 +137,8 @@ stateful txn layer emits one) — see `scenario-harness/src/agent.rs`.
 
 ## References
 
-- [`crates/b2bua/src/dispatch.rs`](../../crates/b2bua/src/dispatch.rs),
-  [`router.rs`](../../crates/b2bua/src/router.rs),
+- [`crates/b2bua/src/dispatch/`](../../crates/b2bua/src/dispatch/),
+  [`router/`](../../crates/b2bua/src/router/),
   [`store/`](../../crates/b2bua/src/store/),
   [`rules/`](../../crates/b2bua/src/rules/)
 - [ADR-0007](./0007-transaction-layer-rust-shape.md) (X3 deferral),

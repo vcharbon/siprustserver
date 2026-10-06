@@ -42,7 +42,7 @@ pub(super) fn keepalive_timeout_peer(
 /// `SocketAddr`s (the repl layer addresses peers by endpoint URL, resolved
 /// elsewhere), so they fall through to `External` here — a documented limitation;
 /// the metric is still bounded and correct, just coarser for repl-peer timeouts
-/// (which are rare and would land in the external LRU/overflow).
+/// (which are rare and would count against the external cap).
 ///
 /// The outbound proxy may be configured as a HOSTNAME (not an IP literal). We
 /// resolve it via `ToSocketAddrs` (taking the first resolved addr) and compare by
@@ -175,6 +175,7 @@ mod tests {
                 pending_reinvite_2xx: None,
                 answered_2xx: None,
                 emitted_ack: None,
+                sdp_session: None,
                 awaited_ack_cseq: None,
             },
         }
@@ -199,7 +200,9 @@ mod tests {
             kind: None,
             adopted: None,
             invite_final_sent: None,
+            in_session_timer: None,
             messages: Default::default(),
+            sdp_session: Default::default(),
         }
     }
 
@@ -208,6 +211,7 @@ mod tests {
             &crate::rules::relay::rebuild_a_leg_invite(&minimal_invite_snapshot()),
             "203.0.113.7:5060".parse().unwrap(),
             &B2buaConfig::default(),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         call.a_leg.dialogs = a_dialogs;
@@ -233,6 +237,7 @@ mod tests {
                 call::SipHeader { name: "Content-Length".into(), value: "0".into() },
             ],
             body: vec![],
+            cseq: 1,
         }
     }
 }

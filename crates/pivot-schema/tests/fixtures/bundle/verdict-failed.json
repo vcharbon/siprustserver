@@ -86,6 +86,12 @@
       "leg": "A"
     },
     {
+      "cseq": 2,
+      "failure": "final-unacknowledged",
+      "leg": "B",
+      "status": 487
+    },
+    {
       "expected": "answered",
       "failure": "check-failed",
       "field": "cdr[0].disposition",

@@ -30,7 +30,10 @@ spec:
         prometheus.io/port: "15692"
         prometheus.io/path: "/metrics"
     spec:
-      nodeSelector: { tier: app }
+      # The infra node (cluster.yaml), alone with the other shared dependencies.
+      nodeSelector: { tier: infra }
+      tolerations:
+        - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
       containers:
         - name: rabbitmq
           image: ${RABBITMQ_IMAGE}
@@ -52,9 +55,20 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 15
+          # The broker's store on memory: it restarts empty anyway (no PVC), and
+          # a disk-backed store waits on the host's fsync before confirming a
+          # publish, which a busy host stretches past a publisher's confirm bound.
+          # Sized for a full queue: x-max-length 100000 records of ~1.2 KB is
+          # ~120 MB of messages plus the store's index; the tmpfs counts toward
+          # the 1Gi memory limit.
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/rabbitmq }
           resources:
             requests: { cpu: "200m", memory: "256Mi" }
             limits:   { memory: "1Gi" }
+      volumes:
+        - name: data
+          emptyDir: { medium: Memory, sizeLimit: 512Mi }
 ---
 # Stable ClusterIP so the workers + consumer resolve a single broker at startup.
 apiVersion: v1

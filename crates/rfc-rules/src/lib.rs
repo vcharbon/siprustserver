@@ -1,6 +1,6 @@
 //! RFC-violation rules over an observed SIP wire — the ONE home for this
-//! knowledge (issue 29). A rule body here is written once against the wire
-//! model in [`wire`] and consumed by two adapters: the capture-side census
+//! knowledge. A rule body here is written once against the wire model in
+//! [`wire`] and consumed by two adapters: the capture-side census
 //! (`sip_pcap::rfc`, reading pcap flows documents) and the live recorded-trace
 //! audit (`sip_net::rfc_audit`, reading the harness event channel). What
 //! differs between those consumers is OBSERVATION POLICY — how the stream was

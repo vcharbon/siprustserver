@@ -96,3 +96,19 @@ export const rungIntervalsMs = (cls: ClassName): ReadonlyArray<number> => {
   if (row === undefined) throw new Error(`no schedule for class ${cls}`)
   return row.rung_intervals_ms
 }
+
+/**
+ * The wait before each of a message's `rungs` repeats, rung 1 first: the gaps
+ * `stated` where the capture measured them (a step's `retransmit_intervals_ms`,
+ * §6.9), otherwise `cls`'s schedule. A count longer than either list repeats
+ * the last gap, as `Schedule::exact` does past its list: steady pacing rather
+ * than a class the message never chose.
+ */
+export const rungGapsMs = (
+  cls: ClassName,
+  rungs: number,
+  stated?: ReadonlyArray<number>
+): ReadonlyArray<number> => {
+  const gaps = stated !== undefined && stated.length > 0 ? stated : rungIntervalsMs(cls)
+  return Array.from({ length: rungs }, (_, r) => gaps[Math.min(r, gaps.length - 1)]!)
+}

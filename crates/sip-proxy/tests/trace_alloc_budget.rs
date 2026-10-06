@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the global allocation counter.
 //! Allocation budget for the proxy's per-call trace tier on an UNSAMPLED call
 //! (ADR-0026).
 //!
@@ -17,7 +18,7 @@
 use std::sync::Arc;
 
 use alloc_counter::{measure, CountingAlloc};
-use observe::{CallIdentity, RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, CallIdentity, RateDraw, SampleAdmission};
 use sip_message::sniff;
 use sip_proxy::observability::metrics::{Face, RoutingDecisionKind};
 use sip_proxy::trace::emit::{self, RouteFacts};
@@ -49,7 +50,7 @@ const CALL_ID: &str = "alloc-budget@10.0.0.1";
 /// an exporter is configured (so the machinery is live), yet no call is traced.
 fn untraced() -> Arc<ProxyTraces> {
     Arc::new(ProxyTraces::new(
-        SampleAdmission::new(true, 0.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 0.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         true,
     ))
 }
@@ -150,7 +151,7 @@ fn nothing_sampled() {
 // anything on the strength of that flag alone.
 fn one_other_call_traced() {
     let traces = Arc::new(ProxyTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         true,
     ));
     const TRACED: &str = "traced@10.0.0.9";

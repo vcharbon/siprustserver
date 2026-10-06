@@ -18,6 +18,7 @@
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import * as Wire from "./wire.js"
 import { defaulted, nullable } from "./serde.js"
 
 /** Value of the top-level `schema` field. Consumers reject versions they do not know. */
@@ -37,12 +38,33 @@ export const DecodeStats = Schema.Struct({
 })
 export interface DecodeStats extends Schema.Schema.Type<typeof DecodeStats> {}
 
+/**
+ * One stretch of one probe of a merged capture put on another probe's clock
+ * before the dedup: from `from_us` on the probe's own clock (`0`: the start)
+ * until its next entry, `offset_us` was subtracted from every timestamp `probe`
+ * wrote, on the evidence of `pairs` datagrams both probes wrote at that offset.
+ */
+export const AlignedProbe = Schema.Struct({
+  probe: Schema.Int,
+  reference: Schema.Int,
+  from_us: Schema.Int,
+  offset_us: Schema.Int,
+  pairs: Schema.Int
+})
+export interface AlignedProbe extends Schema.Schema.Type<typeof AlignedProbe> {}
+
 /** SIP-classification counters over the decoded datagrams. */
 export const FlowStats = Schema.Struct({
   sip_messages: Schema.Int,
   capture_dups: Schema.Int,
   parse_failed: Schema.Int,
-  non_sip: Schema.Int
+  non_sip: Schema.Int,
+  /**
+   * Every stretch of every rebased probe, a zero one (the clock back inside the
+   * window after a step) included. Absent when no probe moved — a single-probe
+   * capture, or probes the window already reads as one.
+   */
+  aligned_probes: Schema.optionalKey(Schema.Array(AlignedProbe))
 })
 export interface FlowStats extends Schema.Schema.Type<typeof FlowStats> {}
 
@@ -201,36 +223,29 @@ const msgFields = {
 } as const
 
 /** Whole payload is valid UTF-8 — the common, diff-readable case. */
-export const TextMsg = Schema.Struct({ ...msgFields, raw: Schema.String })
+export const TextMsg = Schema.Struct({ ...msgFields, ...Wire.textArm })
 export interface TextMsg extends Schema.Schema.Type<typeof TextMsg> {}
 
 /** Start line + headers + blank line as UTF-8, then a binary body as standard base64. */
-export const HeadBodyMsg = Schema.Struct({ ...msgFields, head: Schema.String, body_b64: Schema.String })
+export const HeadBodyMsg = Schema.Struct({ ...msgFields, ...Wire.headBodyArm })
 export interface HeadBodyMsg extends Schema.Schema.Type<typeof HeadBodyMsg> {}
 
 /** Even the head is not UTF-8 — opaque, standard base64. */
-export const OpaqueMsg = Schema.Struct({ ...msgFields, raw_b64: Schema.String })
+export const OpaqueMsg = Schema.Struct({ ...msgFields, ...Wire.opaqueArm })
 export interface OpaqueMsg extends Schema.Schema.Type<typeof OpaqueMsg> {}
 
 /**
  * One captured SIP message. The exact wire bytes ride in EXACTLY ONE of three
- * forms, as SIBLING keys of `ts_us`, chosen purely from the bytes so re-emitting
- * a transformed model is deterministic.
+ * forms (`Wire`), as SIBLING keys of `ts_us`, chosen purely from the bytes so
+ * re-emitting a transformed model is deterministic.
  */
 export const Msg = Schema.Union([TextMsg, HeadBodyMsg, OpaqueMsg])
 export type Msg = typeof Msg.Type
 
 /** The payload arm a decoded message carries, as a tagged value. */
-export type Payload =
-  | { readonly _tag: "text"; readonly raw: string }
-  | { readonly _tag: "head-body"; readonly head: string; readonly body_b64: string }
-  | { readonly _tag: "opaque"; readonly raw_b64: string }
+export type Payload = Wire.Payload
 
-export const payloadOf = (msg: Msg): Payload => {
-  if ("raw" in msg) return { _tag: "text", raw: msg.raw }
-  if ("head" in msg) return { _tag: "head-body", head: msg.head, body_b64: msg.body_b64 }
-  return { _tag: "opaque", raw_b64: msg.raw_b64 }
-}
+export const payloadOf: (msg: Msg) => Payload = Wire.payloadOf
 
 /** All messages sharing one Call-ID, split by observation hop. */
 export const Leg = Schema.Struct({
@@ -341,14 +356,16 @@ export interface FlowsDoc extends Schema.Schema.Type<typeof FlowsDoc> {}
 export const decodeFlows = Schema.decodeUnknownEffect(FlowsDoc)
 export const decodeFlowsSync = Schema.decodeUnknownSync(FlowsDoc)
 
+/** Refuse a document of a schema version this contract does not model. */
+export const requireSchemaVersion = (doc: FlowsDoc): Effect.Effect<void> =>
+  doc.schema === EMIT_SCHEMA_VERSION
+    ? Effect.void
+    : Effect.die(new Error(`flows schema ${doc.schema}, expected ${EMIT_SCHEMA_VERSION}`))
+
 /** Parse a flows document from its text, refusing a schema version this contract does not model. */
 export const parseFlows = (text: string) =>
   Effect.suspend(() => decodeFlows(JSON.parse(text) as unknown)).pipe(
-    Effect.tap((doc) =>
-      doc.schema === EMIT_SCHEMA_VERSION
-        ? Effect.void
-        : Effect.die(new Error(`flows schema ${doc.schema}, expected ${EMIT_SCHEMA_VERSION}`))
-    )
+    Effect.tap(requireSchemaVersion)
   )
 
 // --- Reading helpers ---------------------------------------------------------
@@ -363,8 +380,7 @@ export const headerValues = (msg: Msg, name: string): Array<string> =>
 
 /**
  * Refuse a document that does not project a header a rule names. Without this
- * the rule silently matches nothing — the quiet-mismatch failure friction E6
- * records, one level up.
+ * the rule silently matches nothing — a quiet mismatch, one level up.
  */
 export const requireHeaders = (doc: FlowsDoc, wanted: ReadonlyArray<string>): void => {
   const have = new Set(doc.emit_headers.map((h) => h.toLowerCase()))
@@ -382,8 +398,34 @@ export const requireHeaders = (doc: FlowsDoc, wanted: ReadonlyArray<string>): vo
  * from those vantage legs is a case OF. One query, so what a case declares in
  * `case.source.call_groups` and what an exclusion rule reads are the same set.
  */
-export const groupsForLegs = (doc: FlowsDoc, legs: ReadonlyArray<number>): Array<number> =>
-  doc.groups.flatMap((group, index) => (group.legs.some((leg) => legs.includes(leg)) ? [index] : []))
+export const groupsForLegs = (doc: FlowsDoc, legs: ReadonlyArray<number>): Array<number> => {
+  const byLeg = groupsByLeg(doc)
+  const out = new Set<number>()
+  for (const leg of legs) for (const group of byLeg.get(leg) ?? []) out.add(group)
+  return [...out].sort((a, b) => a - b)
+}
+
+/**
+ * Leg → the indices of the groups holding it, ascending, built once per
+ * document: every case of a capture asks, and a scan of every group per case
+ * is quadratic in calls.
+ */
+const groupsByLeg = (doc: FlowsDoc): ReadonlyMap<number, ReadonlyArray<number>> => {
+  const known = groupsByLegOf.get(doc)
+  if (known !== undefined) return known
+  const byLeg = new Map<number, Array<number>>()
+  doc.groups.forEach((group, index) => {
+    for (const leg of group.legs) {
+      const groups = byLeg.get(leg)
+      if (groups === undefined) byLeg.set(leg, [index])
+      else groups.push(index)
+    }
+  })
+  groupsByLegOf.set(doc, byLeg)
+  return byLeg
+}
+
+const groupsByLegOf = new WeakMap<FlowsDoc, ReadonlyMap<number, ReadonlyArray<number>>>()
 
 export const isMethod = (msg: Msg, method: string): boolean =>
   msg.summary.kind === "request" && msg.summary.method.toUpperCase() === method.toUpperCase()
@@ -432,3 +474,31 @@ export const isSuccessToInvite = (msg: Msg): boolean => {
 /** An INVITE with no To-tag: the request that OPENS a dialog, never a re-INVITE. */
 export const opensDialog = (msg: Msg): boolean =>
   isInvite(msg) && msg.summary.kind === "request" && msg.summary.to.tag === null
+
+/**
+ * The host of a `host[:port]` address — a Via sent-by or a captured socket —
+ * IPv6 brackets kept, the port dropped.
+ */
+export const hostOf = (hostport: string): string => {
+  if (hostport.startsWith("[")) {
+    const end = hostport.indexOf("]")
+    return end < 0 ? hostport : hostport.slice(0, end + 1)
+  }
+  const colon = hostport.indexOf(":")
+  return colon >= 0 && colon === hostport.lastIndexOf(":") ? hostport.slice(0, colon) : hostport
+}
+
+/**
+ * Whether two Vias name the same host: case-insensitively (RFC 3261 §19.1.4)
+ * and whatever the port, since a UA on TCP may name a new one per connection
+ * (§18.1.1).
+ */
+export const sameViaHost = (a: Via, b: Via): boolean =>
+  hostOf(a.sent_by).toLowerCase() === hostOf(b.sent_by).toLowerCase()
+
+/**
+ * The bottom Via: the originator's, as it sent the request, since every proxy
+ * pushes its own above the ones it received (RFC 3261 §16.6 step 8).
+ * `undefined` where the vantage carried no Via.
+ */
+export const originVia = (msg: Msg): Via | undefined => msg.via?.at(-1)

@@ -2,19 +2,23 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
-use call::helpers::{add_originated_b_leg, mark_decision, set_call_ext};
-use call::{Call, CallLimiterState, DecisionKind, TerminationCause, TimerEntry, TimerType};
+use call::helpers::{add_originated_b_leg, mark_decision};
+use call::{Call, DecisionKind, TerminationCause, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::decision::{CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo};
+use crate::decision::{
+    header_lines, CallDecisionEngine, CallDecisionError, CallFailureRequest, CallTreatment,
+    FailureInfo,
+};
+use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
-use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterWorker};
+use crate::metrics::AdmitSite;
 use crate::rules::capabilities;
 use crate::rules::relay;
-use crate::target_admission::{classify_admission, AdmissionVerdict};
 
 use super::schemas::{BodyUpdate, RouteDecision};
 
@@ -37,7 +41,7 @@ pub async fn apply_route(
     a_invite: &SipRequest,
     invite_wire: &[u8],
     decision: &dyn CallDecisionEngine,
-    limiter: &dyn CallLimiter,
+    limiter: &LimiterWorker,
     config: &B2buaConfig,
     id_gen: &IdGen,
     clock: &Clock,
@@ -57,6 +61,7 @@ pub async fn apply_route(
             Some("Too Many Hops".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -73,11 +78,11 @@ pub async fn apply_route(
         crate::trace::intake::force_enable(&mut call, invite_wire, now_ms);
     }
 
-    // The withhold latch: a failover route that does not restate the withheld
-    // option tags cannot restore one — union the standing list into this
-    // route's declaration before it replaces the features (SetFeatures parity).
+    // The call-lifetime latch: a failover route that does not restate the
+    // withheld option tags cannot restore one — merged before its features
+    // replace the standing ones (SetFeatures parity).
     let mut features = route.features.clone();
-    features.latch_withheld_option_tags(call.features.as_ref());
+    features.latch_call_lifetime(call.features.as_ref());
     call.features = Some(features);
     call.callback_context = route.callback_context.clone();
     // Release-event subscription registry: recorded like
@@ -87,23 +92,16 @@ pub async fn apply_route(
     // parity, same as `features`).
     call.subscriptions = route.subscriptions.clone();
 
-    // Seed per-service ext slices (service-layer activation gate). A
-    // core-reserved key is not a service slice and no service id may collide
-    // with it (ADR-0016) — a decision response cannot write it.
-    for (service_id, value) in route.service_ext {
-        if crate::rules::relay::is_core_reserved_ext(&service_id) {
-            continue;
-        }
-        call = set_call_ext(call, &service_id, Some(value));
-    }
+    // Seed per-service ext slices (service-layer activation gate).
+    call = super::apply_reject::seed_service_ext(call, route.service_ext);
 
-    // ── Target admission: reject non-IP non-allow-listed destinations early ──
+    // ── Destination allow-list: reject non-IP non-allow-listed destinations early ──
     // Catches the case where call-control returns a bogus host (e.g. `kindlab`
     // from a misconfigured fixture, or a `.svc.cluster.local` name the K8s runner
     // constructs that has no live pod). Without this the host would flow to the
     // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
-    // early filter — emit `503` and terminate BEFORE any b-leg state / limiter
-    // INCR is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
+    // early filter — emit `503` and terminate BEFORE any b-leg state or limiter
+    // hold is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
     // is the Rust analogue of `buildAdmissionRejectResult` (503 + To-tag +
     // terminate effects + Reject CDR). Done before the limiter loop so a rejected
     // target never acquires a hold.
@@ -117,82 +115,41 @@ pub async fn apply_route(
             Some("Service Unavailable".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
         );
     }
 
-    // Admission control: one BATCHED + TRANSACTIONAL admit for every limiter
-    // entry — all increment, or none. The b2bua owns the fail-open policy.
-    if !route.call_limiter.is_empty() {
-        let entries: Vec<LimiterEntry> = route
-            .call_limiter
-            .iter()
-            .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
-            .collect();
-        let outcome = limiter.admit(&entries).await;
-        if crate::trace::sampled(&call) {
-            crate::trace::emit::limiter(
-                &call,
-                now_ms,
-                "admit",
-                &format!("{entries:?} -> {outcome:?}"),
-            );
-        }
-        match outcome {
-            AdmitOutcome::Admitted { window } => {
-                for e in &route.call_limiter {
-                    call.limiter_entries.push(CallLimiterState {
-                        limiter_id: e.id.clone(),
-                        limit: e.limit,
-                        origin_window: window,
-                        increment_succeeded: Some(true),
-                    });
-                }
-                // Arm the refresh timer so a long call migrates its holds to the
-                // current window before they age out of the summed lookback.
-                let entry = TimerEntry {
-                    id: format!("{:?}", TimerType::LimiterRefresh),
-                    timer_type: TimerType::LimiterRefresh,
-                    fire_at: now_ms + config.limiter_refresh_sec * 1000,
-                    leg_id: None,
-                };
-                call.timers.push(entry.clone());
-                fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
-            }
-            // Fail open: admit, record NO holds (nothing released or refreshed).
-            AdmitOutcome::Unavailable => {}
-            AdmitOutcome::Rejected { limiter_id } => {
-                return Box::pin(limiter_reject_failover(
-                    call,
-                    limiter_id,
-                    a_invite,
-                    invite_wire,
-                    decision,
-                    limiter,
-                    config,
-                    id_gen,
-                    clock,
-                    now_ms,
-                    depth,
-                ))
-                .await;
-            }
-        }
+    if let Some(limiter_id) = admit_route(&mut call, &route.call_limiter, limiter, now_ms).await {
+        return Box::pin(limiter_reject_failover(
+            call,
+            limiter_id,
+            a_invite,
+            invite_wire,
+            decision,
+            limiter,
+            config,
+            id_gen,
+            clock,
+            now_ms,
+            depth,
+        ))
+        .await;
     }
 
     // The route is admitted: it is what the call is handled under from here
     // on, and the leg it dials, or the service that dials for it, is stamped
-    // under this mark. A route the hop budget, the target admission or the
+    // under this mark. A route the hop budget, the destination allow-list or the
     // limiter refused was never applied and is no mark; a limiter failover's
     // route answers no failed leg.
     let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
     let leg_id = (depth == 0).then(|| "a".to_string());
     call = mark_decision(call, now_ms, kind, leg_id, route.label.clone());
 
-    // Announcement / deferred-routing services (ADR-0016 slice 8): when the
-    // decision attaches a `service_ext` slice that defers routing (it set
+    // Announcement / deferred-routing services (ADR-0016): when the decision
+    // attaches a `service_ext` slice that defers routing (it set
     // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
     // created here — the service's `init` owns leg creation (e.g. an unadopted
     // media leg toward an MRF, dialing the real destination later). The
@@ -227,30 +184,35 @@ pub async fn apply_route(
         .no_answer_timeout_sec
         .or(route.features.no_answer_timeout_sec)
         .map(|secs| relay::clamp_no_answer(config, &call.call_ref, secs));
-    // Additive header rewrites (PAI, PANI, any X-*). Structural From/To/R-URI go
-    // through the typed fields below, never this map (ADR-0017 X2).
-    let header_updates: Vec<(String, Option<String>)> = route
-        .update_headers
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
+    // The decision's header statements (sets of one or more lines, removals).
+    // Structural From/To/R-URI go through the typed fields below, never this
+    // map (ADR-0017 X2).
+    let header_updates: Vec<(String, Option<String>)> =
+        route.update_headers.as_ref().map(header_lines).unwrap_or_default();
     // Whether the INVITE this route mints carries an offer: the relayed
-    // a-leg body under `Keep`, none under `Drop`, the substitute under
-    // `Replace`. The strategy's withhold and the `fake-prack` delayed-offer
-    // fallback both read it.
+    // a-leg description under `Keep` and `AttachParts`, none under `Drop`, the
+    // substitute under `Replace`. The strategy's withhold and the `fake-prack`
+    // delayed-offer fallback both read it.
     let offers_sdp = match &route.update_body {
-        BodyUpdate::Keep => relay::carries_sdp(a_invite),
+        BodyUpdate::Keep | BodyUpdate::AttachParts(_) => relay::carries_sdp(a_invite),
         BodyUpdate::Drop => false,
         BodyUpdate::Replace(body) => !body.is_empty(),
     };
+    // Attached parts are composed at the mint, beside the a-leg's description.
+    let attached = match &route.update_body {
+        BodyUpdate::AttachParts(parts) => Some(
+            b2bua_sdk::model::Body::from_leg(a_invite.body().to_vec(), call.a_leg.leg_id.clone())
+                .with_parts(parts.clone()),
+        ),
+        _ => None,
+    };
     // A decision field that does not read has no destination behind it: refuse
-    // the route rather than originate toward a fabricated address (055). The
+    // the route rather than originate toward a fabricated address. The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
     // field; the malformed text itself stays off the wire.
     let (mut leg, mut effect) = match relay::build_b_leg(
-        &call.call_ref,
+        relay::CallMarks::of(&call),
         leg_id,
-        call.emergency == Some(true),
         a_invite,
         dest,
         route.new_ruri.as_deref(),
@@ -259,13 +221,15 @@ pub async fn apply_route(
         no_answer,
         config,
         id_gen,
-        None,
+        attached.as_ref(),
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
-        call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
+        crate::rules::charging::minting_arm(&call, leg_id, None),
         &capabilities::withheld_option_tags(&call, None, offers_sdp),
         &capabilities::offered_option_tags(&call, None),
         None,
+        call.a_leg.invite_final_sent.is_none(),
+        now_ms,
     ) {
         Ok(built) => built,
         Err(err) => {
@@ -281,12 +245,17 @@ pub async fn apply_route(
                 Some(err.to_string()),
                 None,
                 &[],
+                &config.minted_final_advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::Admission,
             );
         }
     };
+
+    // The route's adds yield to the INVITE as minted.
+    let adds = route.update_headers.as_ref().map(b2bua_sdk::header_update::header_adds);
+    crate::rules::stated_headers::add_to_minted(&mut leg, &mut effect, &adds.unwrap_or_default());
 
     // After the mint read the armed strategy's withhold: the fallback the
     // INVITE was minted under is the one the call now runs.
@@ -298,7 +267,7 @@ pub async fn apply_route(
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
         let mut draft = req.thaw();
         match &route.update_body {
-            BodyUpdate::Keep => {}
+            BodyUpdate::Keep | BodyUpdate::AttachParts(_) => {}
             BodyUpdate::Drop => {
                 draft = draft.without_body();
                 if let Some(d) = leg.dialogs.first_mut() {
@@ -313,8 +282,23 @@ pub async fn apply_route(
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
+        // The client-transaction handles hold the INVITE as it leaves.
+        let image = req.image().to_vec();
+        for handle in leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()) {
+            handle.original_invite = image.clone();
+        }
+        if let Some(handle) = leg.pending_invite_txn.as_mut() {
+            handle.original_invite = image;
+        }
     }
 
+    leg.sdp_session = relay::opened(
+        &effect,
+        match &route.update_body {
+            BodyUpdate::Keep | BodyUpdate::AttachParts(_) => relay::Author::Leg(&call.a_leg.leg_id),
+            BodyUpdate::Drop | BodyUpdate::Replace(_) => relay::Author::Stack,
+        },
+    );
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
 
@@ -362,6 +346,52 @@ pub async fn apply_route(
     HandlerResult { call, effects: fx }
 }
 
+/// Admission control: one admit of the route's whole limiter set, as
+/// `stated`, keyed by the call and numbered by its next change — all or
+/// none, nothing sent for a route stating none. The initial route holds
+/// nothing yet, so a refusal releases nothing. The b2bua owns the fail-open
+/// policy (`CallLimiterState::apply_admit`): a sent admit owes the call's
+/// release whatever its answer; only an admitted set is counted, and the
+/// turn's refresh invariant arms its refresh (`limiter::call::arm_refresh`).
+/// The worker answers within the admit bound. The refusing limiter's id when
+/// a cap refused the route.
+async fn admit_route(
+    call: &mut Call,
+    stated: &[LimiterEntry],
+    limiter: &LimiterWorker,
+    now_ms: i64,
+) -> Option<String> {
+    if stated.is_empty() {
+        return None;
+    }
+    let entries = stated.to_vec();
+    let (change, held) = call.limiter.number_admit();
+    let key = call.limiter.key().to_string();
+    let report = limiter.admit(AdmitSite::Initial, &key, change, &held, entries, false).await;
+    if crate::trace::sampled(call) {
+        crate::trace::emit::limiter(
+            call,
+            now_ms,
+            "admit",
+            &format!("{:?} -> {:?}", report.entries, report.outcome),
+        );
+    }
+    call.limiter.apply_admit(&report);
+    match report.outcome {
+        // Counted: the turn's refresh arming keeps its lease.
+        AdmitOutcome::Admitted => None,
+        // Fail open: the call runs uncounted (no refresh). A supersession or
+        // a release fence needs another admit or a release of the key, minted
+        // this turn: both unreachable (the worker counts a fence under
+        // `site="initial"`).
+        AdmitOutcome::Unavailable
+        | AdmitOutcome::NotSent
+        | AdmitOutcome::Superseded { .. }
+        | AdmitOutcome::Released => None,
+        AdmitOutcome::Rejected { limiter_id, .. } => Some(limiter_id),
+    }
+}
+
 /// The limiter refused this route: consult `/call/failure` for a failover
 /// treatment and apply it, or answer `486 Busy Here` when the call has no
 /// callback context to fail over with — or has already burned
@@ -374,7 +404,7 @@ async fn limiter_reject_failover(
     a_invite: &SipRequest,
     invite_wire: &[u8],
     decision: &dyn CallDecisionEngine,
-    limiter: &dyn CallLimiter,
+    limiter: &LimiterWorker,
     config: &B2buaConfig,
     id_gen: &IdGen,
     clock: &Clock,
@@ -389,6 +419,7 @@ async fn limiter_reject_failover(
             Some("Busy Here".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -437,26 +468,24 @@ async fn limiter_reject_failover(
             DecisionKind::FailoverReject,
             None,
             a_invite,
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
         ),
-        Ok(CallTreatment::Redirect(rd)) => {
-            let call = mark_decision(call, now_ms, DecisionKind::FailoverRedirect, None, rd.label);
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                rd.code,
-                rd.reason,
-                rd.update_headers.as_ref(),
-                &rd.contacts,
-                id_gen,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
+        Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
+            call,
+            rd,
+            DecisionKind::FailoverRedirect,
+            None,
+            a_invite,
+            &config.minted_final_advertisement,
+            id_gen,
+            now_ms,
+        ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5); a backend error → 486 Busy Here, the
-        // stack's own final, no decision behind it and no mark.
+        // fallback (ADR-0017 X5); a backend error → the final the engine
+        // stated, else 486 Busy Here: the stack's own, no decision behind it
+        // and no mark.
         Ok(CallTreatment::Relay { label }) => {
             let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
             crate::initial_invite::reject_call(
@@ -466,18 +495,34 @@ async fn limiter_reject_failover(
                 Some("Temporarily Unavailable".into()),
                 None,
                 &[],
+                &config.minted_final_advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
         }
-        Err(_) => crate::initial_invite::reject_call(
+        Err(CallDecisionError::Refused { code, reason, update_headers }) => {
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                code,
+                reason,
+                update_headers.as_ref(),
+                &[],
+                &config.minted_final_advertisement,
+                id_gen,
+                now_ms,
+                TerminationCause::Admission,
+            )
+        }
+        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
             call,
             a_invite,
             486,
             Some("Busy Here".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -527,7 +572,7 @@ fn record_failure_round_trip(
             },
             crate::trace::intake::json_body(treatment),
         ),
-        Err(err) => ("error", err.to_string().into_bytes()),
+        Err(err) => crate::trace::intake::error_outcome(err),
     };
     crate::trace::emit::round_trip(
         call,
@@ -566,8 +611,8 @@ fn arm_global_duration(
 /// the CORE `setup-timeout` rule (408 to A, CANCEL pending b-legs). Lives in
 /// `call.timers`, so a reclaimed mid-setup call still carries its deadline —
 /// the configured sip-txn initial-INVITE bound dies with a crashed node and
-/// left such calls holding their limiter slots for the full GlobalDuration
-/// (endurance 2026-06-12). `setup_timeout_sec <= 0` disables.
+/// would leave such calls holding their limiter slots for the full
+/// GlobalDuration. `setup_timeout_sec <= 0` disables.
 fn arm_setup_timeout(
     call: &mut Call,
     fx: &mut HandlerEffects,
@@ -593,7 +638,7 @@ fn arm_setup_timeout(
 
 /// Whether any service-ext slice asks the framework to defer normal destination
 /// routing (its `defer_routing` flag is `true`), so the owning service's `init`
-/// creates the legs instead (ADR-0016 slice 8). Generic — no service is named here.
+/// creates the legs instead (ADR-0016). Generic — no service is named here.
 fn defers_routing(call: &Call) -> bool {
     call.ext.as_ref().is_some_and(|ext| {
         ext.values().any(|v| v.get("defer_routing").and_then(|d| d.as_bool()) == Some(true))

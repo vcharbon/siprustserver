@@ -15,9 +15,15 @@
  * the same line, so a reader never has to guess whether a cell failed or never
  * ran. A cell whose document declares its lane BLOCKED is not red either: it
  * leaves a `skipped.json` and never reaches the interpreter.
+ *
+ * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
+ * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
+ * `error.txt` saying `interrupted` where its bundle would have been. It
+ * answers nothing — its fiber is interrupted — so the caller counts it from
+ * what it admitted and what landed.
  */
 import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
-import { Classifier, Confront, Reclassifier } from "@sip/pipeline"
+import { Classifier, Confront, FlowsFile, Reclassifier } from "@sip/pipeline"
 import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -25,13 +31,13 @@ import * as FileSystem from "effect/FileSystem"
 import * as Path from "effect/Path"
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner"
 import { LanePresets } from "./lanes.js"
+import { readRecordings } from "./recordings.js"
 import {
   cellDir,
   cellIdOf,
   CLASSIFICATION_FILE,
   CONFRONTATION_FILE,
   ERROR_FILE,
-  RECORDING_DIR,
   RESULT_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
@@ -94,6 +100,9 @@ export interface CellRun {
   readonly detail: string
 }
 
+/** What an interrupted cell leaves in its `error.txt`. */
+export const INTERRUPTED = "interrupted"
+
 export const runCell = Effect.fn("Driver.runCell")(function* (
   cell: Campaign.CampaignCell,
   context: CellContext
@@ -107,7 +116,16 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
     cell.kind === "rust-test"
       ? runRustTest(cell, context, absolute)
       : runPivotReplay(cell, context, absolute)
-  const outcome = yield* guarded(body)
+  const outcome = yield* guarded(body).pipe(
+    Effect.onInterrupt(() =>
+      Effect.ignore(
+        Effect.andThen(
+          fs.makeDirectory(absolute, { recursive: true }),
+          fs.writeFileString(path.join(absolute, ERROR_FILE), `${INTERRUPTED}\n`)
+        )
+      )
+    )
+  )
 
   if (outcome.crashed) {
     yield* fs.makeDirectory(absolute, { recursive: true })
@@ -240,7 +258,11 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
     )
     : []
-  const structural = Bundle.verdictPassed(verdict) && rfcGating.length === 0
+  // A run whose body panicked never passes, and no restatement makes it pass:
+  // whatever verdict it left was written before the unwind, so it cannot
+  // answer for what came after.
+  const panicked = report.outcome._tag === "panicked"
+  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)
@@ -259,9 +281,10 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
   return {
-    passed: final.passed,
-    detail:
-      final.passed === gated
+    passed: !panicked && final.passed,
+    detail: panicked
+      ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
+      : final.passed === gated
         ? gated === structural
           ? rfcGating.length === 0
             ? report.stderr
@@ -305,11 +328,13 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   const classifier = yield* Classifier.Service
 
   const recordings = yield* readRecordings(absolute)
-  const flows =
-    cell.flows === undefined
-      ? undefined
-      : yield* Flows.parseFlows(yield* fs.readFileString(cell.flows))
-  const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
+  // The legs this case cites, never the capture: a document of thousands of
+  // calls is read once for its leg index, then a few legs per cell (`FlowsFile`).
+  const captured = cell.flows === undefined
+    ? undefined
+    : yield* FlowsFile.readFlowsLegsDecoded(cell.flows, observedLegs(pivot))
+  if (captured !== undefined) yield* Flows.requireSchemaVersion(captured.envelope)
+  const resources = yield* readStatedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
   // The run configuration states what the media plane did to the session
   // descriptions the run sent, which decides what an expected SDP is held to.
   const config = yield* Bundle.decodeRunConfig(
@@ -321,7 +346,7 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     recordings,
     resources,
     media: Bundle.mediaModeOf(config),
-    ...(flows === undefined ? {} : { flows })
+    ...(captured === undefined ? {} : { captured: captured.legs })
   })
 
   const meta = {
@@ -359,38 +384,42 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   return summary
 })
 
+/** The flows legs the document's `expect` steps cite through their `observed` coordinate. */
+const observedLegs = (pivot: Pivot.PivotV3): ReadonlySet<number> =>
+  new Set(
+    Pivot.pivotSteps(pivot).flatMap((step) =>
+      step.op === "expect" && step.observed !== undefined ? [step.observed.leg] : []
+    )
+  )
+
 /**
- * Every resource an `expect` step's body references, read from the case
- * directory and keyed by its ref — the texts the confrontation holds the
- * received bodies against.
+ * Every resource a `send` or `expect` step's body or part references, read
+ * from the case directory as bytes and keyed by its ref: what the
+ * confrontation holds the received bodies against (an expected one must
+ * exist), and what the capture drove into the system (a sent one the
+ * directory lacks is left out).
  */
-const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
+const readStatedBodies = Effect.fn("Driver.readStatedBodies")(function* (
   caseDir: string,
   pivot: Pivot.PivotV3
 ) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
-  const out = new Map<string, string>()
+  const out = new Map<string, Uint8Array>()
   for (const step of Pivot.pivotSteps(pivot)) {
     const body = step.msg.body
-    if (step.op !== "expect" || body === undefined || !Body.isResourceBody(body)) continue
-    if (out.has(body.ref)) continue
-    out.set(body.ref, yield* fs.readFileString(path.join(caseDir, body.ref)))
-  }
-  return out
-})
-
-/** Every per-leg recording of one finished bundle, keyed by leg name. */
-const readRecordings = Effect.fn("Driver.readRecordings")(function* (absolute: string) {
-  const fs = yield* FileSystem.FileSystem
-  const path = yield* Path.Path
-  const dir = path.join(absolute, RECORDING_DIR)
-  const out = new Map<string, ReadonlyArray<Bundle.RecordedMessage>>()
-  if (!(yield* fs.exists(dir))) return out
-  for (const entry of yield* fs.readDirectory(dir)) {
-    if (!entry.endsWith(".jsonl")) continue
-    const text = yield* fs.readFileString(path.join(dir, entry))
-    out.set(entry.slice(0, -".jsonl".length), yield* Bundle.decodeRecording(text))
+    if ((step.op !== "expect" && step.op !== "send") || body === undefined) continue
+    const refs = Body.isResourceBody(body)
+      ? [body.ref]
+      : Body.isMultipartBody(body)
+        ? body.multipart.parts.map((part) => part.ref)
+        : []
+    for (const ref of refs) {
+      if (out.has(ref)) continue
+      const file = path.join(caseDir, ref)
+      if (step.op === "send" && !(yield* fs.exists(file))) continue
+      out.set(ref, yield* fs.readFile(file))
+    }
   }
   return out
 })

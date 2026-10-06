@@ -51,6 +51,13 @@ pub trait UdpEndpoint: Send + Sync {
     /// Snapshot of the live per-endpoint counters.
     fn counters(&self) -> UdpEndpointCounters;
 
+    /// The buffer sizes the kernel granted this endpoint's socket. `None` for
+    /// an endpoint with no kernel socket of its own (the simulated fabric, test
+    /// doubles, logical sub-endpoints).
+    fn socket_buffers(&self) -> Option<crate::types::SocketBuffers> {
+        None
+    }
+
     /// Install a delivery-time recording tap on this endpoint's inbox
     ///. Returns `false` when the impl has no tappable
     /// inbox — the recording decorator then falls back to recv-time recording.
@@ -104,6 +111,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
     fn counters(&self) -> UdpEndpointCounters {
         (**self).counters()
+    }
+    fn socket_buffers(&self) -> Option<crate::types::SocketBuffers> {
+        (**self).socket_buffers()
     }
     fn install_recv_tap(&self, tap: crate::types::RecvTap) -> bool {
         (**self).install_recv_tap(tap)
@@ -165,6 +175,7 @@ impl Counters {
             pre_ingress_replies: self.pre_ingress_replies.load(Ordering::Relaxed),
             pre_ingress_reply_failures: self.pre_ingress_reply_failures.load(Ordering::Relaxed),
             send_would_block: self.send_would_block.load(Ordering::Relaxed),
+            kernel_rx_dropped: 0,
         }
     }
 }

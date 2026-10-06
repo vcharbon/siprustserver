@@ -52,6 +52,17 @@ pub(super) fn address(field: &'static str, text: &str) -> Result<Uri, Unreadable
     })
 }
 
+/// The identity `text` names on a From or To a decision states, read by
+/// [`NameAddr::parse_untagged_identity`], or a refusal. The core owns the
+/// dialog tags (ADR-0017 X2).
+pub(super) fn identity(field: &'static str, text: &str) -> Result<NameAddr, UnreadableAddress> {
+    NameAddr::parse_untagged_identity(&SipStr::owned(text)).map_err(|err| UnreadableAddress {
+        field,
+        value: text.to_string(),
+        reason: err.reason,
+    })
+}
+
 /// One `Contact: <uri>;q=…` redirect target (RFC 3261 §20.10) for a 3xx the
 /// B2BUA authors. A target no reader accepts is refused: the caller dials what
 /// a 3xx Contact names, so an invented one sends it at an address the decision
@@ -76,7 +87,7 @@ mod unreadable_address_tests {
     use super::{redirect_contact, UnreadableAddress};
     use crate::config::B2buaConfig;
     use crate::effects::{OutboundBody, OutboundSipEffect};
-    use crate::rules::relay::build_b_leg;
+    use crate::rules::relay::{build_b_leg, CallMarks};
     use call::Leg;
     use sip_message::generators::CapabilitySet;
     use sip_message::parser::custom::CustomParser;
@@ -105,9 +116,8 @@ Content-Length: 0\r\n\r\n";
         new_to: Option<&str>,
     ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
         build_b_leg(
-            "w0|call-ref|xyz",
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
             "b-1",
-            false,
             &a_leg_invite(),
             ("10.244.2.7".to_string(), 5060),
             new_ruri,
@@ -123,6 +133,8 @@ Content-Length: 0\r\n\r\n";
             &[],
             &[], // no withheld option tags
             None,
+            true,
+            0,
         )
     }
 
@@ -177,6 +189,103 @@ Content-Length: 0\r\n\r\n";
         };
         assert_eq!(invite.from().uri().host(), "carrier.example");
         assert_eq!(invite.to().uri().user(), Some("+15559876"));
+    }
+
+    fn invite_of(effect: OutboundSipEffect) -> SipRequest {
+        match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
+        }
+    }
+
+    /// A `tag` a decision states on its From is dropped: the leg's tag is the
+    /// core's own, exactly one on the wire, and the URI parameters inside the
+    /// brackets stay URI parameters.
+    #[test]
+    fn a_decision_from_tag_is_dropped_for_the_minted_one() {
+        let (leg, effect) =
+            build(None, Some("<sip:+15551234@carrier.example;user=phone>;tag=stated-tag"), None)
+                .expect("a bracketed From must route");
+        let invite = invite_of(effect);
+        let tag = invite.from().tag().expect("a From tag").to_string();
+        assert_ne!(tag, "stated-tag");
+        assert_eq!(leg.dialogs[0].sip.local_tag, tag);
+        assert_eq!(invite.from().uri().user(), Some("+15551234"));
+        assert_eq!(invite.from().uri().param("user").and_then(|p| p.as_str()), Some("phone"));
+        let from_line = invite
+            .headers()
+            .iter()
+            .find(|h| h.name.as_str().eq_ignore_ascii_case("From"))
+            .map(|h| h.value.as_str().to_string())
+            .expect("From line");
+        assert_eq!(from_line.matches("tag=").count(), 1, "{from_line}");
+    }
+
+    /// A request outside any dialog carries no To tag (RFC 3261 §8.1.1.2): one a
+    /// decision states is dropped, the rest of the To kept.
+    #[test]
+    fn a_decision_to_tag_is_dropped() {
+        let (_leg, effect) =
+            build(None, None, Some("<sip:+15559876@carrier.example;user=phone>;tag=peer-tag"))
+                .expect("a bracketed To must route");
+        let invite = invite_of(effect);
+        assert_eq!(invite.to().tag(), None);
+        assert_eq!(invite.to().uri().user(), Some("+15559876"));
+        assert_eq!(invite.to().uri().param("user").and_then(|p| p.as_str()), Some("phone"));
+    }
+
+    /// A `tag` written as a URI parameter, on a bare value or inside the brackets,
+    /// is dropped the same way; the other URI parameters stay.
+    #[test]
+    fn a_tag_uri_parameter_is_dropped() {
+        for text in [
+            "sip:+15551234@carrier.example;user=phone;tag=bare-tag",
+            "<sip:+15551234@carrier.example;user=phone;tag=inner>",
+        ] {
+            let (_leg, effect) = build(None, Some(text), Some(text)).expect("must route");
+            let invite = invite_of(effect);
+            assert!(!invite.from().uri().params().has("tag"), "{text}");
+            assert!(!invite.to().uri().params().has("tag"), "{text}");
+            assert_eq!(invite.to().tag(), None);
+            assert!(invite.from().tag().is_some_and(|t| !t.is_empty() && t != "bare-tag"));
+            assert_eq!(invite.to().uri().param("user").and_then(|p| p.as_str()), Some("phone"));
+        }
+    }
+
+    /// A bracketed identity no reader accepts is refused like a bare one, the field
+    /// named.
+    #[test]
+    fn an_unreadable_bracketed_identity_is_refused() {
+        for text in ["<sip:a@2001:db8::1>", "\"Bob\" <sip:a@h", "<>"] {
+            for (field, built) in [
+                ("new_from", build(None, Some(text), None)),
+                ("new_to", build(None, None, Some(text))),
+            ] {
+                let err = built.err().unwrap_or_else(|| panic!("{field}={text:?} must be refused"));
+                assert_eq!(err.field, field);
+                assert_eq!(err.value, text);
+            }
+        }
+    }
+
+    /// A `tag=` inside the userinfo or a `?`-header value would count as a second
+    /// From tag at the freeze, so the identity is refused on either field, never built.
+    #[test]
+    fn a_tag_inside_the_userinfo_is_refused() {
+        for text in [
+            "<sip:+15551234;tag=inner@carrier.example>",
+            "<sip:+15551234@carrier.example?x=a;tag=b>",
+        ] {
+            for (field, built) in [
+                ("new_from", build(None, Some(text), None)),
+                ("new_to", build(None, None, Some(text))),
+            ] {
+                let err = built.err().unwrap_or_else(|| panic!("{field}={text:?} must be refused"));
+                assert_eq!(err.field, field);
+            }
+        }
     }
 
     // No rewrites at all: the relayed a-leg values were admitted by the inbound

@@ -8,6 +8,7 @@
 //! green for the wrong reason.
 
 use crate::flow::{Op, Step};
+use crate::lint::transactions::{discharged_by, landing_of};
 use crate::lint::{at, reach, Index, Place, Reach, Report};
 use crate::must_fail::DeclaredFailure;
 
@@ -48,13 +49,17 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
 }
 
 /// The `unexpected-ack` shape: the anchor is the dialog-creating 2xx the
-/// SCRIPTED PEER sends, and the flow states no ACK answering it.
+/// SCRIPTED PEER sends, and the flow states no ACK discharging it.
 ///
 /// Both halves are load-bearing. The peer has to be the SENDER, because the ACK
 /// the failure is about is the PLATFORM's answer to it — where the peer merely
 /// received the 2xx, the withheld ACK is the peer's own and nothing unexpected
-/// arrives. And an ACK the flow already states is an ACK the run expects, so
-/// the platform emitting one satisfies the document instead of failing it.
+/// arrives. And an ACK the flow states for the anchor's own transaction is an
+/// ACK the run expects, so the platform emitting one satisfies the document
+/// instead of failing it. Which transaction an ACK discharges is the leg's
+/// state (`lint::transactions`, RFC 3261 §13.2.2.4): an ACK expected for a
+/// LATER INVITE the leg takes leaves the anchor's 2xx as un-ACKed as the
+/// capture had it.
 fn unexpected_ack(
     all: &[(Place, &Step)],
     step: &Step,
@@ -74,7 +79,7 @@ fn unexpected_ack(
         );
         return;
     }
-    if let Some(ack) = answering(all, step, place, "ACK") {
+    if let Some(ack) = discharging(all, step, place) {
         report.error(
             "must-fail/anchor-already-acked",
             path,
@@ -184,6 +189,22 @@ fn unexpected_cancel(
             "drop the declaration: a document that already expects the CANCEL ahead of the final has nothing to declare unexpected",
         );
     }
+}
+
+/// The id of the ACK step the flow states DISCHARGING the transaction this 2xx
+/// landed on: an ACK on the same leg that this step's own run reaches, paired
+/// by the leg's transaction state rather than by method alone.
+fn discharging<'a>(all: &[(Place, &'a Step)], step: &Step, place: Place) -> Option<&'a str> {
+    let transaction = landing_of(all, step, place);
+    all.iter()
+        .find(|(other_place, other)| {
+            other.leg == step.leg
+                && is_method(other, "ACK")
+                && reach(place, *other_place) == Reach::Ok
+                && discharged_by(all, other, *other_place)
+                    .is_some_and(|discharge| discharge.transaction == transaction)
+        })
+        .map(|(_, other)| other.id.as_str())
 }
 
 /// The id of the request the flow states answering this response: a `method`

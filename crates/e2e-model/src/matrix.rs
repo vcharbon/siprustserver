@@ -2,12 +2,11 @@
 //! script cross-product of load shapes (callshapes program §7 / phase D1).
 //!
 //! Rather than hand-listing every `Establishment`+`Script` combination, the
-//! axes are declared as data ([`ESTS`], [`SCRS`]) and a compatibility predicate
-//! ([`compatible`]) gates the cross-product; [`generated_shapes`] composes each
-//! legal cell through the callshapes pipeline algebra
-//! ([`ShapePlan`](callshapes::plan::ShapePlan)) into a
-//! [`ShapeDescriptor`](crate::registry::ShapeDescriptor) with a **stable
-//! generated id** (`"<establishment>+<script>"`, e.g. `forked+reinvite`).
+//! axes are declared as data (`ESTS`, `SCRS`) and a compatibility predicate
+//! (`compatible`) gates the cross-product; `generated_shapes` composes each
+//! legal cell through the callshapes pipeline algebra ([`ShapePlan`]) into a
+//! [`ShapeDescriptor`] with a **stable generated id**
+//! (`"<establishment>+<script>"`, e.g. `forked+reinvite`).
 //!
 //! # SUT-reachability
 //!
@@ -62,7 +61,7 @@ const FORK_TAGS: &[&str] = &["fk1", "fk2", "fk3"];
 /// The establishment axis. Reliable (E2), true forking (E3), reroute-on-reject
 /// (E4 — the reject arm sends NO provisional, so this already models
 /// "reroute-no-18x": bob's `Disposition::Reject` answers the final directly),
-/// reroute-on-no-answer (E6/047 — ring-then-silent primary, SUT-timer-driven).
+/// reroute-on-no-answer (E6 — ring-then-silent primary, SUT-timer-driven).
 const ESTS: &[Est] = &[
     Est { frag: "reliable", make: Establishment::Reliable, needs_bob2: false, reliable: true },
     Est {
@@ -82,7 +81,7 @@ const ESTS: &[Est] = &[
         needs_bob2: true,
         reliable: false,
     },
-    // E6 (047): NO-ANSWER-triggered failover — bob rings then never answers,
+    // E6: NO-ANSWER-triggered failover — bob rings then never answers,
     // the SUT's per-route no-answer timer CANCELs it and walks to bob2.
     Est {
         frag: "reroute_noanswer",

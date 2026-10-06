@@ -71,8 +71,8 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
 
 /// The end-of-hold in-dialog BYE the UAC sends after its keepalive hold — the
 /// request that resolves to the same `callRef` as [`invite`] (same Call-ID +
-/// alice tag) and, on the rebooted primary, gets the 481. `CSeq: 2 BYE` mirrors
-/// the endurance `-trace_err` log (the BYE is the 2nd request of the dialog).
+/// alice tag) and, on the rebooted primary, gets the 481. `CSeq: 2 BYE`: the BYE
+/// is the 2nd request of the dialog.
 fn bye(cid: &str) -> SipRequest {
     let raw = format!(
         "BYE sip:bob@example.com SIP/2.0\r\n\
@@ -104,8 +104,8 @@ fn call_state_metered(
     metrics: B2buaMetrics,
 ) -> CallState {
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
-    let writer = BufferedTerminateWriter::spawn(store.clone(), 1024);
-    CallState::new(store, writer, ordinal, metrics).with_replication(repl)
+    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 1024);
+    CallState::new(store, ordinal, metrics).with_replication(repl, writer)
 }
 
 /// Seed a call body into `(role, primary)` of the replicating store.
@@ -126,7 +126,13 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = call_state("w1", repl.clone());
 
-    let c0 = build_initial_call(&invite("w0", "w1", "cid-a"), src(), &config_for("w0"), 0);
+    let c0 = build_initial_call(
+        &invite("w0", "w1", "cid-a"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r0 = c0.call_ref.clone();
     assert!(r0.starts_with("w0|"));
     state.create(c0);
@@ -138,6 +144,41 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
     assert!(!state.is_takeover("w0|other|t"));
 }
 
+/// A replicated call a service moved onto a set the limiter does not hold
+/// runs uncounted on the node that takes it over: the set replicates with
+/// its limiter state, and the copy counts in the gauge until it is shed.
+#[tokio::test]
+async fn a_takeover_copy_running_on_an_unheld_set_counts_as_uncounted() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let metrics = B2buaMetrics::new();
+    let state = call_state_metered("w1", repl.clone(), metrics.clone());
+    let mut call = build_initial_call(
+        &invite("w0", "w1", "cid-runs-on"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
+    let entry = |id: &str| call::LimiterEntry { id: id.into(), limit: 1 };
+    call.limiter = call::CallLimiterState::from_parts(
+        call.limiter.key().to_string(),
+        true,
+        (vec![entry("x")], 1),
+        (vec![entry("x")], 1),
+        1,
+        Some(vec![entry("y")]),
+    );
+    let r = call.call_ref.clone();
+    put(&repl, BAK, "w0", &call).await;
+
+    let (c, _skew) = state.peek_replica(&r).await.expect("read from bak:w0");
+    assert_eq!(c.limiter.runs_on(), Some(&[entry("y")][..]), "runs_on replicates");
+    assert!(state.materialize_if_absent(c, MaterialiseOrigin::Takeover));
+    assert_eq!(metrics.limiter().uncounted_calls(), 1, "the copy runs on y, which is not held");
+    assert!(state.drop_local(&r));
+    assert_eq!(metrics.limiter().uncounted_calls(), 0, "a shed copy leaves the gauge");
+}
+
 // ---------------------------------------------------------------------------
 // (2) local-only self-release: shed the live copy, keep the backup Element.
 // ---------------------------------------------------------------------------
@@ -147,7 +188,13 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
     let state = call_state("w1", repl.clone());
 
     // A call w0 owns + we (w1) back up: seed bak:w0, then materialise the takeover.
-    let call = build_initial_call(&invite("w0", "w1", "cid-h"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-h"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put(&repl, BAK, "w0", &call).await;
 
@@ -175,7 +222,7 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
 }
 
 // ---------------------------------------------------------------------------
-// (2b) clock-skew hardening — test #5: origin_now_ms → skew_offset_ms
+// (2b) clock-skew hardening: origin_now_ms → skew_offset_ms
 //      computation + persistence + reaching hydration.
 // ---------------------------------------------------------------------------
 /// Seed a call with an explicit `origin_now_ms` (the sender's wall clock at
@@ -214,7 +261,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     let state = call_state("w0", repl.clone());
 
     // A reclaimable pri:w0 call (rebooted-primary reclaim source).
-    let call = build_initial_call(&invite("w0", "w1", "cid-skew"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-skew"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put_with_origin(&repl, PRI, "w0", &call, 70_000).await;
 
@@ -239,7 +292,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     // The backup-partition takeover read surfaces it too.
     let repl_b = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
     let state_b = call_state("w1", repl_b.clone());
-    let call_b = build_initial_call(&invite("w0", "w1", "cid-skew-b"), src(), &config_for("w0"), 0);
+    let call_b = build_initial_call(
+        &invite("w0", "w1", "cid-skew-b"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let rb = call_b.call_ref.clone();
     put_with_origin(&repl_b, BAK, "w0", &call_b, 55_000).await; // origin 45 s behind
     let (_c, skew_b) = state_b.peek_replica(&rb).await.expect("read bak:w0");
@@ -247,7 +306,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
 
     // A locally-originated write (no origin stamp) carries NO offset.
     let repl_local = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
-    let call_l = build_initial_call(&invite("w0", "w1", "cid-local"), src(), &config_for("w0"), 0);
+    let call_l = build_initial_call(
+        &invite("w0", "w1", "cid-local"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     put(&repl_local, PRI, "w0", &call_l).await;
     assert_eq!(
         repl_local.skew_offset_ms(&call_l.call_ref),
@@ -271,8 +336,13 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
     let state = call_state_metered("w1", repl.clone(), metrics.clone());
 
     // The image w1 reverse-flushed when its takeover copy of a w0 call released.
-    let mut ended =
-        build_initial_call(&invite("w0", "w1", "cid-ended"), src(), &config_for("w0"), 0);
+    let mut ended = build_initial_call(
+        &invite("w0", "w1", "cid-ended"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     ended.state = CallModelState::Terminated;
     let r_ended = ended.call_ref.clone();
     put(&repl, BAK, "w0", &ended).await;
@@ -290,7 +360,13 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
 
     // A ref this node is primary for is not a takeover source; an unknown
     // backup-role ref is simply absent.
-    let own = build_initial_call(&invite("w1", "w0", "cid-own"), src(), &config_for("w1"), 0);
+    let own = build_initial_call(
+        &invite("w1", "w0", "cid-own"),
+        src(),
+        &config_for("w1"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     assert_eq!(state.peek_replica(&own.call_ref).await.err(), Some(ReplicaMiss::WrongRole));
     assert_eq!(state.peek_replica("w0|nobody|t").await.err(), Some(ReplicaMiss::Absent));
 }
@@ -304,7 +380,13 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     let state = call_state("w0", repl.clone());
 
     // A call w0 reclaimed into its own pri:w0 partition (via bootstrap).
-    let call = build_initial_call(&invite("w0", "w1", "cid-r"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-r"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put(&repl, PRI, "w0", &call).await;
 
@@ -334,15 +416,14 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 }
 
 // ===========================================================================
-// REPRODUCTION — the endurance "long-hold dialogs die on B2BUA reboot" defect
-// (study `deploy/k8s/results/endurance-20260605-165318/long-call-failure-study.html`).
+// Long-hold dialogs across a B2BUA reboot.
 //
 // The two tests below recreate, at this exact seam, the decision that produces
 // the `481 Call/Transaction Does Not Exist` on the end-of-hold BYE. They split
-// the failure into its TWO underlying conditions so we can reason about the fix
-// separately — because the recommended fix only addresses ONE of them.
+// the failure into its TWO underlying conditions, because a local reclaim read
+// recovers only ONE of them.
 //
-// Causal chain (verified in the study):
+// Causal chain:
 //   reboot → reclaim incomplete → BYE routed back to the (Ready) primary →
 //   the takeover read sees a PRIMARY-role miss (`ReplicaMiss::WrongRole`)
 //   → process() falls into maybe_reject_orphan → 481.
@@ -353,14 +434,14 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 /// import landed, and only a backup reverse-flush `ReclaimCall` — never an
 /// arriving in-dialog request — re-materialised a post-sweep straggler).
 ///
-/// FIXED at the router: `router::process`'s in-dialog lookup follows a
-/// `NotBackupRole` takeover refusal from `router::materialise` with an
-/// on-demand reclaim through the same module, so the arriving BYE
-/// materialises + serves the call instead of orphan-481ing. This test pins the
-/// STATE-LEVEL seam contract the router builds on: `peek_replica` (correctly)
-/// refuses a primary-role ref — the backup partition is a takeover source,
-/// `pri:{self}` is a reclaim source read by `peek_reclaimable` — and the body
-/// is reachable through the latter. The end-to-end recovery is asserted by
+/// The router recovers it: `router::process`'s in-dialog lookup follows a
+/// `NotBackupRole` takeover refusal from `router::materialise` with an on-demand
+/// reclaim through the same module, so the arriving BYE materialises + serves the
+/// call instead of orphan-481ing. This test pins the STATE-LEVEL seam contract
+/// the router builds on: `peek_replica` (correctly) refuses a primary-role ref —
+/// the backup partition is a takeover source, `pri:{self}` is a reclaim source
+/// read by `peek_reclaimable` — and the body is reachable through the latter. The
+/// end-to-end recovery is asserted by
 /// `failover-harness::in_dialog_bye_races_bulk_reclaim_served_on_demand`.
 #[tokio::test]
 async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
@@ -370,7 +451,13 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
 
     // A long-hold call w0 owns. After reboot its body is present in pri:w0 (the
     // bootstrap delivered it) but it was NOT materialised into the live map.
-    let call = build_initial_call(&invite("w0", "w1", "cid-long"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-long"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert!(r.starts_with("w0|"), "call_ref encodes w0 as the primary");
     put(&repl, PRI, "w0", &call).await; // pri:w0 body present …
@@ -382,12 +469,11 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
         state.peek_replica(&r).await.err(),
         Some(ReplicaMiss::WrongRole),
         "REPRO: a primary-role miss is no takeover source → \
-         maybe_reject_orphan → 481 on the BYE — the endurance long-call loss"
+         maybe_reject_orphan → 481 on the BYE"
     );
 
     // Render the LITERAL response the UAC receives — exactly what
     // `maybe_reject_orphan` emits when the read above misses.
-    // This is the message in the endurance `/uac-long-options_1_errors.log`.
     let the_481 = generate_response(
         &bye("cid-long"),
         481,
@@ -417,15 +503,14 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
 }
 
 /// CASE B — the body was NEVER pulled into `pri:{self}` (the bootstrap pull
-/// itself truncated: the study's `repl_reclaimed_total = 392` of ~2350, the
-/// dominant production case). The call's only surviving copy is `bak:w0` on the
-/// PEER. The same 481 results — but here the recommended local-read fix would
-/// ALSO return None, so it does NOT recover this population.
+/// itself truncated). The call's only surviving copy is `bak:w0` on the PEER.
+/// The same 481 results, and a local read returns None too, so it does NOT
+/// recover this population.
 ///
-/// This is the crux for the fix discussion: a fix that only reads the local
-/// `pri:{self}` partition is blind to a call the truncated bootstrap never
-/// imported. Recovering it needs an on-demand PULL from the peer's `bak:{self}`
-/// (the same source bootstrap uses), or a bootstrap that does not truncate.
+/// A recovery that only reads the local `pri:{self}` partition is blind to a
+/// call the truncated bootstrap never imported. Recovering it needs an
+/// on-demand PULL from the peer's `bak:{self}` (the same source bootstrap uses),
+/// or a bootstrap that does not truncate.
 #[tokio::test]
 async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
@@ -433,7 +518,13 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
 
     // Build the ref the same way, but seed NOTHING into this node's pri:w0 (the
     // truncated bootstrap never imported it). It lives only in bak:w0 on w1.
-    let call = build_initial_call(&invite("w0", "w1", "cid-long2"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-long2"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert!(state.peek(&r).is_none(), "not live (never reclaimed)");
 
@@ -454,7 +545,7 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
 }
 
 // ===========================================================================
-// #4 REPRODUCTION — the Backup-flow bootstrap silently OMITS a reclaimed call.
+// The Backup-flow bootstrap must not OMIT a reclaimed call.
 //
 // The server side of a peer's `PullRequest[Backup] caller=w1 since=(0,0)` answers
 // from `scan_refs_backed_by`, which filters `pri:{self}` on the DENORMALISED
@@ -476,7 +567,13 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     let state = call_state("w0", repl.clone());
 
     // A call w0 owns, backed up by w1 (topology.bak = w1, from the w_bak cookie).
-    let call = build_initial_call(&invite("w0", "w1", "cid-bak"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-bak"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert_eq!(
         call.topology.as_ref().map(|t| t.bak.as_str()),
@@ -507,7 +604,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     assert_eq!(
         repl.scan_refs_backed_by("w0", "w1"),
         vec![r.clone()],
-        "#4: a reclaimed pri:{{self}} call MUST be visible to its backup's bootstrap"
+        "a reclaimed pri:{{self}} call MUST be visible to its backup's bootstrap"
     );
 }
 
@@ -539,6 +636,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
             &invite("w0", "w1", &format!("rec-{i}")),
             src(),
             &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         put(&repl, PRI, "w0", &call).await;
@@ -570,6 +668,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
                     &invite("w0", "w1", &format!("churn-{w}-{j}")),
                     src(),
                     &config_for("w0"),
+                    &sip_txn::IdGen::seeded(1),
                     0,
                 );
                 let cr = call.call_ref.clone();

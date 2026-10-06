@@ -2,8 +2,8 @@
 //!
 //! One line per row, in `(at_ms, seq)` order, tagged with the plane so SIP,
 //! replication, lifecycle and views events are distinguishable in a terminal. A
-//! lifecycle row renders as a centred `=== … ===` band (matching the historic
-//! ha-harness text band); a belief change renders as a `[VIEW]` line on its
+//! lifecycle row renders as a centred `=== … ===` band (the ha-harness
+//! text band); a belief change renders as a `[VIEW]` line on its
 //! observer. Message rows carry their detail (full wire text for SIP) indented
 //! under the line so the file is self-contained. The views table and the
 //! disagreements list close the file, mirroring the HTML report.
@@ -24,12 +24,16 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
     out.push_str(&format!("  Unified sequence: {}\n", doc.title));
     out.push_str(&format!("  Status: {}\n", if doc.passed { "PASS" } else { "FAIL" }));
     out.push_str(&format!("  Lanes: {}\n", lane_line(doc)));
+    // The HTTP count and legend entry appear only where the doc has the plane,
+    // so a SIP-only timeline renders as before.
+    let http = count(doc, |k| matches!(k, RowKind::Http { .. }));
     out.push_str(&format!(
-        "  Rows: {}  (sip={}, repl={}, lifecycle={})\n",
+        "  Rows: {}  (sip={}, repl={}, lifecycle={}{})\n",
         doc.rows.len(),
         count(doc, |k| matches!(k, RowKind::Sip { .. })),
         count(doc, |k| matches!(k, RowKind::Repl { .. })),
         count(doc, |k| matches!(k, RowKind::Lifecycle)),
+        if http > 0 { format!(", http={http}") } else { String::new() },
     ));
     if !doc.views.is_empty() {
         out.push_str(&format!("  View changes: {}\n", doc.views.len()));
@@ -48,8 +52,12 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
     // Legend so the plane tags are self-describing.
     out.push_str(
         "  legend: [SIP] request/response · [REPL] replication frame · \
-         [VIEW] belief change · === lifecycle ===\n",
+         [VIEW] belief change · === lifecycle ===",
     );
+    if http > 0 {
+        out.push_str(" · [HTTP] exchange");
+    }
+    out.push('\n');
     out.push_str(&"-".repeat(SEP_WIDTH));
     out.push('\n');
 
@@ -167,9 +175,10 @@ fn render_row(out: &mut String, row: &SeqRow, base: i64, doc: &SeqDoc) {
             ));
             out.push('\n');
         }
-        RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+        RowKind::Sip { delivered } | RowKind::Repl { delivered } | RowKind::Http { delivered } => {
             let plane = match row.kind {
                 RowKind::Sip { .. } => "SIP ",
+                RowKind::Http { .. } => "HTTP",
                 RowKind::Repl { .. } => "REPL",
                 RowKind::Lifecycle => unreachable!(),
             };

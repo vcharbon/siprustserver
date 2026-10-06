@@ -98,7 +98,7 @@ mod tests {
         let bindings = IdentityBindings::new().bind("caller", "private", "0009001").bind(
             "called-0-0",
             "e164",
-            "+33000900004",
+            "+15550900004",
         );
         assert_eq!(bindings.resolve("caller", "private").unwrap(), "0009001");
         assert_eq!(

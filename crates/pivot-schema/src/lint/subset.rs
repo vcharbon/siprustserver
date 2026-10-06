@@ -22,7 +22,7 @@
 //! capture DOES justify — its provenance, its coordinates, its span — so a
 //! document that lost them is caught here rather than at confrontation.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::accessor::Accessor;
 use crate::flow::FlowNode;
@@ -103,7 +103,7 @@ fn authored_constructs(index: &Index<'_>, report: &mut Report) {
             refuse(report, "subset/after", path, "an `after` ordering");
         }
     }
-    // The ONE tolerated absence a capture justifies (§6.9, issue 106): a
+    // The ONE tolerated absence a capture justifies (§6.9): a
     // caller-facing PROVISIONAL beyond the peer emissions that anchor it, on a
     // document that SAYS it derived one. The flag is what puts the inference in
     // front of a reviewer, which is the whole of what this gate asks (module
@@ -188,12 +188,39 @@ const SURPLUS_PROVISIONAL_FLAG: &str = "provisional-expect-surplus-tolerated";
 /// so a second step on one capture coordinate is never silent (§6.9).
 const DERIVED_PROVISIONAL_FLAG: &str = "relayed-provisional-expect-derived";
 
+/// The flag the far-side pass is obliged to write beside what it transcribed
+/// onto a leg the vantage lost past its 2xx: the other leg's in-dialog INVITE,
+/// its 2xx and its ACK, whichever party sent the INVITE, each naming the
+/// message it copies (§6.9).
+const FAR_SIDE_REINVITE_FLAG: &str = "far-side-reinvite-derived";
+
 /// Whether a step has the shape both provisional exemptions are bounded to: an
 /// `expect` of a provisional response. 100 is the stack's own and never
 /// relayed, so it is outside the rules exactly as it is outside their passes.
 fn provisional_expect_shape(step: &crate::flow::Step) -> bool {
     matches!(step.op, crate::flow::Op::Expect)
         && step.msg.status.is_some_and(|status| status > 100 && status < 200)
+}
+
+/// Whether a step has one of the three message shapes the far-side pass pairs
+/// across the legs, and no other: an in-dialog INVITE request, an in-dialog
+/// 2xx to INVITE, or an in-dialog automatic ACK. Either half of a pair may be
+/// the one listed second, and both halves have the shape; the gate reads the
+/// pair's legs and ops itself.
+fn far_side_shape(step: &crate::flow::Step) -> bool {
+    if !step.in_dialog {
+        return false;
+    }
+    let method = step.msg.method.as_deref().map(str::to_ascii_uppercase);
+    match (method.as_deref(), step.msg.status) {
+        (Some("INVITE"), None) => true,
+        (Some("ACK"), None) => step.auto,
+        (None, Some(status)) => {
+            (200..300).contains(&status)
+                && step.msg.cseq_method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+        }
+        _ => false,
+    }
 }
 
 fn capture_evidence(index: &Index<'_>, report: &mut Report) {
@@ -215,27 +242,44 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
     }
     // A capture coordinate pairs a step with the message it is compared against,
     // and the pairing is a lookup — so two steps may name one message where the
-    // SUT emits it twice, which is what a DERIVED provisional expectation does.
-    // Both halves gate, as they do for `optional`: the flag alone would exempt
-    // every duplicate in the file, the shape alone a silent inference.
-    let derived = index
-        .pivot
-        .case
-        .annotations
-        .as_ref()
-        .is_some_and(|a| a.flags.iter().any(|f| f.kind == DERIVED_PROVISIONAL_FLAG));
-    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // SUT emits it twice, which is what a DERIVED provisional expectation does,
+    // and where the far side of a relayed re-INVITE was transcribed onto the
+    // other leg: that pair is one message on TWO legs in OPPOSITE ops, and
+    // nothing else. Both halves gate, as they do for `optional`: the flag
+    // alone would exempt every duplicate in the file, the shape alone a
+    // silent inference.
+    let flagged = |kind: &str| {
+        index
+            .pivot
+            .case
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.flags.iter().any(|f| f.kind == kind))
+    };
+    let derived = flagged(DERIVED_PROVISIONAL_FLAG);
+    let far_side = flagged(FAR_SIDE_REINVITE_FLAG);
+    let mut seen: BTreeMap<(usize, usize), &crate::flow::Step> = BTreeMap::new();
     for (_, step) in index.all_steps() {
         if let Some(observed) = &step.observed {
-            if !seen.insert((observed.leg, observed.msg))
-                && !(derived && provisional_expect_shape(step))
-            {
-                report.error(
-                    "capture/observed-duplicated",
-                    at("flow", &step.id),
-                    "two captured steps name one captured message",
-                    "give the step its own `observed`, or state the pass that derived it",
-                );
+            let coordinate = (observed.leg, observed.msg);
+            let mirrored = |holder: &crate::flow::Step| {
+                far_side
+                    && far_side_shape(step)
+                    && far_side_shape(holder)
+                    && holder.leg != step.leg
+                    && holder.op != step.op
+            };
+            if let Some(holder) = seen.get(&coordinate) {
+                if !(derived && provisional_expect_shape(step)) && !mirrored(holder) {
+                    report.error(
+                        "capture/observed-duplicated",
+                        at("flow", &step.id),
+                        "two captured steps name one captured message",
+                        "give the step its own `observed`, or state the pass that derived it",
+                    );
+                }
+            } else {
+                seen.insert(coordinate, step);
             }
         }
         if step.observed.is_none() {

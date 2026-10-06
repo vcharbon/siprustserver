@@ -44,6 +44,42 @@
 //! already subsumes, and it cannot disambiguate that cross-failover branch
 //! reuse.
 //!
+//! **An out-of-dialog request is told from its UAC's reuse by its bottom
+//! Via.** Every proxy pushes its Via above the ones it received (§16.6 step 8),
+//! so the bottom Via is the originator's as it sent the request. A second
+//! transaction on a spent number with no To tag is judged against the first
+//! copy's bottom Via:
+//!
+//!   - the same sent-by and branch: the same request reaching the taker by
+//!     another path — a spiral (§16.3) or a merged fork (§8.2.2.2) — and it
+//!     records nothing;
+//!   - another sent-by host: another element originated it (a transparent
+//!     B2BUA's outgoing leg keeps the caller's Call-ID, From tag and CSeq), and
+//!     it is not this UAC's reuse. The port is not compared: a UA on TCP may
+//!     name a new ephemeral port per connection (§18.1.1);
+//!   - the same host under a new branch: the UAC's own new transaction on a
+//!     spent number, a reuse (§8.1.3.5; §22.2 makes the increment a MUST for a
+//!     credentials retry).
+//!
+//! The in-dialog buckets read the same way: a Record-Routed route set that
+//! spirals (§12.2, §16.3) hands one in-dialog request to an element twice. A
+//! copy whose Via stack the vantage did not carry, or whose bottom Via names
+//! no branch, proves neither, and the reuse reading stands. An element that
+//! copies the caller's Vias under its own breaks §8.1.1.7 (a UA inserts one
+//! Via) and can mask its own reuse as the caller's request.
+//!
+//! **A forwarded request is marked relayed on evidence.** A proxy forwards the
+//! CSeq unchanged (§16.6), so a finding on a request is `relayed` only where
+//! the view carries the same request from another emitter nearer the origin:
+//! the same Call-ID, bottom Via (sent-by and branch), CSeq number and method,
+//! under a shorter Via stack. Any hop counts, since a forwarding box may wear
+//! another address on each interface, and view order does not, since a view
+//! merged from several captures can carry the forwarded copy first. The live
+//! audit judges each bind's view alone, which never carries the request on its
+//! way into the forwarder, so relay attribution applies to capture views.
+//! Without that evidence — a one-sided view, or a CSeq the forwarder
+//! rewrote — the emitter is charged as the originator.
+//!
 //! **A forked or confirmed dialog anchors on the attempt that ESTABLISHED it**
 //! — the largest dialog-creating CSeq at or below its first in-dialog request,
 //! folded in as the set's lower anchor. For a plain single-attempt call that is
@@ -66,7 +102,10 @@
 //! registry-driven numeric pass (ADR-0007) rejects such a CSeq at ingest, so no
 //! observed message can carry one.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use sip_message::header::SentBy;
+use sip_message::sniff::{self, OriginVia};
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
@@ -111,7 +150,7 @@ impl Obligation for CseqInDialogOrder {
                         emitter: req.emitter.to_string(),
                         taker: key.taker.to_string(),
                         cseq: req.cseq,
-                        relayed: false,
+                        relayed: seen.relayed(req),
                         anchor: req.msg,
                         decision: match charged.remove(&req.msg) {
                             Some(evidence) => Decision::Violated(evidence),
@@ -271,7 +310,14 @@ struct Reading<'a> {
     txn_cseqs: BTreeMap<&'a str, BTreeSet<(u32, String)>>,
     /// Every response the view carried, in observation order.
     responses: Vec<Response<'a>>,
+    /// Each request the view carried, named by what a forwarder keeps (§16.6),
+    /// → every (emitter, Via stack depth) it was carried with.
+    copies: HashMap<ForwardedKey<'a>, Vec<(&'a str, usize)>>,
 }
+
+/// A request as every hop that forwards it carries it: Call-ID, bottom Via
+/// sent-by and branch, CSeq number and method (uppercased).
+type ForwardedKey<'a> = (&'a str, SentBy, String, u32, String);
 
 /// One stream's accounting.
 #[derive(Debug, Default)]
@@ -381,9 +427,26 @@ struct Request<'a> {
     branch: &'a str,
     emitter: &'a str,
     from_tag: &'a str,
+    /// The request's bottom Via, where the vantage carried its head: the hop
+    /// that originated it.
+    origin: Option<OriginVia>,
+    /// The request as a forwarder keeps it, where a bottom Via names it.
+    forwarded: Option<ForwardedKey<'a>>,
 }
 
 impl Request<'_> {
+    /// Whether `copy`, a later request on this one's number, is
+    /// its originator's own reuse rather than this request by another path or
+    /// another originator's — read off the two bottom Vias (see the module
+    /// doc). Without both Vias, or a bottom branch, the reuse reading stands.
+    fn reused_by(&self, copy: &Request<'_>) -> bool {
+        let (Some(first), Some(again)) = (&self.origin, &copy.origin) else { return true };
+        if !first.sent_by.as_borrowed().same_host(&again.sent_by.as_borrowed()) {
+            return false;
+        }
+        first.branch.is_none() || first.branch != again.branch
+    }
+
     fn not_contiguous(&self, prior_cseq: u32, to_tag: &str) -> Evidence {
         Evidence::CseqNotContiguous {
             skip_msg: self.msg,
@@ -435,6 +498,28 @@ impl<'a> Reading<'a> {
         seen
     }
 
+    /// `msg`'s request as a forwarder keeps it, or `None` where no bottom Via
+    /// with a branch names it across hops.
+    fn forwarded_key(msg: &'a Msg, origin: Option<&OriginVia>) -> Option<ForwardedKey<'a>> {
+        let origin = origin?;
+        Some((
+            msg.call_id.as_str(),
+            origin.sent_by.clone(),
+            origin.branch.clone()?,
+            msg.cseq,
+            msg.cseq_method.to_ascii_uppercase(),
+        ))
+    }
+
+    /// Whether the view carries `req` from another emitter nearer the origin
+    /// (see the module doc).
+    fn relayed(&self, req: &Request<'_>) -> bool {
+        let (Some(key), Some(origin)) = (&req.forwarded, &req.origin) else { return false };
+        self.copies.get(key).is_some_and(|copies| {
+            copies.iter().any(|&(emitter, depth)| emitter != req.emitter && depth < origin.depth)
+        })
+    }
+
     /// Absorb one message. A repeat is not skipped here: the §12.2.1.1 fold is
     /// the rule's own and strictly stronger (see the module doc), and the two
     /// transaction rules judge every copy the taker took, as a UAC does.
@@ -465,6 +550,11 @@ impl<'a> Reading<'a> {
                 .entry(branch)
                 .or_default()
                 .insert((msg.cseq, msg.cseq_method.to_ascii_uppercase()));
+        }
+        let origin = msg.head.as_deref().and_then(sniff::bottom_via);
+        let forwarded = Self::forwarded_key(msg, origin.as_ref());
+        if let (Some(key), Some(origin)) = (&forwarded, &origin) {
+            self.copies.entry(key.clone()).or_default().push((msg.src.as_str(), origin.depth));
         }
         // A request with no From tag names no stream: it can key nothing.
         let Some(from_tag) = msg.from_tag.as_deref() else { return };
@@ -502,6 +592,7 @@ impl<'a> Reading<'a> {
         if msg.is_request("ACK") || msg.is_request("CANCEL") {
             return;
         }
+        let to_tag = msg.to_tag.as_deref().unwrap_or_default();
         let req = Request {
             msg: mi,
             hop: msg.hop,
@@ -511,12 +602,17 @@ impl<'a> Reading<'a> {
             branch: branch.unwrap_or_default(),
             emitter: msg.src.as_str(),
             from_tag,
+            origin,
+            forwarded,
         };
-        let dialog = stream.dialogs.entry(msg.to_tag.as_deref().unwrap_or_default()).or_default();
+        let dialog = stream.dialogs.entry(to_tag).or_default();
         match dialog.by_cseq.get(&req.cseq) {
             None => {
                 dialog.by_cseq.insert(req.cseq, req);
             }
+            // Another path for the same request, or another originator's
+            // request: not this UAC's reuse (see the module doc).
+            Some(first) if !first.reused_by(&req) => {}
             // A DIFFERENT transaction carried a CSeq the dialog already spent →
             // the dialog CSeq failed to increment. Same branch, different method
             // is one transaction's shape restated, and records nothing new.
@@ -876,10 +972,366 @@ mod tests {
         assert_eq!((*cseq, *prior_cseq), (4, 2), "the +2 gap off the RESENT INVITE");
     }
 
+    /// `m` re-addressed onto the hop `src` → `dst`.
+    fn hop(src: &str, dst: &str, mut m: Msg) -> Msg {
+        m.src = src.to_string();
+        m.dst = dst.to_string();
+        m
+    }
+
+    /// `m` carrying the Via stack `vias`, top first (`"<sent-by>;branch=<b>"`),
+    /// with its top branch the first row's.
+    fn vias(mut m: Msg, vias: &[&str]) -> Msg {
+        let rows: String = vias.iter().map(|v| format!("Via: SIP/2.0/UDP {v}\r\n")).collect();
+        m.head = Some(format!("{} sip:bob@h SIP/2.0\r\n{rows}\r\n", "INVITE").into_bytes());
+        m.via_branch =
+            vias.first().and_then(|v| v.split_once(";branch=")).map(|(_, b)| b.to_string());
+        m
+    }
+
+    const ALICE_VIA_1: &str = "10.0.0.1:5060;branch=z9hG4bK-a1";
+
+    /// alice CANCELs her INVITE and, once its 487 is ACKed, re-offers it on
+    /// the same Call-ID, From tag and CSeq from the same sent-by under a new
+    /// bottom branch: no hop pushed a Via, so this is her own new transaction
+    /// on a spent number (§8.1.3.5).
+    #[test]
+    fn a_re_offer_on_a_new_bottom_branch_is_violated() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &[ALICE_VIA_1]),
+            req(2_000, "CANCEL", 1, "z9hG4bK-a1", None),
+            rsp(3_000, 487, 1, "INVITE", "z9hG4bK-a1"),
+            req(3_100, "ACK", 1, "z9hG4bK-a1", Some("btag")),
+            vias(req(2_000_000, "INVITE", 1, "", None), &["10.0.0.1:5060;branch=z9hG4bK-a2"]),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Violated(Evidence::CseqReused { .. })));
+        assert_eq!(f[0].anchor, 4, "the re-offer that did not advance");
+    }
+
+    /// A spiral (§16.3): proxy P forwards alice's INVITE to X, and X routes it
+    /// back to P with Call-ID, From tag and CSeq unchanged. Each hop pushed its
+    /// Via above alice's, so P takes the copy with her bottom Via: ONE request
+    /// twice (§8.2.2.2), not a UAC reusing its CSeq.
+    #[test]
+    fn a_spiralled_invite_is_the_same_request_not_a_reuse() {
+        const P: &str = "10.0.0.9:5060";
+        const X: &str = "10.0.0.3:5060";
+        let a = "10.0.0.1:5060;branch=z9hG4bK-b0";
+        let p1 = "10.0.0.9:5060;branch=z9hG4bK-b1";
+        let x2 = "10.0.0.3:5060;branch=z9hG4bK-b2";
+        let p3 = "10.0.0.9:5060;branch=z9hG4bK-b3";
+        let invite = |at_us| req(at_us, "INVITE", 1, "", None);
+        let ok = |at_us, src: &str, dst: &str, branch: &str| {
+            hop(src, dst, rsp(at_us, 200, 1, "INVITE", branch))
+        };
+        let msgs = [
+            hop(ALICE, P, vias(invite(1_000), &[a])),
+            hop(P, X, vias(invite(2_000), &[p1, a])),
+            hop(X, P, vias(invite(3_000), &[x2, p1, a])),
+            hop(P, BOB, vias(invite(4_000), &[p3, x2, p1, a])),
+            ok(5_000, BOB, P, "z9hG4bK-b3"),
+            ok(5_100, P, X, "z9hG4bK-b2"),
+            ok(5_200, X, P, "z9hG4bK-b1"),
+            ok(5_300, P, ALICE, "z9hG4bK-b0"),
+            hop(ALICE, P, in_dialog(6_000, "ACK", 1, "z9hG4bK-a0")),
+            hop(P, X, in_dialog(6_100, "ACK", 1, "z9hG4bK-a1")),
+            hop(X, P, in_dialog(6_200, "ACK", 1, "z9hG4bK-a2")),
+            hop(P, BOB, in_dialog(6_300, "ACK", 1, "z9hG4bK-a3")),
+        ];
+        assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
+    }
+
+    /// Two branches of one fork reach the same UAS (§8.2.2.2): the copies
+    /// differ in their top Via and share alice's bottom one, so they are one
+    /// request, merged.
+    #[test]
+    fn a_merged_fork_copy_is_the_same_request() {
+        let msgs = [
+            vias(
+                req(1_000, "INVITE", 1, "", None),
+                &["10.0.0.9:5060;branch=z9hG4bK-f1", ALICE_VIA_1],
+            ),
+            vias(
+                req(2_000, "INVITE", 1, "", None),
+                &["10.0.0.9:5060;branch=z9hG4bK-f2", ALICE_VIA_1],
+            ),
+        ];
+        assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
+    }
+
+    /// A copy whose bottom Via names another sent-by was originated by another
+    /// element — a transparent B2BUA's outgoing leg keeping the caller's
+    /// Call-ID, From tag and CSeq — and is not this UAC's reuse.
+    #[test]
+    fn another_originators_request_is_not_a_reuse() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &[ALICE_VIA_1]),
+            vias(req(2_000, "INVITE", 1, "", None), &["10.0.0.7:5060;branch=z9hG4bK-x1"]),
+        ];
+        assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
+    }
+
+    /// A spiralled copy reaching the taker after it answered the first one 2xx
+    /// is still that request by another path: the Via stack decides, not the
+    /// state of the first transaction.
+    #[test]
+    fn a_spiral_copy_after_the_2xx_is_not_a_reuse() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &[ALICE_VIA_1]),
+            rsp(2_000, 200, 1, "INVITE", "z9hG4bK-a1"),
+            vias(
+                req(3_000, "INVITE", 1, "", None),
+                &["10.0.0.3:5060;branch=z9hG4bK-x2", ALICE_VIA_1],
+            ),
+        ];
+        assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
+    }
+
+    /// A bottom Via naming no branch cannot show two copies to be one request:
+    /// the reuse reading stands.
+    #[test]
+    fn a_branchless_bottom_via_proves_no_second_path() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &["10.0.0.1:5060"]),
+            vias(
+                req(2_000, "INVITE", 1, "", None),
+                &["10.0.0.9:5060;branch=z9hG4bK-p", "10.0.0.1:5060"],
+            ),
+        ];
+        assert_eq!(order(&msgs).len(), 1, "{:?}", order(&msgs));
+    }
+
+    /// A Record-Routed route set that spirals (§16.3, §12.2): alice's BYE
+    /// reaches P, goes on to X and comes back to P with her bottom Via kept.
+    /// P takes ONE in-dialog request twice, not a dialog CSeq reuse.
+    #[test]
+    fn a_spiralled_in_dialog_request_is_not_a_reuse() {
+        const P: &str = "10.0.0.9:5060";
+        const X: &str = "10.0.0.3:5060";
+        let a = "10.0.0.1:5060;branch=z9hG4bK-y0";
+        let p1 = "10.0.0.9:5060;branch=z9hG4bK-y1";
+        let x2 = "10.0.0.3:5060;branch=z9hG4bK-y2";
+        let bye = |at_us| in_dialog(at_us, "BYE", 2, "");
+        let msgs = [
+            hop(ALICE, P, in_dialog(500, "INVITE", 1, "z9hG4bK-i")),
+            hop(ALICE, P, vias(bye(1_000), &[a])),
+            hop(P, X, vias(bye(2_000), &[p1, a])),
+            hop(X, P, vias(bye(3_000), &[x2, p1, a])),
+        ];
+        assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
+    }
+
+    /// A proxy forwards a request with its CSeq unchanged (§16.6), so a reuse
+    /// its originator committed reaches the next hop through it: the finding
+    /// there is marked relayed, the originator's is not.
+    #[test]
+    fn a_forwarded_reuse_is_marked_relayed() {
+        const LB: &str = "10.0.0.9:5060";
+        const W: &str = "10.0.0.4:5060";
+        let lb1 = "10.0.0.9:5060;branch=z9hG4bK-l1";
+        let lb2 = "10.0.0.9:5060;branch=z9hG4bK-l2";
+        let a2 = "10.0.0.1:5060;branch=z9hG4bK-a2";
+        let invite = |at_us| req(at_us, "INVITE", 1, "", None);
+        let msgs = [
+            hop(ALICE, LB, vias(invite(1_000), &[ALICE_VIA_1])),
+            hop(LB, W, vias(invite(1_100), &[lb1, ALICE_VIA_1])),
+            hop(ALICE, LB, vias(invite(9_000), &[a2])),
+            hop(LB, W, vias(invite(9_100), &[lb2, a2])),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 2, "the reuse at each hop: {f:?}");
+        let at = |emitter: &str| f.iter().find(|x| x.emitter == emitter).expect(emitter);
+        assert!(!at(ALICE).relayed, "alice originated the reuse: {f:?}");
+        assert!(at(LB).relayed, "the LB forwarded it: {f:?}");
+    }
+
+    /// A proxy that rewrites the CSeq it forwards breaks §16.6 on its own
+    /// account: alice's INFO 3 leaves P as INFO 2, a number P already used in
+    /// that dialog. Nothing in the view shows that request arriving at P, so
+    /// P originated the reuse and is charged as such.
+    #[test]
+    fn a_proxy_rewriting_the_cseq_is_charged_as_originator() {
+        const P: &str = "10.0.0.9:5060";
+        let info = |at_us, cseq, branch| in_dialog(at_us, "INFO", cseq, branch);
+        let (n2, n3) = ("10.0.0.1:5060;branch=z9hG4bK-n2", "10.0.0.1:5060;branch=z9hG4bK-n3");
+        let msgs = [
+            hop(ALICE, P, vias(info(1_000, 2, ""), &[n2])),
+            hop(P, BOB, vias(info(1_100, 2, ""), &["10.0.0.9:5060;branch=z9hG4bK-q2", n2])),
+            hop(ALICE, P, vias(info(2_000, 3, ""), &[n3])),
+            hop(P, BOB, vias(info(2_100, 2, ""), &["10.0.0.9:5060;branch=z9hG4bK-q3", n3])),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].emitter, P);
+        assert!(!f[0].relayed, "P rewrote the CSeq: {f:?}");
+    }
+
+    /// A view that carries only the forwarded copies shows no request arriving
+    /// at the forwarder: without that evidence the reuse is charged to it.
+    #[test]
+    fn a_one_sided_view_charges_the_forwarder() {
+        const LB: &str = "10.0.0.9:5060";
+        const W: &str = "10.0.0.4:5060";
+        let invite = |at_us| req(at_us, "INVITE", 1, "", None);
+        let msgs = [
+            hop(LB, W, vias(invite(1_100), &["10.0.0.9:5060;branch=z9hG4bK-l1", ALICE_VIA_1])),
+            hop(
+                LB,
+                W,
+                vias(
+                    invite(9_100),
+                    &["10.0.0.9:5060;branch=z9hG4bK-l2", "10.0.0.1:5060;branch=z9hG4bK-a2"],
+                ),
+            ),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(!f[0].relayed, "no arrival at the LB is in view: {f:?}");
+    }
+
+    /// A view merged from several captures can order the forwarded copy ahead
+    /// of its arrival. Attribution does not follow view order: the copy nearer
+    /// the origin (the shorter Via stack) is the evidence for the other.
+    #[test]
+    fn relay_attribution_does_not_follow_view_order() {
+        const LB: &str = "10.0.0.9:5060";
+        const W: &str = "10.0.0.4:5060";
+        let a2 = "10.0.0.1:5060;branch=z9hG4bK-a2";
+        let invite = |at_us| req(at_us, "INVITE", 1, "", None);
+        let msgs = [
+            hop(ALICE, LB, vias(invite(1_000), &[ALICE_VIA_1])),
+            hop(LB, W, vias(invite(1_100), &["10.0.0.9:5060;branch=z9hG4bK-l1", ALICE_VIA_1])),
+            hop(LB, W, vias(invite(8_900), &["10.0.0.9:5060;branch=z9hG4bK-l2", a2])),
+            hop(ALICE, LB, vias(invite(9_000), &[a2])),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 2, "the reuse at each hop: {f:?}");
+        let at = |emitter: &str| f.iter().find(|x| x.emitter == emitter).expect(emitter);
+        assert!(!at(ALICE).relayed, "alice originated the reuse: {f:?}");
+        assert!(at(LB).relayed, "the LB forwarded it: {f:?}");
+    }
+
+    /// Two captures of one request at the same Via depth from two emitters —
+    /// alice seen on both sides of a NAT — are neither nearer the origin than
+    /// the other: no copy is relayed, and the reuse is charged at each.
+    #[test]
+    fn copies_at_the_same_depth_are_not_relayed() {
+        const INSIDE: &str = "192.168.1.10:5060";
+        const OUTSIDE: &str = "203.0.113.5:5060";
+        const T: &str = "10.0.0.4:5060";
+        let a2 = "10.0.0.1:5060;branch=z9hG4bK-a2";
+        let invite = |at_us| req(at_us, "INVITE", 1, "", None);
+        let msgs = [
+            hop(INSIDE, T, vias(invite(1_000), &[ALICE_VIA_1])),
+            hop(OUTSIDE, BOB, vias(invite(1_100), &[ALICE_VIA_1])),
+            hop(INSIDE, T, vias(invite(9_000), &[a2])),
+            hop(OUTSIDE, BOB, vias(invite(9_100), &[a2])),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 2, "the reuse at each capture: {f:?}");
+        assert!(f.iter().all(|x| !x.relayed), "neither copy is nearer the origin: {f:?}");
+    }
+
+    /// The evidence must be the same request: a forwarder that changes the
+    /// method of what it forwards sends a request nothing in view carried
+    /// before, and is charged as its originator.
+    #[test]
+    fn a_forwarder_changing_the_method_is_no_relay() {
+        const P: &str = "10.0.0.9:5060";
+        let (n2, n3) = ("10.0.0.1:5060;branch=z9hG4bK-n2", "10.0.0.1:5060;branch=z9hG4bK-n3");
+        let msgs = [
+            hop(ALICE, P, vias(in_dialog(1_000, "INFO", 2, ""), &[n2])),
+            hop(
+                P,
+                BOB,
+                vias(in_dialog(1_100, "INFO", 2, ""), &["10.0.0.9:5060;branch=z9hG4bK-q2", n2]),
+            ),
+            hop(ALICE, P, vias(in_dialog(2_000, "MESSAGE", 2, ""), &[n3])),
+            hop(
+                P,
+                BOB,
+                vias(in_dialog(2_100, "INFO", 2, ""), &["10.0.0.9:5060;branch=z9hG4bK-q3", n3]),
+            ),
+        ];
+        let f = order(&msgs);
+        let at_bob: Vec<_> = f.iter().filter(|x| x.emitter == P).collect();
+        assert_eq!(at_bob.len(), 1, "{f:?}");
+        assert!(!at_bob[0].relayed, "P forwarded a MESSAGE as an INFO: {f:?}");
+    }
+
+    /// The same for the bottom Via's sent-by, pinned on a skipped number: a
+    /// reuse cannot pin it, since a copy naming another bottom host reads as
+    /// another originator's request and records no reuse at all.
+    #[test]
+    fn a_forwarder_changing_the_bottom_sent_by_is_no_relay() {
+        const P: &str = "10.0.0.9:5060";
+        let (n2, n4) = ("10.0.0.1:5060;branch=z9hG4bK-n2", "10.0.0.1:5060;branch=z9hG4bK-n4");
+        let msgs = [
+            hop(ALICE, P, vias(in_dialog(1_000, "INFO", 2, ""), &[n2])),
+            hop(
+                P,
+                BOB,
+                vias(in_dialog(1_100, "INFO", 2, ""), &["10.0.0.9:5060;branch=z9hG4bK-q2", n2]),
+            ),
+            hop(ALICE, P, vias(in_dialog(2_000, "INFO", 4, ""), &[n4])),
+            hop(
+                P,
+                BOB,
+                vias(
+                    in_dialog(2_100, "INFO", 4, ""),
+                    &["10.0.0.9:5060;branch=z9hG4bK-q4", "10.0.0.77:5060;branch=z9hG4bK-n4"],
+                ),
+            ),
+        ];
+        let f = order(&msgs);
+        let at_bob: Vec<_> = f.iter().filter(|x| x.emitter == P).collect();
+        assert_eq!(at_bob.len(), 1, "the skip at bob: {f:?}");
+        assert!(!at_bob[0].relayed, "P rewrote the bottom sent-by: {f:?}");
+    }
+
+    /// A UA on TCP may send each connection from a new ephemeral port and name
+    /// it in its sent-by (§18.1.1): the same host under a new bottom branch is
+    /// still that UA's reuse.
+    #[test]
+    fn a_new_ephemeral_port_is_the_same_originator() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &["10.0.0.1:49152;branch=z9hG4bK-a1"]),
+            vias(req(9_000, "INVITE", 1, "", None), &["10.0.0.1:49170;branch=z9hG4bK-a2"]),
+        ];
+        assert_eq!(order(&msgs).len(), 1, "{:?}", order(&msgs));
+    }
+
+    /// A copy whose Via stack this vantage did not carry proves neither a
+    /// second path nor another originator: the reuse reading of two
+    /// transactions on one number stands.
+    #[test]
+    fn a_copy_without_a_readable_via_stack_is_a_reuse() {
+        let msgs = [
+            vias(req(1_000, "INVITE", 1, "", None), &[ALICE_VIA_1]),
+            req(2_000, "INVITE", 1, "z9hG4bK-f2", None),
+        ];
+        assert_eq!(order(&msgs).len(), 1, "{:?}", order(&msgs));
+    }
+
+    /// A DIFFERENT request on a spent number is a reuse even while the first
+    /// is pending: §8.2.2.2 names one request by its CSeq number AND method.
+    #[test]
+    fn another_method_on_a_pending_number_is_violated() {
+        let msgs = [
+            req(1_000, "INVITE", 1, "z9hG4bK-i1", None),
+            req(2_000, "OPTIONS", 1, "z9hG4bK-o", None),
+        ];
+        let f = order(&msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Violated(Evidence::CseqReused { .. })));
+    }
+
     /// A request the vantage carried no branch for cannot be folded, so its
-    /// numbers still join the dialog's set — the silence the old engine kept:
-    /// contiguity is judged, and only a same-number pair goes unjudged because
-    /// nothing tells the two transactions apart.
+    /// numbers still join the dialog's set: contiguity is judged, and only a
+    /// same-number pair goes unjudged because nothing tells the two
+    /// transactions apart.
     #[test]
     fn a_branchless_request_still_joins_the_set() {
         let branchless = |mut m: Msg| {

@@ -32,8 +32,8 @@ artifact**, not a failover bug. Each pod anchors wall time once at start
 (`sip_clock::Clock::system`); when the shared host clock **steps**
 (post-sleep drift "corrected" by stepping timesyncd), pods anchored on either
 side of the step diverge permanently, and a replicated absolute `fire_at` from
-the dead node becomes past-due on the takeover node. Root case:
-endurance-20260630 `reinvite/unexpected "got OPTIONS expected 200"`.
+the dead node becomes past-due on the takeover node. Its symptom:
+`reinvite/unexpected "got OPTIONS expected 200"`.
 
 Two halves, do not conflate them:
 
@@ -67,8 +67,8 @@ endurance twin) but still cannot reproduce a host clock stepping *mid-run*.
   (`router::reclaim_all` → `smooth_keepalives`), never in the timer driver**
   (ADR-0014 §4). Both cohorts: past-due oldest-first (bounded speed-up) and
   future-dated de-correlated **earlier only**. Performance only — no
-  correctness role, no timing assumption. (Skipping it reproduced the
-  2026-06-12 reboot keepalive-burst throughput collapse.)
+  correctness role, no timing assumption. (Skipping it reproduces a reboot
+  keepalive-burst throughput collapse.)
 - **Reclaim discharge stays off the SIP wire**
   ([ADR-0022 X5](../adr/0022-initial-invite-final-response-guarantee.md)):
   `answer_unanswered_a_leg = false` on the two HA discharge helpers for
@@ -79,6 +79,10 @@ endurance twin) but still cannot reproduce a host clock stepping *mid-run*.
 - **Pristine reboot.** A restarted node (including a backup) must come back
   with zero live calls before reclaim; the failover harness hard-asserts it
   and endurance treats it as an invariant.
+- **Only the core's paced sweep evicts expired replica bodies.** A read never
+  evicts one, and no other task calls `ReplicatingCallStore::reap`: an
+  out-of-band reap takes deferred terminals without their limiter release or
+  their lost-CDR count.
 
 ## References
 
@@ -89,5 +93,5 @@ endurance twin) but still cannot reproduce a host clock stepping *mid-run*.
 - [crates/loadgen/README.md](../../crates/loadgen/README.md) — chaos
   correlation, report buckets
 - `deploy/k8s/lib/host-checks.sh` — `check_clock` and other pre-run checks
-- `crates/failover-harness/tests/failover.rs` — e.g.
+- `crates/failover-harness/tests/it/failover.rs` — e.g.
   `reboot_reclaim_exactly_one_owner…`, `skew_ahead_backup_no_immediate_options_at_takeover`

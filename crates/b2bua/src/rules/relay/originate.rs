@@ -9,10 +9,11 @@ use call::{
 };
 use sip_message::draft::RequestDraft;
 use sip_message::generators::{
-    self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope,
+    self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
 use sip_message::header::{
-    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, TokenListHeader, Uri,
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, NameAddr,
+    TokenListHeader, Uri,
 };
 use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -20,10 +21,11 @@ use sip_txn::{IdGen, TxnKind};
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
-use super::address::{address, UnreadableAddress};
-use super::body::{media_type, sdp};
+use super::address::{address, identity, UnreadableAddress};
+use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
-use super::identity::{leg_contact, leg_via};
+use super::identity::{leg_contact, leg_via, CallMarks};
+use b2bua_sdk::model::Body;
 
 /// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
 /// Every header rides as an unparsed line, so the rebuilt message carries the
@@ -50,17 +52,116 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
         .expect("a-leg INVITE snapshot is well-formed")
 }
 
-/// The transparency scope of the INVITE this B2BUA originates: a decision that
-/// replaces the originator's body states a body of the same role (a held REFER
-/// offer) or none at all, and the set describing the originator's body rides
-/// only as far as what replaced it still answers for.
-fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
+/// What an override's bytes are to the originator's body, the one place an
+/// override is classed: the originator's own bytes are [`SourceBody::Verbatim`];
+/// a body of the originator's media type standing in its place (an untyped
+/// override re-sends that type) is [`SourceBody::Replaced`]; none at all, a body
+/// of another type, or one described by the message it was taken from
+/// ([`Body::descriptors`]) is [`SourceBody::Dropped`] — nothing of the
+/// originator's describes it.
+fn override_role(a_leg_invite: &SipRequest, body: &Body) -> SourceBody {
+    let source = a_leg_invite.body();
+    if body.bytes.is_empty() || !body.descriptors.is_empty() || source.is_empty() {
+        return SourceBody::Dropped;
+    }
+    if body.bytes.as_slice() == source.as_ref() {
+        return SourceBody::Verbatim;
+    }
+    let source_type = a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type);
+    let override_type = body.content_type.as_deref().and_then(media_type);
+    match (source_type, override_type) {
+        (Some(_), None) => SourceBody::Replaced,
+        (Some(source), Some(stated)) if source.is(stated.token()) => SourceBody::Replaced,
+        _ => SourceBody::Dropped,
+    }
+}
+
+/// The transparency scope of the INVITE this B2BUA originates: the set
+/// describing the originator's body rides as far as the minted body still
+/// answers for it ([`override_role`]). An override composed around attached
+/// parts states its own framing ([`minted_body`]), so none of it rides as a
+/// relayed line.
+fn relay_scope(a_leg_invite: &SipRequest, body_override: Option<&Body>) -> RelayScope<'static> {
     let scope = RelayScope::request();
     match body_override {
-        Some(body) if body.is_empty() => scope.without_source_body(),
-        Some(_) => scope.with_replaced_body(),
         None => scope,
+        Some(body) if body.parts.is_some() => scope.without_source_body(),
+        Some(body) => match override_role(a_leg_invite, body) {
+            SourceBody::Verbatim => scope,
+            SourceBody::Replaced => scope.with_replaced_body(),
+            SourceBody::Dropped => scope.without_source_body(),
+        },
     }
+}
+
+/// Whether a relayed header may ride beside the minted body: an entity header
+/// the relay scope does not class ([`generators::describes_body`]) describes
+/// the originator's body only where that body rides whole.
+fn describes_minted_body(scope: RelayScope<'_>, name: &str) -> bool {
+    scope.body == SourceBody::Verbatim
+        || generators::describes_body(name)
+        || !sip_message::is_entity_header(name)
+}
+
+/// The lines describing an override's bytes: those of the message it was
+/// taken from ([`Body::descriptors`]), else the originator's as far as
+/// [`override_role`] keeps them describing it — all of its entity headers
+/// beside its own bytes, the role alone beside a stand-in.
+fn override_descriptors(a_leg_invite: &SipRequest, body: &Body) -> Vec<(String, String)> {
+    let pairs = |lines: &[MsgHeader]| -> Vec<(String, String)> {
+        lines.iter().map(|h| (h.name.to_string(), h.value.to_string())).collect()
+    };
+    if !body.descriptors.is_empty() {
+        return pairs(&body.descriptors);
+    }
+    match override_role(a_leg_invite, body) {
+        SourceBody::Verbatim => pairs(a_leg_invite.headers()),
+        SourceBody::Replaced => {
+            let scope = RelayScope::request().with_replaced_body();
+            let described: Vec<MsgHeader> = generators::body_descriptors(a_leg_invite.headers())
+                .into_iter()
+                .filter(|h| generators::relayable(&h.name, scope))
+                .collect();
+            pairs(&described)
+        }
+        SourceBody::Dropped => Vec::new(),
+    }
+}
+
+/// The body the minted INVITE carries, its media type, and the entity headers
+/// the INVITE states for it: the source's body, an override's bytes with the
+/// lines describing them ([`override_descriptors`]), or an override's session
+/// description beside its attached parts, headed by those lines.
+fn minted_body(
+    a_leg_invite: &SipRequest,
+    body_override: Option<&Body>,
+) -> (Vec<u8>, Option<header::MediaType>, Vec<(String, String)>) {
+    if let Some((body, parts)) = body_override.and_then(|b| Some((b, b.parts.as_ref()?))) {
+        let ct = source_content_type(a_leg_invite, body);
+        let described = override_descriptors(a_leg_invite, body);
+        let attached = sip_message::attach_parts(ct.as_deref(), &described, &body.bytes, parts);
+        let content_type = attached.content_type.as_deref().and_then(media_type);
+        return (attached.body, content_type, attached.headers);
+    }
+    let (body, described) = match body_override {
+        Some(b) if !b.descriptors.is_empty() && !b.bytes.is_empty() => {
+            (b.bytes.clone(), override_descriptors(a_leg_invite, b))
+        }
+        Some(b) => (b.bytes.clone(), Vec::new()),
+        None => (a_leg_invite.body().to_vec(), Vec::new()),
+    };
+    // An override typed for itself states its type; an untyped one re-sends
+    // the originator's kind of body.
+    let content_type = if body.is_empty() {
+        None
+    } else {
+        body_override
+            .and_then(|b| b.content_type.as_deref())
+            .and_then(media_type)
+            .or_else(|| a_leg_invite.raw(HeaderName::ContentType).next().and_then(media_type))
+            .or_else(|| body_override.map(|_| sdp()))
+    };
+    (body, content_type, described)
 }
 
 /// True iff `header_updates` names `header` with no value — a caller stating
@@ -100,7 +201,7 @@ fn apply_offered_option_tags(extra_headers: &mut Vec<MsgHeader>, offered: &[Stri
 /// narrowing empties drops its header — a withheld tag leaves ONE wire form on
 /// every leg the call originates, whichever mint assembled it. Lines not naming
 /// a withheld tag are left byte-identical.
-fn apply_withheld_option_tags(extra_headers: &mut Vec<MsgHeader>, withheld: &[String]) {
+pub(crate) fn apply_withheld_option_tags(extra_headers: &mut Vec<MsgHeader>, withheld: &[String]) {
     if withheld.is_empty() {
         return;
     }
@@ -140,6 +241,13 @@ fn narrow_token_set<K: header::kind::TokenKind>(
     }
 }
 
+/// The INVITE that dialled `leg`, as it left the stack (after every edit a
+/// route applied), re-parsed from the leg's initial client-transaction handle.
+/// `None` on the originator's leg, which the stack did not dial.
+pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
+    super::ack::parse_request(&leg.pending_invite_txn.as_ref()?.original_invite)
+}
+
 /// Clamp a decision-supplied ring deadline (s) for an originated leg under the
 /// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_sec`),
 /// with the per-call `debug!` note on a clamp — the ONE clamp site both
@@ -166,29 +274,25 @@ pub(crate) fn clamp_no_answer(config: &B2buaConfig, call_ref: &str, requested: i
 /// affected leg instead of dialing a fabricated target.
 #[allow(clippy::too_many_arguments)]
 pub fn build_b_leg(
-    call_ref: &str,
+    // The call's marks, stamped on the originated b-leg INVITE's Via + Contact.
+    marks: CallMarks,
     leg_id: &str,
-    // The call's emergency state (`call.emergency == Some(true)`); stamps the
-    // `;em=1` / `;emerg=1` markers on the originated b-leg INVITE's Via +
-    // Contact, so every subsequent in-dialog packet of the call stays
-    // identifiable as emergency traffic on the wire.
-    is_emergency: bool,
     a_leg_invite: &SipRequest,
     dest: (String, u16),
     new_ruri: Option<&str>,
-    // Identity rewrites (ADR-0017): override the b-leg From/To **URI** (the
-    // from/to numbers). The B2BUA always owns the tags, so only the URI is
-    // settable here; `None` keeps the relayed a-leg URI. The basic path passes
-    // `(None, None)`.
+    // Identity rewrites (ADR-0017): the b-leg From / To as a name-addr or a bare
+    // addr-spec. The B2BUA owns the tags: a `tag` stated on either is dropped.
+    // `None` keeps the relayed a-leg URI. The basic path passes `(None, None)`.
     new_from: Option<&str>,
     new_to: Option<&str>,
     no_answer_timeout_sec: Option<i64>,
     config: &B2buaConfig,
     id_gen: &IdGen,
-    // REFER transfer overrides: `body_override` replaces the cloned a-leg body
-    // (held SDP, or empty = drop); `header_updates` set/remove extra headers on
-    // the transfer INVITE. The basic-B2BUA path passes `(None, &[])`.
-    body_override: Option<&[u8]>,
+    // Body override: replaces the cloned a-leg body (held SDP, or empty =
+    // drop), or attaches parts beside its session description
+    // ([`Body::parts`]); `header_updates` set/remove extra headers on the
+    // minted INVITE. The basic-B2BUA path passes `(None, &[])`.
+    body_override: Option<&Body>,
     header_updates: &[(String, Option<String>)],
     // Capability set advertised on this originated leg
     // (`Allow`/`Supported`/`Accept`), resolved by the caller: declared, else
@@ -216,7 +320,23 @@ pub fn build_b_leg(
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
     kind: Option<call::LegKind>,
+    // Whether the caller's INVITE still awaits its final as this leg is
+    // dialled: only then may the leg's answer answer it, and only then are the
+    // snapshot's clock stamps current (`settle_session_timer`,
+    // `RelayScope::from_stored_copy`).
+    caller_invite_pending: bool,
+    // The turn's clock (ms): the `Timestamp` the INVITE states where the
+    // originator's stated one (RFC 3261 §20.38).
+    now_ms: i64,
 ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
+    let stamp = generators::timestamp_value(now_ms);
+    let scope = if caller_invite_pending {
+        relay_scope(a_leg_invite, body_override)
+    } else {
+        relay_scope(a_leg_invite, body_override).from_stored_copy()
+    }
+    .with_identity(config.identity_privacy())
+    .stamped(Some(&stamp));
     let branch = id_gen.new_branch();
     let from_tag = id_gen.new_tag();
     let b_call_id = format!("{}-{}@{}", leg_id, id_gen.new_tag(), config.sip_local_ip);
@@ -226,27 +346,15 @@ pub fn build_b_leg(
         Some(text) => address("new_ruri", text)?,
         None => a_leg_invite.request_uri().clone(),
     };
-    let from_uri = match new_from {
-        Some(text) => address("new_from", text)?,
-        None => a_leg_invite.from().uri().clone(),
+    let from_addr = match new_from {
+        Some(text) => identity("new_from", text)?,
+        None => NameAddr::new(a_leg_invite.from().uri().clone()),
     };
-    let to_uri = match new_to {
-        Some(text) => address("new_to", text)?,
-        None => a_leg_invite.to().uri().clone(),
+    let to_addr = match new_to {
+        Some(text) => identity("new_to", text)?,
+        None => NameAddr::new(a_leg_invite.to().uri().clone()),
     };
-    let body = match body_override {
-        Some(b) => b.to_vec(),
-        None => a_leg_invite.body().to_vec(),
-    };
-    let content_type = if body.is_empty() {
-        None
-    } else {
-        a_leg_invite
-            .raw(HeaderName::ContentType)
-            .next()
-            .and_then(media_type)
-            .or_else(|| body_override.map(|_| sdp()))
-    };
+    let (body, content_type, entity_headers) = minted_body(a_leg_invite, body_override);
     // `(name, Some(v))` sets, `(name, None)` removes — either way the name is the
     // caller's and no relayed or configured copy of it rides (see [`removed`]).
     // Neither reaches a STRUCTURAL name (RFC 3261 §16.6): the generator owns
@@ -260,13 +368,27 @@ pub fn build_b_leg(
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
         .collect();
+    // The entity headers the minted body states for itself; a name the decision
+    // stated stands, and a structural name is the generator's.
+    let decided = extra_headers.clone();
+    for (name, value) in entity_headers {
+        let header = HeaderName::from(name.as_str());
+        if HeaderName::class_of(&name) != HeaderClass::Structural
+            && !decided.iter().any(|h| header.matches(&h.name))
+            && !removed(header_updates, &header)
+        {
+            extra_headers
+                .push(MsgHeader { name: SipStr::owned(&name), value: SipStr::owned(&value) });
+        }
+    }
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
     // call declares one; a half nobody stated carries no line. The offer and
     // the withhold narrow the assembled sets after this. Neither clobbers a
-    // caller-supplied value from `header_updates`.
+    // caller-supplied value from `header_updates`, and a half the caller
+    // removed stays off (see [`removed`]).
     for (name, value) in capabilities.lines() {
-        if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+        if !extra_headers.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&value),
@@ -282,7 +404,8 @@ pub fn build_b_leg(
         let name = HeaderName::from(configured.as_str());
         if extra_headers.iter().any(|h| name.matches(&h.name))
             || removed(header_updates, &name)
-            || !generators::relayable(configured, relay_scope(body_override))
+            || !generators::relayable_from(configured, a_leg_invite.headers(), scope)
+            || !describes_minted_body(scope, configured)
         {
             continue;
         }
@@ -300,10 +423,12 @@ pub fn build_b_leg(
     // statement and stands: an explicit `header_updates` value, then this face's
     // advertisement, then the relayed value.
     let stated = extra_headers.clone();
-    for header in generators::relayable_headers(a_leg_invite.headers(), relay_scope(body_override))
-    {
+    for header in generators::relayable_request_headers(a_leg_invite, scope) {
         let name = HeaderName::from(header.name.as_str());
-        if !stated.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
+        if !stated.iter().any(|h| name.matches(&h.name))
+            && !removed(header_updates, &name)
+            && describes_minted_body(scope, header.name.as_str())
+        {
             extra_headers.push(header);
         }
     }
@@ -315,13 +440,22 @@ pub fn build_b_leg(
     apply_offered_option_tags(&mut extra_headers, offered_option_tags);
     apply_withheld_option_tags(&mut extra_headers, withheld_option_tags);
 
+    // RFC 4028: the caller's session timer rides only to a leg whose answer
+    // answers the caller's INVITE, and only as far as the leg offers it.
+    let takes_part = caller_invite_pending
+        && kind.unwrap_or(call::LegKind::Destination) != call::LegKind::Media
+        && !withheld_option_tags.iter().any(|t| t.eq_ignore_ascii_case(super::TIMER));
+    let leg_offers = generators::offers_session_timer(&extra_headers);
+    super::settle_session_timer(&mut extra_headers, a_leg_invite.headers(), takes_part, leg_offers);
+
     // RFC 7315 §5.6: the element that STARTS a leg generates the identifier its
     // charging session is correlated on. One already on the message — relayed
     // from the originator, or stated by the decision — is that identifier, so
-    // this only ever mints where none arrived.
+    // this only ever mints where none arrived; a decision removing it mints
+    // none.
     if let Some(charging) = charging {
         let name = ChargingVector::header_name();
-        if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+        if !extra_headers.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             let host = charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
             let icid = format!("{}-{}", id_gen.new_tag(), leg_id);
             extra_headers.push(MsgHeader {
@@ -334,11 +468,11 @@ pub fn build_b_leg(
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
-        from: Some(header::From::from_uri(from_uri.clone()).with_tag(SipStr::owned(&from_tag))),
-        to: Some(header::To::from_uri(to_uri.clone())),
+        from: Some(header::From::new(from_addr.clone()).with_tag(SipStr::owned(&from_tag))),
+        to: Some(header::To::new(to_addr.clone())),
         cseq: 1,
-        via: Some(leg_via(config, call_ref, leg_id, is_emergency, branch.clone())),
-        contact: Some(leg_contact(config, call_ref, leg_id, is_emergency)),
+        via: Some(leg_via(config, marks, leg_id, branch.clone())),
+        contact: Some(leg_contact(config, marks, leg_id)),
         // §16.6 step 3: the originated leg continues the budget of the INVITE
         // that caused it rather than refilling — a B2BUA that restated 70 would
         // let a routing loop through it run forever. A REFER transfer leg reads
@@ -359,9 +493,10 @@ pub fn build_b_leg(
     let (invite, wire_dest) = apply_b_leg_egress(config, leg_id, &[], invite, dest.clone());
 
     // The `call` crate stores dialog identity as text (ADR-0008), so the values
-    // this INVITE was built from are written down as the bytes it carries.
-    let from_uri = from_uri.text().into_owned();
-    let to_uri = to_uri.text().into_owned();
+    // this INVITE was built from are written down as the bytes it carries: the
+    // addresses whole, display names included, the tags kept apart.
+    let local_addr = header::From::new(from_addr).to_wire();
+    let remote_addr = header::To::new(to_addr).to_wire();
     let request_uri = request_uri.text().into_owned();
 
     let dialog = Dialog {
@@ -369,8 +504,8 @@ pub fn build_b_leg(
             call_id: b_call_id.clone(),
             local_tag: from_tag.clone(),
             remote_tag: String::new(),
-            local_uri: from_uri.clone(),
-            remote_uri: to_uri.clone(),
+            local_uri: local_addr.clone(),
+            remote_uri: remote_addr.clone(),
             remote_target: request_uri.clone(),
             local_cseq: 1,
             route_set: vec![],
@@ -388,6 +523,7 @@ pub fn build_b_leg(
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     };
@@ -404,8 +540,8 @@ pub fn build_b_leg(
         dialogs: vec![dialog],
         no_answer_timeout_sec,
         bye_disposition: None,
-        local_uri: Some(from_uri),
-        remote_uri: Some(to_uri),
+        local_uri: Some(local_addr),
+        remote_uri: Some(remote_addr),
         invite_request_uri: Some(request_uri),
         // Also stamp the INVITE handle on the leg: a forked early dialog created
         // from a later 18x has no per-dialog handle, so ACK-for-2xx / RAck CSeq
@@ -416,8 +552,10 @@ pub fn build_b_leg(
         // Derive adoption from the kind (don't pin it): Destination ⇒ adopted,
         // Media ⇒ unadopted. See `call::helpers::is_adopted`.
         adopted: None,
+        in_session_timer: Some(takes_part),
         invite_final_sent: None,
         messages: Default::default(),
+        sdp_session: Default::default(),
     };
 
     let effect = OutboundSipEffect {
@@ -427,7 +565,8 @@ pub fn build_b_leg(
         label: format!("b-leg INVITE ({leg_id})"),
         leg_id: Some(leg_id.to_string()),
         // The originator's INVITE forwarded, unless the decision put its own
-        // body on it — then the offer, and the message, are this stack's.
+        // body on it — then the offer, and the message, are this stack's; a
+        // body composed around attached parts is this stack's too.
         provenance: match body_override {
             Some(_) => Provenance::Authored,
             None => Provenance::Relayed,

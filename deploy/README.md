@@ -32,7 +32,7 @@ Both are configured entirely by env vars (see the module docs at the top of each
 `B2BUA_REPL=1`: real TCP repl transport + `K8sMembership` EndpointSlice
 discovery + SIGTERM drain + `/ready` probe — ADR-0011 / the chaos suite below).
 Still deferred per ADR-0009/0010 and **not** wired here: the HTTP call-control
-decision adapter, the real sliding-window limiter, the real proxy self-gate, the
+decision adapter, the call-keyed limiter as the default, the real proxy self-gate, the
 AIMD per-worker bucket, proxy VIP/HA, and the proxy's own k8s registry (it still
 takes IP literals via `PROXY_WORKERS`).
 
@@ -78,7 +78,7 @@ historical layout.
 | `CLUSTER` / `NS` | `sip-e2e` / `sip-test` | kind cluster name / namespace. |
 | `SUT_IMAGE` | `siprustserver:dev` | Rust SUT image tag. |
 | `WORKER_REPLICAS` | `2` | b2bua worker pool size. |
-| `OBS_ENABLE` | `1` | Bring up the observability stack (Grafana :3333, VictoriaMetrics :8428). `0` to skip. |
+| `OBS_ENABLE` | `1` | Bring up the observability stack (Grafana :3333, VictoriaMetrics :8428) on `up`, re-apply the in-cluster scrapers on every `deploy`, and fail either when the cluster's series do not reach VictoriaMetrics within `OBS_CHECK_WAIT` (180 s); `./run.sh obs-check` runs the check alone. `0` to skip. |
 | `REPL_ENABLE` / `REPL_PORT` | `0` / `9092` | HA call replication (chaos suite sets `1`). |
 
 Host preflight knobs (see system requirements below):
@@ -87,7 +87,7 @@ Host preflight knobs (see system requirements below):
 |---|---|---|
 | `PREFLIGHT_STRICT` | `0` | `1` makes a failed cgroup/sysctl check **abort** `up` instead of warning. |
 | `PREFLIGHT_FIX_SYSCTLS` | `0` | `1` auto-raises any low sysctl (needs root / passwordless sudo). |
-| `REQUIRED_SYSCTLS` | `fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304` | Space-separated `key=min` pairs checked at `up`. |
+| `REQUIRED_SYSCTLS` | `fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304 net.core.rmem_max=4194304` | Space-separated `key=min` pairs checked at `up`. |
 
 ```bash
 # Example: run the whole stack on a different subnet + LB port (e.g. 172.20 collides
@@ -106,14 +106,14 @@ advisory by default — see the knobs above) before creating the cluster.
 |---|---|
 | Tools on `PATH` | `docker` (rootful), `docker compose`, `kind`, `kubectl`, `envsubst` (gettext) — checked by `run.sh` preflight. |
 | **cgroups** | **v2 strongly preferred** (default on Ubuntu 22.04+, Debian 12, Fedora 35+, RHEL/Rocky 9). On cgroup **v1** the host must boot with `cgroup_enable=memory swapaccount=1`, otherwise `cap-kind-memory.sh`'s `--memory-swap` node ceiling is **silently ignored**. Verify: `docker info \| grep -i cgroup` → `Cgroup Version: 2`. |
-| **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. `net.core.wmem_max≥4194304` lets the SIP sockets take the 4 MiB `SO_SNDBUF` the manifests request (ADR-0033); it is the host's, a kind node cannot raise it. |
+| **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. `net.core.wmem_max≥4194304` lets the SIP sockets take the 4 MiB `SO_SNDBUF` the manifests request (ADR-0033), and `net.core.rmem_max≥4194304` the 4 MiB `SO_RCVBUF`; both are the host's, a kind node cannot raise them. |
 | Kernel modules | `sch_netem` (needed by `chaos.sh` `tc netem`), `br_netfilter`, `overlay`. |
 | RAM | ~16 GiB. The cluster ceiling alone is 9.5 GiB (`cap-kind-memory.sh`, tunable via `TOTAL_CAP_MB` and the per-tier `*_CAP_MB`). |
 | Network | `$SIP_SUBNET` (default `172.20.0.0/16`) **must be free** on the host — no vmnet / route / other docker network may overlap it. On VMware, check `ip route \| grep 172.20` and `docker network ls`; if it collides, set a free `SIP_SUBNET`. |
 
 ## HA replication chaos suite — `deploy/k8s/chaos.sh`
 
-Goal-3 (S11) acceptance: the **real-clock, real-TCP, real-k8s** test of
+HA acceptance: the **real-clock, real-TCP, real-k8s** test of
 peer-to-peer call replication (ADR-0011). It stands up the stack with
 replication **on** (`REPL_ENABLE=1`, ≥2 workers), drives long-hold dialogs, then
 kills the worker holding a dialog mid-call and asserts the dialog **survives**
@@ -126,6 +126,10 @@ cd deploy/k8s
 ./chaos.sh kill         # inject one worker kill against a running stack
 ./chaos.sh down
 # knobs: CALLS=30 CPS=3 KILL_TARGET=b2bua-worker-0 PASS_THRESHOLD=90 KEEP=1
+# faults of the shared dependencies (the limiter, the CDR broker, their node):
+./chaos.sh limiterkill | limiterrestart | limiternetcut | limiterreject | limiterslow | limiterfreeze
+./chaos.sh brokerfreeze | infranodekill
+./chaos.sh cleanup      # undo any of them an interrupted caller left applied
 ```
 
 It is a **shell script, not a `cargo test`** — real kind clusters + image builds
@@ -142,12 +146,11 @@ and the b2bua-runner module docs for the env grammar
 
 ## Sharing with sipjsserver (vendored, divergeable)
 
-This runner is **independent** (its own bash + manifests). As of S11 the two
-pieces it used to **symlink** from a sibling `sipjsserver` checkout are now
-**vendored copies** in-tree, so the runner stands alone and the artifacts may
-diverge (the chaos/endurance scenarios especially):
+This runner is **independent** (its own bash + manifests). The pieces it shares
+with `sipjsserver` are **vendored copies** in-tree, so the runner stands alone
+and the artifacts may diverge (the chaos/endurance scenarios especially):
 
-| Artifact | Location (was a symlink) | Note |
+| Artifact | Location | Note |
 |---|---|---|
 | Cluster topology | `deploy/k8s/cluster.yaml` | Copied from `sipjsserver/tests/k8s/cluster.yaml`; **same cluster name `sip-e2e`** (the one-cluster switch) |
 | SIPp scenarios | `deploy/k8s/sipp/scenarios/` | Copied from the sipjs sipp chart; free to diverge |

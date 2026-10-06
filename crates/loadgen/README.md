@@ -8,11 +8,13 @@ report that keeps the first-N samples per `(scenario × result-class)` — inclu
 the OK flows and, for failures, *why* they failed.
 
 It multiplexes every dialog over a **few static UDP sockets** (one per defined
-endpoint: `uac`, `uas`, `refer`), so call rate is not bounded by fds/ephemeral
-ports. Calls are correlated by one random per-call token; **how the token
-travels through the SUT is a pluggable per-run strategy** (`--correlate`): a
-relayed header (default `X-Loadgen-Id`, needs SUT cooperation) or the To-header
-user-part (works against any SIP-correct B2BUA). See *Correlation strategies*.
+endpoint address: `uac`, `uas`, `refer`, or one shared socket with
+`--shared-socket`), so call rate is not bounded by fds/ephemeral ports. Calls
+are correlated by one per-call token; **how the token travels through the SUT
+is a pluggable per-run strategy** (`--correlate`): a relayed header (default
+`X-Loadgen-Id`, needs SUT cooperation), the To-header user-part (works against
+any SIP-correct B2BUA), or the caller's From user (for a SUT that keeps the
+calling party's number on every leg). See *Correlation strategies*.
 
 ---
 
@@ -29,11 +31,11 @@ and drive the load driver against it:
 ```bash
 # all loadgen smoke tests (correlation/demux, no-leak, orphans, picker,
 # emergency-under-overload, post-call cleanup across failure modes)
-cargo test -p loadgen --test smoke
+cargo test -p loadgen --test it smoke::
 
 # one test, with its full SIP trace printed:
-cargo test -p loadgen --test smoke loadgen_mux_emergency_split_under_overload -- --nocapture
-cargo test -p loadgen --test smoke loadgen_post_call_cleanup_no_leak -- --nocapture
+cargo test -p loadgen --test it smoke::loadgen_mux_emergency_split_under_overload -- --nocapture
+cargo test -p loadgen --test it smoke::loadgen_post_call_cleanup_no_leak -- --nocapture
 ```
 
 These run in the **default test lane** (`just test`) — they are fast and require
@@ -73,7 +75,8 @@ Prerequisites for the real cluster (one-time):
   `172.20.0.1`). See the `cluster-nat-inventory` notes for the NAT details.
 
 Key flags: `--cps`, `--duration`, `--max-in-flight`, `--target`, `--bind-ip`,
-`--base-port` (uac=base, uas=base+1, refer=base+2), `--correlate` /
+`--base-port` (uac=base, uas=base+1, refer=base+2), `--shared-socket` (all
+three on `base`; see *Shared socket*), `--correlate` /
 `--correlation-header` / `--correlation-template` / `--correlation-extract`
 (see *Correlation strategies*), `--route-pin-to-uas`, `--refer-key` (the
 `X-Api-Call.refer_key` the SUT's REFER backend authorizes — per-run SUT auth
@@ -155,7 +158,7 @@ therefore fires **no catch-up burst** (the old, faster grid's backlog of past-du
 slots is discarded, the new grid starts *now*), and a **raise** takes effect
 within one slot of the shorter period. A transient catch-up (after a stall) is
 still bounded by `--max-in-flight` (the excess is shed+counted). Coverage:
-`crates/loadgen/tests/governor.rs` (cadence, cut-without-burst, pause/resume) and
+`crates/loadgen/tests/it/governor.rs` (cadence, cut-without-burst, pause/resume) and
 the `post_rate_retargets_the_running_server` HTTP smoke test.
 
 ### The environment axis: `--endpoint-config`
@@ -192,15 +195,16 @@ loadgen standalone is its reader.
 
 ### Correlation strategies
 
-Every call mints one random token; the mux demuxes an inbound **initial** leg
-(a Call-ID it has never seen) back to its call by recovering that token. A
+Every call carries one token (minted, or its caller's From user under
+`from-user`); the mux demuxes an inbound **initial** leg (a Call-ID it has
+never seen) back to its call by recovering that token. A
 strategy has two halves — **stamp** (how the token is written into the outgoing
 INVITE) and **extract** (how it is recovered from a received leg) — picked
 per run with `--correlate`; all mux endpoints share the one strategy:
 
 - **`--correlate header`** (default) — the token rides one transparent header
   the SUT must **relay** onto every leg it originates (our b2bua:
-  `B2BUA_RELAY_HEADERS`). Untuned this is byte-for-byte the historic behaviour:
+  `B2BUA_RELAY_HEADERS`). Untuned:
   `X-Loadgen-Id: <token>`, extraction = the whole header value.
   - `--correlation-header <name>` picks the header.
   - `--correlation-template <tpl>` shapes the VALUE around a `${token}`
@@ -223,23 +227,59 @@ per run with `--correlate`; all mux endpoints share the one strategy:
   the To user is now loadgen-owned, so don't combine it with a SUT that routes
   or rewrites on the To user. (The REFER scenario's `Refer-To` user becomes the
   token too, so the transfer leg keeps correlating.)
+- **`--correlate from-user`** — the token IS the calling party's **From URI
+  user**, taken from the attached Test case's resolved `core.from` (per call
+  from its binding pool); nothing is stamped and the loadgen mints no number.
+  Extraction reads the From user of the arriving INVITE, so the SUT may rewrite
+  the From host, display name and tag, and may route on the To. Contract:
+  - every mix entry carries a case (`--case` or `case=`), checked at startup;
+  - the key is the From user percent-unescaped and compared as written
+    (visual separators kept; a `tel:` URI's number without its parameters);
+  - a call whose resolved From is absent or has no user is counted
+    `class="rejected"` before any datagram. A drawn number a concurrent call
+    holds or that is cooling is re-drawn from the case's pool, up to 8 draws;
+    only when every draw is unavailable is the call `rejected`. Each refused
+    draw counts once (`loadgen_mux_token_collision_total`,
+    `loadgen_mux_key_cooling_total`), so these count draws, not calls. Those contention rejections are classified against the
+    chaos markers of the last 64·T1, like the failure that caused them;
+  - the caller's first INVITE must carry the key as its From user; a mismatch
+    fails the send and counts `loadgen_mux_caller_key_mismatch_total`;
+  - a number whose call ended not ok cools for 64·T1 (32 s): a draw of it
+    meanwhile counts `loadgen_mux_key_cooling_total`. A number whose call
+    ended ok is reusable at once.
+
+The mux never hands a finished call's leg to the next call on its key: an
+INVITE on a Call-ID a finished call released within 64·T1 is a
+`reason="released"` orphan, and a leg arriving before its call's caller sent
+its INVITE is a `reason="early"` orphan. A new INVITE reusing a caller's own
+Call-ID (RFC 3261 §8.1.1.4) is a `reason="call_id_reuse"` orphan.
 
 Correlation failures are observable either way: an arriving initial INVITE with
 no extractable token counts `loadgen_mux_orphan_total{reason="no_header"}`; an
 extracted token matching no pending call counts `reason="unknown_token"`.
 
 In code the strategy is `loadgen::Correlation` (`header(name)`,
-`header_templated(name, template, extract)`, `to_user()`); the stamp half is
+`header_templated(name, template, extract)`, `to_user()`, `from_user()`); the stamp half is
 applied inside `CallEnv::outgoing_invite` via `CorrelationStamp` (the per-call
 identity half, orthogonal to the egress rewrite), the extract half by the mux
 demux. Both strategies are covered by unit tests (`mux::tests`) and the
 smoke suite (`loadgen_to_user_correlation_without_relayed_header` proves a full
 call correlates with **no** relay configured on the SUT).
 
+### Shared socket
+
+`--shared-socket` binds `alice`, `bob` and `charlie` on one address (`--base-port`);
+an `--endpoint-config` giving the roles one address is the explicit form. It
+fits a SUT that sends each new leg back to the ip:port that originated the
+call. The mux binds each distinct address once; per call the driver declares
+the caller bind first, then the callee legs, so responses reach the caller by
+its Call-ID and a new leg reaches its callee by the call's token (and, with
+several legs, the R-URI picker). The layout is independent of `--correlate`.
+
 ### Packet loss + auto-retransmit (robustness testing)
 
 Two default-off knobs let you exercise the SUT (and the loadgen itself) against a
-lossy fabric — an un-tuned run is byte-for-byte the historic behaviour.
+lossy fabric — an un-tuned run drops and retransmits nothing extra.
 
 - **`--drop-rate <f>`** (or **`--drop`** = the `0.001` default, 1/1000 so
   `P(3 drops in a row) ≈ 1e-9`): each datagram this call's mux endpoints send OR
@@ -360,17 +400,17 @@ The worked example, `e2e/cases/load-basic-pooled.json`:
   "bindings": {
     "mode": "seq",
     "entries": [
-      { "core": { "from": "sip:+3310${seq:4}@pool.example",
-                  "to":   "sip:+3390${seq:4}@callee.example" } },
+      { "core": { "from": "sip:+155510${seq:4}@pool.example",
+                  "to":   "sip:+155590${seq:4}@callee.example" } },
       { "core": { "from": "sip:+4420${rand:6}@pool.example" } }
     ]
   }
 }
 ```
 
-Call 0 dials `From: sip:+33100000@pool.example` → `To: sip:+33900000@…`, call 1
+Call 0 dials `From: sip:+1555100000@pool.example` → `To: sip:+1555900000@…`, call 1
 `From: sip:+4420<6 random digits>@…` (falling back to the base/default To), call
-2 wraps to entry 0 with `+33100002`, and so on. What the resolution drives:
+2 wraps to entry 0 with `+1555100002`, and so on. What the resolution drives:
 
 - the resolved **core `from`/`to`/`ruri`** ride the same egress
   `outgoing_invite` path as an e2e Test case's `core` (folded in before the
@@ -392,7 +432,7 @@ A malformed token (`${bogus}`, `${seq:}`, an unclosed `${…`) or an empty pool
 fails **at startup** (the same load-time validation `validate_case` applies on
 the e2e surface), never silently mid-run. Absent `bindings`, the case's single
 `input` is used for every call (tokens still expand), and with no `--case` at
-all the historic flag-only behaviour is byte-for-byte unchanged. Smoke
+all the run is driven by the flags alone. Smoke
 coverage: `loadgen_pooled_case_identities_and_dwell_overrides`.
 
 ### Test-case checks on sampled calls (`checks` / `checkSets`)
@@ -428,8 +468,8 @@ fail the sample.
 A case may also carry **`allowViolations`: `["no-contact-on-bye", …]`** —
 the authored analogue of `Harness::allow_violation` for a flow that
 legitimately deviates. The named RFC audit rules are exempted per call, so the
-finding no longer reclassifies the sampled call to `rfc_audit_fail`. Absent /
-empty = today's full audit, byte-for-byte. Smoke coverage:
+finding does not reclassify the sampled call to `rfc_audit_fail`. Absent /
+empty = the full audit. Smoke coverage:
 `loadgen_case_checks_pass_and_render_verdicts`,
 `loadgen_failing_check_reclassifies_to_check_fail`,
 `loadgen_allow_violations_waives_named_rfc_rule`.
@@ -518,13 +558,13 @@ page with its one-line reason.
   `Send` `AgentBinder` (`scenario-harness/src/loadbind.rs`) so thousands of calls
   run as ordinary tokio tasks. Recording + the RFC 3261/3262/3264 audit are the
   **same** decorators the harness report uses, layered per-sampled-call.
-- **The smoke suite is the regression gate.** `crates/loadgen/tests/smoke.rs`
+- **The smoke suite is the regression gate.** `crates/loadgen/tests/it/smoke.rs`
   runs the driver against an in-process `B2buaSut` and asserts correlation/demux,
   no dialog mixing, no mux/SUT leak, orphan observability, the multi-receiver
   picker, the emergency/overload 503-split, and post-call cleanup across every
   teardown path. These are real-clock but short, so they live in the **default
   lane** (`just test`). Keep them green; they have caught real B2BUA bugs (e.g.
-  the Tier-3 overload-shed per-call-lock leak).
+  the overload-shed per-call-lock leak).
 - **It does not replace the conformance tests.** Strict per-message RFC oracles
   live in `b2bua-harness` (e.g. `refer_allow.rs`). Load scenarios are
   interleaving-tolerant on purpose — a load tool must be robust to reordering.
@@ -619,7 +659,7 @@ drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
 
 ### Add a smoke test
 
-Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/smoke.rs`: call
+Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/it/smoke.rs`: call
 `setup(base_port, Correlation::header("X-Loadgen-Id"), sample_cap)` (or
 `setup_with(.., |c| …)` to tune the in-process B2BUA, e.g. exhaust the CPS bucket
 for an overload test; `setup_no_relay(..)` for the third-party-SUT shape with no
@@ -696,7 +736,7 @@ so adding digest is one object:
   §17.1.2.2), asks the responder for a credential, and resends the request with
   the credential header + a **bumped CSeq** + a fresh Via branch, exactly **once**
   (a challenge to the resend is a plain `status_401/407`). **Without** a responder
-  the behaviour is byte-for-byte today's — no retry.
+  a challenge is final — no retry.
 
 - **How to plug one in.** Set it on the run's `CallEnv`
   (`CallEnv::with_challenge_responder(Arc::new(MyDigest{…}))`) or, on the load

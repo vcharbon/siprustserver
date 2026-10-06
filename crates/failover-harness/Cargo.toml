@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 b2bua = { path = "../b2bua" }
+# The simulated load sampler each worker's overload signal reads.
+load-shed = { path = "../load-shed" }
 # Shared b2bua/proxy spawn primitives live in b2bua-harness; failover-harness reuses them.
 b2bua-harness = { path = "../b2bua-harness" }
 call = { path = "../call" }
@@ -26,7 +28,7 @@ topology = { path = "../topology" }
 ha-harness = { path = "../ha-harness" }
 seq-report = { path = "../seq-report" }
 # Promoted to normal deps (vs dev-deps in b2bua-harness): the DSL wires the
-# genuine limiter stack (HttpCallLimiter + LimiterServer + WindowStore) over the
+# genuine limiter stack (HttpCallLimiter + LimiterServer + CallStore) over the
 # SIMULATED HTTP fabric on the fake clock in library code, so every matrix cell
 # runs with real limiter logic (not a NoopLimiter/mock; no socket, no wall-clock)
 # (ADR-0013 §0) — the reason this is a dedicated crate rather than a
@@ -37,6 +39,10 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# A test service states the body of a request it originates.
+b2bua-sdk = { path = "../b2bua-sdk" }
+# A test wraps the limiter client (the `CallLimiter` trait is async-trait).
+async-trait = { workspace = true }
 # The trace-plane tests install their own sampling gate and read the captured
 # subscriber buffer (ADR-0026).
 observe = { path = "../observe" }

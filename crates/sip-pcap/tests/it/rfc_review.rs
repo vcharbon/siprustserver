@@ -4,12 +4,11 @@
 //! side the stated SUT set puts it, and the two outputs — the text a reader
 //! gets and the report a consumer parses — are pinned as goldens.
 //!
-//! The fixture is one call of a production capture re-encoded from its
-//! anonymized flows document (`sipflow --to-pcap`): every number, host, IP
-//! and vendor string rewritten, seven INVITE-transaction datagrams written
-//! twice 100 µs apart the way a mirrored tap does. Its known defect is the
-//! one the census charged on the source: a dialog-creating 2xx nobody ACKs,
-//! on both sides of the B2BUA.
+//! The fixture is one synthetic call through a B2BUA (documentation
+//! addresses, example hosts, `+1555` numbers, minted Call-IDs, tags and
+//! branches), seven INVITE-transaction datagrams written twice 100 µs apart
+//! the way a mirrored tap does. Its one defect is a dialog-creating 2xx
+//! nobody ACKs, on both sides of the B2BUA.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,6 +1,6 @@
 {
   "uid": "call-limiter",
-  "title": "Call limiter — shared sliding-window (Rust)",
+  "title": "Call limiter — shared, keyed by call (Rust)",
   "tags": ["siprustserver", "call-limiter", "limiter"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -28,34 +28,34 @@
     },
     {
       "id": 2, "type": "stat", "title": "Concurrent (all limiter ids)",
-      "description": "`limiter_current_total` — sum of live counts across ALL limiter ids. With the worker's always-on global-stress:999999 entry, every call is counted here, so this tracks total concurrency through the limiter (NOT the cap-20 endurance stream alone — that is read SIPp-side on the endurance dashboard).",
+      "description": "`limiter_holds` — sum of live counts across ALL limiter ids. With the worker's always-on global-stress:999999 entry, every call is counted here, so this tracks total concurrency through the limiter (NOT the cap-20 endurance stream alone — that is read SIPp-side on the endurance dashboard).",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "limiter_current_total", "refId": "A" }],
+      "targets": [{ "expr": "limiter_holds", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "none" } }
     },
     {
       "id": 3, "type": "stat", "title": "Admits / sec",
-      "description": "`rate(limiter_admit_total[1m])` — admit requests received. ≈ the whole suite's call-setup rate, since every call traverses the limiter (full-chain stress).",
+      "description": "`sum(rate(limiter_admits_total[1m]))` — admit requests received. ≈ the whole suite's call-setup rate, since every call traverses the limiter (full-chain stress).",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "rate(limiter_admit_total[1m])", "refId": "A" }],
+      "targets": [{ "expr": "sum(rate(limiter_admits_total[1m]))", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
       "id": 4, "type": "stat", "title": "Rejected / sec",
-      "description": "`rate(limiter_rejected_total[1m])` — admits rejected (≥1 entry over cap). Driven by the cap-20 endurance stream; drops to 0 during limiter_kill/limiter_netcut (b2bua fails open).",
+      "description": "`rate(limiter_admits_total{outcome=\"rejected\"}[1m])` — admits rejected (≥1 entry over cap). Driven by the cap-20 endurance stream; drops to 0 during limiter_kill/limiter_netcut (b2bua fails open).",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "rate(limiter_rejected_total[1m])", "refId": "A" }],
+      "targets": [{ "expr": "rate(limiter_admits_total{outcome=\"rejected\"}[1m])", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
-      "id": 5, "type": "stat", "title": "Live keys",
-      "description": "`limiter_live_keys` — live (id, window) keys held. Leak monitor: should stay bounded (≈ number of active limiter ids × active windows).",
+      "id": 5, "type": "stat", "title": "Calls counted",
+      "description": "`limiter_calls` — calls holding a set. Leak monitor: should track the active calls carrying a limiter.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "limiter_live_keys", "refId": "A" }],
+      "targets": [{ "expr": "limiter_calls", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "none" } }
     },
     {
@@ -68,21 +68,21 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "rate(limiter_admit_total[1m])", "refId": "A", "legendFormat": "admit/s" },
-        { "expr": "rate(limiter_admitted_total[1m])", "refId": "B", "legendFormat": "admitted/s" },
-        { "expr": "rate(limiter_rejected_total[1m])", "refId": "C", "legendFormat": "rejected/s" }
+        { "expr": "sum(rate(limiter_admits_total[1m]))", "refId": "A", "legendFormat": "admit/s" },
+        { "expr": "rate(limiter_admits_total{outcome=\"admitted\"}[1m])", "refId": "B", "legendFormat": "admitted/s" },
+        { "expr": "rate(limiter_admits_total{outcome=\"rejected\"}[1m])", "refId": "C", "legendFormat": "rejected/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     },
     {
       "id": 8, "type": "timeseries", "title": "Release / refresh (per-s)",
-      "description": "release = holds dropped on BYE/terminate; refresh = holds migrated to the current window for long calls (every LIMITER_WINDOW_SECONDS). Both should track admitted/s in steady state — the full chain on every call.",
+      "description": "release = calls released on BYE/terminate; refresh = leases extended for long calls (every LIMITER_REFRESH_SECONDS). Both should track admitted/s in steady state — the full chain on every call.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "rate(limiter_release_total[1m])", "refId": "A", "legendFormat": "release/s" },
-        { "expr": "rate(limiter_refresh_total[1m])", "refId": "B", "legendFormat": "refresh/s" }
+        { "expr": "rate(limiter_release_calls_total[1m])", "refId": "A", "legendFormat": "release/s" },
+        { "expr": "rate(limiter_refresh_requests_total[1m])", "refId": "B", "legendFormat": "refresh/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps", "min": 0, "custom": { "fillOpacity": 8, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
@@ -93,19 +93,20 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "rate(limiter_rejected_total[1m]) / clamp_min(rate(limiter_admit_total[1m]), 1)", "refId": "A", "legendFormat": "reject ratio" }
+        { "expr": "sum(rate(limiter_admits_total{outcome=\"rejected\"}[1m])) / clamp_min(sum(rate(limiter_admits_total[1m])), 1)", "refId": "A", "legendFormat": "reject ratio" }
       ],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
     },
     {
-      "id": 10, "type": "timeseries", "title": "Leak monitor — live keys + auto-cleared/s",
-      "description": "live_keys (gauge) should stay bounded; auto_cleared/s = window keys removed by the TTL sweep (crash-recovery / leaked-hold cleanup). A rising live_keys with no traffic, or a steady auto_cleared/s, signals holds not being released — investigate the b2bua release path.",
+      "id": 10, "type": "timeseries", "title": "Leak monitor — calls counted + lease-expired/s",
+      "description": "limiter_calls (gauge) should stay bounded; lease-expired/s = call sets dropped because their lease lapsed (crash-recovery / lost-release cleanup). A rising limiter_calls with no traffic, or a steady lease-expired/s, signals calls not being released — investigate the b2bua release path.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "limiter_live_keys", "refId": "A", "legendFormat": "live keys" },
-        { "expr": "rate(limiter_auto_cleared_total[1m])", "refId": "B", "legendFormat": "auto-cleared/s" }
+        { "expr": "limiter_calls", "refId": "A", "legendFormat": "calls counted" },
+        { "expr": "rate(limiter_lease_expired_calls_total[1m])", "refId": "B", "legendFormat": "lease-expired/s" },
+        { "expr": "rate(limiter_lease_expired_holds_total[1m])", "refId": "C", "legendFormat": "lease-expired holds/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
@@ -116,14 +117,66 @@
     },
     {
       "id": 12, "type": "timeseries", "title": "Concurrent (all ids) over time",
-      "description": "`limiter_current_total` over time. During limiter_kill/limiter_netcut this dips (fail-open admits record no holds; existing holds age out via TTL) then refills within ~LIMITER_WINDOW_SECONDS as active calls' refresh timers re-populate the counters.",
+      "description": "`limiter_holds` over time. During limiter_kill/limiter_netcut this dips (fail-open admits count nothing; a restarted limiter starts empty and the calls admitted before it never re-register) and refills with new calls.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "limiter_current_total", "refId": "A", "legendFormat": "current total" }
+        { "expr": "limiter_holds", "refId": "A", "legendFormat": "holds" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 13, "type": "row", "title": "Worker view (b2bua_limiter_*)", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Calls running uncounted",
+      "description": "`b2bua_limiter_uncounted_calls` per worker: resident calls whose route names limiter ids the limiter does not count (an admit that failed open, a release fence, a set an admit dropped). Back to 0 once they end.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod)(b2bua_limiter_uncounted_calls)", "refId": "A", "legendFormat": "{{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "Limiter requests with no usable answer (per s)",
+      "description": "`b2bua_limiter_failures_total` by request and cause. An op=admit failure on an initial admit, or on an uncounted call, runs the call uncounted; on a reroute of a counted call it stays counted. cause=breaker_open sent no request.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (op, cause)(rate(b2bua_limiter_failures_total[1m])) > 0", "refId": "A", "legendFormat": "{{op}} {{cause}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 16, "type": "timeseries", "title": "Breaker, release queue and refresh batch",
+      "description": "`b2bua_limiter_breaker_open` (1 while open), `b2bua_limiter_release_queue_depth` and `b2bua_limiter_refresh_due` per worker.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "max by (pod)(b2bua_limiter_breaker_open)", "refId": "A", "legendFormat": "breaker open {{pod}}" },
+        { "expr": "sum by (pod)(b2bua_limiter_release_queue_depth)", "refId": "B", "legendFormat": "release queue {{pod}}" },
+        { "expr": "sum by (pod)(b2bua_limiter_refresh_due)", "refId": "C", "legendFormat": "refresh due {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 17, "type": "timeseries", "title": "Given up and refresh answers (per s)",
+      "description": "`b2bua_limiter_release_given_up_total` and `b2bua_limiter_refresh_given_up_total` by reason (each freed by the lease), and the refresh answers other than extended (`b2bua_limiter_refresh_answers_total`).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (reason)(rate(b2bua_limiter_release_given_up_total[1m])) > 0", "refId": "A", "legendFormat": "release given up: {{reason}}" },
+        { "expr": "sum by (reason)(rate(b2bua_limiter_refresh_given_up_total[1m])) > 0", "refId": "B", "legendFormat": "refresh given up: {{reason}}" },
+        { "expr": "sum by (outcome)(rate(b2bua_limiter_refresh_answers_total{outcome!=\"extended\"}[1m])) > 0", "refId": "C", "legendFormat": "refresh answered {{outcome}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

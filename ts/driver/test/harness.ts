@@ -11,6 +11,7 @@ import { Classifier, Reclassifier } from "@sip/pipeline"
 import { ReplayCli } from "@sip/toolchain"
 import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -130,7 +131,31 @@ export interface RigOptions {
   readonly lanes?: Layer.Layer<LanePresets.Service>
   readonly reclassifier?: Layer.Layer<Reclassifier.Service>
   readonly classifier?: Layer.Layer<Classifier.Service>
+  /** Substituted when a test is about what a deployment's routing compiler refuses. */
+  readonly routing?: Layer.Layer<RoutingCompiler.Service>
+  /** Collects every path a cell reads WHOLE, for a test about how a file is read. */
+  readonly reads?: Array<string>
+  /** The interpreter stub, where a test wants another than the one that answers at once. */
+  readonly replay?: string
 }
+
+/** The platform file system, telling `reads` every whole-file read that goes through it. */
+const watching = (reads: Array<string>): Layer.Layer<FileSystem.FileSystem> =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.map(FileSystem.FileSystem, (base) =>
+      FileSystem.FileSystem.of({
+        ...base,
+        readFile: (path: string) => {
+          reads.push(path)
+          return base.readFile(path)
+        },
+        readFileString: (path: string, encoding?: string) => {
+          reads.push(path)
+          return base.readFileString(path, encoding)
+        }
+      }))
+  ).pipe(Layer.provide(NodeServices.layer))
 
 /** Every service a campaign needs, on the Node platform and the stub binaries. */
 export const rig = (options: RigOptions = {}) =>
@@ -139,10 +164,16 @@ export const rig = (options: RigOptions = {}) =>
     options.reclassifier ?? Reclassifier.layer,
     options.classifier ?? Classifier.layer,
     options.lanes ?? LanePresets.layerWith(() => Effect.succeed(STUB_LANE)),
-    RoutingCompiler.layer
+    options.routing ?? RoutingCompiler.layer
   ).pipe(
-    Layer.provideMerge(NodeServices.layer),
-    Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ REPLAY_BIN: fixture("stub-replay.sh") })))
+    Layer.provideMerge(
+      options.reads === undefined
+        ? NodeServices.layer
+        : Layer.mergeAll(NodeServices.layer, watching(options.reads))
+    ),
+    Layer.provide(
+      ConfigProvider.layer(ConfigProvider.fromUnknown({ REPLAY_BIN: options.replay ?? fixture("stub-replay.sh") }))
+    )
   )
 
 /** The stub crate runner, taking its exit code and whether it reports from argv. */

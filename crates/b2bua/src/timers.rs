@@ -7,6 +7,9 @@
 //! On expiry the driver emits a [`CallEvent::Timer`] on its fire channel; the
 //! router selects on that channel and routes it through the per-call dispatcher
 //! exactly like an inbound message — so timer handling shares the per-call FIFO.
+//! The fire carries the incarnation of the call that scheduled it, so a fire
+//! already on the channel when that call ended reaches no later call on its
+//! `call_ref` (the router drops it).
 //!
 //! ## Cancellation: epoch correctness **+** physical `Key` removal
 //!
@@ -14,8 +17,8 @@
 //! entry expires or is removed, its slot is freed and the **next insert reuses
 //! it, yielding the same `Key` value**. A *stale* `id → Key` map therefore
 //! aliases, and `try_remove(stale_key)` then evicts whatever *live* timer now
-//! occupies that slot — a silent, catastrophic wrong-timer cancel (the bug where
-//! a keepalive-timeout cancel killed the rescheduled keepalive). See
+//! occupies that slot — a silent, catastrophic wrong-timer cancel (e.g. a
+//! keepalive-timeout cancel killing the rescheduled keepalive). See
 //! `[[test-time clock & timers]]` in CLAUDE.md.
 //!
 //! The aliasing hazard needs a **stale** key — one held past the moment its
@@ -33,10 +36,10 @@
 //! - **Physical removal (the why):** Cancel/CancelAll/reschedule call
 //!   `try_remove(&key)` so a cancelled timer's slot is reclaimed *immediately*,
 //!   not at its original deadline. Without this, a per-call `GlobalDuration`
-//!   timer (default 1 h) cancelled by a 30 s call's BYE lingered ~3570 s as a
-//!   tombstone; under steady load the queue grew to ≈ `arrival_rate × 3600`
-//!   (~850k entries observed at ~100 cps) and the oversized timing wheel drove a
-//!   monotonic CPU climb that looked like a leak but wasn't. Physical removal
+//!   timer (default 1 h) cancelled by a 30 s call's BYE lingers ~3570 s as a
+//!   tombstone; under steady load the queue grows to ≈ `arrival_rate × 3600`
+//!   (~850k entries at ~100 cps) and the oversized timing wheel drives a
+//!   monotonic CPU climb that looks like a leak but isn't. Physical removal
 //!   keeps `queue.len()` ≈ the live timer count. This is the concrete instance
 //!   of the CLAUDE.md rule "all per-call state MUST be released at call end."
 //! - **Epoch (the backstop):** a `Fired` is delivered only if its epoch still
@@ -54,8 +57,8 @@ use tokio_util::time::{delay_queue::Key, DelayQueue};
 
 use call::{TimerEntry, TimerType};
 
-use crate::event::CallEvent;
 use crate::metrics::B2buaMetrics;
+use b2bua_sdk::event::CallEvent;
 
 struct Fired {
     id: String,
@@ -63,10 +66,11 @@ struct Fired {
     timer_type: TimerType,
     call_ref: String,
     leg_id: Option<String>,
+    incarnation: Option<String>,
 }
 
 enum TimerCmd {
-    Schedule { entry: TimerEntry, call_ref: String },
+    Schedule { entry: TimerEntry, call_ref: String, incarnation: Option<String> },
     Cancel { call_ref: String, id: String },
     CancelAll { call_ref: String },
 }
@@ -108,8 +112,10 @@ impl TimerService {
         (Self { cmd_tx }, fire_rx)
     }
 
-    pub async fn schedule(&self, entry: TimerEntry, call_ref: String) {
-        let _ = self.cmd_tx.send(TimerCmd::Schedule { entry, call_ref }).await;
+    /// Arm `entry` for the call `call_ref` whose incarnation is
+    /// `incarnation` (`call::Call::incarnation`), which its fire carries.
+    pub async fn schedule(&self, entry: TimerEntry, call_ref: String, incarnation: Option<String>) {
+        let _ = self.cmd_tx.send(TimerCmd::Schedule { entry, call_ref, incarnation }).await;
     }
 
     pub async fn cancel(&self, call_ref: String, id: String) {
@@ -159,9 +165,9 @@ impl TimerService {
     /// *same* `Instant` with zero real skew (the harness exercises the past-due path
     /// deterministically; the failover harness's per-node clock-anchor-offset knob
     /// now injects deterministic inter-node skew to exercise the re-anchor seam).
-    pub async fn restore(&self, entries: Vec<TimerEntry>, call_ref: String) {
+    pub async fn restore(&self, entries: Vec<TimerEntry>, call_ref: String, incarnation: &str) {
         for entry in entries {
-            self.schedule(entry, call_ref.clone()).await;
+            self.schedule(entry, call_ref.clone(), Some(incarnation.to_string())).await;
         }
     }
 }
@@ -211,7 +217,7 @@ async fn driver(
             biased;
             cmd = cmd_rx.recv() => match cmd {
                 None => break, // all handles dropped
-                Some(TimerCmd::Schedule { entry, call_ref }) => {
+                Some(TimerCmd::Schedule { entry, call_ref, incarnation }) => {
                     next_epoch += 1;
                     let epoch = next_epoch;
                     let akey = (call_ref.clone(), entry.id.clone());
@@ -239,6 +245,7 @@ async fn driver(
                             timer_type: entry.timer_type,
                             call_ref,
                             leg_id: entry.leg_id,
+                            incarnation,
                         },
                         Duration::from_millis(delay),
                     );
@@ -294,6 +301,7 @@ async fn driver(
                         timer_type: expired.timer_type,
                         call_ref: expired.call_ref,
                         leg_id: expired.leg_id,
+                        incarnation: expired.incarnation,
                     };
                     // Unbounded: only fails if the router (receiver) is gone — i.e.
                     // the worker is shutting down — and dropping the fire is fine.
@@ -306,10 +314,10 @@ async fn driver(
         }
         // Live timer-queue gauges. `queue.len()` is the physical entry count;
         // `active.len()` is the schedulable timer count. With physical
-        // cancellation the two now track each other — their gap is the
-        // tombstone backlog, which should stay ≈ 0. A gap that *climbs* means a
-        // removal is being missed and entries are lingering again (the old 1 h
-        // GlobalDuration leak); it is the regression alarm for this fix. Updated
+        // cancellation the two track each other — their gap is the tombstone
+        // backlog, which should stay ≈ 0. A gap that *climbs* means a removal is
+        // being missed and entries linger (e.g. a cancelled 1 h GlobalDuration
+        // left to expire); it is the alarm for that leak. Updated
         // every iteration (cheap Relaxed stores); the driver only iterates on a
         // state change.
         metrics.set_timer_gauges(queue.len() as u64, active.len() as u64);
@@ -342,6 +350,7 @@ mod tests {
                     leg_id: Some("b-1".into()),
                 },
                 "w0|cid|tag".into(),
+                Some("w0|cid|tag#k".into()),
             )
             .await;
         // Nothing yet.
@@ -351,10 +360,11 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1_500)).await;
         let ev = fire_rx.recv().await.unwrap();
         match ev {
-            CallEvent::Timer { timer_type, call_ref, leg_id } => {
+            CallEvent::Timer { timer_type, call_ref, leg_id, incarnation } => {
                 assert_eq!(timer_type, TimerType::NoAnswer);
                 assert_eq!(call_ref, "w0|cid|tag");
                 assert_eq!(leg_id.as_deref(), Some("b-1"));
+                assert_eq!(incarnation.as_deref(), Some("w0|cid|tag#k"), "the scheduler's");
             }
             _ => panic!("expected timer event"),
         }
@@ -373,6 +383,7 @@ mod tests {
                     leg_id: None,
                 },
                 "c".into(),
+                None,
             )
             .await;
         timers.cancel("c".into(), "t1".into()).await;
@@ -382,12 +393,11 @@ mod tests {
         assert!(fire_rx.try_recv().is_err());
     }
 
-    /// Regression for the `DelayQueue` `Key`-aliasing bug (the keepalive cycle-2
-    /// hang). Replays the real sequence: a timer fires (freeing its slab slot),
-    /// a second timer reuses that slot, the first is rescheduled, then the second
-    /// is cancelled. Under the old `try_remove`-by-`Key` driver the cancel
-    /// aliased the freed slot and evicted the *rescheduled* first timer, which
-    /// then silently never fired. With logical (epoch) cancellation it must fire.
+    /// `DelayQueue` `Key` aliasing: a timer fires (freeing its slab slot), a
+    /// second timer reuses that slot, the first is rescheduled, then the second
+    /// is cancelled. A cancel holding a stale `Key` would alias the freed slot
+    /// and evict the *rescheduled* first timer, which would then silently never
+    /// fire. The rescheduled timer must fire.
     #[tokio::test(start_paused = true)]
     async fn reschedule_survives_aliasing_cancel() {
         let clock = Clock::test_at(0);
@@ -404,6 +414,7 @@ mod tests {
                     leg_id: None,
                 },
                 cref.clone(),
+                None,
             )
             .await;
         tokio::time::advance(Duration::from_millis(30_000)).await;
@@ -425,6 +436,7 @@ mod tests {
                     leg_id: Some("a".into()),
                 },
                 cref.clone(),
+                None,
             )
             .await;
         // 3. ... reschedule keepalive for t=60s ...
@@ -437,9 +449,10 @@ mod tests {
                     leg_id: None,
                 },
                 cref.clone(),
+                None,
             )
             .await;
-        // 4. ... and cancel the timeout (the aliasing trigger in the old driver).
+        // 4. ... and cancel the timeout (the aliasing trigger).
         timers.cancel(cref.clone(), "KeepaliveTimeout:a".into()).await;
 
         // The cancelled timeout must NOT fire; the rescheduled keepalive MUST.
@@ -462,13 +475,12 @@ mod tests {
         }
     }
 
-    /// The fix for the timer-queue tombstone CPU drift: cancelling a timer must
-    /// physically reclaim its `DelayQueue` slot *now*, not leave it to expire at
-    /// its original deadline. Models the real leak — a long `GlobalDuration`
-    /// timer (1 h) armed on a call that tears down seconds later: under the old
-    /// logical-only cancel the slot lingered ~1 h, so at load the queue grew to
-    /// hundreds of thousands of dead entries. `queue_len` must drop to 0 on the
-    /// teardown cancel, well before the 1 h deadline.
+    /// Cancelling a timer must physically reclaim its `DelayQueue` slot *now*,
+    /// not leave it to expire at its original deadline. Models a long
+    /// `GlobalDuration` timer (1 h) armed on a call that tears down seconds
+    /// later: a logical-only cancel would leave the slot ~1 h, so at load the
+    /// queue would grow to hundreds of thousands of dead entries. `queue_len`
+    /// must drop to 0 on the teardown cancel, well before the 1 h deadline.
     #[tokio::test(start_paused = true)]
     async fn cancel_physically_reclaims_the_queue_slot() {
         let clock = Clock::test_at(0);
@@ -484,6 +496,7 @@ mod tests {
                     leg_id: None,
                 },
                 "c".into(),
+                None,
             )
             .await;
         settle().await;
@@ -520,6 +533,7 @@ mod tests {
                         leg_id: None,
                     },
                     "c".into(),
+                    None,
                 )
                 .await;
         }
@@ -532,16 +546,16 @@ mod tests {
         assert_eq!(metrics.timer_live(), 1);
     }
 
-    /// Review regression (#8): a burst of more timers than the old bounded fire
-    /// channel held (1024) must deliver EVERY fire — the `DelayQueue` is the only
-    /// bound, not an in-front buffer. Under the old `try_send` into `channel(1024)`
-    /// the overflow was silently dropped (a lost keepalive/no-answer/max-duration).
+    /// A burst of more timers than a bounded fire channel would hold (1024) must
+    /// deliver EVERY fire — the `DelayQueue` is the only bound, not an in-front
+    /// buffer. A `try_send` into `channel(1024)` would silently drop the overflow
+    /// (a lost keepalive/no-answer/max-duration).
     #[tokio::test(start_paused = true)]
     async fn timer_flood_past_old_channel_cap_delivers_every_fire() {
         let clock = Clock::test_at(0);
         let (timers, mut fire_rx) = TimerService::spawn(clock);
 
-        const N: usize = 3_000; // comfortably past the old 1024 cap
+        const N: usize = 3_000; // comfortably past a 1024 cap
         for i in 0..N {
             timers
                 .schedule(
@@ -552,6 +566,7 @@ mod tests {
                         leg_id: None,
                     },
                     format!("call-{i}"),
+                    None,
                 )
                 .await;
         }
@@ -579,15 +594,14 @@ mod tests {
         assert_eq!(got, N, "every fire delivered — no silent overflow drop");
     }
 
-    /// Regression for the cross-call timer-id aliasing reap bug. The timer
-    /// service is a single shared driver, but timer ids are per-call and repeat
-    /// across calls (every established call arms a `"Keepalive"` timer). With the
-    /// old id-only `active` map, scheduling a second call's `"Keepalive"` (same
-    /// id, different call_ref) overwrote the first's live epoch, so the first
-    /// call's queued keepalive became a stale tombstone and silently never
-    /// fired — at scale keepalives stopped, dead peers were never probed, and
-    /// `active_calls` grew without bound. Both calls' identically-named timers
-    /// must now fire independently.
+    /// Cross-call timer-id aliasing. The timer service is a single shared
+    /// driver, but timer ids are per-call and repeat across calls (every
+    /// established call arms a `"Keepalive"` timer). An id-only `active` map
+    /// would let a second call's `"Keepalive"` (same id, different call_ref)
+    /// overwrite the first's live epoch, so the first call's keepalive would
+    /// silently never fire — at scale keepalives stop, dead peers are never
+    /// probed, and `active_calls` grows without bound. Both calls'
+    /// identically-named timers must fire independently.
     #[tokio::test(start_paused = true)]
     async fn colliding_timer_ids_across_calls_both_fire() {
         let clock = Clock::test_at(0);
@@ -606,6 +620,7 @@ mod tests {
                         leg_id: None,
                     },
                     cref.clone(),
+                    None,
                 )
                 .await;
         }
@@ -630,8 +645,8 @@ mod tests {
     }
 
     /// Cancelling one call's timer must not cancel another call's identically
-    /// named timer. With the old id-only cancel, `cancel("Keepalive")` for call A
-    /// wiped call B's `"Keepalive"` epoch too.
+    /// named timer: an id-only cancel would let `cancel("Keepalive")` for call A
+    /// wipe call B's `"Keepalive"` epoch too.
     #[tokio::test(start_paused = true)]
     async fn cancel_is_scoped_to_its_call() {
         let clock = Clock::test_at(0);
@@ -648,6 +663,7 @@ mod tests {
                         leg_id: None,
                     },
                     cref.clone(),
+                    None,
                 )
                 .await;
         }

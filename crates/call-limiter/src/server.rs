@@ -1,10 +1,15 @@
 //! [`LimiterServer`] — the [`HttpService`] that routes the limiter API onto the
-//! [`WindowStore`], bumping [`LimiterMetrics`] at the edges.
+//! [`CallStore`], bumping [`LimiterMetrics`] at the edges.
 //!
 //! Routes: `POST /v1/admit`, `POST /v1/release`, `POST /v1/refresh`,
-//! `GET /metrics`, `GET /healthz`. A malformed body is `400`; an unknown route
-//! is `404`. The handler is pure compute (no real I/O), so the simulated fabric
-//! drives it deterministically under a paused clock.
+//! `GET /v1/health`, `GET /metrics`, `GET /healthz`. Every admit, refresh and
+//! health answer states the store's lease, and every admit and refresh answer
+//! the set held for its key. `/healthz` answers the
+//! process; `/v1/health` answers only once the store has, so a client's
+//! breaker probing it learns that a request can be served. A malformed body
+//! is `400`; an unknown route is `404`. The handler is pure compute (no real
+//! I/O), so the simulated fabric drives it deterministically under a paused
+//! clock.
 
 use std::sync::Arc;
 
@@ -12,29 +17,37 @@ use async_trait::async_trait;
 use http_net::{HttpRequest, HttpResponse, HttpService};
 
 use crate::metrics::LimiterMetrics;
-use crate::window::{AdmitResult, WindowStore};
-use crate::wire::{AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest};
+use crate::store::{AdmitResult, CallStore, RefreshResult};
+use crate::wire::{
+    AdmitAnswer, AdmitRequest, AdmitResponse, HealthResponse, HeldSet, RefreshAnswer, RefreshReply,
+    RefreshRequest, RefreshResponse, ReleaseRequest,
+};
 
-/// The limiter HTTP service: a window store + its metrics.
+/// The limiter HTTP service: a call store + its metrics.
 pub struct LimiterServer {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     metrics: LimiterMetrics,
 }
 
 impl LimiterServer {
     /// Build over a shared store. The same store can be handed to the janitor.
-    pub fn new(store: Arc<WindowStore>, metrics: LimiterMetrics) -> Self {
+    pub fn new(store: Arc<CallStore>, metrics: LimiterMetrics) -> Self {
         Self { store, metrics }
     }
 
     /// The shared store (for the runner's janitor task).
-    pub fn store(&self) -> Arc<WindowStore> {
+    pub fn store(&self) -> Arc<CallStore> {
         self.store.clone()
     }
 
     /// The metrics handle.
     pub fn metrics(&self) -> LimiterMetrics {
         self.metrics.clone()
+    }
+
+    /// The lease every admit, refresh and health answer states.
+    fn lease_ms(&self) -> u64 {
+        self.store.lease_ms().max(0) as u64
     }
 }
 
@@ -58,29 +71,29 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad admit body: {e}")),
                 };
-                let resp = match self.store.admit(&parsed.entries) {
-                    AdmitResult::Admitted { window } => {
-                        self.metrics.on_admit(true);
-                        AdmitResponse { admitted: true, window: Some(window), rejected_id: None }
+                let AdmitRequest { key, change, held, entries, release_on_refusal } = parsed;
+                let outcome =
+                    self.store.admit_carrying(&key, change, &held, &entries, release_on_refusal);
+                self.metrics.on_admit(&outcome);
+                let (outcome, rejected_id, held) = match outcome {
+                    AdmitResult::Admitted => {
+                        (AdmitAnswer::Admitted, None, Some(HeldSet { change, entries }))
                     }
-                    AdmitResult::Rejected { limiter_id } => {
-                        self.metrics.on_admit(false);
-                        AdmitResponse {
-                            admitted: false,
-                            window: None,
-                            rejected_id: Some(limiter_id),
-                        }
+                    AdmitResult::Rejected { limiter_id, held } => {
+                        (AdmitAnswer::Rejected, Some(limiter_id), Some(held))
                     }
+                    AdmitResult::Superseded { held } => (AdmitAnswer::Superseded, None, Some(held)),
+                    AdmitResult::Released => (AdmitAnswer::Released, None, None),
                 };
-                json_ok(&resp)
+                json_ok(&AdmitResponse { outcome, rejected_id, held, lease_ms: self.lease_ms() })
             }
             ("POST", "/v1/release") => {
                 let parsed: ReleaseRequest = match serde_json::from_slice(&req.body) {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
-                self.store.release(&parsed.entries);
-                self.metrics.on_release();
+                self.store.release(&parsed.keys);
+                self.metrics.on_release(parsed.keys.len());
                 json_ok(&serde_json::json!({}))
             }
             ("POST", "/v1/refresh") => {
@@ -88,10 +101,28 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let entries = self.store.refresh(&parsed.entries);
-                self.metrics.on_refresh();
-                json_ok(&RefreshResponse { entries })
+                let calls =
+                    parsed.calls.iter().map(|c| (c.key.as_str(), c.change, c.entries.as_slice()));
+                let results = self.store.refresh_all(calls);
+                self.metrics.on_refresh(results.iter().map(|r| &r.result));
+                let outcomes = results
+                    .into_iter()
+                    .map(|refreshed| RefreshReply {
+                        outcome: match refreshed.result {
+                            RefreshResult::Extended => RefreshAnswer::Extended,
+                            RefreshResult::Reregistered => RefreshAnswer::Reregistered,
+                            RefreshResult::Released => RefreshAnswer::Released,
+                            RefreshResult::Dropped => RefreshAnswer::Dropped,
+                        },
+                        held: refreshed.held,
+                    })
+                    .collect();
+                json_ok(&RefreshResponse { outcomes, lease_ms: self.lease_ms() })
             }
+            ("GET", "/v1/health") => json_ok(&HealthResponse {
+                calls: self.store.calls() as u64,
+                lease_ms: self.lease_ms(),
+            }),
             ("GET", "/metrics") => {
                 HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())
             }

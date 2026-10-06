@@ -1,7 +1,7 @@
-//! In-dialog UPDATE transaction-handling completeness (GAP-P8b-5 + GAP-P8b-2).
+//! In-dialog UPDATE transaction-handling completeness.
 //!
-//! 1. **Non-2xx finals of relayed non-INVITEs are relayed back** (GAP-P8b-5,
-//!    `relay-non-invite-failure`): the B2BUA relays an UPDATE (or INFO) onto
+//! 1. **Non-2xx finals of relayed non-INVITEs are relayed back**
+//!    (`relay-non-invite-failure`): the B2BUA relays an UPDATE (or INFO) onto
 //!    the peer dialog; the far end's 481/488 final must reach the requester —
 //!    plain transaction-layer symmetry (RFC 3261 §8.1.3.3), the non-INVITE
 //!    sibling of `relay-reinvite-response`. Like a failed re-INVITE (§14.1),
@@ -11,7 +11,7 @@
 //!    is unaffected — B2BUA-originated requests leave no pending-relay
 //!    snapshot).
 //! 2. **UPDATE during a pending failover reroute gets a local 491**
-//!    (GAP-P8b-2, `update-peer-unavailable`): the b-leg failed, `/call/failure`
+//!    (`update-peer-unavailable`): the b-leg failed, `/call/failure`
 //!    produced a reroute, the replacement leg is not usable yet — relaying the
 //!    UPDATE would fire into a dead dialog (or be silently dropped against a
 //!    tag-less one), so the B2BUA answers 491 Request Pending locally and the
@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::{B2buaScene, B2buaSut};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -33,12 +33,12 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=sendonly\r\n";
 
 /// Established call → alice UPDATEs → the B2BUA relays → bob answers **481**.
-/// The 481 must be relayed back to alice (pre-fix: silently dropped, alice
-/// times out) and the call must survive — the failure of one in-dialog
+/// The 481 must be relayed back to alice (dropped, it would leave alice to time
+/// out) and the call must survive — the failure of one in-dialog
 /// transaction is reported, nothing more. A follow-up INFO answered **488**
 /// proves the same symmetry for another method, and a normal BYE teardown
 /// proves the dialogs stayed usable.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn relayed_update_481_reaches_requester_and_call_survives() {
     let s = B2buaScene::new("b2bua-update-481-relay").await;
     let mut dialog = s.establish().await;
@@ -48,7 +48,7 @@ async fn relayed_update_481_reaches_requester_and_call_survives() {
     let mut update = dialog.request(InDialogMethod::Update, Some(REOFFER)).await;
     s.bob.receive("UPDATE").await.respond(481, "Call/Transaction Does Not Exist").await;
 
-    // The non-2xx final is relayed to the requester (GAP-P8b-5).
+    // The non-2xx final is relayed to the requester.
     update.expect(481).await;
 
     // The call is NOT torn down by the failed UPDATE transaction.
@@ -65,11 +65,11 @@ async fn relayed_update_481_reaches_requester_and_call_survives() {
     let _report = s.finish().await;
 }
 
-/// The downstream `bc_rc_update_then_bye` direction: **bob** relays an UPDATE
+/// The reverse direction: **bob** relays an UPDATE
 /// and **alice** answers the non-2xx (481). The final must reach bob — the
 /// pending-relay snapshot lives on the a-leg dialog and correlates the a-side
 /// response back to the b-side requester exactly like the reverse direction.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn relayed_update_481_from_answering_side_reaches_bob() {
     let h = Harness::new("b2bua-update-481-from-a");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -100,15 +100,19 @@ async fn relayed_update_481_from_answering_side_reaches_bob() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
-/// GAP-P8b-2: an UPDATE arriving on the surviving early dialog while a
+/// An UPDATE arriving on the surviving early dialog while a
 /// failover reroute is pending is answered **491 Request Pending** locally
 /// (`update-peer-unavailable`) — the failed b-leg is terminated and the
 /// replacement leg has no usable dialog yet, so relaying would go into the
-/// void. The reroute then completes normally and the call establishes.
-#[tokio::test]
+/// void. The reroute then completes normally and the call establishes. The
+/// UPDATE is bodyless: an offer there would meet alice's own unanswered INVITE
+/// offer and draw RFC 3311 §5.2's 500 (`update_offer_pending.rs`).
+#[tokio::test(start_paused = true)]
 async fn update_during_pending_reroute_gets_491_and_reroute_completes() {
     let h = Harness::new("b2bua-update-failover-491");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -144,12 +148,8 @@ async fn update_during_pending_reroute_gets_491_and_reroute_completes() {
     let mut bob_uas = bob.receive("INVITE").await;
 
     // ── alice UPDATEs the surviving early dialog mid-reroute → local 491 ──
-    let mut update = call
-        .send_request(InDialogMethod::Update)
-        .with_to_tag(&early_atag)
-        .with_sdp(REOFFER)
-        .send()
-        .await;
+    let mut update =
+        call.send_request(InDialogMethod::Update).with_to_tag(&early_atag).send().await;
     update.expect(491).await;
 
     // Neither target saw the UPDATE — it was answered locally.
@@ -169,5 +169,7 @@ async fn update_during_pending_reroute_gets_491_and_reroute_completes() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

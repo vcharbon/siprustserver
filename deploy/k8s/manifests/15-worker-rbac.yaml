@@ -1,4 +1,4 @@
-# RBAC for the b2bua worker's K8sMembership EndpointSlice informer (S11).
+# RBAC for the b2bua worker's K8sMembership EndpointSlice informer.
 #
 # Each worker is BOTH a replication server and a client: to discover its peers
 # it watches the EndpointSlices of the headless `b2bua-worker` Service (the same

@@ -17,7 +17,7 @@
 //! skipped: retransmitting a 2xx until it is ACKed is required behaviour
 //! (RFC 3261 §13.3.1.4), so only the FIRST emission of a given final decides
 //! a rule. The relation is bounded twice
-//! ([`crate::callfacts::mark_repeats`]): by the transaction envelope, so
+//! (`crate::callfacts::mark_repeats`): by the transaction envelope, so
 //! matching bytes emitted after it are a fresh emission and DO decide rules,
 //! and by the CLASS, so an unreliable provisional — which retransmits on no
 //! timer — states no relation at all. A platform that rings twice rang twice,
@@ -50,7 +50,7 @@ mod testkit;
 pub use census::{Census, LocatedHit, ReadFailure, RuleTally};
 pub use sut::{Side, SutSet};
 
-/// The rule vocabulary and its evidence live ONCE, in `rfc-rules` (issue 29);
+/// The rule vocabulary and its evidence live ONCE, in `rfc-rules`;
 /// this module is the capture ADAPTER over them. The census runs the
 /// [`RfcRule::WIRE`] subset — the rules whose corpus numbers back the pivot
 /// §11.1 contract — plus the candidates a sweep names to take their baseline
@@ -59,7 +59,7 @@ pub use rfc_rules::{Evidence, RuleId as RfcRule};
 
 /// Which side of the captured deployment an endpoint sits on, as the GROUP
 /// TOPOLOGY tells it — which endpoint the call's legs cross, see
-/// [`roles_of_group`].
+/// `roles_of_group`.
 ///
 /// Evidence, never a deployment statement: a consumer that knows which
 /// addresses are the system under test attributes the side from that, and a

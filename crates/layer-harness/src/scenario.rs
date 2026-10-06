@@ -22,13 +22,15 @@ pub fn lane_key(addr: SocketAddr) -> LaneKey {
     addr.to_string()
 }
 
-/// Which physical fabric a lane belongs to (`ext` = the public SIP socket,
-/// `core` = the optional second fabric a proxy binds).
+/// Which fabric a lane belongs to (`ext` = the public SIP socket, `core` = the
+/// optional second fabric a proxy binds, `service` = an HTTP service the run
+/// records exchanges with).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkTag {
     #[default]
     Ext,
     Core,
+    Service,
 }
 
 /// How the scenario's transport was wired. Recorded structurally so the

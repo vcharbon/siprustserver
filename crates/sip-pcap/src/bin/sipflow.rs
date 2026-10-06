@@ -22,7 +22,7 @@
 //!   sipflow /tmp/sipcap --list
 //!   sipflow /tmp/sipcap --call-id 7f3a... --full
 //!   sipflow /tmp/sipcap --final-status none
-//!   sipflow /tmp/sipcap --ruri 166601009 --final-status 5xx
+//!   sipflow /tmp/sipcap --ruri 15550100 --final-status 5xx
 //!   sipflow /tmp/sipcap --json > flows.json
 //!   sipflow /tmp/sipcap --query update-rejected.json
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
@@ -73,6 +73,14 @@ struct Args {
     /// automatically. Required except with `--schema` / `--enrich`, which read
     /// no capture.
     inputs: Vec<PathBuf>,
+
+    /// Read the inputs as ONE consecutive capture — ring files of one tap,
+    /// oldest first — and refuse them (exit 2) unless each file starts where
+    /// the previous one ended: no overlap, and no gap wider than this many
+    /// milliseconds. Without it, several inputs are read as whatever they
+    /// are, a corpus of unrelated captures included.
+    #[arg(long, value_name = "MAX_GAP_MS")]
+    contiguous: Option<u64>,
 
     /// Select call groups containing a leg whose Call-ID contains this substring.
     #[arg(long)]
@@ -327,7 +335,11 @@ fn main() {
         std::process::exit(2);
     }
 
-    let (datagrams, stats) = match sip_pcap::read_capture_files(&files) {
+    let read = match args.contiguous {
+        Some(max_gap_ms) => sip_pcap::read_capture_set(&files, max_gap_ms.saturating_mul(1_000)),
+        None => sip_pcap::read_capture_files(&files),
+    };
+    let (datagrams, stats) = match read {
         Ok(v) => v,
         Err(e) => {
             eprintln!("capture read failed: {e}");
@@ -404,6 +416,16 @@ fn main() {
         flows.groups.len(),
         selected.len(),
     );
+    for a in &flows.stats.aligned_probes {
+        eprintln!(
+            "# aligned-probe={} reference={} from-us={} offset-ms={:.3} pairs={}",
+            a.probe,
+            a.reference,
+            a.from_us,
+            a.offset_us as f64 / 1000.0,
+            a.pairs
+        );
+    }
 
     // The review is over EVERY selected group, whatever `--limit` prints: the
     // limit bounds the reader's screen, not the question.

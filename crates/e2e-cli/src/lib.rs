@@ -1,4 +1,4 @@
-//! The `e2e` CLI body (ADR-0018 Phase H). `cli(args) -> exit code` is a
+//! The `e2e` CLI body (ADR-0018). `cli(args) -> exit code` is a
 //! library function so the integration tests drive the real command surface
 //! without spawning the binary.
 

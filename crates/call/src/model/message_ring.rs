@@ -19,7 +19,8 @@ pub enum MessageDirection {
 
 /// One message of a leg's history. `seq` is per call and monotonic across
 /// legs, so the rings of two legs interleave by it; `at_ms` is the clock of
-/// the turn that handled the message. `headers` holds every value, in wire
+/// the turn that handled the message and `turn` its number, which tells apart
+/// two turns sharing a millisecond. `headers` holds every value, in wire
 /// order, of each configured header name, in the order the names are
 /// configured — `(canonical name, value)` pairs, one per header line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,11 @@ pub struct MessageEntry {
     /// folded — is stamped with the failover's ordinal.
     pub decision_ordinal: u32,
     pub headers: Vec<(String, String)>,
+    /// The turn that handled the message (`Call::message_turn` at the
+    /// append): the message handled, what the transaction layer answered it
+    /// with on its own and what the turn sent share one number. Turns count
+    /// from `1` per call; `0` is no turn.
+    pub turn: u32,
 }
 
 /// The last `cap` entries of a leg, and how many the cap evicted before them.
@@ -86,6 +92,7 @@ mod tests {
             to_tag: None,
             decision_ordinal: 0,
             headers: Vec::new(),
+            turn: 1,
         }
     }
 

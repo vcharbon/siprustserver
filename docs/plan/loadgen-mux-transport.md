@@ -216,5 +216,5 @@ shows the OK vs 503 split with first-N samples per class.
 still-confirmed call whose transfer leg was rejected). With `FailMidCall`
 (confirmed→BYE) they cover the teardown matrix; `loadgen_post_call_cleanup_no_leak`
 asserts the SUT fully reaps (no live call / lock / stamp) after the mix. This
-caught a real B2BUA leak: the Tier-3 overload-shed `return`ed under the held
+caught a real B2BUA leak: the overload shed `return`ed under the held
 per-call lock without the orphan-teardown, stranding a `locks`-map entry.

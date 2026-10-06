@@ -1,7 +1,9 @@
 //! Leg "stack identity" — port of `src/b2bua/stack-identity.ts`. Stamps the
 //! B2BUA's own Via + Contact onto outbound messages, carrying the `callRef`
-//! (`cr`) and leg id (`lg`) in opaque params so any inbound response/request
-//! self-routes back to the owning call without an external lookup.
+//! (`cr`), the leg id (`lg`) and the call incarnation's mark (`ci`) in opaque
+//! params so any inbound response/request self-routes back to the owning call
+//! without an external lookup, and a straggler of an earlier call on the same
+//! `callRef` is told from the live one.
 //!
 //! `callRef` contains `|` (and Call-IDs may contain `@`/`:`), which are unsafe
 //! in a SIP param value, so the values are percent-encoded here and decoded by
@@ -21,6 +23,8 @@ pub struct StackIdentityOpts<'a> {
     pub local_port: u16,
     pub call_ref: &'a str,
     pub leg: &'a str,
+    /// The call's [`call::Call::incarnation_mark`].
+    pub incarnation_mark: &'a str,
     pub is_emergency: bool,
 }
 
@@ -29,12 +33,13 @@ fn encoded(value: &str) -> ParamValue {
     ParamValue::Token(SipStr::owned(&encode_param(value)))
 }
 
-/// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`rport` params).
+/// Build the B2BUA Via for an outbound message (with `cr`/`lg`/`ci`/`rport` params).
 pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     let mut via = Via::udp(SipStr::owned(opts.local_ip), opts.local_port)
         .with_branch(SipStr::owned(&branch))
         .with_param("cr", encoded(opts.call_ref))
         .with_param("lg", encoded(opts.leg))
+        .with_param("ci", encoded(opts.incarnation_mark))
         .requesting_rport();
     if opts.is_emergency {
         via = via.with_param("em", ParamValue::Token(SipStr::from_static("1")));
@@ -42,12 +47,13 @@ pub fn build_call_via(opts: &StackIdentityOpts, branch: String) -> Via {
     via
 }
 
-/// Build the B2BUA Contact for an outbound message (with `callRef`/`leg` params).
+/// Build the B2BUA Contact for an outbound message (with `callRef`/`leg`/`ci` params).
 pub fn build_call_contact(opts: &StackIdentityOpts) -> header::Contact {
     let mut uri = Uri::sip_user(SipStr::from_static("b2bua"), SipStr::owned(opts.local_ip))
         .with_port(opts.local_port)
         .with_param("callRef", encoded(opts.call_ref))
-        .with_param("leg", encoded(opts.leg));
+        .with_param("leg", encoded(opts.leg))
+        .with_param("ci", encoded(opts.incarnation_mark));
     if opts.is_emergency {
         uri = uri.with_param("emerg", ParamValue::Token(SipStr::from_static("1")));
     }
@@ -67,28 +73,24 @@ pub fn build_call_via_and_contact(
 // ---------------------------------------------------------------------------
 // Public read-side seam — consumer-facing API for the addresses the B2BUA
 // stamps on outbound Contact / Via (port of `StackIdentity` /
-// `StackIdentityApi`, Issue 8 of the upstream-consumer plan).
+// `StackIdentityApi`).
 // ---------------------------------------------------------------------------
 
 /// Read-only view of the addresses this B2BUA advertises to its peers.
-/// Consumers running their own templating layer (e.g. resolving `$(ip.AS)` /
-/// `$(port.AS)` placeholders in their call-control payloads) read these once at
-/// startup, then hand fully-resolved literals to the decision engine.
+/// Consumers running their own templating layer (e.g. resolving address
+/// placeholders in their call-control payloads) read these once at startup,
+/// then hand fully-resolved literals to the decision engine.
 ///
-/// In the TS source these are `Effect<string>` / `Effect<number>` reads behind a
-/// `ServiceMap.Service` DI seam; here the read channel is `never` (a pure config
-/// projection), so the faithful Rust idiom is a cheap value with accessors —
-/// mirroring `sip_proxy`'s `ProxyCore::advertised()`. The `Default` layer is
-/// replaced by [`StackIdentity::from_config`], deriving the advertised
-/// host/port from [`B2buaConfig::sip_local_ip`] / [`B2buaConfig::sip_local_port`]
-/// (the `AppConfig.sipLocalIp` / `sipLocalPort` of the source). If a separate
-/// "advertised" address slot is ever added, the accessor names stay the same.
+/// A pure config projection: a cheap value with accessors, mirroring
+/// `sip_proxy`'s `ProxyCore::advertised()`. [`StackIdentity::from_config`]
+/// derives the advertised host/port from [`B2buaConfig::sip_local_ip`] /
+/// [`B2buaConfig::sip_local_port`]. If a separate "advertised" address slot is
+/// ever added, the accessor names stay the same.
 ///
-/// This is a **forward-looking consumer seam**: it mirrors the TS public
-/// read-API one-for-one but has no in-tree caller yet (the outbound builders
+/// This is a **consumer seam** with no in-tree caller (the outbound builders
 /// above read the same fields straight off [`B2buaConfig`]). It exists so a
-/// consumer running its own `$(ip.AS)` / `$(port.AS)` templating layer has a
-/// stable contract to read once at startup; do not delete it as dead code.
+/// consumer running its own templating layer has a stable contract to read once
+/// at startup; do not delete it as dead code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackIdentity {
     advertised_host: String,
@@ -131,16 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn via_carries_cr_lg_rport() {
-        let opts = StackIdentityOpts {
-            local_ip: "10.0.0.1",
-            local_port: 5060,
-            call_ref: "w0|cid|tag",
-            leg: "b-1",
-            is_emergency: false,
-        };
-        let via = build_call_via(&opts, "z9hG4bKabc".to_string());
-        assert_eq!(param_names(via.params()), vec!["branch", "cr", "lg", "rport"]);
+    fn via_carries_cr_lg_ci_rport() {
+        let via = build_call_via(&opts(false), "z9hG4bKabc".to_string());
+        assert_eq!(param_names(via.params()), vec!["branch", "cr", "lg", "ci", "rport"]);
+        assert_eq!(via.param("ci").and_then(ParamValue::as_str), Some("k3x9"));
         assert_eq!(via.branch(), Some("z9hG4bKabc"));
     }
 
@@ -150,6 +146,7 @@ mod tests {
             local_port: 5060,
             call_ref: "w0|cid|tag",
             leg: "b-1",
+            incarnation_mark: "k3x9",
             is_emergency,
         }
     }
@@ -169,7 +166,7 @@ mod tests {
         let via = build_call_via(&opts(true), "z9hG4bKabc".to_string());
         // `em` rides *after* cr/lg/rport, value "1".
         assert_eq!(via.param("em").and_then(ParamValue::as_str), Some("1"));
-        assert_eq!(param_names(via.params()), vec!["branch", "cr", "lg", "rport", "em"]);
+        assert_eq!(param_names(via.params()), vec!["branch", "cr", "lg", "ci", "rport", "em"]);
     }
 
     #[test]
@@ -182,14 +179,14 @@ mod tests {
     fn contact_appends_emerg_marker_when_emergency() {
         let contact = build_call_contact(&opts(true));
         assert_eq!(contact.uri().param("emerg").and_then(ParamValue::as_str), Some("1"));
-        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg", "emerg"]);
+        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg", "ci", "emerg"]);
     }
 
     #[test]
     fn contact_omits_emerg_marker_when_not_emergency() {
         let contact = build_call_contact(&opts(false));
         assert_eq!(contact.uri().param("emerg"), None);
-        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg"]);
+        assert_eq!(param_names(contact.uri().params()), vec!["callRef", "leg", "ci"]);
     }
 
     #[test]

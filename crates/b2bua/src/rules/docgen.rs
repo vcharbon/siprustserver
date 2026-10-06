@@ -11,8 +11,8 @@
 
 use std::collections::BTreeSet;
 
-use super::model::{Effect, Match, MatchKind, RuleDefinition, StatusMatch};
 use super::service::ServiceDef;
+use b2bua_sdk::model::{Effect, Match, MatchKind, RuleDefinition, StatusMatch};
 
 /// A labelled transition edge (ADR-0016 X9). The `label` reads
 /// `<input message> ⇒ <output side effects>` — the matcher summary that *triggers*
@@ -312,8 +312,8 @@ pub fn check_registry(services: &[ServiceDef]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::model::{Match, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
     use crate::rules::ServiceSeed;
+    use b2bua_sdk::model::{Match, RuleDefinition, RuleHandleResult, SERVICE_LAYER};
     use call::{MachineId, StateLabel};
 
     static STUB_ACTIVE: [StateLabel; 1] = [StateLabel::new("S0")];

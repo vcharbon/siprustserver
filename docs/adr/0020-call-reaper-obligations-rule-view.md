@@ -14,9 +14,27 @@ it entirely:
 1. **Handler panic** — `dispatch.rs` swallows the `JoinError`; the call leaks
    forever, zero CDR, timers live.
 2. **Queue/cap drop** — a dropped event may be the BYE or timer that was
-   supposed to terminate the call; nothing notices.
+   supposed to terminate the call; nothing notices. (A dropped non-INVITE
+   request is now readmitted on its retransmission and a dropped INVITE
+   answered: the owed answer of its row in the dispatch table
+   (`dispatch/class.rs`), paid by `router::owed`, and by `router::turn` for a
+   body aborted before it ran; a `Cancelled` is queued past the bounds,
+   up to a per-call ceiling past which the reaper tears the call down on the
+   wire (BYE, CANCEL: its peers are alive, unlike a stale call's), and a
+   verdict, every timer fire of the call (one per armed timer, the
+   terminating call's timeout among them), every client transaction's
+   outcome (at most three per transaction the call sent) and every answer to
+   a request the call sent off its turn past every bound. A
+   non-INVITE request left without a final when the call ends is forgotten at
+   its release, and an in-dialog INVITE answered 481 there.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is
-   itself a losable timer.
+   itself a losable timer. (It is now admitted past every dispatch bound —
+   the time bound. The work bound is `max_messages_per_call_lifetime`: the
+   events offered for a call, counted at dispatch in every state until its
+   release is queued, and past it a `message-cap` verdict ends the call: what
+   its dispatch-table row does not keep past the cap is refused, a request
+   answered where refused (`dispatch/class.rs`). Installed only with the
+   reaper on.)
 4. **Best-effort CDR** — `BufferedCdrWriter` drops on overflow; a panic before
    `WriteCdr` writes nothing; additionally `process_result` executes
    `RemoveCall` (which propagates the replica delete) *before* the buffered
@@ -86,14 +104,22 @@ so exactly-once holds by construction (no cross-node CDR/limiter idempotency). T
 primary discharges exactly once: **immediately** if alive (its Reclaim-tail puller
 reconciles the dominating terminal into the LIVE map and discharges via the funnel
 — ADR-0014), or **on reboot reclaim** (a reclaimed `Terminated`/`Terminating` body
-discharges instead of re-serving). If the primary never returns, the deferred
-Element's alive-timer expires and a paced reap task discharges it through the funnel
-— the backup is the **durable fallback**, so the exactly-once guarantee rests on
-*primary OR backup* surviving/restarting (there is no "expires by TTL with no CDR"
-gap). A late reverse-flush racing the discharge cannot resurrect the call: a
-store-side **delete tombstone** (apply-side delete-wins) rejects a re-creating `Put`
-for a recently-deleted ref — required because the `(p,b)` vector structurally cannot
-let a backup's discharged-marker apply to a primary that has bumped `p`. The reaper
+discharges instead of re-serving).
+
+If the primary never returns, the deferred Element's alive-timer expires. The
+paced replica reap then evicts it, releases the call's limiter key and counts its
+CDR lost. The record is lost with the primary (the accepted double-failure); the
+limiter slot and the memory are not. The reap is the only eviction site of an
+expired body, and no read evicts one before it. So each expired deferred terminal
+is released once, whichever partition holds it: a replica its primary flushed, or
+the takeover copy's own terminal.
+
+A late reverse-flush racing the discharge cannot resurrect the call. A store-side
+**delete tombstone** (apply-side delete-wins) rejects a re-creating `Put` of a
+recently-deleted call; a new call on the same ref is not buried (ADR-0014,
+"`(p,b)` orders one call incarnation"). It is required because the `(p,b)`
+vector structurally cannot let a backup's discharged-marker apply to a primary
+that has bumped `p`. The reaper
 X1 promise is unchanged (one funnel, one CDR); the reap task is a durability backstop,
 not a reconciliation timer (ADR-0014 causality preserved).
 

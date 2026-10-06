@@ -37,9 +37,36 @@ pub struct Node {
 
 /// Spawn a core on simulated SIP and replication fabrics with no peers.
 pub async fn node(ordinal: &str) -> Node {
+    node_with(ordinal, |_| {}).await
+}
+
+/// [`node`] with `tune` applied to its config last.
+pub async fn node_with(ordinal: &str, tune: impl FnOnce(&mut B2buaConfig)) -> Node {
+    node_serving(ordinal, tune, Vec::new()).await
+}
+
+/// [`node_with`] running `services`.
+pub async fn node_serving(
+    ordinal: &str,
+    tune: impl FnOnce(&mut B2buaConfig),
+    services: Vec<crate::rules::ServiceDef>,
+) -> Node {
+    node_on(&SimulatedSignalingNetwork::new(1), ordinal, tune, services).await
+}
+
+/// The SIP address a test node listens on.
+pub const NODE_SIP_ADDR: ([u8; 4], u16) = ([127, 0, 0, 2], 5080);
+
+/// [`node_serving`] on the SIP fabric `net`, where a test may bind peers.
+pub async fn node_on(
+    net: &SimulatedSignalingNetwork,
+    ordinal: &str,
+    tune: impl FnOnce(&mut B2buaConfig),
+    services: Vec<crate::rules::ServiceDef>,
+) -> Node {
     let clock = Clock::test_at(0);
-    let sip_addr = SocketAddr::from(([127, 0, 0, 2], 5080));
-    let endpoint = SimulatedSignalingNetwork::new(1)
+    let sip_addr = SocketAddr::from(NODE_SIP_ADDR);
+    let endpoint = net
         .bind_udp(BindUdpOpts::new(sip_addr, 256))
         .await
         .expect("bind the simulated SIP endpoint");
@@ -64,6 +91,8 @@ pub async fn node(ordinal: &str) -> Node {
         reboot_budget_sec: 600,
         ..Default::default()
     };
+    let mut config = config;
+    tune(&mut config);
     let cdr = InMemoryCdrWriter::new();
     let metrics = B2buaMetrics::new();
     let deps = B2buaDeps {
@@ -76,12 +105,21 @@ pub async fn node(ordinal: &str) -> Node {
         wire_faults: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
+        refusals: None,
+        deferred_ceilings: None,
         replication: Some(setup),
         metrics: metrics.clone(),
         adaptation_http: None,
         compose: crate::rules::ComposeOptions::default(),
+        capacity: None,
     };
-    Node { core: B2buaCore::spawn(endpoint, deps), store, cdr, metrics, clock }
+    Node {
+        core: B2buaCore::spawn_with_services(endpoint, deps, services),
+        store,
+        cdr,
+        metrics,
+        clock,
+    }
 }
 
 /// The caller's source address on the simulated fabric.

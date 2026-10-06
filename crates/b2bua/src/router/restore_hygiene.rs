@@ -106,11 +106,10 @@ fn cap_future_keepalives(timers: &mut [TimerEntry], now_ms: i64, keepalive_inter
 /// Re-anchor **deadband** (ms): a persisted `skew_offset_ms` whose magnitude is
 /// below this is NOT applied — it is dominated by replication transit latency +
 /// clock jitter, not a genuine inter-node clock disagreement worth correcting.
-/// This is what keeps the re-anchor a *no-op* under the single-clock harness,
-/// whose coarse `advance` (100 ms chunks + settles between replication hops)
-/// inflates `receiver_now − origin_now` to a few hundred ms of pure latency with
-/// ZERO real skew — perturbing a keepalive by that latency breaks the harness's
-/// strict SIP-transparency oracle. A real host clock STEP is interval-sized
+/// Under the single-clock harness `receiver_now − origin_now` is pure latency
+/// with ZERO real skew, so the re-anchor is a *no-op* there and a keepalive
+/// keeps the deadline the harness's strict SIP-transparency oracle expects. A
+/// real host clock STEP is interval-sized
 /// (≥ the keepalive cadence, hundreds of seconds), so it clears this deadband by
 /// orders of magnitude. Correcting only skew that materially exceeds latency is
 /// also strictly better in production: sub-second offsets do not meaningfully
@@ -224,8 +223,8 @@ pub(super) struct Smoothing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::CallEvent;
     use crate::timers::TimerService;
+    use b2bua_sdk::event::CallEvent;
     use sip_clock::Clock;
     use std::time::Duration;
 
@@ -249,7 +248,7 @@ mod tests {
     // The reclaim/takeover hygiene: a snapshot caught mid-keepalive-round-trip
     // carries an armed `KeepaliveTimeout`; restoring it verbatim onto the
     // reclaiming/taking-over node fires it (its guarded OPTIONS died with the
-    // crashed node) and BYEs a healthy long hold. The fix strips it; the next
+    // crashed node) and BYEs a healthy long hold. The hygiene strips it; the next
     // `Keepalive` re-probes fresh. Asserts both the stripping AND that the
     // remaining `Keepalive` survives.
     #[test]
@@ -288,7 +287,7 @@ mod tests {
     /// clock-skew bounds as core timers.
     #[test]
     fn service_timer_survives_restore_hygiene_and_is_reanchored() {
-        let svc = TimerType::service(call::MachineId::new("routing"), "timer18x");
+        let svc = TimerType::service(call::MachineId::new("routing"), "deadline18x");
         let now = 1_000_000;
         let skew = 45_000; // receiver_now − origin_now (clears the deadband)
         let raw_fire_at = now - skew + 5_000; // origin-frame deadline
@@ -312,11 +311,11 @@ mod tests {
         );
     }
 
-    // REPRO of the residual endurance loss at the timer layer: a *past-due*
-    // `KeepaliveTimeout` restored from a pre-crash snapshot fires IMMEDIATELY
-    // (`restore` clamps `fire_at <= now` to a next-tick fire) — this is the
-    // event that drives `keepalive-timeout` → BYE on a healthy reclaimed call.
-    // With the fix the stripped set restores NOTHING that fires at now=reclaim.
+    // At the timer layer: a *past-due* `KeepaliveTimeout` restored from a
+    // pre-crash snapshot fires IMMEDIATELY (`restore` clamps `fire_at <= now` to
+    // a next-tick fire) — this is the event that drives `keepalive-timeout` → BYE
+    // on a healthy reclaimed call. The stripped set restores NOTHING that fires
+    // at now=reclaim.
     #[tokio::test(start_paused = true)]
     async fn past_due_keepalive_timeout_fires_on_restore_without_the_fix() {
         let clock = Clock::test_at(0);
@@ -324,10 +323,10 @@ mod tests {
         // node armed it +120 s before its clock, which is in our past).
         tokio::time::advance(Duration::from_millis(200_000)).await;
 
-        // WITHOUT the fix: the verbatim snapshot includes the past-due timeout.
+        // Unstripped: the verbatim snapshot includes the past-due timeout.
         let (timers, mut fire_rx) = TimerService::spawn(clock.clone());
         let snapshot = vec![keepalive(500_000), keepalive_timeout("b-1", 120_000)];
-        timers.restore(snapshot.clone(), "w0|cid|tag".into()).await;
+        timers.restore(snapshot.clone(), "w0|cid|tag".into(), "w0|cid|tag#k").await;
         tokio::time::advance(Duration::from_millis(1)).await;
         let fired = fire_rx.recv().await.unwrap();
         match fired {
@@ -339,12 +338,12 @@ mod tests {
             _ => panic!("expected a timer event"),
         }
 
-        // WITH the fix: the same snapshot, stripped, fires NOTHING at reclaim time
-        // (the future Keepalive is the only survivor and is far off).
+        // Stripped: the same snapshot fires NOTHING at reclaim time (the future
+        // Keepalive is the only survivor and is far off).
         let (timers2, mut fire_rx2) = TimerService::spawn(clock);
         let mut fixed = snapshot;
         drop_stale_keepalive_timeout(&mut fixed);
-        timers2.restore(fixed, "w0|cid|tag2".into()).await;
+        timers2.restore(fixed, "w0|cid|tag2".into(), "w0|cid|tag2#k").await;
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(
             fire_rx2.try_recv().is_err(),
@@ -452,13 +451,13 @@ mod tests {
         );
     }
 
-    // REPRO of the endurance throughput collapse at the smoothing layer: a clean
-    // reboot rehydrates the whole partition at one instant with future-dated
-    // keepalive deadlines clustered in one interval. WITHOUT the future-dated
-    // branch they all keep the SAME `fire_at` and fire as one burst a cadence
-    // later (an OPTIONS spike that saturates the front proxy); WITH it each
-    // call's keepalive is spread into `[now, fire_at]` by a per-call hash, so a
-    // 1000-call cohort no longer shares a single deadline.
+    // The throughput collapse at the smoothing layer: a clean reboot rehydrates
+    // the whole partition at one instant with future-dated keepalive deadlines
+    // clustered in one interval. WITHOUT the future-dated branch they all keep
+    // the SAME `fire_at` and fire as one burst a cadence later (an OPTIONS spike
+    // that saturates the front proxy); WITH it each call's keepalive is spread
+    // into `[now, fire_at]` by a per-call hash, so a 1000-call cohort no longer
+    // shares a single deadline.
     #[test]
     fn future_dated_keepalive_cohort_is_de_correlated() {
         let now = 1_000_000;
@@ -478,10 +477,10 @@ mod tests {
             fire_ats.insert(fa);
         }
         // De-correlation: a synchronised cohort would collapse to ONE deadline;
-        // the fix scatters them across the interval (allow a few hash collisions).
+        // the spread scatters them across the interval (allow a few hash collisions).
         assert!(
             fire_ats.len() > 900,
-            "cohort de-correlated: {} distinct fire_at over 1000 calls (was 1 before the fix)",
+            "cohort de-correlated: {} distinct fire_at over 1000 calls (1 if synchronised)",
             fire_ats.len(),
         );
         // Determinism: re-running the same ref yields the SAME slot (idempotent

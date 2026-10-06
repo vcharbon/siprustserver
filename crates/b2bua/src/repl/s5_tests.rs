@@ -92,7 +92,7 @@ async fn convergence_update_and_delete() {
 
     // Update c1 (higher call_gen) + delete c2.
     a.store.put_call(PRI, "A", &c1, b"v2".to_vec(), &[], 0, 2, 0, &fwd("B")).await.unwrap();
-    a.store.delete_call(PRI, "A", &c2, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &c2, &[], false, &fwd("B")).await.unwrap();
     tick(50).await;
 
     assert_eq!(
@@ -437,10 +437,9 @@ async fn cold_reboot_reacquires_full_set() {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION (ADR-0012 D1): a LAGGED membership channel must still redirect the
-// puller to a peer's NEW address. Before the fix the supervisor reconcile loop
-// did `Err(_) => return` on `Lagged` and the node went permanently deaf — the
-// puller stayed pinned to the dead pod IP (the endurance-run incident). Here the
+// ADR-0012 D1: a LAGGED membership channel must still redirect the puller to a
+// peer's NEW address. A reconcile loop that returned on `Lagged` would leave the
+// node permanently deaf — the puller pinned to the dead pod IP. Here the
 // address-change delta is deliberately DROPPED from the broadcast ring (buried
 // under >256 throwaway deltas), so the only way the puller can redirect is the
 // `Lagged → snapshot reconcile` path.

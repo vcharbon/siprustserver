@@ -52,5 +52,7 @@ async fn alice_calls_bob_through_b2bua() {
     assert!(kinds.contains(&CdrEventType::Bye), "bye: {kinds:?}");
     assert_eq!(cdr.b_legs.len(), 1, "one b-leg");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

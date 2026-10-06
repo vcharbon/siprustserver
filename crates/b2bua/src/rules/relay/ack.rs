@@ -1,26 +1,35 @@
-//! The ACK-for-2xx on a b-leg dialog (RFC 3261 §13.2.2.4): who owes it when a
-//! 2xx is taken, and the branch-stable re-ACKs for a retransmitted 2xx, echoing
-//! the CSeq of the INVITE the ACK acknowledges. A non-2xx final's hop-by-hop
-//! ACK (§17.1.1.3) is the transaction layer's, whichever node sent the INVITE
-//! (a taken-over call seeds that transaction, `router::materialise`).
+//! The ACK-for-2xx on a b-leg dialog (RFC 3261 §13.2.2.4): composing it from
+//! dialog state, and the branch-stable re-ACKs for a retransmitted 2xx, echoing
+//! the CSeq of the INVITE the ACK acknowledges.
+//!
+//! The ACK a relayed INVITE's 2xx owes is the acknowledging peer's own ACK,
+//! relayed: §13.2.2.4 gives one ACK per 2xx received, so the body and the
+//! end-to-end headers that peer put on it travel with it and a repeated 2xx
+//! re-passes that same datagram. Only an INVITE this stack originated is ACKed
+//! on its own account, with nothing of a peer's. A non-2xx
+//! final's hop-by-hop ACK (§17.1.1.3) is the transaction layer's, whichever node
+//! sent the INVITE (a taken-over call seeds that transaction,
+//! `router::materialise`).
 
 use call::{Dialog, Leg, LegState};
 use sip_message::generators;
 use sip_message::generators::GenerateAckFor2xxOpts;
 use sip_message::header::MediaType;
+use sip_message::SipHeader;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
-use crate::rules::model::{RuleAction, RuleContext};
 
 use super::dialog::{target_dest, to_gen_dialog};
 use super::egress::apply_b_leg_egress;
-use super::identity::leg_via;
+use super::identity::{leg_via, CallMarks};
 
 /// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw. `body` carries
 /// the inbound ACK's payload through (the delayed-offer re-INVITE answer rides
-/// the ACK, RFC 3264 §4); pass empty for a bodyless ACK.
+/// the ACK, RFC 3264 §4); pass empty for a bodyless ACK. `extra_headers` are
+/// the relayed ACK's end-to-end lines, already filtered for this leg; empty for
+/// an ACK this stack composes on its own account.
 ///
 /// Returns the effect **and the Via branch it used**, so the caller can retain
 /// the branch on the dialog ([`call::helpers::retain_ack_branch`]) for a
@@ -28,13 +37,13 @@ use super::identity::leg_via;
 /// is: the peer's relayed, or one this stack composes on its own account.
 #[allow(clippy::too_many_arguments)]
 pub fn ack_b_leg(
-    call_ref: &str,
+    marks: CallMarks,
     leg: &Leg,
-    is_emergency: bool,
     config: &B2buaConfig,
     id_gen: &IdGen,
     body: Vec<u8>,
     content_type: Option<MediaType>,
+    extra_headers: Vec<SipHeader>,
     provenance: Provenance,
 ) -> Option<(OutboundSipEffect, String)> {
     let dialog = leg.dialogs.first()?;
@@ -64,10 +73,11 @@ pub fn ack_b_leg(
     // INVITE transaction handle.
     let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.sip.local_cseq.max(0) as u32);
     let opts = GenerateAckFor2xxOpts {
-        via: Some(leg_via(config, call_ref, &leg.leg_id, is_emergency, branch.clone())),
+        via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
         cseq: Some(ack_cseq),
         body,
         content_type,
+        extra_headers,
         ..Default::default()
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
@@ -94,55 +104,25 @@ pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
 }
 
 /// `true` when the INVITE last sent on this dialog carried the offer, so the ACK
-/// for its 2xx owes no answer body (RFC 3264 §4) and the core can compose it from
-/// the dialog alone. A delayed-offer INVITE answers this `false`: its ACK carries
-/// the answer, which only the caller's own ACK supplies.
+/// for its 2xx owes no answer body (RFC 3264 §4) and this stack can compose it
+/// from the dialog alone. A delayed-offer INVITE answers this `false`, a body
+/// framing no session description included (RFC 5621 §3.1): its ACK carries
+/// the answer, which only the acknowledging peer's own ACK supplies.
 pub(crate) fn acked_invite_carries_offer(dialog: &Dialog) -> bool {
-    acked_invite(dialog).is_some_and(|r| !r.body().is_empty())
+    acked_invite(dialog).is_some_and(|r| r.sdp().is_some())
 }
 
 /// The INVITE last sent on this dialog, re-parsed from its cached
 /// client-transaction handle.
-fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
+pub(crate) fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
     parse_request(&dialog.ext.pending_invite_txn.as_ref()?.original_invite)
 }
 
 /// A request re-parsed from the bytes a client-transaction handle caches it as.
-fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
+pub(super) fn parse_request(bytes: &[u8]) -> Option<sip_message::SipRequest> {
     use sip_message::SipParser;
     match sip_message::parser::custom::CustomParser::new().parse(bytes).ok()? {
         sip_message::SipMessage::Request(r) => Some(r),
         _ => None,
-    }
-}
-
-/// The ACK actions a just-taken 2xx owes on `leg_id` (RFC 3261 §13.2.2.4): the
-/// UAC core ACKs a 2xx **on receipt**, so an ACK this stack can compose on its
-/// own goes out now, and the caller's own ACK is then hop-local (`relay-ack`
-/// absorbs it — nothing is owed onward).
-///
-/// Empty for a delayed-offer INVITE, whose ACK carries the answer only the
-/// caller's ACK supplies (RFC 3264 §4): that one alone stays end-to-end. Same
-/// gate as the `ack_branch` arming in `confirm_dialog`, so the two never
-/// disagree about who owes the ACK.
-pub(crate) fn ack_on_answer(ctx: &RuleContext, leg_id: &str) -> Vec<RuleAction> {
-    // Read the fork the 2xx confirms — the dialog under its own To-tag (§12.1.2),
-    // the same choice `confirm_dialog` makes. `dialogs.first()` would read a
-    // losing branch and could split this gate from the one arming `ack_branch`.
-    let tag = ctx.response().and_then(|r| r.to().tag()).unwrap_or_default().to_string();
-    let dialog = ctx.source_leg().and_then(|leg| {
-        leg.dialogs
-            .iter()
-            .find(|d| !tag.is_empty() && d.sip.remote_tag == tag)
-            .or_else(|| leg.dialogs.iter().find(|d| d.sip.remote_tag.is_empty()))
-            .or_else(|| leg.dialogs.first())
-    });
-    match dialog {
-        Some(d) if acked_invite_carries_offer(d) => vec![RuleAction::AckLeg {
-            leg_id: leg_id.to_string(),
-            body: Vec::new(),
-            content_type: None,
-        }],
-        _ => Vec::new(),
     }
 }

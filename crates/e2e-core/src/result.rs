@@ -1,4 +1,4 @@
-//! The **result model + persistence** (ADR-0018 Phase F): one serde
+//! The **result model + persistence** (ADR-0018): one serde
 //! `RunResult` per cell — verdict, check verdicts, surfaced report findings,
 //! the neutral [`SeqDoc`] diagram, timings — written as
 //! `e2e/runs/<campaign>/<ts>/<case>__<shape>__<infra>/result.json`, with a
@@ -61,16 +61,17 @@ pub struct MediaRef {
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
     pub cell: CellId,
-    /// Check verdicts all passed AND the run's expects held AND the RFC hard
+    /// Check verdicts all passed AND the run's expects held AND no extra
+    /// anomaly of the run gates (an HTTP service's verdict) AND the RFC hard
     /// gate found no gating (non-advisory, subject-applicable, unwaived)
     /// violation. A gating RFC violation FAILS the cell with the report intact
     /// (`rfc` rows carry `advisory: false`) instead of crashing it report-less.
     pub passed: bool,
     pub checks: Vec<CheckVerdict>,
-    /// Findings the report surfaces alongside the diagram — the role-aware RFC
-    /// suite fold plus the structural recorder anomalies; each row tags its
-    /// endpoint and advisory/gating severity (same fold as the HTML report's
-    /// anomaly list).
+    /// The RFC findings of the run: the diagram's anomalies the audit rule
+    /// registry sourced (`rule_sourced`), each tagged with its endpoint and
+    /// advisory/gating severity. Structural recorder findings and harness
+    /// verdicts (an HTTP service's, a failed expect) stay in `seq_doc` only.
     pub rfc: Vec<Anomaly>,
     /// Media artifacts (media-exchanging shapes only; empty otherwise).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -103,7 +104,7 @@ impl RunResult {
             cell,
             passed,
             checks: check_verdicts,
-            rfc: seq_doc.anomalies.clone(),
+            rfc: seq_doc.anomalies.iter().filter(|a| a.rule_sourced).cloned().collect(),
             media: Vec::new(),
             seq_doc,
             timings,

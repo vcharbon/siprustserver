@@ -115,7 +115,8 @@ impl ReEmitKind {
 /// the ladder rather than silently hitting the socket below the recording.
 pub type SendTap = Arc<dyn Fn(&[u8], SocketAddr, ReEmitKind) + Send + Sync>;
 
-/// Per-endpoint counters. Snapshot of the live atomics behind an endpoint.
+/// Per-endpoint counters: the live atomics behind an endpoint, plus the
+/// kernel's own drop count for a real socket, read at snapshot time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UdpEndpointCounters {
     pub enqueued: u64,
@@ -129,6 +130,18 @@ pub struct UdpEndpointCounters {
     /// was full. Non-zero means egress was throttled by the kernel; the
     /// datagrams are lost and SIP retransmission covers them.
     pub send_would_block: u64,
+    /// Datagrams the kernel dropped before the receive pump read them, mostly
+    /// on a full `SO_RCVBUF` (see [`crate::socket_stats::rx_dropped`]). Always 0
+    /// for an endpoint with no kernel socket of its own.
+    pub kernel_rx_dropped: u64,
+}
+
+/// The buffer sizes the kernel granted a bound socket, in bytes, as it reports
+/// them back (doubled for its overhead, clamped at `rmem_max` / `wmem_max`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketBuffers {
+    pub recv: usize,
+    pub send: usize,
 }
 
 /// SIP role(s) a bind serves (port of `UaRole`). The audit framework's
@@ -155,7 +168,7 @@ pub enum PreIngressAction {
     /// Silently drop (counted as `pre_ingress_dropped`).
     Drop,
     /// Don't enqueue; send these bytes back to the source (counted as
-    /// `pre_ingress_replies`). The Tier-1 overload brake's stateless-503 path.
+    /// `pre_ingress_replies`). The ingress brake's stateless 503 path.
     Reply(Vec<u8>),
 }
 
@@ -189,6 +202,13 @@ pub struct BindUdpOpts {
     /// hop, a stalled interface) wants this well above what one such hold can
     /// pin — see `docs/adr/0031`. Honored by the real impl only.
     pub send_buffer_bytes: Option<usize>,
+    /// `SO_RCVBUF` to request on the socket, in bytes. `None` leaves the
+    /// kernel default (`net.core.rmem_default`). The kernel clamps the request
+    /// to `net.core.rmem_max` and doubles it. A datagram that arrives while the
+    /// buffer is full is dropped by the kernel and counted only in
+    /// [`UdpEndpointCounters::kernel_rx_dropped`]. Honored by the real impl
+    /// only.
+    pub recv_buffer_bytes: Option<usize>,
     /// Timeline this endpoint stamps [`UdpPacket::arrival_ms`] on. Share the
     /// process `Clock` with whoever ages those packets: two `Clock`s differ by
     /// a constant, a raw wall reading diverges from one without bound.
@@ -207,6 +227,7 @@ impl BindUdpOpts {
             roles: None,
             lane_label: None,
             send_buffer_bytes: None,
+            recv_buffer_bytes: None,
             clock: Clock::system(),
         }
     }
@@ -214,6 +235,12 @@ impl BindUdpOpts {
     /// Request `SO_SNDBUF` of `bytes` (see the `send_buffer_bytes` field).
     pub fn with_send_buffer(mut self, bytes: usize) -> Self {
         self.send_buffer_bytes = Some(bytes);
+        self
+    }
+
+    /// Request `SO_RCVBUF` of `bytes` (see the `recv_buffer_bytes` field).
+    pub fn with_recv_buffer(mut self, bytes: usize) -> Self {
+        self.recv_buffer_bytes = Some(bytes);
         self
     }
 
@@ -298,6 +325,9 @@ pub enum BindErrorReason {
     AddrInUse,
     /// Any other OS-level bind failure.
     OsError,
+    /// A multiplexing network holds back what the bind would claim (a
+    /// per-call key released by a failed call) for a while; retry later.
+    HeldBack,
 }
 
 /// Failure binding a UDP endpoint (port of `BindError`).

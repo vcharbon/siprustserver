@@ -10,6 +10,7 @@ description = "Public Rule SDK (ADR-0016 X6): the callflow-service authoring sur
 workspace = true
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }

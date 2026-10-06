@@ -14,7 +14,7 @@
 //!   crossing_reinvite_glare alice re-INVITE relayed; bob's crosses → 491
 //! ```
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -63,6 +63,49 @@ async fn failed_reinvite_keeps_dialog_state() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// A relayed re-INVITE's 481 is the far end's answer, relayed to the
+/// originator like any non-2xx final (RFC 3261 §14.1): it is not a denial of
+/// the dialog this stack holds, so `relay-reinvite-response` outranks
+/// `handle-481` and the call stays up, both legs BYE-able.
+#[tokio::test]
+async fn a_relayed_reinvite_481_is_reported_and_leaves_the_call_up() {
+    let h = Harness::with_transit_delay("b2bua-reinvite-481-relayed", 0);
+    let alice = h.agent("alice", "127.0.0.1:5166").await;
+    let bob = h.agent("bob", "127.0.0.1:5176").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5176).start(&h, "b2bua", "127.0.0.1:5186").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(b2bua.active_calls(), 1, "call established");
+
+    // alice re-INVITEs; bob answers 481 — relayed to alice, nothing torn down.
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(481, "Call/Transaction Does Not Exist").await;
+    reinv.expect(481).await;
+
+    assert_eq!(b2bua.active_calls(), 1, "a relayed re-INVITE 481 keeps the call up");
+    alice.drain().await;
+    bob.drain().await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -103,8 +146,8 @@ async fn reinvite_18x_then_488_keeps_call() {
     bob_uas.respond(488, "Not Acceptable Here").await;
 
     // The 488 is relayed to the originator (alice) — the failure is reported.
-    // (Pre-fix this never arrives: the 183 dropped the pending snapshot, so the
-    // 488 fell through to `route-failure` → `TerminateCall` and alice times out.)
+    // (Were the 183 to drop the pending snapshot, the 488 would fall through to
+    // `route-failure` → `TerminateCall` and alice would time out.)
     reinv.expect(488).await;
 
     // ── the call MUST still be up: the provisional must not have dropped the
@@ -120,6 +163,8 @@ async fn reinvite_18x_then_488_keeps_call() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -173,6 +218,8 @@ async fn alice_reinvite() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -222,6 +269,8 @@ async fn bob_reinvite() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -278,5 +327,7 @@ async fn crossing_reinvite_glare() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

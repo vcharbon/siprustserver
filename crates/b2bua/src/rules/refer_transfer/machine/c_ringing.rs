@@ -2,19 +2,23 @@
 //! toward the referrer, C's initial answer (→ c-realign), and the failure /
 //! no-answer terminals.
 
+use b2bua_sdk::provisional::absorbed_provisional_actions;
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
+use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 
-/// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped).
+/// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped). The referrer's
+/// peer is answered, so C's provisional is shown to no one: C keeps what it is
+/// owed (`Early`, a PRACK on a reliable one, the CDR event) and the referrer
+/// hears of the progress.
 pub(super) fn c_1xx_to_notify() -> RuleDefinition {
     sm_rule! {
         id: "transfer-c-1xx-to-notify",
@@ -23,6 +27,7 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
         transitions: [],
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY active (C progress) → referrer" },
+            Effect::Originate { method: Method::Prack, label: "PRACK → C (reliable 1xx, nothing shown to A)" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -34,13 +39,15 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
-            // Dedupe identical repeats against the *last* status only.
+            let mut actions = absorbed_provisional_actions(ctx);
+            // Dedupe identical repeats against the *last* status only: the
+            // repeat draws no NOTIFY and is accounted no second time.
             if st.last_c_leg_notified_status == Some(resp.status()) {
-                return ok(vec![]);
+                actions.retain(|a| !matches!(a, RuleAction::AddCdrEvent { .. }));
+                return ok(actions);
             }
             let mut new_state = st.clone();
             new_state.last_c_leg_notified_status = Some(resp.status());
-            let mut actions = Vec::new();
             actions.extend(notify(&st, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()));
             actions.push(RuleAction::SetTransfer { state: Some(new_state) });
             ok(actions)
@@ -77,10 +84,20 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             let c_leg_id = st.c_leg_id.clone()?;
 
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
-            let c_initial_sdp = (!resp.body().is_empty()).then(|| resp.body().to_vec());
+            let c_initial_sdp = resp.sdp().map(<[u8]>::to_vec);
             // A's SDP for the c-realign re-INVITE-C offer.
+            // FIXME(refer): a delayed-offer a-INVITE leaves this empty, so the
+            // re-INVITE to C makes a delayed offer its ACK never answers; source
+            // A's current description (her ACK answer) instead.
             let a_leg = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-            let a_sdp = a_leg.body();
+            let a_sdp = a_leg.sdp().unwrap_or_default();
+            // A's lines describe the offer only where it is her whole body.
+            let a_offer = Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string());
+            let a_offer = if a_sdp == a_leg.body().as_ref() {
+                a_offer.described_by(a_leg.headers())
+            } else {
+                a_offer
+            };
 
             let mut new_state = st.clone();
             new_state.phase = TransferPhase::CRealigning;
@@ -93,7 +110,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     disposition: Some(call::LegDisposition::Bridged),
                 },
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
-                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
+                RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
             ];
             actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
@@ -106,7 +123,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                 },
                 RuleAction::SendReinvite {
                     leg_id: c_leg_id.clone(),
-                    body: a_sdp.to_vec(),
+                    body: Some(a_offer),
                     add_headers: vec![],
                 },
                 RuleAction::AddCdrEvent {
@@ -187,7 +204,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
             .timer_type(call::TimerType::NoAnswer)
             .filter(|ctx| {
                 let timer_leg = match ctx.event {
-                    crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
+                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                     _ => None,
                 };
                 state(ctx).and_then(|s| s.c_leg_id.as_deref()).is_some()
@@ -205,7 +222,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
                     status_code: None,
                     reason: Some("no_answer_timeout".to_string()),
                 },
-                RuleAction::DestroyLeg { leg_id: c_leg_id },
+                RuleAction::DestroyLeg { leg_id: c_leg_id, headers: vec![] },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 RuleAction::SetTransfer { state: None },

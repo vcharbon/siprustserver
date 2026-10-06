@@ -7,18 +7,17 @@
 //! Observationally pure: internal helpers may use early returns as control
 //! flow, but every escape is translated into `Err(SipParseError)` at this
 //! entry point. No panic ever crosses the boundary.
-//!
-//! STATUS: scaffolded, not yet ported. See MIGRATION_STATUS.md.
 
 use bytes::Bytes;
 
 use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::error::SipParseError;
-use crate::parser::{SipParser, SipParserLimits};
+use crate::parser::{Framing, SipParser, SipParserLimits};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub(crate) mod compact_forms;
+pub mod contact_entries;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
@@ -111,18 +110,30 @@ impl SipParser for CustomParser {
         let start = parse_start_line(&mut s, image, limits)?;
         let parsed = headers::parse_headers(&mut s, &text, block.lines, limits)?;
         let headers_vec = parsed.headers;
-        let content_length = parsed.content_length as usize;
 
+        // The body bound is the declared Content-Length; a datagram that
+        // declares none ends with its bytes (RFC 3261 §18.3), a stream that
+        // declares none is undelimited and refused (§20.14).
         let available = raw.len() - body_at;
-        let body: Bytes = if content_length > 0 {
-            if available < content_length {
-                return Err(SipParseError::new(format!(
-                    "Content-Length {content_length} exceeds remaining bytes {available}"
-                )));
+        let body: Bytes = match parsed.content_length {
+            Some(0) => Bytes::new(),
+            Some(declared) => {
+                let content_length = declared as usize;
+                if available < content_length {
+                    return Err(SipParseError::new(format!(
+                        "Content-Length {content_length} exceeds remaining bytes {available}"
+                    )));
+                }
+                raw.slice(body_at..body_at + content_length)
             }
-            raw.slice(body_at..body_at + content_length)
-        } else {
-            Bytes::new()
+            None => match limits.framing {
+                Framing::Datagram => raw.slice(body_at..),
+                Framing::Stream => {
+                    return Err(SipParseError::new(
+                        "Content-Length is mandatory over a stream transport (RFC 3261 §20.14)",
+                    ))
+                }
+            },
         };
 
         let mode = if limits.wire_grammar { ExtractMode::Wire } else { ExtractMode::Hydrate };

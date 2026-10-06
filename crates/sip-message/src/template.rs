@@ -329,7 +329,7 @@ pub struct EmitOpts {
 /// Rewrite each header whose canonical name matches a `(canonical, wire)` entry
 /// to the mapped wire name-form (compact-name replay of the stack-regenerated
 /// headers). Non-matching headers pass through unchanged; an empty map is the
-/// identity (today's full names). Values are untouched. Used by the template
+/// identity (full names). Values are untouched. Used by the template
 /// emission path to write `v:`/`f:`/… for a capture that used compact names.
 /// Render `msg` under the header block the template lane states for it — the
 /// captured wire names ([`apply_name_forms`]), the remote-target host:port
@@ -567,7 +567,7 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(out[0].name, "v");
         assert_eq!(out[1].name, "f");
         assert_eq!(out[2].name, "Subject", "unmapped header untouched");
-        // Empty map = identity (today's full names).
+        // Empty map = identity (full names).
         assert_eq!(apply_name_forms(&headers, &[]), headers);
     }
 

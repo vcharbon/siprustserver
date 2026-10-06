@@ -1,5 +1,5 @@
-//! S10b — the **goal-2 simulated-failover harness** (plan "Goal-2 acceptance";
-//! ADR-0011 X10). It composes, under ONE fake clock:
+//! The **simulated-failover harness** (ADR-0011 X10). It composes, under ONE
+//! fake clock:
 //!
 //! - the `scenario-harness` SIP plane (alice/bob UAs + the SIP recorder),
 //! - a real load-balancing `ProxyCore` SUT over a [`SimulatedWorkerRegistry`]
@@ -16,8 +16,8 @@
 //!
 //! ## Fake-clock discipline (CLAUDE.md hazards)
 //! Everything runs under `#[tokio::test(start_paused = true)]`. [`FailoverHarness::advance`]
-//! drives BOTH the SIP and replication sim pipelines with the proven
-//! settle/advance/settle discipline. Both fabrics use transit delay `>= 1 ms`
+//! drives BOTH the SIP and replication sim pipelines in settled 100 ms chunks
+//! (`sip_clock::testkit::pump_sampled`). Both fabrics use transit delay `>= 1 ms`
 //! (the SIP harness coerces 0→1; the repl fabric is built with 1). Drive the
 //! protocol BETWEEN advances: advance to the deadline, then react. The cross-plane
 //! pipeline is deep (txn → router → dispatcher → SIP net AND changelog → server →
@@ -36,6 +36,7 @@ use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
+use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
@@ -172,6 +173,13 @@ pub struct ReplicatedB2buaSut {
     /// of this node (initial spawn AND each reboot), so a tuned knob survives
     /// crash/reboot cycles. Default no-op.
     tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The callflow services each incarnation registers.
+    services: fn() -> Vec<ServiceDef>,
+    /// The adaptation HTTP port each incarnation's services send their
+    /// `ServiceHttpRequest`s through; `None` answers every one `error`.
+    adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    /// The rule composition each incarnation runs.
+    compose: b2bua::rules::ComposeOptions,
     /// The cluster's views ledger, shared with the harness: this node registers
     /// each incarnation it spawns and records its own lifecycle beliefs here.
     views: Arc<ViewLedger>,
@@ -179,6 +187,11 @@ pub struct ReplicatedB2buaSut {
     /// ledger's sampler sees the process go, and the parked handles of a dead
     /// incarnation stop being read as a running node.
     alive: Arc<AtomicBool>,
+    /// The system information this node's capacity gate reads (ADR-0037).
+    /// Simulated so a run is deterministic; RSS starts at 0. Every
+    /// incarnation's gate reads the same control, so a set value survives a
+    /// reboot.
+    system: b2bua::capacity::SimulatedSystemControl,
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
@@ -264,6 +277,17 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.metrics()).unwrap_or(&self.metrics)
     }
 
+    /// The simulated system information this node's capacity gate samples
+    /// (ADR-0037): set the RSS here to drive the RSS bounds.
+    pub fn system(&self) -> &b2bua::capacity::SimulatedSystemControl {
+        &self.system
+    }
+
+    /// The live core's memory admission gate. Panics while crashed.
+    pub fn capacity(&self) -> &b2bua::capacity::CapacityGate {
+        self.core.as_ref().expect("capacity of a crashed worker").capacity()
+    }
+
     /// Non-2xx INVITE finals this worker's transaction layer re-sent on Timer G
     /// (RFC 3261 §17.2.1) — the a-leg server transaction speaking. 0 while crashed.
     pub fn server_final_retransmits(&self) -> u64 {
@@ -311,6 +335,17 @@ impl ReplicatedB2buaSut {
             .unwrap_or_else(|| repl_net::frame::Watermark::new(0, 0))
     }
 
+    /// This node's changelog head: the position of the last change it logged
+    /// for its peers. `None` while crashed or unreplicated.
+    pub fn changelog_head(&self) -> Option<repl_net::frame::Watermark> {
+        self.core.as_ref().and_then(|c| c.repl_store()).map(|s| s.changelog().head())
+    }
+
+    /// This incarnation's handle on its call limiter. `None` while crashed.
+    pub fn limiter_worker(&self) -> Option<b2bua::limiter::LimiterWorker> {
+        self.core.as_ref().map(|c| c.limiter().clone())
+    }
+
     /// Whether `peer`'s flow on `partition` is connected to THIS node's
     /// replication server and has reported applying everything this node ever
     /// logged for it (ADR-0031 D2) — the per-flow predicate the drain's
@@ -346,7 +381,8 @@ impl ReplicatedB2buaSut {
     }
 
     /// The primary version counter (`p`) currently stored for a ref, or `None`
-    /// — projected from the `(p,b)` version vector ([`current_cv`]).
+    /// — projected from the `(p,b)` version vector
+    /// ([`ReplicatingCallStore::current_cv`]).
     pub fn call_gen(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<i64> {
         self.store.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
@@ -502,8 +538,9 @@ impl ReplicatedB2buaSut {
     }
 
     /// Does this node hold **any trace** of `call_ref` — live (serving) or as a
-    /// replica body in either partition? Used to assert a terminated call left
-    /// nothing behind anywhere (so a later reboot cannot resurrect it).
+    /// replica body in either partition, an expired body included until the
+    /// reap evicts it? Used to assert a terminated call left nothing behind
+    /// anywhere (so a later reboot cannot resurrect it). A pure read.
     pub async fn holds_any_trace(&self, call_ref: &str) -> bool {
         if self.serves(call_ref) {
             return true;
@@ -511,14 +548,7 @@ impl ReplicatedB2buaSut {
         match call::parse_call_ref(call_ref) {
             Some(p) => {
                 for role in [PartitionRole::Primary, PartitionRole::Backup] {
-                    if self
-                        .store
-                        .get_call(role, &p.primary, call_ref)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
-                    {
+                    if self.store.peek_body_raw(role, &p.primary, call_ref).await.is_some() {
                         return true;
                     }
                 }
@@ -531,7 +561,7 @@ impl ReplicatedB2buaSut {
     /// CRASH: abort the core's tasks + park its pullers, then drop it and replace
     /// the store with a fresh empty one (memory wiped). The node is inert until
     /// [`reboot`](Self::reboot). Closing the core's tasks closes its repl
-    /// connections cleanly (the S9 note: crash-to-close, not a fabric partition).
+    /// connections cleanly (crash-to-close, not a fabric partition).
     pub fn crash(&mut self) {
         if let Some(mut core) = self.core.take() {
             core.abort();
@@ -589,16 +619,20 @@ impl ReplicatedB2buaSut {
         );
         match self.core.as_ref() {
             Some(core) => core.drain(bounds).await,
-            None => {
-                DrainOutcome { exit: DrainExit::Quiescent, residual: 0, elapsed: Duration::ZERO }
-            }
+            None => DrainOutcome {
+                exit: DrainExit::Quiescent,
+                residual: 0,
+                elapsed: Duration::ZERO,
+                release_flush: Default::default(),
+            },
         }
     }
 
     /// [`begin_drain`](Self::begin_drain) without the wait: latch `Draining`
     /// now and hand the wait back as a [`PendingDrain`] the test polls while it
-    /// drives the timeline. The wait holds only the core's owned probes, so the
-    /// process can still be killed mid-drain.
+    /// drives the timeline. The wait holds only the core's owned probes, its
+    /// release flush included, so the process can still be killed mid-drain;
+    /// a killed incarnation's flush returns at once.
     pub fn begin_drain_detached(&self, bounds: DrainBounds) -> PendingDrain {
         self.views.record(
             &self.incarnation_key(),
@@ -611,15 +645,18 @@ impl ReplicatedB2buaSut {
             core.drain_probe()
         });
         let metrics = self.core.as_ref().map(|core| core.metrics().clone());
+        let limiter = self.core.as_ref().map(|core| core.limiter().clone());
         let mut pending = PendingDrain {
             fut: Box::pin(async move {
                 match probe {
                     Some(p) => {
+                        // The core's own drain, flush included, without the
+                        // borrow of the core; it records the same exit, unless
+                        // the incarnation was killed mid-drain.
                         let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
-                        // The detached wait stands in for `B2buaCore::drain`, so
-                        // it records the same exit reason the runner would.
-                        if let Some(m) = metrics {
-                            m.record_drain_exit(out.exit.label(), out.elapsed);
+                        let killed = limiter.is_some_and(|l| l.is_stopped());
+                        if let (Some(m), false) = (metrics, killed) {
+                            m.record_drain_exit(&out);
                         }
                         out
                     }
@@ -627,6 +664,7 @@ impl ReplicatedB2buaSut {
                         exit: DrainExit::Quiescent,
                         residual: 0,
                         elapsed: Duration::ZERO,
+                        release_flush: Default::default(),
                     },
                 }
             }),
@@ -640,9 +678,9 @@ impl ReplicatedB2buaSut {
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
     /// view. The node's supervisor reconciles it to a Park. Under reactive-only
-    /// takeover (ADR-0014) this no longer drives an eager takeover (removed); the
-    /// survivor takes a dialog over only when the proxy reroutes its in-dialog
-    /// traffic. Kept so the survivor's membership view stays honest across a kill.
+    /// takeover (ADR-0014) this drives no takeover: the survivor takes a dialog
+    /// over only when the proxy reroutes its in-dialog traffic. It keeps the
+    /// survivor's membership view honest across a kill.
     pub fn simulate_peer_removed(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }
@@ -670,9 +708,9 @@ impl ReplicatedB2buaSut {
     }
 
     /// REBOOT: same ordinal + same repl listen addr, a fresh SIP endpoint on a
-    /// NEW address (new pod IP — [`reboot_sip_addr`](Self::reboot_sip_addr)), an
+    /// NEW address (new pod IP — `reboot_sip_addr`), an
     /// EMPTY store at a NEW higher incarnation gen, a fresh server + supervisor →
-    /// it re-bootstraps + resubscribes from its peers (the S6 reboot path).
+    /// it re-bootstraps + resubscribes from its peers (the reboot path).
     /// Returns the new SIP address so the caller re-learns it into the proxy
     /// registry (and the report). After driving the clock its
     /// [`is_ready`](Self::is_ready) flips true once re-hydration completes.
@@ -746,14 +784,12 @@ impl ReplicatedB2buaSut {
             sip_addr: self.sip_addr,
             decision: self.decision.clone(),
             limiter: self.limiter.clone(),
-            // No callflow services on the replicating path (the plain `spawn`
-            // path before was `spawn_with_services(.., vec![])`).
-            services: Vec::new(),
+            services: (self.services)(),
             outbound_proxy: self.outbound_proxy.clone(),
             replication,
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(self.id_seed())),
-            cdr: self.cdr.clone(),
+            cdr: Arc::new(self.cdr.clone()),
             // DETERMINISTIC overload signal (ELU pinned to 0). The default `None`
             // rides `OverloadSignal::live`, whose `LiveLoadSampler` reads the REAL
             // tokio `worker_total_busy_duration` over REAL wall-clock — a signal
@@ -761,24 +797,22 @@ impl ReplicatedB2buaSut {
             // runs HOT during busy cold-start (spawning both workers + proxy +
             // limiter + health-probe, replication bootstrap). It nondeterministically
             // crossed the 0.75 panic-ELU threshold and shed the establish INVITE with
-            // a Tier-3 `panic_elu` 503 (the ~1/5 "cold-start-503" flake; worse under
+            // a panic-ELU rung `panic_elu` 503 (the ~1/5 "cold-start-503" flake; worse under
             // parallel/CI load). Inject a `simulated()` sampler left at ELU 0 so the
             // panic-ELU backstop never trips on runtime busyness; a test that WANTS to
             // exercise it drives a known ELU through the control instead.
             overload: Some(b2bua::overload::OverloadSignal::new(Arc::new(
-                b2bua::overload::simulated().0,
+                load_shed::simulated().0,
             ))),
-            // The replicating failover path registers no callflow services, so
-            // no `ServiceHttpRequest` is ever fired here.
-            adaptation_http: None,
-            // Default composition (every built-in CORE machine, incl. the
-            // `refer_transfer` seed) — the failover harness does not opt out.
-            compose: b2bua::rules::ComposeOptions::default(),
+            adaptation_http: self.adaptation_http.clone(),
+            compose: self.compose.clone(),
             // Default store + no injected store faults (ADR-0023): the HA
             // stack's behaviour is identical to the pre-seam wiring.
             store: None,
             store_faults: None,
             wire_faults: None,
+            capacity: Some(b2bua::capacity::CapacityGate::new(Arc::new(self.system.probe()))),
+            deferred_ceilings: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
@@ -958,7 +992,7 @@ pub struct FailoverHarness {
     /// The ONE shared global recording-order sequencer (the SIP recorder's
     /// `EventSequencer`). Markers are stamped from it at the instant of
     /// `mark()`/`partition()`/`heal()`/crash/reboot so they interleave with SIP
-    /// messages and repl frames in true append order (Issue 1).
+    /// messages and repl frames in true append order.
     event_seq: Arc<layer_harness::EventSequencer>,
     /// The SIP harness handle (shared so workers can re-bind on reboot). It also
     /// carries this run's log/trace capture: the inner `scenario_harness::Harness`
@@ -970,12 +1004,12 @@ pub struct FailoverHarness {
     /// `Clock` can carry a DIFFERENT wall anchor: a node with offset `+30_000`
     /// reads `now_ms()` 30 s ahead of a node at offset `0`, while behaviour timers
     /// stay on the shared monotonic clock. That is exactly deterministic inter-node
-    /// wall skew under a paused runtime — the one thing the single-clock harness
-    /// could not previously reproduce (CLAUDE.md "single-clock fidelity gap"). A
-    /// node's clock is `Clock::test_at(offset)` (the harness base anchor is 0);
-    /// every clock consumer for that node (b2bua core, changelog/store, membership)
-    /// uses it, so a replica it flushes stamps `origin_now_ms` in ITS frame and the
-    /// receiver computes the true cross-node offset. Default 0 (no skew).
+    /// wall skew under a paused runtime, which a single shared clock cannot
+    /// reproduce. A node's clock is `Clock::test_at(offset)` (the harness base
+    /// anchor is 0); every clock consumer for that node (b2bua core,
+    /// changelog/store, membership) uses it, so a replica it flushes stamps
+    /// `origin_now_ms` in ITS frame and the receiver computes the true cross-node
+    /// offset. Default 0 (no skew).
     worker_clock_offsets: HashMap<String, i64>,
     /// This run's declared RFC-audit scoping — lifetime waivers plus acceptance
     /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
@@ -985,6 +1019,18 @@ pub struct FailoverHarness {
     /// (after the parity defaults) — set via
     /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
     worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The callflow services every worker spawned after
+    /// [`with_worker_services`](Self::with_worker_services) registers, on each
+    /// of its incarnations. None by default.
+    worker_services: fn() -> Vec<ServiceDef>,
+    /// The adaptation HTTP port every worker spawned after
+    /// [`with_worker_adaptation_http`](Self::with_worker_adaptation_http)
+    /// hands its services, on each of its incarnations. None by default.
+    worker_adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    /// The rule composition every worker spawned after
+    /// [`with_worker_compose`](Self::with_worker_compose) runs; every built-in
+    /// CORE machine by default.
+    worker_compose: b2bua::rules::ComposeOptions,
     /// The views ledger: every observer's belief about every worker, written by
     /// the cluster primitives and by the per-chunk sampler in
     /// [`advance`](Self::advance). Shared with each worker SUT.
@@ -1018,6 +1064,11 @@ struct WorkerSpec {
 /// the failover tests can waive it by a symbol rather than a bare string. See
 /// [`FailoverHarness::accept_rfc_deviations_from_now`].
 pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
+
+/// The no-CANCEL-after-final audit rule (`rfc_rules::rules::cancel`), named here
+/// for the same reason: a partitioned owner's CANCEL ladder outlives its copy
+/// (ADR-0034) and crosses a healed plane after the other owner answered.
+pub const RULE_NO_CANCEL_AFTER_FINAL: &str = "no-cancel-after-final";
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
@@ -1085,7 +1136,7 @@ impl FailoverHarness {
         // render strictly in TRUE append order. `at_ms` then serves only as the
         // displayed time label — never the cross-source tiebreaker — so a reboot
         // marker appended just before the bootstrap pull it triggers sorts first
-        // even though both land on the same paused-clock millisecond (Issue 1).
+        // even though both land on the same paused-clock millisecond.
         let event_seq = harness.recording().recorder().sequencer();
         let capture_seq: repl_net::transport::CaptureSeq = {
             let s = event_seq.clone();
@@ -1127,6 +1178,9 @@ impl FailoverHarness {
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
             worker_tune: Arc::new(|_| {}),
+            worker_services: Vec::new,
+            worker_adaptation_http: None,
+            worker_compose: b2bua::rules::ComposeOptions::default(),
             views: ViewLedger::new(clock, event_seq_for_views),
             worker_specs: HashMap::new(),
             sip_cut,
@@ -1144,6 +1198,30 @@ impl FailoverHarness {
         tune: impl Fn(&mut b2bua::B2buaConfig) + Send + Sync + 'static,
     ) -> Self {
         self.worker_tune = Arc::new(tune);
+        self
+    }
+
+    /// Register the services `services` builds on every worker spawned from
+    /// now on, and on each of its incarnations (the failover twin of
+    /// `B2buaSutBuilder::services`).
+    pub fn with_worker_services(mut self, services: fn() -> Vec<ServiceDef>) -> Self {
+        self.worker_services = services;
+        self
+    }
+
+    /// Hand every worker spawned from now on, and each of its incarnations,
+    /// `port` for its services' `ServiceHttpRequest`s (the failover twin of
+    /// `B2buaSutBuilder::adaptation_http`).
+    pub fn with_worker_adaptation_http(mut self, port: b2bua::AdaptationHttpPort) -> Self {
+        self.worker_adaptation_http = Some(port);
+        self
+    }
+
+    /// Run `compose` on every worker spawned from now on, and each of its
+    /// incarnations (the failover twin of
+    /// `B2buaSutBuilder::without_core_refer_transfer`).
+    pub fn with_worker_compose(mut self, compose: b2bua::rules::ComposeOptions) -> Self {
+        self.worker_compose = compose;
         self
     }
 
@@ -1165,7 +1243,8 @@ impl FailoverHarness {
 
     /// Accept `rule`'s findings on messages recorded from **now** until
     /// [`resume_rfc_gate`](Self::resume_rfc_gate) (or the end of the run) — the
-    /// window-scoped counterpart of [`allow_rfc_violation`]. Call it at the instant
+    /// window-scoped counterpart of
+    /// [`allow_rfc_violation`](Self::allow_rfc_violation). Call it at the instant
     /// the scenario injects its fault: establishment, every message before the
     /// injection, and every no-fault scenario keep the rule fully gating, so a new
     /// regression outside the window still fails the test.
@@ -1176,7 +1255,7 @@ impl FailoverHarness {
     /// millisecond.
     ///
     /// A finding the rule cannot pin to a wire entry is unattributable and stays
-    /// gated (only [`allow_rfc_violation`] covers it).
+    /// gated (only [`allow_rfc_violation`](Self::allow_rfc_violation) covers it).
     ///
     /// Accepted findings are classified, not masked: they leave the gate but land
     /// in [`accepted_rfc_deviations`](Self::accepted_rfc_deviations) and in the
@@ -1215,7 +1294,7 @@ impl FailoverHarness {
     }
 
     /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
-    /// see [`worker_clock_offsets`](Self::worker_clock_offsets). Call BEFORE
+    /// see `worker_clock_offsets`. Call BEFORE
     /// [`spawn_worker`](Self::spawn_worker) for `ordinal` (the offset is read at
     /// spawn and carried across reboots). A positive offset anchors the node AHEAD
     /// of true time (skew-ahead), negative BEHIND. Returns `self` for chaining.
@@ -1249,6 +1328,35 @@ impl FailoverHarness {
     /// Bind a named UA at `addr` on the SIP fabric (alice/bob).
     pub async fn agent(&self, name: &str, addr: &str) -> Agent {
         self.harness.agent(name, addr).await
+    }
+
+    /// [`agent`](Self::agent) with explicit RFC-audit roles — a third-party
+    /// proxy on the fabric binds with `{Proxy}`.
+    pub async fn agent_with_roles(
+        &self,
+        name: &str,
+        addr: &str,
+        roles: std::collections::HashSet<sip_net::UaRole>,
+    ) -> Agent {
+        self.harness.agent_with_roles(name, addr, roles).await
+    }
+
+    /// Bind a scripted third-party proxy at `addr` on the SIP fabric: the test
+    /// forwards each message it receives, and may alter it on the way.
+    pub async fn scripted_proxy(&self, name: &str, addr: &str) -> scenario_harness::Proxy {
+        self.harness.proxy(name, addr).await
+    }
+
+    /// One callee socket at `addr` shared by logical agents, each owning the
+    /// requests whose Request-URI user part starts with its prefix (longest
+    /// match) — the failover twin of `scenario_harness::Harness::callee_group`.
+    /// `callees` lists `(name, prefix)`; a name may own several prefixes.
+    pub async fn callee_group(
+        &self,
+        addr: &str,
+        callees: &[(&str, &str)],
+    ) -> scenario_harness::CalleeGroup {
+        self.harness.callee_group(addr, callees).await
     }
 
     /// [`agent`](Self::agent) with an arrival-time [`sip_net::PreIngressHook`]
@@ -1524,8 +1632,13 @@ impl FailoverHarness {
             .chain(published)
             .map(|p| Peer::new(p, p))
             .collect();
+        // The node connects through its own handle on the fabric: a stream it
+        // opens is attributed to it at `connect`, so a partition refuses the
+        // connect rather than holding a stream the puller already counts as
+        // reached. A reboot keeps the handle — the ordinal does not change.
+        let network = self.repl_recording.over(Arc::new(self.repl_sim.as_node(ordinal)));
         let wiring = ReplWiring {
-            network: Arc::new(self.repl_recording.clone()) as Arc<dyn ReplicationNetwork>,
+            network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.repl_resolver.clone(),
             peers: peer_list,
             listen_addr,
@@ -1559,8 +1672,12 @@ impl FailoverHarness {
             decision: spec.decision.clone(),
             limiter: spec.limiter.clone(),
             tune: self.worker_tune.clone(),
+            services: self.worker_services,
+            adaptation_http: self.worker_adaptation_http.clone(),
+            compose: self.worker_compose.clone(),
             views: self.views.clone(),
             alive: Arc::new(AtomicBool::new(true)),
+            system: b2bua::capacity::simulated().1,
         };
         let (setup, store, membership) = sut.wiring.setup(gen, &node_clock);
         sut.store = store;
@@ -1579,7 +1696,7 @@ impl FailoverHarness {
     /// interleaves with SIP messages and repl frames in TRUE append order. Called
     /// at the instant the transition occurs (crash/reboot/drain/failover/
     /// partition/heal/cut) in the runner, so e.g. the reboot marker naturally
-    /// precedes the bootstrap pull it triggers (Issue 1).
+    /// precedes the bootstrap pull it triggers.
     pub fn mark(&mut self, node: &str, peer: Option<&str>, kind: &str, detail: &str) {
         self.markers.push(Marker {
             at_ms: self.clock.now_ms(),
@@ -1591,38 +1708,41 @@ impl FailoverHarness {
         });
     }
 
+    /// The replication listen address of `ordinal`'s current incarnation — the
+    /// one the cluster's resolver hands out, so a fault names the node that is
+    /// serving now, a replacement included.
+    fn repl_listen(&self, ordinal: &str) -> SocketAddr {
+        self.repl_resolver.lock().unwrap().get(ordinal).copied().unwrap_or_else(|| {
+            panic!("{ordinal} has no replication listen address in the cluster's resolver")
+        })
+    }
+
     /// Partition two workers on the repl fabric, both directions and for every
     /// stream between them — the ones their pullers already opened, and any they
-    /// open while the cut lasts. The fabric attributes each stream to the node
-    /// that opened it (the `caller` on its `PullRequest`) and holds delivery on
-    /// the owner pair, so a reconnect from a fresh ephemeral local does not slip
-    /// through. A held direction buffers in order and flushes on
-    /// [`heal`](Self::heal). Marker.
+    /// try to open while the cut lasts. The fabric attributes each stream to
+    /// the node that opened it (at `connect`, through the node's own handle)
+    /// and holds delivery on the owner pair; a connect across the cut is
+    /// refused, so a reconnect from a fresh ephemeral local does not slip
+    /// through and the puller never reads the peer as reached. A held
+    /// direction buffers in order and flushes on [`heal`](Self::heal). Names
+    /// each ordinal's current incarnation. Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
         self.mark(a, Some(b), "partition", "");
     }
 
-    /// Delay delivery on every replication stream `from`'s listener serves by
-    /// `ms` — the frames it sends down the connections pullers opened to it
-    /// (both of `to`'s flows). A flush `from` writes lands on `to` only `ms`
-    /// later. Marker.
-    pub fn delay_streams_from(&mut self, from: &str, to: &str, ms: u64) {
-        let listener = self.repl_addrs[from];
-        let listeners: Vec<SocketAddr> = self.repl_addrs.values().copied().collect();
-        let clients: std::collections::BTreeSet<SocketAddr> = self
-            .repl_report()
-            .frames
-            .iter()
-            .filter(|f| f.from == listener && !listeners.contains(&f.to))
-            .map(|f| f.to)
-            .collect();
-        assert!(!clients.is_empty(), "no replication stream from {from}'s listener to a puller");
-        for client in &clients {
-            self.repl_sim.apply_fault(Fault::Delay { src: listener, dst: *client, ms });
-        }
-        self.mark(from, Some(to), "delay", &format!("{ms}ms on {listener} → {clients:?}"));
+    /// Delay delivery by `ms` on every replication stream from `from` to `to`,
+    /// present and future, in that direction — the frames `from`'s listener
+    /// serves down the streams `to`'s pullers opened, and the ones `from`'s own
+    /// pullers send up to `to`. A flush `from` writes lands on `to` no earlier
+    /// than `ms` after it left; a stream `to` reopens later inherits the delay.
+    /// Names each ordinal's current incarnation; lifted by
+    /// [`heal`](Self::heal). Marker.
+    pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
+        let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
+        self.repl_sim.apply_fault(Fault::Delay { src, dst, ms });
+        self.mark(from, Some(to), "delay", &format!("{ms}ms on {src} → {dst}"));
     }
 
     /// **Cut `addr` off the signalling fabric, both directions** — the node is
@@ -1642,11 +1762,12 @@ impl FailoverHarness {
         self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
     }
 
-    /// Heal a repl-fabric partition: unblock `connect` and release every held
-    /// stream, which flushes what buffered while the cut lasted, in order.
-    /// Marker.
+    /// Heal the repl fabric between two workers: unblock `connect`, lift every
+    /// directed fault between them ([`delay`](Self::delay) included) and
+    /// release every held stream, which flushes what buffered while the cut
+    /// lasted, in order. Names each ordinal's current incarnation. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
         self.mark(a, Some(b), "heal", "");
     }
@@ -1825,8 +1946,12 @@ impl FailoverHarness {
             declared.ip(),
             declared.port() + 100 * u16::try_from(gen - 1).expect("gen fits"),
         ));
-        // Peers must find the replacement, not the incarnation it replaces.
+        // Peers must find the replacement, not the incarnation it replaces, and
+        // the fabric must read the ordinal's streams as the replacement's, so a
+        // fault named on the ordinal reaches them (both maps before the spawn:
+        // the streams it opens are attributed to this address).
         self.repl_resolver.lock().unwrap().insert(ordinal.to_string(), listen_addr);
+        self.repl_sim.declare_endpoint(ordinal, listen_addr);
 
         let sut = self.spawn_incarnation(ordinal, &spec, gen, sip_addr, listen_addr).await;
         self.assert_repl_listening(ordinal, listen_addr).await;
@@ -1891,15 +2016,16 @@ impl FailoverHarness {
 
     // -- clock -------------------------------------------------------------
 
-    /// Advance the paused clock by `dur`, driving BOTH the SIP and repl sim
-    /// pipelines with the proven settle/advance/settle discipline (CLAUDE.md).
-    /// Drive the protocol BETWEEN advances: advance to the deadline, then assert.
+    /// Advance the paused clock by `dur` in settled 100 ms chunks, driving BOTH
+    /// the SIP and repl sim pipelines and sampling the views ledger after each
+    /// chunk (`ceil(dur/100 ms) + 1` chunks: never less than 200 ms). Drive the
+    /// protocol BETWEEN advances: advance to the deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
         sip_clock::testkit::pump_sampled(dur, || self.views.sample()).await;
     }
 
     /// **Fine-grained pump toward an unknown timer deadline.** Advances the
-    /// paused clock in `step` increments (each a full settle/advance/settle pump
+    /// paused clock in `step` increments (each an [`advance`](Self::advance)
     /// across both planes), running the async `ready` probe *after every step*
     /// and returning `true` the instant it is satisfied — `false` if `max` total
     /// elapses first.
@@ -1938,8 +2064,8 @@ impl FailoverHarness {
     }
 
     /// **Mutualised long-wait teardown settle** (TODO `FixCallTerminateOnBackup`
-    /// §5.4). After a call's terminal request, pump the paused clock under the
-    /// settle/advance/settle discipline until `drained` is satisfied — first in
+    /// §5.4). After a call's terminal request, [`advance`](Self::advance) the
+    /// paused clock until `drained` is satisfied — first in
     /// fine 200 ms steps for the immediate flush (CDR write + soft limiter release
     /// + reverse-delete drain + an acting-backup takeover copy's self-release on
     /// Timer H/J ~32 s), then in coarse 5 s steps **past one full
@@ -2046,7 +2172,8 @@ impl FailoverHarness {
     /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
     /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
     /// top of the cross-message rules — over the recorded trace and panic on
-    /// any non-advisory finding, honouring [`allow_rfc_violation`] waivers.
+    /// any non-advisory finding, honouring
+    /// [`allow_rfc_violation`](Self::allow_rfc_violation) waivers.
     ///
     /// The Drop-time gate deliberately runs only the endpoint-scoped
     /// cross-message rules (a transparent failover splits one dialog's CSeq
@@ -2166,7 +2293,7 @@ impl FailoverHarness {
     ///
     /// **Every reboot that re-points traffic at the new address calls this** —
     /// a worker bind the exclusion set does not name is audited as if it were a
-    /// real UA, which [`audited_events`](Self::audited_events) exists to prevent.
+    /// real UA, which `audited_events` exists to prevent.
     pub fn note_worker_rebound(&mut self, _ordinal: &str, new_addr: SocketAddr) {
         self.all_worker_sip_addrs.push(new_addr);
     }
@@ -2300,7 +2427,7 @@ impl FailoverHarness {
     /// Render the COMBINED unified report as the `global.txt` string: the SIP
     /// exchange, the lifecycle markers, AND the replication exchange interleaved
     /// on one time-ordered axis (see [`unified_doc`](Self::unified_doc)).
-    /// Consumes the harness (parity with the historic signature; call last). The
+    /// Consumes the harness (call last). The
     /// non-consuming [`unified_doc`](Self::unified_doc) /
     /// [`write_unified_report`](Self::write_unified_report) are preferred for the
     /// always-write artifacts.
@@ -2454,6 +2581,43 @@ impl HarnessHandle {
         let a = h.agent(name, addr).await;
         *self.inner.lock().unwrap() = Some(h);
         a
+    }
+
+    /// [`agent`](Self::agent) with explicit RFC-audit roles.
+    async fn agent_with_roles(
+        &self,
+        name: &str,
+        addr: &str,
+        roles: std::collections::HashSet<sip_net::UaRole>,
+    ) -> Agent {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let a = h.agent_with_roles(name, addr, roles).await;
+        *self.inner.lock().unwrap() = Some(h);
+        a
+    }
+
+    /// A scripted proxy bound on the shared fabric (under a brief lock).
+    async fn proxy(&self, name: &str, addr: &str) -> scenario_harness::Proxy {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let p = h.proxy(name, addr).await;
+        *self.inner.lock().unwrap() = Some(h);
+        p
+    }
+
+    /// A callee group bound on the shared fabric (under a brief lock).
+    async fn callee_group(
+        &self,
+        addr: &str,
+        callees: &[(&str, &str)],
+    ) -> scenario_harness::CalleeGroup {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let mut group = h.callee_group(addr);
+        for (name, prefix) in callees {
+            group = group.callee(*name, *prefix);
+        }
+        let built = group.build().await;
+        *self.inner.lock().unwrap() = Some(h);
+        built
     }
 
     /// [`agent`](Self::agent) with a pre-ingress hook on the UA's bind.

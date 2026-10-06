@@ -1,26 +1,30 @@
-//! `call-limiter` — a sliding-window concurrent-call limiter, served as a
-//! dedicated stateless HTTP process and shared cluster-wide.
+//! `call-limiter` — a concurrent-call limiter keyed by the call, served as a
+//! dedicated HTTP process and shared cluster-wide.
 //!
 //! This crate is b2bua-agnostic. It carries:
-//! - [`WindowStore`] — the windowed counter core. A faithful port of the TS
-//!   in-memory limiter (`CallLimiter.memory.ts`): N active windows summed,
-//!   per-key TTL, whole-store sweep-on-access. The per-op atomics match the
-//!   Redis Lua scripts (`CallLimiter.redis.ts`): admit = sum-then-incr, refresh
-//!   = incr-current-before-decr-origin (never undercounts), release = decrement
-//!   floored at 0.
-//! - The [`wire`] DTOs for the **batched, transactional** HTTP API: one `admit`
-//!   carries every limiter entry for a call and increments **all or none**.
+//! - [`CallStore`] — the keyed core: per call the entries it holds, the change
+//!   number of its last admit and a lease, per id the live count. One `admit`
+//!   replaces a call's whole set atomically, checked net of the set it already
+//!   holds and refused when older than the set held; `release` is
+//!   idempotent by call; `refresh` extends the lease, or re-creates a set the
+//!   store no longer holds; a lapsed lease drops the set.
+//! - The [`wire`] DTOs of the HTTP API: every request names its call.
 //! - [`LimiterServer`] — an [`http_net::HttpService`] routing `/v1/*` +
-//!   `/metrics` + `/healthz` onto the core.
+//!   `/metrics` + `/healthz` onto the core (`/v1/health` reads the store).
 //! - [`LimiterMetrics`] — global counters + gauges (no per-id labels).
 //!
 //! The HTTP client (and the fail-open policy) live in `b2bua`.
 
+mod catalogue;
 mod metrics;
 mod server;
-mod window;
+mod store;
 pub mod wire;
 
+pub use catalogue::CATALOGUE;
 pub use metrics::LimiterMetrics;
 pub use server::LimiterServer;
-pub use window::{AdmitResult, LimiterConfig, WindowStore};
+pub use store::{
+    AdmitResult, CallStore, LimiterConfig, RefreshResult, Refreshed, StoreStats, DEFAULT_LEASE_SEC,
+    MAX_LEASE_SEC,
+};

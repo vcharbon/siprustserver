@@ -1,6 +1,6 @@
 //! Classic-pcap ENCODING: an emitted flows document back into a capture file.
 //!
-//! The inverse of [`crate::classic`] for the one shape this crate reads
+//! The inverse of `crate::classic` for the one shape this crate reads
 //! everything as — Ethernet II → IPv4/IPv6 → UDP → the exact SIP bytes the
 //! document carries. An anonymized document is the only form of a production
 //! capture that may leave its network; this is what turns it back into a

@@ -43,6 +43,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::Schedule;
 use tokio::time::Instant;
 
+use crate::cancel;
 use crate::checks::{self, MessageObservables};
 use crate::close::{self, Owed};
 use crate::deviation::StepEffects;
@@ -51,6 +52,7 @@ use crate::gate::{self, GateVerdict, Inbound};
 use crate::instance::Instance;
 use crate::plan::{CompiledStep, Discriminator, Plan};
 use crate::preserve;
+use crate::program::ItemKind;
 use crate::progress;
 use crate::recording::Recording;
 use crate::render::{self, UriComposer};
@@ -68,6 +70,10 @@ const UNSCRIPTED: &str = "(unscripted)";
 /// The recording note for the RFC 3261 §15.1.2 final the document never held.
 const OWED_BYE_FINAL: &str =
     "absorbed: the §15.1.2 final owed to the BYE this leg sent, which no expect scripts";
+
+/// The recording note for the RFC 3261 §17.1.1.3 ACK the settle waited for.
+const OWED_FINAL_ACK: &str =
+    "absorbed: the §17.1.1.3 ACK owed to the non-2xx final this leg sent, which the settle awaited";
 
 /// Whether the step is the document's own answer to a BYE — a final gated on a
 /// BYE transaction, whatever status it names.
@@ -121,7 +127,7 @@ pub struct Outcome {
     pub recording: Recording,
     pub timing: RunTiming,
     /// Every datagram the run sighted, in arrival order, each tagged with the
-    /// view it belongs to — the WIRE view of issue 22's pair. The recording is
+    /// view it belongs to — the WIRE view of the wire/TU pair. The recording is
     /// this same stream rendered per leg.
     pub wire_view: Vec<WireEntry>,
 }
@@ -206,6 +212,9 @@ struct Runner<'a, 'p> {
     /// `(leg, CSeq)` of every BYE the script SENT: RFC 3261 §15.1.2 owes each
     /// one a final response, whatever the document scripts for it.
     byes_sent: std::collections::BTreeSet<(String, u32)>,
+    /// `(leg, CSeq)` of every non-2xx INVITE final whose Timer H the settle has
+    /// already reported expired: the failure is stated once, not once per turn.
+    timer_h_reported: std::collections::BTreeSet<(String, u32)>,
     /// The ladder rungs still owed, each with the instant it is due. A ladder
     /// is a peer's own transaction timer and gates nothing: it waits BESIDE the
     /// loop, never inside it, so every other leg keeps its own clock while a
@@ -226,7 +235,6 @@ struct Held {
     step: String,
     inbound: Inbound,
     message: SipMessage,
-    raw: String,
     bytes: Vec<u8>,
     repeat: bool,
     /// Its sequence number in the recording, so releasing it re-notes the entry
@@ -301,6 +309,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             abandoned: None,
             close_refused: std::collections::BTreeSet::new(),
             byes_sent: std::collections::BTreeSet::new(),
+            timer_h_reported: std::collections::BTreeSet::new(),
             pending_repeats: Vec::new(),
             held: None,
             started,
@@ -649,7 +658,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             SipMessage::Request(r) => r.image().to_vec(),
             SipMessage::Response(r) => r.image().to_vec(),
         };
-        let raw = String::from_utf8_lossy(&bytes).into_owned();
 
         // §17.2 FIRST, and before any claim: a retransmitted INVITE must not
         // consume a second claim on its way to being absorbed. The datagram is
@@ -663,7 +671,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.repeats.note(&leg, &bytes, self.now_us());
             self.record_arrival(
                 &leg,
-                raw,
+                bytes,
                 None,
                 Some("absorbed: byte-identical retransmission of a datagram already surfaced"),
                 repeat,
@@ -688,7 +696,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     &leg,
                     Dir::In,
                     self.now_us(),
-                    raw,
+                    bytes,
                     None,
                     Some(&note),
                 );
@@ -715,7 +723,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 .flatten()
             {
                 let leg = known_leg.clone().unwrap_or_else(|| policy.actor.clone());
-                self.record_arrival(&leg, raw, None, Some("background policy"), repeat);
+                self.record_arrival(&leg, bytes, None, Some("background policy"), repeat);
                 self.instance.note_background_answered(index);
                 if !self.answer_background(actor, &leg, &message, policy.status).await {
                     self.end_script(Some(&leg), None);
@@ -732,7 +740,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // one that carries them, and gives up the moment nothing better lands.
         if let Some(step) = self.holds_out_for_better(known_leg.as_deref(), actor, &inbound) {
             let leg = known_leg.clone().unwrap_or_default();
-            self.record_arrival(&leg, raw.clone(), None, Some(HELD_NOTE), repeat);
+            self.record_arrival(&leg, bytes.clone(), None, Some(HELD_NOTE), repeat);
             let seq = self.instance.recording().last_seq(&leg);
             self.held = Some(Held {
                 actor: actor.to_string(),
@@ -740,7 +748,6 @@ impl<'a, 'p> Runner<'a, 'p> {
                 step,
                 inbound,
                 message,
-                raw,
                 bytes,
                 repeat,
                 seq,
@@ -749,7 +756,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             return true;
         }
 
-        self.deliver(actor, inbound, message, raw, bytes, repeat, None).await
+        self.deliver(actor, inbound, message, bytes, repeat, None).await
     }
 
     /// The fork gate for `step`, under whichever §6.1 reading the plan gave its
@@ -869,7 +876,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             &held.actor.clone(),
             held.inbound,
             held.message,
-            held.raw,
             held.bytes,
             held.repeat,
             held.seq,
@@ -888,7 +894,6 @@ impl<'a, 'p> Runner<'a, 'p> {
         actor: &str,
         inbound: Inbound,
         message: SipMessage,
-        raw: String,
         bytes: Vec<u8>,
         repeat: bool,
         held_seq: Option<u64>,
@@ -896,7 +901,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         let leg = match self.leg_of(actor, &inbound) {
             Ok(leg) => leg,
             Err(detail) => {
-                self.record_arrival("unattributed", raw, None, Some(&detail), repeat);
+                self.record_arrival("unattributed", bytes, None, Some(&detail), repeat);
                 // A datagram belonging to no leg of this flow stops nothing: it
                 // is the failure it is, and every armed expect is as satisfiable
                 // as it was (§11.2).
@@ -909,7 +914,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         };
         if self.owed_bye_final(&leg, &inbound) {
-            self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
+            self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return true;
         }
         let seq = match held_seq {
@@ -918,11 +923,14 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Some(seq)
             }
             None => {
-                self.record_arrival(&leg, raw, None, None, repeat);
+                self.record_arrival(&leg, bytes.clone(), None, None, repeat);
                 self.instance.recording().last_seq(&leg)
             }
         };
 
+        // The dialog's confirmation BEFORE this message taught the leg anything:
+        // what a tail that no longer matches was scripted for (`progress`).
+        let confirmed_before = self.stacks.get(&leg).is_some_and(|stack| stack.confirmed());
         // Learn the dialog facts before matching: a step's inline checks may
         // read what this very message taught the leg.
         if let Some(stack) = self.stacks.get_mut(&leg) {
@@ -973,41 +981,92 @@ impl<'a, 'p> Runner<'a, 'p> {
         // takes a datagram whose HEADER SET diverges (`gate::body_content_holds`)
         // — the step names each difference and fails, rather than refusing the
         // message and abandoning the call several steps past the cause.
+        // A late CANCEL's other final answers the step as its own status would
+        // (§6.7d): read off this leg's wire, beside the structural gate.
+        let ladder = if inbound.status.is_some()
+            && Method::from_wire(&inbound.cseq_method) == Method::Cancel
+        {
+            self.instance.recording().legs().remove(&leg).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let late_cancel = |step: &CompiledStep| {
+            let opener = self.instance.cursor().opening_send(&step.id);
+            cancel::answers_late_cancel(step, &inbound, &ladder, opener)
+        };
+        let gates = |step: &CompiledStep| {
+            gate::discriminates(step, &inbound).matches() || late_cancel(step)
+        };
         let matched = gated
             .iter()
             .find(|step| {
-                gate::discriminates(step, &inbound).matches()
+                gates(step)
                     && self.rides_fork(step, &inbound).matches()
                     && gate::content_holds(step, &inbound, &scope, &resolver).matches()
             })
             .or_else(|| {
                 gated.iter().find(|step| {
-                    gate::discriminates(step, &inbound).matches()
+                    gates(step)
                         && self.rides_fork(step, &inbound).matches()
                         && gate::body_content_holds(step, &inbound, &scope).matches()
                         && self.takes_header_divergent(step, &inbound, actor, &leg)
                 })
             });
+        let tolerated = matched
+            .filter(|step| !gate::discriminates(step, &inbound).matches())
+            .and_then(|step| match (&step.discriminator, inbound.status) {
+                (Discriminator::Response { status, .. }, Some(arrived)) => {
+                    Some(cancel::note(*status, arrived))
+                }
+                _ => None,
+            });
         let Some(step) = matched.cloned() else {
-            // Diagnose against the step this datagram came CLOSEST to: one whose
+            // Charged to the expect of the transaction the datagram rides
+            // (RFC 3261 §17.1.3), else to the step it came CLOSEST to: one whose
             // discriminator matched and whose content did not says exactly what
             // is wrong, where an unordered group's first member would describe a
-            // step the datagram was never for.
-            let closest = gated
-                .iter()
-                .find(|step| gate::discriminates(step, &inbound).matches())
-                .unwrap_or(&gated[0]);
-            let reason = match gate::discriminates(closest, &inbound) {
+            // step the datagram was never for (`progress`).
+            let ladder = self.instance.recording().legs().remove(&leg).unwrap_or_default();
+            let (closest, own_transaction, retired, released, ends) = {
+                let cursor = self.instance.cursor();
+                let items = &self.instance.plan().program().items;
+                let armed: Vec<progress::Armed<'_>> = gated
+                    .iter()
+                    .map(|step| progress::Armed {
+                        step,
+                        opener: cursor.opening_send(&step.id),
+                        retirable: items[step.loc.item].kind == ItemKind::Message,
+                    })
+                    .collect();
+                let unmatched = progress::unmatched(&inbound, &armed, &ladder, confirmed_before)
+                    .expect("the leg has an armed expect");
+                (
+                    unmatched.charged.clone(),
+                    unmatched.own_transaction,
+                    unmatched.retired,
+                    unmatched.released,
+                    unmatched.ends,
+                )
+            };
+            let reason = match gate::discriminates(&closest, &inbound) {
                 GateVerdict::Rejects(why) => why,
-                GateVerdict::Matches => match self.rides_fork(closest, &inbound) {
+                GateVerdict::Matches => match self.rides_fork(&closest, &inbound) {
                     GateVerdict::Rejects(why) => why,
                     GateVerdict::Matches => {
-                        match gate::content_holds(closest, &inbound, &scope, &resolver) {
+                        match gate::content_holds(&closest, &inbound, &scope, &resolver) {
                             GateVerdict::Rejects(why) => why,
                             GateVerdict::Matches => "no armed expect matched".into(),
                         }
                     }
                 },
+            };
+            let reason = if own_transaction {
+                format!(
+                    "{reason}; on the {} transaction {} waits on",
+                    inbound.cseq_method, closest.id
+                )
+            } else {
+                reason
             };
             let also_armed: Vec<&str> =
                 gated.iter().map(|s| s.id.as_str()).filter(|id| *id != closest.id).collect();
@@ -1024,11 +1083,42 @@ impl<'a, 'p> Runner<'a, 'p> {
                 reason,
                 arrived: inbound.arrived(),
             });
-            self.answer_unscripted(&leg, &message).await;
+            // What the leg owes for this datagram is the scripted tail's where
+            // the run goes on past a retired step; otherwise it is composed here,
+            // as for any arrival the flow refused.
+            if retired.is_empty() || ends {
+                self.answer_unscripted(&leg, &message).await;
+            }
+            // A final ended the transaction the charged step waits on: the step
+            // is retired, the tolerated absences on that transaction released,
+            // and what stands behind them measures from now. No timing note and
+            // no outcome: the step took nothing.
+            let now = Instant::now();
+            for id in &released {
+                if self.instance.release_step(id) {
+                    self.completed_at.insert(id.clone(), now);
+                }
+            }
+            for id in &retired {
+                if self.instance.retire_step(id) {
+                    self.completed_at.insert(id.clone(), now);
+                }
+            }
+            if !retired.is_empty() || !released.is_empty() {
+                if let Some(seq) = seq {
+                    let note = format!(
+                        "the final of the transaction {step} waits on: {} where the step names {}; {step} {}",
+                        inbound.status.unwrap_or(0),
+                        closest.discriminator,
+                        if retired.is_empty() { "released" } else { "retired" }
+                    );
+                    self.instance.recording().renote(&leg, seq, &note);
+                }
+                self.settle_blocks(now);
+            }
             // The run goes on unless this arrival left the leg with nothing it
             // can still be satisfied by (§11.2).
-            let ladder = self.instance.recording().legs().remove(&leg).unwrap_or_default();
-            if !progress::blocks(&inbound, &gated, &ladder) {
+            if !ends {
                 return true;
             }
             self.end_script(Some(&leg), Some(&step));
@@ -1042,6 +1132,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         if let Some(seq) = seq {
             self.instance.recording().attribute(&leg, seq, &step.id);
+            if let Some(note) = &tolerated {
+                self.instance.recording().renote(&leg, seq, note);
+            }
         }
         // The step now owns these bytes: every later copy of them on this leg is
         // a repeat of THIS message, which is the unit §6.9 counts.
@@ -1133,6 +1226,18 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
+    /// Whether `inbound` is the ACK a non-2xx INVITE final this leg SENT is
+    /// owed (RFC 3261 §17.1.1.3): the closer of the server transaction the
+    /// settle floor holds the run open for, so it is the settle's own arrival
+    /// and never the late datagram a completed flow reports.
+    fn owed_final_ack(&self, leg: &str, inbound: &Inbound) -> bool {
+        if !inbound.method.as_deref().is_some_and(|method| method.eq_ignore_ascii_case("ACK")) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        close::unacked_finals(&ladder).iter().any(|owed| owed.cseq == inbound.cseq)
+    }
+
     /// Answer a background policy's message. It is answered and recorded; the
     /// flow never sees it.
     async fn answer_background(
@@ -1168,7 +1273,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     leg,
                     Dir::Out,
                     self.now_us(),
-                    String::from_utf8_lossy(&wire).into_owned(),
+                    wire,
                     None,
                     Some(note),
                 );
@@ -1190,14 +1295,20 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// Absorption and `background` behave exactly as they do mid-flow — a
     /// provable repeat is absorbed and noted, a policy's traffic is answered —
     /// and everything else is RECORDED. It is a failure only when the flow had
-    /// succeeded: then nothing was left to arrive, and something did.
+    /// succeeded: then nothing was left to arrive, and something did. The
+    /// finding does not silence the endpoint: an act the RFC makes its own
+    /// whatever the document scripts — the `200` to a BYE on the dialog it
+    /// holds (RFC 3261 §15.1.2), the final a PRACK draws (RFC 3262 §3) — is
+    /// answered here as it is mid-flow, so the peer's transaction ends instead
+    /// of retransmitting to its timer while the run waits on the call to end.
+    /// The ACK a non-2xx final this leg sent is owed (§17.1.1.3) is what the
+    /// settle floor waits for: absorbed, never a late arrival.
     async fn record_during_settle(&mut self, actor: &str, message: SipMessage, flow_ok: bool) {
         let inbound = Inbound::of(&message);
         let bytes: Vec<u8> = match &message {
             SipMessage::Request(r) => r.image().to_vec(),
             SipMessage::Response(r) => r.image().to_vec(),
         };
-        let raw = String::from_utf8_lossy(&bytes).into_owned();
         let leg =
             self.leg_by_call_id(&inbound.call_id).unwrap_or_else(|| "unattributed".to_string());
 
@@ -1207,7 +1318,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.repeats.note(&leg, &bytes, self.now_us());
             self.record_arrival(
                 &leg,
-                raw,
+                bytes,
                 None,
                 Some("absorbed during settle: byte-identical retransmission"),
                 repeat,
@@ -1224,7 +1335,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &leg,
                 Dir::In,
                 self.now_us(),
-                raw,
+                bytes,
                 None,
                 Some(&note),
             );
@@ -1239,7 +1350,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             ) {
                 self.record_arrival(
                     &leg,
-                    raw,
+                    bytes,
                     None,
                     Some("background policy, during settle"),
                     repeat,
@@ -1249,26 +1360,28 @@ impl<'a, 'p> Runner<'a, 'p> {
                 return;
             }
         }
-        // A leg whose script ENDED still has a UA behind it, and the generic
-        // close answers out of the same dialog state the flow used. So the stack
-        // learns what its leg takes here too — a request it never took is one it
-        // cannot answer (§11.2). A run still following its flow learns nothing
-        // after the flow: nothing composes another message on it.
-        if self.abandoned.is_some() {
-            if let Some(stack) = self.stacks.get_mut(&leg) {
-                match &message {
-                    SipMessage::Request(r) => stack.learn_request(r),
-                    SipMessage::Response(r) => stack.learn_response(r),
-                }
-            }
-        }
         if self.owed_bye_final(&leg, &inbound) {
-            self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
+            self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return;
+        }
+        if self.owed_final_ack(&leg, &inbound) {
+            self.record_arrival(&leg, bytes, None, Some(OWED_FINAL_ACK), repeat);
+            return;
+        }
+        // A leg whose script ENDED still has a UA behind it, answering out of
+        // the same dialog state the flow used. So the stack learns what its leg
+        // takes here too, past the same absorbed final `deliver` never learns
+        // — a request it never took is one it cannot answer (§11.2), whether
+        // the generic close or this window answers it.
+        if let Some(stack) = self.stacks.get_mut(&leg) {
+            match &message {
+                SipMessage::Request(r) => stack.learn_request(r),
+                SipMessage::Response(r) => stack.learn_response(r),
+            }
         }
         self.record_arrival(
             &leg,
-            raw,
+            bytes,
             None,
             Some(if flow_ok {
                 "arrived after the flow completed"
@@ -1283,7 +1396,15 @@ impl<'a, 'p> Runner<'a, 'p> {
         // completed flow can send several, and they are all the same finding.
         if flow_ok && !self.late_datagram_reported {
             self.late_datagram_reported = true;
-            self.instance.fail(Failure::DatagramAfterFlow { leg, arrived: inbound.arrived() });
+            self.instance
+                .fail(Failure::DatagramAfterFlow { leg: leg.clone(), arrived: inbound.arrived() });
+        }
+        // The transaction obligation the arrival leaves is discharged where it
+        // is mid-flow; an abandoned script's is the generic close's next turn,
+        // which keeps its own order across everything the leg holds open —
+        // CANCEL first, then PRACK, then the oldest.
+        if self.abandoned.is_none() {
+            self.answer_unscripted(&leg, &message).await;
         }
     }
 
@@ -1361,13 +1482,12 @@ impl<'a, 'p> Runner<'a, 'p> {
                 });
                 continue;
             }
-            let raw = String::from_utf8_lossy(&wire).into_owned();
-            let sent = raw.lines().next().unwrap_or_default().to_string();
+            let sent = sip_message::sniff::first_line(&wire);
             self.instance.recording().push(
                 &leg,
                 Dir::Out,
                 self.now_us(),
-                raw,
+                wire,
                 None,
                 Some(&format!("the generic close: this leg {owed}")),
             );
@@ -1377,8 +1497,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
-    /// Discharge the transaction-layer obligation a REFUSED datagram leaves on
-    /// its leg (RFC 3261 §9.2, §17.1.1.3).
+    /// Discharge the transaction-layer obligation a REFUSED datagram, or one
+    /// arriving after the flow, leaves on its leg (RFC 3261 §9.2, §15.1.2,
+    /// §17.1.1.3; RFC 3262 §3).
     ///
     /// The refusal STANDS and the flow is untouched: like a `background` answer
     /// this moves no cursor and satisfies no `expect`. What is owed is
@@ -1386,8 +1507,9 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// answered here, and the emission is the leg's own stack — the same
     /// compliant SIP the generic close puts on the wire.
     async fn answer_unscripted(&mut self, leg: &str, message: &SipMessage) {
-        // The CANCEL pair is two acts, and the second is read off the recording
-        // once the first is on it — the turn the generic close takes, taken here.
+        // The CANCEL pair and the BYE pair are two acts each, and the second is
+        // read off the recording once the first is on it — the turn the generic
+        // close takes, taken here.
         for _ in 0..2 {
             let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
             let Some(owed) = close::unscripted(&ladder, message) else { return };
@@ -1411,7 +1533,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 leg,
                 Dir::Out,
                 self.now_us(),
-                String::from_utf8_lossy(&wire).into_owned(),
+                wire,
                 None,
                 Some(&format!("the transaction the flow never scripted: this leg {owed}")),
             );
@@ -1438,15 +1560,15 @@ impl<'a, 'p> Runner<'a, 'p> {
         let route_target = self.lane.route_target;
         let stack = self.stacks.get_mut(leg).ok_or_else(|| fail("the leg has no stack".into()))?;
         let (message, dst) = match owed {
-            Owed::Answer { cseq_method, status } => {
+            Owed::Answer { cseq_method, cseq, to_tag, status, early_tag } => {
                 let answer = crate::stack::Answer {
                     status: *status,
                     reason: reason_for(*status),
                     cseq_method: Some(cseq_method),
-                    early_tag: None,
+                    early_tag: early_tag.as_deref(),
                 };
                 let response = stack
-                    .respond(&answer, &[], Vec::new(), None)
+                    .respond_to(*cseq, to_tag.as_deref(), &answer, &[], Vec::new(), None)
                     .map_err(|e| fail(e.to_string()))?;
                 let dst = stack.response_target(Some(cseq_method)).unwrap_or(route_target);
                 (SipMessage::Response(response), dst)
@@ -1687,7 +1809,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &step.leg,
                 Dir::Out,
                 self.now_us(),
-                String::new(),
+                Vec::new(),
                 Some(&step.id),
                 Some("withheld by a suppress-auto deviation"),
             );
@@ -1767,12 +1889,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             });
             return false;
         }
-        let raw = String::from_utf8_lossy(&wire).into_owned();
         self.instance.recording().push(
             &step.leg,
             Dir::Out,
             self.now_us(),
-            raw,
+            wire.clone(),
             Some(&step.id),
             fallback.as_deref(),
         );
@@ -1848,7 +1969,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             &ack.leg,
             Dir::Out,
             self.now_us(),
-            String::from_utf8_lossy(&ack.wire).into_owned(),
+            ack.wire.clone(),
             Some(&ack.step),
             Some("drawn by a repeat of the final it acknowledges"),
         );
@@ -1936,7 +2057,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &due.leg,
                 Dir::Out,
                 self.now_us(),
-                String::from_utf8_lossy(&due.wire).into_owned(),
+                due.wire.clone(),
                 Some(&due.step),
                 Some(&format!("retransmission {} of {}", due.n, due.count)),
             );
@@ -1946,12 +2067,12 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     /// Record one ARRIVING datagram, with the §17.2 seam deciding whether it is
     /// a repeat: a repeat carries its `repeat_of` back-reference to the datagram
-    /// it repeats (friction H8), everything else does not. The classification is
+    /// it repeats, everything else does not. The classification is
     /// the seam's alone — this only chooses which recording door to use.
     fn record_arrival(
         &self,
         leg: &str,
-        raw: String,
+        wire: Vec<u8>,
         step: Option<&str>,
         note: Option<&str>,
         repeat: bool,
@@ -1959,9 +2080,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let recording = self.instance.recording();
         let at_us = self.now_us();
         if repeat {
-            recording.push_repeat(leg, Dir::In, at_us, raw, step, note);
+            recording.push_repeat(leg, Dir::In, at_us, wire, step, note);
         } else {
-            recording.push(leg, Dir::In, at_us, raw, step, note);
+            recording.push(leg, Dir::In, at_us, wire, step, note);
         }
     }
 
@@ -2237,6 +2358,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 let done = self.instance.cursor().is_done() || self.abandoned.is_some();
                 let mut open = settle::open_reasons(done, sut, post.as_ref());
                 open.extend(close_reasons(&self.close_obligations()));
+                open.extend(settle::floor(&self.instance.recording(), self.now_us()).reasons());
                 open
             }) {
                 self.instance.fail(failure);
@@ -2246,11 +2368,25 @@ impl<'a, 'p> Runner<'a, 'p> {
             // ruling (§11.2), and what is still open on it is the close's.
             let flow_done = self.instance.cursor().is_done() || self.abandoned.is_some();
             let owed = self.close_obligations();
+            // A non-2xx INVITE final a leg sent is a server transaction the
+            // system's ACK ends (RFC 3261 §17.2.1); past Timer H it is gone
+            // and the ACK never came, which is the system's failure to state.
+            let floor = settle::floor(&self.instance.recording(), self.now_us());
+            for expired in &floor.expired {
+                if self.timer_h_reported.insert((expired.leg.clone(), expired.owed.cseq)) {
+                    self.instance.fail(Failure::FinalUnacknowledged {
+                        leg: expired.leg.clone(),
+                        status: expired.owed.status,
+                        cseq: expired.owed.cseq,
+                    });
+                }
+            }
             // A rung still owed keeps the run open: the flow ending does not
             // end a transaction's own timer, and `drive` counts the ladders
             // only after settle for exactly that reason.
             if owed.is_empty()
                 && self.pending_repeats.is_empty()
+                && floor.held.is_empty()
                 && settle::is_settled(flow_done, sut, post.as_ref())
             {
                 break;
@@ -2258,6 +2394,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             if Instant::now() >= deadline {
                 let mut open = settle::open_reasons(flow_done, sut, post.as_ref());
                 open.extend(close_reasons(&owed));
+                open.extend(floor.reasons());
                 self.instance.fail(Failure::SettleTimedOut { budget_ms, open });
                 timed_out = true;
                 break;
@@ -2456,6 +2593,7 @@ fn reason_for(status: u16) -> &'static str {
         202 => "Accepted",
         404 => "Not Found",
         480 => "Temporarily Unavailable",
+        481 => "Call/Transaction Does Not Exist",
         486 => "Busy Here",
         487 => "Request Terminated",
         488 => "Not Acceptable Here",

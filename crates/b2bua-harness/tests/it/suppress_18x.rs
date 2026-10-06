@@ -2,12 +2,16 @@
 //! `tests/scenarios/suppress-18x.ts`.
 //!
 //! The B2BUA rewrites the first 18x from any b-leg into a bare 180 (no SDP / no
-//! 100rel), suppresses later 18x, and reuses the first 180's To-tag on the 200
-//! OK. A reliable 1xx is PRACKed by the B2BUA itself (alice never sees it).
+//! 100rel) and suppresses later 18x. A reliable 1xx is PRACKed by the B2BUA
+//! itself (alice never sees it). The 200 OK answers under the tag of the caller
+//! dialog its callee dialog was shown as: the dialog behind the bare 180 keeps
+//! that 180's To-tag; a callee dialog the caller was never shown (a suppressed
+//! fork, a rerouted leg) opens a caller dialog of its own under a fresh To-tag
+//! (RFC 3261 §12.1.2, §13.2.2.4).
 //!
 //! Failover cases (`failoverNoAnswer`, `failoverReject`) ride the `/call/failure`
-//! b-leg failover path: the first 180's To-tag must survive the leg swap (the
-//! `relay_first_18x` slice is not cleared on failover), so bob2's 200 reuses it.
+//! b-leg failover path: bob2 rang behind the mask, so its 200 opens the second
+//! caller dialog; the non-2xx finals stay on the owned 180's tag (§17.2.1).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,12 +102,80 @@ async fn basic() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// One callee, two early dialogs on the one INVITE (RFC 3261 §12.1 forking):
+/// fork 1 rings and is shown as the bare 180, fork 2 rings behind the mask and
+/// answers. The caller never saw fork 2, so its 200 opens a caller dialog of
+/// its own (§12.1.2) under a fresh To-tag, and that dialog carries her ACK,
+/// her BYE and the B2BUA's own in-dialog request toward her.
+#[tokio::test]
+async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
+    let h = Harness::with_transit_delay("suppress-18x-unshown-fork-answers", 0);
+    let alice = h.agent("alice", "127.0.0.1:5651").await;
+    let bob = h.agent("bob", "127.0.0.1:5661").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5661, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5671")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // Fork 1 rings → the bare 180 the caller sees, under the owned tag.
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    let shown_tag = owned_180_tag(&mut call).await;
+
+    // Fork 2 rings behind the mask (suppressed), then answers.
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
+    uas.adopt_to_tag("bobfork2");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    let answered_tag = ok.to().tag().expect("200 has a To-tag").to_string();
+    assert_ne!(answered_tag, shown_tag, "the unshown fork's 200 opens a second caller dialog");
+    assert_eq!(ok.body(), ANSWER.as_bytes(), "the 200 carries the answering fork's SDP");
+
+    // The caller's ACK confirms the dialog the 200 opened and reaches fork 2.
+    let dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides fork 2's dialog");
+
+    // The dialog she rang on is abandoned: a request she sends under the 180's
+    // tag matches no dialog the B2BUA holds and draws 481 (RFC 3261 §12.2.2),
+    // never the answered session.
+    let mut stale = call
+        .send_request(InDialogMethod::Update)
+        .with_to_tag(&shown_tag)
+        .with_sdp(OFFER)
+        .send()
+        .await;
+    stale.expect(481).await;
+
+    // Bob's BYE reaches the caller inside the confirmed dialog: the B2BUA's
+    // From-tag toward her is the tag the 200 carried, not the 180's.
+    let mut bob_dialog = uas.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    let mut bye_at_alice = alice.receive("BYE").await;
+    assert_eq!(
+        bye_at_alice.request().from().tag(),
+        Some(answered_tag.as_str()),
+        "the BYE toward the caller names the dialog the 200 opened",
+    );
+    bye_at_alice.respond(200, "OK").await;
+    bob_bye.expect(200).await;
+    drop(dialog);
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 /// Failover on reject: bob1 sends 180 then 503; the B2BUA fails over via
 /// `/call/failure` to bob2 (new R-URI), which answers. Alice never sees the 503;
-/// her 200 OK reuses the first 180's To-tag (continuity across the leg swap).
+/// her 200 OK opens a second caller dialog (bob2 rang behind the mask) and the
+/// dialog it confirms carries her ACK and BYE.
 /// (TS `suppress18xFailoverReject`.)
 #[tokio::test]
 async fn failover_reject() {
@@ -145,14 +217,12 @@ async fn failover_reject() {
     uas2.respond(180, "Ringing").await;
     uas2.respond(180, "Ringing").await;
 
-    // Bob2 answers; alice's 200 reuses the first 180's To-tag (from bob1!).
+    // Bob2 answers; alice's 200 opens a caller dialog of its own — bob1's 180
+    // pinned the first tag, bob2 was never shown.
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(
-        ok.to().tag(),
-        Some(first_to_tag.as_str()),
-        "200 To-tag == first 180 To-tag across failover",
-    );
+    let answered_tag = ok.to().tag().expect("200 has a To-tag").to_string();
+    assert_ne!(answered_tag, first_to_tag, "the unshown bob2's 200 opens a second caller dialog");
 
     let mut dialog = call.ack().await;
     bob2.receive("ACK").await;
@@ -161,12 +231,15 @@ async fn failover_reject() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 /// Failover on no-answer: delayed-offer INVITE; bob1 rings then times out; the
 /// B2BUA CANCELs bob1 and fails over via `/call/failure` to bob2 (new R-URI),
-/// which answers with the offer. Alice's 200 reuses the first 180's To-tag.
+/// which answers with the offer. Alice's 200 opens a second caller dialog (bob2
+/// rang behind the mask), and her ACK answers the offer inside it.
 /// (TS `suppress18xFailoverNoAnswer`.)
 #[tokio::test(start_paused = true)]
 async fn failover_no_answer() {
@@ -218,10 +291,10 @@ async fn failover_no_answer() {
     uas2.respond(200, "OK").with_sdp(OFFER).await;
 
     let ok = call.expect(200).await;
-    assert_eq!(
-        ok.to().tag(),
-        Some(first_to_tag.as_str()),
-        "200 To-tag == first 180 To-tag across failover",
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        first_to_tag,
+        "the unshown bob2's 200 opens a second caller dialog",
     );
 
     // Alice answers the delayed offer in the ACK (RFC 3264 §4).
@@ -233,16 +306,61 @@ async fn failover_no_answer() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
-// ── relay18x.messages policy (GAP-P7-2) ─────────────────────────────────────
-// The Routing API `Relay18x.messages` field picks WHICH 18x are relayed (each
+// ── Relay18xMessages policy ────────────────────────────────────────────────
+// The `Relay18xMessages` policy picks WHICH 18x are relayed (each
 // relayed one still downgraded to a bare 180 under the SAME stored To-tag):
 // FIRST (default, covered by the tests above), ALL, ONE_PER_VALUE (one per
 // distinct *upstream* status value). `expect` is strict (anything but the
 // expected status panics), so the `expect(200)` after the last expected 180
 // doubles as the "nothing extra was relayed" suppression assert.
+
+/// `messages = ALL`, a forked callee: every fork's 18x is relayed as a bare 180
+/// under the first 180's To-tag, so every fork was SHOWN — the fork that
+/// answers, first or not, answers under that one tag.
+#[tokio::test]
+async fn messages_all_a_relayed_fork_answers_under_the_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-messages-all-fork", 0);
+    let alice = h.agent("alice", "127.0.0.1:5653").await;
+    let bob = h.agent("bob", "127.0.0.1:5663").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_messages(
+        "127.0.0.1",
+        5663,
+        RelayFirst18xStrategy::DropSdp,
+        call::features::Relay18xMessages::All,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5673")
+    .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    let a_tag = owned_180_tag(&mut call).await;
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
+    let p2 = call.expect(180).await;
+    assert_eq!(p2.to().tag(), Some(a_tag.as_str()), "fork 2's 180 is shown under the same tag");
+
+    uas.adopt_to_tag("bobfork2");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to().tag(), Some(a_tag.as_str()), "a shown fork answers under the 180's tag");
+
+    let mut dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides fork 2's dialog");
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
 
 /// `messages = ALL`: every 18x bob sends is relayed, each downgraded to a bare
 /// 180 under the first 180's To-tag.
@@ -290,6 +408,8 @@ async fn messages_all_relays_every_18x_downgraded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -341,12 +461,14 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 /// No policy → normal behaviour: every 180 is relayed verbatim (no suppression,
-/// no bare-180 downgrade). Regression guard the new code stays off the default
-/// path. (TS `suppress18xDisabled`.)
+/// no bare-180 downgrade): the policy stays off the default path.
+/// (TS `suppress18xDisabled`.)
 #[tokio::test]
 async fn disabled() {
     let h = Harness::with_transit_delay("suppress-18x-disabled", 0);
@@ -376,6 +498,8 @@ async fn disabled() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -418,6 +542,7 @@ async fn assert_rejected_and_reaped(b2bua: &B2buaSut) {
     assert_eq!(cdrs.len(), 1, "one CDR for the rejected call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -495,8 +620,8 @@ async fn a_forked_rejection_rides_the_owned_180_s_tag() {
 
 /// The rejection arrives on the SECOND b-leg, after a `/call/failure` leg swap.
 /// The `relay_first_18x` slice is deliberately not cleared on failover, so the
-/// owned tag survives it on a final exactly as `failover_reject` shows it does
-/// on the 200.
+/// owned tag survives it on a final; the 200 of that leg is what opens a
+/// dialog of its own (`failover_reject`).
 #[tokio::test]
 async fn a_rejection_after_failover_rides_the_owned_180_s_tag() {
     let h = Harness::with_transit_delay("suppress-18x-failover-rejection-tag", 1);
@@ -595,6 +720,7 @@ async fn the_cancelled_call_s_487_rides_the_owned_180_s_tag() {
     settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the cancelled call");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     alice.drain().await;
     bob.drain().await;
@@ -677,6 +803,8 @@ async fn a_stray_prack_is_answered_here_and_never_reaches_the_callee() {
         .count();
     assert_eq!(leaked, 0, "the callee saw {leaked} PRACK(s) on a leg that negotiated none");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -734,6 +862,8 @@ async fn the_rerouted_leg_is_solicited_the_same_reliability_as_the_first() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -791,5 +921,7 @@ async fn a_declared_advertisement_is_narrowed_by_the_strategy_not_discarded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

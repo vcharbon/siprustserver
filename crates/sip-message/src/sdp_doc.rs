@@ -158,6 +158,21 @@ fn new_media(raw_m_line: &str) -> MutableMedia {
     }
 }
 
+/// One `m=` line's value (no leading `m=`) read as a media block with no
+/// media-level line: type, port, transport and formats.
+pub fn media_line(m_value: &str) -> MediaLine {
+    let m = new_media(m_value);
+    MediaLine {
+        r#type: m.r#type,
+        port: m.port,
+        transport: m.transport,
+        formats: m.formats,
+        attributes: m.attributes,
+        c_line: m.c_line,
+        ptime: m.ptime,
+    }
+}
+
 /// The description a body carries, or `None` where the bytes do not open with
 /// the canonical `v=` token — which is what makes them a session description at
 /// all.
@@ -257,16 +272,19 @@ pub fn extract_format_list(m_line: &str) -> Vec<String> {
 /// The block's direction attribute; absence is [`SdpDirection::SendRecv`]
 /// (RFC 3264 §6.1).
 pub fn extract_direction(media: &MediaLine) -> SdpDirection {
-    for attr in &media.attributes {
-        match attr.trim().to_ascii_lowercase().as_str() {
-            "sendrecv" => return SdpDirection::SendRecv,
-            "sendonly" => return SdpDirection::SendOnly,
-            "recvonly" => return SdpDirection::RecvOnly,
-            "inactive" => return SdpDirection::Inactive,
-            _ => {}
-        }
+    media.attributes.iter().find_map(|a| direction_of(a)).unwrap_or(SdpDirection::SendRecv)
+}
+
+/// The direction an attribute value (without the leading `a=`) states, or
+/// `None` where it is not one of the four direction attributes (RFC 3264 §6.1).
+pub fn direction_of(attr: &str) -> Option<SdpDirection> {
+    match attr.trim().to_ascii_lowercase().as_str() {
+        "sendrecv" => Some(SdpDirection::SendRecv),
+        "sendonly" => Some(SdpDirection::SendOnly),
+        "recvonly" => Some(SdpDirection::RecvOnly),
+        "inactive" => Some(SdpDirection::Inactive),
+        _ => None,
     }
-    SdpDirection::SendRecv
 }
 
 /// Every `a=rtpmap:<pt> <encoding>[/<rate>[/<channels>]]` in `media` as ordered
@@ -291,6 +309,39 @@ pub fn extract_rtpmaps(media: &MediaLine) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Every `a=fmtp:<format> <parameters>` in `media` as ordered
+/// `(format, parameters)` pairs, the parameters verbatim. The FIRST occurrence
+/// of a format wins.
+pub fn extract_fmtps(media: &MediaLine) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for attr in &media.attributes {
+        let Some(tail) = strip_prefix_ci(attr, "fmtp:") else { continue };
+        let tail = tail.trim();
+        let (format, params) = tail.split_once(' ').unwrap_or((tail, ""));
+        if !format.is_empty() && !out.iter().any(|(f, _)| f == format) {
+            out.push((format.to_string(), params.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Every `a=crypto:<tag> <crypto-suite> <key-params> [<session-params>]` in
+/// `media` (RFC 4568 §9.1) as ordered `(tag, suite, rest)` triples, `rest`
+/// being everything after the suite, verbatim.
+pub fn extract_cryptos(media: &MediaLine) -> Vec<(String, String, String)> {
+    media
+        .attributes
+        .iter()
+        .filter_map(|attr| {
+            let tail = strip_prefix_ci(attr, "crypto:")?.trim();
+            let (tag, tail) = tail.split_once(' ')?;
+            let tail = tail.trim_start();
+            let (suite, rest) = tail.split_once(' ').unwrap_or((tail, ""));
+            Some((tag.to_string(), suite.to_string(), rest.trim().to_string()))
+        })
+        .collect()
 }
 
 /// The rtpmap value RFC 4566 §6 makes an encoding EQUAL to, for a comparison
@@ -363,32 +414,69 @@ impl SdpOrigin {
             && self.unicast_address == other.unicast_address
     }
 
+    /// The `o=` line's value — everything after `o=`.
+    pub fn value(&self) -> &str {
+        &self.raw_origin_line[2..]
+    }
+
     /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
-    /// identity fields unchanged, the version one above this one.
-    pub fn next_version_line(&self) -> String {
-        format!(
+    /// identity fields unchanged, the version one above this one. `None` where
+    /// the version is already the largest one this reader holds: no next
+    /// version can be stated, and a wrapped one would run backwards.
+    pub fn next_version_line(&self) -> Option<String> {
+        Some(format!(
             "o={} {} {} {} {} {}",
             self.username,
             self.session_id,
-            self.session_version + 1,
+            self.session_version.checked_add(1)?,
             self.nettype,
             self.addrtype,
             self.unicast_address
-        )
+        ))
     }
 }
 
-/// `new_offer` re-stated as a re-offer of the session `previous` described
-/// (RFC 3264 §8): its `o=` line is replaced by `previous`'s with the version
-/// incremented by one, every other line kept as written. `None` where either
-/// body carries no readable `o=` line — the caller then has no session to
-/// continue and sends the offer as it is.
-pub fn reoffer_continuing(new_offer: &[u8], previous: &[u8]) -> Option<Vec<u8>> {
-    let prior = parse_origin(previous)?;
-    let current = parse_origin(new_offer)?;
-    let text = String::from_utf8_lossy(new_offer);
-    let replaced = text.replacen(&current.raw_origin_line, &prior.next_version_line(), 1);
-    Some(replaced.into_bytes())
+/// A description cut at its `m=` lines, byte for byte: the session-level text,
+/// then each media section (its `m=` line and every line up to the next one),
+/// with line endings as written. The sections are in `parse_sdp_body`'s media
+/// order; the values in them are read there.
+pub(crate) struct Sections<'a> {
+    pub(crate) session: &'a str,
+    pub(crate) media: Vec<Section<'a>>,
+}
+
+pub(crate) struct Section<'a> {
+    pub(crate) text: &'a str,
+}
+
+impl<'a> Sections<'a> {
+    pub(crate) fn of(text: &'a str) -> Self {
+        let mut starts: Vec<usize> = Vec::new();
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            if line.starts_with("m=") {
+                starts.push(offset);
+            }
+            offset += line.len();
+        }
+        let session_end = starts.first().copied().unwrap_or(text.len());
+        let media = starts
+            .iter()
+            .enumerate()
+            .map(|(k, &at)| Section {
+                text: &text[at..starts.get(k + 1).copied().unwrap_or(text.len())],
+            })
+            .collect();
+        Self { session: &text[..session_end], media }
+    }
+}
+
+impl Section<'_> {
+    /// The `m=` line's value.
+    pub(crate) fn value(&self) -> &str {
+        let line = self.text.split('\n').next().unwrap_or_default();
+        line.strip_suffix('\r').unwrap_or(line).get(2..).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -553,19 +641,11 @@ a=inactive\r\n";
         assert!(!a.identifies_same_session(&moved), "the address is part of the identity");
     }
 
-    /// RFC 3264 §8: a re-offer keeps the previous description's `o=` identity
-    /// and increments only its version; the new offer's other lines ride as
-    /// written.
     #[test]
-    fn a_continuing_reoffer_carries_the_previous_origin_one_version_up() {
-        let previous = b"v=0\r\no=- 56623135 20000000 IN IP4 10.1.1.1\r\ns=-\r\nc=IN IP4 10.1.1.1\r\nt=0 0\r\nm=audio 38278 RTP/AVP 8\r\n";
-        let new_offer = b"v=0\r\no=- 3997628865 3997628865 IN IP4 10.2.2.2\r\ns=oms\r\nc=IN IP4 10.2.2.2\r\nt=0 0\r\nm=audio 30550 RTP/AVP 9 8\r\na=sendrecv\r\n";
-        let out = reoffer_continuing(new_offer, previous).expect("both carry o=");
-        assert_eq!(
-            out,
-            b"v=0\r\no=- 56623135 20000001 IN IP4 10.1.1.1\r\ns=oms\r\nc=IN IP4 10.2.2.2\r\nt=0 0\r\nm=audio 30550 RTP/AVP 9 8\r\na=sendrecv\r\n".to_vec()
-        );
-        assert!(reoffer_continuing(new_offer, b"v=0\r\ns=-\r\n").is_none(), "no previous origin");
-        assert!(reoffer_continuing(b"", previous).is_none(), "no offer");
+    fn the_next_version_never_wraps() {
+        let a = parse_origin(b"v=0\r\no=alice 1 7 IN IP4 10.0.0.1\r\n").expect("a");
+        assert_eq!(a.next_version_line().as_deref(), Some("o=alice 1 8 IN IP4 10.0.0.1"));
+        let top = format!("v=0\r\no=alice 1 {} IN IP4 10.0.0.1\r\n", u64::MAX);
+        assert_eq!(parse_origin(top.as_bytes()).expect("top").next_version_line(), None);
     }
 }

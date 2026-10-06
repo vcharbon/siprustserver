@@ -3,7 +3,7 @@
 //! The rules themselves live in [`super::core_rules`] and the sibling
 //! `rules::*` family modules.
 
-use crate::rules::model::RuleDefinition;
+use b2bua_sdk::model::RuleDefinition;
 
 use super::core_rules::core_rules;
 

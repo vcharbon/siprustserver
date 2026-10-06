@@ -5,12 +5,10 @@
 //! SIP-URI validators (ADR-0007). These are the exact functions the ABNF fuzz
 //! suite drives.
 //!
-//! The TS source scans JS strings by UTF-16 code unit with `charCodeAt` /
-//! `slice` / `indexOf`. We byte-scan the source `&str` directly: every
-//! structural delimiter in these grammars is ASCII, so a UTF-8 lead or
-//! continuation byte can never alias one, and every index we slice at lands on
-//! a char boundary. (Previously each function collected a `Vec<char>` per call
-//! — 4x the bytes plus an allocation, the top self-time bucket under load.)
+//! We byte-scan the source `&str` directly: every structural delimiter in these
+//! grammars is ASCII, so a UTF-8 lead or continuation byte can never alias one,
+//! and every index we slice at lands on a char boundary. No function collects a
+//! `Vec<char>` (4x the bytes plus an allocation per call).
 
 use std::collections::BTreeMap;
 
@@ -354,7 +352,7 @@ pub fn parse_sip_uri_string(uri: &SipStr) -> Option<ParsedUri> {
 // ---------------------------------------------------------------------------
 // Every delimiter these helpers scan for is ASCII: a UTF-8 lead/continuation
 // byte can never equal one, so byte-wise scanning visits exactly the same
-// structural positions the old `&[char]` walk did, and every index handed to
+// structural positions a `&[char]` walk would, and every index handed to
 // a `&str` slice below lands on a char boundary. Indices may run past the end
 // (the callers propagate `end + 1` positions on missing delimiters, as the TS
 // did) — hence the clamping in `subslice`.
@@ -711,7 +709,7 @@ pub fn validate_strict_sip_uri(uri: &str) -> Option<String> {
         return Some("missing scheme colon".to_string());
     }
     // Scheme bytes are validated ASCII above, so the case-fold compare is
-    // exactly the old `to_lowercase()` — without minting a String per call.
+    // exactly `to_lowercase()` — without minting a String per call.
     let scheme = &uri[..i];
     i += 1; // past ':'
 

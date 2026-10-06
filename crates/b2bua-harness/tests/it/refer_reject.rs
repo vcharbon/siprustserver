@@ -1,4 +1,4 @@
-//! REFER reject-path scenarios (slice 5e). Port of
+//! REFER reject-path scenarios. Port of
 //! `tests/scenarios/refer-reject.ts`.
 //!
 //! Each scenario brings an A↔B call to confirmed state, then exercises one
@@ -10,13 +10,13 @@
 //!   5. referSecondDuringAuthorizing — second REFER while refer-authorizing → 491.
 //!   6. referUnreadableReferTo — Refer-To absent / unreadable → 400 (seed rule).
 //!
-//! Each routes with `features.refer` active, so this platform terminates the
+//! Each routes with `features.refer` active, so the B2BUA terminates the
 //! REFER; without that directive a REFER is relayed to the peer leg
 //! (`refer_transparent_relay.rs`).
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -94,6 +94,8 @@ async fn refer_reject_http_403() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -150,6 +152,8 @@ async fn refer_http_timeout() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -190,6 +194,8 @@ async fn refer_replaces_rejected() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -238,6 +244,8 @@ async fn refer_out_of_dialog() {
     alice_bye.expect(200).await;
     let _ = &mut bob_dialog;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -298,12 +306,14 @@ async fn refer_second_during_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 // ── 6. Unreadable Refer-To on the LOCAL path → 400 Bad Request ────────────
 
-/// A REFER this platform processes itself (`features.refer`) whose Refer-To is
+/// A REFER the B2BUA processes itself (`features.refer`) whose Refer-To is
 /// an unclosed name-addr no reader accepts (RFC 3261 §20.30 / §25.1) is refused
 /// 400: the target is the request's whole point (RFC 3515 §2), so there is
 /// nothing to authorize and no transfer to start — never a 202 for a transfer
@@ -353,5 +363,6 @@ async fn refer_unreadable_refer_to_rejected_400() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

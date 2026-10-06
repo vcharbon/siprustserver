@@ -65,8 +65,8 @@ pub struct Msg {
     pub cseq_method: String,
     /// The top-Via branch, when the vantage carried it (RFC 3261 §17 names a
     /// transaction by it). `None` where the message had none or the vantage
-    /// does not record one: a rule that needs it returns `Undecidable` for that
-    /// occasion, never a guess.
+    /// does not record one: a rule that needs it states nothing it cannot pair
+    /// — an `Undecidable` occasion or none at all — never a guess.
     pub via_branch: Option<String>,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
@@ -93,6 +93,18 @@ impl Msg {
             Kind::Response { status } => Some(*status),
             Kind::Request { .. } => None,
         }
+    }
+
+    /// The session description this message DECLARED it carried: the body under
+    /// `application/sdp`, the SDP part of a `multipart/…` body (RFC 5621 §3.1),
+    /// `None` where the head or body is unreadable, empty, or names neither.
+    pub fn sdp(&self) -> Option<&[u8]> {
+        let head = self.head.as_deref()?;
+        let body = self.body.as_deref()?;
+        use sip_message::header::{HeaderValue, MediaType};
+        let ct = sip_message::sniff::header_value(head, "Content-Type")?;
+        let ct = MediaType::parse(&sip_message::SipStr::owned(&ct)).ok()?;
+        sip_message::sdp_range(&ct, body).map(|r| &body[r])
     }
 }
 

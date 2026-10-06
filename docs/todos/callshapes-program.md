@@ -20,7 +20,7 @@ with the in-dialog material reusable over ANY established dialog context
 1. **Deliverable / placement.** New crate `crates/callshapes` in siprustserver
    (depends on scenario-harness + e2e-model). Its `README.md` is the
    downstream-consumption guide, written with a dial-plan platform as the worked example
-   (dial-plan binder against `routing-mock/config/numbers.json`, ~30-LOC bin
+   (dial-plan binder against the platform's number plan file, ~30-LOC bin
    via `ShapeRegistry`). Nothing is written into the downstream repo; it picks
    the crate up on its next submodule pin bump.
 
@@ -70,7 +70,7 @@ with the in-dialog material reusable over ANY established dialog context
 
 7. **Catalog v1 — FULL matrix**, generated from a declared compatibility
    matrix (not every pair is legal), stable generated shape ids
-   (e.g. `nk-reroute-no18x+reinvite10`):
+   (e.g. `reroute-no18x+reinvite10`):
    - Establishments: **E1** transparent · **E2** reliable/100rel
      (183+RSeq→PRACK; UPDATE-pre-connect variant) · **E3** forked multi-18x
      (distinct To-tags, one wins; loser-late-200 variant) · **E4**
@@ -167,7 +167,7 @@ with the in-dialog material reusable over ANY established dialog context
   `Harness::with_network_and_clock(…, Clock::test_at(0), TransportKind::Fake, …)`
   recording harness — PanicDump works) and the mux (bound raw via `bind_on`;
   the loadgen's own per-call audit is the gate). Tests:
-  `crates/loadgen/tests/fake_net.rs`. Driver, governor, recv timeouts,
+  `crates/loadgen/tests/it/fake_net.rs`. Driver, governor, recv timeouts,
   retransmit ladders, and the SUT's 32 s reap all ride virtual time — the
   3-test file (incl. a loss soak + a targeted-drop recovery) runs in <1 s.
 - The paused lane can assert what the real-UDP lane cannot: after the soak,
@@ -219,7 +219,7 @@ the pre-existing real-clock smoke contention flake below):
   DISTINCT To-tags on ONE INVITE branch (a true fork, §12.1.2) were absorbed as
   retransmits of each other, and a loser's late 200 never reached the body. Now
   keyed `(branch, status, To-tag)` via a new `to_tag()` raw extractor. A genuine
-  same-tag retransmit still dedups (033 ask D2 unchanged). Tests:
+  same-tag retransmit still dedups. Tests:
   `mux::tests::calltxns_distinct_fork_tags_are_not_deduped`,
   `…::to_tag_extracts_the_to_parameter`. This is the transport half of C1 and is
   independently correct — required before the caller/callee forking machinery.
@@ -256,7 +256,7 @@ for the fork seams + the peer-to-peer loser-late-200 finding), then C2/C4/C5.
   to `Disposition::ForkingRing`; shapes `forked`/`forked_reliable` registered
   and proven end-to-end through the transparent-CORE-relay `B2buaSut`
   (`route_all_with_refer` leaves `relay_first_18x_to_180 = None` — verified) in
-  `loadgen/tests/fake_net.rs` (`loadgen_fake_net_forked_plain`,
+  `loadgen/tests/it/fake_net.rs` (`loadgen_fake_net_forked_plain`,
   `…_forked_reliable`, `…_forked_loss_soak`). The three distinct-tag 18x relay
   through as three a-facing early dialogs and the caller confirms on the
   winner's 2xx. `validate()` enforces ≥2 tags + winner/loser membership.

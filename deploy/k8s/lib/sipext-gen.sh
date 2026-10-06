@@ -21,11 +21,11 @@
 #     - <slot>       deterministic IP slot: IP = SIPEXT_UAC_BASE_IP + slot
 #                    (.100+; see the slot plan in lib/net-env.sh). Callers own
 #                    the slot assignment so parallel streams never collide.
-#     - <max_calls>/<max_concurrent>  sipp -m / -l (same semantics as before).
-#   Env knobs (defaults reproduce the old job template):
+#     - <max_calls>/<max_concurrent>  sipp -m / -l.
+#   Env knobs:
 #     UAC_CPU_LIM (k8s qty, default 8)     -> docker --cpus   (hard cap; docker
 #     UAC_MEM_LIM (k8s qty, default 1536Mi)-> docker --memory  has no "request")
-#     UAC_RESTART (default on-failure:4)   -> docker --restart (the old Job
+#     UAC_RESTART (default on-failure:4)   -> docker --restart (the Job
 #                    backoffLimit:4 analog: a SIPp exit-255 timer-wheel abort
 #                    is recreated in place; docker kill/rm never triggers it)
 #     LIMITER_CAP (default 20)             -> the -key xapi limiter JSON
@@ -40,6 +40,11 @@
 #   stale in-repo FQDN file — workers must never resolve external names),
 #   -s service, -i <its sipext IP> -p 5060, -r/-rp/-l/-m/-recv_timeout
 #   600000/-trace_err/-trace_stat -stf /stats/stat.csv -fd 1.
+#   Both files are bounded: SIPp rotates /stats/errors.log at 16 MiB keeping
+#   one rotated file in its working directory /stats (-ringbuffer_*), the
+#   exporter twin trims the stat CSV to its last 16 MiB on disk
+#   (exporter/stat_trim.py; it mounts /stats writable) and counts the error
+#   entries over the whole run across the rotations (exporter/error_follow.py).
 #
 # Observability: the exporter twin serves :9035 on the stream's sipext IP; the
 # host-side VictoriaMetrics scrapes the .100-.135 range statically (see
@@ -117,7 +122,8 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
   ip="$(sipext_uac_ip "$slot")" || return 1
   sdir="$SIPEXT_STATS_ROOT/$name"
   mkdir -p "$sdir"
-  rm -f "$sdir/stat.csv"   # a stale CSV from a previous run would feed the exporter old counters
+  # Stale files from a previous run would feed the exporter old counters.
+  rm -f "$sdir/stat.csv" "$sdir/errors.log" "$sdir"/*_errors_*.log
   cpus="$(k8s_cpu_to_docker "${UAC_CPU_LIM:-8}")"
   mem="$(k8s_mem_to_docker "${UAC_MEM_LIM:-1536Mi}")"
   restart="${UAC_RESTART:-on-failure:4}"
@@ -130,7 +136,7 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
     --cpus "$cpus" --memory "$mem" \
     -v "$SCENARIOS:/scenarios:ro" \
     -v "$SIPEXT_GEN_DIR/uas-targets.csv:/scenarios/uas-targets.csv:ro" \
-    -v "$sdir:/stats" \
+    -v "$sdir:/stats" -w /stats \
     "$SIPP_IMAGE" sipp "${SIPEXT_TARGET}:${SIP_PORT}" \
       -sf "/scenarios/$scenario" \
       -key xapi "{\"action\":\"route\",\"call_limiter\":[{\"id\":\"endurance-limiter\",\"limit\":${LIMITER_CAP}}]}" \
@@ -140,7 +146,9 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
       -r "$cps" -rp 1000 \
       -l "$maxc" -m "$max_calls" \
       -recv_timeout 600000 \
-      -trace_err -trace_stat -stf /stats/stat.csv -fd 1 \
+      -trace_err -error_file /stats/errors.log \
+      -ringbuffer_files 1 -ringbuffer_size 16777216 \
+      -trace_stat -stf /stats/stat.csv -fd 1 \
     >/dev/null || { _sipext_gen_die "docker run failed for UAC stream $name"; return 1; }
   # Stat->Prometheus exporter twin: SAME netns as the UAC (shares its IP; 9035
   # TCP cannot clash with sipp's 5060 UDP), same env contract as the old
@@ -150,7 +158,7 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
     --label "sipext-run=$CLUSTER" --label "sipext-kind=sipp-exporter" \
     --network "container:$name" \
     --cpus 0.5 --memory 128m \
-    -v "$sdir:/stats:ro" \
+    -v "$sdir:/stats" \
     -v "$SIPP_EXPORTER_DIR:/exporter:ro" \
     -e SIPP_STAT_FILE=/stats/stat.csv \
     -e "SIPP_SCENARIO=$scenario" \

@@ -3,32 +3,38 @@
 //! route (b-leg creation) or reject. This is an **async** handler (it calls the
 //! decision backend), so it lives outside the synchronous rule chain; the router
 //! invokes it for out-of-dialog INVITEs and runs the result through the same
-//! invariant finalization as a rule result.
+//! invariant finalization as a rule result. A setup its caller CANCELed before
+//! its turn ran asks the decision engine nothing ([`cancelled_setup`]).
 
 use std::net::SocketAddr;
 
 use call::helpers::{add_cdr_event, mark_decision, record_termination};
 use call::{
-    ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, DecisionKind,
-    Leg, LegDisposition, LegKind, LegState, RemoteInfo, TerminationCause,
+    ALegInviteSnapshot, Call, CallLimiterState, CallModelState, CallTopology, CdrEvent,
+    CdrEventType, DecisionKind, Leg, LegDisposition, LegKind, LegState, RemoteInfo,
+    TerminationCause,
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
+use sip_message::generators::CapabilitySet;
 use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::decision::apply_reject::apply_reject;
+use b2bua_sdk::reason_phrase::default_reason;
+
+use crate::decision::apply_reject::{apply_redirect, apply_reject};
 use crate::decision::apply_route::apply_route;
 use crate::decision::{
-    CallDecisionEngine, NewCallRequest, NewCallResponse, RedirectContact, SipHeaderUpdates,
+    CallDecisionEngine, CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact,
+    SipHeaderUpdates,
 };
 use crate::effects::{HandlerEffects, HandlerResult};
-use crate::event::CallEvent;
-use crate::limiter::CallLimiter;
+use crate::limiter::LimiterWorker;
 use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 use crate::trace;
+use b2bua_sdk::event::CallEvent;
 
 /// Headers sent as top-level decision-request fields (excluded from
 /// `sip_headers`). Shared with the failure path: `route-failure` applies the
@@ -149,6 +155,7 @@ pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
     config: &B2buaConfig,
+    id_gen: &IdGen,
     now_ms: i64,
 ) -> Call {
     let call_ref = call::derive_call_ref(
@@ -156,6 +163,12 @@ pub fn build_initial_call(
         invite.call_id().as_str(),
         invite.from().tag().unwrap_or(""),
     );
+    // The limiter key is the call's incarnation: the call_ref plus a mark,
+    // unique over time where the call_ref is not (a retried INVITE reuses its
+    // Call-ID and From tag).
+    let limiter =
+        CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &id_gen.new_tag()));
+    let (local_addr, remote_addr) = relay::uas_addresses(invite);
     let a_leg = Leg {
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
@@ -166,8 +179,8 @@ pub fn build_initial_call(
         dialogs: vec![],
         no_answer_timeout_sec: None,
         bye_disposition: None,
-        local_uri: Some(invite.to().uri().to_string()),
-        remote_uri: Some(invite.from().uri().to_string()),
+        local_uri: Some(local_addr),
+        remote_uri: Some(remote_addr),
         invite_request_uri: Some(invite.request_uri().to_string()),
         pending_invite_txn: None,
         ext: None,
@@ -175,7 +188,9 @@ pub fn build_initial_call(
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        in_session_timer: None,
         messages: Default::default(),
+        sdp_session: Default::default(),
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
@@ -186,6 +201,7 @@ pub fn build_initial_call(
             .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
             .collect(),
         body: invite.body().to_vec(),
+        cseq: invite.cseq().seq(),
     };
     Call {
         call_ref,
@@ -195,7 +211,7 @@ pub fn build_initial_call(
         callback_context: None,
         billing_context: None,
         a_leg_invite,
-        limiter_entries: vec![],
+        limiter,
         timers: vec![],
         cdr_events: vec![CdrEvent {
             event_type: CdrEventType::InviteReceived,
@@ -220,7 +236,7 @@ pub fn build_initial_call(
         // (see `call` codec_roundtrip emergency contract). The field carries the
         // call's emergency state to the `;emerg=1`/`;em=1` URI/Via markers in
         // `stack_identity`, so it is derived from the INVITE here, not
-        // hard-coded. The overload tiers classify the wire request directly and
+        // hard-coded. The admission ladder classifies the wire request directly and
         // never read this field.
         emergency: is_emergency_request(invite).then_some(true),
         features: None,
@@ -241,8 +257,19 @@ pub fn build_initial_call(
         decision_log: Vec::new(),
         decision_ordinal: 0,
         termination: None,
+        message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),
     }
+}
+
+/// The initial-INVITE turn of a setup its caller CANCELed before the turn ran:
+/// the call opens its trace (ADR-0026), and nothing else happens — no
+/// decision request, no limiter admit, no wire effect. The `Cancelled` turn
+/// queued behind it ends the call with its Cancel CDR.
+pub fn cancelled_setup(mut call: Call, invite_wire: &[u8], now_ms: i64) -> HandlerResult {
+    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    trace::intake::activate(&mut call, &a_invite, invite_wire, now_ms);
+    HandlerResult { call, effects: HandlerEffects::new() }
 }
 
 /// Run the initial-INVITE decision + route/reject. `call` must already carry the
@@ -255,7 +282,7 @@ pub fn build_initial_call(
 pub async fn handle_initial_invite(
     mut call: Call,
     decision: &dyn CallDecisionEngine,
-    limiter: &dyn CallLimiter,
+    limiter: &LimiterWorker,
     config: &B2buaConfig,
     id_gen: &IdGen,
     wire_faults: &crate::wire_faults::WireFaults,
@@ -319,24 +346,20 @@ pub async fn handle_initial_invite(
             DecisionKind::Reject,
             Some("a".into()),
             &a_invite,
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
         ),
-        Ok(NewCallResponse::Redirect(rd)) => {
-            let call =
-                mark_decision(call, now_ms, DecisionKind::Redirect, Some("a".into()), rd.label);
-            reject_call(
-                call,
-                &a_invite,
-                rd.code,
-                rd.reason,
-                rd.update_headers.as_ref(),
-                &rd.contacts,
-                id_gen,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
+        Ok(NewCallResponse::Redirect(rd)) => apply_redirect(
+            call,
+            rd,
+            DecisionKind::Redirect,
+            Some("a".into()),
+            &a_invite,
+            &config.minted_final_advertisement,
+            id_gen,
+            now_ms,
+        ),
         // `Relay` is a failover-only treatment; with no captured downstream
         // failure at new-call time it falls back to 480 (ADR-0017 X5).
         Ok(NewCallResponse::Relay { label }) => {
@@ -348,19 +371,34 @@ pub async fn handle_initial_invite(
                 Some("Temporarily Unavailable".into()),
                 None,
                 &[],
+                &config.minted_final_advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::DecisionReject,
             )
         }
-        // No decision was returned: nothing to record, the stack's own final.
-        Err(_unavailable) => reject_call(
+        // No decision was returned: nothing to record, the stack's own final —
+        // the one the engine stated, else 503.
+        Err(CallDecisionError::Refused { code, reason, update_headers }) => reject_call(
+            call,
+            &a_invite,
+            code,
+            reason,
+            update_headers.as_ref(),
+            &[],
+            &config.minted_final_advertisement,
+            id_gen,
+            now_ms,
+            TerminationCause::Admission,
+        ),
+        Err(CallDecisionError::Unavailable(_)) => reject_call(
             call,
             &a_invite,
             503,
             Some("Service Unavailable".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -391,7 +429,9 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// skipped (the generator owns them, header-ownership matrix X2). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
 /// own is none. `cause` is the termination record's: the decision layer's
-/// refusal, or the stack's own admission.
+/// refusal, or the stack's own admission. A failure final carries the
+/// deployment's `advertisement` for a minted final under the decision's
+/// statements.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reject_call(
     mut call: Call,
@@ -400,16 +440,17 @@ pub(crate) fn reject_call(
     reason: Option<String>,
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
+    advertisement: &CapabilitySet,
     id_gen: &IdGen,
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let reason = reason.unwrap_or_else(|| default_reason(status));
+    let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
-    // decision never stated (055). Answer the plain server error instead — the
+    // decision never stated. Answer the plain server error instead — the
     // re-entry carries no contacts, so it always terminates.
-    let extra_headers = match build_reject_headers(update_headers, contacts) {
+    let mut extra_headers = match build_reject_headers(update_headers, contacts) {
         Ok(headers) => headers,
         Err(err) => {
             tracing::warn!(
@@ -424,12 +465,22 @@ pub(crate) fn reject_call(
                 Some(err.to_string()),
                 update_headers,
                 &[],
+                advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::Admission,
             );
         }
     };
+    // A failure final refused in this element's own name carries the
+    // deployment's advertisement, each half under the decision's statements.
+    if crate::rules::capabilities::is_minted_failure(status) {
+        crate::rules::capabilities::stamp_own_advertisement(
+            advertisement,
+            |name| update_headers.is_some_and(|u| u.keys().any(|n| name.matches(n))),
+            &mut extra_headers,
+        );
+    }
     let mut effects = HandlerEffects::new();
     // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
     if let Some(effect) = relay::response_to_a_leg(
@@ -445,7 +496,13 @@ pub(crate) fn reject_call(
         None,
         extra_headers,
         crate::effects::Provenance::Authored,
+        crate::rules::relay::Author::Stack,
     ) {
+        let mut effect = effect;
+        let adds = update_headers.map(b2bua_sdk::header_update::header_adds).unwrap_or_default();
+        if let crate::effects::OutboundBody::Response(resp) = &mut effect.body {
+            *resp = crate::rules::stated_headers::response_with_adds(resp.clone(), &adds);
+        }
         effects.outbound.push(effect);
         call = add_cdr_event(
             call,
@@ -466,14 +523,15 @@ pub(crate) fn reject_call(
 }
 
 fn build_request(invite: &SipRequest) -> NewCallRequest {
-    let mut sip_headers: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for h in invite.headers() {
-        if STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)) {
-            continue;
-        }
-        sip_headers.entry(h.name.to_string()).or_default().push(h.value.to_string());
-    }
+    // One `(name, value)` per wire line, in wire order: the order of a multi-line
+    // header is part of its meaning (RFC 7044 `History-Info` index chains), whatever
+    // spelling each line wears.
+    let sip_headers: Vec<(String, String)> = invite
+        .headers()
+        .iter()
+        .filter(|h| !STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)))
+        .map(|h| (h.name.to_string(), h.value.to_string()))
+        .collect();
     NewCallRequest {
         call_id: invite.call_id().as_str().to_string(),
         ruri: invite.request_uri().to_string(),
@@ -483,31 +541,14 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
         contact: invite.raw(HeaderName::Contact).map(str::to_string).collect(),
         content_type: invite.raw(HeaderName::ContentType).next().map(str::to_string),
         sip_headers,
-        sip_body: (!invite.body().is_empty())
-            .then(|| String::from_utf8_lossy(invite.body()).into_owned()),
+        sip_body: (!invite.body().is_empty()).then(|| invite.body().to_vec()),
     }
-}
-
-/// The reason phrase a reject wears when the decision states none. `500` is the
-/// fail-safe every adapter reaches for, so it wears its own RFC 3261 §21.5.1
-/// phrase rather than the `603` fallthrough.
-fn default_reason(status: u16) -> String {
-    match status {
-        302 => "Moved Temporarily",
-        403 => "Forbidden",
-        404 => "Not Found",
-        480 => "Temporarily Unavailable",
-        486 => "Busy Here",
-        500 => "Server Internal Error",
-        503 => "Service Unavailable",
-        _ => "Declined",
-    }
-    .to_string()
 }
 
 /// Build the extra response headers for a reject/redirect: the non-structural
-/// `update_headers` *sets* (e.g. `Reason:`) plus one `Contact: <uri>;q=…` per
-/// redirect target. Removals and stack-owned keys are dropped — the response
+/// `update_headers` *sets* (e.g. `Reason:`), one line per stated line — its
+/// adds yield to the final as built ([`reject_call`]) — plus one
+/// `Contact: <uri>;q=…` per redirect target. Removals and stack-owned keys are dropped — the response
 /// generator owns the structural set (ADR-0017 X2), including the Contact a
 /// redirect authors from its typed target list.
 /// Errs when a redirect target does not read — the whole redirect is refused,
@@ -521,7 +562,13 @@ fn build_reject_headers(
     if let Some(map) = update_headers {
         for (name, val) in map {
             let named = HeaderName::from(name.as_str());
-            if let (Some(v), HeaderClass::EndToEnd) = (val, named.class()) {
+            if named.class() != HeaderClass::EndToEnd {
+                continue;
+            }
+            if val.adds() {
+                continue;
+            }
+            for v in val.lines() {
                 out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
             }
         }
@@ -588,7 +635,13 @@ mod emergency_on_invite_tests {
         // Each canonical emergency RPH token flags the new a-leg Call as emergency.
         for tok in ["esnet.0", "wps.0", "q735.0"] {
             let invite = invite_with_rph(Some(tok));
-            let call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+            let call = build_initial_call(
+                &invite,
+                src(),
+                &config_for("w0"),
+                &sip_txn::IdGen::seeded(1),
+                0,
+            );
             assert_eq!(
                 call.emergency,
                 Some(true),
@@ -600,12 +653,23 @@ mod emergency_on_invite_tests {
     #[test]
     fn non_emergency_invite_leaves_emergency_unset() {
         // No Resource-Priority at all → field stays absent (`None`), NOT Some(false).
-        let call = build_initial_call(&invite_with_rph(None), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(None),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "no RPH → emergency stays None");
 
         // A well-formed but non-emergency RPH namespace.value also stays None.
-        let call =
-            build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("dsn.flash")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "non-emergency RPH → emergency stays None");
     }
 
@@ -613,8 +677,13 @@ mod emergency_on_invite_tests {
     fn emergency_is_derived_through_the_real_helper() {
         // Proves the field is wired to `is_emergency_request` and not a naive
         // header-presence check: r-values compare case-insensitively (RFC 4412)…
-        let call =
-            build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("ESNET.0")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, Some(true), "r-value casing must not gate emergency");
 
         // …an emergency r-value among multiple namespaces flags…
@@ -622,13 +691,19 @@ mod emergency_on_invite_tests {
             &invite_with_rph(Some("dsn.flash, q735.0")),
             src(),
             &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         assert_eq!(call.emergency, Some(true), "emergency r-value in a list flags emergency");
 
         // …and an r-value merely embedding a token does not.
-        let call =
-            build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("esnet.01")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");
     }
 }
@@ -683,7 +758,13 @@ mod stickiness_cookie_tests {
 
     fn call_for(invite: &SipRequest) -> call::Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(invite, SocketAddr::from(([10, 0, 0, 9], 5060)), &config, 0)
+        build_initial_call(
+            invite,
+            SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &config,
+            &sip_txn::IdGen::seeded(1),
+            0,
+        )
     }
 
     #[test]
@@ -787,24 +868,90 @@ mod multi_instance_header_tests {
 
         // Contact is populated via the plural getter, so any number of instances
         // survives (the parser caps an INVITE at one per RFC 3261 §8.1.1.8, but the
-        // schema no longer collapses — it carries whatever arrived).
+        // schema does not collapse — it carries whatever arrived).
         assert_eq!(req.contact, vec!["<sip:alice@10.0.0.9:5060>".to_string()]);
 
         // Every hop of a multi-line header survives, in wire order.
         assert_eq!(
-            req.sip_headers.get("History-Info").map(Vec::as_slice),
-            Some(
-                &[
-                    "<sip:a@ex.com>;index=1".to_string(),
-                    "<sip:b@ex.com>;index=1.1".to_string(),
-                    "<sip:c@ex.com>;index=1.1.1".to_string(),
-                ][..]
-            ),
+            req.sip_header_values("History-Info").collect::<Vec<_>>(),
+            vec![
+                "<sip:a@ex.com>;index=1",
+                "<sip:b@ex.com>;index=1.1",
+                "<sip:c@ex.com>;index=1.1.1",
+            ],
         );
-        assert_eq!(req.sip_headers.get("Diversion").map(Vec::len), Some(2));
+        assert_eq!(req.sip_header_values("Diversion").count(), 2);
 
         // The single-value accessor returns the first instance for the common read.
         assert_eq!(req.sip_header("History-Info"), Some("<sip:a@ex.com>;index=1"));
         assert_eq!(req.sip_header("Absent"), None);
+    }
+
+    /// The decision reads the INVITE's body byte for byte: a binary body is
+    /// never re-encoded on its way to the decision engine.
+    #[test]
+    fn a_binary_body_reaches_the_decision_byte_for_byte() {
+        let body: &[u8] = &[0x77, 0x83, 0xFF, 0x00, 0x0A];
+        let head = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKbin\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: binary-body\r\n\
+             CSeq: 1 INVITE\r\n\
+             Content-Type: application/vnd.example.data\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let raw = [head.as_bytes(), body].concat();
+        let invite = match CustomParser::new().parse(&raw).expect("fixture INVITE should parse") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        };
+        assert_eq!(build_request(&invite).sip_body.as_deref(), Some(body));
+    }
+
+    /// RFC 3261 §7.3.1: a header name is case-insensitive and its lines are one
+    /// ordered set, so a chain whose hops two elements spelled differently reaches
+    /// the decision engine in wire order, each line under the spelling it wore.
+    #[test]
+    fn build_request_keeps_wire_order_across_spellings() {
+        let invite = parse(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKx\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: multi-spelling\r\n\
+             CSeq: 1 INVITE\r\n\
+             History-Info: <sip:a@ex.com>;index=1\r\n\
+             X-Trunk: t1\r\n\
+             history-info: <sip:b@ex.com>;index=1.1\r\n\
+             HISTORY-INFO: <sip:c@ex.com>;index=1.1.1\r\n\
+             x-trunk: t2\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let req = build_request(&invite);
+        assert_eq!(
+            req.sip_headers,
+            vec![
+                ("Max-Forwards".to_string(), "70".to_string()),
+                ("History-Info".to_string(), "<sip:a@ex.com>;index=1".to_string()),
+                ("X-Trunk".to_string(), "t1".to_string()),
+                ("history-info".to_string(), "<sip:b@ex.com>;index=1.1".to_string()),
+                ("HISTORY-INFO".to_string(), "<sip:c@ex.com>;index=1.1.1".to_string()),
+                ("x-trunk".to_string(), "t2".to_string()),
+            ],
+        );
+        assert_eq!(
+            req.sip_header_values("History-Info").collect::<Vec<_>>(),
+            vec![
+                "<sip:a@ex.com>;index=1",
+                "<sip:b@ex.com>;index=1.1",
+                "<sip:c@ex.com>;index=1.1.1"
+            ],
+        );
+        assert_eq!(req.sip_header_values("x-TRUNK").collect::<Vec<_>>(), vec!["t1", "t2"]);
     }
 }

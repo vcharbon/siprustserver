@@ -63,7 +63,9 @@ fn extract_strict_numeric_prefix(value: &str, rule: &NumericHeaderRule) -> Optio
 
 pub struct ParsedHeaders {
     pub headers: Vec<SipHeader>,
-    pub content_length: u64,
+    /// The declared `Content-Length`; `None` when the block states none, which
+    /// the transport framing then resolves (RFC 3261 §18.3).
+    pub content_length: Option<u64>,
 }
 
 /// Scan the ordered **as-wire** header names from a raw datagram — RFC 3261
@@ -116,7 +118,7 @@ pub fn parse_headers(
     // Size the list up front from the block's line count — growing it from
     // empty cost one reallocation per doubling, several per message.
     let mut headers: Vec<SipHeader> = Vec::with_capacity(lines);
-    let mut content_length: u64 = 0;
+    let mut content_length: Option<u64> = None;
 
     loop {
         if s.at_end_of_headers() {
@@ -163,7 +165,7 @@ pub fn parse_headers(
                 match extract_strict_numeric_prefix(&trimmed_value, &rule) {
                     Some(parsed) => {
                         if known == HeaderName::ContentLength {
-                            content_length = parsed;
+                            content_length = Some(parsed);
                         }
                     }
                     None => {

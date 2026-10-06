@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::header::HeaderName;
@@ -116,8 +116,46 @@ async fn a_failing_finals_headers_ride_the_decision_authored_final() {
     );
     assert_eq!(raw("Reason"), ["Q.850;cause=34"], "the decision's own statement rides too");
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// The callee's `Date` and `Timestamp` echo state when the callee sent its
+/// refusal (RFC 3261 §20.17 / §8.2.6.1). A final the decision authors is the
+/// stack's own message, sent after the consult: those readings stay behind.
+#[tokio::test(start_paused = true)]
+async fn a_failing_finals_date_stays_off_the_decision_authored_final() {
+    let s = plan_scene("failure-hdr-date").await;
+    let plan = plan(serde_json::json!({
+        "action": "reject", "code": 480, "reason": "Temporarily Unavailable"
+    }));
+
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Date", "Mon, 05 Oct 2026 10:00:01 GMT")
+        .with_header("Timestamp", "54 0.5")
+        .with_header("P-Vendor-Thing", "annotation")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let resp = call.expect(480).await;
+    assert_eq!(resp.raw(HeaderName::Date).count(), 0, "the callee's Date: {resp:?}");
+    assert_eq!(resp.raw(HeaderName::Timestamp).count(), 0, "the callee's echo: {resp:?}");
+    assert_eq!(
+        resp.raw(HeaderName::from("P-Vendor-Thing")).collect::<Vec<_>>(),
+        ["annotation"],
+        "the rest of the refusal still rides"
+    );
+
     let _report = s.finish().await;
 }
 
@@ -173,8 +211,6 @@ async fn a_decision_header_update_owns_the_name_it_states() {
         "a name the decision does not state still travels"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -212,8 +248,42 @@ async fn the_resynthesized_relay_final_restates_the_callees_headers() {
     assert_eq!(raw("P-Charging-Vector"), ["icid-value=\"cv-bleg-3\""]);
     assert_eq!(raw("Allow"), ["INVITE, ACK, CANCEL, BYE"]);
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// The relay treatment carries the callee's own final onward, as a plain relay
+/// does: its `Date` rides verbatim (RFC 3261 §20.17) and its `Timestamp` echo
+/// answers the caller's own INVITE (§8.2.6.1).
+#[tokio::test(start_paused = true)]
+async fn the_resynthesized_relay_final_keeps_the_callees_clock_stamps() {
+    let s = plan_scene("failure-hdr-relay-stamps").await;
+    let plan = plan(serde_json::json!({"action": "relay"}));
+
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .with_header("Timestamp", "54")
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Date", "Mon, 05 Oct 2026 10:00:01 GMT")
+        .with_header("Timestamp", "54 0.5")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let resp = call.expect(486).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(raw("Date"), ["Mon, 05 Oct 2026 10:00:01 GMT"]);
+    assert_eq!(raw("Timestamp"), ["54"]);
+
     let _report = s.finish().await;
 }
 
@@ -255,8 +325,47 @@ async fn privacy_id_withholds_the_identity_the_failing_final_conceals() {
     assert_eq!(raw("Privacy"), ["id"], "the privacy instruction itself travels");
     assert_eq!(raw("P-Vendor-Thing"), ["annotation"], "privacy withholds only the assertion");
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// Inside the trust domain (`privacy_service = false`) the failing final's
+/// asserted identity rides beside its `Privacy: id` (RFC 3325 §5): the next
+/// hop is the boundary that conceals it.
+#[tokio::test(start_paused = true)]
+async fn inside_the_trust_domain_the_failing_finals_identity_rides() {
+    let s = B2buaScene::with_b2bua("failure-hdr-privacy-relayed", |_bob_port| {
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan()))
+            .tune(|c| c.privacy_service = false)
+    })
+    .await;
+    let plan = plan(serde_json::json!({"action": "relay"}));
+
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Privacy", "id")
+        .with_header("P-Asserted-Identity", "<sip:+15550001@op.example>")
+        .with_header("Remote-Party-ID", "<sip:+15550001@op.example>;party=called")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let resp = call.expect(486).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(raw("P-Asserted-Identity"), ["<sip:+15550001@op.example>"]);
+    assert_eq!(raw("Remote-Party-ID"), ["<sip:+15550001@op.example>;party=called"]);
+    assert_eq!(raw("Privacy"), ["id"]);
+
     let _report = s.finish().await;
 }
 
@@ -321,8 +430,6 @@ async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
         "no charging correlation for a leg that produced no final"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -378,8 +485,6 @@ async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
         "a new instruction correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -392,13 +497,15 @@ async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
 async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
     let limiter: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_millis(150)));
     let s = B2buaScene::with_b2bua("failure-hdr-limiter-refusal", move |_bob_port| {
-        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan())).limiter(limiter)
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan()))
+            .limiter(limiter)
+            .limiter_store(store)
     })
     .await;
     // The failover hop's limiter entry admits nothing, so its refusal — not a
@@ -453,8 +560,6 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
         "a capacity refusal correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -514,7 +619,5 @@ async fn the_setup_deadline_final_speaks_only_for_itself() {
         "the timed-out final correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

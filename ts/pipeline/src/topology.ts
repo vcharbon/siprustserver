@@ -9,11 +9,13 @@
  * peer address that speaks on the same dialog.
  */
 import { Flows, type Call, type Case, type Placement, type Tokens } from "@sip/contracts"
+import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CallIdDerivation } from "./derivation.js"
-import { vantageMsgIdxs } from "./cut.js"
+import { vantageMsgIdxs, type Correlation } from "./cut.js"
+import type { FormsTable } from "./forms.js"
 import { canonical, classKey, type Plan } from "./plan.js"
 import type { SutSet } from "./sut.js"
-import { addrForm, body, headText, uriUser } from "./wire.js"
+import { addrForm, body, uriUser } from "./wire.js"
 import type { Vantage } from "./selection.js"
 
 /**
@@ -79,6 +81,9 @@ export const JOIN_PROTOCOL_FLAG = "join-protocol:"
  */
 export type JoinsReading = ReadonlyMap<number, JoinReading>
 
+/** The SIP role a joined leg plays: a resource for an `mrf` join, a callee for a `refer` one. */
+export const joinedActorKind = (join: JoinReading): ActorKind => (join.kind === "mrf" ? "mrf" : "uas")
+
 /** One simulated socket, before a `side`/`binding` is decided for it. */
 export interface LayoutEndpoint {
   readonly id: string
@@ -136,19 +141,16 @@ export interface Layout {
  */
 export const peerSide = (a: ActorObs, sock: string): boolean => !a.sutSet.has(sock)
 
-/** Two calls one application server minted from a common base call. */
-export const relatedByDerivation = (
-  flows: Flows.FlowsDoc,
-  a: number,
-  b: number,
-  derives: CallIdDerivation
-): boolean => {
-  const ca = flows.legs[a]!.call_id
-  const cb = flows.legs[b]!.call_id
-  if (derives(ca, cb) || derives(cb, ca)) return true
-  return flows.legs.some(
-    (base, i) => i !== a && i !== b && derives(base.call_id, ca) && derives(base.call_id, cb)
-  )
+/**
+ * Two calls one application server minted from a common base call: one derives
+ * from the other, or a third leg's Call-ID derives both. Read off the
+ * correlation's edges alone, so the index is the one seam to the derivation.
+ */
+export const relatedByDerivation = (a: number, b: number, correlation: Correlation): boolean => {
+  const basesOfA = new Set(correlation.basesOf(a))
+  const basesOfB = new Set(correlation.basesOf(b))
+  if (basesOfA.has(b) || basesOfB.has(a)) return true
+  return [...basesOfA].some((i) => i !== a && i !== b && basesOfB.has(i))
 }
 
 export const build = (
@@ -158,7 +160,8 @@ export const build = (
   plan: Plan,
   derives: CallIdDerivation,
   chainHints: ReadonlyArray<readonly [number, number]> = [],
-  joins: (flows: Flows.FlowsDoc, actors: ReadonlyArray<ActorObs>) => JoinsReading = () => new Map()
+  joins: (flows: Flows.FlowsDoc, actors: ReadonlyArray<ActorObs>) => JoinsReading = () => new Map(),
+  index: CaptureIndex = captureIndex(flows, derives, plan)
 ): Layout => {
   const flags: Array<Case.Flag> = []
   const raw: Array<ActorObs> = []
@@ -249,7 +252,7 @@ export const build = (
     }
   })
 
-  const grouping = calledBranches(flows, raw, derives, chainHints)
+  const grouping = calledBranches(flows, raw, index.correlation, chainHints)
   const joined = joins(flows, raw)
   for (const [i, join] of joined) {
     raw[i]!.joinedBy = join
@@ -279,10 +282,12 @@ export const build = (
     if (a.kind === "uac") {
       actors.push({ id: a.actorId, type: "uac", endpoint: a.endpointId })
     } else if (a.joinedBy) {
-      // A media resource is dialled by whatever joined it, never claimed by
-      // R-URI position — so it takes no claim, and two callees sharing a number
-      // stay the only thing `claim/same-number-ambiguous` can mean.
-      actors.push({ id: a.actorId, type: "mrf", endpoint: a.endpointId })
+      // A joined leg is dialled by whatever joined it, never claimed by R-URI
+      // position — so it takes no claim, and two callees sharing a number stay
+      // the only thing `claim/same-number-ambiguous` can mean. What it IS on the
+      // wire is the join's: a media resource, or a transferee answering like
+      // any callee.
+      actors.push({ id: a.actorId, type: joinedActorKind(a.joinedBy), endpoint: a.endpointId })
     } else {
       actors.push({
         id: a.actorId,
@@ -300,8 +305,10 @@ export const build = (
     })
   }
 
-  const caller = callerIdentity(flows, plan, raw)
-  const called = ordered.map((br) => br.map((i) => calledIdentity(flows, plan, raw[i]!)))
+  const caller = callerIdentity(flows, plan, index.forms, raw)
+  const called = ordered.map((br) =>
+    br.map((i) => calledIdentity(flows, plan, index.forms, raw[i]!))
+  )
 
   const posByKey = new Map<string, string>()
   const uac = raw.find((a) => a.kind === "uac")
@@ -414,7 +421,7 @@ interface Branches {
 const calledBranches = (
   flows: Flows.FlowsDoc,
   raw: ReadonlyArray<ActorObs>,
-  derives: CallIdDerivation,
+  correlation: Correlation,
   chainHints: ReadonlyArray<readonly [number, number]>
 ): Branches => {
   const established = callerAnsweredTs(flows, raw)
@@ -436,7 +443,7 @@ const calledBranches = (
       const answerIntervened =
         established !== undefined && established >= prevStart && established < start
       if (failedAt > start || answerIntervened) return
-      const ev = chainEvidence(flows, prev, a, derives, chainHints)
+      const ev = chainEvidence(flows, prev, a, correlation, chainHints)
       if (!ev) return
       if (!best || failedAt > best.failedAt || (failedAt === best.failedAt && b < best.b)) {
         best = { failedAt, b, ev }
@@ -456,15 +463,14 @@ const chainEvidence = (
   flows: Flows.FlowsDoc,
   prev: ActorObs,
   next: ActorObs,
-  derives: CallIdDerivation,
+  correlation: Correlation,
   chainHints: ReadonlyArray<readonly [number, number]>
 ): string | undefined => {
-  if (
-    flows.groups.some((g) => g.legs.includes(prev.origLeg) && g.legs.includes(next.origLeg))
-  ) {
+  const prevGroups = new Set(Flows.groupsForLegs(flows, [prev.origLeg]))
+  if (Flows.groupsForLegs(flows, [next.origLeg]).some((g) => prevGroups.has(g))) {
     return "both attempts sit in one upstream call group"
   }
-  if (relatedByDerivation(flows, prev.origLeg, next.origLeg, derives)) {
+  if (relatedByDerivation(prev.origLeg, next.origLeg, correlation)) {
     return "the attempts' Call-IDs are application-server derivations of one base call"
   }
   const hinted = chainHints.some(
@@ -476,48 +482,10 @@ const chainEvidence = (
     : undefined
 }
 
-const collectForms = (flows: Flows.FlowsDoc, plan: Plan, key: string): Array<string> => {
-  const forms = new Set<string>()
-  for (const leg of flows.legs) {
-    for (const msg of leg.msgs) {
-      for (const user of harvestNumbers(msg)) {
-        const cls = plan.classify(user)
-        if (cls && classKey(cls) === key) {
-          const label = plan.formLabel(user)
-          if (label) forms.add(label)
-        }
-      }
-    }
-  }
-  return [...forms].sort()
-}
-
-/**
- * Number-bearing user-parts of a datagram. A coarse stand-in for the Rust
- * `identities::harvest` seam: the R-URI plus every sip/sips/tel URI in an
- * identity header. It only feeds `forms`, so over-reach costs a label, never a
- * mapping.
- */
-const harvestNumbers = (m: Flows.Msg): Array<string> => {
-  const out: Array<string> = []
-  if (m.summary.kind === "request" && m.summary.uri) out.push(uriUser(m.summary.uri))
-  for (const uri of headText(m).split(/\r?\n/).slice(0, 60).flatMap(identityUris)) {
-    out.push(uriUser(uri))
-  }
-  return out.filter((u) => u.length > 0)
-}
-
-const IDENTITY_HEADERS =
-  /^(from|f|to|t|contact|m|p-asserted-identity|p-preferred-identity|diversion|remote-party-id|history-info|refer-to|r|referred-by|b)\s*:/i
-
-const identityUris = (line: string): Array<string> => {
-  if (!IDENTITY_HEADERS.test(line)) return []
-  return [...line.matchAll(/(?:sips?|tel):[^>\s,;]+/gi)].map((m) => m[0]!)
-}
-
 const callerIdentity = (
   flows: Flows.FlowsDoc,
   plan: Plan,
+  table: FormsTable,
   raw: ReadonlyArray<ActorObs>
 ): PartyIdentity => {
   const uac = raw.find((a) => a.kind === "uac")
@@ -529,7 +497,7 @@ const callerIdentity = (
   }
   const cls = plan.classify(user)
   if (!cls) return { kind: "unknown", observed: user }
-  const forms = collectForms(flows, plan, classKey(cls))
+  const forms = table.get(classKey(cls)) ?? []
   return {
     kind: "external-caller",
     observed: canonical(cls),
@@ -537,7 +505,12 @@ const callerIdentity = (
   }
 }
 
-const calledIdentity = (flows: Flows.FlowsDoc, plan: Plan, a: ActorObs): PartyIdentity => {
+const calledIdentity = (
+  flows: Flows.FlowsDoc,
+  plan: Plan,
+  table: FormsTable,
+  a: ActorObs
+): PartyIdentity => {
   const leg = flows.legs[a.origLeg]!
   const inviteMsg = a.msgIdxs.map((i) => leg.msgs[i]!).find(Flows.isInvite)
   const ruri = inviteMsg?.summary.kind === "request" ? inviteMsg.summary.uri : ""
@@ -548,7 +521,7 @@ const calledIdentity = (flows: Flows.FlowsDoc, plan: Plan, a: ActorObs): PartyId
   for (const user of candidates) {
     const cls = plan.classify(user)
     if (cls) {
-      const forms = collectForms(flows, plan, classKey(cls))
+      const forms = table.get(classKey(cls)) ?? []
       return {
         kind: "site",
         observed: canonical(cls),

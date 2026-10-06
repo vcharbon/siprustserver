@@ -2,7 +2,7 @@
 //! is both a [`WorkerRegistry`] (read seam) and a control handle
 //! (`add`/`remove`/`set_health`/`set_address`).
 //!
-//! Like every registry it is a thin wrapper over the shared [`WorkerSet`]: the
+//! Like every registry it is a thin wrapper over the shared `WorkerSet`: the
 //! identity (ordinal + host) is a [`topology::SimulatedMembership`] sharing the
 //! injected [`Clock`]; the per-worker port + health are annotation presets. Each
 //! mutator drives the membership and/or the overlay, then **recomposes eagerly**,
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// The snapshot-based recompose is inherently lag-immune: there is no delta
-    /// channel to overflow (the old `Lagged` resync hazard is gone). Driving many
+    /// channel to overflow (no `Lagged` resync hazard). Driving many
     /// membership changes then a real removal still converges to the current set.
     #[test]
     fn bulk_membership_changes_converge() {

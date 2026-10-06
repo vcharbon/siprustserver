@@ -16,6 +16,9 @@
 //!   the same ordinal so two lanes' differing absolute sequence numbers agree;
 //! - `Lifecycle` bands (chaos markers — load-lane only, wall-clock placed) are
 //!   dropped;
+//! - `Http` rows are dropped (whether a lane records the HTTP exchanges is a
+//!   transport fact), with the lanes only they reference and every `Service`
+//!   lane;
 //! - only normalization-stable anomalies survive: RFC-audit findings (those the
 //!   projector tagged [`Anomaly::rule_sourced`]) are kept with their lane mapped
 //!   to a role and their timing-bearing `detail` cleared; every other anomaly
@@ -24,9 +27,9 @@
 //!   check-verdict notes, all of which carry timing or transport specifics) is
 //!   dropped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::{Anomaly, Lane, RowKind, SeqDoc, SeqRow};
+use crate::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
 
 /// Label substrings the SIP projector stamps to mark a retransmission — an
 /// outbound timer re-emit or an absorbed inbound duplicate. A row carrying one
@@ -52,6 +55,7 @@ fn role_of_lane(lane: &Lane) -> String {
             crate::LaneKind::Sut => "sut".to_string(),
             crate::LaneKind::Node => "node".to_string(),
             crate::LaneKind::Ua => "ua".to_string(),
+            crate::LaneKind::Service => "service".to_string(),
         };
     }
     name.to_string()
@@ -77,10 +81,16 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
     let resolve =
         |id: &str| -> String { role_map.get(id).cloned().unwrap_or_else(|| role_of_lane_id(id)) };
 
+    // Lanes an HTTP row references and no other row does leave with the rows.
+    let http_only = http_only_lanes(doc);
+
     // Lanes → roles, order-preserving, deduplicated on the resolved role.
     let mut lanes: Vec<Lane> = Vec::new();
     let mut seen_lane = std::collections::HashSet::new();
     for l in &doc.lanes {
+        if l.kind == LaneKind::Service || http_only.contains(l.id.as_str()) {
+            continue;
+        }
         let role = resolve(&l.id);
         if seen_lane.insert(role.clone()) {
             lanes.push(Lane::new(role.clone(), role, l.kind));
@@ -91,7 +101,7 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
     let mut kept: Vec<&SeqRow> = doc
         .rows
         .iter()
-        .filter(|r| !matches!(r.kind, RowKind::Lifecycle))
+        .filter(|r| !matches!(r.kind, RowKind::Lifecycle | RowKind::Http { .. }))
         .filter(|r| !is_retransmit(&r.label))
         .collect();
     // Causal order: sort by the recording sequence (the cross-plane truth), then
@@ -152,6 +162,17 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
     }
 }
 
+/// The lane ids HTTP rows reference that no other row references.
+fn http_only_lanes(doc: &SeqDoc) -> HashSet<&str> {
+    fn ends(r: &SeqRow) -> impl Iterator<Item = &str> {
+        std::iter::once(r.from.as_str()).chain(r.to.as_deref())
+    }
+    let (http, other): (Vec<&SeqRow>, Vec<&SeqRow>) =
+        doc.rows.iter().partition(|r| matches!(r.kind, RowKind::Http { .. }));
+    let used: HashSet<&str> = other.into_iter().flat_map(ends).collect();
+    http.into_iter().flat_map(ends).filter(|id| !used.contains(id)).collect()
+}
+
 /// A lane id fallback role when no map entry exists: the sub-lane suffix
 /// (`ip:port#name` → `name`), else the id with any address stripped.
 fn role_of_lane_id(id: &str) -> String {
@@ -177,11 +198,12 @@ fn normalize_label(label: &str) -> String {
 }
 
 /// Force a message row's per-attempt delivery flag to `true` (delivery is a
-/// transport fact); lifecycle rows never reach here.
+/// transport fact); lifecycle and HTTP rows never reach here.
 fn force_delivered(kind: RowKind) -> RowKind {
     match kind {
         RowKind::Sip { .. } => RowKind::Sip { delivered: true },
         RowKind::Repl { .. } => RowKind::Repl { delivered: true },
+        RowKind::Http { .. } => RowKind::Http { delivered: true },
         RowKind::Lifecycle => RowKind::Lifecycle,
     }
 }

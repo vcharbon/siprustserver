@@ -1,20 +1,18 @@
-//! [`CancelBranchLru`] — proxy-local `(Call-ID, From-tag, CSeq number) →
-//! {target, branches, cookie}` cache with per-entry TTL (port of
-//! `CancelBranchLru.ts`).
+//! [`CancelBranchLru`] — proxy-local `INVITE transaction → {target, branches,
+//! cookie}` cache with per-entry TTL (port of `CancelBranchLru.ts`).
 //!
 //! RFC 3261 §16.10 / §17.2.3: a stateless proxy forwards a CANCEL to the same
 //! downstream the matching INVITE went to. The outbound branch the downstream
 //! transaction layer correlates them by is a function of the message (§16.11,
 //! `crate::branch`), so what this cache carries is the TARGET.
-//! Keying on `(Call-ID, From-tag, CSeq number)` (RFC 3261 §9.1) is the
-//! canonical correlator — it works at any hop regardless of whether the
-//! upstream rewrote the branch, and (unlike keying on the proxy's outbound
-//! branch) survives the LoadBalancer re-sharding a fallback selection to a
-//! different worker. The From-tag matters because BOTH directions of a dialog
-//! are remembered here and share the Call-ID with *independent* CSeq spaces
-//! (§12.2.1.1): without it, a UAC re-INVITE and a worker-outbound re-INVITE
-//! that happen to land on the same CSeq number within one TTL overwrite each
-//! other's entry, and the later CANCEL/ACK is forwarded to the wrong party.
+//! An entry is keyed on the INVITE transaction as its upstream opened it
+//! ([`invite_txn_key`]): the received top-Via branch and sent-by, the pair a
+//! CANCEL repeats (§9.1) and §17.2.3 matches on. The dialog identity is no key
+//! on its own: a spiral (§16.3) crosses this proxy twice under one Call-ID,
+//! From tag and CSeq, once each way, and each pass's CANCEL belongs with its
+//! own INVITE. Keying on the RECEIVED transaction rather than on the proxy's
+//! outbound branch survives the LoadBalancer re-sharding a fallback selection
+//! to a different worker.
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
 //! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, or
@@ -27,10 +25,12 @@
 //! the owner task can drive.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sip_clock::Clock;
+use sip_message::header::Via;
 use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
@@ -64,39 +64,75 @@ pub const DEFAULT_SWEEP_INTERVAL_MS: u64 = 16_000;
 const _: () = assert!(DEFAULT_SWEEP_INTERVAL_MS <= RTX_ENTRY_TTL_MS);
 const _: () = assert!(RTX_ENTRY_TTL_MS <= INVITE_ENTRY_TTL_MS);
 
-/// Build the composite key. `|` is illegal inside an RFC 3261 Call-ID `word`
-/// and inside a `tag` token, so the join is unambiguous. A missing From-tag
-/// (pre-RFC-3261 UA) keys as the empty string.
-pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
-    format!("{call_id}|{}|{cseq_num}", from_tag.unwrap_or(""))
+/// The key of the INVITE transaction `via` opened upstream (§17.2.3): its
+/// branch and sent-by (in `SentByRef::write_canonical`'s form), with the
+/// Call-ID, From tag and CSeq number, which the INVITE, its CANCEL, its non-2xx
+/// ACK and every response to them repeat. The three dialog fields keep apart
+/// two transactions on one branch token (an upstream that spends a token twice
+/// across a restart, or a pre-RFC-3261 one that sends none). `|` is illegal in
+/// every component, so the join is unambiguous; a missing part keys as empty.
+pub fn invite_txn_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
+    txn_key(&["inv"], via, call_id, from_tag, cseq_num)
 }
 
-/// Namespaced key for the non-2xx ACK hop memo, consulted on the request path
-/// when the upstream's §17.1.1.3 ACK arrives. Written in two flavours:
+/// Namespaced key for the retransmission target memo of the `method` request
+/// `via` sent: [`invite_txn_key`]'s fields under `rtx|{method}|`. A genuine
+/// retransmission repeats them all (§17.2.3); another request on a reused
+/// branch token (a UA whose `IdGen` reset on a restart) differs in one.
+pub fn retransmit_key(
+    via: &Via,
+    call_id: &str,
+    from_tag: Option<&str>,
+    method: &str,
+    cseq_num: u32,
+) -> String {
+    txn_key(&["rtx", method], via, call_id, from_tag, cseq_num)
+}
+
+fn txn_key(
+    namespace: &[&str],
+    via: &Via,
+    call_id: &str,
+    from_tag: Option<&str>,
+    cseq: u32,
+) -> String {
+    let branch = via.branch().unwrap_or_default();
+    let sent_by = via.sent_by_ref();
+    let from_tag = from_tag.unwrap_or_default();
+    let ns_len: usize = namespace.iter().map(|n| n.len() + 1).sum();
+    let mut key = String::with_capacity(
+        ns_len + branch.len() + sent_by.host().len() + call_id.len() + from_tag.len() + 24,
+    );
+    for part in namespace {
+        key.push_str(part);
+        key.push('|');
+    }
+    key.push_str(branch);
+    key.push('|');
+    let _ = sent_by.write_canonical(&mut key);
+    let _ = write!(key, "|{call_id}|{from_tag}|{cseq}");
+    key
+}
+
+/// Namespaced key for the non-2xx ACK hop memo of the INVITE transaction
+/// `via` opened upstream, consulted on the request path when the upstream's
+/// §17.1.1.3 ACK (the INVITE's own top Via) arrives. Written in two flavours:
 ///  • RESPONSE path, on relaying a non-2xx INVITE final upstream — carries
 ///    the node the final came from, so the ACK is RELAYED to the transaction
 ///    that sent the final (it matches the ACK and stops retransmitting);
 ///  • request path `reply()`, on a final the proxy generated ITSELF — empty
 ///    `branch`, so the ACK is ABSORBED here (the proxy is the UAS; no
 ///    downstream exists).
-/// `ackhop|` keeps it disjoint from the plain INVITE keys and the `rtx|`
+/// `ackhop|` keeps it disjoint from the `inv|` INVITE keys and the `rtx|`
 /// memos sharing this store.
-pub fn ack_hop_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
-    format!("ackhop|{}", call_id_cseq_key(call_id, from_tag, cseq_num))
+pub fn ack_hop_key(via: &Via, call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> String {
+    txn_key(&["ackhop"], via, call_id, from_tag, cseq_num)
 }
 
-/// What we cache per remembered INVITE: the downstream target, the branch we
-/// stamped on our outgoing Via (§16.11's function of the message — empty marks
-/// a final the proxy generated itself, whose ACK has no downstream to reach),
-/// and the branch the UPSTREAM stamped on the top Via of the request as it
-/// arrived.
-///
-/// `upstream_branch` is the §17.1.1.3 discriminator for the non-2xx ACK hop
-/// decision (consulted via the [`ack_hop_key`] memo): an ACK for a NON-2xx
-/// final reuses its INVITE's top-Via branch (same transaction), while an ACK
-/// for a 2xx is a new transaction with a fresh branch and takes the normal
-/// routing ladder. Empty when the upstream request carried no branch
-/// (pre-RFC-3261 UA) — never matched against.
+/// What we cache per remembered INVITE: the downstream target and the branch
+/// we stamped on our outgoing Via (§16.11's function of the message — empty
+/// marks a final the proxy generated itself, whose ACK has no downstream to
+/// reach). The upstream's branch is part of the key.
 ///
 /// `stickiness` is the cookie the INVITE's dialog rides on (the params of the
 /// Record-Route this proxy minted for it, or of the Route it carried), kept only
@@ -108,14 +144,12 @@ pub fn ack_hop_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> Stri
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
-    pub upstream_branch: String,
     pub stickiness: Option<RouteParams>,
 }
 
 struct StoredEntry {
     target: ProxyAddr,
     branch: String,
-    upstream_branch: String,
     stickiness: Option<RouteParams>,
     expires_at_ms: u64,
 }
@@ -183,7 +217,6 @@ impl CancelBranchLru {
             StoredEntry {
                 target: entry.target,
                 branch: entry.branch,
-                upstream_branch: entry.upstream_branch,
                 stickiness: entry.stickiness,
                 expires_at_ms,
             },
@@ -203,7 +236,6 @@ impl CancelBranchLru {
             Some(e) => Some(CancelEntry {
                 target: e.target.clone(),
                 branch: e.branch.clone(),
-                upstream_branch: e.upstream_branch.clone(),
                 stickiness: e.stickiness.clone(),
             }),
             None => None,
@@ -235,36 +267,76 @@ impl Default for CancelBranchLru {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sip_message::header::HeaderValue;
+    use sip_message::sip_str::SipStr;
 
     fn entry(branch: &str) -> CancelEntry {
         CancelEntry {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
-            upstream_branch: String::new(),
             stickiness: None,
         }
     }
 
+    fn via(line: &str) -> Via {
+        Via::parse(&SipStr::owned(line)).expect("a Via value")
+    }
+
+    fn key(call_id: &str) -> String {
+        invite_txn_key(&via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"), call_id, Some("t"), 1)
+    }
+
     #[test]
-    fn key_format_is_callid_tag_cseq() {
-        assert_eq!(call_id_cseq_key("abc@h", Some("t1"), 7), "abc@h|t1|7");
-        assert_eq!(call_id_cseq_key("abc@h", None, 7), "abc@h||7");
+    fn key_format_is_branch_sent_by_then_dialog_fields() {
+        let v = via("SIP/2.0/UDP Host.Example:5060;branch=z9hG4bK1;received=10.0.0.9;rport=4");
+        assert_eq!(
+            invite_txn_key(&v, "abc@h", Some("t1"), 7),
+            "inv|z9hG4bK1|host.example:5060|abc@h|t1|7"
+        );
+        assert_eq!(
+            invite_txn_key(&via("SIP/2.0/UDP h;branch=z9hG4bK1"), "abc@h", None, 7),
+            "inv|z9hG4bK1|h|abc@h||7"
+        );
+        assert_eq!(
+            ack_hop_key(&v, "abc@h", Some("t1"), 7),
+            "ackhop|z9hG4bK1|host.example:5060|abc@h|t1|7"
+        );
+    }
+
+    #[test]
+    fn the_received_transaction_disambiguates_one_dialog_identity() {
+        // A spiral crosses the proxy twice under one Call-ID, From tag and
+        // CSeq: the branch and the sent-by keep the two passes apart.
+        let first = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
+        for other in [
+            "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKb",
+            "SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bKa",
+            "SIP/2.0/UDP 10.0.0.1:5061;branch=z9hG4bKa",
+            "SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKa",
+        ] {
+            assert_ne!(
+                invite_txn_key(&first, "c1", Some("t"), 5),
+                invite_txn_key(&via(other), "c1", Some("t"), 5),
+                "{other}"
+            );
+        }
     }
 
     #[test]
     fn from_tag_disambiguates_the_two_dialog_directions() {
         // Both directions share the Call-ID; CSeq spaces are independent and
         // can collide on the same number — the From-tag keeps them apart.
+        let v = via("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKa");
         assert_ne!(
-            call_id_cseq_key("c1", Some("uac"), 5),
-            call_id_cseq_key("c1", Some("b2bua"), 5)
+            invite_txn_key(&v, "c1", Some("uac"), 5),
+            invite_txn_key(&v, "c1", Some("b2bua"), 5)
         );
     }
 
     #[test]
     fn remember_then_lookup_returns_entry() {
         let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let k = call_id_cseq_key("call-1", Some("t"), 1);
+        let k = key("call-1");
         lru.remember(&k, entry("z9hG4bK-1"), 1000);
         assert_eq!(lru.lookup(&k).unwrap().branch, "z9hG4bK-1");
         assert_eq!(lru.size(), 1);
@@ -274,8 +346,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn entries_expire_after_their_own_ttl() {
         let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        let short = call_id_cseq_key("call-1", Some("t"), 1);
-        let long = call_id_cseq_key("call-2", Some("t"), 1);
+        let short = key("call-1");
+        let long = key("call-2");
         lru.remember(&short, entry("a"), 1000);
         lru.remember(&long, entry("b"), 5000);
         tokio::time::advance(std::time::Duration::from_millis(1001)).await;
@@ -287,8 +359,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn sweep_drops_expired() {
         let lru = CancelBranchLru::with_clock(Clock::test_at(0));
-        lru.remember(&call_id_cseq_key("c1", Some("t"), 1), entry("a"), 1000);
-        lru.remember(&call_id_cseq_key("c2", Some("t"), 1), entry("b"), 1000);
+        lru.remember(&key("c1"), entry("a"), 1000);
+        lru.remember(&key("c2"), entry("b"), 1000);
         tokio::time::advance(std::time::Duration::from_millis(1001)).await;
         assert_eq!(lru.sweep_expired(), 2);
         assert_eq!(lru.size(), 0);

@@ -2,11 +2,15 @@
 //! written per call at termination, carrying the accumulated `Call.cdr_events`.
 //! The in-memory writer ([`InMemoryCdrWriter`]) lets tests assert exactly one
 //! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
+//! A transport sink publishes the bytes of a [`CdrEncoder`], by default
+//! [`JsonRecordEncoder`] (the [`CdrRecord`] as JSON).
 
 mod buffered;
+mod encoder;
 mod memory;
 
 pub use buffered::BufferedCdrWriter;
+pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
 pub use memory::InMemoryCdrWriter;
 
 use async_trait::async_trait;
@@ -129,7 +133,13 @@ mod tests {
             _ => panic!("expected a request"),
         };
         let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(&req, SocketAddr::from(([10, 0, 0, 9], 5060)), &cfg, created_at)
+        build_initial_call(
+            &req,
+            SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &cfg,
+            &sip_txn::IdGen::seeded(1),
+            created_at,
+        )
     }
 
     #[test]

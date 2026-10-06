@@ -1,4 +1,4 @@
-//! The transport seam (slice S3): a connection-oriented, reliable, ordered,
+//! The transport seam: a connection-oriented, reliable, ordered,
 //! message-granular replication network.
 //!
 //! This is the replication analogue of `sip-net`'s `SignalingNetwork`, but for
@@ -37,7 +37,7 @@ use crate::Frame;
 
 pub use real::RealReplicationNetwork;
 pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
-pub use simulated::{Fault, SimulatedReplicationNetwork};
+pub use simulated::{Fault, NodeReplicationNetwork, SimulatedReplicationNetwork};
 
 /// Failure opening an outbound connection.
 #[derive(Debug, Clone, thiserror::Error)]

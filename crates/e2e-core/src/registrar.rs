@@ -6,9 +6,9 @@
 //! The deployed Rust `sip-proxy` `ProxyCore` does **not** implement REGISTER —
 //! it is the single-endpoint K8s-LB binary and explicitly defers the registrar
 //! path (`sip-proxy/src/lib.rs`: "Deferred: the SIP registrar/REGISTER path";
-//! `core/mod.rs`: "the dual-fabric registrar mode is out of scope"). So, exactly
-//! as the task brief permits, the mimic runs **in-process** on the harness fabric
-//! rather than being forced onto the cluster proxy.
+//! `core/mod.rs`: "the dual-fabric registrar mode is out of scope"). So the
+//! mimic runs **in-process** on the harness fabric rather than being forced onto
+//! the cluster proxy.
 //!
 //! What it faithfully reproduces from sipjs:
 //!   - **Binding key = To/From URI userpart, lowercased** (`Registrar.ts` v1

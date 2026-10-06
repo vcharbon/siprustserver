@@ -6,10 +6,9 @@
 //! route time, and EVERY limit teardown path (max-duration BYE, message-cap
 //! 503, the crossing CANCEL/200) MUST release it — `current_total` back to 0 —
 //! exactly as a clean BYE would. A limit that tears the call down but forgets
-//! the limiter decrement pins a trunk's capacity forever (the endurance cap20
-//! pinning class, see [[stuck-setup-zombie-limiter-pinning]]).
+//! the limiter release pins a trunk's capacity forever.
 //!
-//! Coverage map (the user's enumerated limit cases):
+//! Coverage map (the enumerated limit cases):
 //!   - ring forever / no-answer → setup timeout: ALREADY covered with a limiter
 //!     in `setup_timeout.rs::ringing_forever_is_torn_down_at_setup_timeout_and_
 //!     releases_the_limiter` (150 s a-leg deadline, under the configured
@@ -21,6 +20,7 @@
 //!   - too many in-dialog messages on an up call → message cap: `in_dialog_*`.
 //! The 200/CANCEL crossing limit case lives in its sibling `cancel_200_crossing.rs`.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +29,12 @@ use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
-    ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -52,12 +51,10 @@ fn laddr() -> SocketAddr {
 }
 
 /// Stand up a real `LimiterServer` on its own simulated HTTP fabric. The
-/// returned `WindowStore` is the ground-truth counter every test asserts drains
+/// returned `CallStore` is the ground-truth counter every test asserts drains
 /// back to 0; the handle keeps the server task alive for the scenario.
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)
@@ -84,7 +81,7 @@ fn route_limited(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 r.features.platform.max_duration_sec = max_duration_sec;
                 NewCallResponse::Route(r)
             })
@@ -99,7 +96,7 @@ fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
 /// **Call never hangs up → max-duration cap.** A perfectly healthy, established
 /// call that simply never sends a BYE must be torn down at the absolute
 /// `GlobalDuration` cap: the B2BUA BYEs *both* legs, writes the `max_duration`
-/// CDR, and — the leak this suite guards — releases its limiter hold. Pre-fix a
+/// CDR, and — the leak this suite guards — releases its limiter hold. A leaking
 /// "call that never hangs" would hold its trunk slot until the process died.
 #[tokio::test(start_paused = true)]
 async fn max_duration_byes_both_legs_and_releases_the_limiter() {
@@ -115,6 +112,7 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1, 60);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -149,7 +147,7 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
         0,
         "limiter hold released at the max-duration teardown"
     );
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -183,6 +181,7 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5075, "trunk-A", 1, 10);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -225,8 +224,7 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     h.advance(Duration::from_secs(33)).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released at the max-duration teardown");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -259,6 +257,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.reaper_enabled = false)
         .start(&h, "b2bua", "127.0.0.1:5081")
         .await;
@@ -296,8 +295,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -323,6 +321,7 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
     let decision = route_limited("127.0.0.1", 5076, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.reaper_enabled = false)
         .start(&h, "b2bua", "127.0.0.1:5086")
         .await;
@@ -385,7 +384,7 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
         0,
         "limiter released after the PRACK-loop cap teardown"
     );
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -408,6 +407,7 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5072, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         // Keepalive far out so the ONLY in-dialog events are our OPTIONS — the
         // count is then exactly 2 per round, deterministic.
         .tune(|c| {
@@ -463,8 +463,7 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     b_bye.respond(200, "OK").await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -498,7 +497,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         ) -> Result<NewCallResponse, CallDecisionError> {
             let mut r = route_to("127.0.0.1", 5073);
             r.callback_context = Some("cap-failover".into());
-            r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
+            r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 1 }];
             r.features.platform.max_duration_sec = 3_600;
             Ok(NewCallResponse::Route(r))
         }
@@ -524,6 +523,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let b2bua = B2buaSut::builder(Arc::new(SilentFailoverEngine))
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.max_messages_per_call = CAP;
             c.reaper_enabled = false;
@@ -568,8 +568,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         reasons_of(&cdrs[0]),
     );
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released on the cap turn itself");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The parked consult's deadline fold lands on a call that no longer exists

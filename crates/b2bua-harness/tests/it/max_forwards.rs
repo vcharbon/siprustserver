@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use b2bua::decision::test_adapter::{reject, route_to};
-use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine, SipHeaderUpdates};
+use b2bua::decision::{HeaderUpdate, NewCallResponse, ScriptedDecisionEngine, SipHeaderUpdates};
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -52,7 +52,7 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |req| {
-                match req.sip_headers.get("Max-Forwards").and_then(|v| v.first()) {
+                match req.sip_header("Max-Forwards") {
                     Some(hops) if hops.trim() == "0" => reject(483, "Too Many Hops"),
                     // A backend that never sees the count could not tell these
                     // apart, so the ROUTE arm is what fails this test.
@@ -75,6 +75,7 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "the refused call is a call that was born and released");
     assert!(cdrs[0].b_legs.is_empty(), "a reject creates no b-leg");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -99,8 +100,8 @@ async fn a_decision_cannot_restate_the_hop_count() {
                 let mut updates = SipHeaderUpdates::new();
                 // A backend trying to refill the budget, and one trying to
                 // withhold the header entirely.
-                updates.insert("Max-Forwards".into(), Some("70".into()));
-                updates.insert("Content-Length".into(), None);
+                updates.insert("Max-Forwards".into(), HeaderUpdate::line("70"));
+                updates.insert("Content-Length".into(), HeaderUpdate::Remove);
                 r.update_headers = Some(updates);
                 NewCallResponse::Route(r)
             })
@@ -132,6 +133,7 @@ async fn a_decision_cannot_restate_the_hop_count() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -164,6 +166,7 @@ async fn a_route_for_a_spent_hop_count_is_refused_483() {
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the refused call");
     assert!(cdrs[0].b_legs.is_empty(), "the leg the decision asked for is never originated");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -202,6 +205,7 @@ async fn a_b_leg_may_leave_with_its_last_hop_spent() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -239,6 +243,7 @@ async fn a_bye_at_zero_hops_still_tears_the_call_down() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -274,6 +279,7 @@ async fn every_relayed_request_states_one_hop_less() {
     assert_eq!(hops(bob_uas.request(), "the relayed re-INVITE"), 69, "the relay spends one hop");
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
+    dialog.ack(None).await;
     bob.receive("ACK").await;
 
     // ── and so does the teardown the caller sends ──
@@ -284,6 +290,7 @@ async fn every_relayed_request_states_one_hop_less() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;

@@ -1,6 +1,6 @@
-//! [`Readiness`] — the b2bua readiness state machine (migration slice S7,
-//! ADR-0011 X6 / ADR-0010 X8). Drives the self-reported OPTIONS health a front
-//! proxy probes (`crates/sip-proxy/src/health/probe.rs`):
+//! [`Readiness`] — the b2bua readiness state machine (ADR-0011 X6 / ADR-0010
+//! X8). Drives the self-reported OPTIONS health a front proxy probes
+//! (`crates/sip-proxy/src/health/probe.rs`):
 //!
 //! - [`ReadinessState::Ready`] → `200 OK`.
 //! - [`ReadinessState::NotReady`] → `503` + `Reason: SIP;cause=503;text="not-ready"`.
@@ -10,8 +10,8 @@
 //! ## Gating
 //! Readiness rides two sticky cluster signals exposed by
 //! [`ReplicationSupervisor`](super::ReplicationSupervisor): `all_bootstrapped`
-//! (every reachable peer re-hydrated, S6) AND `all_current` (every peer's
-//! forward replog caught up, S5). Both true ⇒ the node may serve.
+//! (every reachable peer re-hydrated) AND `all_current` (every peer's forward
+//! replog caught up). Both true ⇒ the node may serve.
 //!
 //! ## Latch + Draining precedence
 //! Once the gate has *ever* opened, [`Readiness::state`] latches `Ready`
@@ -40,11 +40,11 @@ pub enum ReadinessState {
 
 /// The two cluster gates readiness reads. Implemented for
 /// [`ReplicationSupervisor`]; a trivial always-true impl backs
-/// [`Readiness::always_ready`] for the legacy/default path.
+/// [`Readiness::always_ready`] for an unwired node.
 pub trait ReadinessSource: Send + Sync {
-    /// Every reachable peer has finished Bootstrap re-hydration (S6).
+    /// Every reachable peer has finished Bootstrap re-hydration.
     fn all_bootstrapped(&self) -> bool;
-    /// Every peer's forward replog is caught up — sticky `current` (S5).
+    /// Every peer's forward replog is caught up — sticky `current`.
     fn all_current(&self) -> bool;
     /// The membership view behind the two gates is authoritative (the informer's
     /// initial LIST completed). Both gates are `.all()` over the desired peer
@@ -71,7 +71,7 @@ impl ReadinessSource for ReplicationSupervisor {
 }
 
 /// A trivial source that is always bootstrapped + current. Backs the
-/// default/legacy path (no replication wired) so OPTIONS keeps answering 200.
+/// unwired node (no replication wired) so OPTIONS keeps answering 200.
 struct AlwaysReadySource;
 
 impl ReadinessSource for AlwaysReadySource {
@@ -117,7 +117,7 @@ impl Readiness {
         }
     }
 
-    /// Default/legacy readiness: always `Ready` (until drained). Keeps the
+    /// An unwired node's readiness: always `Ready` (until drained). Keeps the
     /// always-200 OPTIONS contract for nodes with no replication wired.
     pub fn always_ready() -> Self {
         Self::new(Arc::new(AlwaysReadySource))

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use load_shed::{at_ms, Ewma, TokenBucket};
+
 use super::band::{compute_band, EluBand};
 use super::config::LoadObserverConfig;
 use super::payload::OverloadPayload;
@@ -29,9 +31,8 @@ pub enum AimdAction {
     StaleDecrease,
 }
 
-/// Full per-worker snapshot — the diagnostics view of one AIMD bucket. Only
-/// tests consume it today; the per-worker Prometheus surface is a deferred
-/// slice (`ProxyMetrics` is registry-aggregate).
+/// One AIMD bucket's state, as the tests read it.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AimdSnapshot {
     pub worker_id: String,
@@ -49,14 +50,15 @@ pub struct AimdSnapshot {
     pub payload_missing_count: u64,
 }
 
-/// Per-`(LB, worker)` AIMD bucket. One per worker the LB has observed a payload
-/// from (or that a `try_consume`/`sweep` first touched). All time fields are
+/// Per-`(LB, worker)` AIMD bucket. One per worker an OPTIONS reply came from,
+/// with a payload ([`apply_payload`](WorkerLoadObserver::apply_payload)) or
+/// without one ([`note_payload_missing`](WorkerLoadObserver::note_payload_missing)). All time fields are
 /// epoch-ms, fed in via `now_ms` — never read from the wall clock here.
 #[derive(Debug, Clone)]
 struct WorkerState {
-    cap: f64,
-    tokens: f64,
-    last_refill_at_ms: i64,
+    /// The admit gate. Its capacity is the AIMD cap, which is also its refill
+    /// rate per second; [`WorkerState::set_cap`] is the one write.
+    bucket: TokenBucket,
     cooldown_until_ms: i64,
     last_action: AimdAction,
 
@@ -69,7 +71,9 @@ struct WorkerState {
     worker_treated_rate_cps: f64,
 
     own_admitted_since_last_tick: u64,
-    own_admitted_rate_cps: f64,
+    /// This LB's own admit rate to the worker, smoothed so a single quiet tick
+    /// does not crash it to 0 (α = 0.3 on the new sample).
+    own_admitted_rate_cps: Ewma,
     last_own_rate_tick_at_ms: i64,
 
     last_payload_at_ms: i64,
@@ -79,9 +83,11 @@ struct WorkerState {
 impl WorkerState {
     fn fresh(config: &LoadObserverConfig, now_ms: i64) -> Self {
         Self {
-            cap: config.cap_initial_cps,
-            tokens: config.cap_initial_cps,
-            last_refill_at_ms: now_ms,
+            bucket: TokenBucket::full(
+                config.cap_initial_cps,
+                config.cap_initial_cps,
+                at_ms(now_ms),
+            ),
             cooldown_until_ms: 0,
             last_action: AimdAction::Init,
             elu: 0.0,
@@ -91,15 +97,27 @@ impl WorkerState {
             last_adm_at_ms: now_ms,
             worker_treated_rate_cps: 0.0,
             own_admitted_since_last_tick: 0,
-            own_admitted_rate_cps: 0.0,
+            own_admitted_rate_cps: Ewma::starting_at(0.3, 0.0),
             last_own_rate_tick_at_ms: now_ms,
             last_payload_at_ms: now_ms,
             payload_missing_count: 0,
         }
     }
+
+    /// The AIMD cap (cps).
+    fn cap(&self) -> f64 {
+        self.bucket.capacity()
+    }
+
+    /// Set the AIMD cap at `now_ms`: the bucket's capacity and refill rate.
+    /// Time before `now_ms` is credited at the old cap; the level is clamped
+    /// to the new one.
+    fn set_cap(&mut self, cap: f64, now_ms: i64) {
+        self.bucket.set_rate(cap, cap, at_ms(now_ms));
+    }
 }
 
-/// Tracks one AIMD [`WorkerState`] per worker. Interior mutability via `Mutex` —
+/// Tracks one AIMD `WorkerState` per worker. Interior mutability via `Mutex` —
 /// the background OPTIONS path writes (`apply_payload`/`sweep_stale`) and the LB
 /// select path reads + consumes (`band_for`/`try_consume_for`), all CPU-only.
 pub struct WorkerLoadObserver {
@@ -116,27 +134,14 @@ impl WorkerLoadObserver {
         Self { config, cooldown_ms, workers: Mutex::new(HashMap::new()) }
     }
 
-    /// Lazy refill: accrue `cap` tokens/sec for the elapsed time since the last
-    /// refill, capped at `cap`. A no-op when no time has passed, so reading the
-    /// snapshot or consuming repeatedly at the same `now_ms` doesn't over-fill.
-    fn refill_bucket(state: &mut WorkerState, now_ms: i64) {
-        let dt_sec = (now_ms - state.last_refill_at_ms) as f64 / 1000.0;
-        if dt_sec <= 0.0 {
-            return;
-        }
-        state.tokens = state.cap.min(state.tokens + state.cap * dt_sec);
-        state.last_refill_at_ms = now_ms;
-    }
-
-    /// EWMA-smooth this LB's own admit rate to the worker so a single quiet tick
-    /// doesn't crash the rate to 0 (α = 0.3 on the new sample).
+    /// Fold this LB's admits since the last tick into its smoothed own rate.
     fn update_own_rate(state: &mut WorkerState, now_ms: i64) {
         let dt_sec = (now_ms - state.last_own_rate_tick_at_ms) as f64 / 1000.0;
         if dt_sec <= 0.0 {
             return;
         }
         let observed = state.own_admitted_since_last_tick as f64 / dt_sec;
-        state.own_admitted_rate_cps = 0.7 * state.own_admitted_rate_cps + 0.3 * observed;
+        state.own_admitted_rate_cps.observe(observed);
         state.own_admitted_since_last_tick = 0;
         state.last_own_rate_tick_at_ms = now_ms;
     }
@@ -153,12 +158,12 @@ impl WorkerLoadObserver {
 
         match new_band {
             EluBand::AboveCritical => {
-                state.cap = c.cap_floor_cps;
+                state.set_cap(c.cap_floor_cps, now_ms);
                 state.cooldown_until_ms = now_ms + self.cooldown_ms;
                 state.last_action = AimdAction::DecreaseCritical;
             }
             EluBand::HardToCritical => {
-                state.cap = c.cap_floor_cps.max(state.cap * c.aimd_decrease_factor);
+                state.set_cap(c.cap_floor_cps.max(state.cap() * c.aimd_decrease_factor), now_ms);
                 state.cooldown_until_ms = now_ms + self.cooldown_ms;
                 state.last_action = AimdAction::Decrease;
             }
@@ -170,7 +175,8 @@ impl WorkerLoadObserver {
                 if now_ms < state.cooldown_until_ms {
                     state.last_action = AimdAction::Cooldown;
                 } else {
-                    state.cap = c.cap_ceiling_cps.min(state.cap + c.aimd_increase_step_cps);
+                    let cap = c.cap_ceiling_cps.min(state.cap() + c.aimd_increase_step_cps);
+                    state.set_cap(cap, now_ms);
                     state.last_action = AimdAction::Increase;
                 }
             }
@@ -188,7 +194,7 @@ impl WorkerLoadObserver {
                 from = ?previous,
                 to = ?new_band,
                 elu,
-                cap_cps = state.cap,
+                cap_cps = state.cap(),
                 "worker load band change"
             );
         }
@@ -249,55 +255,18 @@ impl WorkerLoadObserver {
         }
     }
 
-    /// Attempt to consume one token from the worker's bucket. `true` ⇒ admitted
-    /// (token spent); `false` ⇒ the bucket is empty. An **unknown worker is
-    /// admitted** (we don't gate workers we've never observed a payload from —
-    /// bootstrap-friendly).
-    pub fn try_consume_for(&self, worker_id: &str, now_ms: i64) -> bool {
+    /// Take one token from the worker's bucket. `Err` carries the seconds
+    /// until a token, read from the same refill as the failed take: at least
+    /// 1, [`ZERO_RATE_WAIT_SEC`](load_shed::ZERO_RATE_WAIT_SEC) at a zero rate.
+    /// A worker no payload has arrived from has no bucket and is admitted.
+    /// The strategy answers an empty bucket and counts it
+    /// (`SelectError::RateCapExhausted`).
+    pub fn try_consume_for(&self, worker_id: &str, now_ms: i64) -> Result<(), u32> {
         let mut workers = self.workers.lock().unwrap();
-        let Some(state) = workers.get_mut(worker_id) else {
-            return true; // bootstrap-friendly
-        };
-        Self::refill_bucket(state, now_ms);
-        if state.tokens >= 1.0 {
-            state.tokens -= 1.0;
-            true
-        } else {
-            // Bucket empty — the actual 503 (+ Retry-After) is synthesized at the
-            // strategy boundary as `SelectError::RateCapExhausted`; this only
-            // reports the consume outcome. The aggregate
-            // `sip_proxy_overload_rejections_total{reason="bucket_empty"}` IS
-            // counted there (load_balancer.rs); a per-worker-labelled rejection
-            // counter awaits a per-worker Prometheus surface (`ProxyMetrics` is
-            // registry-aggregate today).
-            false
+        match workers.get_mut(worker_id) {
+            Some(state) => state.bucket.try_take(at_ms(now_ms)),
+            None => Ok(()),
         }
-    }
-
-    /// Seconds until ≥ 1 token will be available for this worker (`0` if available
-    /// now, or for an unknown worker). With an empty bucket and a non-positive cap
-    /// (the floor is `>= 1` by config, so this is defensive) returns `60` as a
-    /// fallback.
-    ///
-    /// This is a *real* per-bucket Retry-After derived from the worker's own
-    /// cap/fill rate — the strongest signal the LB can give the UAC (a near-full
-    /// bucket retries in ~1 s; a floored one waits longer), rather than a
-    /// hard-coded constant. `select_for_new_dialog` feeds this into
-    /// `SelectError::RateCapExhausted` (clamped to `>= 1`, so the wire value is
-    /// never a no-op `Retry-After: 0`).
-    pub fn retry_after_sec_for(&self, worker_id: &str, now_ms: i64) -> u32 {
-        let mut workers = self.workers.lock().unwrap();
-        let Some(state) = workers.get_mut(worker_id) else {
-            return 0;
-        };
-        Self::refill_bucket(state, now_ms);
-        if state.tokens >= 1.0 {
-            return 0;
-        }
-        if state.cap <= 0.0 {
-            return 60;
-        }
-        ((1.0 - state.tokens) / state.cap).ceil() as u32
     }
 
     /// The worker's current band, or `None` if no payload has ever arrived.
@@ -313,9 +282,8 @@ impl WorkerLoadObserver {
     /// Returns the number of workers floored this sweep, so the caller can feed a
     /// coarse `stale_decrease` aggregate counter — the observer itself stays pure
     /// (no `ProxyMetrics` dependency, no clock), mirroring how the per-worker
-    /// `bucket_empty` rejection is counted at the strategy boundary, not here. The
-    /// per-worker `worker_id`-labelled push is a deferred slice; the per-worker
-    /// smoking gun is preserved meanwhile in the snapshot's
+    /// `bucket_empty` rejection is counted at the strategy boundary, not here.
+    /// The per-worker smoking gun is the snapshot's
     /// `last_action = StaleDecrease` + `payload_missing_count`.
     pub fn sweep_stale(&self, now_ms: i64) -> u64 {
         let c = &self.config;
@@ -326,7 +294,7 @@ impl WorkerLoadObserver {
             if age <= c.payload_stale_ms {
                 continue;
             }
-            state.cap = c.cap_floor_cps.max(state.cap * c.aimd_decrease_factor);
+            state.set_cap(c.cap_floor_cps.max(state.cap() * c.aimd_decrease_factor), now_ms);
             state.cooldown_until_ms = now_ms + self.cooldown_ms;
             state.last_action = AimdAction::StaleDecrease;
             state.payload_missing_count += 1;
@@ -335,27 +303,28 @@ impl WorkerLoadObserver {
         floored
     }
 
-    /// Full per-worker snapshot (diagnostics, tests). Reading the snapshot also
-    /// lazily refills each bucket so the `tokens` field isn't stale (the same
-    /// refill the next consume would do).
+    /// Every bucket's state. Reading it refills each bucket, as the next
+    /// consume would, so `tokens` is current.
+    #[cfg(test)]
     pub fn snapshot(&self, now_ms: i64) -> Vec<AimdSnapshot> {
         let mut workers = self.workers.lock().unwrap();
         let mut out = Vec::with_capacity(workers.len());
         for (worker_id, state) in workers.iter_mut() {
-            Self::refill_bucket(state, now_ms);
+            let tokens = state.bucket.level(at_ms(now_ms));
+            let own_admitted_rate_cps = state.own_admitted_rate_cps.get();
             let total = state.worker_treated_rate_cps;
-            let share = if total > 0.0 { state.own_admitted_rate_cps / total } else { 0.0 };
+            let share = if total > 0.0 { own_admitted_rate_cps / total } else { 0.0 };
             out.push(AimdSnapshot {
                 worker_id: worker_id.clone(),
                 elu: state.elu,
                 gc: state.gc,
                 band: state.band,
-                cap_cps: state.cap,
-                tokens: state.tokens,
+                cap_cps: state.cap(),
+                tokens,
                 cooldown_ms_remaining: (state.cooldown_until_ms - now_ms).max(0),
                 last_action: state.last_action,
                 worker_treated_rate_cps: total,
-                own_admitted_rate_cps: state.own_admitted_rate_cps,
+                own_admitted_rate_cps,
                 share,
                 payload_age_ms: now_ms - state.last_payload_at_ms,
                 payload_missing_count: state.payload_missing_count,

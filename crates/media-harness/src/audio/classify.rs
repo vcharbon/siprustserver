@@ -32,7 +32,7 @@ pub struct MediaVerdict {
     pub margin: f64,
     /// Distance to every reference, for reporting.
     pub distances: BTreeMap<ClipName, f64>,
-    /// RMS in [0,1] full-scale, for the silence diagnosis.
+    /// RMS in \[0,1\] full-scale, for the silence diagnosis.
     pub rms: f64,
 }
 

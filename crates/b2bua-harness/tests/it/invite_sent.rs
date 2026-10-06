@@ -2,31 +2,22 @@
 //! the leg's INVITE is emitted and stamped with the decision it is dialed
 //! under — the first route's leg, a failover's replacement leg and a
 //! service's media leg alike — and none for a leg refused before its INVITE
-//! is minted. The SUT is spawned bare so a probe [`CdrWriter`] hands the test
-//! the terminated `Call` with its legs' kinds.
+//! is minted. The SUT keeps every terminated `Call` whole, so the test reads
+//! its legs' kinds.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, CallTreatment, NewCallResponse, ScriptedDecisionEngine,
-};
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold, NoopLimiter};
-use b2bua::metrics::B2buaMetrics;
+use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::{CallLimiter, LimiterEntry};
 use b2bua::rules::ServiceDef;
-use b2bua::store::InMemoryCallStore;
-use b2bua::{B2buaCore, B2buaDeps};
-use b2bua_harness::settle_until;
+use b2bua_harness::limiter::doubles::{fail_open, refuse_on};
+use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CdrEventType, LegKind};
 use scenario_harness::Harness;
-use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_txn::IdGen;
-
-use crate::common::probe_cdr::{ProbeCdr, TerminatedCalls};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -38,19 +29,18 @@ const BOB: &str = "127.0.0.1:5071";
 const MRF: &str = "127.0.0.1:5072";
 const B2BUA: &str = "127.0.0.1:5080";
 
-/// A bare SUT under `decision`, `limiter` and `services`, every target
-/// admitted, writing through the probe.
+/// The SUT under `decision`, its own `limiter` if any, and `services`, every
+/// target admitted, keeping every terminated `Call` whole.
 struct Sut {
     addr: SocketAddr,
-    core: B2buaCore,
-    terminated: TerminatedCalls,
+    b2bua: B2buaSut,
 }
 
 impl Sut {
     async fn spawn(
         h: &Harness,
         decision: Arc<dyn CallDecisionEngine>,
-        limiter: Arc<dyn CallLimiter>,
+        limiter: Option<Arc<dyn CallLimiter>>,
         services: Vec<ServiceDef>,
     ) -> Self {
         Self::spawn_tuned(h, decision, limiter, services, |_| {}).await
@@ -59,62 +49,33 @@ impl Sut {
     async fn spawn_tuned(
         h: &Harness,
         decision: Arc<dyn CallDecisionEngine>,
-        limiter: Arc<dyn CallLimiter>,
+        limiter: Option<Arc<dyn CallLimiter>>,
         services: Vec<ServiceDef>,
-        tune: impl FnOnce(&mut B2buaConfig),
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
     ) -> Self {
-        let (endpoint, addr) = h
-            .bind_sut_with_roles(
-                "b2bua",
-                B2BUA,
-                std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-            )
-            .await;
-        let terminated = TerminatedCalls::default();
-        let mut config = B2buaConfig {
-            self_ordinal: "w0".into(),
-            sip_local_ip: addr.ip().to_string(),
-            sip_local_port: addr.port(),
-            worker_allowed_target_suffixes: vec!["*".into()],
-            keepalive_interval_sec: 30,
-            keepalive_timeout_sec: 5,
-            overload_panic_elu_threshold: 1.1,
-            cdr: CdrConfig { message_ring: 32, captured_headers: Vec::new() },
-            ..Default::default()
-        };
-        tune(&mut config);
-        let deps = B2buaDeps {
-            config,
-            decision,
-            limiter,
-            cdr: Arc::new(ProbeCdr::new(terminated.clone())),
-            store: Arc::new(InMemoryCallStore::new()),
-            store_faults: Default::default(),
-            wire_faults: Default::default(),
-            clock: Clock::test_at(0),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            replication: None,
-            metrics: B2buaMetrics::new(),
-            adaptation_http: None,
-            compose: b2bua::rules::ComposeOptions::default(),
-        };
-        let core = B2buaCore::spawn_with_services(endpoint, deps, services);
-        Self { addr, core, terminated }
+        let mut builder =
+            B2buaSut::builder(decision).services(services).keep_terminated_calls().tune(|c| {
+                c.worker_allowed_target_suffixes = vec!["*".into()];
+                c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+                tune(c);
+            });
+        if let Some(limiter) = limiter {
+            builder = builder.limiter(limiter);
+        }
+        let b2bua = builder.start(h, "b2bua", B2BUA).await;
+        Self { addr: b2bua.addr, b2bua }
     }
 
-    /// Every call created is reaped and the one CDR is written; the record
-    /// carries the events as the call holds them.
+    /// Every call created is reaped, every limiter hold released, and the
+    /// one CDR is written; the record carries the events as the call holds
+    /// them.
     async fn assert_reaped(&self) -> Call {
-        settle_until(|| self.terminated.snapshot().len() == 1).await;
-        settle_until(|| self.core.active_calls() == 0).await;
-        assert_eq!(self.core.active_calls(), 0, "the call is removed");
-        assert_eq!(self.core.lock_count(), 0, "no stranded per-call lock");
-        let m = self.core.metrics();
-        assert_eq!(m.creations_total(), m.removals_total(), "every call created is removed");
-        let terminated = self.terminated.snapshot();
+        settle_until(|| self.b2bua.is_reaped() && self.b2bua.cdr_records().len() == 1).await;
+        self.b2bua.assert_fully_reaped();
+        let terminated = self.b2bua.terminated_calls();
         assert_eq!(terminated.len(), 1, "exactly one CDR per call");
         let call = terminated.into_iter().next().unwrap();
-        let records = self.core.cdr().read_all().await;
+        let records = self.b2bua.cdr_records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].events, call.cdr_events);
         call
@@ -142,7 +103,7 @@ async fn a_plain_call_holds_exactly_one_invite_sent() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071));
-    let sut = Sut::spawn(&h, decision, Arc::new(NoopLimiter), Vec::new()).await;
+    let sut = Sut::spawn(&h, decision, None, Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -187,7 +148,7 @@ async fn a_failover_call_holds_one_invite_sent_per_leg() {
             .on_failure(|_| CallTreatment::Route(route_to("127.0.0.1", 5071)))
             .build(),
     );
-    let sut = Sut::spawn(&h, decision, Arc::new(NoopLimiter), Vec::new()).await;
+    let sut = Sut::spawn(&h, decision, None, Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     carol.receive("INVITE").await.respond(486, "Busy Here").await;
@@ -253,13 +214,7 @@ async fn a_media_leg_holds_its_invite_sent() {
     let alice = h.agent("alice", ALICE).await;
     let mrf = h.agent("mrf", MRF).await;
     let bob = h.agent("bob", BOB).await;
-    let sut = Sut::spawn(
-        &h,
-        announcement_decision(),
-        Arc::new(NoopLimiter),
-        vec![announcement::service()],
-    )
-    .await;
+    let sut = Sut::spawn(&h, announcement_decision(), None, vec![announcement::service()]).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut mrf_uas = mrf.receive("INVITE").await;
@@ -294,24 +249,6 @@ async fn a_media_leg_holds_its_invite_sent() {
     let _report = h.finish().await;
 }
 
-/// A limiter that refuses every admission naming `refused` and admits the
-/// rest without holds.
-struct RefusingLimiter(&'static str);
-
-#[async_trait]
-impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
-        match entries.iter().find(|e| e.id == self.0) {
-            Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
-            None => AdmitOutcome::Unavailable,
-        }
-    }
-    async fn release(&self, _holds: &[LimiterHold]) {}
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        holds.to_vec()
-    }
-}
-
 /// A route the limiter refuses dials nothing and leaves no `InviteSent`; the
 /// failover route the refusal raises dials the one leg, recorded once.
 #[tokio::test(start_paused = true)]
@@ -324,7 +261,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx".into());
-                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 NewCallResponse::Route(r)
             })
             .on_failure(|req| {
@@ -333,7 +270,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
             })
             .build(),
     );
-    let sut = Sut::spawn(&h, decision, Arc::new(RefusingLimiter("cap")), Vec::new()).await;
+    let sut = Sut::spawn(&h, decision, Some(refuse_on("cap", fail_open())), Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -352,7 +289,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
     let _report = h.finish().await;
 }
 
-/// A leg the target admission refuses in the executor is never minted: the
+/// A leg the destination allow-list refuses in the executor is never minted: the
 /// call ends on the `Reject` the refusal writes and holds no `InviteSent`.
 #[tokio::test(start_paused = true)]
 async fn an_admission_refused_leg_holds_no_invite_sent() {
@@ -379,11 +316,10 @@ async fn an_admission_refused_leg_holds_no_invite_sent() {
             .build(),
     );
     // Only the production suffix is admitted: `mrf.example` is refused.
-    let sut =
-        Sut::spawn_tuned(&h, decision, Arc::new(NoopLimiter), vec![announcement::service()], |c| {
-            c.worker_allowed_target_suffixes = vec![".svc.cluster.local".into()]
-        })
-        .await;
+    let sut = Sut::spawn_tuned(&h, decision, None, vec![announcement::service()], |c| {
+        c.worker_allowed_target_suffixes = vec![".svc.cluster.local".into()]
+    })
+    .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     call.expect(503).await;

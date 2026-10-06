@@ -96,7 +96,7 @@ fn intake_rate(traces: &ProxyTraces, raw: &[u8]) -> Option<f64> {
 mod tests {
     use super::*;
 
-    use observe::{RateDraw, SampleAdmission, TokenBucket};
+    use observe::{activation_bucket, RateDraw, SampleAdmission};
 
     fn traces(honors_header: bool) -> ProxyTraces {
         gate(true, honors_header)
@@ -104,13 +104,7 @@ mod tests {
 
     fn gate(exporter: bool, honors_header: bool) -> ProxyTraces {
         ProxyTraces::new(
-            SampleAdmission::new(
-                exporter,
-                1.0,
-                10,
-                RateDraw::seeded(2),
-                TokenBucket::default_at(0),
-            ),
+            SampleAdmission::new(exporter, 1.0, 10, RateDraw::seeded(2), activation_bucket(0)),
             honors_header,
         )
     }

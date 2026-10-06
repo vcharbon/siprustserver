@@ -37,10 +37,10 @@
     },
     {
       "id": 3, "type": "stat", "title": "Dispatch drops / sec",
-      "description": "Sum of per-call queue-full drops + global call-cap drops (`b2bua_dispatch_queue_drops_total` + `b2bua_dispatch_cap_drops_total`). Non-zero means the worker is shedding load.",
+      "description": "Sum of per-call queue-full drops + global call-cap drops (`b2bua_dispatch_queue_drops_total` + `b2bua_dispatch_cap_drops_total`) + new INVITEs shed at the cap (`b2bua_new_calls_total{reason=\"cap_shed\"}`). Non-zero means the worker is shedding load.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum(rate(b2bua_dispatch_queue_drops_total{pod=~\"$pod\"}[1m])) + sum(rate(b2bua_dispatch_cap_drops_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "targets": [{ "expr": "sum(rate(b2bua_dispatch_queue_drops_total{pod=~\"$pod\"}[1m])) + sum(rate(b2bua_dispatch_cap_drops_total{pod=~\"$pod\"}[1m])) + sum(rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"cap_shed\",pod=~\"$pod\"}[1m]))", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 1 }] } } }
     },
     {
@@ -71,26 +71,30 @@
     },
     {
       "id": 7, "type": "timeseries", "title": "Dispatch backpressure / sec",
-      "description": "queue_drops (per-call FIFO full) · cap_drops (global call cap) · saturation (global handler-concurrency hits).",
+      "description": "queue_drops (per-call FIFO full) · cap_drops (global call cap) · cap_shed (new INVITEs refused at the cap) · saturation (handler bodies that waited for a permit of the shared pool) · share_waits (new-call handler bodies that waited for a permit of the new-call share).",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum by (pod) (rate(b2bua_dispatch_queue_drops_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "queue_drops {{pod}}" },
         { "expr": "sum by (pod) (rate(b2bua_dispatch_cap_drops_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "cap_drops {{pod}}" },
-        { "expr": "sum by (pod) (rate(b2bua_dispatch_saturation_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "saturation {{pod}}" }
+        { "expr": "sum by (pod) (rate(b2bua_new_calls_total{outcome=\"rejected\",reason=\"cap_shed\",pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "cap_shed {{pod}}" },
+        { "expr": "sum by (pod) (rate(b2bua_dispatch_saturation_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "saturation {{pod}}" },
+        { "expr": "sum by (pod) (rate(b2bua_dispatch_new_call_share_waits_total{pod=~\"$pod\"}[1m]))", "refId": "E", "legendFormat": "share_waits {{pod}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
       "id": 8, "type": "timeseries", "title": "Handler faults / sec",
-      "description": "handler_timeouts · force_purge (loop-guard purges) · fast_reject_terminating (requests rejected on a terminating call) · unroutable_dropped (no route resolved).",
+      "description": "handler_timeouts · force_purge (loop-guard purges) · fast_reject_terminating (requests rejected on a terminating call) · unroutable: messages and events that resolved to no call — dropped (an ACK or a response, by kind), refused (a request answered 481/405, by method), internal (a released transaction's timeout, no wire message).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum(rate(b2bua_handler_timeouts_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "handler_timeouts" },
         { "expr": "sum(rate(b2bua_force_purge_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "force_purge" },
         { "expr": "sum(rate(b2bua_fast_reject_terminating_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "fast_reject_terminating" },
-        { "expr": "sum(rate(b2bua_unroutable_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "unroutable_dropped" }
+        { "expr": "sum by (kind) (rate(b2bua_unroutable_dropped_total{pod=~\"$pod\"}[1m])) > 0", "refId": "D", "legendFormat": "unroutable_dropped {{kind}}" },
+        { "expr": "sum by (method, code) (rate(b2bua_unroutable_refused_total{pod=~\"$pod\"}[1m])) > 0", "refId": "E", "legendFormat": "unroutable_refused {{method}} {{code}}" },
+        { "expr": "sum by (event, method) (rate(b2bua_unroutable_internal_total{pod=~\"$pod\"}[1m])) > 0", "refId": "F", "legendFormat": "unroutable_internal {{event}} {{method}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
@@ -124,7 +128,7 @@
       "description": "`b2bua_requests_total{method}` — every inbound SIP request the worker processes, by method. Call setups are the INVITE line here; `b2bua_call_creations_total` (top row) is the authoritative per-call rate.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (method) (rate(b2bua_requests_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{method}}" }],
+      "targets": [{ "expr": "sum by (method) (rate(b2bua_requests_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}}" }],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     },
@@ -133,7 +137,7 @@
       "description": "`b2bua_responses_total{method,code}` — every inbound SIP response the worker handles, keyed by CSeq method + status code (INVITE 200, BYE 200, OPTIONS 200, INVITE 4xx/5xx, …). A rising 5xx share flags upstream trouble.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (method, code) (rate(b2bua_responses_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
+      "targets": [{ "expr": "sum by (method, code) (rate(b2bua_responses_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
       "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     },
@@ -177,7 +181,7 @@
     },
     {
       "id": 34, "type": "timeseries", "title": "Replication cumulative (forward progress)",
-      "description": "Monotonic replication ops applied per pod+stream+op (`b2bua_repl_applied_total{flow,op}`). A worker reboot's bulk reclaim shows as a sharp STEP in recovery/create for that pod (the bump the old aggregate `pull_applied` hid). backup/create = steady forward replication; */delete = teardown propagation.",
+      "description": "Monotonic replication ops applied per pod+stream+op (`b2bua_repl_applied_total{flow,op}`). A worker reboot's bulk reclaim shows as a sharp STEP in recovery/create for that pod (a bump an aggregate counter would hide). backup/create = steady forward replication; */delete = teardown propagation.",
       "gridPos": { "h": 8, "w": 18, "x": 6, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [

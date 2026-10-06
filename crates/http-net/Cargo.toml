@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Reusable unary HTTP transport seam (request/response, no streaming). Mirror of repl-net's transport: a SimulatedHttpNetwork in-memory fabric (dst-keyed pause/cutoff/error faults + transit delay) for paused-clock tests, a RecordingHttpNetwork decorator, and a feature-gated RealHttpNetwork (hyper + pooled reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
+description = "Reusable unary HTTP transport seam (request/response, no streaming). Mirror of repl-net's transport: a SimulatedHttpNetwork in-memory fabric (dst-keyed pause/cutoff/error faults + transit delay) for paused-clock tests, a RecordingHttpNetwork decorator onto the layer-harness Recorder, and a feature-gated RealHttpNetwork (hyper + pooled reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
 [lints]
 workspace = true
@@ -21,11 +21,18 @@ real = [
 ]
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-# Recording timestamps come from the injected wall-clock seam.
-sip-clock = { path = "../sip-clock" }
+# The recording decorator records onto the test harness's `Recorder`.
+layer-harness = { path = "../layer-harness" }
+# The scripted service (`scripted`): programs are serde documents, request
+# bodies are validated as JSON before fragment matching, and the continuation
+# token is base64url on the wire.
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
 
 # --- real transport only (feature "real") ---
 # Pooled, keep-alive HTTP client (the b2bua makes many small calls). No TLS —
@@ -40,4 +47,6 @@ bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# `cargo test -p http-net` exercises the real transport too.
+http-net = { path = ".", features = ["real"] }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }

@@ -73,7 +73,7 @@ will likely be extracted at the `call` layer, as [source ADR-0002] anticipates):
 
 **Out of scope for "basic B2B"** (note the hooks, don't build): `CallLimiter`
 (separate `limiter` layer; source ADR-0004), `OverloadController`/two-tier drain
-(source ADR-0008; but the transport **preIngress tier-1 brake** is in `sip-net`),
+(source ADR-0008; but the transport **preIngress ingress brake** is in `sip-net`),
 the HTTP `CallDecisionEngine`/`callControl` (stub with a static route),
 `SERVICE_LAYER` callflow rules and REFER transfer (source `TransferRules` +
 callflow services).
@@ -184,7 +184,7 @@ feature) so ported timer scenarios observe intermediate values identically.
   `queueMax`, `counters { enqueued, tailDropped, preIngressDropped,
   preIngressReplies }`.
 - `BindUdpOpts { ip, port, queueMax, preIngress?, reusePort?, roles?, raw? }`.
-- **preIngress tier-1 brake:** `PreIngressHook(raw, rinfo, depth) ->
+- **preIngress ingress brake:** `PreIngressHook(raw, rinfo, depth) ->
   accept | drop | reply(buf)` — stateless 503-with-jittered-Retry-After on new
   non-emergency INVITEs above `udpQueueTier1ThresholdPct`. (Overload *controller*
   is out of scope; this transport-level gate is in.)

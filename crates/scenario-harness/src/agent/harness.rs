@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,6 +32,8 @@ use crate::run::RunReport;
 /// RFC-legitimate silence a compliant SUT produces while still owing traffic:
 /// the §13.3.1.4 retransmit ladder's T2 plateau (4 s between rungs).
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// The inbound queue bound of a SUT's bind.
+const SUT_QUEUE_MAX: usize = 256;
 
 /// Monotonic id source for branches / tags / Call-IDs. Deterministic (no RNG),
 /// so report bytes are stable across runs. `pub(crate)` so the Send
@@ -89,6 +93,9 @@ pub struct Harness {
     /// [`tag_anchor`](Harness::tag_anchor), surfaced on the [`RunReport`] for
     /// the E2E check engine (ADR-0019).
     anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>>,
+    /// Futures [`finish`](Harness::finish) awaits before it settles the fabric
+    /// (see [`settle_before_finish`](Harness::settle_before_finish)).
+    finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
 }
 
 impl Harness {
@@ -207,6 +214,7 @@ impl Harness {
             waivers,
             recv_timeout,
             anchors,
+            finish_settles: RefCell::new(Vec::new()),
         }
     }
 
@@ -296,6 +304,25 @@ impl Harness {
     /// `offending` field carries.
     pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
         sip_net::audit_wire_entries(&self.recording.channel().snapshot())
+    }
+
+    /// Register a future that [`finish`](Self::finish) and
+    /// [`finish_collecting`](Self::finish_collecting) await, in registration
+    /// order, before they settle the fabric: how a fixture waits out work that
+    /// trails the scenario's last message (a SUT's post-call round trip to a
+    /// side service) so a check it runs after the run reads a settled state.
+    /// The future must complete on its own within a bounded time.
+    pub fn settle_before_finish(&self, settle: impl Future<Output = ()> + 'static) {
+        self.finish_settles.borrow_mut().push(Box::pin(settle));
+    }
+
+    /// Await the registered [`settle_before_finish`](Self::settle_before_finish)
+    /// futures.
+    async fn run_finish_settles(&self) {
+        let settles = std::mem::take(&mut *self.finish_settles.borrow_mut());
+        for settle in settles {
+            settle.await;
+        }
     }
 
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
@@ -466,26 +493,42 @@ impl Harness {
         addr: &str,
         roles: HashSet<sip_net::UaRole>,
     ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+        self.bind_sut_with_opts(name, addr, roles, None).await
+    }
+
+    /// [`bind_sut_with_roles`](Self::bind_sut_with_roles) with the SUT's own
+    /// arrival-time [`sip_net::PreIngressHook`], run on every datagram with the
+    /// bind's live queue depth before it is queued (a SUT's ingress brake).
+    pub async fn bind_sut_with_opts(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        roles: HashSet<sip_net::UaRole>,
+        pre_ingress: Option<sip_net::PreIngressHook>,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name, NetworkTag::Core);
-        let ep = self
-            .network
-            .bind_udp(BindUdpOpts::new(addr, 256).with_roles(roles))
-            .await
-            .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        let mut opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
+        if let Some(hook) = pre_ingress {
+            opts = opts.with_pre_ingress(hook);
+        }
+        let ep =
+            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)
     }
 
     /// Advance virtual time by `d` (requires a paused runtime —
-    /// `#[tokio::test(start_paused = true)]`). Advances in 100 ms chunks so
-    /// in-flight delivery tasks observe intermediate instants. Because the
-    /// report's `at_ms` rides the same tokio clock (via `sip-clock`), the
-    /// elapsed time shows up in the rendered timestamps. Call it *between*
-    /// protocol events (after the message just sent has been `expect`ed) so
-    /// each message keeps a clean send/receive timestamp.
+    /// `#[tokio::test(start_paused = true)]`), running the work in flight at
+    /// every instant a timer falls due inside the span
+    /// ([`sip_clock::testkit::advance_settled`]): a datagram lands and a
+    /// detached request is answered at its wire instant. Because the report's
+    /// `at_ms` rides the same tokio clock (via `sip-clock`), the elapsed time
+    /// shows up in the rendered timestamps. Call it *between* protocol events
+    /// (after the message just sent has been `expect`ed) so each message keeps
+    /// a clean send/receive timestamp.
     pub async fn advance(&self, d: Duration) {
-        sip_clock::testkit::advance_in_100ms_chunks(d).await;
+        sip_clock::testkit::advance_settled(d).await;
     }
 
     /// Drain the fabric before the trace snapshot: wait out in-flight
@@ -504,6 +547,12 @@ impl Harness {
         // The reads above may themselves send (an auto-answered keepalive) —
         // one more drain so the snapshot closes on a quiet wire.
         self.network.await_in_flight(Duration::from_millis(200)).await;
+    }
+
+    /// The run's recorder, so a scene records other channels (an HTTP
+    /// service's exchanges) on the same sequence and clock as the SIP trace.
+    pub fn recorder(&self) -> Recorder {
+        self.recorder.clone()
     }
 
     /// The recording decorator handle — lets a caller read the raw signaling
@@ -557,6 +606,7 @@ impl Harness {
         self.dump.disarm();
         self.log_dump.disarm();
         self.cseq_gate.disarm();
+        self.run_finish_settles().await;
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
@@ -628,6 +678,7 @@ impl Harness {
         self.log_dump.disarm();
         self.artifact_dump.disarm();
         self.cseq_gate.disarm();
+        self.run_finish_settles().await;
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,

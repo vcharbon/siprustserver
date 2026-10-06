@@ -391,7 +391,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (class)(rate(loadgen_calls_total[1m]))",
+          "expr": "sum by (class)(rate(loadgen_calls_total[1m])) > 0",
           "refId": "A",
           "legendFormat": "{{class}}"
         }
@@ -659,7 +659,7 @@
           "legendFormat": "inflight"
         },
         {
-          "expr": "sum by (reason,method)(loadgen_mux_orphan_total)",
+          "expr": "sum by (reason,method)(loadgen_mux_orphan_total) > 0",
           "refId": "C",
           "legendFormat": "orphan {{reason}}/{{method}}"
         },

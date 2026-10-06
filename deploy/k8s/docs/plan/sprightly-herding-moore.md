@@ -147,7 +147,7 @@ No Rust changes. No new crate deps.
    VIP is on exactly one edge node (`kubectl exec … ip addr | grep 172.20.255.250`),
    a SIPp call to the VIP completes, then `./chaos.sh proxykill` (master) and
    confirm calls keep flowing (VIP moves, <2s gap) and the limiter stream pins at
-   ~20 (`sipp_current_calls{role="limiter"}`, and `limiter_rejected_total` rate
+   ~20 (`sipp_current_calls{role="limiter"}`, and `limiter_admits_total{outcome="rejected"}` rate
    non-zero — proves the `-key` fix). Iterate here until green.
 2. **Clean 2-hour run:** `./endurance.sh run` (full `DURATION=7200`,
    `CHAOS_INTERVAL=900`, `SHORT_CPS=100`). Success criteria:

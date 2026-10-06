@@ -59,8 +59,7 @@ async fn initial_invite_store_fault_fails_closed_500_no_call_created() {
     // Nothing leaked: the dispatch created a per-call queue for the rejected
     // INVITE; the orphan teardown must balance it (creations == removals,
     // no stranded lock/stamp).
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let _report = s.finish().await;
@@ -75,10 +74,9 @@ async fn in_dialog_bye_store_fault_500_then_retry_succeeds() {
     let s = scene_with_faults("store-fault-bye", &faults).await;
 
     let mut dialog = s.establish().await;
-    // `establish` returns on the ACK the SUT owes BOB (sent on receipt of his
-    // 200), which no longer implies alice's own ACK has been consumed — it is
-    // still one transit hop away. Let it land, so the armed window holds the BYE
-    // alone and the rejection count means what it says.
+    // `establish` returns on the ACK the SUT relays to BOB, which does not imply
+    // the call's own bookkeeping for it has settled. Let that land, so the armed
+    // window holds the BYE alone and the rejection count means what it says.
     s.h.advance(Duration::from_millis(500)).await;
 
     // Store goes down mid-call.
@@ -98,7 +96,7 @@ async fn in_dialog_bye_store_fault_500_then_retry_succeeds() {
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye2.expect(200).await;
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(
         s.b2bua.metrics().store_fault_rejected_total(),
@@ -152,7 +150,7 @@ async fn keepalive_audit_store_fault_fails_open_and_rearms() {
 
     // Normal teardown; fully reaped.
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let _report = s.finish().await;

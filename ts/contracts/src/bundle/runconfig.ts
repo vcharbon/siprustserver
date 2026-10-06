@@ -59,7 +59,9 @@ export const RunConfig = Schema.Struct({
   /** Defects this lane's SUT is known to produce; the gate each names stands down. */
   known_bugs: Schema.optionalKey(Schema.Array(KnownBug)),
   /** What the media plane did to this run's session descriptions; the interpreter states it from the lane's booking. */
-  media: Schema.optionalKey(MediaMode)
+  media: Schema.optionalKey(MediaMode),
+  /** The dialog-identity nonce the lane seeded the run's Call-IDs and tags from; absent where the run minted its own. */
+  identity_nonce: Schema.optionalKey(Schema.String)
 })
 export interface RunConfig extends Schema.Schema.Type<typeof RunConfig> {}
 

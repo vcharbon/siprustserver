@@ -9,8 +9,15 @@ To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` /
 Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
-Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
+Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
 
+
+## Agent models
+
+When work is delegated to sub-agents: implementation, tests, fix-ups and every other task run on
+Opus, B2BUA changes included. Each review pass is one adversarial reviewer on Opus. Fable
+reviews a change only when the user names it for that change, at most once; later review passes
+run on Opus. The complexity of a change does not call for Fable.
 
 ## Where the details live (progressive disclosure)
 
@@ -53,19 +60,23 @@ Every test models a complete, functioning callflow:
   dead-call detection (keepalive timeout, the 32 s terminating safety timer,
   `GlobalDuration`) so the B2BUA detects the dead call and reaps it. Never
   leave a call up at `finish()`.
-- **Assert release, not just silence.** `finish()` does NOT catch a leaked
-  call (structural leak anomalies deliberately don't gate). After any
-  timeout-path termination, drain with `settle_until` then assert
-  `B2buaSut::assert_fully_reaped()` (or `assert_call_fully_over` in failover
-  tests).
+- **Assert release, not just silence.** `B2buaScene::finish()` settles the SUT
+  and runs `B2buaSut::assert_fully_reaped()` (calls, locks, reaper stamps,
+  setup-CANCEL marks, limiter holds); `finish_leaving(leak)` declares limiter
+  holds left on purpose. `Harness::finish()` alone does NOT catch a leaked
+  call (structural leak anomalies deliberately don't gate): a test on a bare
+  `Harness` + `B2buaSut` drains with `settle_until(|| sut.is_reaped())` then
+  asserts `assert_fully_reaped()` itself (`assert_call_fully_over` in
+  failover tests).
 
 ## Writing a new b2bua / failover test
 
 Do NOT hand-roll the INVITE/180/200/ACK dance — it lives once in
 `scenario_harness::callflow`. Single-SUT b2bua test: use `B2buaScene::new(name)`
 (alice :5060 / bob :5070 / b2bua :5080, routes to bob) then `scene.establish()`
-→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()`; for a
-non-default decision use `B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
+→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()` (the
+reaped check runs there); for a non-default decision use
+`B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
 HA failover test: `scenario_harness::callflow::establish(&alice,&bob,proxy.addr())`
 (or `Call::new(..).no_ring()` for the 200-only variant) and `hangup` for teardown.
 ONLY for the uninterrupted happy-path setup — any dance that asserts on the 18x,
@@ -79,9 +90,9 @@ Behaviour rides `tokio::time` directly; `Clock::test_at(0)` reads the same
 timeline, so one `advance` moves behaviour timers *and* report timestamps —
 there is **no separate fake-clock counter** (deliberately simpler than the TS
 `TestClock` pump; keep it that way). Tests use
-`#[tokio::test(start_paused = true)]` + `Harness::advance` (100 ms chunks),
-called *between* protocol steps, exactly to the deadline being tripped. The
-non-negotiables (details + smell table in the guide): never leap two deadlines
+`#[tokio::test(start_paused = true)]` + `Harness::advance` (settled: work in
+flight runs at each instant it falls due), called *between* protocol steps,
+exactly to the deadline being tripped. The non-negotiables (details + smell table in the guide): never leap two deadlines
 in one advance; never feed a paused test a real wall-clock signal; transit
 delay ≥ 1 ms, never 0; don't hand-roll timer drivers — copy the epoch +
 lockstep-`Key` shape in `crates/b2bua/src/timers.rs` (module doc) if you must.
@@ -90,14 +101,24 @@ that before instrumenting.
 
 ## Test-runtime policy (default vs slow lane)
 
-**An integration test that takes >60 s of wall-clock on the REAL clock must not
-run by default.** Mark it `#[ignore = "real-clock >60s — slow lane (just
-test-slow)"]` and keep a fake-clock (`start_paused`) equivalent of the scenario
-in the default lane — writing one if missing is the point of the rule. Lanes
-live in the `justfile`: `just test` (default), `just test-slow`
-(`cargo test --release -- --ignored`). Paused-clock tests are exempt from the
-60 s rule but not free — before `#[ignore]`-ing a slow one, cut the timer churn
-at its source (see the clock guide, rule 5).
+**The default lane holds every fake-clock test, whatever its length, and every
+real-clock test under 1 s. Nothing else runs by default.** A test is fake-clock
+when its runtime is paused (`start_paused`, `sip_clock::run_paused_within`);
+any other test, synchronous ones included, is real-clock. A real-clock test of
+1 s or more (worst run at 16 test threads) is
+`#[ignore = "slow lane: real clock >= 1 s"]`, and every `loadgen` test, lib and
+integration alike, is `#[ignore = "slow lane: loadgen"]`. Lanes live in the
+`justfile` and run under cargo-nextest (`.config/nextest.toml`: one process per
+test, 16 at once across every binary; doc tests through `cargo test --doc`):
+`just test` (default), `just test-slow` (`cargo nextest run --release -P slow
+--run-ignored only`). One crate's tests:
+`cargo nextest run --workspace -E 'package(=<crate>)' <filter>`, which reuses
+the workspace build (a `-p` build resolves other features and recompiles). A
+filtered run skips an ignored test without a word: add `--run-ignored all`
+(`cargo test`: `-- --include-ignored`) to run one. Moving a real-clock scenario out is the
+moment to write its paused-clock equivalent for the default lane. A slow
+paused-clock test stays in the default lane: cut its timer churn at the source
+(clock guide, rule 5).
 
 ## Compiling ([ADR-0029](docs/adr/0029-dev-build-cost.md))
 
@@ -105,7 +126,8 @@ at its source (see the clock guide, rule 5).
 fast signal (no codegen), `just test [filter]` / `just test-slow`, `just lint`,
 `just image` for the k8s image, `just doctor` when a machine looks broken,
 `just disk` / `just clean-incremental` under disk pressure. Every recipe is a
-plain cargo call, so a hand-typed `cargo test` behaves identically — including
+plain cargo call, so a hand-typed `cargo nextest run` or `cargo test` builds
+identically — including
 the parallelism cap: `.cargo/config.toml` sets `[build] jobs = 4`, because this
 workspace links ~250 test binaries and the concurrent mold links at one job per
 core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
@@ -127,7 +149,7 @@ A crate's integration tests compile into ONE binary. In a crate that has a
 `tests/it/` directory, a new test file goes **inside it**, with a `mod` line
 added to `tests/it/main.rs`; a stray `tests/foo.rs` links a second copy of the
 whole dependency graph. Select one with
-`cargo test -p <crate> --test it <module>::<name>`.
+`cargo nextest run --workspace -E 'package(=<crate>) & binary(it)' <module>::<name>`.
 
 A test that installs process-global state (a trace registry, the allocation
 counter, a real socket, process env) stays a `tests/*.rs` target of its own —

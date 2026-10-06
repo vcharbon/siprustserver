@@ -4,9 +4,9 @@
 //! `SipParser` is the **layer interface** (the DI seam that mimics Effect
 //! Layer): consumers depend on the trait, not a concrete parser, and any
 //! impl — `CustomParser` (production) or `RvoipParser` (dev-only oracle) —
-//! is swappable behind it. Future contract wrappers (the effect-layer-test
-//! 4-wrapper model: property/paranoid/parity/scopedAudit, deferred to the
-//! SignalingNetwork slice) will also implement this same trait as decorators.
+//! is swappable behind it. Contract wrappers (the effect-layer-test 4-wrapper
+//! model: property/paranoid/parity/scopedAudit) implement this same trait as
+//! decorators.
 //!
 //! Pure + synchronous + never-panics across the boundary: parse failures are
 //! `Err(SipParseError)`, never panics. There is no async / Effect runtime at
@@ -34,7 +34,7 @@ pub trait SipParser {
 
     /// Parse a datagram the caller already owns as [`Bytes`]. The message's
     /// `raw` and `body` then SHARE that buffer instead of copying it — the
-    /// receive path should prefer this. Defaults to a copy via [`parse`].
+    /// receive path should prefer this. Defaults to a copy via [`parse`](Self::parse).
     fn parse_shared(&self, raw: Bytes) -> Result<SipMessage, SipParseError> {
         self.parse(&raw)
     }
@@ -55,6 +55,23 @@ pub struct SipParserLimits {
     /// `false` for harness/rule-validator scenarios that must inspect
     /// malformed-but-parseable messages without the parser pre-rejecting.
     pub wire_grammar: bool,
+    /// How the bytes handed to `parse` were delimited, which decides the body
+    /// of a message that states no `Content-Length` (RFC 3261 §18.3).
+    pub framing: Framing,
+}
+
+/// The transport framing of the bytes a parser is handed. Over a datagram the
+/// message ends with the datagram, so a missing `Content-Length` makes the
+/// body the remainder (RFC 3261 §18.3); over a stream nothing else delimits
+/// the message, so the header is mandatory and its absence is refused
+/// (§20.14, §18.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Framing {
+    /// UDP and every other message-oriented transport.
+    #[default]
+    Datagram,
+    /// TCP, TLS, SCTP and every other stream transport.
+    Stream,
 }
 
 impl Default for SipParserLimits {
@@ -67,6 +84,7 @@ impl Default for SipParserLimits {
                 .map(|s| s.to_string())
                 .collect(),
             wire_grammar: true,
+            framing: Framing::Datagram,
         }
     }
 }

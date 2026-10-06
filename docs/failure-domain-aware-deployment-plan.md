@@ -58,7 +58,7 @@ before coding.
 **Rollback:** revert the manifest split (back to one StatefulSet, hostname proxy
 anti-affinity, multicast) and the `encode_stickiness` filter; the `Peer`/
 `WorkerEntry` field is harmless if left (defaults to `None` → filter is a no-op,
-i.e. today's behaviour). No persisted state to undo.
+i.e. the single-zone behaviour). No persisted state to undo.
 
 **Performance:** `encode_stickiness` gains one extra filter pass over the
 (small) alive set per new dialog — negligible. No change to the in-dialog hot
@@ -163,7 +163,7 @@ stays a config knob for degenerate clusters.
   **2 nodes per zone**. Hosts the three zoned StatefulSets (2 workers/zone).
 - **proxies** — co-located on 2 of the app nodes in 2 distinct zones (no separate
   `tier=edge` nodes). The proxy `nodeSelector` + zone anti-affinity place them.
-- **load** — NONE (updated for the sipext dual-plane layout, 2026-07-12): the
+- **load** — NONE (the sipext dual-plane layout): the
   generators (sipp UAC/UAS, loadgen) are plain docker containers on the no-NAT
   `sipext` bridge dialing the proxy's EXTERNAL VIP; there are no tier=load kind
   nodes and no hostPort map anymore. Note the co-located-proxy row above also
@@ -171,9 +171,9 @@ stays a config knob for degenerate clusters.
   (only) ones dual-homed onto the sipext bridge.
 
 > **Host memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
-> than today's cluster — see the endurance OOM history
-> (`deploy/observability/.../cap-kind-memory.sh`, MEMORY: *endurance+chaos
-> suite*). Run `cap-kind-memory.sh` first. A smaller "mechanism-only" variant
+> than the single-zone cluster — see the OOM notes in
+> `deploy/k8s/cap-kind-memory.sh`. Run `cap-kind-memory.sh` first. A smaller
+> "mechanism-only" variant
 > (3 zones × 1 node = 3 app nodes) can validate distinct-zone selection +
 > zone-kill without the 2-per-zone density.
 

@@ -12,9 +12,14 @@
  * The binary is built by the DEPLOYMENT, not by this repository, so its path
  * comes from `REPLAY_BIN` with no default: guessing a path outside this
  * checkout would mean running whatever happened to be there.
+ *
+ * A run whose fiber is interrupted sends the binary SIGTERM and, once
+ * {@link INTERRUPT_GRACE} is over, SIGKILL: an interpreter that will not stop
+ * never keeps its driver from stopping.
  */
 import type * as Config from "effect/Config"
 import * as Context from "effect/Context"
+import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { REPLAY } from "./binaries.js"
@@ -34,6 +39,9 @@ export type RunOutcome =
   | { readonly _tag: "panicked" }
   /** An exit code the vocabulary does not name. Never seen from a healthy binary. */
   | { readonly _tag: "unknown"; readonly exitCode: number }
+
+/** How long an interrupted run's binary has after SIGTERM before it is SIGKILLed. */
+export const INTERRUPT_GRACE: Duration.Duration = Duration.seconds(5)
 
 const OUTCOMES: ReadonlyArray<RunOutcome["_tag"]> = ["passed", "failed", "refused", "environment", "panicked"]
 
@@ -85,7 +93,7 @@ export const layer = Layer.effect(
 
     const runSpec = Effect.fn("ReplayCli.run")(function* (runSpecPath: string) {
       const env = yield* Environment
-      const output = yield* cli.all(bin, [runSpecPath], { env: { ...env } })
+      const output = yield* cli.all(bin, [runSpecPath], { env: { ...env }, forceKillAfter: INTERRUPT_GRACE })
       return {
         outcome: outcomeOf(output.exitCode),
         exitCode: output.exitCode,

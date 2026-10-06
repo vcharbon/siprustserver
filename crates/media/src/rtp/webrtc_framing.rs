@@ -1,7 +1,7 @@
 //! webrtc-rs RTP framing — the independent conformance witness.
 //!
-//! Wraps the `rtp` crate's [`Packet`](rtp::packet::Packet) /
-//! [`Header`](rtp::header::Header) so it can cross-check the hand-rolled
+//! Wraps the `rtp` crate's [`Packet`] /
+//! [`Header`] so it can cross-check the hand-rolled
 //! [`HandRolled`](super::packet::HandRolled) codec on the wire. Direct analog of
 //! the TS `rtpJsFraming` (which wraps Versatica's `rtp.js`).
 

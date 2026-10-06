@@ -18,21 +18,25 @@ import { CheckClass } from "./check.js"
 /** A tier-2 reference the numbering plan resolved. */
 export const PositionalRef = Schema.Struct({
   pos: Schema.String,
-  form: Schema.optionalKey(Schema.String)
+  form: Schema.optionalKey(Schema.String),
+  addr: Schema.optionalKey(Schema.String)
 })
 export interface PositionalRef extends Schema.Schema.Type<typeof PositionalRef> {}
 
 /** A tier-2 reference the numbering plan did not resolve: replayed verbatim. */
 export const FrozenRef = Schema.Struct({
   frozen: Schema.String,
-  kind: Schema.optionalKey(Schema.String)
+  kind: Schema.optionalKey(Schema.String),
+  addr: Schema.optionalKey(Schema.String)
 })
 export interface FrozenRef extends Schema.Schema.Type<typeof FrozenRef> {}
 
 /**
  * A tier-2 reference: either the numbering plan recognized the value and the
  * document stores its ROLE, or it did not and the document freezes the value.
- * UNTAGGED — told apart by which key is present.
+ * UNTAGGED — told apart by which key is present. On a From or To either shape
+ * may state `addr`: the captured name-addr (tag excluded) with its role numbers
+ * composed as `${num:…}`, which is then the field's whole value.
  */
 export const Ref = Schema.Union([PositionalRef, FrozenRef])
 export type Ref = typeof Ref.Type

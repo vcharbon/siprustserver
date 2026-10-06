@@ -1,7 +1,7 @@
 /**
  * A caller-facing provisional beyond the peer emissions that anchor it is a
  * tolerated absence: the platform's spare copy, not a datagram a relay is
- * caused to send (§6.9, issue 106).
+ * caused to send (§6.9).
  */
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"

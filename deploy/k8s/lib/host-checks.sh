@@ -17,7 +17,7 @@
 PREFLIGHT_STRICT="${PREFLIGHT_STRICT:-0}"
 PREFLIGHT_FIX_SYSCTLS="${PREFLIGHT_FIX_SYSCTLS:-0}"
 # Space-separated "key=min" pairs. A node is OK when its current value >= min.
-REQUIRED_SYSCTLS="${REQUIRED_SYSCTLS:-fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304}"
+REQUIRED_SYSCTLS="${REQUIRED_SYSCTLS:-fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304 net.core.rmem_max=4194304}"
 
 # Reuse the caller's log/warn/die if present (run.sh defines log+die); otherwise
 # provide minimal fallbacks so the lib is sourceable standalone.
@@ -90,10 +90,10 @@ check_sysctls() {
 # failed-over call's timers as `(fire_at_from_dead_node - our now_ms).max(0)`, so
 # that offset turns a healthy 300 s keepalive into a PAST-DUE one that fires the
 # instant the backup takes over the dialog — an OPTIONS burst onto both legs,
-# mis-triaged as a SUT failover bug (root cause of endurance-20260630
-# reinvite/unexpected/clear: an a-leg keepalive OPTIONS raced the failed-over
-# re-INVITE ~290 s early). The b2bua's restore tolerates only ms–seconds of skew
-# by design; keeping the host clock that stable is infra's job, not the SUT's.
+# that reads as a SUT failover bug (an a-leg keepalive OPTIONS racing the
+# failed-over re-INVITE ~290 s early). The b2bua's restore tolerates only
+# ms–seconds of skew by design; keeping the host clock that stable is infra's
+# job, not the SUT's.
 check_clock() {
   # The hazard is specific to a STEPPING wall clock. A real NTP-disciplined
   # server (chrony slewing at <=500 ppm) never steps mid-run — nothing to check.

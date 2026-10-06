@@ -3,7 +3,7 @@
 //! Wires the `b2bua` library over the **real, non-recording** UDP transport
 //! (`sip_net::RealSignalingNetwork` — no `Recorder` decorator, no simulated
 //! fabric) and a **system wall clock** (`Clock::system`, so transaction/dialog
-//! timers fire). The generic runner plumbing — env grammar, bind + Tier-1
+//! timers fire). The generic runner plumbing — env grammar, bind + ingress
 //! brake, advertise coercion, deps defaults, probe server, gauge sampler,
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
@@ -16,7 +16,7 @@
 //!   - CDR  : RabbitMQ sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the
 //!            kit's discarding `NullCdrWriter` — either way behind the bounded
 //!            `BufferedCdrWriter` (drop-on-overload).
-//!   - HA   : opt-in peer-to-peer replication (S11) with static or kube
+//!   - HA   : opt-in peer-to-peer replication with static or kube
 //!            EndpointSlice membership.
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
 //!            appended to `/metrics`).
@@ -24,7 +24,7 @@
 //! Config via env (all optional; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
 //! knobs are parsed by `b2bua_runner_kit::RunnerEnv` — see its field docs):
 //!   B2BUA_LISTEN    SIP/signaling listen addr        (default 0.0.0.0:5060)
-//!   B2BUA_ADVERTISE SIP host[:port] stamped on Via/Contact/b-leg Call-ID
+//!   B2BUA_ADVERTISE SIP host\[:port\] stamped on Via/Contact/b-leg Call-ID
 //!                   (default: bound IP, or loopback if bind is 0.0.0.0).
 //!                   In k8s inject the pod IP via downward API `status.podIP`,
 //!                   else peers route responses to 0.0.0.0 (a storm).
@@ -37,12 +37,18 @@
 //!                   b-leg goes straight to the callee (local/dev only). (unset)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
-//!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default empty =
-//!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
+//!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
+//!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033
+//!   B2BUA_UDP_RCVBUF SO_RCVBUF on the signalling socket, bytes (default 4 MiB;
+//!                   empty = kernel rmem_default; clamped at rmem_max)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
-//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
+//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
+//!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
+//!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
+//!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
+//!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
@@ -50,71 +56,52 @@
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC b-leg initial INVITE give-up when NOTHING answers, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32 — tightening is a deliberate §17.1.1.2 deviation, telephony policy: 2 s buys 2 re-sends, 5 s 3, 10 s 4, 32 s 6; a provisional swaps in B2BUA_INVITE_TXN_TIMEOUT_SEC; in-dialog INVITE and non-INVITE keep 64·T1)
 //!   B2BUA_CANCEL_STRICT_RFC_WAIT truthy (1/true/yes/on) = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
-//!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
+//!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
+//!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: the last N distinct SIP messages a leg received or sent (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
 //!
 //! ## Call limiter
-//!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
-//!   LIMITER_WINDOW_SECONDS  refresh cadence; MUST match the service window (default 300)
+//!   LIMITER_URL             the shared limiter, [http://]host:port; unset → NoopLimiter (fail-open)
+//!   LIMITER_REFRESH_SECONDS lease refresh cadence, below the service lease    (default 40)
 //!   LIMITER_TIMEOUT_MS      per-request fail-open budget                     (default 150)
 //!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)
 //!   B2BUA_STRESS_LIMITER_LIMIT cap for that entry (never rejects in practice) (default 999999)
 //!
-//! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off = legacy)
-//!   B2BUA_REPL          "1"/"true" enables peer-to-peer call replication
-//!   B2BUA_REPL_LISTEN   replication TCP listen addr     (default 0.0.0.0:9092)
-//!   B2BUA_REPL_PORT     port peers are reached on       (default = REPL_LISTEN port)
-//!   B2BUA_PEERS         static membership `ord@host,..`  (dev/local; takes precedence)
-//!   B2BUA_REPL_SERVICE  headless Service to discover     (default b2bua-worker)
-//!   B2BUA_NAMESPACE     namespace for k8s discovery      (default $POD_NAMESPACE / sip-test)
+//! ## HA replication — opt-in via `B2BUA_REPL=1` (default off: unwired node)
+//!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
+//!   B2BUA_NAMESPACE  the replication grammar (see `b2bua_runner_kit::ReplicationSettings`)
 //!
-//! Two deferred S11 decisions are resolved here:
-//!   - **Incarnation gen** = boot wall-clock seconds (monotonic across pod
-//!     restarts → `(new_gen,0) > (old_gen,*)` holds; see [`boot_incarnation`]).
-//!   - **Replication addressing** = port-agnostic `Peer.host` + a cluster-wide
-//!     `B2BUA_REPL_PORT` (see [`make_addr_resolver`]) — no per-peer port grammar.
-//! And SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
+//! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
-// Use jemalloc instead of the glibc system allocator. Under the many tokio
-// worker threads, glibc malloc spawns up to 8×ncpu arenas and retains freed
-// chunks (it caps arena *count*, not per-arena high-water mark), so a churning
-// SIP B2BUA's RSS ratchets monotonically up under sustained load and never
-// returns memory to the OS — a 2026-06-13/14 no-chaos soak measured ~209 MiB/h
-// growth with all logical state (active_calls/store/txn/repl) dead flat, leading
-// to a node-cgroup OOM. jemalloc's decay-based purging returns dirty/muzzy pages
-// to the OS (tuned aggressively via _RJEM_MALLOC_CONF on the worker container),
-// bounding steady-state RSS. No logical leak exists; this is purely allocator
-// retention. See deploy/k8s/manifests/20-worker.yaml.
+// Use jemalloc instead of the glibc system allocator. Under the many tokio worker
+// threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it
+// caps arena *count*, not per-arena high-water mark), so a churning SIP B2BUA's
+// RSS ratchets monotonically up under sustained load and never returns memory to
+// the OS — a no-chaos soak measured ~209 MiB/h growth with all logical state
+// (active_calls/store/txn/repl) dead flat, leading to a node-cgroup OOM.
+// jemalloc's decay-based purging returns dirty/muzzy pages to the OS (tuned
+// aggressively via _RJEM_MALLOC_CONF on the worker container), bounding
+// steady-state RSS. No logical leak exists; this is purely allocator retention.
+// See deploy/k8s/manifests/20-worker.yaml.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
-use b2bua::cdr::CdrWriter;
-use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
-use b2bua::repl::{PeerResolver, ReplicatingCallStore};
-use b2bua::ReplicationSetup;
-use b2bua_runner_kit::{
-    env_flag, env_or, resolve, split_host_port, validate_default_dest, RunnerEnv,
-};
-use repl_net::RealReplicationNetwork;
-use topology::{Membership, Peer, StaticMembership};
-
-mod cdr_rabbitmq;
+use b2bua::decision::ScriptedDecisionEngine;
+use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, RunnerEnv};
+use call::LimiterEntry;
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
 /// admit/release/refresh chain is exercised on all traffic (the endurance suite
 /// drives this). `B2BUA_STRESS_LIMITER_ID` empty disables it; the default cap
 /// (`B2BUA_STRESS_LIMITER_LIMIT`, default 999999) is high enough to never reject.
-fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
+fn stress_limiter_from_env() -> Option<LimiterEntry> {
     let id = env_or("B2BUA_STRESS_LIMITER_ID", "global-stress");
     if id.trim().is_empty() {
         return None;
@@ -123,143 +110,7 @@ fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(999_999);
-    Some(CallLimiterEntry { id, limit })
-}
-
-/// **Incarnation gen** (deferred S11 decision: boot wall-clock vs pod epoch).
-/// We pick **boot wall-clock milliseconds**: normally monotonic across pod
-/// restarts, so a rebooted worker serves under a higher `gen` than its previous
-/// life — `(new_gen, 0) > (old_gen, *)` — and pullers apply its frames without
-/// a manual reset (ADR-0011 X9). Milliseconds (not seconds) so a sub-second
-/// crash-restart cannot reuse the previous life's gen with the counter reset to
-/// 0 — under the old seconds gen a warm peer kept tailing from its stale high
-/// counter and silently skipped every new entry. The wall clock can still step
-/// BACKWARD (NTP/VM resync); that case — and any residual collision — is
-/// handled server-side: `Changelog::needs_reset` forces a `ResetToBootstrap`
-/// whenever a puller presents a same-gen counter above our head or a
-/// future-gen watermark. Falls back to 0 only if the wall clock is before the
-/// epoch (never, in practice).
-fn boot_incarnation() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
-/// Where replication peer addresses come from (ADR-0012 D3).
-enum ReplAddressing {
-    /// Static `B2BUA_PEERS`: the host is a bare IP or a user-provided DNS name —
-    /// use it directly (IP fast-path, else resolve the name).
-    Static,
-    /// k8s informer: derive the **stable per-pod FQDN** from the ordinal (=
-    /// StatefulSet pod name) and resolve it FRESH per connect, so a restarted
-    /// peer's new IP is picked up without a membership delta. Falls back to the
-    /// EndpointSlice-supplied host (a Pod IP) if CoreDNS misses, so we are not
-    /// hard-dependent on DNS for liveness.
-    K8sPodDns { service: String, namespace: String },
-}
-
-/// **Replication addressing** (ADR-0012 D3 / deferred S11 decision). Membership is
-/// port-agnostic (a Pod has one IP, many ports); every peer's repl server is at
-/// `<resolved-host>:repl_port`, where `repl_port` is one cluster-wide config value
-/// (`B2BUA_REPL_PORT`). The address is resolved **fresh on every connect attempt**
-/// so a restarted peer self-heals via the puller's own reconnect loop. `None`
-/// (unresolvable right now) → the puller backs off and retries, re-resolving.
-struct ReplResolver {
-    repl_port: u16,
-    addressing: ReplAddressing,
-}
-
-#[async_trait]
-impl PeerResolver for ReplResolver {
-    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
-        let addr = match &self.addressing {
-            ReplAddressing::Static => {
-                if let Ok(ip) = peer.host.parse::<IpAddr>() {
-                    Some(SocketAddr::new(ip, self.repl_port))
-                } else {
-                    tokio::net::lookup_host((peer.host.as_str(), self.repl_port))
-                        .await
-                        .ok()
-                        .and_then(|mut it| it.next())
-                }
-            }
-            ReplAddressing::K8sPodDns { service, namespace } => {
-                // Prefer the stable per-pod DNS name (D3): re-resolving it picks up
-                // a restarted peer's new IP without any membership delta.
-                let fqdn = format!("{}.{}.{}.svc.cluster.local", peer.ordinal, service, namespace);
-                let by_dns = tokio::net::lookup_host((fqdn.as_str(), self.repl_port))
-                    .await
-                    .ok()
-                    .and_then(|mut it| it.next());
-                // CoreDNS miss / NXDOMAIN-while-not-ready → fall back to the
-                // EndpointSlice host (a Pod IP). Backoff+retry covers transients.
-                by_dns.or_else(|| {
-                    peer.host.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, self.repl_port))
-                })
-            }
-        };
-        // Fires once per (re)connect attempt — its presence (with a *new* addr)
-        // proves the puller redirected to a restarted peer (handoff §7 / ADR-0012
-        // D3). `None` → unresolvable now; the puller backs off and retries.
-        match addr {
-            Some(a) => tracing::info!(peer = %peer.ordinal, addr = %a, "repl peer resolved"),
-            None => tracing::warn!(peer = %peer.ordinal, "repl peer unresolvable (will retry)"),
-        }
-        addr
-    }
-}
-
-fn make_addr_resolver(repl_port: u16, addressing: ReplAddressing) -> b2bua::repl::AddrResolver {
-    Arc::new(ReplResolver { repl_port, addressing })
-}
-
-/// Resolve cluster membership for replication. `B2BUA_PEERS` (a static
-/// `ord@host,..` list, used for dev/local) takes precedence; otherwise the k8s
-/// EndpointSlice informer watches the headless `B2BUA_REPL_SERVICE`. Returns
-/// `None` (→ replication stays off) if neither a static list nor an in-cluster
-/// kube client is available — liveness over completeness, the worker still
-/// serves SIP.
-async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
-    let peers = env_or("B2BUA_PEERS", "");
-    if !peers.trim().is_empty() {
-        match StaticMembership::from_string(&peers, "B2BUA_PEERS") {
-            Ok(m) => {
-                tracing::info!(source = "B2BUA_PEERS", %peers, "replication membership");
-                return Some((Arc::new(m), ReplAddressing::Static));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "B2BUA_PEERS parse error — replication disabled");
-                return None;
-            }
-        }
-    }
-    let service = env_or("B2BUA_REPL_SERVICE", "b2bua-worker");
-    let namespace = env::var("B2BUA_NAMESPACE")
-        .or_else(|_| env::var("POD_NAMESPACE"))
-        .unwrap_or_else(|_| "sip-test".to_string());
-    // rustls 0.23 has no default CryptoProvider compiled in; install ring once
-    // before the kube client opens its first TLS connection (idempotent — a
-    // second call returns Err, which we ignore).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    match kube::Client::try_default().await {
-        Ok(client) => {
-            tracing::info!(
-                source = "k8s-endpointslice",
-                %service,
-                %namespace,
-                "replication membership"
-            );
-            // Reach peers by their stable per-pod DNS name (ADR-0012 D3), built from
-            // the ordinal + this Service + namespace.
-            let addressing = ReplAddressing::K8sPodDns {
-                service: service.clone(),
-                namespace: namespace.clone(),
-            };
-            Some((Arc::new(topology::K8sMembership::spawn(client, namespace, service)), addressing))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "no kube client and no B2BUA_PEERS — replication disabled");
-            None
-        }
-    }
+    Some(LimiterEntry { id, limit })
 }
 
 #[tokio::main]
@@ -271,16 +122,13 @@ async fn main() {
     jemalloc_stats::log_config();
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
-    // UNRESOLVED host:port. A DNS name is resolved PER CALL — and round-robined
-    // across a headless Service's pod set — in b2bua's `apply_route`, so the b-leg
-    // goes pod-direct from the LB VIP with no kube-proxy ClusterIP NAT. Resolving
-    // once here would instead pin every call to a single startup-resolved pod (and
-    // could fail the worker's boot if the callee Service has no endpoints yet). An
-    // IP literal passes straight through the resolver unchanged.
+    // unresolved host:port: the core never resolves a destination name for
+    // sending. Behind an IP-literal `B2BUA_OUTBOUND_PROXY` the proxy resolves the
+    // Request-URI name; otherwise a name destination is dropped at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
-    // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (Tier-1
+    // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
     // brake installed) → advertise coercion → validated config + metrics/clock.
     let base = RunnerEnv::from_env().bind("b2bua-runner").await;
 
@@ -290,101 +138,23 @@ async fn main() {
     validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
         .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
-    // CDR sink: publish to RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else
-    // the kit's discarding default. Either way it sits behind the
-    // `BufferedCdrWriter` bounded queue (drop-on-overload at `cdr_queue` depth),
-    // so the in-process max buffer is identical regardless of sink. The writer
-    // records into `base.metrics` — the SAME registry the core exports at
-    // `/metrics` (a private registry here would leave `b2bua_cdr_written_total`
-    // dead at 0).
-    let cdr_sink: Option<Arc<dyn CdrWriter>> = match env::var("B2BUA_CDR_RABBITMQ_URL") {
-        Ok(url) if !url.trim().is_empty() => {
-            let queue = env_or("B2BUA_CDR_RABBITMQ_QUEUE", "cdr");
-            let max_len: i64 = env_or("B2BUA_CDR_RABBITMQ_MAX_LEN", "100000")
-                .parse()
-                .expect("B2BUA_CDR_RABBITMQ_MAX_LEN");
-            tracing::info!(
-                sink = "rabbitmq",
-                %queue,
-                max_len,
-                buffer = base.env.cdr_queue,
-                "CDR sink wired"
-            );
-            Some(Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(
-                url,
-                queue,
-                max_len,
-                base.metrics.clone(),
-            )))
-        }
-        _ => None,
-    };
+    // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
+    // discarding default, either way behind the kit's bounded buffer.
+    let cdr_sink = base.rabbitmq_cdr_sink_from_env();
 
-    let mut deps = base.deps(
-        Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
-            dest_host.clone(),
-            dest_port,
-            stress_limiter_from_env(),
-        )),
-        cdr_sink,
-    );
+    let mut deps = base
+        .deps(
+            Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
+                dest_host.clone(),
+                dest_port,
+                stress_limiter_from_env(),
+            )),
+            cdr_sink,
+        )
+        .await;
 
-    // --- Replication wiring (opt-in, S11). `None` keeps the legacy path. ---
-    deps.replication = if env_flag("B2BUA_REPL") {
-        match build_membership().await {
-            Some((membership, addressing)) => {
-                let repl_listen = resolve(&env_or("B2BUA_REPL_LISTEN", "0.0.0.0:9092"));
-                // Cluster-wide repl port peers are reached on; defaults to our
-                // own listen port (homogeneous pool).
-                let repl_port: u16 = env_or("B2BUA_REPL_PORT", &repl_listen.port().to_string())
-                    .parse()
-                    .expect("B2BUA_REPL_PORT");
-                let incarnation_gen = boot_incarnation();
-                let store =
-                    Arc::new(ReplicatingCallStore::new(incarnation_gen, base.clock.clone()));
-                tracing::info!(
-                    listen = %repl_listen,
-                    peer_port = repl_port,
-                    incarnation_gen,
-                    "replication ENABLED"
-                );
-                // Diagnostic: log the discovered peer set a few times so we can
-                // see whether the K8sMembership informer actually populates peers
-                // (it starts empty and fills async). Empty after several seconds
-                // ⇒ informer/watch problem; populated ⇒ the issue is downstream.
-                {
-                    let m = membership.clone();
-                    tokio::spawn(async move {
-                        for _ in 0..6 {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            let peers: Vec<String> = m
-                                .snapshot()
-                                .into_iter()
-                                .map(|p| {
-                                    format!(
-                                        "{}@{} ready={} terminating={}",
-                                        p.ordinal, p.host, p.ready, p.terminating
-                                    )
-                                })
-                                .collect();
-                            tracing::info!(peers = %peers.join(", "), "repl membership snapshot");
-                        }
-                    });
-                }
-                Some(ReplicationSetup {
-                    network: Arc::new(RealReplicationNetwork::new()),
-                    membership,
-                    store,
-                    listen_addr: repl_listen,
-                    addr_resolver: make_addr_resolver(repl_port, addressing),
-                    incarnation_gen,
-                })
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
+    // Replication (opt-in): `None` leaves the node unwired.
+    deps.replication = base.replication_setup_from_env().await;
 
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the

@@ -1,5 +1,5 @@
-//! topology — the shared, **port-agnostic** cluster-membership seam (slice S1a
-//! of the HA-replication migration).
+//! topology — the shared, **port-agnostic** cluster-membership seam of HA
+//! replication.
 //!
 //! Both the front proxy (worker LB) and the b2bua replication engine need to
 //! agree on *who is in the cluster*. That "who" is membership: a set of
@@ -330,8 +330,8 @@ pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
 /// from the **authoritative snapshot** on every wakeup: a delta, a `Lagged`
 /// overflow, or a `period` tick. A `Lagged` (we fell behind a bursty producer and
 /// dropped intermediate deltas) is non-fatal — the next snapshot is current, so we
-/// reconcile and KEEP LOOPING; the old `Err(_) => return` here is exactly what
-/// deafened the supervisor and stranded it on dead peer IPs (ADR-0012 D1). Only a
+/// reconcile and KEEP LOOPING — returning on it would deafen the supervisor and
+/// strand it on dead peer IPs (ADR-0012 D1). Only a
 /// `Closed` source (membership dropped) stops the loop. Returns the task handle
 /// (abort to stop). `reconcile` must be idempotent — an unchanged set is a no-op.
 pub fn spawn_membership_reconcile<F>(

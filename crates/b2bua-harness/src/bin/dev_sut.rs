@@ -3,7 +3,7 @@
 //! UDP.
 //!
 //! It stands up the SAME System-Under-Test the `loadgen` smoke suite uses
-//! (`crates/loadgen/tests/smoke.rs`): a real [`b2bua::B2buaCore`] bound on a
+//! (`crates/loadgen/tests/it/smoke.rs`): a real [`b2bua::B2buaCore`] bound on a
 //! `RealSignalingNetwork` (real sockets, wall clock, `TransportKind::Live`) that
 //! routes the b-leg to the loadgen's `bob` endpoint and honours the full inbound
 //! `X-Api-Call` control surface (destination pin + ADR-0017 `routes` failover

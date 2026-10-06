@@ -6,7 +6,7 @@
 //! longer exists) and flushed on the first provisional. A branch that stays
 //! response-less past the grace window gets the CANCEL REGARDLESS — a callee
 //! that answers nothing must still hear the cancellation
-//! (`sip-txn/tests/cancel_hold.rs` pins the layer seam; this pins the
+//! (`sip-txn/tests/it/cancel_hold.rs` pins the layer seam; this pins the
 //! end-to-end callflow). Decision: ADR-0028.
 
 use std::sync::Arc;
@@ -64,7 +64,7 @@ async fn b_leg_cancel_is_held_until_first_provisional() {
 
     // ── fully reaped ──────────────────────────────────────────────────────────
     h.advance(Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -105,7 +105,7 @@ async fn b_leg_cancel_is_sent_at_grace_expiry_when_callee_stays_silent() {
     bob.receive_absorbing("ACK", &["INVITE"]).await;
 
     h.advance(Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -141,7 +141,7 @@ async fn strict_policy_never_cancels_a_silent_callee() {
     // exactly past it, so a regression that falls back to the 150 s
     // SetupTimeout fails here instead of passing under a longer pump.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     // The branch never drew a provisional: under the strict policy the CANCEL
     // died with the txn and never reached the wire (bob saw INVITE
@@ -189,7 +189,7 @@ async fn grace_sent_cancel_to_a_dead_callee_still_reaps_on_the_backstop() {
     // past it, so a regression that falls back to the 150 s SetupTimeout fails
     // here instead of passing under a longer pump.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

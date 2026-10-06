@@ -1,10 +1,11 @@
-//! Slice 1 (live): play→record over real UDP + real wall-clock.
+// Own binary (ADR-0030 X2): real UDP paced by the wall clock; its frame count wants an idle process.
+//! Play→record over real UDP + real wall-clock.
 //!
 //! The wire proof that the framing/codec/transport path works on real sockets,
 //! not just the simulated fabric. Port of
 //! `../sipjsserver/tests/media/rtp-media-live.test.ts`. Localhost UDP can drop a
 //! packet, so the frame count is asserted with a small tolerance (unlike the
-//! exact count in the simulated slice).
+//! exact count over the simulated fabric).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +35,7 @@ fn neg(remote: &NetAddr) -> NegotiatedMedia {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: real clock >= 1 s"]
 async fn live_play_record_over_real_udp() {
     let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(RealSignalingNetwork::new());
     // Real framing over real sockets; system clock for RTCP timestamps.

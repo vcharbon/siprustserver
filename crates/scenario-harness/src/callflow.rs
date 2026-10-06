@@ -7,7 +7,7 @@
 //! happy-path handshake: caller INVITEs (with an SDP offer) through some `via`
 //! address; callee rings (180) then answers (200 with an SDP answer); the ACK
 //! is relayed end-to-end. The ONLY thing that differs between the single-SUT
-//! b2bua tests and the HA failover tests is the `via` address — a [`B2buaSut`]
+//! b2bua tests and the HA failover tests is the `via` address — a `B2buaSut`
 //! addr for single-SUT, a front-proxy VIP for HA. So that dance lives here,
 //! once, operating purely on [`Agent`] + a [`SocketAddr`]:
 //!

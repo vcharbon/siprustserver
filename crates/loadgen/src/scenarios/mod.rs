@@ -3,11 +3,9 @@
 //! The portable actor-declared scenario bodies + their trait/runner live in
 //! [`scenario_harness::actor`] (the per-call environment in
 //! [`scenario_harness::realcall`]) so the SAME flow serves the load fleet AND
-//! the in-process functional leak gate. The
-//! **tables** that used to live here (`by_id` / `default_scenarios` /
-//! `failure_scenarios`) folded into the unified, open shape registry
-//! ([`e2e_model::ShapeRegistry`]): each shape is declared ONCE as a
-//! [`ShapeDescriptor`](e2e_model::ShapeDescriptor) — id, load attributes
+//! the in-process functional leak gate. The scenario **tables** live in the
+//! unified, open shape registry ([`e2e_model::ShapeRegistry`]): each shape is
+//! declared ONCE as a [`ShapeDescriptor`] — id, load attributes
 //! (needs-charlie / needs-bob2 / emergency), mix weights, and the load-body
 //! factory — and the driver's [`MixEntry`](crate::driver::MixEntry) is built
 //! from it (`MixEntry::by_id` / `default_mix` / `failure_mix`). This module
@@ -35,8 +33,8 @@
 pub use scenario_harness::realcall::{CallCtx, CallEnv, CallScope, ScenarioId};
 // The load bodies are ACTOR-declared (per-endpoint reactive actors the runner
 // joins); re-export the whole set plus their trait/runner under this module so
-// a `scenarios::BasicCall` user resolves. `LoadScenario` is the historic alias
-// for the load body's trait (now `ActorScenario`).
+// a `scenarios::BasicCall` user resolves. `LoadScenario` is an alias
+// for the load body's trait, `ActorScenario`.
 pub use scenario_harness::actor::scenarios::{
     AbandonRinging, BasicCall, InviteReject, LongCall, OptionsHold, PrackUpdate, Refer,
     ReferCharlieReject, Reinvite, ReroutingPrack,

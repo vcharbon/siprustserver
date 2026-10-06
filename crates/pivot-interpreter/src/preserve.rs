@@ -55,7 +55,7 @@ mod tests {
 
     fn stated() -> Vec<TemplateHeader> {
         vec![
-            TemplateHeader::frozen("p-asserted-identity", "<sip:+33000900004@lane.invalid>"),
+            TemplateHeader::frozen("p-asserted-identity", "<sip:+15550900004@lane.invalid>"),
             TemplateHeader::frozen("Supported", "timer, 100rel"),
             TemplateHeader::frozen("User-Agent", "Pivot/1"),
         ]
@@ -73,7 +73,7 @@ mod tests {
             ("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1"),
             ("From", "<sip:a@lane.invalid>;tag=t1"),
             ("CSeq", "1 INVITE"),
-            ("p-asserted-identity", "<sip:+33000900004@lane.invalid>"),
+            ("p-asserted-identity", "<sip:+15550900004@lane.invalid>"),
             ("Supported", "timer, 100rel"),
             ("User-Agent", "Pivot/1"),
             ("Content-Length", "0"),
@@ -85,7 +85,7 @@ mod tests {
     fn a_reordered_block_names_the_header_that_moved() {
         let out = emitted(&[
             ("Supported", "timer, 100rel"),
-            ("p-asserted-identity", "<sip:+33000900004@lane.invalid>"),
+            ("p-asserted-identity", "<sip:+15550900004@lane.invalid>"),
             ("User-Agent", "Pivot/1"),
         ]);
         let error = verify(&stated(), &out).unwrap_err();
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn a_canonicalized_name_is_a_casing_breach_and_says_so() {
         let out = emitted(&[
-            ("P-Asserted-Identity", "<sip:+33000900004@lane.invalid>"),
+            ("P-Asserted-Identity", "<sip:+15550900004@lane.invalid>"),
             ("Supported", "timer, 100rel"),
             ("User-Agent", "Pivot/1"),
         ]);
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn a_dropped_header_is_named_as_absent() {
         let out = emitted(&[
-            ("p-asserted-identity", "<sip:+33000900004@lane.invalid>"),
+            ("p-asserted-identity", "<sip:+15550900004@lane.invalid>"),
             ("User-Agent", "Pivot/1"),
         ]);
         let error = verify(&stated(), &out).unwrap_err();

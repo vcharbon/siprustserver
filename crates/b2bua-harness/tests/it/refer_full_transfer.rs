@@ -1,4 +1,4 @@
-//! REFER full-transfer scenarios (slice 5c). Port of
+//! REFER full-transfer scenarios. Port of
 //! `tests/scenarios/refer-full-transfer.ts`.
 //!
 //! Drive the complete A↔B↔C transfer through both re-INVITEs to completion
@@ -15,7 +15,9 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
+
+use crate::common::sdp::apart_from_origin;
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -27,7 +29,7 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 // a-realign re-INVITE toward A must carry *this* body (the one-way-audio guard).
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // A's answer to the a-realign re-INVITE (A accepts C's media).
-const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 const CHARLIE_PORT: u16 = 5667;
 
@@ -61,9 +63,9 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert_eq!(
-        String::from_utf8_lossy(req.body()),
-        body,
-        "re-INVITE body should equal expected SDP"
+        apart_from_origin(&String::from_utf8_lossy(req.body())),
+        apart_from_origin(body),
+        "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
     assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
@@ -140,6 +142,102 @@ async fn refer_allow_full_happy() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+// ── 1b. C rings reliably: the stack PRACKs it, the caller hears nothing ────
+
+/// The transfer target's reliable 183 answers an INVITE this stack sent, on a
+/// call whose caller was answered long before: the caller is shown no
+/// provisional (RFC 3261 §17.2.1 — her INVITE transaction is complete), so the
+/// stack acknowledges it itself (RFC 3262 §4) and the referrer is notified of
+/// the progress; the transfer then completes and A's hangup reaches C.
+#[tokio::test]
+async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() {
+    let h = Harness::with_transit_delay("refer-allow-full-c-reliable", 1);
+    let alice = h.agent("alice", "127.0.0.1:5966").await;
+    let bob = h.agent("bob", "127.0.0.1:5976").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976)
+        .start(&h, "b2bua", "127.0.0.1:5986")
+        .await;
+
+    // A↔B established; A advertises 100rel, so every leg minted for her offers it.
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &refer_to_charlie())
+        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .send()
+        .await;
+    refer.expect(202).await;
+
+    let mut n100 = bob.receive("NOTIFY").await;
+    assert_notify(&n100, "active", "SIP/2.0 100 Trying");
+    n100.respond(200, "OK").await;
+
+    // C is offered 100rel and rings reliably; the stack PRACKs on A's behalf.
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    assert!(
+        charlie_uas
+            .request()
+            .header::<sip_message::header::Supported>()
+            .expect("a Supported")
+            .expect("readable Supported")
+            .contains("100rel"),
+        "the transfer target is offered 100rel",
+    );
+    charlie_uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    charlie.receive("PRACK").await.respond(200, "OK").await;
+
+    let mut n183 = bob.receive("NOTIFY").await;
+    assert_notify(&n183, "active", "SIP/2.0 183");
+    n183.respond(200, "OK").await;
+
+    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie.receive("ACK").await;
+
+    let mut nterm = bob.receive("NOTIFY").await;
+    assert_notify(&nterm, "terminated", "SIP/2.0 200");
+    nterm.respond(200, "OK").await;
+
+    let mut c_realign = charlie.receive("INVITE").await;
+    assert_reinvite(c_realign.request(), OFFER, "b-2");
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
+    charlie.receive("ACK").await;
+
+    let mut a_realign = alice.receive("INVITE").await;
+    assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    let lines: Vec<String> = alice.wire_view().iter().map(|e| e.start_line()).collect();
+    let answered_at = lines.iter().position(|l| l.starts_with("SIP/2.0 200")).unwrap();
+    let stray: Vec<&String> =
+        lines[answered_at + 1..].iter().filter(|l| l.starts_with("SIP/2.0 1")).collect();
+    assert!(stray.is_empty(), "the answered caller is shown no provisional: {stray:?}");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -203,6 +301,8 @@ async fn refer_allow_full_a_reject_realign() {
     charlie.receive("BYE").await.respond(200, "OK").await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -275,6 +375,8 @@ async fn refer_allow_full_a_glare_reinvite() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -345,6 +447,8 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     charlie.receive("BYE").await.respond(200, "OK").await;
 
     let _ = &mut a_realign;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -424,5 +528,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
         .await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

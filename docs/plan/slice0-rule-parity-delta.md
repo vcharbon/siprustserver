@@ -13,7 +13,7 @@ invariant enforcement, per-dialog CSeq/tag-map/passthrough, and timer constants.
 | `relayInfoRule` | `relay-info` | MATCH | |
 | `relayUpdateRule` | `relay-update` | MATCH | |
 | `relayMessageRule` | `relay-message` | MATCH | |
-| `relayAckRule` | `relay-ack` | **DELTA — DELIBERATE** | TS relays the caller's ACK end to end. The Rust UAC core ACKs a 2xx on receipt (RFC 3261 §13.2.2.4), so the caller's own ACK is hop-local and absorbed; the one ACK that still travels end to end answers a delayed-offer INVITE, whose 2xx carries the offer and whose ACK must carry the answer (RFC 3264 §4). |
+| `relayAckRule` | `relay-ack` | MATCH | Both relay the caller's ACK end to end (RFC 3261 §13.2.2.4 — one ACK per 2xx, with the body its sender put on it). |
 | `relayReinviteRule` | `relay-reinvite` | MATCH | bare relay; glare/response correlation are Slice 1 |
 | `relayPrackRule` | `relay-prack` | MATCH | RAck CSeq rewrite in `actions.rs` (RFC 3262 §7.2) |
 | `relayByeRule` | `relay-bye` | **DELTA — FIXED** | Rust omitted the `terminate-leg{bye_received}` pre-mark; relied on a bespoke source-leg branch in `begin_termination`. Now emits it, matching TS. |

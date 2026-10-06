@@ -1,7 +1,7 @@
 //! [`WorkerRegistryControl`] — the health-write seam (port of
 //! `health/WorkerRegistryControl.ts`). The HealthProbe writes worker health
 //! through this seam so it does not depend on a concrete registry's internals.
-//! The one impl is the adapter over the shared [`WorkerSet`] — every registry
+//! The one impl is the adapter over the shared `WorkerSet` — every registry
 //! (static, composed, simulated) wraps a `WorkerSet`, so each hands out the
 //! same adapter from its `control()`.
 
@@ -16,7 +16,7 @@ pub trait WorkerRegistryControl: Send + Sync {
     fn set_health(&self, id: &str, health: WorkerHealth);
 }
 
-/// Adapter exposing a shared [`WorkerSet`]'s health annotation as a control seam.
+/// Adapter exposing a shared `WorkerSet`'s health annotation as a control seam.
 /// This is the production wiring: the OPTIONS [`HealthProbe`](crate::health::HealthProbe)
 /// writes observed worker health into the same annotation overlay the projection
 /// reads, so a worker that stops answering OPTIONS is demoted to `Dead` and

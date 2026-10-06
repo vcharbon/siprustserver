@@ -8,13 +8,13 @@
 //!
 //! `SHA-1` is **not** a cryptographic primitive here — only a fast,
 //! well-distributed hash. We interpret the top 8 bytes (big-endian) of
-//! `SHA1(key:id)` as a `u64`, then multiply by the weight in `u128` space (the
-//! TS port used `bigint` to dodge the 2^53 float-precision loss; `u128` is the
-//! exact Rust equivalent for weights up to `u64::MAX`).
+//! `SHA1(key:id)` as a `u64`, then multiply by the weight in `u128` space
+//! (exact for weights up to `u64::MAX`, no 2^53 float-precision loss).
 
 use sha1::{Digest, Sha1};
 
-/// A worker that can be picked by HRW. `weight` defaults to 1 via [`weight`].
+/// A worker that can be picked by HRW. `weight` defaults to 1 via
+/// [`weight`](Self::weight).
 pub trait RendezvousCandidate {
     fn id(&self) -> &str;
     /// Optional weight; higher → proportionally more keys land here.

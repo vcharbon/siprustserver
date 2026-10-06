@@ -1,5 +1,4 @@
-//! A `/calls` decision result landing on a call the CALLER already CANCELed
-//!.
+//! A `/call/new` decision result landing on a call the CALLER already CANCELed.
 //!
 //! The caller gives up while the routing decision is still in flight: the txn
 //! layer finalizes the initial-INVITE transaction at once (200 to the CANCEL,
@@ -18,6 +17,7 @@
 //! land through the rule chain and read the call's own
 //! `Terminating`/`Terminated` state.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,13 +27,13 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::{reject, route_to};
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest,
-    NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest, NewCallResponse,
+    RejectDecision, ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{establish, hangup, invite_final_statuses, settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Harness, RunReport};
 use sip_clock::Clock;
@@ -42,7 +42,7 @@ use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// The scripted BL round trip the caller's CANCEL races (BC_02: up to the
+/// The scripted decision round trip the caller's CANCEL races (up to the
 /// adapter's 1 s budget — inside the 5 s decision deadline).
 const DECISION_DELAY: Duration = Duration::from_millis(900);
 
@@ -137,7 +137,7 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1, "the drop is metered once",);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The CDR records the CANCEL and no trace of the dropped route.
@@ -199,7 +199,7 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -225,11 +225,11 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 0, "bob was never dialed");
 }
 
-/// Limiter variant: `apply_route` INCRs the route's `call_limiter` holds
-/// BEFORE the drop seam runs, so the dropped result must still carry them onto
-/// the resident call — the queued termination's obligation discharge DECRs
-/// each one. A drop that discarded the holds would strand a cluster-visible
-/// slot for the whole limiter window on exactly the caller-gives-up-early
+/// Limiter variant: `apply_route` admits the route's `call_limiter` set
+/// BEFORE the drop seam runs, so the dropped result must still carry the
+/// counted state onto the resident call — the queued termination's obligation
+/// discharge releases the call. A drop that discarded it would strand a
+/// cluster-visible set for a whole lease on exactly the caller-gives-up-early
 /// path the spec calls common.
 #[tokio::test(start_paused = true)]
 async fn dropped_route_still_discharges_its_limiter_holds() {
@@ -238,18 +238,14 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     // A real `LimiterServer` on the simulated HTTP fabric (same rig as
-    // `limiter.rs`), so the INCR is a genuine cluster hold we can probe.
+    // `limiter.rs`), so the admitted hold is a genuine cluster hold we can probe.
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
-    // Fail-open budget well above the paused-clock HTTP round trip: the 1 ms
-    // simulated transits quantize to the 100 ms advance chunks the admit rides
-    // through (it lands mid-`h.advance`, unlike the agent-pumped callflow
-    // steps), so a production-sized 150 ms budget would fail open here.
     let limiter: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_millis(150)));
 
     let decision = Arc::new(DelayedDecisionEngine {
         new_call_delay: DECISION_DELAY,
@@ -258,14 +254,17 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_req| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 10 }];
+                    r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 10 }];
                     NewCallResponse::Route(r)
                 })
                 .build(),
         ),
     });
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .limiter_store(store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(200)).await;
@@ -274,7 +273,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // Cross the decision's landing: the route INCRs its hold, then is dropped.
+    // Cross the decision's landing: the route admits its hold, then is dropped.
     h.advance(Duration::from_secs(2)).await;
     assert!(
         bob.try_receive_tolerating("INVITE", &[]).await.is_none(),
@@ -282,15 +281,13 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    // The admit really happened AND the termination released the call — the
+    // admit↔release pairing survives the drop.
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "the dropped route's hold is released");
+    assert_eq!(store.calls(), 0, "the store holds nothing for the call");
     b2bua.assert_fully_reaped();
-
-    // The admit really happened (its window key is live) AND the termination
-    // discharged it — the INCR↔DECR pairing survives the drop.
-    settle_until(|| store.stats().current_total == 0).await;
-    let stats = store.stats();
-    assert_eq!(stats.live_keys, 1, "the dropped route's admit INCRed a real hold");
-    assert_eq!(stats.current_total, 0, "the termination DECRed the carried hold");
 
     let report = h.finish().await;
     assert_eq!(
@@ -366,7 +363,7 @@ async fn fold_lands_on_terminating_call(
 
     // ── bob's withheld 487 resolves the cancelled b-leg; the call finalizes ──
     b_inv.respond(487, "Request Terminated").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     (h, alice, bob, b2bua)
 }
@@ -450,7 +447,7 @@ async fn delayed_route_on_a_live_call_still_routes() {
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 0, "nothing was dropped");
     hangup(&mut dialog, &bob).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 1, "the delayed route dialed bob");

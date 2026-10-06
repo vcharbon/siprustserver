@@ -21,11 +21,17 @@
 //!   real sockets do not obey `tokio::time::pause`, so deterministic scenarios
 //!   cannot use real HTTP. This is the workhorse.
 //! - `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
-//!   `real`**, filled in by the runner slice. Its tests run on a real
+//!   `real`**. Its tests run on a real
 //!   (non-paused) runtime.
-//! - [`RecordingHttpNetwork`] — a decorator that tees every client exchange
-//!   into a capture sink (stamped with the injected [`sip_clock::Clock`]) for
-//!   test assertions.
+//! - [`RecordingHttpNetwork`] — a test decorator that records both sides of
+//!   every exchange onto the `layer-harness` `Recorder` ([`HTTP_TAG`]), so HTTP
+//!   joins the run's ladder; [`to_http_entries`] reads the channel back.
+//!
+//! ## Scripted service
+//! [`scripted::ScriptedHttpService`] is an [`HttpService`] for tests: it serves
+//! the exchanges a scenario states as a program and answers anything else
+//! `500`, recorded as a finding. Its faults include closing the connection
+//! without a response, through [`HttpService::answer`] and [`HttpAnswer`].
 //!
 //! ## Failure counters
 //! The real transport classifies every client failure into
@@ -38,15 +44,16 @@
 //! [`HttpError`]). The *timeout budget* and the fail-open policy are the
 //! caller's job (it wraps `request` in `tokio::time::timeout`): under a paused
 //! clock a [`Fault::Stall`]ed request simply never completes until the caller's
-//! timeout fires when the harness advances. See `b2bua::limiter_http`.
+//! timeout fires when the harness advances. See `b2bua::limiter::http`.
 
 pub mod failures;
+pub mod scripted;
 mod transport;
 
 #[cfg(feature = "real")]
 pub use transport::RealHttpNetwork;
 pub use transport::{
-    BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpError, HttpRequest,
-    HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordingHttpNetwork,
-    SimulatedHttpNetwork,
+    to_http_entries, BindError, CapturedExchange, ExchangeOutcome, Fault, HttpAnswer, HttpError,
+    HttpNetworkEvent, HttpOutcome, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
+    HttpTransport, RecordedHttpEntry, RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
 };

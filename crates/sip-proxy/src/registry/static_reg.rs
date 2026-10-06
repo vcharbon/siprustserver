@@ -1,5 +1,5 @@
 //! Static worker registry — a fixed worker pool from `id@host:port,...` (the
-//! `PROXY_WORKERS` grammar). Now a thin wrapper over the shared [`WorkerSet`]: the
+//! `PROXY_WORKERS` grammar). Now a thin wrapper over the shared `WorkerSet`: the
 //! identity (ordinal + host) is a [`topology::StaticMembership`]; the per-worker
 //! port + health are presets in the annotation overlay. Because a static
 //! membership never changes, the projection is composed once at construction; the

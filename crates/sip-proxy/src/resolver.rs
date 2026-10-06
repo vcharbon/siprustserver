@@ -6,8 +6,8 @@
 //! carries a DNS name (e.g. a `sipp-uas` pod FQDN). Resolution must never run
 //! on the recv-loop task: the loop is single-task, so one slow/unresolvable
 //! name awaited inline head-of-line blocks ALL proxy traffic for the resolver
-//! timeout — the same starvation shape as the 2026-06-12 keepalive-burst
-//! collapse, but sustained. The send path is therefore tiered:
+//! timeout — the starvation shape of a keepalive-burst collapse, but
+//! sustained. The send path is therefore tiered:
 //!
 //! 1. **IP literal** — sent inline by the core, never touches this module.
 //! 2. **Fresh positive cache hit** — sent inline here (lock-only, no await
@@ -15,10 +15,9 @@
 //! 3. **Anything else** — handed to a spawned single-flight resolve task; the
 //!    recv loop never waits on DNS.
 //!
-//! The cache is bounded and TTL'd in both directions, replacing the old
-//! process-global forever-cache:
+//! The cache is bounded and TTL'd in both directions:
 //! - a **positive TTL** so a restarted callee pod's new A record is picked up
-//!   (the old cache pinned the dead IP for the process lifetime);
+//!   (a forever-cache would pin the dead IP for the process lifetime);
 //! - a **negative TTL** so an unresolvable name costs one lookup per window,
 //!   not one per packet;
 //! - a **size cap**, because the `;outbound` self-Route lets any sender steer
@@ -33,7 +32,7 @@
 //! FIRST b-leg forward after a deploy / CoreDNS restart / TTL expiry is
 //! warm-equivalent instead of a 3.5–7.5 s stall that blows the downstream 2 s
 //! connect timer:
-//! - **Absolute-first resolution** ([`resolution_candidates`]): kube ships
+//! - **Absolute-first resolution** (`resolution_candidates`): kube ships
 //!   `ndots:5`, so a dotted Service FQDN is search-domain-expanded through
 //!   several serial lookups before being tried as-is. Querying the
 //!   absolutely-qualified `{host}.` first collapses that to ONE lookup; the
@@ -112,7 +111,7 @@ where
 /// The production resolver — `tokio::net::lookup_host` (getaddrinfo on the
 /// blocking pool), first result wins. A per-pod name is single-A, so it
 /// resolves to ONE pod consistently. Dotted names are queried
-/// absolutely-qualified first (see [`resolution_candidates`] — the ndots fix).
+/// absolutely-qualified first (see `resolution_candidates` — the ndots fix).
 pub struct SystemResolver;
 
 #[async_trait]
@@ -249,22 +248,27 @@ impl NameCache {
 }
 
 /// Outcome labels for `sip_proxy_named_sends_total{outcome}`.
-mod outcome {
+pub(crate) mod outcome {
     pub const CACHED: &str = "cached";
     pub const RESOLVED: &str = "resolved";
     pub const RESOLVE_FAILED: &str = "resolve_failed";
     pub const DROPPED_NEGATIVE: &str = "dropped_negative";
     pub const DROPPED_IN_FLIGHT: &str = "dropped_in_flight";
+    /// Every outcome.
+    pub const ALL: [&str; 5] =
+        [CACHED, RESOLVED, RESOLVE_FAILED, DROPPED_NEGATIVE, DROPPED_IN_FLIGHT];
 }
 
 /// Outcome labels for `sip_proxy_resolver_refresh_total{outcome}` (proactive
 /// refresh + startup prewarm — closed set).
-mod refresh_outcome {
+pub(crate) mod refresh_outcome {
     pub const REFRESHED: &str = "refreshed";
     pub const FAILED: &str = "failed";
     pub const IDLE_STOPPED: &str = "idle_stopped";
     pub const PREWARMED: &str = "prewarmed";
     pub const PREWARM_FAILED: &str = "prewarm_failed";
+    /// Every outcome.
+    pub const ALL: [&str; 5] = [REFRESHED, FAILED, IDLE_STOPPED, PREWARMED, PREWARM_FAILED];
 }
 
 struct Inner {

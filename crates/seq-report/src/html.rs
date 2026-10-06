@@ -49,6 +49,7 @@ const BOTTOM_PAD: i64 = 30;
 
 const SIP_COLOR: &str = "#2563eb"; // blue
 const REPL_COLOR: &str = "#9333ea"; // purple
+const HTTP_COLOR: &str = "#0891b2"; // cyan — an HTTP request or reply
 const BAND_COLOR: &str = "#b91c1c"; // red
 const LOST_COLOR: &str = "#dc2626"; // red — the "✗ lost in transit" cross
 const GATING_COLOR: &str = "#dc2626"; // red — gating-anomaly badge
@@ -61,7 +62,7 @@ const DISPUTE_FILL: &str = "#fef3c7"; // amber tint — observers disagree here
 /// distinct connection (ephemeral socket) gets a stable hue so two flows to the
 /// same node — and a node's pre-crash vs post-reboot sockets — read as visibly
 /// different arrows even though they collapse onto one node lane. Index 0 is the
-/// historic repl purple so single-socket diagrams look unchanged. Hues are
+/// repl purple, so single-socket diagrams use one colour. Hues are
 /// chosen legible against white and distinct from the SIP blue.
 const CONN_PALETTE: &[&str] = &[
     "#9333ea", // purple
@@ -99,6 +100,7 @@ fn lane_color(kind: LaneKind) -> &'static str {
         LaneKind::Ua => "#0f766e",
         LaneKind::Sut => "#92400e",
         LaneKind::Node => "#1e3a8a",
+        LaneKind::Service => HTTP_COLOR,
     }
 }
 
@@ -119,7 +121,8 @@ fn anomaly_views<'a>(doc: &'a SeqDoc, items: &[Item<'_>]) -> Vec<AnomalyView<'a>
     let mut ord_of: HashMap<u64, usize> = HashMap::new();
     for (ord, item) in items.iter().enumerate() {
         if let Item::Row(row) = item {
-            if matches!(row.kind, RowKind::Sip { .. } | RowKind::Repl { .. }) {
+            if matches!(row.kind, RowKind::Sip { .. } | RowKind::Repl { .. } | RowKind::Http { .. })
+            {
                 ord_of.entry(row.seq).or_insert(ord);
             }
         }
@@ -195,7 +198,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|d| format!("<p class=\"desc\">{}</p>", escape(d)))
         .unwrap_or_default();
 
-    // Per-flow color legend (036 ask C): SIP rows carrying a `conn` (the
+    // Per-flow color legend: SIP rows carrying a `conn` (the
     // Call-ID) are colored per flow — name each color so a reader can map
     // arrow hue → dialog without opening payloads. First-seen order.
     let mut flow_chips = String::new();
@@ -220,6 +223,17 @@ pub fn render_html(doc: &SeqDoc) -> String {
             escape(&shown),
         ));
     }
+
+    // The HTTP plane is named only where the doc has one, so a SIP-only
+    // report renders as before.
+    let http_css = http_css(doc, "");
+    let http_legend = if has_http(doc) {
+        format!(
+            "<span><i class=\"swatch\" style=\"border-top-color:{HTTP_COLOR};border-top-style:dotted\"></i>HTTP</span>\n      "
+        )
+    } else {
+        String::new()
+    };
 
     // When the doc is wall-clock-aligned, state the absolute anchor so every
     // relative `T+…` stamp maps to a real UTC instant (the "proper reference"
@@ -262,7 +276,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
   .payload-head {{ margin-bottom: 8px; }}
   .seq-sip .payload-head {{ color: {SIP_COLOR}; }}
   .seq-repl .payload-head {{ color: {REPL_COLOR}; }}
-  .ts {{ color: #6b7280; font-family: monospace; }}
+{http_css}  .ts {{ color: #6b7280; font-family: monospace; }}
   /* Clickable diagram messages: hover thickens the arrow + tints the hit row;
      the selected row stays tinted. */
   .seq-msg:hover line {{ stroke-width: 3; }}
@@ -325,7 +339,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
     <div class="legend">
       <span><i class="swatch" style="border-top-color:{SIP_COLOR}"></i>SIP</span>
       <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
-      <span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
+      {http_legend}<span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
       <span><i class="swatch" style="border-top-color:{VIEW_COLOR}"></i>View (what an observer believes about a node)</span>
       <span style="color:{LOST_COLOR}">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
       {flow_chips}
@@ -379,7 +393,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
 
 /// Render ONLY the SVG sequence diagram — the exact markup [`render_html`]
 /// embeds in its diagram panel. For callers that persist/serve the diagram
-/// standalone (the E2E `result.json` sibling artifacts, ADR-0018 Phase F).
+/// standalone (the E2E `result.json` sibling artifacts, ADR-0018).
 pub fn render_svg(doc: &SeqDoc) -> String {
     let items = doc.sorted_items();
     let base = doc.base_ms();
@@ -407,6 +421,7 @@ pub fn render_embed(doc: &SeqDoc) -> String {
     let anoms_of_row = row_anomaly_map(&views);
     let svg = svg_markup(doc, &items, base, &lane_idx, &anoms_of_row, &views);
     let payloads = render_payloads(doc, &items, base, &anoms_of_row, &views);
+    let http_css = http_css(doc, ".seq-embed ");
 
     format!(
         r#"<div class="seq-embed">
@@ -425,7 +440,7 @@ pub fn render_embed(doc: &SeqDoc) -> String {
   .seq-embed .payload-head {{ margin-bottom: 8px; }}
   .seq-embed .seq-sip .payload-head {{ color: {SIP_COLOR}; }}
   .seq-embed .seq-repl .payload-head {{ color: {REPL_COLOR}; }}
-  .seq-embed .ts {{ color: #6b7280; font-family: monospace; }}
+{http_css}  .seq-embed .ts {{ color: #6b7280; font-family: monospace; }}
   .seq-embed .seq-msg {{ cursor: pointer; }}
   .seq-embed .seq-msg:hover line {{ stroke-width: 3; }}
   .seq-embed .seq-msg:hover text {{ text-decoration: underline; }}
@@ -501,6 +516,11 @@ fn svg_markup(
     s.push_str(&format!(
         "<marker id=\"ah-sip\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{SIP_COLOR}\"/></marker>"
     ));
+    if has_http(doc) {
+        s.push_str(&format!(
+            "<marker id=\"ah-http\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{HTTP_COLOR}\"/></marker>"
+        ));
+    }
     for (i, c) in CONN_PALETTE.iter().enumerate() {
         s.push_str(&format!(
             "<marker id=\"ah-conn-{i}\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{c}\"/></marker>"
@@ -509,7 +529,7 @@ fn svg_markup(
     s.push_str("</defs>\n");
 
     // Lifelines + column heads. Consecutive lanes sharing a `group` (logical
-    // sub-lanes of one socket — 036 ask C) get one bracketing header with the
+    // sub-lanes of one socket) get one bracketing header with the
     // shared resource (the ip:port) centered above their individual captions.
     let life_bottom = height - BOTTOM_PAD / 2;
     {
@@ -580,25 +600,39 @@ fn svg_markup(
                     escape(&ts),
                 ));
             }
-            RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+            RowKind::Sip { delivered }
+            | RowKind::Repl { delivered }
+            | RowKind::Http { delivered } => {
                 let is_repl = matches!(row.kind, RowKind::Repl { .. });
+                let is_http = matches!(row.kind, RowKind::Http { .. });
                 // Per-key color for arrows carrying a `conn`: repl rows key on
                 // the socket (two flows to the same node, pre-crash vs
-                // post-reboot sockets); SIP rows key on the Call-ID (036 ask C
-                // — a b2bua's a-leg vs b-leg read as distinct flows). A row
+                // post-reboot sockets); SIP rows key on the Call-ID
+                // (a b2bua's a-leg vs b-leg read as distinct flows). A row
                 // with no `conn` falls back to its plane's default color.
+                // An HTTP row keeps its plane's color whatever its `conn`.
                 let color = match (&row.conn, is_repl) {
+                    _ if is_http => HTTP_COLOR,
                     (Some(c), _) => conn_color(c),
                     (None, true) => REPL_COLOR,
                     (None, false) => SIP_COLOR,
                 };
                 let marker = match (&row.conn, is_repl) {
+                    _ if is_http => "ah-http".to_string(),
                     (Some(c), _) => format!("ah-conn-{}", conn_palette_index(c)),
                     (None, true) => "ah-conn-0".to_string(),
                     (None, false) => "ah-sip".to_string(),
                 };
-                let dash = if is_repl { " stroke-dasharray=\"5 3\"" } else { "" };
-                let plane_class = if is_repl { "seq-repl" } else { "seq-sip" };
+                let dash = match (is_repl, is_http) {
+                    (true, _) => " stroke-dasharray=\"5 3\"",
+                    (_, true) => " stroke-dasharray=\"2 2\"",
+                    _ => "",
+                };
+                let plane_class = match (is_repl, is_http) {
+                    (true, _) => "seq-repl",
+                    (_, true) => "seq-http",
+                    _ => "seq-sip",
+                };
                 // Anomaly badge: a row any finding links to carries a ⚠ at its
                 // left end, colored by the WORST linked severity, so the eye
                 // finds the offending messages without opening the list.
@@ -719,14 +753,18 @@ fn render_payloads(
         let ts = ts_label(doc, row.at_ms, base);
         match row.kind {
             RowKind::Lifecycle => {}
-            RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+            RowKind::Sip { delivered }
+            | RowKind::Repl { delivered }
+            | RowKind::Http { delivered } => {
                 let class = match row.kind {
                     RowKind::Sip { .. } => "seq-sip",
+                    RowKind::Http { .. } => "seq-http",
                     RowKind::Repl { .. } => "seq-repl",
                     RowKind::Lifecycle => unreachable!(),
                 };
                 let plane = match row.kind {
                     RowKind::Sip { .. } => "SIP",
+                    RowKind::Http { .. } => "HTTP",
                     RowKind::Repl { .. } => "REPL",
                     RowKind::Lifecycle => unreachable!(),
                 };
@@ -748,6 +786,9 @@ fn render_payloads(
                     .unwrap_or_default();
                 let badge = match (delivered, row.conn.as_deref()) {
                     (true, _) => String::new(),
+                    (false, _) if matches!(row.kind, RowKind::Http { .. }) => {
+                        " ✗ NO ANSWER DELIVERED".to_string()
+                    }
                     (false, Some(c)) => format!(" ✗ LOST IN TRANSIT (defunct conn {})", escape(c)),
                     (false, None) => " ✗ LOST IN TRANSIT".to_string(),
                 };
@@ -947,4 +988,18 @@ fn render_views_sections(doc: &SeqDoc, base: i64) -> String {
     }
     out.push_str("</ul></div>\n");
     out
+}
+
+/// The HTTP plane's payload style under `scope`, empty for a doc without it.
+fn http_css(doc: &SeqDoc, scope: &str) -> String {
+    if has_http(doc) {
+        format!("  {scope}.seq-http .payload-head {{ color: {HTTP_COLOR}; }}\n")
+    } else {
+        String::new()
+    }
+}
+
+/// Whether the doc draws the HTTP plane.
+fn has_http(doc: &SeqDoc) -> bool {
+    doc.rows.iter().any(|r| matches!(r.kind, RowKind::Http { .. }))
 }

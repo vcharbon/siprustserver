@@ -15,7 +15,7 @@ use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
-use super::client_txn::{try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{stated_lines, try_expect_response, try_send_cancel, AckCtx};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
 use super::step::{unwrap_step, StepError};
 use super::Agent;
@@ -72,6 +72,8 @@ pub struct ClientInvite {
     /// §9.1), so it is retained here.
     pub(super) wire_dst: SocketAddr,
     pub(super) original_invite: SipRequest,
+    /// The datagram the INVITE went out as, for [`retransmit`](Self::retransmit).
+    pub(super) invite_wire: Vec<u8>,
     pub(super) dialog: StackDialog,
     /// Per-forked-early-dialog CSeq (keyed by the fork's To-tag), for the
     /// delayed-offer forking case (RFC 3261 §12.1.2 / §12.2.1.1): one INVITE
@@ -93,6 +95,13 @@ impl ClientInvite {
     /// per-endpoint demux binds the originating actor to.
     pub fn call_id(&self) -> String {
         self.original_invite.call_id().to_string()
+    }
+
+    /// Send the INVITE again, byte for byte, as Timer A does while no response
+    /// has arrived (RFC 3261 §17.1.1.2): the same transaction, not a new
+    /// request. A retransmission belongs before the final is read.
+    pub async fn retransmit(&self) {
+        self.agent.send_wire(&self.invite_wire, self.wire_dst).await;
     }
 
     /// Wait for and assert a response status. Learns the remote tag (from the
@@ -398,6 +407,7 @@ impl ClientInvite {
         self.agent.try_send_wire(resent.image(), self.wire_dst).await?;
         // Re-point the transaction state at the retried INVITE: the CANCEL / ACK /
         // dialog CSeq must all follow the new transaction, not the challenged one.
+        self.invite_wire = resent.image().to_vec();
         self.original_invite = resent;
         self.dialog.local_cseq = new_cseq;
         Ok(true)
@@ -420,8 +430,9 @@ impl ClientInvite {
     /// reuses the INVITE's Request-URI / Call-ID / From / To / topmost Via branch
     /// and the INVITE's CSeq *number* with method `CANCEL`, and is sent to the
     /// SAME wire destination the INVITE took (the proxy / B2BUA when
-    /// [`Invite::through`] was used). Returns a client transaction so the caller
-    /// can `expect` the `200 OK` to the CANCEL; the matching `487 Request
+    /// [`Invite::through`](crate::agent::Invite::through) was used). Returns a
+    /// client transaction so the caller can `expect` the `200 OK` to the
+    /// CANCEL; the matching `487 Request
     /// Terminated` for the INVITE arrives on this same UA and is consumed via
     /// [`ClientInvite::expect`]. CANCEL is a dedicated primitive: it takes no
     /// template in v1 (a captured CANCEL's frozen-header quirks are not
@@ -479,7 +490,8 @@ impl ClientInvite {
     /// [`try_prack`](Self::try_prack) that also returns the PRACK request as
     /// sent — the reactive actor keys its "PRACK awaiting 200" ledger obligation
     /// on the returned request's CSeq (the 200 carries the same number). Same
-    /// RAck derivation; the linear lane uses the request-less [`try_prack`].
+    /// RAck derivation; the linear lane uses the request-less
+    /// [`try_prack`](Self::try_prack).
     ///
     /// FORK-addressed: the PRACK belongs to the early dialog the reliable 1xx
     /// CREATED (RFC 3262 §5), so it is addressed under the response's own
@@ -548,12 +560,26 @@ impl ClientInvite {
     /// declared `delayed-automatic` (holds the ACK first), so a plain `ack()`
     /// after a declaration still delays.
     pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
+        self.ack_with_stating(sdp, &[]).await
+    }
+
+    /// [`ack`](Self::ack) with the acknowledging party's own header lines on
+    /// the ACK (RFC 3261 §13.2.2.4 makes it a request of its own, so it may
+    /// state end-to-end headers like any other).
+    pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) -> Dialog {
+        self.ack_with_stating(None, stated).await
+    }
+
+    /// [`ack_with`](Self::ack_with) and [`ack_stating`](Self::ack_stating) at
+    /// once: the delayed-offer answer and the party's own lines on one ACK.
+    pub async fn ack_with_stating(&mut self, sdp: Option<&str>, stated: &[(&str, &str)]) -> Dialog {
         self.honour_delayed_automatic().await;
         let handle =
             InviteClientTransactionHandle { original_invite: self.original_invite.clone() };
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
             body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            extra_headers: stated_lines(stated),
             ..Default::default()
         };
         let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);

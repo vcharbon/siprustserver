@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="690" height="376" font-family="system-ui, sans-serif" font-size="12">
+<defs><marker id="ah-sip" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker><marker id="ah-conn-0" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9333ea"/></marker><marker id="ah-conn-1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0891b2"/></marker><marker id="ah-conn-2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ca8a04"/></marker><marker id="ah-conn-3" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#16a34a"/></marker><marker id="ah-conn-4" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#db2777"/></marker><marker id="ah-conn-5" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/></marker><marker id="ah-conn-6" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0d9488"/></marker><marker id="ah-conn-7" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ea580c"/></marker></defs>
+<text x="540" y="18" text-anchor="middle" font-weight="bold" fill="#6b7280">10.0.0.9:5070</text>
+<path d="M520 28 L520 34 L560 34 L560 28" fill="none" stroke="#9ca3af" stroke-width="1"/>
+<line x1="90" y1="70" x2="90" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="90" y="35" text-anchor="middle" font-weight="bold" fill="#0f766e">alice (10.0.0.1:5060)</text>
+<line x1="240" y1="70" x2="240" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="240" y="35" text-anchor="middle" font-weight="bold" fill="#1e3a8a">b1 (10.0.0.2:5060)</text>
+<line x1="390" y1="70" x2="390" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="390" y="35" text-anchor="middle" font-weight="bold" fill="#1e3a8a">b2 (10.0.0.3:5060)</text>
+<line x1="540" y1="70" x2="540" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="540" y="35" text-anchor="middle" font-weight="bold" fill="#0f766e">bob</text>
+<g class="seq-msg seq-sip" data-idx="0" style="cursor:pointer">
+<line x1="90" y1="93" x2="240" y2="93" stroke="#2563eb" stroke-width="1.5" opacity="1" marker-end="url(#ah-sip)"/>
+<text x="165" y="89" text-anchor="middle" fill="#2563eb" opacity="1">INVITE sip:bob@x</text>
+<text x="6" y="96" fill="#6b7280" font-family="monospace" font-size="10">T+0.000s</text>
+<rect x="15" y="70" width="300" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-repl" data-idx="1" style="cursor:pointer">
+<line x1="240" y1="139" x2="390" y2="139" stroke="#ea580c" stroke-width="1.5" opacity="1" marker-end="url(#ah-conn-7)" stroke-dasharray="5 3"/>
+<text x="315" y="135" text-anchor="middle" fill="#ea580c" opacity="1">Data[Create/bak] c-1@host</text>
+<text x="6" y="142" fill="#6b7280" font-family="monospace" font-size="10">T+0.007s</text>
+<rect x="165" y="116" width="300" height="46" fill="transparent"/>
+</g>
+<rect x="40" y="174" width="640" height="22" fill="#fee2e2" stroke="#b91c1c" stroke-dasharray="3 2"/>
+<text x="345" y="189" text-anchor="middle" fill="#b91c1c" font-weight="bold">⏻ crash b1 &#160; (T+0.014s)</text>
+<g class="seq-msg seq-sip" data-idx="3" style="cursor:pointer">
+<line x1="240" y1="231" x2="540" y2="231" stroke="#ea580c" stroke-width="1.5" opacity="1" marker-end="url(#ah-conn-7)"/>
+<text x="390" y="227" text-anchor="middle" fill="#ea580c" opacity="1">INVITE sip:bob@y</text>
+<text x="228" y="235" text-anchor="middle" fill="#dc2626" font-size="13" font-weight="bold">⚠</text>
+<text x="6" y="234" fill="#6b7280" font-family="monospace" font-size="10">T+0.021s</text>
+<rect x="165" y="208" width="450" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-repl" data-idx="4" style="cursor:pointer">
+<line x1="390" y1="277" x2="293" y2="277" stroke="#9333ea" stroke-width="1.5" opacity="0.5" stroke-dasharray="5 3"/>
+<text x="341" y="273" text-anchor="middle" fill="#9333ea" opacity="0.8">PullRequest ✗ lost</text>
+<text x="293" y="282" text-anchor="middle" fill="#dc2626" font-size="15" font-weight="bold">✗</text>
+<text x="6" y="280" fill="#6b7280" font-family="monospace" font-size="10">T+0.028s</text>
+<rect x="165" y="254" width="300" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-sip" data-idx="5" style="cursor:pointer">
+<line x1="540" y1="323" x2="345" y2="323" stroke="#ea580c" stroke-width="1.5" opacity="0.5"/>
+<text x="442" y="319" text-anchor="middle" fill="#ea580c" opacity="0.8">200 OK ✗ lost</text>
+<text x="345" y="328" text-anchor="middle" fill="#dc2626" font-size="15" font-weight="bold">✗</text>
+<text x="6" y="326" fill="#6b7280" font-family="monospace" font-size="10">T+0.035s</text>
+<rect x="165" y="300" width="450" height="46" fill="transparent"/>
+</g>
+</svg>

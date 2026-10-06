@@ -45,7 +45,7 @@ pub const SUBFLOW_EARLY: &str = "early_pracked";
 
 /// How an endpoint answers the INITIAL (dialog-creating) INVITE it receives —
 /// the endpoint state machine's entry policy. Later in-dialog traffic is always
-/// handled reactively by [`super::react::default_react`], regardless of
+/// handled reactively by `super::react::default_react`, regardless of
 /// disposition.
 #[derive(Debug, Clone, Copy)]
 pub enum Disposition {

@@ -11,7 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use scenario_harness::claim::ClaimRule;
 use scenario_harness::legpick::LegPicker;
-use sip_message::sniff::call_id;
+use sip_message::preparse::is_invite_request_buffer;
+use sip_message::sniff::{call_id, from_user};
 use sip_net::queue::PacketQueue;
 use sip_net::{
     BindError, BindErrorReason, BindUdpOpts, SendError, SendTap, SignalingNetwork, UdpEndpoint,
@@ -21,7 +22,9 @@ use tokio::time::Instant;
 
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
-use super::{CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role};
+use super::{
+    CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
+};
 
 /// One declared bind on a mux endpoint, dispensed in declaration order as the
 /// call's agents call `bind_udp(addr)`.
@@ -101,6 +104,8 @@ pub struct MuxNetwork {
     pub(super) dispense: HashMap<SocketAddr, Vec<BindDecl>>,
     pub(super) pickers: HashMap<SocketAddr, LegPicker>,
     pub(super) cursor: Mutex<HashMap<SocketAddr, usize>>,
+    /// This call's caller state, shared by its caller endpoint and its slots.
+    pub(super) gate: Arc<CallGate>,
     /// Per-call simulated packet-loss rate applied to every endpoint bound on
     /// this network (0 = off). Each endpoint gets its own RNG seeded off
     /// `drop_seed` so alice/bob/charlie drop independently.
@@ -170,6 +175,9 @@ impl SignalingNetwork for MuxNetwork {
         // shared-vantage socket the caller endpoint and pending UAS receivers
         // coexist on one addr.
         let role = if uas.is_some() { Role::Callee } else { Role::Caller };
+        if role == Role::Caller {
+            self.gate.has_caller.store(true, Ordering::Relaxed);
+        }
         // One loss model + (optional) retransmit engine per endpoint, shared
         // between this endpoint (outbound) and the registry entry the inbound
         // `route` path consults, so both directions and the resend tasks agree.
@@ -197,23 +205,32 @@ impl SignalingNetwork for MuxNetwork {
             }
             let token = self.token.clone();
             let mut g = mux.reg.lock().unwrap();
+            // A key cooling after a failed call is refused in the same step
+            // (under the registry lock) that would claim it.
+            if !g.by_token.contains_key(&token) && self.core.key_cooling(&token) {
+                return Err(BindError {
+                    reason: BindErrorReason::HeldBack,
+                    addr: opts.addr,
+                    message: format!("correlation key {token:?} is cooling after a failed call"),
+                });
+            }
             let pending_ttl = self.core.pending_ttl;
             let slot = match g.by_token.entry(token.clone()) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let slot = e.into_mut();
                     if slot.owner != self.owner {
                         // Claims are scoped (token, rule) per call instance —
-                        // a colliding token (To-user correlation + a shared
-                        // callee number) fails HERE, before any leg could be
-                        // misdelivered.
+                        // a colliding token (a number shared under To-user or
+                        // From-user correlation) fails HERE, before any leg
+                        // could be misdelivered.
                         mux.stats.token_collision.fetch_add(1, Ordering::Relaxed);
                         return Err(BindError {
                             reason: BindErrorReason::AlreadyBound,
                             addr: opts.addr,
                             message: format!(
                                 "correlation token {token:?} already registered by a \
-                                 concurrent call (shared callee number under To-user \
-                                 correlation?)"
+                                 concurrent call (a number shared under To-user or \
+                                 From-user correlation?)"
                             ),
                         });
                     }
@@ -245,6 +262,7 @@ impl SignalingNetwork for MuxNetwork {
                     // `try_receive`. The harness sets `pending_ttl == recv_timeout`,
                     // so the 4× margin holds; keep `pending_ttl >= recv_timeout`.
                     deadline: Instant::now() + pending_ttl * 4,
+                    gate: self.gate.clone(),
                 }),
             };
             keyset.lock().unwrap().push(Key::Token { token, label: label.clone() });
@@ -259,13 +277,19 @@ impl SignalingNetwork for MuxNetwork {
             });
         }
 
+        // Under from-user correlation the call's key IS its caller's From
+        // user, so a caller endpoint holds the key its INVITE must present.
+        let caller_key =
+            (role == Role::Caller && mux.correlation.is_from_user()).then(|| self.token.clone());
         Ok(Box::new(MuxEndpoint {
             local: mux.addr,
             role,
+            caller_key,
             mux: mux.clone(),
             queue,
             keyset,
-            caller_registered: AtomicBool::new(false),
+            gate: self.gate.clone(),
+            invite_sent: AtomicBool::new(false),
             queue_max: mux.queue_max,
             drop,
             txns,
@@ -293,10 +317,16 @@ impl SignalingNetwork for MuxNetwork {
 struct MuxEndpoint {
     local: SocketAddr,
     role: Role,
+    /// The From user a caller's initial INVITE must carry (from-user
+    /// correlation only): the call's key, registered by its callee legs.
+    caller_key: Option<String>,
     mux: Arc<MuxSocket>,
     queue: Arc<PacketQueue>,
     keyset: Arc<Mutex<Vec<Key>>>,
-    caller_registered: AtomicBool,
+    /// The call's caller state; a caller opens it with its first INVITE.
+    gate: Arc<CallGate>,
+    /// This caller endpoint has sent its first INVITE.
+    invite_sent: AtomicBool,
     queue_max: usize,
     /// Simulated per-call packet loss (disabled by default), shared with this
     /// call's [`CallTxns`] so retransmits are lossy too. Outbound loss is applied
@@ -312,23 +342,49 @@ struct MuxEndpoint {
 #[async_trait]
 impl UdpEndpoint for MuxEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        // A caller learns its own dialog key from its first outbound request
-        // (the INVITE) and registers it so responses/in-dialog demux back. This is
-        // local bookkeeping, so it happens even when the datagram is then dropped
-        // on the wire below (a real UAC that loses its INVITE still owns the dialog).
-        if self.role == Role::Caller && !self.caller_registered.load(Ordering::Relaxed) {
+        // A caller registers the Call-ID of each dialog it opens, up to and
+        // including its first INVITE, so responses and in-dialog requests demux
+        // back to it. Under from-user correlation that first INVITE must carry
+        // the call's key as its From user: a mismatch would return legs to
+        // another call (or none), so it is refused and counted, never sent.
+        // This is local bookkeeping, done even when the datagram is then
+        // dropped on the wire below (a UAC that loses its INVITE still owns
+        // the dialog).
+        if self.role == Role::Caller && !self.invite_sent.load(Ordering::Relaxed) {
+            let invite = is_invite_request_buffer(buf);
+            if invite {
+                if let Some(key) = &self.caller_key {
+                    let from = from_user(buf);
+                    if from.as_deref() != Some(key.as_str()) {
+                        self.mux.stats.caller_key_mismatch.fetch_add(1, Ordering::Relaxed);
+                        return Err(SendError::stated(format!(
+                            "caller INVITE From user {from:?} is not the call key {key:?}"
+                        )));
+                    }
+                }
+            }
             if let Some(cid) = call_id(buf) {
+                // Lock order: registry, then keyset (as the demux and `Drop`).
                 let mut g = self.mux.reg.lock().unwrap();
-                g.by_call_id.insert(
-                    cid.clone(),
-                    Delivery {
-                        queue: self.queue.clone(),
-                        drop: self.drop.clone(),
-                        txns: self.txns.clone(),
-                    },
-                );
-                self.keyset.lock().unwrap().push(Key::CallId(cid));
-                self.caller_registered.store(true, Ordering::Relaxed);
+                let mut keys = self.keyset.lock().unwrap();
+                if !keys.iter().any(|k| matches!(k, Key::CallId(c) if *c == cid)) {
+                    g.by_call_id.insert(
+                        cid.clone(),
+                        Delivery {
+                            caller: true,
+                            queue: self.queue.clone(),
+                            drop: self.drop.clone(),
+                            txns: self.txns.clone(),
+                        },
+                    );
+                    keys.push(Key::CallId(cid));
+                }
+            }
+            if invite {
+                self.invite_sent.store(true, Ordering::Relaxed);
+                // Release: the Call-ID registered above is visible to the
+                // dispatcher that Acquire-loads the gate open.
+                self.gate.invite_sent.store(true, Ordering::Release);
             }
         }
         // Record the outbound message in the retransmit engine BEFORE the loss
@@ -394,6 +450,7 @@ impl Drop for MuxEndpoint {
             match key {
                 Key::CallId(c) => {
                     g.by_call_id.remove(&c);
+                    g.release(c, Instant::now() + RELEASE_HOLD);
                 }
                 // Remove only THIS receiver from a possibly-shared slot; drop the
                 // slot once its last receiver leaves. A claim that never fired is

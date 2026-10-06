@@ -3,19 +3,25 @@
 //! and ACK origination toward a leg. Response relay does NOT live here — see
 //! [`super::relay_response`].
 
-use call::helpers::{add_pending_request, bump_local_cseq, relay_cseq_delta, update_remote_cseq};
+use call::helpers::{
+    add_pending_request, bump_local_cseq, find_b_leg, leg_kind, relay_cseq_delta,
+    update_remote_cseq,
+};
 use call::{Call, PendingRequest, RetainedEmission};
-use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
+use sip_message::generators::{
+    self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
+};
 use sip_message::header::{HeaderName, MediaType, RAck};
-use sip_message::{hops, Method};
+use sip_message::{hops, Method, SipHeader, SipRequest};
 use sip_txn::TxnKind;
 
+use crate::config::B2buaConfig;
 use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance, QuietTurn,
 };
 use crate::rules::capabilities;
-use crate::rules::model::RuleContext;
 use crate::rules::relay;
+use b2bua_sdk::model::RuleContext;
 
 use super::select::{
     dialog_identity_tag, in_dialog_method, invite_cseq_from_handle, leg_at, leg_index,
@@ -24,9 +30,11 @@ use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog, carrying `body`/`content_type` through
-    /// (a delayed-offer answer rides the ACK, RFC 3261 §13.2.2.4 / RFC 3264 §4).
-    /// `provenance` says whose ACK it is: the peer's, relayed, or one this
-    /// stack composes on its own account.
+    /// (a delayed-offer answer rides the ACK, RFC 3261 §13.2.2.4 / RFC 3264 §4)
+    /// and `extra_headers`, the relayed ACK's end-to-end lines. `provenance`
+    /// says whose ACK it is: the peer's, relayed, or one this stack composes on
+    /// its own account; `author` whose description `body` is.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ack_leg(
         &self,
         call: &mut Call,
@@ -34,8 +42,24 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         body: Vec<u8>,
         content_type: Option<MediaType>,
+        extra_headers: Vec<SipHeader>,
         provenance: Provenance,
+        author: relay::Author<'_>,
     ) {
+        // The ACK rides the leg's dialog: the one a 2xx confirmed.
+        let dialog = call::helpers::find_leg(call, leg_id)
+            .and_then(|l| l.dialogs.first())
+            .map(|d| d.sip.remote_tag.clone());
+        let body = relay::continue_on_leg(
+            call,
+            leg_id,
+            dialog.as_deref(),
+            author,
+            relay::Carried::InDialog,
+            body,
+            content_type.as_ref(),
+            self.config.sdp_form.as_ref(),
+        );
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
         } else {
@@ -56,24 +80,26 @@ impl ActionExecutor<'_> {
                     format!("ACK (re-ACK, 2xx retransmit) → {leg_id}"),
                     leg_id,
                 ));
+                fx.quiet = Some(QuietTurn::ReAck);
                 return;
             }
         }
         let ack = leg.and_then(|leg| {
             relay::ack_b_leg(
-                &call.call_ref,
+                relay::CallMarks::of(call),
                 leg,
-                call.emergency == Some(true),
                 self.config,
                 self.id_gen,
                 body,
                 content_type,
+                extra_headers,
                 provenance,
             )
         });
         if let Some((e, branch)) = ack {
             // Retain THE ACK's exact bytes + destination before it leaves, so a
-            // retransmitted 2xx re-passes this datagram (§13.2.2.4).
+            // retransmitted 2xx re-passes this datagram (§13.2.2.4); the
+            // end-of-turn stamp rebinds it to the bytes that leave.
             if let OutboundBody::Request(r) = &e.body {
                 *call = call::helpers::retain_emitted_ack(
                     call.clone(),
@@ -114,14 +140,15 @@ impl ActionExecutor<'_> {
     ) {
         // ACK for 2xx: reuse the INVITE CSeq (no dialog-sequence advance,
         // §13.2.2.4) — delegate to the dedicated builder, carrying the inbound
-        // ACK's body through (the delayed-offer re-INVITE answer rides the ACK,
-        // RFC 3264 §4). The target may be either side (a re-INVITE answered by
-        // bob is ACKed toward bob; one answered by alice is ACKed toward alice).
+        // ACK's body (the delayed-offer re-INVITE answer rides the ACK, RFC 3264
+        // §4) and its end-to-end headers through, filtered as on any relayed
+        // request. The target may be either side (a re-INVITE answered by bob
+        // is ACKed toward bob; one answered by alice is ACKed toward alice).
         //
         // Relayed ONLY while the target dialog holds an armed, undischarged ACK
         // obligation for this CSeq — a 2xx in hand that nothing has ACKed yet.
-        // Anything else is absorbed: an ACK the target's own UAC core already
-        // composed on receipt is not owed twice, an early dialog owes no ACK (a
+        // Anything else is absorbed: an ACK a rule already composed on this
+        // stack's own account is not owed twice, an early dialog owes no ACK (a
         // §17.1.1.3 reject-ACK is hop-local, never relayed), and a surplus peer
         // ACK — fresh Via branch or repeated — must not re-ACK an acknowledged
         // 2xx. A repeated 2xx re-ACKs via `re-ack-retransmitted-2xx`, which never
@@ -135,13 +162,18 @@ impl ActionExecutor<'_> {
                 return;
             }
             let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+            let face = capabilities::Face::of_leg(target_leg);
+            let (extra_headers, _) =
+                relayed_request_headers(call, req, target_leg, face, self.config, self.now_ms);
             self.ack_leg(
                 call,
                 fx,
                 target_leg,
                 req.body().to_vec(),
                 content_type,
+                extra_headers,
                 Provenance::Relayed,
+                relay::Author::Leg(ctx.source_leg_id),
             );
             return;
         }
@@ -222,39 +254,43 @@ impl ActionExecutor<'_> {
         } else {
             None
         };
+        let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
+        let body = relay::continue_on_leg(
+            call,
+            target_leg,
+            Some(&target_dialog.sip.remote_tag),
+            relay::Author::Leg(ctx.source_leg_id),
+            relay::Carried::of(req.method(), None, true),
+            req.body().to_vec(),
+            content_type.as_ref(),
+            self.config.sdp_form.as_ref(),
+        );
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
         let target_face = capabilities::Face::of_leg(target_leg);
+        let (extra_headers, advertised) =
+            relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                &call.call_ref,
+                relay::CallMarks::of(call),
                 target_leg,
-                call.emergency == Some(true),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                target_leg,
-                call.emergency == Some(true),
-            )),
-            body: req.body().to_vec(),
-            content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
+            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg)),
+            body,
+            content_type,
             cseq: Some(outbound_cseq as u32),
             // §16.6 step 3: the relayed request continues the sender's hop
             // budget. The stack's OWN in-dialog requests (teardown BYE,
             // keepalive, a re-offer it authors) state the §8.1.1.6 default —
             // only what crosses the back-to-back UA inherits a count.
             max_forwards: Some(hops::forwarded_max_forwards(req).value()),
-            extra_headers: relay::relay_request_passthrough_headers(
-                req,
-                &capabilities::declared_advert_headers(call.features.as_ref(), target_face),
-            ),
+            extra_headers,
             rack,
             // The peer's own advertisement rides in `extra_headers`; this is
             // the DECLARED set for the face, else nothing of the stack's own.
-            capabilities: Some(capabilities::advertised(call, target_face)),
+            capabilities: Some(advertised),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
@@ -306,10 +342,11 @@ impl ActionExecutor<'_> {
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
-                source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 direction: ctx.direction,
                 cancelled: false,
                 offered_100rel: req.offers_100rel(),
+                offered: relay::carries_sdp(req),
+                source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
             };
             *call = add_pending_request(call.clone(), target_leg, &t_id, pending);
         }
@@ -323,4 +360,55 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Relayed,
         });
     }
+}
+
+/// What a request relayed in dialog toward `target_leg` carries, and the
+/// capability set the generator stamps for that face. The source's end-to-end
+/// headers ride bar the halves the face declares and the advertisement headers
+/// the method does not admit. The call's withheld option
+/// tags govern the INVITEs the stack originates; on a relayed request the
+/// peers negotiate end to end (RFC 3262 per transaction), so only their
+/// `timer` half reaches it, toward a leg the call originated; and the session
+/// timer rides only to a leg dialled into it, as far as the leg offers it
+/// (`relay::settle_session_timer`). A `Timestamp` the source stated is
+/// restated with the turn's clock, `now_ms` (RFC 3261 §20.38).
+fn relayed_request_headers(
+    call: &Call,
+    req: &SipRequest,
+    target_leg: &str,
+    face: capabilities::Face,
+    config: &B2buaConfig,
+    now_ms: i64,
+) -> (Vec<SipHeader>, CapabilitySet) {
+    let declared = capabilities::declared_advert_headers(call.features.as_ref(), face);
+    let situation = RelaySituation::request(req.method(), relay::toward_leg(target_leg));
+    let stamp = generators::timestamp_value(now_ms);
+    let scope = config.relay_scope(RelayScope::request(), situation).stamped(Some(&stamp));
+    let mut headers = b2bua_sdk::in_dialog_relay::relayed_request_lines(req, &declared, scope);
+    let mut advertised = capabilities::advertised(call, face);
+    let leg = find_b_leg(call, target_leg);
+    let withheld = match (face, leg) {
+        // The offer state decides only `100rel`, which never reaches here.
+        (capabilities::Face::Originated, Some(leg)) => {
+            capabilities::withheld_option_tags(call, Some(leg_kind(leg)), true)
+                .into_iter()
+                .filter(|tag| tag.eq_ignore_ascii_case(relay::TIMER))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    relay::apply_withheld_option_tags(&mut headers, &withheld);
+    for tag in &withheld {
+        advertised = advertised.without_option_tag(tag);
+    }
+    // The leg's part was fixed when it was dialled, the call's `timer` withhold
+    // and the strategy's included.
+    let takes_part = leg.and_then(|l| l.in_session_timer) != Some(false);
+    let leg_offers = if declared.contains(&HeaderName::Supported) {
+        advertised.supported().is_some_and(|s| s.contains(relay::TIMER))
+    } else {
+        generators::offers_session_timer(&headers)
+    };
+    relay::settle_session_timer(&mut headers, req.headers(), takes_part, leg_offers);
+    (headers, advertised)
 }

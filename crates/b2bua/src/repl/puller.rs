@@ -22,10 +22,8 @@
 //! ## No client-side apply-gate — `(p,b)` is the only idempotency
 //! The puller applies **every** `Data` under the ADR-0014 `(p,b)` version-vector
 //! rule; a re-delivered/stale frame is rejected by dominance, not by a watermark
-//! compare. Dropping the old `at <= W → skip` gate is what fixes the
-//! bootstrap-frame collision (every bootstrap frame shares `at = W`, so the gate
-//! used to admit only the first and silently drop the rest — the ~203/3000
-//! re-hydration cliff).
+//! compare. Every bootstrap frame shares `at = W`, so an `at <= W → skip` gate
+//! would admit only the first and silently drop the rest.
 //!
 //! ## Watermark advances only on `Noop` and post-bootstrap tail `Data.at`
 //! `W` is a pure **changelog position**, never the `(p,b)` vector. It advances on
@@ -63,14 +61,14 @@
 //! - `Backoff`: `sleep(min(init·2^attempt, max))` + a select on cancel (a plain
 //!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard).
 //!
-//! ## Bootstrap hard timer (X5 / Decision 4 — liveness over completeness)
+//! ## Bootstrap hard timer (ADR-0011 X5 — liveness over completeness)
 //! A cold puller arms one absolute deadline `now + bootstrap_hard_timeout_ms`.
 //! While bootstrap is outstanding the connect wait **and** the first-`Noop` wait
 //! race it; if it fires the puller goes **bootstrap-complete (best-effort)** so
 //! the node boots and serves even when a peer is unreachable or pathologically
-//! slow. Unlike the old design it does **not** abandon the connection — there is
-//! no apply-gate collision to avoid, so it keeps streaming on the same socket and
-//! the real first `Noop` (when it arrives) completes the bootstrap for real.
+//! slow. It does **not** abandon the connection: it keeps streaming on the same
+//! socket and the real first `Noop` (when it arrives) completes the bootstrap for
+//! real.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -82,6 +80,7 @@ use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::{mpsc, watch};
 use topology::Peer;
 
+use super::incarnation::is_another_call;
 use super::{AddrResolver, ReplicatingCallStore};
 use crate::router::ReplCommand;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
@@ -91,7 +90,7 @@ const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
 const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
 /// Default bootstrap hard-timeout (ms): the upper bound on how long the puller
 /// waits — for a reachable connection AND for the first catch-up `Noop` — before
-/// declaring bootstrap-complete best-effort (X5 / Decision 4 — liveness over
+/// declaring bootstrap-complete best-effort (ADR-0011 X5 — liveness over
 /// completeness). The connection is NOT dropped on expiry; it keeps streaming.
 const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 /// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
@@ -129,6 +128,14 @@ enum ApplyOutcome {
     Applied,
     Dominated,
     Refused,
+    /// A backup replica of a call not held yet, left unstored at a backup
+    /// ceiling (ADR-0037). Says nothing about the call; the next `Put` that
+    /// finds room stores it.
+    Shed,
+    /// A reverse flush of a call incarnation other than the Element's: a
+    /// takeover copy's view of a call the authority has since replaced on the
+    /// ref. The Element keeps its call and nothing is handed to the fold.
+    Superseded,
 }
 
 /// Backoff knobs for a puller (tests inject short values).
@@ -179,10 +186,10 @@ pub struct PullerStatus {
     /// supervisor owns the authoritative copy keyed by `(ordinal, flow)`; the
     /// puller publishes its progress here so a Park/re-add resumes from it.
     pub watermark: Watermark,
-    /// Sticky **bootstrap-complete** flag (X5 / Decision 4). Set when the first
+    /// Sticky **bootstrap-complete** flag (ADR-0011 X5). Set when the first
     /// catch-up `Noop` arrives OR the bootstrap hard timer fires (best-effort) OR
     /// the puller resumes warm (`W > (0,0)` — no bootstrap needed). Cleared only
-    /// by a `ResetToBootstrap`. S7 readiness consumes this.
+    /// by a `ResetToBootstrap`. Readiness consumes this.
     pub bootstrap_complete: bool,
     /// Monotonic reset generation: bumped each time the server pushes
     /// `ResetToBootstrap` (watermark forced back to `(0,0)`). Lets the supervisor
@@ -220,6 +227,20 @@ enum SelectOutcome {
     Cancelled,
 }
 
+/// Resolves once `cancel` reads `true` or its sender is gone: with no sender
+/// left nothing can park the puller, so it stops. Cancel-safe, so a `select!`
+/// arm can race it against the step in flight.
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Drives the client side for ONE `(peer, flow)`. Cheap to construct; `run` loops
 /// until cancelled. The watermark + current flag are published on a `watch`
 /// channel the supervisor reads.
@@ -249,6 +270,9 @@ pub struct Puller {
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
     /// store directly), so the existing constructors stay source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
+    /// The memory admission gate whose backup ceilings bound the replicas this
+    /// node stores for its peers (ADR-0037). `None` stores every replica.
+    capacity: Option<crate::capacity::CapacityGate>,
     /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
     /// Element's lifecycle state, and the store persists the same encoding.
     codec: MsgpackCodec,
@@ -298,6 +322,7 @@ impl Puller {
                 status_tx,
                 metrics,
                 repl_tx: None,
+                capacity: None,
                 codec: MsgpackCodec::new(),
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
@@ -307,17 +332,38 @@ impl Puller {
         )
     }
 
-    /// Attach the router command sink (ADR-0011 X11 fail-back). Builder so the
-    /// existing [`new`](Self::new)/[`new_at`](Self::new_at) callers (sim + unit
-    /// tests, which assert on the store directly) are unchanged.
+    /// Attach the router command sink (ADR-0011 X11 fail-back). A puller built
+    /// without it (sim + unit tests, which assert on the store directly) sends no
+    /// router commands.
     pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
         self.repl_tx = Some(tx);
         self
     }
 
+    /// The position this flow may report having applied, given it received
+    /// up to `at`: a Backup flow never claims past a replica it left unstored
+    /// (ADR-0037), so a draining primary does not read a shed call as held
+    /// (ADR-0031 D2). A Reclaim flow sheds nothing.
+    fn claimable(&self, at: Watermark) -> Watermark {
+        if self.is_reclaim() {
+            return at;
+        }
+        match self.store.shed_floor(self.peer_ordinal(), at.gen) {
+            Some(floor) if floor < at => floor,
+            _ => at,
+        }
+    }
+
+    /// Attach the memory admission gate whose backup ceilings this puller
+    /// applies (ADR-0037).
+    pub fn with_capacity(mut self, gate: crate::capacity::CapacityGate) -> Self {
+        self.capacity = Some(gate);
+        self
+    }
+
     /// Convenience constructor for a puller that always connects to a **fixed**
     /// `peer_addr` (a resolver-less caller / tests with a concrete bound socket).
-    /// Wraps `peer_addr` in a constant [`FnPeerResolver`].
+    /// Wraps `peer_addr` in a constant [`FnPeerResolver`](super::FnPeerResolver).
     #[allow(clippy::too_many_arguments)]
     pub fn new_at(
         peer_ordinal: impl Into<String>,
@@ -388,8 +434,9 @@ impl Puller {
         self.network.connect(addr).await.ok()
     }
 
-    /// Run the FSM until `cancel` flips to `true` (Park / shutdown). `cancel` is
-    /// a `watch` so the supervisor can interrupt a parked-out puller atomically.
+    /// Run the FSM until `cancel` flips to `true` (Park / shutdown) or its sender
+    /// is dropped. `cancel` is a `watch` so the supervisor can interrupt a
+    /// parked-out puller atomically.
     pub async fn run(self, mut cancel: watch::Receiver<bool>) {
         let mut attempt: u32 = 0;
         // Arm the bootstrap hard deadline iff we start cold. A warm resume is
@@ -492,17 +539,11 @@ impl Puller {
             Some(at) => tokio::select! {
                 _ = fut => SelectOutcome::Completed,
                 _ = tokio::time::sleep_until(at) => SelectOutcome::Deadline,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { SelectOutcome::Cancelled }
-                    else { SelectOutcome::Completed }
-                }
+                () = cancelled(cancel) => SelectOutcome::Cancelled,
             },
             None => tokio::select! {
                 _ = fut => SelectOutcome::Completed,
-                _ = cancel.changed() => {
-                    if *cancel.borrow() { SelectOutcome::Cancelled }
-                    else { SelectOutcome::Completed }
-                }
+                () = cancelled(cancel) => SelectOutcome::Cancelled,
             },
         }
     }
@@ -528,34 +569,22 @@ impl Puller {
         // ---- Connecting ---- resolve fresh (D3) + connect, racing the hard
         // deadline so a hung connect to an unreachable/stalled peer still lets the
         // node go bootstrap-complete.
-        // A spurious (non-cancelling) `cancel.changed()` wake re-enters the race
-        // via `continue` — the deadline arm stays armed. The old shape re-awaited
-        // `try_connect` OUTSIDE the select, so a hard timer expiring during that
-        // window was missed and the node never went bootstrap-complete by timer.
-        let conn = loop {
-            match *deadline {
-                Some(at) => tokio::select! {
-                    c = self.try_connect() => break c,
-                    _ = tokio::time::sleep_until(at) => {
-                        // Hard timer tripped mid-connect: best-effort complete for
-                        // readiness, then back off + retry (now warm → no hard timer).
-                        self.mark_bootstrap_complete(0, "hard timeout while connecting");
-                        *deadline = None;
-                        return RunOutcome::ConnectFailed;
-                    }
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return RunOutcome::Cancelled; }
-                        continue;
-                    }
-                },
-                None => tokio::select! {
-                    c = self.try_connect() => break c,
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return RunOutcome::Cancelled; }
-                        continue;
-                    }
-                },
-            }
+        let conn = match *deadline {
+            Some(at) => tokio::select! {
+                c = self.try_connect() => c,
+                _ = tokio::time::sleep_until(at) => {
+                    // Hard timer tripped mid-connect: best-effort complete for
+                    // readiness, then back off + retry (now warm → no hard timer).
+                    self.mark_bootstrap_complete(0, "hard timeout while connecting");
+                    *deadline = None;
+                    return RunOutcome::ConnectFailed;
+                }
+                () = cancelled(cancel) => return RunOutcome::Cancelled,
+            },
+            None => tokio::select! {
+                c = self.try_connect() => c,
+                () = cancelled(cancel) => return RunOutcome::Cancelled,
+            },
         };
         let conn = match conn {
             Some(c) => c,
@@ -586,6 +615,13 @@ impl Puller {
         // advance W and apply the Reverse rule from the first frame. A cold pull
         // starts pre-bootstrap: apply ungated, hold W until the first Noop.
         let mut bootstrapped = since != Watermark::new(0, 0);
+        // A Backup scan re-sends every live body of the primary, so the shed
+        // marks of an earlier stream (an old incarnation, a ref deleted while
+        // disconnected) say nothing about it: they go, and a body still left
+        // out marks itself again (ADR-0037).
+        if !bootstrapped && !self.is_reclaim() {
+            self.store.clear_shed_of(self.peer_ordinal());
+        }
         // Bodies imported during the pre-`Noop` bootstrap phase — the
         // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
         // the same value across reconnects would signal truncation (now
@@ -617,17 +653,11 @@ impl Puller {
                         }
                         continue;
                     }
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return RunOutcome::Cancelled; }
-                        continue;
-                    }
+                    () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
                 None => tokio::select! {
                     f = conn.recv() => f,
-                    _ = cancel.changed() => {
-                        if *cancel.borrow() { return RunOutcome::Cancelled; }
-                        continue;
-                    }
+                    () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
             };
             match frame {
@@ -642,6 +672,8 @@ impl Puller {
                     origin_now_ms,
                     indexes,
                     body,
+                    answered,
+                    incarnation,
                 }) => {
                     // Apply under the `(p,b)` rule for this flow + phase. No
                     // watermark gate — `(p,b)` dominance is the only idempotency.
@@ -662,9 +694,21 @@ impl Puller {
                             origin_now_ms,
                             &indexes,
                             body,
+                            answered,
+                            incarnation,
                             mode,
                         )
                         .await;
+                    if outcome == ApplyOutcome::Shed {
+                        let floor = self.status_tx.borrow().watermark;
+                        self.store.note_shed(
+                            &call_ref,
+                            self.peer_ordinal(),
+                            at.gen,
+                            floor,
+                            body_ttl_ms,
+                        );
+                    }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
@@ -687,7 +731,7 @@ impl Puller {
                         // frames all share `at = W`: claiming W before the whole
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
-                        if conn.send(Frame::Position { at }).await.is_err() {
+                        if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
                             return RunOutcome::Disconnected;
                         }
                     }
@@ -718,7 +762,7 @@ impl Puller {
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
-                    if conn.send(Frame::Position { at }).await.is_err() {
+                    if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
                         return RunOutcome::Disconnected;
                     }
                 }
@@ -768,13 +812,19 @@ impl Puller {
     /// | mode | `Put` | `Delete` |
     /// |---|---|---|
     /// | [`Bootstrap`](ApplyMode::Bootstrap) | apply unless `(sp, sb)` dominates | apply |
-    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates, refuse when the body branches off the Element or `sb > b_in` | apply unless the Element is a live call the authority never answered |
+    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates, refuse when the body branches off the Element or `sb > b_in` | apply unless the Element is a live call the authority never answered (by a flush or by this `Delete`) |
     /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` | apply |
     ///
     /// With no local copy every mode applies; the store's own resurrection
-    /// tombstone, not this gate, is what stops a re-create of a just-deleted ref.
+    /// tombstone, not this gate, is what stops a re-create of a just-deleted call.
     /// An EXPIRED Element is already gone by the time the gate reads it — it has
     /// no vector to compare, so a `Delete` lands and a `Put` is taken as a create.
+    ///
+    /// The vector orders versions of one call incarnation. A `Put` of another
+    /// incarnation than the Element's is not a version of it: Bootstrap and
+    /// Forward take it as a create (the authority serves a new call on the ref,
+    /// so the Element's call is over there), and Reverse returns
+    /// [`Superseded`](ApplyOutcome::Superseded).
     ///
     /// Bootstrap recovery and the Reverse tail keep delete-wins outright. Forward
     /// is the one direction that yields (ADR-0031 D3): a `Put` whose body stands
@@ -782,13 +832,9 @@ impl Puller {
     /// Element's own `b`, is a branch of the call the Element records and is
     /// refused; a `Delete` is refused only for the one fact the guard protects —
     /// an ACTIVE, answered Element the authority has never published an answer
-    /// for. Both Forward refusals count into
+    /// for, by a flush or by the `Delete` itself. Both Forward refusals count into
     /// `b2bua_repl_forward_flush_refused_total{op}`.
     ///
-    /// (Tombstone-suppress — never resurrect a locally-deleted call — is deferred:
-    /// it needs a reaped tombstone set; deletes already win, so the remaining gap
-    /// is only a late reverse-create racing a delete, which the watermark + reap
-    /// bound.)
     /// Returns the [`ApplyOutcome`]: a dominated re-delivery and a refusal both
     /// leave the store untouched, and only the refusal is a split of the two
     /// views. The reclaim tail reclaims on an applied reverse flush and hands a
@@ -806,6 +852,8 @@ impl Puller {
         origin_now_ms: i64,
         indexes: &[String],
         body: Option<Arc<[u8]>>,
+        answered: bool,
+        incarnation: Option<String>,
         mode: ApplyMode,
     ) -> ApplyOutcome {
         let primary = partition_of(&self.self_ordinal, call_ref).1;
@@ -817,6 +865,11 @@ impl Puller {
         match op {
             Op::Put => {
                 let stored = self.store.current_cv(role, &primary, call_ref);
+                let another_call = stored.is_some()
+                    && is_another_call(
+                        self.store.incarnation(call_ref).as_deref(),
+                        incarnation.as_deref(),
+                    );
                 // The Forward direction reads the frame's body twice — for the
                 // branch compare and for the authority's view of the answer — so
                 // it is decoded once, here.
@@ -824,18 +877,21 @@ impl Puller {
                     .then(|| body.as_deref().and_then(|b| self.codec.decode(b).ok()))
                     .flatten();
                 // Stored `(sp,sb)` DOMINATES incoming `(p,b)` ⇒ skip (idempotent /
-                // reordered re-delivery). The dominance gate is now the ONLY
+                // reordered re-delivery). The dominance gate is the ONLY
                 // idempotency (no watermark apply-gate): it is what makes every
                 // bootstrap frame — all sharing `at = W` — safe to apply.
                 let dominated = |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
                 let outcome = match mode {
                     // Bootstrap recovery: the authority's body, monotone by `(p,b)`.
                     ApplyMode::Bootstrap => match stored {
-                        Some((sp, sb)) if dominated(sp, sb) => ApplyOutcome::Dominated,
+                        Some((sp, sb)) if !another_call && dominated(sp, sb) => {
+                            ApplyOutcome::Dominated
+                        }
                         _ => ApplyOutcome::Applied,
                     },
                     // Forward (primary → backup): the D3 guard, counters first and
                     // then the bodies.
+                    ApplyMode::Forward if another_call => ApplyOutcome::Applied,
                     ApplyMode::Forward => {
                         self.forward_put_outcome(
                             role,
@@ -853,12 +909,27 @@ impl Puller {
                     // reactive reclaim materialises it). Else keep our own — and
                     // hand it up, re-delivery included: the fold reads the body for
                     // progress the vector cannot carry (ADR-0014 amendment).
+                    ApplyMode::Reverse if another_call => ApplyOutcome::Superseded,
                     ApplyMode::Reverse => match stored {
                         Some((sp, sb)) if call_gen != sp || call_bgen <= sb => {
                             ApplyOutcome::Refused
                         }
                         _ => ApplyOutcome::Applied,
                     },
+                };
+                let outcome = if outcome == ApplyOutcome::Applied
+                    && stored.is_none()
+                    && role == PartitionRole::Backup
+                    && !self.store.buries(call_ref, incarnation.as_deref())
+                    && self
+                        .capacity
+                        .as_ref()
+                        .and_then(|g| g.refuses_backup(self.store.backup_held()))
+                        .is_some()
+                {
+                    ApplyOutcome::Shed
+                } else {
+                    outcome
                 };
                 if outcome == ApplyOutcome::Refused && mode == ApplyMode::Forward {
                     self.metrics.record_repl_forward_flush_refused("put");
@@ -880,7 +951,11 @@ impl Puller {
                             // Carry the origin wall clock so the store can persist
                             // the receive-time skew offset for later timer
                             // re-anchoring on failover/reclaim (clock-skew hardening).
-                            &PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() },
+                            &PutOpts {
+                                origin_now_ms: Some(origin_now_ms),
+                                incarnation,
+                                ..PutOpts::default()
+                            },
                         )
                         .await;
                     // Inbound replica admitted — record the op per stream+endpoint:
@@ -901,16 +976,23 @@ impl Puller {
                 outcome
             }
             Op::Delete => {
+                // A delete of another call than the Element's ends that call
+                // alone (the store buries it and keeps the Element), so the
+                // guard has nothing of it to protect.
+                let of_the_element = !is_another_call(
+                    self.store.incarnation(call_ref).as_deref(),
+                    incarnation.as_deref(),
+                );
                 if mode == ApplyMode::Forward
-                    && self.element_outlives_the_delete(role, &primary, call_ref).await
+                    && of_the_element
+                    && self.element_outlives_the_delete(role, &primary, call_ref, answered).await
                 {
                     self.metrics.record_repl_forward_flush_refused("delete");
                     return ApplyOutcome::Refused;
                 }
-                let _ = self
-                    .store
-                    .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())
-                    .await;
+                let opts = PutOpts { incarnation, ..PutOpts::default() };
+                let _ =
+                    self.store.delete_call(role, &primary, call_ref, indexes, false, &opts).await;
                 self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), "delete");
                 ApplyOutcome::Applied
             }
@@ -980,11 +1062,15 @@ impl Puller {
     /// Whether the stored Element records a call this `Delete` must not end: an
     /// Element that is still there (`current_cv` — an EXPIRED one is already gone
     /// and lets the delete land), whose body is **`Active`**, whose caller **was
-    /// answered**, and for which the deleting authority has never itself flushed
-    /// an answer
-    /// ([`authority_answered`](ReplicatingCallStore::authority_answered)). That is
-    /// the one fact D3 protects: an answer somebody else gave on this Element,
-    /// which the authority is tearing down because it never saw it (ADR-0031 D3).
+    /// answered**, and for which the deleting authority has never published an
+    /// answer. That is the one fact D3 protects: an answer somebody else gave on
+    /// this Element, which the authority is tearing down because it never saw it
+    /// (ADR-0031 D3).
+    ///
+    /// The authority publishes its answer by flushing it
+    /// ([`authority_answered`](ReplicatingCallStore::authority_answered)) or by
+    /// this `Delete` stating it (`stated_answered`, the frame's `answered`). A
+    /// `Delete` stating no answer only leaves the flushed mark to decide.
     ///
     /// Everything else takes delete-wins. An ending Element (`Terminating` /
     /// `Terminated`) goes with the delete — the call is over whoever ended it, and
@@ -1004,8 +1090,10 @@ impl Puller {
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
+        stated_answered: bool,
     ) -> bool {
-        if self.store.current_cv(role, primary, call_ref).is_none()
+        if stated_answered
+            || self.store.current_cv(role, primary, call_ref).is_none()
             || self.store.authority_answered(call_ref)
         {
             return false;
@@ -1037,7 +1125,7 @@ impl Puller {
         body: Option<Arc<[u8]>>,
         origin_now_ms: i64,
     ) {
-        use ApplyOutcome::{Applied, Dominated, Refused};
+        use ApplyOutcome::{Applied, Dominated, Refused, Shed, Superseded};
         let Some(tx) = &self.repl_tx else { return };
         if mode == ApplyMode::Forward && !bootstrapped {
             return;
@@ -1060,6 +1148,7 @@ impl Puller {
                 origin_now_ms,
             },
             (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
+            (_, Shed | Superseded) => return,
         };
         let _ = tx.send(cmd);
     }
@@ -1086,7 +1175,7 @@ mod tests {
     /// A scripted client connection that delivers each pre-arranged bootstrap
     /// frame after a fixed clock-time `gap`, then parks (a quiet tail). Faithful
     /// to the real server, EVERY bootstrap `Data` carries the SAME scan-start
-    /// head `at` — the collision the old apply-gate used to drop.
+    /// head `at`, which a watermark apply-gate would drop.
     struct PacedConn {
         frames: Mutex<VecDeque<Frame>>,
         gap_ms: u64,
@@ -1142,6 +1231,8 @@ mod tests {
                     origin_now_ms: 0,
                     indexes: Vec::new(),
                     body: Some(Arc::from(format!("body{i}").into_bytes().into_boxed_slice())),
+                    answered: false,
+                    incarnation: None,
                 });
             }
             q.push_back(Frame::Noop { at: self.w_scan });
@@ -1155,12 +1246,10 @@ mod tests {
         }
     }
 
-    /// Regression (#1, re-hydration truncation): a bootstrap whose `n` frames all
-    /// share `at = W` must re-hydrate IN FULL. Pre-fix the client-side apply-gate
-    /// (`at <= W → skip`) admitted only the first and dropped the rest (the
-    /// ~203/3000 ceiling); now there is no gate — `(p,b)` dominance is the only
-    /// idempotency, so every frame applies. The whole stream also outlasts the
-    /// hard-timeout window, which (new model) no longer abandons the connection.
+    /// A bootstrap whose `n` frames all share `at = W` re-hydrates IN FULL:
+    /// `(p,b)` dominance is the only idempotency, so every frame applies. The
+    /// whole stream also outlasts the hard-timeout window, which does not abandon
+    /// the connection.
     #[tokio::test(start_paused = true)]
     async fn bootstrap_frames_sharing_watermark_all_rehydrate() {
         let clock = Clock::test_at(0);
@@ -1194,7 +1283,7 @@ mod tests {
         }
 
         // ALL n pre-seed calls landed in pri:{w1} — none lost to an apply-gate
-        // collision. Pre-fix only the first survived.
+        // collision.
         for i in 0..n {
             let cr = format!("w1|{i}|t");
             assert!(
@@ -1210,5 +1299,528 @@ mod tests {
             status.borrow().bootstrap_complete,
             "first catch-up Noop observed ⇒ bootstrap-complete",
         );
+    }
+
+    // ---- backup ceilings (ADR-0037) ----
+
+    /// A Backup-flow puller on `w1` pulling `w0`, its gate at `capacity`.
+    fn backup_puller(
+        capacity: crate::config::CapacityConfig,
+    ) -> (
+        Puller,
+        ReplicatingCallStore,
+        crate::capacity::CapacityGate,
+        crate::capacity::SimulatedSystemControl,
+    ) {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let (probe, control) = crate::capacity::simulated();
+        let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
+        gate.configure(&capacity);
+        let net: Arc<dyn ReplicationNetwork> =
+            Arc::new(PacedNet { n: 0, gap_ms: 100, w_scan: Watermark::new(1, 1) });
+        let (puller, _status) = Puller::new_at(
+            "w0",
+            "w1",
+            Partition::Bak,
+            "127.0.0.1:9".parse().unwrap(),
+            net,
+            store.clone(),
+            PullerConfig::fast_test(),
+            Watermark::new(0, 0),
+            B2buaMetrics::new(),
+        );
+        (puller.with_capacity(gate.clone()), store, gate, control)
+    }
+
+    async fn put(p: &Puller, partition: Partition, call_ref: &str, gen: i64) -> ApplyOutcome {
+        let body: Arc<[u8]> = Arc::from(b"body".to_vec().into_boxed_slice());
+        p.apply_to_store(
+            Op::Put,
+            partition,
+            call_ref,
+            gen,
+            0,
+            0,
+            0,
+            &[],
+            Some(body),
+            false,
+            None,
+            ApplyMode::Forward,
+        )
+        .await
+    }
+
+    async fn held(store: &ReplicatingCallStore, call_ref: &str) -> bool {
+        store.get_call(PartitionRole::Backup, "w0", call_ref).await.unwrap().is_some()
+    }
+
+    /// At the count ceiling a replica of a new call is not stored; replicas
+    /// already held keep taking updates, and a freed slot lets the next `Put`
+    /// of the shed call in.
+    #[tokio::test]
+    async fn the_backup_count_ceiling_sheds_new_replicas_only() {
+        let (p, store, gate, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Bak, "w0|b|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 2);
+
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 1).await, ApplyOutcome::Shed);
+        assert!(!held(&store, "w0|c|t").await, "a shed replica is not stored");
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Calls), 1);
+
+        assert_eq!(
+            put(&p, Partition::Bak, "w0|a|t", 2).await,
+            ApplyOutcome::Applied,
+            "a held replica keeps taking updates at the ceiling"
+        );
+
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                "w0|b|t",
+                2,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                false,
+                None,
+                ApplyMode::Forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 1);
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 2).await, ApplyOutcome::Applied);
+        assert!(held(&store, "w0|c|t").await, "the next Put after a free slot stores it");
+    }
+
+    /// At the backup RSS ceiling a replica of a new call is not stored.
+    #[tokio::test]
+    async fn the_backup_rss_ceiling_sheds_new_replicas() {
+        let (p, store, gate, control) = backup_puller(crate::config::CapacityConfig {
+            backup_rss_bytes: Some(1000),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        control.set_rss_bytes(Some(1000));
+        gate.sample(crate::capacity::Occupancy::default());
+        assert_eq!(put(&p, Partition::Bak, "w0|b|t", 1).await, ApplyOutcome::Shed);
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 2).await, ApplyOutcome::Applied);
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Rss), 1);
+        assert_eq!(store.backup_held(), 1);
+    }
+
+    /// Our own calls coming home (the `Pri` partition) are never shed: they
+    /// are live calls, not backups.
+    #[tokio::test]
+    async fn a_reclaimed_own_call_is_never_shed() {
+        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Pri, "w1|mine|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 1);
+    }
+
+    /// A shed replica is not a split: nothing rides up to the router.
+    #[tokio::test]
+    async fn a_shed_replica_signals_nothing() {
+        let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let p = p.with_repl_sink(tx);
+        p.signal_put_outcome(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
+        p.signal_put_outcome(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A connection that plays a fixed script, one frame per `gap_ms`, and
+    /// records every frame the puller sends back.
+    struct RecordingConn {
+        frames: Mutex<VecDeque<Frame>>,
+        sent: Arc<Mutex<Vec<Frame>>>,
+    }
+
+    #[async_trait]
+    impl ReplicationConnection for RecordingConn {
+        async fn send(&self, frame: Frame) -> Result<(), SendError> {
+            self.sent.lock().unwrap().push(frame);
+            Ok(())
+        }
+        async fn recv(&self) -> Option<Frame> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let next = self.frames.lock().unwrap().pop_front();
+            match next {
+                Some(f) => Some(f),
+                None => std::future::pending().await,
+            }
+        }
+        fn peer_addr(&self) -> SocketAddr {
+            "127.0.0.1:9".parse().unwrap()
+        }
+        fn local_addr(&self) -> SocketAddr {
+            "127.0.0.1:8".parse().unwrap()
+        }
+    }
+
+    struct RecordingNet {
+        script: Mutex<Option<VecDeque<Frame>>>,
+        sent: Arc<Mutex<Vec<Frame>>>,
+    }
+
+    #[async_trait]
+    impl ReplicationNetwork for RecordingNet {
+        async fn connect(
+            &self,
+            _dst: SocketAddr,
+        ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+            let frames = self.script.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::new(RecordingConn { frames: Mutex::new(frames), sent: self.sent.clone() }))
+        }
+        async fn listen(
+            &self,
+            _local: SocketAddr,
+        ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+            unreachable!("the recording net is pull-only")
+        }
+    }
+
+    fn data(op: Op, call_ref: &str, gen: i64, counter: u64) -> Frame {
+        Frame::Data {
+            at: Watermark::new(1, counter),
+            op,
+            partition: Partition::Bak,
+            call_ref: call_ref.to_string(),
+            call_gen: gen,
+            call_bgen: 0,
+            body_ttl_ms: 0,
+            origin_now_ms: 0,
+            indexes: Vec::new(),
+            body: (op == Op::Put).then(|| Arc::from(b"body".to_vec().into_boxed_slice())),
+            answered: false,
+            incarnation: None,
+        }
+    }
+
+    /// Run a puller of `partition` from `w0` on `w1`, resuming from `start`,
+    /// through `script`, its gate at `capacity`; the positions it reported.
+    async fn reported_positions(
+        start: Watermark,
+        partition: Partition,
+        store: &ReplicatingCallStore,
+        capacity: crate::config::CapacityConfig,
+        script: Vec<Frame>,
+    ) -> Vec<Watermark> {
+        let (probe, _control) = crate::capacity::simulated();
+        let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
+        gate.configure(&capacity);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let net: Arc<dyn ReplicationNetwork> = Arc::new(RecordingNet {
+            script: Mutex::new(Some(VecDeque::from(script))),
+            sent: sent.clone(),
+        });
+        let (puller, _status) = Puller::new_at(
+            "w0",
+            "w1",
+            partition,
+            "127.0.0.1:9".parse().unwrap(),
+            net,
+            store.clone(),
+            PullerConfig::fast_test(),
+            start,
+            B2buaMetrics::new(),
+        );
+        let puller = puller.with_capacity(gate);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move { puller.run(cancel_rx).await });
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
+        }
+        let _ = cancel_tx.send(true);
+        task.abort();
+        let reported = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Position { at } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        reported
+    }
+
+    fn at(counter: u64) -> Watermark {
+        Watermark::new(1, counter)
+    }
+
+    /// While a shed replica stands, the flow reports no position past the last
+    /// one it held everything up to, whatever else it applies; once the
+    /// replica is stored, the report catches up (ADR-0031 D2 x ADR-0037).
+    #[tokio::test(start_paused = true)]
+    async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let reported = reported_positions(
+            Watermark::new(0, 0),
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+            vec![
+                Frame::Noop { at: at(1) },
+                data(Op::Put, "w0|a|t", 1, 2),
+                data(Op::Put, "w0|b|t", 1, 3),
+                data(Op::Put, "w0|a|t", 2, 4),
+                Frame::Noop { at: at(4) },
+                data(Op::Delete, "w0|a|t", 3, 5),
+                data(Op::Put, "w0|b|t", 2, 6),
+                Frame::Noop { at: at(6) },
+            ],
+        )
+        .await;
+        let want: Vec<Watermark> = [1, 2, 2, 2, 2, 2, 6, 6].into_iter().map(at).collect();
+        assert_eq!(reported, want, "positions reported per frame");
+        assert_eq!(store.shed_count(), 0, "the stored replica cleared its mark");
+    }
+
+    /// A Delete of a shed replica's call releases the position it held.
+    #[tokio::test(start_paused = true)]
+    async fn a_deleted_shed_replica_releases_the_position() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let reported = reported_positions(
+            Watermark::new(0, 0),
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+            vec![
+                Frame::Noop { at: at(1) },
+                data(Op::Put, "w0|a|t", 1, 2),
+                data(Op::Put, "w0|b|t", 1, 3),
+                data(Op::Delete, "w0|b|t", 2, 4),
+            ],
+        )
+        .await;
+        let want: Vec<Watermark> = [1, 2, 2, 4].into_iter().map(at).collect();
+        assert_eq!(reported, want);
+    }
+
+    /// A Backup scan drops the marks an earlier stream left (an old
+    /// incarnation of the primary): the scan re-sends every live body.
+    #[tokio::test(start_paused = true)]
+    async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", 1, at(3), 0);
+        let reported = reported_positions(
+            Watermark::new(0, 0),
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![Frame::Noop { at: Watermark::new(2, 1) }],
+        )
+        .await;
+        assert_eq!(reported, vec![Watermark::new(2, 1)]);
+        assert_eq!(store.shed_count(), 0);
+    }
+
+    /// `frame` as the primary's next incarnation (gen 2) sends it.
+    fn reborn(mut frame: Frame) -> Frame {
+        if let Frame::Data { at, .. } = &mut frame {
+            at.gen = 2;
+        }
+        frame
+    }
+
+    /// A rebooted primary is tailed warm, with no scan: the marks its old
+    /// incarnation's writes left go at the first position of the new one.
+    #[tokio::test(start_paused = true)]
+    async fn a_warm_resume_past_a_reboot_drops_the_old_incarnations_marks() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", 1, at(3), 0);
+        let reported = reported_positions(
+            at(5),
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![reborn(data(Op::Put, "w0|y|t", 1, 1)), Frame::Noop { at: Watermark::new(2, 1) }],
+        )
+        .await;
+        assert_eq!(reported, vec![Watermark::new(2, 1), Watermark::new(2, 1)]);
+        assert_eq!(store.shed_count(), 0);
+    }
+
+    /// A Reclaim flow sheds nothing, so a Backup flow's marks of the same
+    /// peer never cap it.
+    #[tokio::test(start_paused = true)]
+    async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", 1, at(1), 0);
+        let reported = reported_positions(
+            Watermark::new(0, 0),
+            Partition::Pri,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![Frame::Noop { at: at(9) }],
+        )
+        .await;
+        assert_eq!(reported, vec![at(9)]);
+        assert_eq!(store.shed_count(), 1, "the Backup flow's mark stands");
+    }
+
+    /// A re-delivered Put of a call deleted inside the tombstone window is
+    /// ignored by the store, never shed: it marks nothing.
+    #[tokio::test]
+    async fn a_tombstoned_put_is_not_shed() {
+        let (p, _store, gate, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                "w0|a|t",
+                2,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                false,
+                None,
+                ApplyMode::Forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 1).await, ApplyOutcome::Applied);
+        assert_ne!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Shed);
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Calls), 0);
+    }
+
+    // ---- call incarnations on one callRef ----
+
+    /// A `Put` of `call_ref` at `(p, b)`, naming `incarnation`, applied in `mode`.
+    async fn put_of(
+        p: &Puller,
+        partition: Partition,
+        call_ref: &str,
+        (gen, bgen): (i64, i64),
+        incarnation: &str,
+        mode: ApplyMode,
+    ) -> ApplyOutcome {
+        let body: Arc<[u8]> = Arc::from(incarnation.as_bytes().to_vec().into_boxed_slice());
+        p.apply_to_store(
+            Op::Put,
+            partition,
+            call_ref,
+            gen,
+            bgen,
+            60_000,
+            0,
+            &[],
+            Some(body),
+            false,
+            Some(incarnation.to_string()),
+            mode,
+        )
+        .await
+    }
+
+    /// The body stored for `call_ref` in `role` of `w0`.
+    async fn body_of(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &str) -> Vec<u8> {
+        store.get_call(role, "w0", call_ref).await.unwrap().expect("a body is held").to_vec()
+    }
+
+    /// The `(p,b)` vector orders versions of one call. A new call on the ref
+    /// restarts at `p = 1`, so a backup that missed the old call's delete holds
+    /// it at a version the new call's first `Put` does not dominate; the new
+    /// call replaces it all the same, in the tail and in a bootstrap.
+    #[tokio::test]
+    async fn a_new_call_on_the_ref_replaces_an_element_its_version_does_not_dominate() {
+        for mode in [ApplyMode::Forward, ApplyMode::Bootstrap] {
+            let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+            let r = "w0|a|t";
+            assert_eq!(
+                put_of(&p, Partition::Bak, r, (5, 0), "w0|a|t#1", mode).await,
+                ApplyOutcome::Applied
+            );
+            assert_eq!(
+                put_of(&p, Partition::Bak, r, (5, 0), "w0|a|t#1", mode).await,
+                ApplyOutcome::Dominated,
+                "a re-delivery of the same call is still dominated ({mode:?})"
+            );
+            assert_eq!(
+                put_of(&p, Partition::Bak, r, (1, 0), "w0|a|t#2", mode).await,
+                ApplyOutcome::Applied,
+                "{mode:?}"
+            );
+            assert_eq!(body_of(&store, PartitionRole::Backup, r).await, b"w0|a|t#2");
+            assert_eq!(store.current_cv(PartitionRole::Backup, "w0", r), Some((1, 0)));
+            assert_eq!(store.incarnation(r).as_deref(), Some("w0|a|t#2"));
+            assert_eq!(store.backup_held(), 1);
+        }
+    }
+
+    /// A reverse flush of a call the Element no longer holds — a takeover
+    /// copy's view of the call the authority replaced on the ref — is refused
+    /// whatever its version, and nothing is handed to the fold: folding it
+    /// would end or rewrite the new call.
+    #[tokio::test]
+    async fn a_reverse_flush_of_a_replaced_call_folds_into_nothing() {
+        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let p = p.with_repl_sink(tx);
+        let r = "w0|a|t";
+        let reverse = ApplyMode::Reverse;
+        assert_eq!(
+            put_of(&p, Partition::Pri, r, (1, 0), "w0|a|t#2", ApplyMode::Bootstrap).await,
+            ApplyOutcome::Applied
+        );
+        let outcome = put_of(&p, Partition::Pri, r, (1, 7), "w0|a|t#1", reverse).await;
+        assert_eq!(outcome, ApplyOutcome::Superseded);
+        p.signal_put_outcome(reverse, outcome, true, r, None, 0);
+        assert!(rx.try_recv().is_err(), "nothing rides up to the router");
+        assert_eq!(body_of(&store, PartitionRole::Primary, r).await, b"w0|a|t#2");
+
+        let outcome = put_of(&p, Partition::Pri, r, (1, 1), "w0|a|t#2", reverse).await;
+        assert_eq!(outcome, ApplyOutcome::Applied, "the held call's own flush still applies");
+    }
+
+    /// A deleted call stays buried on the apply path: its late `Put` is not
+    /// stored, while a new call on the same ref is.
+    #[tokio::test]
+    async fn a_deleted_call_is_not_resurrected_and_a_new_one_on_its_ref_is_stored() {
+        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let r = "w0|a|t";
+        let forward = ApplyMode::Forward;
+        put_of(&p, Partition::Bak, r, (3, 0), "w0|a|t#1", forward).await;
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                r,
+                0,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                false,
+                None,
+                forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied);
+
+        put_of(&p, Partition::Bak, r, (4, 0), "w0|a|t#1", forward).await;
+        assert!(store.get_call(PartitionRole::Backup, "w0", r).await.unwrap().is_none());
+        put_of(&p, Partition::Bak, r, (1, 0), "w0|a|t#2", forward).await;
+        assert_eq!(body_of(&store, PartitionRole::Backup, r).await, b"w0|a|t#2");
     }
 }

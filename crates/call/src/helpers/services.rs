@@ -18,7 +18,7 @@ pub fn relay_first_18x_first_relayed(call: &Call) -> bool {
     call.relay_first_18x.as_ref().map(|s| s.first_relayed).unwrap_or(false)
 }
 
-/// The active `relay18x.messages` policy (defaults to `FIRST` when the feature
+/// The active `Relay18xMessages` policy (defaults to `FIRST` when the feature
 /// or the field is absent).
 pub fn relay_first_18x_messages(call: &Call) -> crate::features::Relay18xMessages {
     call.features

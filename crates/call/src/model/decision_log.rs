@@ -6,14 +6,15 @@
 //! decision replaced on the call. Append helper:
 //! [`crate::helpers::mark_decision`].
 //!
-//! A route the limiter, the hop budget or the target admission refused, an
+//! A route the limiter, the hop budget or the destination allow-list refused, an
 //! unanswered consult (engine error, deadline), a limiter-refused reroute and
 //! every final the stack authors on its own mark nothing.
 
 use serde::{Deserialize, Serialize};
 
 /// The closed set of decision families this stack applies: the decision
-/// point crossed with the treatment it returned.
+/// point crossed with the treatment it returned. The replicated encoding is
+/// positional: a new variant is appended, never inserted or reordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {
@@ -44,13 +45,18 @@ pub enum DecisionKind {
     /// A REFER's decision: denied — also what an unanswered consult resolves
     /// to.
     TransferReject,
+    /// An in-dialog INFO's decision: relay it to the peer.
+    InfoRelay,
+    /// An in-dialog INFO's decision: answer it here, relay nothing.
+    InfoAcknowledge,
 }
 
 /// One applied decision. `ordinal` is its 1-based position in the log — the
 /// value stamped on everything written under it; `at_ms` is the clock of the
 /// turn that applied it; `leg_id` names the leg whose event the decision
 /// answers: `a` for the initial INVITE, the leg that failed for a failover,
-/// the referring leg for a transfer, `None` for a call-scoped release event
+/// the referring leg for a transfer, the leg the INFO arrived on for an
+/// in-dialog INFO, `None` for a call-scoped release event
 /// and for a failover a limiter refusal raised (no leg failed); `label` is
 /// the opaque string the decision layer attached, recorded for the call's
 /// record and read by nothing here.

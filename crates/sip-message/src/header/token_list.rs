@@ -64,7 +64,7 @@ impl<K: TokenKind> TokenListHeader<K> {
         self.tokens.is_empty()
     }
 
-    /// Add `token` if it is a well-formed [`token`](is_token) the set does not
+    /// Add `token` if it is a well-formed `token` the set does not
     /// already carry. Anything else — a comma list, an embedded space, a value
     /// carrying CR/LF — is DROPPED: the set is the stack's grammar barrier, so
     /// a caller-supplied string can never render a second value or a second

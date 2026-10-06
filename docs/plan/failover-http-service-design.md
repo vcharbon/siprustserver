@@ -75,13 +75,15 @@ response path; absent for the no-answer path).
   carries a `status` (response path) → `RelayFailureToALeg` + `begin-termination`;
   else (no-answer path) → `begin-termination`.
 
-### Tag continuity across failover (the property the 4 cases assert)
+### Dialog identity across failover (the property the 4 cases assert)
 The failover must NOT clear `call.relay_first_18x`. The first 180 (bob1) stored the
 a-facing tag (`stored_a_tag`) and set `first_relayed`. `CreateLeg` does not touch
-features or the relay slice, so: bob2's 18x is suppressed (`first_relayed` true) and
-bob2's 200 reuses `stored_a_tag` via `force-tag-consistency`. The call-level
-`features.relay_first_18x_to_180` already activates the new leg — no re-application
-needed. This is exactly why these 4 cases test failover.
+features or the relay slice, so bob2's 18x is suppressed (`first_relayed` true).
+Bob2 rings behind the mask, so `answering-dialog-identity` maps it to a fresh
+a-facing tag and its 200 opens a second caller dialog rather than answering under
+`stored_a_tag`. The call-level `features.relay_first_18x_to_180` already activates
+the new leg — no re-application needed. This is exactly why these 4 cases test
+failover.
 
 ### Scripted adapter + harness
 - `test_adapter`: add `failover_route_to(...)` helper building
@@ -92,8 +94,10 @@ needed. This is exactly why these 4 cases test failover.
 
 ## Cases
 1. `suppress-18x failoverNoAnswer` — no-answer timeout on bob1(180) → CANCEL bob1,
-   failover to bob2(new_ruri); bob2 200 To-tag == bob1 180 To-tag (delayed offer).
-2. `suppress-18x failoverReject` — bob1 180 then 503 → failover bob2; To-tag cont.
+   failover to bob2(new_ruri); bob2 200 carries a fresh To-tag, opening a second
+   caller dialog (delayed offer).
+2. `suppress-18x failoverReject` — bob1 180 then 503 → failover bob2; same fresh
+   To-tag on bob2's 200.
 3. `fake-prack forking` — bob1 183(100rel)+PRACK+503 → failover bob2 (unreliable);
    alice 200 carries bob2 SDP (b1 cache discarded). B2BUA-driven failover (confirmed).
 4. `fake-prack failover` — same shape as 3, separate trace.

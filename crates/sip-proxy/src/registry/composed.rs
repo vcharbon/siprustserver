@@ -1,4 +1,4 @@
-//! `ComposedWorkerRegistry` — the production [`WorkerRegistry`]: a [`WorkerSet`]
+//! `ComposedWorkerRegistry` — the production [`WorkerRegistry`]: a `WorkerSet`
 //! (shared `topology::Membership` ⊕ health projection) driven by a live membership
 //! source via the shared `topology::spawn_membership_reconcile` self-heal loop.
 //!

@@ -5,9 +5,9 @@
   "compatibleShapes": ["basic-call-media"],
   "input": {
     "core": {
-      "from": "sip:+33123456789@example.com",
-      "to": "sip:+33987654321@example.com",
-      "ruri": "sip:+33987654321@127.0.0.1:5070"
+      "from": "sip:+15551234567@example.com",
+      "to": "sip:+15559876543@example.com",
+      "ruri": "sip:+15559876543@127.0.0.1:5070"
     }
   },
   "checkSets": ["invite-identity"],

@@ -3,11 +3,11 @@
 # disk and the top CPU processes every $INTERVAL seconds to a '|'-delimited log,
 # flushing periodically so a WSL VM crash still leaves the run-up-to-death visible.
 #
-# Rationale: the 2026-06-30 WSL crash ("100% CPU") had NO preserved evidence —
-# dmesg resets on the WSL reboot and Windows-side vmmem isn't visible from Linux.
-# This log is the baseline: if a future run crashes the VM again, compare the
-# tail here against this baseline to tell a regression (new climb) from the
-# known kindnetd-hot-loop + soak-stack steady state.
+# Rationale: a WSL crash ("100% CPU") preserves NO evidence — dmesg resets on
+# the WSL reboot and Windows-side vmmem isn't visible from Linux. This log is the
+# baseline: if a run crashes the VM, compare the tail here against this
+# baseline to tell a regression (new climb) from the known kindnetd-hot-loop +
+# soak-stack steady state.
 #
 # Env: INTERVAL (s, default 5), OUT (log path).
 set -u

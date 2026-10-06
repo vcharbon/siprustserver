@@ -1,11 +1,10 @@
 //! `RecordedAnomaly` + `Severity` — the cross-layer finding ledger.
 //!
-//! In the TS source `RecordedAnomaly` is a wide discriminated union with one
-//! arm per layer (`signalingAudit`, `queueLeak`, `codecParity`, …). A closed
-//! Rust enum would force every layer to edit this crate to add an arm, which
-//! defeats "shared foundation imported by most layers". So the Rust shape is a
+//! A closed enum with one arm per layer (`signalingAudit`, `queueLeak`,
+//! `codecParity`, …) would force every layer to edit this crate to add an arm,
+//! which defeats "shared foundation imported by most layers". So the shape is a
 //! **flat struct** with a `&'static str` `kind` discriminant the layer owns,
-//! plus the fields every variant shared (`check`, `detail`, `severity`,
+//! plus the fields every finding shares (`check`, `detail`, `severity`,
 //! `bind_key`). A layer encodes any extra fields it needs (queue depth,
 //! in-flight count) into `detail`.
 

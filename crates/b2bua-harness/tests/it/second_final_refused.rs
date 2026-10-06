@@ -186,7 +186,7 @@ async fn a_service_final_on_a_cancelled_call_is_refused_and_counted() {
 
     // ── bob's withheld 487 resolves the cancelled b-leg; the call finalizes ──
     b_inv.respond(487, "Request Terminated").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().second_final_refused_total(), 1, "no further refusal at teardown");
 
@@ -231,7 +231,7 @@ async fn the_first_final_on_a_live_call_is_admitted() {
     b_inv.respond(487, "Request Terminated").await;
     assert_eq!(b2bua.metrics().second_final_refused_total(), 0, "a first final is not a refusal");
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;

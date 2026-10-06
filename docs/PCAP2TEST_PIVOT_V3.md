@@ -16,7 +16,7 @@ compiler, dumb interpreter.** A corner case is compiled into explicit fields by
 the generator, never inferred at replay time. The named anti-example is the
 v0.1 interpreter's keepalive elision: callflow knowledge inside an interpreter
 is a design failure of the format, and `background` (§5.1) is where that
-particular knowledge now lives — as document data.
+particular knowledge lives — as document data.
 
 Rationale and the design record live with the consumer that authored the
 format. This file states the contract and nothing else.
@@ -44,7 +44,7 @@ A v2 reader looking for a field that moved:
 | `routing.attempts` | `calls[].attempts`. `relay18x` moved onto the call with it, and the `routing` container is gone. v2's `setup_deadline_ms` has no v3 counterpart (§0.1) |
 | — | `calls[]`: a document may play several calls at once |
 | cross-leg order derived from `routing.attempts` | `after: ["<step-id>"]`, stated |
-| resource name `resources/s07_uac1_0.sdp` | `resources/uac1_3_0.sdp` — actor, ordinal within the case, part index. Step-index-free (friction H1) |
+| resource name `resources/s07_uac1_0.sdp` | `resources/uac1_3_0.sdp` — actor, ordinal within the case, part index. Step-index-free |
 | — | `case.origin`: `capture` or `authored`, the subset gate's discriminator |
 | `case.source` required | required for `origin: capture`, absent otherwise |
 | — | `case.requires`: informative capability tokens |
@@ -70,6 +70,59 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-05 — a From or To ref states the name-addr its number rode in.** A
+tier-2 ref on a From or To may carry `addr`: the captured value with its tag
+dropped (display name, URI and user parameters, header parameters), each role
+number composed as `${num:…}`. Present, it is the field's whole value and the
+lane composes no URI around it. The generator states it on a UAC's
+dialog-opening INVITE send, and records the identity on the dialog-opening
+INVITE a UAS expects, where no `ruri` is stated (§8). Lint refuses an `addr`
+on a `ruri` (`ref/addr-on-ruri`), one carrying a tag (`ref/addr-tagged`) and one
+that does not read as a name-addr (`ref/addr-unreadable`); the interpreter
+refuses them at render. A number is composed in a URI's user part, and in a
+display name that is the number itself, never in a host or a parameter; one a
+URI writes with user parameters (3GPP TS 24.229 `verstat`) is composed like any
+other.
+
+**2026-09-22 — a tolerated absence is released only in front of the leg's
+first pending required step.** An expect armed beside a pending required expect
+or an unsent send (§6.7b, §6.7c) released every `optional` standing before it,
+including those behind that pending step, whose order against it is unknown.
+The release now stops at the leg's first pending step that is not an `optional`
+expect (§6.5, §14). §6.7c's bounds state the method-wide armed-answer check and
+the block rule as the scheduler applies them. No document field changes.
+
+**2026-09-22 — a CANCEL sent after its INVITE's non-2xx final is answered 200
+or 481, and either satisfies the step.** A UAS holds its INVITE server
+transaction in Completed after a non-2xx final until the ACK or Timer H
+(RFC 3261 §17.2.1), and a CANCEL matching a transaction draws 200 while one
+matching none draws 481 (§9.2). An expect naming either final to a CANCEL the
+leg sent after a non-2xx final to its INVITE reached it takes the other as its
+own (§6.7d, §14). No document
+field changes.
+
+**2026-09-22 — an unmatched response is charged to the expect of its own
+transaction, and a final retires it.** A response rides the client transaction
+of the request it answers (RFC 3261 §17.1.3), so a datagram no armed expect
+matched is charged to the armed expect waiting on that transaction, not to the
+first expect of the leg; a final so charged retires the expect, and the run goes
+on where the tail is still composable (§14). No document field changes; the
+verdict gains `retired`, the retired steps.
+
+**2026-09-15 — the settle waits on the scripted legs' own INVITE server
+transactions.** A non-2xx final a scripted leg sent to an INVITE holds a server
+transaction in Completed until the ACK the system owes on the INVITE's branch
+or Timer H (RFC 3261 §17.1.1.3, §17.2.1). The settle read the flow and the
+system's call count only, so a run closed in the instant such a final went
+out and the ACK landed after the recording; a system that never ACKed passed
+identically. No document field changes; the verdict gains one failure.
+
+| change | where |
+|---|---|
+| the settle floor: an un-ACKed non-2xx INVITE final a scripted leg sent keeps the run open, bounded by Timer H from the final's first emission, whoever composed the final — a step, the unscripted answer, the generic close. A budget that runs out names it (`leg B: 487 to INVITE CSeq 2 awaits its ACK`) | §10, `pivot-interpreter` |
+| past Timer H the transaction is gone and the ACK never came: the run settles and states `final-unacknowledged` (`leg`, `status`, `cseq`), a structural failure a declared divergence never carries | §10, `pivot-schema` verdict |
+| the ACK that ends the wait is recorded as the transaction's own closer (`absorbed: the §17.1.1.3 ACK …`), never as `datagram-after-flow` | §10, `pivot-interpreter` |
+
 **2026-09-14 — an expected session description is asserted by CONTENT, the
 lane-owned fields masked where the run rebooked them.** An expected SDP was a
 declared shape (`sdp-present`) and nothing read its lines, so a description the
@@ -81,7 +134,7 @@ only.
 
 | change | where |
 |---|---|
-| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version masked always, and every field the expect's own `rewrite` tokens name — exactly what the render writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never — masked where the run's media plane REBOOKED it; on a verbatim run the tokens mask nothing and two descriptions the structure cannot tell apart must be the same bytes (one `document:bytes` record otherwise). Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
+| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version, and every field the expect's own `rewrite` tokens name — exactly what the render writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never — masked where the run's media plane REBOOKED it; on a verbatim run the tokens mask nothing and two descriptions the structure cannot tell apart must be the same bytes (one `document:bytes` record otherwise). Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
 | the generator stores an expected SDP as `{ ref, rewrite, compare: "sdp" }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_0.sdp`; multipart stays a shape | §8.3, generator |
 | the interpreter gates a `compare: sdp` resource on presence AND media type, exactly as the `sdp-present` shape gates; the content is the confrontation's | §6.3, §8.3, `pivot-interpreter` |
 | the confrontation states one `body` record per differing line key, `body:sdp:<section>:<line>:<scope>` (sections `session`, `m<i>`), a side that is no session description as one `body:sdp:document:sdp:<scope>` record, a media section on one side only as one `body:sdp:m<i>:section:<scope>` record, two descriptions a verbatim run carried as different bytes with the structure equal as one `body:sdp:document:bytes:<scope>` record — every line verbatim, each side one element per line as a header record carries one per value; the driver reads the run's media mode off the bundle and hands it to the confrontation | the pipeline's `confront`, `sdpfold`, the driver |
@@ -105,7 +158,7 @@ after the run.
 | the confrontation gains `body` records: `body:<type/subtype>:<scope>`, the expected and received texts one a side, both verbatim; a reception carrying no body confronts as the empty text; the driver supplies every expect-side resource from the case directory and a ref it did not supply is a driver error | `ConfrontationRecord.kind`, the pipeline's `confront`, the driver |
 
 **2026-08-30 — an expect-side ladder states its FACTS and the interpreter
-excuses nothing.** Ticket 211. §6.9 splits a ladder — the count is the
+excuses nothing.** §6.9 splits a ladder — the count is the
 document's, the pacing is RFC 3261's per message class — and on a `send` step
 that split closes, because the scripted peer paces itself by the document's own
 gaps. On an `expect` step it cannot: the emitter is the SUT on its own T1 while
@@ -113,38 +166,24 @@ the count was read off a platform on another one, so the two counts are one
 dwell measured against two ladders and the cut is faithful either way. The
 interpreter had answered that with a 30 ms wall-clock margin
 (`ladder-overtaken-by-answer`), which derived from nothing and missed by 25 ms
-on `capture_181953` s45. The margin is gone; the note carries the facts instead
+on a captured step. The margin is gone; the note carries the facts instead
 and a post-run tolerance re-counts them.
 
 | change | where |
 |---|---|
 | `RetransmitNote` gains `side` (`send` / `expect`), `intervals_ms` (the document's own gaps for the step), `dwell_us` (the claimed datagram to the closer that ended the ladder) and `rfc_rungs` (the rungs an RFC-paced ladder of the message's class puts inside that dwell); `blessed` is removed | §6.9, `pivot-schema`, `@sip/contracts` |
 | `retransmit-count-mismatch` gates unconditionally: the interpreter counts the ladder and excuses no count, on any lane | §6.9, `pivot-interpreter` |
-| the tolerance is `ladder-recounted-under-rfc-pacing`, a second bless premise on the post-run reclassifier: expect-side, one stated gap per declared rung, the captured pacing putting the DECLARED rungs in the dwell and the RFC ladder the OBSERVED ones — all four or the failure stands | the downstream rules package (`ladder-recount.ts`), audited by issue 163 |
+| the tolerance is `ladder-recounted-under-rfc-pacing`, a second bless premise on the post-run reclassifier: expect-side, one stated gap per declared rung, the captured pacing putting the DECLARED rungs in the dwell and the RFC ladder the OBSERVED ones — all four or the failure stands | the downstream rules package (`ladder-recount.ts`) |
 
-**2026-08-29 — the ACK-relay delta reads the offer, and a moved ACK carries its
-dependents.** Ticket 189. The transform was gated on the call having run a
-local-ACK mechanism, so an ordinary answered call kept a causality the replay
-never reproduces; the gate is GONE and the offer decides alone. And moving the
-ACK is only half of it: a step the capture anchored on that ACK is re-based onto
-the ACK's own captured anchor, so it keeps its captured instant instead of
-riding the move forward.
-
-| change | where |
-|---|---|
-| the mechanism gate is deleted; every propagated ACK to a 2xx is transformed, the delayed-offer exception and the undetermined reading unchanged | §13.2, generator |
-| `ack-relay-delta-relayed` is GONE — nothing declines for that reason any more. `ack-relay-delta-rebased` names what a move re-based | §13.2's flag table, `case.annotations.flags` |
-
-**2026-08-26 — `auto` is a composition marker, not a storage policy.** Ruling
-of the design record. The
+**2026-08-26 — `auto` is a composition marker, not a storage policy.** The
 closed field list on an auto step was the ONE departure from the three-tier
 model in the pipeline, and it left an ACK's frozen headers and the delayed
-offer's ANSWER with no home: measured over 400 captures / 8910 steps, scripted
-steps dropped 0 headers and 0 bodies while auto steps dropped 993 and 99. The
+offer's ANSWER with no home: scripted steps dropped no header and no body
+while auto steps dropped both. The
 justification written for the list — "a scripted copy emits a second automatic"
 — was false in this interpreter, which emits only from `emit(&step)`. Every
-`§13.2 ack-relay-delta-delayed-offer` flag in the corpus therefore asserted a
-preservation the document did not perform.
+delayed-offer ACK in the corpus therefore asserted a preservation the document
+did not perform.
 
 | change | where |
 |---|---|
@@ -154,7 +193,7 @@ preservation the document did not perform.
 | a `verbatim-emission` naming an auto step COMPILES: there is a stored block to preserve. `PlanError::PreservesAutomaticStep` is deleted | §11, interpreter |
 
 Consequence, stated because it must be measured and not absorbed: once the
-harness DRIVES those headers, every relay claim issue 65 declined on
+harness DRIVES those headers, every relay claim left undecided on
 `request:ACK:in-dialog`, `request:PRACK:in-dialog` and `response:200:PRACK`
 becomes decidable again. The capability set on an ACK or a PRACK is inert
 (RFC 3261 §20.5, §12.2 — an ACK is no target-refresh request, and it draws no
@@ -199,7 +238,7 @@ that predicts the replay's divergence and writes the case as a NEGATIVE one,
 proving both that failure detection works and that the bad behavior is gone.
 No auto-repair is attempted: there is no way to guess how such a call would
 have ended. The ONLY ground for not generating a case from a capture is an
-INCOMPLETE source call (`source-call-incomplete`, Q51 (b)); the census refusal
+INCOMPLETE source call (`source-call-incomplete`); the census refusal
 survives solely as a DEFERRED guard on the residue no declaration can anchor.
 
 | change | where |
@@ -208,7 +247,7 @@ survives solely as a DEFERRED guard on the residue no declaration can anchor.
 | `pivot-schema lint` holds the new shape: `must-fail/anchor-not-a-reliable-provisional-send`, `must-fail/anchor-already-pracked` | §11.2, §13 |
 | both SUT-invalid census refusals (`sut-violates:<rule>`) are DEFERRED: withdrawn where the case declares every charged coordinate, standing only on the undeclarable residue. A charged coordinate carries its RULE, so one rule's anchor never withdraws another's refusal | generator |
 | census-sync settles a hit on a REFUSED case in its own `CASE REFUSED` block instead of writing an entry no case will ever carry; decisions are recomputed each run, so a later re-cut re-surfaces the hit | census-sync |
-| every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter (Q53) |
+| every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter |
 
 **2026-08-23 — `must_fail`: a document declares the failure its run MUST
 produce.** Ruling of the third evidence round. A source whose
@@ -222,7 +261,7 @@ change, so it lands here.
 | `must_fail[]`: `failure` (CLOSED, one member `unexpected-ack`), `step` (the anchor) and `derived_from` (the §11.1 rule the source broke). Declaring any makes the document a NEGATIVE case, which passes only by failing exactly as declared | §2, §11.2 |
 | `pivot-schema lint` holds the placement: `ref/must-fail-step-unknown`, `must-fail/duplicate`, `must-fail/anchor-not-a-2xx-send`, `must-fail/anchor-already-acked` | §11.2, §13 |
 | the subset gate lets a captured document carry it: a declaration pairs a detector's hit with the lane knowledge §13.2 already applies, and it is the one construct by which a captured document may state something the capture does not hold | §13.1 |
-| the generator DERIVES it from the census hit, at the seam that stamps `rfc_violations`, and never from the shape of the flow: only where the scripted peer SENDS the unACKed 2xx does this platform's own local ACK arrive where nothing expects it | generator |
+| the generator DERIVES it from the census hit, at the seam that stamps `rfc_violations`, and never from the shape of the flow: only where the scripted peer SENDS the unACKed 2xx does the platform's own local ACK arrive where nothing expects it | generator |
 
 The verdict inversion is NOT in this batch: a run does not yet read the
 declaration, so a negative case's run reports the plain failure. §15 marked it,
@@ -243,7 +282,7 @@ read by the run that carries it. No field changes; the run bundle gains a
 | the run keeps replaying past a declared datagram, so a negative case still tears its call down, settles and evaluates its postconditions. The gate, the lint rules and the recording are untouched | §10, §11.2 |
 
 **2026-08-23 — `must_fail`: the declaration INCLUDES, and the derivation goes
-first.** Ruling Q47 (b) of the collision round. The two entries
+first.** The two entries
 above read "the declared failure and nothing else", which no corpus negative can
 meet: replaying a capture the replay is known to diverge from makes the tail
 diverge too. No field changes; the run bundle gains a `tolerated` list, and the
@@ -256,7 +295,7 @@ generator stops refusing a case it can declare.
 | where the census charges the capture's own SUT with the withheld ACK, the DERIVATION decides first: the case is generated as a negative one wherever it anchors a declaration for every charged hit, and refused by category only where it cannot. The unPRACKed-provisional rule still refuses outright | §11.2, §0.1 (2026-08-23) |
 
 **2026-08-24 — what ends a script is being unable to GO ON, on every
-document.** Ruling Q52, correcting the
+document.** This corrects the
 trigger the entry below states. Ending early has nothing to do with whether a
 document is positive or negative: it is about whether the run can compose its
 next message. No field changes; what moves is where the rule is written, since it
@@ -269,7 +308,7 @@ is run semantics and not a property of a declaration.
 | the rule and the generic close are POLARITY-FREE and move to §14, where run semantics live. A positive run that cannot go on is abandoned, closed and settled exactly like a negative one — and still fails. §11.2 keeps only what a declaration adds | §10, §11.2, §14 |
 
 **2026-08-23 — `must_fail`: the first delta ends the SCRIPT, and the call is
-closed generically.** Ruling Q50. The two entries
+closed generically.** The two entries
 above have a negative run keep replaying past its divergence, which scripts a
 conversation neither party is having; and the tail's own aborting deltas were
 piling a settle failure on top of the declaration anyway. No field changes; the
@@ -318,7 +357,7 @@ batch also introduced is RETIRED by the 2026-08-25 entry above.)
 |---|---|
 | `rfc_violations[].rule` gains `no-ack-to-dialog-creating-2xx` (RFC 3261 §13.2.2.4), with its detector in `crates/sip-pcap/src/rfc/ack.rs` and the report field it carries | §11.1 |
 
-**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31. No field shape
+**2026-08-23 — `flow[].in_dialog` is TOTAL.** No field shape
 changes; the CONTRACT does, which is what this index is for — a document that
 marked only the finals §4.1 reads is now a lint error, so the batch lands across
 this document, `pivot-schema`'s lint and the generator exactly as an amendment
@@ -352,7 +391,7 @@ Rulings of the design record.
 |---|---|
 | `calls[].setup_deadline_ms` is REMOVED — one concept, one spelling, and the wire only ever shows the cancel timing, which `attempts[].no_answer_ms` already states. §4.3 (the PROVISIONAL section) and the §15 row are gone with it, and the per-lane compilation contract renumbers §4.4 → §4.3 | §0, §4, §4.3, §15 |
 | REFER with `Replaces` is OUT OF SCOPE. The `has-replaces` claim discriminator is REMOVED from `actors[].claim.by`, leaving `ruri-pos` and `arrival-order`; the §15 `replaces`-correlated row is gone, and the authored attended-transfer fixture is replaced by `authored-consultation-refer.v3.json`, which carries the same authored-only constructs with a plain `Refer-To` | §5, §15, fixture set |
-| the generator EXCLUDES a call group carrying that mechanism instead of cutting a case from it, loudly: reason token `refer-replaces-out-of-scope` on stdout, the evidence datagram on stderr, and both in `<out>/<capture>/excluded.json` (`testkit/ts/rules/src/exclusions.ts`). Zero groups in the 10 182-document corpus match | generator |
+| the generator EXCLUDES a call group carrying that mechanism instead of cutting a case from it, loudly: reason token `refer-replaces-out-of-scope` on stdout, the evidence datagram on stderr, and both in `<out>/<capture>/excluded.json`. A deployment's rule set names the exclusion | generator |
 
 `setup_deadline_ms` may return by amendment the day a per-call setup budget
 becomes observable as a distinct fact rather than a second spelling of the
@@ -365,10 +404,10 @@ vocabulary —
 by string equality, so one lane spelled two ways would downgrade classified
 checks on the origin's own lane. Renamed in the generator, this document's
 examples, drafts and staged fixtures now; the bulk corpus picks it up at
-regeneration (issue 07).
+regeneration.
 
 **2026-08-22 — forked early dialogs: an accessor namespace, and UPDATE inside
-one.** Rulings Q29 and Q38.
+one.**
 
 | change | where |
 |---|---|
@@ -379,7 +418,7 @@ The authored `forked-100rel-prack-per-early-dialog` draft is the exercise: its
 "each PRACK rides its own fork" assertion was an `RAck` regex proxy and now
 reads the two forks' own tags and RSeqs.
 
-**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35.
+**2026-08-22 — verbatim body fidelity: a part's own entity block.**
 
 | change | where |
 |---|---|
@@ -391,21 +430,21 @@ The flows schema is NOT bumped: `msgs[].body.parts[].headers` is additive and
 omitted when empty, and schema 5's rule is a bump on a BREAKING change to the
 emitted shape. A flows document produced before this batch states no part
 headers because its producer read none — the corpus picks them up at
-regeneration (issue 07).
+regeneration.
 
-**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34.
+**2026-08-22 — the ACK ladder: drawn, and collapsed once.**
 
 | change | where |
 |---|---|
 | `retransmits` on an auto ACK step means ONE ACK per repeat of the final its `cseq` names (RFC 3261 §13.2.2.4), drawn by the wire and never paced — an ACK rides no retransmission timer. Copies of the final that arrive while the ACK is held are each still owed one. A count on a scripted ACK, or on one naming no `cseq`, is refused by the interpreter and by lint (`retransmits/scripted-ack`) | §6.3, §6.9, §14 |
-| the generator collapses a repeat onto the step it repeats using the flows document's `repeat_of`, not `retx`. **Amended 2026-08-26 (issue 81/82): the fresh-branch re-ACK no longer collapses** — a repeat is the same datagram byte for byte, and those ACKs are not, so H8's ladder is encoded once because it is one step per emission, not because a count absorbs it. `retx` is the same-branch half of that one relation, not a second criterion, and both are bounded by the transaction envelope and by byte identity (§6.9) — which makes the two halves coincide. A document whose producer computed no `repeat_of` keeps the `retx` collapse and carries a `retransmit-collapse-legacy` flag | generator, §6.9 |
+| the generator collapses a repeat onto the step it repeats using the flows document's `repeat_of`, not `retx`. **Amended 2026-08-26: the fresh-branch re-ACK does not collapse** — a repeat is the same datagram byte for byte, and those ACKs are not, so such a ladder is encoded once because it is one step per emission, not because a count absorbs it. `retx` is the same-branch half of that one relation, not a second criterion, and both are bounded by the transaction envelope and by byte identity (§6.9) — which makes the two halves coincide. A document whose producer computed no `repeat_of` keeps the `retx` collapse and carries a `retransmit-collapse-legacy` flag | generator, §6.9 |
 
 The drawn shape is exercised end to end by the authored
 `bc-rc-drawn-ack-per-2xx` draft and its run bundle. The `samples/` documents and
 the bulk corpus still show the pre-collapse encoding; they pick it up at
-regeneration (issue 07).
+regeneration.
 
-**2026-08-22 — ratified working readings.** Ruling Q38 accepted these as
+**2026-08-22 — ratified working readings.** These were accepted as
 readings of the format, amendable like anything else here. Each is now stated
 where its section already discusses the matter.
 
@@ -424,17 +463,14 @@ enforced by the interpreter's plan, is now mirrored in lint as
 `deviation/verbatim-emission-auto`, so a generator learns it at lint time.
 
 **2026-08-23 — the `rfc_violations` rule vocabulary grows a second member.**
-Ruling Q30.
 
 | change | where |
 |---|---|
 | `unacked-reliable-provisional` joins the closed `rule` enum, with its detector: RFC 3262 §4, a UAC that took a reliable provisional and never PRACKed it | §11.1 |
 
 A member and its detector land together, which is what "closed" is for. The
-corpus census run that justifies it is `corpus-work/violation-census/`
-(33 hits in 8 of 10 182 documents), and the registry that remembers the accepted
-ones is populated mechanically for source-side emitters by
-`testkit/ts/scripts`'s `census-sync` — never for the platform's own.
+registry that remembers the accepted hits is populated mechanically for
+source-side emitters by the census sync — never for the platform's own.
 
 ## 1. Case directory layout
 
@@ -447,8 +483,7 @@ tests/pcap2test/<case-id>/
   source.html            # selection/review view (generated)
 ```
 
-Illustrations quote the sample documents in `testkit/scenarios/samples/`
-(`simple-attempt.v3.json`, `reroute-chain.v3.json`, `noanswer-failover.v3.json`,
+Illustrations quote sample documents (`simple-attempt.v3.json`, `reroute-chain.v3.json`, `noanswer-failover.v3.json`,
 `retransmit-delayed-ack.v3.json`) and the fixture set in
 `crates/pivot-schema/tests/fixtures/`, where `authored-cancel-race.v3.json`,
 `authored-consultation-refer.v3.json` and `authored-blind-transfer.v3.json` are
@@ -617,8 +652,8 @@ and `after`.
         "final": { "status": 200, "at_ms": 25404 },
         "join_evidence": "the attempts' Call-IDs are application-server derivations of one base call" }
     ],
-    "relay18x": { "mode": "18X_TO_180_SDP_REMOVE", "messages": "FIRST",
-                  "prack": "PRACK_MANAGED_BY_AS", "evidence": [ "…" ] } }
+    "relay18x": { "mode": "DOWNGRADE_NO_SDP", "messages": "FIRST",
+                  "prack": "PRACK_ANSWERED_LOCALLY", "evidence": [ "…" ] } }
 ]
 ```
 
@@ -657,7 +692,7 @@ caller-leg final (`call/refused-step-not-a-final`); a call that states neither a
 chain nor a refusal stays `call/no-attempts`.
 
 A refused call arms no ring, runs under no provisional profile and reaches no
-`/calls/failure`: the refusal is its whole lowered program (§4.3), and the lane
+`/call/failure`: the refusal is its whole lowered program (§4.3), and the lane
 names no egress for a leg that never happens.
 
 A third outcome sits beside those two: the CALLER abandoned the call. It
@@ -760,20 +795,20 @@ the value.
 
 ### 4.2 relay18x
 
-The provisional-handling profile the CAPTURED SUT ran, in the Routing API's own
+The provisional-handling profile the CAPTURED SUT ran, in the decision API's own
 vocabulary so a lane applies it without re-deciding.
 
 | field | required | meaning |
 |---|---|---|
-| `mode` | yes | open profile token (e.g. `18X_TO_180_SDP_REMOVE`, `18X_TO_180_SDP_TRANSPARENT`) |
-| `messages` | yes | open token: how many upstream `18x` reach the caller (this deployment emits `FIRST`, `ONE_PER_VALUE`, `ALL`) |
-| `prack` | no | open prack-mode token (`PRACK_MANAGED_BY_AS`), present only where the SUT answered 100rel itself |
+| `mode` | yes | open profile token (e.g. `DOWNGRADE_NO_SDP`, `DOWNGRADE_KEEP_SDP`) |
+| `messages` | yes | open token: how many upstream `18x` reach the caller (the `Relay18xMessages` feature's own values are `FIRST`, `ONE_PER_VALUE`, `ALL`) |
+| `prack` | no | open prack-mode token (`PRACK_ANSWERED_LOCALLY`), present only where the SUT answered 100rel itself |
 | `evidence` | yes | the detection signals that fired |
 
 Every token here names a platform's configuration, not a SIP constant. The
 structs model all three as open strings and lint checks none of them against a
-list; the values above are what this deployment's detector emits, and a
-different platform's vocabulary is as valid.
+list; the values above are examples, and a different platform's vocabulary is
+as valid.
 
 ### 4.3 Per-lane compilation contract
 
@@ -1010,10 +1045,16 @@ the document.
 above is what keeps them from overlapping: `in_dialog` means CONFIRMED, so every
 early-dialog message — a reliable provisional, the PRACK that rides it, an
 UPDATE before the final — sits at or before the dialog-creating final and takes
-no marker, and `early` alone says which fork it rides. The two co-occur on
-exactly one shape: a message after the confirming final that still needs the
-fork named, such as the ACK to a forked 2xx, where `early` gates the To-tag and
-`in_dialog` states that the dialog is up.
+no marker, and `early` alone says which fork it rides. The two co-occur where a
+message after the leg's first dialog-creating final belongs to a FURTHER dialog
+on the leg: a later fork's own 2xx to the forked INVITE — a second dialog, which
+the UAC ACKs like the first (RFC 3261 §13.2.2.4) — and the ACK the leg expects
+for it, where `early` gates the To-tag and `in_dialog` states that a dialog is
+up. The cut leaves the ACK to the fork that answered first unnamed — it rides
+the dialog `in_dialog` states — and lint pairs it by the 2xx it discharges; an
+ACK that does name its fork pairs by the tag either way. An ACK the leg sends
+names none, since a request send names a fork only where it rides one, and no
+request send inside a confirmed dialog does.
 
 What consumes the marker is §4.1's citation rule, and `pivot-schema lint` is
 what enforces the totality (`in-dialog/missing`, `in-dialog/outside-dialog`).
@@ -1031,12 +1072,22 @@ The marker rides BESIDE `in_dialog`, never instead of it: that ACK sits strictly
 after the final, so it carries both. It rides beside `early` too, where the ACK
 names the fork it answers. Under forking each answered fork mints its own dialog
 on the one leg and each is confirmed by its own ACK, so the marker is stated once
-per DIALOG rather than once per leg, and the fork tag is what pairs an ACK with
-the final it answers.
+per DIALOG rather than once per leg: a leg answered 2xx under two To-tags carries
+it twice. An ACK that names its fork pairs with the final by the tag; one naming
+none pairs with the fork's 2xx it discharges.
 
 Two ACKs never carry it. An ACK to a re-INVITE's 2xx, which renegotiates a
 dialog that is already up. And an ACK to a NON-2xx final, which is §17.1.1.3's
-transaction-owned ACK, on a leg that may hold no dialog at all.
+transaction-owned ACK, on a leg that may hold no dialog at all. Which ACK
+answers the final is read by LEG STATE — each ACK discharging the newest INVITE
+transaction in its direction that holds a final and no ACK yet — and never as
+the first ACK the leg carries after the final: a re-INVITE sent over the
+un-ACKed 2xx (§14.1) is answered 491, its ACK runs first and discharges the
+re-INVITE, and the 2xx's own ACK behind it is the one that confirms. The
+reading is by position, with no CSeq consulted, so a leg whose ACKs run in the
+other order (the 2xx's ACK before the 491's) is read the other way round. The
+cut stamps by that reading and lint checks it by the same one; under forking an
+ACK naming its fork pairs by the tag instead.
 
 The marking is REQUIRED the way `in_dialog` is: a confirmed dialog whose
 answering ACK states no marker is an error. Requiredness is about the MARKER and
@@ -1135,9 +1186,9 @@ pointing at it (§11).
 own transaction drew**, not a paced ladder: an ACK rides no retransmission
 timer, and the UAC core owes one ACK per 2xx it RECEIVES (RFC 3261 §13.2.2.4),
 so the count is drawn by the wire and measured against the repeats of that one
-final. Copies of the final that arrive while the ACK is held are still owed one
-each, and go out with it when the hold ends — except where the ACK owes a
-delayed offer's answer, and "Composed on arrival" below states that one. `cseq`
+final. Which copies draw one turns on WHOSE ACK answers the final, and the two
+paragraphs below state that: the ACK to a 2xx is the acknowledging peer's own,
+the ACK to a non-2xx final the client transaction's. `cseq`
 is the MARKER that a step
 carries one transaction to draw against — a count on an ACK that is not an
 automatic, or on one stating no `cseq`, is refused.
@@ -1160,42 +1211,38 @@ recorded. It is a fresh transaction on the dialog, not a `repeat_of` — the
 branches differ — so the ACK ladder above never sees it, and the interpreter's
 own discharge bookkeeping must not deny it its final.
 
-*Amended 2026-08-27 (issue 103), narrowed 2026-08-28 (issues 149, 150).* The count is
+*Amended 2026-08-27, narrowed 2026-08-28.* The count is
 the final's own ladder, and the ladder is the only thing that puts an ACK on the
 leg: a B2BUA owes one ACK per final it RECEIVES here, so N ACKs arriving from
 the far leg draw none of their own.
 
-**Composed on arrival.** "One per copy" holds wherever the stack can form the
-ACK the moment the final lands — the ACK that carries NO BODY, in-dialog or
-not, which it composes from the dialog alone. The one exception is the ACK
-owing the ANSWER to a delayed offer (§13.2.1): it does not exist until the far
-leg's ACK supplies that answer, so a copy inside the wait is answered by the
-single ACK that follows it and only a copy landing once the ACK exists draws one
-of its own. The wait is read off the two `observed` coordinates, and the rungs
-off the final's measured `retransmit_intervals_ms` where it states them, §6.9's
-class ladder where it does not.
-
-What separates the two is the body the ACK owes, never whether it CONFIRMS the
-dialog, and the discriminator is our own stack's: taking a 2xx mints the ACK's
-client transaction — on the initial answer and on a re-INVITE's alike — and
-every copy re-sends it, but only where the ACK owes no answer body
-(`acked_invite_carries_offer`). All three shapes are pinned in
-`crates/b2bua-harness/tests/reack_2xx_before_caller_ack.rs`.
+**Relayed from the far leg.** The ACK to a 2xx is the ACKNOWLEDGING PEER's own,
+relayed: §13.2.2.4 gives the UAC core ONE ACK per 2xx and re-passes THAT ACK to
+the transport for every copy, so on a relayed INVITE the ACK this leg owes goes
+out when the far leg's arrives — initial INVITE or re-INVITE, offer in the
+INVITE or delayed offer (§13.2.1), body or none. A copy inside the wait is
+answered by the single ACK that follows it and draws none of its own; a copy
+landing once the ACK exists draws a re-send of that datagram, body included.
+The wait is read off the two `observed` coordinates, and the rungs off the
+final's measured `retransmit_intervals_ms` where it states them, §6.9's class
+ladder where it does not.
 
 **Displaced by the next INVITE.** The leg holds exactly ONE such ACK — the
-client transaction the 2xx minted — and a new INVITE transaction on the leg
-resets it, so a copy of a superseded final draws nothing and the count drops by
-one per copy landing past that reset. Which copies those are is read off the
-document's own DELAY GRAPH, each step's `delay.from` walked back to the anchor
-it names, not off the `observed` coordinates: ACKing on receipt where the source
-platform relayed the caller's ACK pulls the re-INVITE chain forward, so a repeat
-the capture placed before the next INVITE lands after it in the run.
+datagram the relay retained — and a new INVITE transaction on the leg resets it,
+so a copy of a superseded final draws nothing and the count drops by one per
+copy landing past that reset. Which copies those are is read off the document's
+own DELAY GRAPH, each step's `delay.from` walked back to the anchor it names,
+not off the `observed` coordinates: when the SUT opens that later transaction is
+what the document's own delays say, not an instant the source platform measured.
+Only the band between the ACK and the reset draws.
 
-Issue 103 also counted a RELAYED half — "the platform passes on every ACK it
-takes off the far leg" — and took the larger of the two. That described a defect
-(issues 145/147): a B2BUA relays no ACK it does not owe, and the accuracy figure
-the pair was measured on was taken against the unfixed SUT. The half is gone and
-the number is the composed one.
+**Composed on arrival.** An ACK to a NON-2xx final is the client transaction's
+own (§17.1.1.3): composed from the final itself, hop by hop on every platform,
+so every copy of that final draws one back. The FINAL's status decides which of
+the two paragraphs applies — never the body the ACK carries, and never whether
+it CONFIRMS the dialog. Both shapes are pinned in
+`crates/b2bua-harness/tests/it/repeated_2xx_before_caller_ack.rs` and
+`crates/b2bua-harness/tests/it/ack_body_relayed.rs`.
 
 An auto PRACK acknowledges the reliable provisionals outstanding on its leg
 OLDEST FIRST: N provisionals are acknowledged by N PRACKs, in arrival order.
@@ -1249,7 +1296,13 @@ plus `cseq-method`. A later assertion may cite which branch ran, through
 **`optional: true`** on an expect — tolerated absence. The step is released when
 a later step on the same leg MATCHES first, and released again — rather than
 failed — when its OWN budget (`within_ms`, else `timing.expect_budget_ms`)
-expires.
+expires. The match releases only the tolerated absences standing in front of
+the leg's first PENDING step that is not one — a required expect or a send not
+yet made: an expect armed beside such a step (§6.7b, §6.7c) says nothing about
+the order of what stands behind it, and those optionals stay armed. An optional
+so kept can take a later datagram that a later step on its leg with the same
+discriminator also names: a document scripting two such steps is ambiguous, and
+the run reads list order.
 
 Both releases are normative, and the budget one is what keeps a tolerated
 absence from wedging the steps behind it forever: nothing else states when the
@@ -1299,7 +1352,7 @@ no internal order to be earlier in.
 
 An external event, anchored by step refs like everything else. `action` is an
 open token from a deployment-owned injector registry (`store-fault:LiveAudit`,
-`http:bl-cut`, `node-kill`); `target` is in the injector's own vocabulary.
+`http:decision-cut`, `node-kill`); `target` is in the injector's own vocabulary.
 
 **The interpreter never executes an action.** It calls an injector interface the
 lane provides. That one mechanism spans store faults, HTTP-fabric faults and HA
@@ -1330,7 +1383,7 @@ A captured document carries no `after`: the chain barrier is derivable from
 "overlap": "s13"
 ```
 
-Same-leg order is list order and it BINDS (§6.7b is its one exception), so a
+Same-leg order is list order and it BINDS (§6.7b and §6.7c are its exceptions), so a
 document that lists two steps in the order the capture happened to see them has
 decided that order. `overlap`
 is how it declines to: the two steps arm TOGETHER on their leg's frontier, and
@@ -1383,9 +1436,91 @@ A message step only: an `alt` armed early could COMMIT before the send in front
 of it goes out, and an `unordered` group arms its whole membership. Neither is a
 relay standing in a queue, and a capture carries neither (§13.1).
 
-This is the ONE place where same-leg list order does not bind, and it un-asserts
-exactly what the capture never established: the order between a dwell the
-document holds and a latency it does not.
+Here same-leg list order does not bind, and what is un-asserted is exactly what
+the capture never established: the order between a dwell the document holds and
+a latency it does not. §6.7c is the other such place, for the same reason.
+
+### 6.7c The answer to a transaction already open
+
+A leg that has SENT a request is the client of the transaction it opened
+(RFC 3261 §17.1), and the response it is owed rides that transaction and no
+other. Two answers one leg is owed on two open transactions therefore carry no
+order between them: the order a capture shows is the order one implementation
+happened to emit them in, and no document can oblige another to keep it. A BYE
+on an early dialog is the canonical case — the UAS owes 200 to the BYE and
+487 to the INVITE (§15.1.2), and either may leave first — but the shape is
+general: a 200 to a PRACK and the next provisional of the INVITE, a 481 to a
+re-INVITE and the 200 to the BYE that crossed it.
+
+So an `expect` gated on a response whose transaction this leg has already
+opened is ARMED BESIDE whatever stands in front of it on the leg — another
+transaction's answer, or sends this leg has not made yet — and whichever the
+wire settles first settles first. The bounds, stated once here and nowhere per
+document:
+
+- the expect names its transaction: `status` plus `cseq-method`. A status alone
+  names no transaction and waits its turn;
+- the leg's last `send` of that method before the expect has COMPLETED. Before
+  that nothing has provoked the answer, and list order is all there is;
+- the expect is that transaction's FIRST pending answer. Within one transaction
+  list order binds — a provisional before its final, one final before the next
+  2xx a fork draws — so an answer standing behind an earlier pending answer of
+  the same transaction waits behind it;
+- no completed or retired expect has taken a FINAL of that transaction since
+  the send: a final ends the transaction (§17.1), and a later answer of the
+  same method is another transaction's, not yet opened;
+- nothing already armed on the leg answers the same METHOD, an older
+  transaction's included: two armed steps with one discriminator would take
+  each other's datagram;
+- a message step only, walked to across message steps only: a block (`alt`,
+  `unordered`) standing between the leg's first blocking item and the candidate
+  stops the walk, and is never armed early (§6.7b). A block that IS the leg's
+  blocking item — an armed `alt` or `unordered` — lets the candidate arm beside
+  it: its members are armed already, and one of the candidate's method refuses
+  it by the bullet above.
+
+Walking past a send emits nothing early, and walking past an expect of the
+leg's own un-orders nothing but this: everything else behind that expect keeps
+its place, and a relay (§6.7b) still stops at it.
+
+`overlap` (§6.7a) and `unordered` (§6.5) remain what a document says when it
+declines an order for a reason of its own; neither is needed to state this one,
+which is the transaction layer's and holds for every document alike.
+
+The same fact keeps the two armed answers' charges apart: a datagram no armed
+expect matched is charged to the expect of ITS transaction, never to the one
+armed beside it (§14, item 4).
+
+### 6.7d The answer to a CANCEL sent after its INVITE's non-2xx final
+
+A CANCEL matching an existing transaction draws 200 whatever that transaction's
+state, and one matching none draws 481 (RFC 3261 §9.2). After a non-2xx final
+the INVITE server transaction lingers in Completed until the ACK or Timer H
+(§17.2.1), and a UAS may dispose of it earlier or never have kept it. So a
+CANCEL a leg sends AFTER a non-2xx final to its INVITE has reached it draws 200
+from a UAS still holding the transaction and 481 from one that no longer does. Both are
+conformant, and which one a capture shows says how long one implementation held
+the transaction, nothing a document can oblige another to keep.
+
+So an `expect` naming 200 or 481 to a CANCEL is satisfied by the other of the
+two. The bounds, stated once here and nowhere per document:
+
+- the expect names its transaction: `status` 200 or 481 plus `cseq-method:
+  CANCEL`. A status alone names no transaction and takes only its own status;
+- only the pair: any other final to the CANCEL is the discriminator's to judge;
+- the leg's recording — this run's wire, never the document's list order —
+  shows a non-2xx final (status 300 or above) to the INVITE of the CANCEL's
+  CSeq number ARRIVING before the CANCEL was sent. A 2xx ends the INVITE server
+  transaction at once (§17.2.1), so a CANCEL sent after one is not covered;
+  neither is a leg that sent no CANCEL. The CANCEL is the one the expect's
+  opening send emitted, else the leg's last one, the transaction item 4 of §14
+  charges on. A CANCEL sent while the INVITE was unanswered is the ordinary race
+  of §9.1, and a 481 to it is a finding; a provisional before it does not count.
+
+The arrival COMPLETES the step as a match: attributed to it, its content read
+under its own `check` mode as the named status's would be, and its recording
+line noted `tolerated: …` with both statuses. Nothing is failed and nothing
+retired.
 
 ### 6.8 delay and dwell
 
@@ -1446,15 +1581,14 @@ seen by every consumer that skips a retransmission. The anchor is the earliest
 match either way, so a re-emission never becomes the head of a fresh ladder on
 the strength of a near neighbour.
 
-*Amended 2026-08-27 (issue 116), withdrawing "the caller's Timer B bounds it at
+*Amended 2026-08-27, withdrawing "the caller's Timer B bounds it at
 the same 32 s".* An **unreliable provisional** — a 1xx above 100 carrying no
 `RSeq` — states no repeat relation AT ALL. It rides no timer: the transaction
 user re-sends it when it chooses, and RFC 3262 §3 paces only the reliable one.
 §17.2.1 names a CAUSE for one re-send, the INVITE going out again, and a cause
 is not a pacing, so borrowing the caller's Timer B as this class's envelope
-stated a ladder that does not exist. Measured across the corpus, every class
-that DOES retransmit sits on T1 — a median gap of 500 ms, the first rung and
-nothing else — while this one sits at 3.9 s with a tail past two minutes. So a
+stated a ladder that does not exist. Every class that DOES retransmit opens on
+T1, the first rung and nothing else, while this one follows no timer at all. So a
 platform that rings twice has SENT TWICE, and both copies are events, however
 alike the bytes. A callee refreshing its ring every minute (RFC 3261 §13.3.1.1
 obliges a non-100 provisional at that cadence) is emitting, not repeating — and
@@ -1484,7 +1618,7 @@ Trying an INVITE ladder draws.
 The SUT's own retransmit behaviour is a different subject and is not bounded
 here: what this section keys is the CAPTURE's repeat relation.
 
-*Amended 2026-08-27 (issue 120).* That holds for a `send` step, whose emitter is
+*Amended 2026-08-27.* That holds for a `send` step, whose emitter is
 the scripted peer. On an `expect` step the emitter is the SUT, so the count
 states what OUR answerer will put on the wire and is DERIVED, never collapsed:
 an INVITE final whose ACK the document holds past T1 obliges the rungs
@@ -1493,10 +1627,10 @@ the 32 s envelope above. The reasoning is §6.3's, one section over: the two
 platforms are different UASs, a captured platform that sat on an un-ACKed final
 states its own non-compliance, and replaying that number leaves the repeat a
 compliant answerer sends unclaimed — an unannounced repeat the gate then refuses.
-Measured over the corpus the derivation and the collapse agree wherever both
-speak (53 of 53, no case where the capture held more than the dwell justifies).
+Where both speak, the derivation and the collapse agree: a capture holding more
+rungs than the dwell justifies is the non-compliance this rule exists to drop.
 
-*Amended 2026-09-04 (issue 143).* **A count states how long a ladder is; WHO
+*Amended 2026-09-04.* **A count states how long a ladder is; WHO
 paced it states whether that count is an assertion.** Four regimes, and the
 interpreter asserts each against its own pacer:
 
@@ -1536,7 +1670,7 @@ rule paces. There the repeat stays one step per emission, carrying its own dwell
 and its own `observed` coordinate — which a count, having none, could never
 hold. §13.2 names the class this covers and the flag it rides.
 
-*Narrowed 2026-08-27 (issue 116).* Two classes ride no ladder, and the relation
+*Narrowed 2026-08-27.* Two classes ride no ladder, and the relation
 above now answers them differently. The unreliable provisional states no repeat
 at all, so the extractor produces none for the generator to decline. The **100
 Trying** still does — its copies are DRAWN, one per copy of the INVITE — and a
@@ -1546,9 +1680,9 @@ repeat: a legacy flows document, or another generator.
 
 A peer that re-ACKs each retransmitted final with a FRESH branch mints a
 different datagram each time, so those ACKs do NOT collapse: each is its own
-step. Ruling Q34 collapsed them, to stop one ladder being encoded twice; the
+step. A former reading collapsed them, to stop one ladder being encoded twice; the
 byte bound withdraws that, because the count §6.3 defines replays copies of ONE
-stored ACK and these differ on the wire. The double encoding Q34 guarded against
+stored ACK and these differ on the wire. The double encoding that reading guarded against
 cannot arise from a step the generator never emits a count on. The generator
 identifies repeats by the flows document's `repeat_of`; a flows document that
 does not carry the field collapses on `retx` alone and says so. Both fields are
@@ -1564,14 +1698,14 @@ generated one whose producer measured nothing — the interval is the one the
 message's class prescribes: T1-doubling for an INVITE (§17.1.1.2), the T1/T2-capped
 ladder otherwise (§17.1.2.2).
 
-*Amended 2026-08-27 (issue 90), reversing "never a stored interval".* The
-premise that a rung's interval is derivable does not survive measurement: across
-the captures that declare a 2xx-INVITE ladder the real gap runs from 409 ms to
-17 480 ms where T1 says 500. The error is not always cosmetic. 92 ms of it puts a
+*Amended 2026-08-27, reversing "never a stored interval".* The
+premise that a rung's interval is derivable does not hold: an implementation
+may configure any T1 (RFC 3261 §17.1.1.1), so a captured gap need not be 500 ms.
+The error is not always cosmetic. A fraction of T1 of it puts a
 reliable provisional's rung on the far side of the PRACK that ends it — a
 callee retransmitting a provisional after it has answered, which the capture
-never held and the protocol does not allow. Ticket 70 rejected storing the
-interval for putting "a second, differently-paced meaning on one field"; the
+never held and the protocol does not allow. Storing the interval was once
+rejected for putting "a second, differently-paced meaning on one field"; the
 objection is answered by a SEPARATE field, and by the fact that every other
 emission in the document already carries its measured `delay`. A rung was the
 one emission whose timing was invented.
@@ -1582,7 +1716,7 @@ the RFC states an interval for them". A document that states one has answered
 that, so `retransmit_intervals_ms` paces a class that has no ladder of its own.
 The generator still does not COLLAPSE an unreliable provisional (§13.2) — that
 is a separate ruling about steps, not about pacing. Two classes ride no timer, and each does something else instead: the
-ACK's count §6.3 DRAWS from the wire, one copy per repeat of the final its
+ACK's count §6.3 DRAWS from the wire, off the repeats of the final its
 transaction names; the unreliable provisional — a 1xx carrying no `RSeq`, re-sent
 at the transaction user's discretion, where RFC 3262 §3 paces only the reliable
 one — is not collapsed at all.
@@ -1650,6 +1784,56 @@ derivation the arithmetic would otherwise state:
   is relayed by nobody. A callee still ringing while its INVITE is cancelled is
   the case the corpus holds.
 
+**And the far side of a relayed in-dialog INVITE the capture holds on one leg
+only is DERIVED, where the policy states the replaying platform relays it.** A
+leg whose captured record ENDS at the 2xx its peer sent — no ACK, nothing at
+all behind it — states nothing about the dialog past that instant: the vantage
+stopped seeing it. The near leg goes on, in either direction: its peer sends an
+in-dialog INVITE and takes a 2xx nothing on the far leg relays, which synthesis
+would read as minted by the platform; or the platform sends an in-dialog INVITE
+down the near leg that nothing on the far leg relays into — the far party's own
+re-INVITE — and the near peer answers it. A platform that relays such an INVITE
+end to end has the far leg on the other end of both, where a document scripting
+nothing for it can neither answer nor send: the near leg's expect waits for a
+message nobody composes, and the run ends at its budget. So the exchange is
+transcribed onto the far leg from the halves the capture holds, in the
+direction it ran. For the near peer's re-INVITE: an `expect INVITE` mirroring
+the near leg's send, its body compared by content where it carried one; a
+`send` of the 2xx the near leg received, headers and body as captured, since a
+relayed answer is the far party's own; an auto `expect ACK` mirroring the near
+leg's. For the far party's re-INVITE: a `send INVITE` carrying the offer and
+the frozen headers the near leg's expect took — a send needs content and the
+capture holds no other; the set is §8's tier 3 as the expect holds it, the
+hop-by-hop dialog and transaction headers already dropped, so what lands is
+end to end except the session-timer pair (RFC 4028 §7.4, §8), which the
+platform mints per hop, rides along, and is judged by the confrontation's
+withheld-interval rule; an `expect` of the 2xx the near peer sent, its body
+stated as the session description the near leg emitted; an auto `send ACK`
+carrying what the near leg's expect took. Each derived step copies the near-leg message's
+`observed` coordinate (§6.10), since the platform relays that message and it
+is what the far-leg datagram is compared against, and each is listed as the
+relay runs: a far-leg send before the near-leg arrival it relays into, a
+far-leg arrival after the near-leg send that relays into it. The near leg's
+arrival is then a relay of the derived send, anchored on it and asserted like
+any relayed content (§6.4). It rides `far-side-reinvite-derived` (§13.2), and
+it is bounded three ways: the far leg's record must end at its 2xx — a leg the
+vantage kept watching that shows no INVITE says the platform did NOT relay,
+which a replay must surface; the near-leg answer must be a 2xx, whoever sent
+it — a refusal the platform composed is its own, except a 491, which is glare
+the replaying platform answers itself (RFC 3261 §14.1) and owes the far leg
+nothing; a refusal the near peer sent is relayed like its 2xx would be, but the
+far leg's ACK to it is the INVITE client transaction's (§17.1.1.3), a step no
+captured message gives a coordinate to, and a 491 there is the near half of a
+crossing pair (§14.1) whose other half is the platform's 491 the near-peer
+side leaves, so the pair is stated whole or not at all;
+`far-side-reinvite-not-derived` names the exchange left alone either way; and the near-leg half must have no
+relay origin — a message the far leg's record does hold is already a step. A
+far party's offer or answer the near leg holds by shape only (a multipart, an
+undeclared binary) is left the same way: no send emits a shape. The first bound
+is a proxy for the temporal one: a far leg whose record goes on past its 2xx
+and shows nothing at or after the re-INVITE's instant is read as watched, and
+nothing is derived for it. A policy that states nothing derives nothing.
+
 A platform running a non-transparency MODE is outside all of it. Such a platform
 emits one 18x by design, the replaying SUT is driven the same way, and its legs
 are not one for one because nothing is missing. What states such a mode is a
@@ -1676,7 +1860,8 @@ Informative; the interpreter never reads it. It exists because the post-run
 confrontation has to pair a run step with the message it is compared against.
 The pairing is a LOOKUP, not a consumption, so two steps may name one captured
 message where the SUT emits it twice — which is what a derived provisional
-expectation does (§6.9).
+expectation does, and what the far side of a relayed re-INVITE derived onto
+the leg the vantage lost does on the other leg (§6.9).
 Required on a captured document, absent on an authored one.
 
 ## 7. timing
@@ -1723,7 +1908,10 @@ The tier model is UNCHANGED:
   or, where the plan does not recognize the value, `{ "frozen": "…" }`. A frozen
   ref adds `kind` where the plan classified the ADDRESS without resolving a
   number. The two shapes are exclusive. The party a positional ref names is
-  declared once, in the identity registry (§8.5).
+  declared once, in the identity registry (§8.5). A From or To ref of either
+  shape may add `addr`, the captured name-addr (tag dropped) with its role
+  numbers composed as `${num:…}`; it is then the field's whole value. A
+  positional ref states it only where its number composed.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
 
 `RSeq` splits by direction: a **send** freezes the captured value (the scripted
@@ -1731,6 +1919,12 @@ endpoint must put a concrete number on the wire for RAck translation), an
 **expect** states existence only via `headers-present` — the value is
 stack-owned per leg (RFC 3262 §3) and the confrontation's `rseq-stack-owned`
 rule judges the number.
+
+The body descriptors split the same way (RFC 3261 §20.11 Content-Disposition,
+§20.12 Content-Encoding, §20.13 Content-Language, §20.24 MIME-Version): a
+**send** freezes them with the rest, an **expect** freezes none of them when
+its captured message carries no body — they describe octets that are not
+there.
 
 ```json
 "msg": {
@@ -1750,6 +1944,7 @@ rule judges the number.
 | `status`, `reason`, `cseq-method` | responses | discriminator |
 | `cseq` | auto steps only | the CSeq number (§6.3) |
 | `ruri`, `from`, `to` | dialog-opening INVITE sends | tier-2 refs |
+| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched |
 | `headers` | any | tier-3 frozen list, wire order |
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
@@ -1865,8 +2060,9 @@ own overlay.
 A single body on a SEND references a resource file, and the registry decides
 what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`{ "ref": "resources/…", "rewrite": ["c=addr", "m=port"] }`), or `mode`
-(`frozen` / `frozen-binary`) plus the captured `content-type` where it replays
-byte-exact.
+(`frozen`) plus the captured `content-type` where it replays byte-exact. A
+resource file holds BYTES; whether they are text is a fact of the bytes, never
+a declared mode, and no rule names a media type to say so (ADR-0035).
 
 **The tokens name what the LANE may rewrite, not what it must.** They are
 applied through the lane's media booking, and a lane that exercises no media
@@ -1884,11 +2080,10 @@ render derives exactly, so the stored and derived values cannot drift; an SDP
 body whose captured type carried parameters states them and replays under them.
 
 A single body on an EXPECT is asserted by SHAPE or by CONTENT, and the
-registry decides which. Multipart is a shape — `{ "mode": "multipart-present" }`
-— because it is reframed at replay; a message that carried no body states
-`{ "mode": "absent" }`, and that IS the assertion. Every TEXT body the registry
-freezes is stored as a resource and asserted by content, in the same form the
-send side stores it, and so is every SDP:
+registry decides which. A message that carried no body states
+`{ "mode": "absent" }`, and that IS the assertion. Every body the registry
+freezes is stored as a resource and asserted by content, whatever its bytes
+hold, in the same form the send side stores it, and so is every SDP:
 
 ```json
 "body": { "ref": "resources/uas1_r3_0.xml", "mode": "frozen",
@@ -1905,14 +2100,18 @@ trailing whitespace trimmed) and nothing else — no attribute reordering, no
 entity work; or `sdp`: both sides as a session description — the session
 section then the media sections by position; within a section lines compare
 as a multiset (attribute order erased); `o=` sess-id and sess-version are
-masked always, and every field a `rewrite` token of the expect names is
-masked where the run's media plane rebooked it. The mask states exactly what
+masked where the run's media plane rebooked it, and every field a `rewrite`
+token of the expect names is masked there too. The mask states exactly what
 the render writes: `c=addr` masks the address of a `c=IN IP4` line and no
 IP6 line; `m=port` masks the port of an `m=` line where it is non-zero, its
 `/count` kept, and no port-0 stream; `a=rtcp` is never written and never
 masked. Nothing else. **The tokens name WHICH fields are lane-owned; the
 run's media mode says whether they were applied**: on a `verbatim` run the
 tokens mask nothing, so a `c=` or an `m=` the system alters is a difference,
+an `o=` whose numbers differ is a `session:o=` record, marked on its probe as
+an origin the system mints where neither side drove that origin into the system,
+the sess-id pairing holds one-to-one across the leg and each session steps its
+version alike on both sides (RFC 4566 §5.2, RFC 3264 §8),
 and the system relays the description byte for byte, so two descriptions the
 structure cannot tell apart — an attribute reordered inside a section, a
 bare-LF line ending, trailing whitespace, an inner blank line — must be the
@@ -1948,11 +2147,27 @@ as the empty text; under `check: assert` the interpreter also refuses it, and
 under `check: record` — every generated expect — the confrontation's record is
 the only statement of it.
 
-A resource body on an expect is TEXT unless its `mode` is `frozen-binary`; a
-`mode` left unstated is text. The ONE exception is that binary payload: the
-recording the confrontation reads is text, so a binary body on an expect is
-not stored at all — the expectation states nothing about it — and were one
-authored it would assert presence only.
+**A frozen body compares byte for byte.** The confrontation holds the received
+bytes — the recording keeps them as they crossed the socket (§14 item 12),
+read under the recorded layout's length, the parser's `Content-Length` bound —
+against the resource file's; `xml` and `sdp` decode both sides as UTF-8 first
+and apply their fold, and a side that is not UTF-8 under a text compare is a
+difference. A probe's two sides are rendered ALIKE: as the texts they are where
+both are text — UTF-8 whose only control bytes are tab, CR and LF — and as
+standard base64 on both where either is not.
+
+A multipart body on an EXPECT is stated PART BY PART where extraction handed
+the parts over — the same `multipart` form the send side stores, every part a
+resource, an SDP part under its `rewrite` tokens with `compare: sdp`, any
+other part `frozen` — and the confrontation locates the received parts by the
+recording's own `body` layout and compares them to the expectation's by
+position: one record for a part-count mismatch, one per part whose media type
+differs, one per differing part under that part's `compare`; a line that
+recorded no layout, or a layout its bytes cannot honour, is one record saying
+so. A part's entity headers are not compared. Where
+extraction handed no parts over, the expect falls back to the shape
+`{ "mode": "multipart-present" }`, and the interpreter gates the reception's
+container type either way.
 
 Multipart bodies reference DECOMPOSED parts:
 
@@ -1963,7 +2178,7 @@ Multipart bodies reference DECOMPOSED parts:
     "content-id": "<offer@example.invalid>",
     "headers": [{ "name": "Content-Disposition", "value": "session" }] },
   { "content-type": "application/EmergencyCallData.eCall.MSD",
-    "ref": "resources/uac1_0_1.bin", "mode": "frozen-binary",
+    "ref": "resources/uac1_0_1.bin", "mode": "frozen",
     "content-id": "<user1@ims.example.net>",
     "headers": [{ "name": "Content-Transfer-Encoding", "value": "binary" },
                 { "name": "Content-Disposition", "value": "By-Reference" }],
@@ -1975,6 +2190,9 @@ Multipart bodies reference DECOMPOSED parts:
 so no consumer owns MIME; the pivot references files that already exist.
 `cid-linked` is COMPUTED from the part's `Content-ID` plus the message's header
 list.
+
+A part on an expect may state `compare` with the meaning a single resource
+body gives it (`exact` when absent, `xml`, `sdp`); on a send it is ignored.
 
 A part states its own ENTITY BLOCK. `content-id` is its `Content-ID` value with
 the angle brackets the wire wrote (RFC 2045 §7), and `headers` is every other
@@ -2022,7 +2240,7 @@ never changes how a part is handled:
 | part content-type | handling |
 |---|---|
 | `application/sdp` | rewrite `c=` and `m=` |
-| known non-SDP | freeze (`frozen`, or `frozen-binary` for non-text) |
+| known non-SDP | freeze (`frozen`, text or bytes alike) |
 | unrecognized | freeze AND flag when the payload carries number-like digits |
 
 The unrecognized arm is the point: a missing handler is a decision owed, not a
@@ -2035,8 +2253,8 @@ its ordinal over the messages it emits, and the part index within that message
 — and `resources/<actor>_r<n>_<part>.<ext>` on an expect, the ordinal counted
 over the messages the actor expects. Every message takes an ordinal whether or
 not it carries a body, and the two counters are separate, so a send and an
-expect of one actor never name one file. The name is **step-index-free** (v2
-friction H1) — renumbering the flow, inserting a step, splitting a deviation,
+expect of one actor never name one file. The name is **step-index-free** —
+renumbering the flow, inserting a step, splitting a deviation,
 none of it renames a file on disk.
 
 ### 8.5 The identity registry
@@ -2047,7 +2265,7 @@ Every number and domain the document names is declared ONCE, at the top level:
 "identities": [
   { "name": "caller", "kind": "external-caller", "observed": "0009001",
     "forms": ["private"] },
-  { "name": "called-0-0", "kind": "site", "observed": "+33000900004",
+  { "name": "called-0-0", "kind": "site", "observed": "+15550900004",
     "forms": ["e164"], "catalog": { "class": "site" } },
   { "name": "transferee", "kind": "site", "forms": ["e164"] }
 ]
@@ -2109,9 +2327,16 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
+
+`body` observes the message body as text where its bytes are UTF-8 and as
+standard base64 where they are not, chosen by the bytes alone — UTF-8 validity
+and nothing else, unlike the confrontation's probe rendering (§8.3), which
+also treats a control byte as non-text; `body.b64` observes it as base64
+always — the byte-exact assertion an author writes for a body that is not
+text.
 
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
@@ -2136,7 +2361,7 @@ would have to drop the fact. So the fact stays, NAMED.
 
 | class | what it reads |
 |---|---|
-| `origin-platform-header` | a header only the origin platform emits (`P-Charging-Vector`, `P-Identifier`, `P-Orig`) |
+| `origin-platform-header` | a header value only the origin platform emits: a family of its own (`P-Charging-Vector`, `X-Vendor-Id`, `X-Vendor-Orig`), or a value the capture never shows reaching it |
 | `cdr-vocabulary` | the origin platform's CDR record vocabulary: event names, disposition words, field spellings |
 
 Two sites carry one:
@@ -2150,6 +2375,13 @@ Two sites carry one:
 
 An unclassified check gates on every lane. `headers-present` carries no class:
 existence is not a vocabulary.
+
+The generator states the class from two readings, and the interpreter infers
+none: the deployment's own header families, and — §6.4 at header granularity —
+an asserted value no capture-side `send` of the document carries. A value the
+capture never shows reaching the SUT was minted by the origin platform, so it is
+that platform's spelling whatever the header's name; the same header relayed
+byte-for-byte stays protocol and gates.
 
 **The rule a run applies, and it is the only one:**
 
@@ -2180,7 +2412,7 @@ computed from gating checks alone; there is no third status value.
 ### 9.2 Timing tolerance — the run's window, not the document's
 
 **A `timer_linked` dwell (§6.8) is a fact about a SYSTEM timer, and a system's
-timers are its own.** One platform arms a whole second where the capture measured
+timers are its own.** One platform arms a whole second where the capture states
 15 139 ms; a platform under real load fires a few hundred milliseconds off. The
 document keeps what it measured — that is the fact — and the RUN states the
 window it accepts around it:
@@ -2222,6 +2454,14 @@ the document measured proves a different thing than the document does.
 **After the last flow node the runner ALWAYS runs a settle phase.** It waits
 until every scripted dialog is terminal AND the system reports no active call
 AND the CDR expectation is met, bounded by `timing.settle_budget_ms`.
+
+A scripted dialog is terminal only once the transactions it holds are. A
+non-2xx final a scripted leg sent to an INVITE keeps the run open until the
+ACK the system owes it on the INVITE's branch (RFC 3261 §17.1.1.3) or Timer H
+from the final's first emission (§17.2.1), whichever comes first; that ACK is
+recorded as the transaction's own closer, never as a datagram after the flow.
+Past Timer H the transaction is gone and the missing ACK is the system's
+failure, `final-unacknowledged`: the run settles and states it.
 
 **Failing to settle is always test failure. There is no soft mode.**
 
@@ -2441,7 +2681,7 @@ and a member arrives with the derivation that decides it.
 
 | failure | what the run must produce |
 |---|---|
-| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The platform's UAC core ACKs a 2xx on receipt (RFC 3261 §13.2.2.4) whatever the caller did, so every such 2xx draws one — except on a delayed-offer INVITE, whose ACK carries the answer only the caller's own ACK supplies. The derivation today still narrows this by a local-ACK mechanism and by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages); §13.2's own gate is gone, and this one is tracked by the FIXME at the head of the generator's `mechanism` reading |
+| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The ACK to a 2xx is the acknowledging peer's own, relayed (RFC 3261 §13.2.2.4), so where the caller never ACKs the platform's own §13.3.1.4 give-up composes one before its teardown BYE — on an offer-carrying INVITE, whose ACK owes no answer body; a delayed-offer dialog gets the BYE alone and draws no such datagram. The derivation today still narrows this by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages) |
 | `unexpected-prack` | a PRACK this platform sends to the reliable provisional the anchor step EMITS (RFC 3262 §4). The source never PRACKed it, so no step states one, and this platform's own answer arrives where nothing expects it |
 | `unexpected-cancel` | a CANCEL this platform sends while the INVITE transaction is still in flight (RFC 3261 §9.1), where the source sent its CANCEL only after that transaction had taken — and ACKed — the final the anchor step EMITS. The capture places its CANCEL BEHIND that final, so the document's CANCEL step sits behind it too and this platform's arrives ahead of it, on a leg where nothing yet expects one. The anchor is the final rather than the CANCEL because a declaration's anchor must be a `send`: the transaction end is what the divergence turns on, and the emission is what supplies the dialog |
 
@@ -2541,7 +2781,7 @@ or on another leg satisfies nothing, however loudly it failed.
 ## 12. media — RESERVED
 
 An open object, deployment-extensible. Nothing reads it. It exists so the media
-vocabulary (issue 19: loadgen adoption) lands additively rather than as a
+vocabulary (loadgen adoption) lands additively rather than as a
 version bump. Distinct from `legs[].media`, which is the per-leg RTP source
 token and is not reserved.
 
@@ -2622,63 +2862,21 @@ The gate runs the other way too. Required on `origin: capture`: `case.source`,
 capture showed** — but only where a difference between the source platform and
 this one is a RULE rather than a judgement. §9.1 handles the differences that
 are vocabulary (a fact stays, named, and the run decides what it costs). This
-section handles the two differences that are BEHAVIOUR, where leaving the
-capture untransformed would encode a ladder no lane can run.
+section handles the differences that are BEHAVIOUR, where leaving the capture
+untransformed would encode a ladder no lane can run.
 
 This is generator behaviour. It adds no field: what the generator changed rides
 `case.annotations.flags`, whose `kind` is an open token.
 
-**The ACK-relay delta.** The source platform relays an ACK to a 2xx end to end,
-always: the b-leg ACK goes out when the a-leg ACK arrives. **This platform does
-not** — its UAC core ACKs a 2xx on receipt (RFC 3261 §13.2.2.4), initial INVITE
-and re-INVITE alike — so on every answered call the captured causality states a
-fact the replay will not reproduce, and the difference is a deliberate one the
-emulation adapts to rather than a defect to fix.
-
-One exception narrows it back: the DELAYED OFFER. Where the INVITE the platform
-sent carried no SDP offer, the answer rides the caller's ACK (RFC 3261 §13.2.1,
-RFC 3264 §4), so that ACK alone must reach the far end.
-
-**The offer decides it and nothing else.** Every `auto` ACK `expect` on a
-platform-facing leg whose captured causality is the relay is transformed — an
-ordinary answered call as much as one that ran a mechanism of its own, because
-the platform ACKs on receipt whatever the call did: re-anchored on the 2xx it
-answers, on its own leg, with a dwell of zero, and MOVED to sit directly behind
-that 2xx — same-leg order is list order (§6), so an ACK left where the relay put
-it would have the run wait for whatever the peer said in between. A step is only
-ever moved EARLIER, so every anchor still points backwards.
-
-**Moving the ACK is half the transform.** A step the capture anchored ON that
-ACK — a peer's own next action, which the source performed once the caller's ACK
-had crossed the box — would ride the move forward and land where the capture
-never put it, closing windows the document still declares on the other leg
-(issue 189: a callee's BYE rode 718 ms early and demolished the a-leg 2xx ladder
-`retransmits` asked for). So a dependent is RE-BASED onto what the ACK itself
-was anchored on, carrying the ACK's own dwell: it keeps the instant the capture
-gave it, expressed against a step that did not move. A dependent that is itself
-a moved ACK is left alone — it holds its own new anchor.
-
-Five flags, one per decision the generator took, each naming the steps it
-covers by id:
-
-| flag | what it says |
-|---|---|
-| `ack-relay-delta-applied` | this call ran a mechanism on which the platform ACKs locally; the source showed the end-to-end shape and these steps now state the local one |
-| `ack-relay-delta-rebased` | a step the capture anchored on a moved ACK was re-based onto that ACK's own captured anchor, keeping its captured instant. Names each step, the ACK it hung off, and the anchor and dwell it now carries |
-| `ack-relay-delta-delayed-offer` | the exception applies — the INVITE carried no offer, and the capture is left exactly as it is. The ANSWER riding that ACK is stored on the step like any other body (§6.3), which is what makes "exactly as it is" true on the wire |
-| `ack-relay-delta-undetermined` | the vantage cannot say whether the exception applies, so NOTHING was transformed |
-| `ack-relay-delta-race-repaired` | a declared race the ACK-relay move left behind: the stamp rode to the later of the pair, or went where the re-anchor left the two measured from different anchors |
-
-**Undetermined is a decision, not a failure.** The INVITE the offer would be
-read from may not be at this vantage, or its body may be a multipart the
-extractor did not decompose. Either way the generator transforms nothing and
-says which step and why: a silent guess about a delayed offer would move an ACK
-that has to relay.
-
-Two things the delta does NOT touch. A `retransmits` count on an auto ACK is
-drawn from the wire as "one per repeat of the final my CSeq names" (§6.3), so it
-re-derives on the lane. And an ACK to a NON-2xx final is a transaction-layer ACK
-(RFC 3261 §17.1.1.3), hop-by-hop on every platform and never a delta.
+**The ACK to a 2xx is no adaptation.** The source platform relays an ACK to a
+2xx end to end — the b-leg ACK goes out when the a-leg ACK arrives — and so
+does this one (§6.3): §13.2.2.4 gives the UAC core one ACK per 2xx and
+re-passes THAT ACK for every copy, so the captured causality is the causality
+the replay reproduces and there is nothing here to transform. The two things
+that could have been adapted are stated where they belong: a `retransmits`
+count on an auto ACK is drawn from the wire as the band the relayed ACK draws
+(§6.3), and an ACK to a NON-2xx final is a transaction-layer ACK (RFC 3261
+§17.1.1.3), hop-by-hop on every platform.
 
 **The unreliable-provisional deficit.** A 1xx above 100 carrying no `RSeq`
 rides no retransmission timer, so it does not repeat at all (§6.9): each
@@ -2692,7 +2890,7 @@ datagrams are compared against, and the second relay keeps its header
 comparison. §6.9 states the three bounds and the mode that puts a case outside
 them.
 
-*Joined 2026-08-27 (issue 116) by the deficit above.* This slot held the
+*Joined 2026-08-27 by the deficit above.* This slot held the
 unreliable-provisional EXPANSION alone: a carve-out keeping a repeat of a class
 that rides no ladder as steps rather than a count. It still holds — such a count
 names a ladder no lane can run whoever wrote the document. What changed is the
@@ -2705,6 +2903,8 @@ flag rides a repeated **100 Trying**, or a document some other producer marked.
 | `ack-count-drawn-from-final` | these ACK expectations carry the count they draw, naming each with the final it read, the number it composed against that final, and what the capture held (§6.3) |
 | `provisional-expect-surplus-tolerated` | these caller-facing provisional expectations were stamped `optional`: the leg holds more relayed provisionals than peer emissions anchoring them, naming each with its leg, status and run (§6.9). The subset gate accepts no `optional` in a captured document without it |
 | `relayed-provisional-expect-derived` | these caller-facing provisional expectations were derived from the emission that causes them: the leg holds fewer relayed provisionals than peer emissions, and each derived step copies a captured arrival, coordinate included, naming its leg, status, the emission it relays and the arrival it copies (§6.9) |
+| `far-side-reinvite-derived` | these in-dialog INVITE exchanges the capture holds on one leg only were transcribed onto the far leg, whose record ends at the 2xx its peer sent: the relaying platform has the far leg on the other end, and each derived step — the INVITE, the 2xx, the ACK, each in the op that mirrors the near leg's — copies the near-leg message it mirrors, coordinate included, naming the leg, the step its record ends at, and every pair with its op (§6.9). The subset gate accepts no second step on one coordinate of those three shapes without it |
+| `far-side-reinvite-not-derived` | these in-dialog INVITE exchanges onto a leg whose record ends at its 2xx were NOT transcribed — the platform answered the near peer's with a refusal other than 491 glare, which is its own; the near peer refused the far party's, a refusal relayed like a 2xx whose hop-by-hop ACK (§17.1.1.3) has no captured coordinate, or answered it 491, the near half of a crossing pair (§14.1) stated whole or not at all; or the far party's offer or answer is held by shape only — and the far leg scripts nothing for the relayed INVITE (§6.9) |
 
 A count on an `expect` of a class something else DRAWS — the 100 Trying an
 INVITE ladder pulls, one per copy (§17.2.1) — asks no lane to invent an
@@ -2712,30 +2912,29 @@ interval, and lint accepts it. The carve-out above is `send`-blind and takes the
 100's repeats as steps regardless; the two readings do not conflict, because a
 step per emission states everything a count would and the interval besides.
 
-Both transformations are reversible at regeneration: the synthesis pass still
-builds the capture unchanged and each adaptation runs against it, so removing an
-adaptation restores the captured ladder exactly.
+Every adaptation is reversible at regeneration: the synthesis pass still builds
+the capture unchanged and each adaptation runs against it, so removing one
+restores the captured ladder exactly.
 
 **The detector roster.** A generated document also states what it LOOKED FOR.
 §2.2 reads absence as "none" and nothing else, so a document carrying no
 `relay18x` is indistinguishable between "transparent, decided" and "announcement
 mode, never looked for", and a `family` whose rule has no arm for the shape in
 front of it asserts a wrong answer where it owes an unknown. So a captured
-document names the detectors this deployment runs and accounts for every one of
+document names the detectors its deployment runs and accounts for every one of
 them, on the same `case.annotations.flags`:
 
 | flag | what it says |
 |---|---|
-| `detector-roster` | the roster this document accounts for, comma-separated. This deployment's is `relay18x, prack, refer, reroute, fork, mrf` |
+| `detector-roster` | the roster this document accounts for, comma-separated, e.g. `relay18x, prack, refer, reroute, fork, mrf` |
 | `detected:<detector>` | the detector fired. `detail` quotes the signals verbatim, the way §4.2 `evidence` does |
 | `detected-none:<detector>` | the detector ran over this capture and asserts the shape is absent |
 | `detection-unavailable:<detector>` | the vantage lacks the messages the detector reads, so it decided nothing |
 
-**`detection-unavailable` is a decision, not a failure** — the same claim
-`ack-relay-delta-undetermined` makes about a transformation. "The shape is
-absent" and "the messages that would settle it are not at this vantage" are
-different statements, and a roster that collapsed them would be the silence it
-exists to remove.
+**`detection-unavailable` is a decision, not a failure.** "The shape is absent"
+and "the messages that would settle it are not at this vantage" are different
+statements, and a roster that collapsed them would be the silence it exists to
+remove.
 
 Every rostered detector states exactly one of the three on every generated
 document, so the flag list is a complete account of what the extractor
@@ -2759,9 +2958,10 @@ Its whole job:
 
 1. **Bind** each endpoint per its `side` and `binding`.
 2. **Sequence** the flow. Same-leg order is list order — save for a relay
-   standing behind a send, which arms beside it (§6.7b) — cross-leg and
-   cross-call order is `after`; a captured chain barrier comes from
-   `attempts[].leg` plus `position`.
+   standing behind a send (§6.7b) and an answer to a transaction the leg has
+   already opened (§6.7c), which arm beside what stands in front of them —
+   cross-leg and cross-call order is `after`; a captured chain barrier comes
+   from `attempts[].leg` plus `position`.
 3. **`send`**: emit exactly what `msg` states, plus tier-1 regeneration, plus
    any run-config injected headers — the run's own, and on a call's DIAL that
    call's own directive (§4.3) — plus any accessor substitution: a `${num:…}`
@@ -2773,7 +2973,23 @@ Its whole job:
 4. **`expect`**: gate on op, leg alignment, discriminator and `within_ms`, whose
    budget opens at the step's own dwell (§6.8). Then apply `check`, then any
    inline `checks`. An `optional` expect is RELEASED — never failed — when a
-   later step on its leg matches first, or when its own budget expires (§6.5).
+   later step on its leg matches first with no pending required expect or
+   unsent send standing in front of the optional, or when its own budget
+   expires (§6.5).
+   A datagram no armed expect matched is charged to the armed expect of ITS
+   transaction — a response rides the client transaction of the request it
+   answers, CSeq method and number (RFC 3261 §17.1.3), and the expect's
+   transaction is the one the leg's own send of that method opened, read off the
+   recording, never off the step's captured `cseq` (§6.3): the armed expect
+   naming the very status, else the first REQUIRED one in leg order, else the
+   first `optional`. With no armed expect on that transaction it is charged to
+   the closest step: a discriminator match, else the first armed. A FINAL so
+   charged ends the transaction and RETIRES the expect (a required one; an
+   `optional` is released, and so is every tolerated absence armed on that
+   transaction), the verdict listing it under `retired`; a block member is
+   charged but never retired. The one status an expect takes besides its own:
+   200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's
+   non-2xx final reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
    informative instead of gating when the run's lane is not `case.origin_lane`,
    unless the run configuration states that class outright. One comparison, no
@@ -2803,7 +3019,24 @@ Its whole job:
     observed inside the run's stated window (§9.2).
 12. **Record, always.** A verbatim per-leg recording of every message, in wire
     order, with arrival time, into the run bundle — in every mode, on every
-    lane, whether or not anything asserted.
+    lane, whether or not anything asserted. A recorded datagram is BYTES
+    (ADR-0035): the line writes them in exactly one of the extractor's three
+    arms, chosen by the bytes alone — `raw` when the whole datagram is UTF-8,
+    `head` + `body_b64` when only the body is not, `raw_b64` when not even
+    the head is — the WHOLE datagram, a tail past the declared
+    `Content-Length` included (RFC 3261 §18.3) — beside the body's `body`
+    layout (media type, the parser's `Content-Length`-bounded length, MIME
+    parts located by offset), so a reader finds a part without splitting on a
+    boundary and every comparison reads the body under that one bound. The
+    interpreter writes a layout for every parsable datagram that carries a
+    body, so a line with no layout is bodiless in the confrontation and the
+    cut; the viewer draws what the wire carried, marking bytes past a stated
+    layout as excess. A layout its bytes cannot honour is refused. The head
+    ends by ONE rule for the arm, the layout and every reader: the empty line
+    that ends the header block (RFC 3261 §7), CRLF being the terminator
+    (§25.1), a bare CR or LF accepted as the parser accepts them. One decoder
+    reads captures and recordings alike; text is a rendering of the bytes,
+    never the stored form.
 13. **Settle** (§10), then evaluate `postconditions`.
 
 **A failure does not end a run; being unable to GO ON does.** A run records every
@@ -2813,14 +3046,22 @@ message that expect waits for can still arrive. What ends the SCRIPT is a failur
 that leaves the run nothing to compose, and there are two:
 
 - a required `expect` whose budget ran out — the message is MISSING;
-- an arrival that leaves an armed expect UNSATISFIABLE — a FINAL response on the
-  very transaction the expect is gated on, carrying a status it cannot match. RFC
-  3261 §17.1 ends a client transaction at its final, so no response of another
-  status rides it again. A provisional ends nothing, a request ends nothing, and
-  a final for another transaction ends nothing. Where several expects are armed on
-  one leg — `alt` branches, an `unordered` group — the arrival must contradict
-  EVERY required one; an `optional` expect is released rather than failed (§6.5)
-  and never blocks.
+- an arrival that leaves the TAIL uncomposable — a FINAL response on the very
+  transaction a required expect is gated on, carrying a status it cannot match.
+  RFC 3261 §17.1 ends a client transaction at its final, so no response of
+  another status rides it again and the expect is retired (item 4). Whether the
+  run goes on is then a DIALOG fact: it ends where the retired step named a
+  PROVISIONAL (the tail was scripted for a transaction still open), or where an
+  INVITE final is of the other class than the one named (2xx against non-2xx)
+  on a leg whose dialog no INVITE 2xx has yet confirmed — the initial INVITE's
+  final decides whether the dialog the tail was scripted for exists (§12.1,
+  §13.2.2.3), while a re-INVITE's final of either class leaves it as it was.
+  Every other retirement goes on: the ACK behind a substituted reject composes
+  off the final that came. A provisional ends nothing, a request ends nothing,
+  and a final for another transaction ends nothing. Where several expects are
+  armed on one leg as a block — `alt` branches, an `unordered` group — none is
+  retired and the arrival must contradict EVERY required one; an `optional`
+  expect is released rather than failed (§6.5) and never blocks.
 
 **This rule is polarity-free.** A `must_fail` declaration (§11.2) changes nothing
 about WHEN a script ends — only what the verdict makes of what was recorded. A
@@ -2844,8 +3085,9 @@ like a scripted dialog that is not terminal.
 The run then settles and evaluates its postconditions like any other case. The
 steps the script never ran do NOT raise `flow-incomplete`: they were abandoned by
 this rule, and the verdict states that rather than hiding it — `completed_steps`
-stays the truth about what ran, and an `abandoned` section names the leg and step
-the script stopped at, the nodes it never ran, and every act the close emitted.
+stays the truth about what ran, `retired` names the expects a final on their own
+transaction retired, and an `abandoned` section names the leg and step the script
+stopped at, the nodes it never ran, and every act the close emitted.
 
 What the interpreter never does: read `calls` beyond leg sequencing and the id
 and caller leg a per-call lane directive is placed by (`joined_by` included: a join explains the chain to a reviewer and a driver, and sequences
@@ -2867,6 +3109,6 @@ Everything in this document is frozen except the following.
 | `rfc_violations` vocabulary | **MINIMAL** | §11.1. One member, `no-200-after-cancel`, and no `allowed` flag. The vocabulary and its mechanics grow from the per-endpoint violation census, not before it |
 | `must_fail` vocabulary | **MINIMAL** | §11.2. Two members, `unexpected-ack` and `unexpected-prack`. It grows with the prediction that decides it, as `rfc_violations` grows with the detector |
 | `inject` execution semantics | **DESIGN ONLY** | §6.6 freezes the shape and the injector-interface split. No interpreter executes an action in this program |
-| `media` | **RESERVED** | §12. Open object, deployment-extensible; the vocabulary lands in issue 19 |
-| match-less retry chains | **UNEXERCISED** (F3) | a retry chain ordered by a match-less rule is absent from the corpus. `calls[].attempts` expresses it; nothing has produced one |
-| body-registry deployment overlay | **NOT MODELLED** (G6) | §8.2. A deployment handler that REWRITES a body has no field on a `body`/`part` to name itself with. No corpus case exercises it |
+| `media` | **RESERVED** | §12. Open object, deployment-extensible; the vocabulary lands with loadgen adoption |
+| match-less retry chains | **UNEXERCISED** | a retry chain ordered by a match-less rule is absent from the corpus. `calls[].attempts` expresses it; nothing has produced one |
+| body-registry deployment overlay | **NOT MODELLED** | §8.2. A deployment handler that REWRITES a body has no field on a `body`/`part` to name itself with. No corpus case exercises it |

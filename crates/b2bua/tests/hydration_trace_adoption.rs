@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! ADR-0026 §5 — trace adoption at the store's hydration seam.
 //!
 //! A node that materialises a replicated call opens THIS node's own root span
@@ -14,9 +15,9 @@ use std::sync::Arc;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore, MaterialiseOrigin};
+use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -56,15 +57,20 @@ fn invite(call_id: &str) -> SipRequest {
 
 fn state(clock: Clock) -> CallState {
     let store = Arc::new(InMemoryCallStore::new());
-    let writer = BufferedTerminateWriter::spawn(store.clone(), 64);
-    CallState::new(store, writer, "w0", B2buaMetrics::new()).with_clock(clock)
+    CallState::new(store, "w0", B2buaMetrics::new()).with_clock(clock)
 }
 
 /// A replica body as it arrives from another node: `sampled` and carrying the
 /// nominal's correlation triple.
 fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    let mut c = build_initial_call(&invite(call_id), src, &B2buaConfig::default(), 0);
+    let mut c = build_initial_call(
+        &invite(call_id),
+        src,
+        &B2buaConfig::default(),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     c.trace_id = Some(NOMINAL_TRACE.to_string());
     c.root_span_id = Some(NOMINAL_ROOT.to_string());
     c.sampled = sampled;
@@ -73,7 +79,7 @@ fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
 
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(3), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(3), activation_bucket(0)),
         false,
     )));
 }

@@ -8,41 +8,26 @@
 use std::net::SocketAddr;
 
 use sip_message::emergency::is_emergency_request;
-use sip_message::header::{
-    MaxForwards, ProxyRequire, RetryAfter, RouteEntry, Unsupported, Uri, Via,
-};
+use sip_message::header::{MaxForwards, ProxyRequire, RouteEntry, Unsupported, Uri, Via};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
-use crate::cancel_lru::{call_id_cseq_key, CancelEntry};
+use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
 use crate::headers::{cookie_params, route_target};
-use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
-use crate::self_gate::BypassKind;
+use crate::observability::metrics::{CancelLookup, Direction, MessageResult, RoutingDecisionKind};
+use crate::self_gate::{AdmitDecision, BypassKind};
 use crate::strategy::{DecodeResult, SelectOpts};
 use crate::trace::emit;
 
 use super::super::{is_dialog_creating, ProxyCore};
-use super::reply::{extra_header, proxy_reason};
+use super::reply::{extra_header, proxy_reason, reject_retry_after};
 use super::{top_via_branch, RouteOutcome};
 
 /// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
 /// one a proxy applies to a value no reader can make sense of, so a malformed
 /// count neither exhausts the loop bound nor lets a request ride forever.
 const DEFAULT_MAX_FORWARDS: u32 = 70;
-
-/// Namespaced key for the retransmission target memo (reuses the `CancelBranchLru`
-/// store). A genuine retransmission repeats the *same* request: identical Call-ID,
-/// upstream branch, method AND CSeq number (RFC 3261 §17.2.3 keys a server
-/// transaction on branch + sent-by + method; the CSeq number pins it further).
-/// All four are required because a UA's per-process `IdGen` resets on a restart,
-/// so a *different* request can reuse a branch token the previous incarnation
-/// already spent — keying on the branch alone would then repeat the earlier
-/// forward's TARGET for an unrelated transaction. The `rtx|` prefix keeps it
-/// disjoint from `call_id_cseq_key` (`{call_id}|{cseq}`).
-fn retransmit_key(call_id: &str, incoming_branch: &str, method: &str, cseq: u32) -> String {
-    format!("rtx|{call_id}|{incoming_branch}|{method}|{cseq}")
-}
 
 impl ProxyCore {
     /// The top-Via sent-by when it is one of our registered workers — i.e. the
@@ -159,15 +144,20 @@ impl ProxyCore {
         //    no transaction it ever created.
         let mut ack_hop: Option<CancelEntry> = None;
         if method == Method::Ack {
-            let key = crate::cancel_lru::ack_hop_key(call_id.as_str(), from.tag(), cseq.seq());
+            let key = crate::cancel_lru::ack_hop_key(
+                req.top_via(),
+                call_id.as_str(),
+                from.tag(),
+                cseq.seq(),
+            );
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                let same_txn = !found.upstream_branch.is_empty()
-                    && top_via_branch(req).as_deref() == Some(found.upstream_branch.as_str());
-                // Branchless legacy fallback (pre-RFC-3261 upstream): no branch
-                // to compare, so keep the old route-less heuristic for it — a
-                // 2xx ACK would carry the dialog's Route set.
-                let legacy_routeless =
-                    found.upstream_branch.is_empty() && !req.has(&sip_message::HeaderName::Route);
+                // The key carries the ACK's branch, so a hit with one is the
+                // INVITE's own transaction. Branchless legacy fallback
+                // (pre-RFC-3261 upstream): no branch to tell them apart, so
+                // the route-less heuristic decides — a 2xx ACK would carry
+                // the dialog's Route set.
+                let same_txn = top_via_branch(req).is_some();
+                let legacy_routeless = !same_txn && !req.has(&sip_message::HeaderName::Route);
                 if same_txn || legacy_routeless {
                     if found.branch.is_empty() {
                         return RouteOutcome { decision: select, target: None };
@@ -186,15 +176,16 @@ impl ProxyCore {
         // transaction split across two B2BUAs, a doubled call). It must also
         // not be re-counted as a new call nor re-gated: a 503 to a retransmit
         // of an admitted INVITE tears down a setup the first copy already
-        // started. Keyed on the full (Call-ID, upstream branch, method, CSeq)
-        // so a genuine retransmit matches but a different request that merely
-        // collides on the branch (a restarted UA's reset `IdGen`) does not.
+        // started. Keyed on the whole received transaction
+        // (`cancel_lru::retransmit_key`) so a genuine retransmit matches but a
+        // different request that merely collides on the branch (a restarted
+        // UA's reset `IdGen`, another sender) does not.
         // CANCEL is excluded — it resolves its target from the INVITE's own
         // entry below.
         let incoming_branch = top_via_branch(req);
-        let rtx_key = incoming_branch
-            .as_ref()
-            .map(|b| retransmit_key(call_id.as_str(), b, method.as_str(), cseq.seq()));
+        let rtx_key = incoming_branch.as_ref().map(|_| {
+            retransmit_key(req.top_via(), call_id.as_str(), from.tag(), method.as_str(), cseq.seq())
+        });
         let rtx_hit: Option<CancelEntry> = if method == Method::Cancel {
             None
         } else {
@@ -217,13 +208,12 @@ impl ProxyCore {
         let mut stripped_route_params: Option<crate::strategy::RouteParams> = None;
         let mut is_worker_outbound = false;
         // §16.12 + double-record-route: pop ALL leading Route values that are
-        // ours, and read the in-dialog direction from the FIRST one — which the
-        // proxy itself chose at dialog set-up. The worker-facing half carries
-        // `;outbound` (→ forward to the R-URI); the external-facing half carries
-        // the stickiness cookie (→ decode to the worker). Direction is therefore
-        // intrinsic to the proxy's own self-issued Record-Route, not a marker the
-        // worker stamps. The partner half of the pair (the other self-RR, present
-        // because we double-record-route) is popped and ignored.
+        // ours. The direction is read from one of them: in a run of whole
+        // pairs, the first entry of the last pair; in an odd run, the first
+        // entry. `;outbound` (the worker-facing half) → forward to the R-URI;
+        // the stickiness cookie (the external-facing half) → decode to the
+        // worker. The rest are popped and ignored. Why the last pair: ADR-0009
+        // X1.
         //
         // A route set the strict reader rejects is one this hop cannot act on:
         // it rides through exactly as it arrived (no pop, no loose-route next
@@ -231,8 +221,13 @@ impl ProxyCore {
         // understand.
         let routes: Vec<RouteEntry> = req.list::<RouteEntry>().unwrap_or_default();
         let self_routes = routes.iter().take_while(|r| self.is_self_route(r.uri())).count();
-        if let Some(first_self) = routes.first().filter(|_| self_routes > 0) {
-            let params = cookie_params(first_self.uri());
+        let direction_route = match self_routes {
+            0 => None,
+            n if n % 2 == 0 => routes.get(n - 2),
+            _ => routes.first(),
+        };
+        if let Some(direction_route) = direction_route {
+            let params = cookie_params(direction_route.uri());
             if params.contains_key("outbound") {
                 is_worker_outbound = true;
             } else {
@@ -276,7 +271,13 @@ impl ProxyCore {
         } else {
             None
         };
+        // A run of two or more whole pairs whose last pair decodes is a request
+        // re-entering through a later pass: its worker Via is the earlier
+        // pass's origin and does not make it worker-outbound.
+        let spiral_reentry =
+            self_routes > 2 && self_routes % 2 == 0 && stripped_route_params.is_some();
         if !is_worker_outbound
+            && !spiral_reentry
             && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
                 || via_worker_addr.is_some())
         {
@@ -292,21 +293,20 @@ impl ProxyCore {
         let is_emergency = is_emergency_request(req);
         if rtx_hit.is_none() {
             if is_new_dialog_invite && !is_emergency && !is_worker_outbound {
-                let decision = self.self_gate.try_admit_external();
-                if !decision.admit {
-                    let reason =
-                        decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
+                if let AdmitDecision::Reject { reason, retry_after_sec } =
+                    self.self_gate.try_admit_external()
+                {
+                    let reason = reason.label();
                     let extra = [
-                        extra_header(RetryAfter::new(decision.retry_after_sec.to_string())),
-                        extra_header(proxy_reason(503, &reason)),
+                        extra_header(reject_retry_after(retry_after_sec)),
+                        extra_header(proxy_reason(503, reason)),
                     ];
                     // The shed fact precedes the 503 it explains: `reply` is
                     // itself an emission site (the datagram it synthesizes).
-                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, &reason);
+                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, reason);
                     self.reply(req, src, 503, "Service Unavailable", &extra).await;
-                    // Bounded set: the self-gate's own reason constants
-                    // (proxy_overload_elu / proxy_overload_cps).
-                    self.metrics.record_reject(&reason);
+                    // A closed set: the gate's `ShedReason` labels.
+                    self.metrics.record_reject(reason);
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
             } else if is_new_dialog_invite && is_emergency {
@@ -335,7 +335,10 @@ impl ProxyCore {
         let mut stickiness: Option<&'static str> = None;
 
         if method == Method::Cancel {
-            let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
+            // §9.1: the CANCEL's Via is its INVITE's top Via, so it finds the
+            // entry of its own INVITE transaction, never another pass of a
+            // spiral sharing its Call-ID, From tag and CSeq.
+            let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
             if let Some(found) = self.cancel_lru.lookup(&key) {
                 // RFC 3261 §9.1 puts the CANCEL where the INVITE went; §16.11
                 // puts it on the INVITE's branch, which the survivor's rebuilt
@@ -348,7 +351,9 @@ impl ProxyCore {
                 // worker's own b-leg CANCEL) go where the INVITE went.
                 let mut cancel_target = found.target;
                 if let Some(cookie) = &found.stickiness {
-                    match self.strategy.decode_stickiness(cookie, msg).await {
+                    let decoded = self.strategy.decode_stickiness(cookie, msg).await;
+                    self.metrics.record_request_decode(&decoded);
+                    match decoded {
                         DecodeResult::Forward { target: t, .. }
                         | DecodeResult::ForwardBackup { target: t, .. } => cancel_target = t,
                         DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => {}
@@ -356,9 +361,9 @@ impl ProxyCore {
                 }
                 target = Some(cancel_target);
                 decision = RoutingDecisionKind::Cancel;
-                self.metrics.record_cancel_lookup("hit");
+                self.metrics.record_cancel_lookup(CancelLookup::Hit);
             } else {
-                self.metrics.record_cancel_lookup("miss");
+                self.metrics.record_cancel_lookup(CancelLookup::Miss);
                 decision = RoutingDecisionKind::Cancel;
                 if is_worker_outbound {
                     // §9.1: a CANCEL goes where its INVITE went. A worker's own
@@ -413,7 +418,9 @@ impl ProxyCore {
                 }
             }
         } else if let Some(params) = &stripped_route_params {
-            match self.strategy.decode_stickiness(params, msg).await {
+            let decoded = self.strategy.decode_stickiness(params, msg).await;
+            self.metrics.record_request_decode(&decoded);
+            match decoded {
                 DecodeResult::Forward { target: t, .. } => {
                     target = Some(t);
                     decision = RoutingDecisionKind::DecodeForward;
@@ -515,7 +522,6 @@ impl ProxyCore {
                     CancelEntry {
                         target: target.clone(),
                         branch: our_branch.clone(),
-                        upstream_branch: incoming_branch.clone().unwrap_or_default(),
                         stickiness: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
@@ -526,8 +532,9 @@ impl ProxyCore {
         if method == Method::Invite {
             // Long TTL: a CANCEL or non-2xx final can legally arrive any time
             // inside the downstream UA's INVITE window (B2BUA SetupTimeout /
-            // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs.
-            let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
+            // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs. Keyed on
+            // the transaction as received, the Via the CANCEL will repeat.
+            let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
             // The cookie a CANCEL re-resolves a dead worker through: the one the
             // re-INVITE carried in its Route, else the one this initial INVITE's
             // Record-Route was minted with. A worker-outbound INVITE's cookie
@@ -539,12 +546,7 @@ impl ProxyCore {
             };
             self.cancel_lru.remember(
                 &key,
-                CancelEntry {
-                    target: target.clone(),
-                    branch: our_branch,
-                    upstream_branch: incoming_branch.clone().unwrap_or_default(),
-                    stickiness,
-                },
+                CancelEntry { target: target.clone(), branch: our_branch, stickiness },
                 crate::cancel_lru::INVITE_ENTRY_TTL_MS,
             );
             self.metrics.set_pending_invite_lru_size(self.cancel_lru.size() as u64);

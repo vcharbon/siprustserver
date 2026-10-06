@@ -499,6 +499,8 @@ dependencies = [
  "call",
  "call-limiter",
  "http-net",
+ "load-shed",
+ "metric-catalogue",
  "observe",
  "proptest",
  "repl-net",
@@ -523,10 +525,12 @@ dependencies = [
  "announcement",
  "async-trait",
  "b2bua",
+ "b2bua-sdk",
  "call",
  "call-limiter",
  "http-net",
  "layer-harness",
+ "load-shed",
  "media",
  "media-harness",
  "observe",
@@ -546,18 +550,40 @@ name = "b2bua-runner"
 version = "0.1.0"
 dependencies = [
  "announcement",
- "async-trait",
  "b2bua",
  "b2bua-runner-kit",
  "call",
  "jemalloc-stats",
+ "probe-http",
+ "tikv-jemallocator",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "b2bua-runner-kit"
+version = "0.1.0"
+dependencies = [
+ "amq-protocol",
+ "async-trait",
+ "b2bua",
+ "call",
+ "call-limiter",
+ "http-net",
+ "jemalloc-stats",
  "kube",
  "lapin",
+ "load-shed",
+ "metric-catalogue",
+ "observe",
  "probe-http",
  "repl-net",
  "rustls",
  "serde_json",
- "tikv-jemallocator",
+ "sip-clock",
+ "sip-message",
+ "sip-net",
+ "sip-txn",
  "tokio",
  "tokio-executor-trait",
  "tokio-reactor-trait",
@@ -566,27 +592,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "b2bua-runner-kit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "b2bua",
- "call",
- "http-net",
- "observe",
- "probe-http",
- "sip-clock",
- "sip-net",
- "sip-txn",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "b2bua-sdk"
 version = "0.1.0"
 dependencies = [
  "call",
+ "serde",
  "serde_json",
  "sip-message",
  "sip-txn",
@@ -720,6 +730,7 @@ name = "call"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "call",
  "proptest",
  "rmp-serde",
  "serde",
@@ -735,6 +746,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "http-net",
+ "metric-catalogue",
  "serde",
  "serde_json",
  "sip-clock",
@@ -792,6 +804,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "lapin",
+ "metric-catalogue",
  "observe",
  "serde",
  "serde_json",
@@ -1359,13 +1372,16 @@ dependencies = [
 name = "failover-harness"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "b2bua",
  "b2bua-harness",
+ "b2bua-sdk",
  "call",
  "call-limiter",
  "ha-harness",
  "http-net",
  "layer-harness",
+ "load-shed",
  "observe",
  "repl-net",
  "scenario-harness",
@@ -1804,11 +1820,17 @@ name = "http-net"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "http-body-util",
+ "http-net",
  "hyper",
  "hyper-util",
+ "layer-harness",
+ "metric-catalogue",
  "reqwest",
+ "serde",
+ "serde_json",
  "sip-clock",
  "thiserror 2.0.18",
  "tokio",
@@ -2161,7 +2183,10 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jemalloc-stats"
 version = "0.1.0"
 dependencies = [
+ "metric-catalogue",
  "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "tokio",
 ]
 
 [[package]]
@@ -2383,6 +2408,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "load-shed"
+version = "0.1.0"
+
+[[package]]
 name = "loadgen"
 version = "0.1.0"
 dependencies = [
@@ -2394,6 +2423,7 @@ dependencies = [
  "flamegraph-util",
  "futures",
  "layer-harness",
+ "metric-catalogue",
  "regex",
  "scenario-harness",
  "serde_json",
@@ -2477,6 +2507,7 @@ version = "0.1.0"
 dependencies = [
  "media",
  "rustfft",
+ "sip-clock",
  "sip-net",
  "tokio",
 ]
@@ -2503,6 +2534,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5de893c32cde5f383baa4c04c5d6dbdd735cfd4a794b0debdb2bb1b421da5ff4"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metric-catalogue"
+version = "0.1.0"
+
+[[package]]
+name = "metric-contract"
+version = "0.1.0"
+dependencies = [
+ "b2bua-runner-kit",
+ "call-limiter",
+ "cdr-consumer-runner",
+ "loadgen",
+ "metric-catalogue",
+ "serde_json",
+ "sip-proxy-runner",
 ]
 
 [[package]]
@@ -2647,6 +2695,8 @@ name = "observe"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "load-shed",
+ "metric-catalogue",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -2980,6 +3030,7 @@ version = "0.1.0"
 dependencies = [
  "b2bua",
  "b2bua-harness",
+ "base64 0.22.1",
  "call",
  "call-limiter",
  "futures",
@@ -2999,6 +3050,7 @@ dependencies = [
 name = "pivot-schema"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "rfc-rules",
  "schemars",
@@ -3778,6 +3830,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "http-net",
  "layer-harness",
  "observe",
  "seq-report",
@@ -4076,10 +4129,12 @@ name = "sip-message"
 version = "0.1.0"
 dependencies = [
  "alloc-counter",
+ "base64 0.22.1",
  "bytes",
  "criterion",
  "proptest",
  "rvoip-sip-core",
+ "schemars",
  "serde",
  "serde_json",
  "smallvec",
@@ -4126,6 +4181,8 @@ dependencies = [
  "bytes",
  "hmac",
  "layer-harness",
+ "load-shed",
+ "metric-catalogue",
  "observe",
  "scenario-harness",
  "sha1",
@@ -4148,6 +4205,7 @@ version = "0.1.0"
 dependencies = [
  "jemalloc-stats",
  "kube",
+ "metric-catalogue",
  "observe",
  "probe-http",
  "rustls",
@@ -4174,6 +4232,10 @@ name = "sip-txn"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "getrandom 0.3.4",
+ "hmac",
+ "metric-catalogue",
+ "sha2",
  "sip-message",
  "sip-net",
  "sip-retransmit",

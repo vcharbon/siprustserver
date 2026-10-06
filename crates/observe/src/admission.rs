@@ -13,14 +13,27 @@
 //! active slot, so the cap tracks live root spans exactly.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use load_shed::{at_ms, TokenBucket};
 
 use crate::counters;
 use crate::rate_draw::RateDraw;
-use crate::token_bucket::TokenBucket;
 
 /// Concurrent traced calls a process holds open by default.
 pub const DEFAULT_MAX_ACTIVE: usize = 200;
+
+/// Activation burst the default bucket absorbs.
+const ACTIVATION_BURST: f64 = 10.0;
+
+/// Steady-state activations per second the default bucket allows.
+const ACTIVATION_REFILL_PER_SEC: f64 = 1.0;
+
+/// The ADR-0026 activation bucket: burst 10, refill 1/s, full at `now_ms`.
+/// It bounds how fast traces may start, independently of how many run at once.
+pub fn activation_bucket(now_ms: i64) -> TokenBucket {
+    TokenBucket::full(ACTIVATION_BURST, ACTIVATION_REFILL_PER_SEC, at_ms(now_ms))
+}
 
 /// Why an activation attempt was refused. Each variant maps to one counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +55,7 @@ pub struct SampleAdmission {
     default_rate: f64,
     max_active: usize,
     draw: RateDraw,
-    bucket: TokenBucket,
+    bucket: Mutex<TokenBucket>,
     active: AtomicUsize,
 }
 
@@ -55,7 +68,7 @@ impl SampleAdmission {
             default_rate: crate::DEFAULT_SAMPLE_RATE,
             max_active: DEFAULT_MAX_ACTIVE,
             draw: RateDraw::from_entropy(),
-            bucket: TokenBucket::default_at(now_ms),
+            bucket: Mutex::new(activation_bucket(now_ms)),
             active: AtomicUsize::new(0),
         })
     }
@@ -74,7 +87,7 @@ impl SampleAdmission {
             default_rate,
             max_active,
             draw,
-            bucket,
+            bucket: Mutex::new(bucket),
             active: AtomicUsize::new(0),
         })
     }
@@ -110,7 +123,7 @@ impl SampleAdmission {
         if !self.draw.draw(rate_override.unwrap_or(self.default_rate)) {
             return Err(Denied::Draw);
         }
-        if !self.bucket.try_take(now_ms) {
+        if !self.take_token(now_ms) {
             counters::bump(&counters::TRACE_DENIED_RATE);
             return Err(Denied::Rate);
         }
@@ -120,6 +133,11 @@ impl SampleAdmission {
         }
         counters::bump(&counters::TRACE_ADMITTED);
         Ok(TraceLease { gate: self.clone() })
+    }
+
+    /// Take one activation token at `now_ms`.
+    fn take_token(&self, now_ms: i64) -> bool {
+        self.bucket.lock().expect("activation bucket mutex").try_take(at_ms(now_ms)).is_ok()
     }
 
     /// Claim one active-trace slot without exceeding the cap.
@@ -149,21 +167,20 @@ mod tests {
     use super::*;
 
     fn always_on(max_active: usize) -> Arc<SampleAdmission> {
-        SampleAdmission::new(true, 1.0, max_active, RateDraw::seeded(1), TokenBucket::default_at(0))
+        SampleAdmission::new(true, 1.0, max_active, RateDraw::seeded(1), activation_bucket(0))
     }
 
     #[test]
     fn without_an_exporter_nothing_is_admitted() {
         let gate =
-            SampleAdmission::new(false, 1.0, 1000, RateDraw::seeded(1), TokenBucket::default_at(0));
+            SampleAdmission::new(false, 1.0, 1000, RateDraw::seeded(1), activation_bucket(0));
         assert_eq!(gate.admit(None, 0).err(), Some(Denied::NoExporter));
         assert_eq!(gate.active(), 0);
     }
 
     #[test]
     fn a_negative_draw_stops_before_the_bucket() {
-        let gate =
-            SampleAdmission::new(true, 0.0, 1000, RateDraw::seeded(1), TokenBucket::default_at(0));
+        let gate = SampleAdmission::new(true, 0.0, 1000, RateDraw::seeded(1), activation_bucket(0));
         for _ in 0..100 {
             assert_eq!(gate.admit(None, 0).err(), Some(Denied::Draw));
         }
@@ -199,8 +216,13 @@ mod tests {
 
     #[test]
     fn a_force_enable_still_passes_the_bucket_and_the_cap() {
-        let gate =
-            SampleAdmission::new(true, 0.0, 2, RateDraw::seeded(9), TokenBucket::new(2.0, 1.0, 0));
+        let gate = SampleAdmission::new(
+            true,
+            0.0,
+            2,
+            RateDraw::seeded(9),
+            TokenBucket::full(2.0, 1.0, at_ms(0)),
+        );
         let _a = gate.admit(Some(1.0), 0).unwrap();
         let _b = gate.admit(Some(1.0), 0).unwrap();
         assert_eq!(gate.admit(Some(1.0), 0).err(), Some(Denied::Rate));

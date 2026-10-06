@@ -22,6 +22,9 @@ use super::stats::MuxStats;
 const T1: Duration = Duration::from_millis(500); // first retransmit interval
 const T2: Duration = Duration::from_secs(4); // non-INVITE / 2xx backoff cap
 const TXN_TIMEOUT: Duration = Duration::from_secs(32); // Timer B/F/H = 64·T1
+/// How long a released Call-ID, or a key whose call ended not ok, is held
+/// back: 64·T1, the longest a peer keeps retransmitting an INVITE (Timer B).
+pub const RELEASE_HOLD: Duration = TXN_TIMEOUT;
 
 /// Stop-control shared between a spawned resender task and the [`CallTxns`] engine
 /// that owns it. The engine flips `stop` (and wakes the task) when the transaction
@@ -473,6 +476,7 @@ mod tests {
     /// no per-method code for) is retransmitted after ~T1 and the resender stops
     /// on its final response; a duplicate of that response is then absorbed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow lane: loadgen"]
     async fn calltxns_timer_e_is_method_generic_for_update() {
         let (txns, peer, peer_addr) = txn_rig().await;
 
@@ -496,6 +500,7 @@ mod tests {
     /// retransmitted inbound PRACK is absorbed and our recorded 200 (PRACK) is
     /// re-sent (the peer's copy was evidently lost).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow lane: loadgen"]
     async fn calltxns_absorbs_duplicate_prack_and_reanswers() {
         let (txns, peer, peer_addr) = txn_rig().await;
 
@@ -515,6 +520,7 @@ mod tests {
     /// peer's INVITE resender already stopped on the 100 Trying). A plain 18x
     /// stays best-effort (never proactively retransmitted).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow lane: loadgen"]
     async fn calltxns_retransmits_reliable_1xx_until_prack() {
         let (txns, peer, peer_addr) = txn_rig().await;
 
@@ -555,6 +561,7 @@ mod tests {
     /// never collapsed as a retransmit. A same-tag repeat still dedups. The
     /// discriminator is `(branch, status, To-tag)`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow lane: loadgen"]
     async fn calltxns_distinct_fork_tags_are_not_deduped() {
         let (txns, _peer, peer_addr) = txn_rig().await;
 
@@ -597,6 +604,7 @@ mod tests {
     /// and the reactive re-answer to a duplicate request. Without it these hit the
     /// socket below the recording layer and never reach the ladder.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow lane: loadgen"]
     async fn calltxns_sendtap_records_every_reemission() {
         let (txns, peer, peer_addr) = txn_rig().await;
         let seen = Arc::new(Mutex::new(Vec::<ReEmitKind>::new()));

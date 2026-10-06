@@ -13,8 +13,8 @@ use sip_message::{Method, SipResponse};
 use crate::event::TxnKind;
 use crate::timers::{ms, TIMER_L};
 
-use super::owner::Owner;
-use super::txn::TxnRole;
+use super::key::ServerTxnId;
+use super::owner::{shrink_idle, Owner};
 
 /// What the layer holds one response to.
 enum Bound {
@@ -73,12 +73,13 @@ impl Owner {
     }
 
     fn bound_for(&self, response: &SipResponse) -> Bound {
-        let branch = response.top_via().branch().unwrap_or_default();
-        let txn = self.txns.get(branch).filter(|t| t.role == TxnRole::Server);
-        // A CANCEL shares its INVITE's branch (§9.1) and its answer that
-        // INVITE's tag (§9.2): the one the INVITE's own To named (§8.2.6.2),
-        // else the one the transaction bound, else the one remembered past it.
+        // A CANCEL shares its INVITE's branch and sent-by (§9.1) and its
+        // answer that INVITE's tag (§9.2): the one the INVITE's own To named
+        // (§8.2.6.2), else the one the transaction bound, else the one
+        // remembered past it.
         if *response.cseq().method() == Method::Cancel {
+            let txn =
+                ServerTxnId::cancelled_invite(response.top_via()).and_then(|id| self.server(id));
             return txn
                 .and_then(|t| t.original_request.as_ref())
                 .and_then(|r| r.to().tag().map(str::to_string))
@@ -86,7 +87,7 @@ impl Owner {
                 .or_else(|| self.recall_uas_tag(response))
                 .map_or(Bound::Free, Bound::Exact);
         }
-        let Some(txn) = txn else {
+        let Some(txn) = ServerTxnId::of_response(response).and_then(|id| self.server(id)) else {
             return self.recall_uas_tag(response).map_or(Bound::Free, Bound::Fill);
         };
         // A request that named the dialog is answered under that tag (§8.2.6.2).
@@ -106,16 +107,15 @@ impl Owner {
             .map_or(Bound::Free, Bound::Fill)
     }
 
-    /// Record what a final this layer just sent on a server INVITE
-    /// transaction bound: the dialog's tag, remembered past the transaction.
+    /// Record what a final this layer just sent on the server INVITE
+    /// transaction `id` names bound: the dialog's tag, remembered past the transaction.
     /// A provisional binds nothing here — the first one's tag is pinned as
     /// `uas_to_tag` by the sender.
-    pub(super) fn record_uas_tag(&mut self, branch: &str, response: &SipResponse) {
+    pub(super) fn record_uas_tag(&mut self, id: ServerTxnId<'_>, response: &SipResponse) {
         let Some(tag) = response.to().tag().map(str::to_string) else { return };
         let (call_id, from_tag) = {
-            let Some(txn) = self.txns.get_mut(branch) else { return };
-            if txn.role != TxnRole::Server || txn.kind != TxnKind::Invite || response.status() < 200
-            {
+            let Some(txn) = self.server_mut(id) else { return };
+            if txn.kind != TxnKind::Invite || response.status() < 200 {
                 return;
             }
             txn.final_to_tag = Some(tag.clone());
@@ -132,6 +132,12 @@ impl Owner {
             (call_id.to_string(), from_tag.to_string()),
             (tag.to_string(), tokio::time::Instant::now()),
         );
+    }
+
+    /// Drop every remembered tag past Timer L.
+    pub(super) fn forget_expired_uas_tags(&mut self) {
+        self.recent_uas_tags.retain(|_, (_, since)| since.elapsed() < ms(TIMER_L));
+        shrink_idle(&mut self.recent_uas_tags);
     }
 
     /// The tag remembered for the dialog `response` answers on, while it is

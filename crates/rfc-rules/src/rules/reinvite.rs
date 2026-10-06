@@ -6,8 +6,8 @@
 //!   - [`NoReInviteWhileInviteInProgress`] (§14.1) charges the UAC: it holds
 //!     one INVITE outstanding per dialog DIRECTION and waits for Confirmed.
 //!   - [`ConcurrentReInvite500Or491`] (§14.2) charges the UAS: a re-INVITE that
-//!     arrives while another INVITE of the dialog is in progress is answered
-//!     491, or 500 with `Retry-After`.
+//!     arrives while its sender's earlier INVITE is in progress is answered 500
+//!     with `Retry-After`, and one crossing the other party's is answered 491.
 //!   - [`FailedReinviteTearsDownDialog`] (§14.1 / §17.1.1.2) charges the UAC's
 //!     peer path: a re-INVITE that drew a provisional draws a final too — the
 //!     prior session survives a failed re-INVITE, and silence ends it.
@@ -26,6 +26,14 @@
 //! final for: neither opens an occasion, and neither re-enters the in-progress
 //! window.
 //!
+//! **A spiral copy is never a second act either.** A request routed back
+//! through a hop it already crossed (§16.3) reaches that hop again under a new
+//! top Via, but every forwarder keeps the Vias below its own (§16.6 step 8), so
+//! its bottom Via — sent-by and branch — is the one it left its originator
+//! with, and its CSeq is unchanged (§16.6). An INVITE whose bottom Via and CSeq
+//! are those of an INVITE in flight at the same endpoint is that INVITE by
+//! another path: neither a race nor an overlap.
+//!
 //! **A 2xx does not end an INVITE transaction — the ACK does** (§14.1 rule 2,
 //! RFC 6026's *Accepted* interval). A non-2xx final does end it there and then:
 //! its ACK belongs to the transaction layer and proves nothing about the TU.
@@ -36,6 +44,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use sip_message::header::SentBy;
 use sip_message::sniff;
 
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
@@ -60,15 +69,18 @@ pub const REINVITE_ANSWER_WINDOW_US: u64 = 1_000_000;
 /// produces one. In a CLOSED observation it collapses.
 pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 
-/// **RFC 3261 §14.2 — a racing re-INVITE is answered 491, or 500 with
-/// Retry-After.** A UAS serialises offer/answer: while one INVITE transaction
-/// of a dialog is still in progress, a second one cannot be evaluated against a
-/// session state that is itself mid-change. §14.2 has it say so rather than
-/// answer both — the test UA answers both, so nothing else catches it.
+/// **RFC 3261 §14.2 — a racing re-INVITE is answered 500 with Retry-After, or
+/// 491 when it crosses.** A UAS serialises offer/answer: while one INVITE
+/// transaction of a dialog is still in progress, a second one cannot be
+/// evaluated against a session state that is itself mid-change. §14.2 has it
+/// say so rather than answer both — the test UA answers both, so nothing else
+/// catches it.
 ///
 /// The occasion is ONE re-INVITE the endpoint TOOK while another INVITE of that
-/// dialog was in progress at it. Charges the taker; 491, or 500 carrying
-/// `Retry-After`, discharges it.
+/// dialog was in progress at it. Charges the taker. When the pending INVITE
+/// came from the same sender (same From tag), only 500 carrying `Retry-After`
+/// discharges it (§14.2's first clause); when it came the other way, only 491
+/// does (the second clause).
 ///
 /// **In progress is measured on the UNORDERED dialog**: a UAS answers whatever
 /// INVITEs ride the dialog, whichever party sent them, so a callee-initiated
@@ -91,6 +103,9 @@ impl Obligation for ConcurrentReInvite500Or491 {
         // re-INVITE is judged against what was in flight BEFORE it.
         let mut in_progress: BTreeMap<PairKey<'_>, BTreeSet<&str>> = BTreeMap::new();
         let mut dialog_of: BTreeMap<TxnKey<'_>, PairKey<'_>> = BTreeMap::new();
+        // Each INVITE transaction's From tag: who sent it on the dialog.
+        let mut sender_tag: BTreeMap<TxnKey<'_>, &str> = BTreeMap::new();
+        let mut origins = Origins::default();
         let mut completed: BTreeSet<TxnKey<'_>> = BTreeSet::new();
         // The racing re-INVITEs, and the first final each was answered with.
         let mut raced: Vec<Race<'_>> = Vec::new();
@@ -113,9 +128,20 @@ impl Obligation for ConcurrentReInvite500Or491 {
                     }
                     let dialog = PairKey::of(taker, &msg.call_id, from_tag, to_tag);
                     let in_flight = in_progress.entry(dialog).or_default();
+                    let spiral = origins.copies_one_of(msg, taker, in_flight);
+                    origins.record(msg, txn);
                     // A Timer-A retransmission reuses its own branch.
-                    if !in_flight.contains(branch) {
-                        if let Some(pending) = in_flight.iter().next().copied() {
+                    if !in_flight.contains(branch) && !spiral {
+                        let same_sender = |b: &&&str| {
+                            let pending = TxnKey { branch: b, ..txn };
+                            sender_tag.get(&pending) == Some(&from_tag)
+                        };
+                        let pending = in_flight
+                            .iter()
+                            .find(same_sender)
+                            .map(|b| (*b, true))
+                            .or_else(|| in_flight.iter().next().map(|b| (*b, false)));
+                        if let Some((pending, same_sender)) = pending {
                             raced.push(Race {
                                 txn,
                                 msg: mi,
@@ -125,11 +151,13 @@ impl Obligation for ConcurrentReInvite500Or491 {
                                 sender: msg.src.as_str(),
                                 branch,
                                 pending_branch: pending,
+                                same_sender,
                             });
                         }
                     }
                     in_flight.insert(branch);
                     dialog_of.insert(txn, dialog);
+                    sender_tag.entry(txn).or_insert(from_tag);
                 }
                 Kind::Response { status } if msg.cseq_method.eq_ignore_ascii_case("INVITE") => {
                     let txn = TxnKey {
@@ -194,7 +222,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 })));
                 continue;
             };
-            if answer.status == 491 {
+            if answer.status == 491 && !race.same_sender {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
@@ -208,7 +236,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 }
                 None => false,
             };
-            if answer.status == 500 && retry_after {
+            if answer.status == 500 && retry_after && race.same_sender {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
@@ -270,6 +298,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
         let mut branch_cseq: BTreeMap<TxnKey<'_>, u32> = BTreeMap::new();
         // Transactions whose 2xx has landed and whose ACK has not gone out.
         let mut accepted: BTreeSet<TxnKey<'_>> = BTreeSet::new();
+        let mut origins = Origins::default();
         let mut out = Vec::new();
 
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -328,6 +357,8 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                         to_tag: if in_dialog { to_tag } else { "" },
                     };
                     let in_flight = in_progress.entry(dialog).or_default();
+                    let spiral = origins.copies_one_of(msg, sender, in_flight);
+                    origins.record(msg, txn);
                     if in_dialog {
                         let finding = |decision| Finding {
                             rule: RuleId::NoReInviteWhileInviteInProgress,
@@ -338,9 +369,10 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                             anchor: mi,
                             decision,
                         };
-                        // A Timer-A retransmission reuses its own branch: the
-                        // same act again, never a second one.
-                        let prior = if in_flight.contains(branch) {
+                        // A Timer-A retransmission reuses its own branch, and
+                        // a spiral copy its bottom Via: the same act again,
+                        // never a second one.
+                        let prior = if in_flight.contains(branch) || spiral {
                             None
                         } else {
                             in_flight.iter().next().copied()
@@ -556,6 +588,9 @@ struct Race<'a> {
     sender: &'a str,
     branch: &'a str,
     pending_branch: &'a str,
+    /// The pending INVITE came from the same sender: §14.2's 500 case, not
+    /// the crossing's 491.
+    same_sender: bool,
 }
 
 /// The first final one transaction was answered with.
@@ -565,6 +600,39 @@ struct Answer {
     /// Whether it carried `Retry-After`, or `None` where the vantage carried no
     /// header block to read.
     retry_after: Option<bool>,
+}
+
+/// The bottom Via (sent-by and branch) and CSeq of each INVITE transaction an
+/// endpoint drove, where the vantage carried them: what every forwarder keeps
+/// (§16.6), so the INVITE by another path (§16.3) is told by them.
+#[derive(Default)]
+struct Origins<'a> {
+    of: BTreeMap<TxnKey<'a>, (SentBy, String, u32)>,
+}
+
+impl<'a> Origins<'a> {
+    fn record(&mut self, msg: &Msg, txn: TxnKey<'a>) {
+        if let Some(origin) = origin(msg) {
+            self.of.entry(txn).or_insert(origin);
+        }
+    }
+
+    /// Whether `msg` is, by its bottom Via and CSeq, one of the INVITEs
+    /// `endpoint` has `in_flight` on its dialog under another top-Via branch.
+    fn copies_one_of(&self, msg: &Msg, endpoint: &str, in_flight: &BTreeSet<&str>) -> bool {
+        let Some(origin) = origin(msg) else { return false };
+        in_flight.iter().any(|branch| {
+            let txn = TxnKey { endpoint, call_id: msg.call_id.as_str(), branch };
+            self.of.get(&txn) == Some(&origin)
+        })
+    }
+}
+
+/// `msg`'s bottom Via sent-by and branch, and its CSeq number, or `None` where
+/// the vantage carried no header block or the bottom Via names no branch.
+fn origin(msg: &Msg) -> Option<(SentBy, String, u32)> {
+    let bottom = msg.head.as_deref().and_then(sniff::bottom_via)?;
+    Some((bottom.sent_by, bottom.branch?, msg.cseq))
 }
 
 /// A message's dialog tags, both present, or `None` where either is missing —
@@ -711,11 +779,11 @@ mod tests {
 
     // ---- concurrent-re-invite-500-or-491 ---------------------------------
 
-    /// Two in-dialog INVITEs race at the UAS and the second draws 491: the
-    /// §14.2 answer, so the occasion is met.
+    /// The sender re-INVITEs while its own earlier INVITE has no final: §14.2's
+    /// first clause owes 500 with `Retry-After`, so a 491 is the violation.
     #[test]
-    fn a_racing_re_invite_answered_491_is_compliant() {
-        let f = eval(
+    fn a_same_sender_race_answered_491_is_violated() {
+        let f = hits(
             &ConcurrentReInvite500Or491,
             &[
                 req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
@@ -726,9 +794,75 @@ mod tests {
         );
         assert_eq!(f.len(), 1, "one occasion, the racing re-INVITE: {f:?}");
         assert_eq!(f[0].rule, RuleId::ConcurrentReInvite500Or491);
-        assert_eq!(f[0].emitter, BOB, "the UAS that owed the 491 is charged");
+        assert_eq!(f[0].emitter, BOB, "the UAS that owed the 500 is charged");
         assert_eq!(f[0].taker, ALICE);
+        let Decision::Violated(Evidence::ConcurrentReInvite { answered_status, .. }) =
+            &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert_eq!(*answered_status, 491);
+    }
+
+    /// A re-INVITE crossing one of the other party's at a hop that carries
+    /// both directions is §14.2's second clause: 491 meets it.
+    #[test]
+    fn a_crossing_race_answered_491_is_compliant() {
+        let f = eval(
+            &ConcurrentReInvite500Or491,
+            &[
+                req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
+                req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
+                rsp(3_000, BOB, ALICE, 491, "z9hG4bK-b", 2, "bt", "at", ""),
+                rsp(4_000, BOB, ALICE, 200, "z9hG4bK-a", 2, "at", "bt", ""),
+            ],
+        );
+        assert_eq!(f.len(), 1, "{f:?}");
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
+    /// At a hop carrying both directions, a re-INVITE that finds its sender's
+    /// own INVITE AND a crossing one in flight is judged against its sender's:
+    /// 500 with Retry-After is owed and a 491 is the violation, whichever
+    /// pending branch sorts first.
+    #[test]
+    fn a_race_over_both_a_same_sender_and_a_crossing_invite_owes_the_500() {
+        let msgs = |status: u16, head: &str| {
+            vec![
+                req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
+                req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-0", 2, "bt", "at"),
+                rsp(3_000, BOB, ALICE, 491, "z9hG4bK-0", 2, "bt", "at", ""),
+                req(2_500, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
+                rsp(4_000, BOB, ALICE, status, "z9hG4bK-2", 3, "at", "bt", head),
+                rsp(5_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
+            ]
+        };
+        let on_the_newcomer =
+            |f: Vec<Finding>| -> Vec<Finding> { f.into_iter().filter(|f| f.cseq == 3).collect() };
+        let compliant =
+            on_the_newcomer(eval(&ConcurrentReInvite500Or491, &msgs(500, "Retry-After: 3\r\n")));
+        assert_eq!(compliant.len(), 1, "{compliant:?}");
+        assert!(
+            matches!(compliant[0].decision, Decision::Compliant),
+            "{:?}",
+            compliant[0].decision
+        );
+        let refused_491 = on_the_newcomer(hits(&ConcurrentReInvite500Or491, &msgs(491, "")));
+        assert_eq!(refused_491.len(), 1, "{refused_491:?}");
+    }
+
+    /// The crossing owes 491, not the 500 of a same-sender race.
+    #[test]
+    fn a_crossing_race_answered_500_is_violated() {
+        let f = hits(
+            &ConcurrentReInvite500Or491,
+            &[
+                req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-a", 2, "at", "bt"),
+                req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-b", 2, "bt", "at"),
+                rsp(3_000, BOB, ALICE, 500, "z9hG4bK-b", 2, "bt", "at", "Retry-After: 3\r\n"),
+            ],
+        );
+        assert_eq!(f.len(), 1, "{f:?}");
     }
 
     /// Answering the race 200 serves two offers at once — the violation, with
@@ -777,7 +911,7 @@ mod tests {
         assert_eq!(hits(&ConcurrentReInvite500Or491, &race("")).len(), 1);
     }
 
-    /// The 100 Trying precedes a compliant 491 — only the transaction's FINAL
+    /// The 100 Trying precedes a compliant 500 — only the transaction's FINAL
     /// answers §14.2, so the provisional must not stand in for it.
     #[test]
     fn a_100_trying_does_not_stand_in_for_the_final() {
@@ -787,7 +921,7 @@ mod tests {
                 req(1_000, ALICE, BOB, "INVITE", "z9hG4bK-1", 2, "at", "bt"),
                 req(2_000, ALICE, BOB, "INVITE", "z9hG4bK-2", 3, "at", "bt"),
                 rsp(3_000, BOB, ALICE, 100, "z9hG4bK-2", 3, "at", "bt", ""),
-                rsp(4_000, BOB, ALICE, 491, "z9hG4bK-2", 3, "at", "bt", ""),
+                rsp(4_000, BOB, ALICE, 500, "z9hG4bK-2", 3, "at", "bt", "Retry-After: 3\r\n"),
                 rsp(5_000, BOB, ALICE, 200, "z9hG4bK-1", 2, "at", "bt", ""),
             ],
         )
@@ -1016,6 +1150,85 @@ mod tests {
             ],
         )
         .is_empty());
+    }
+
+    // ---- spiral copies ---------------------------------------------------
+
+    /// A proxy that a Record-Routed route set crosses twice (§16.3).
+    const P: &str = "10.0.0.9:5060";
+    /// The element the proxy routes the re-INVITE through before it comes back.
+    const X: &str = "10.0.0.7:5060";
+
+    /// `req` carrying `vias`, topmost first, as `branch@host` pairs: the top
+    /// one names the request's own branch.
+    fn via_req(at_us: u64, src: &str, dst: &str, cseq: u32, vias: &[(&str, &str)]) -> Msg {
+        let mut m = req(at_us, src, dst, "INVITE", vias[0].0, cseq, "at", "bt");
+        let rows: String = vias
+            .iter()
+            .map(|(branch, host)| format!("Via: SIP/2.0/UDP {host};branch={branch}\r\n"))
+            .collect();
+        m.head = Some(format!("{rows}Content-Length: 0\r\n\r\n").into_bytes());
+        m
+    }
+
+    /// alice's re-INVITE crosses P, X and P again on its way to bob: P takes it
+    /// twice and sends it twice, each copy under alice's bottom Via.
+    fn spiral(bottom_of_the_copy: &str) -> Vec<Msg> {
+        let alice = ("z9hG4bK-a", "10.0.0.1:5060");
+        let first = ("z9hG4bK-p1", P);
+        let at_x = ("z9hG4bK-x", X);
+        let second = ("z9hG4bK-p2", P);
+        let back = (bottom_of_the_copy, "10.0.0.1:5060");
+        vec![
+            via_req(1_000, ALICE, P, 2, &[alice]),
+            via_req(2_000, P, X, 2, &[first, alice]),
+            via_req(3_000, X, P, 2, &[at_x, first, back]),
+            via_req(4_000, P, BOB, 2, &[second, at_x, first, back]),
+            rsp(5_000, BOB, P, 200, "z9hG4bK-p2", 2, "at", "bt", ""),
+            rsp(6_000, P, X, 200, "z9hG4bK-x", 2, "at", "bt", ""),
+            rsp(7_000, X, P, 200, "z9hG4bK-p1", 2, "at", "bt", ""),
+            rsp(8_000, P, ALICE, 200, "z9hG4bK-a", 2, "at", "bt", ""),
+        ]
+    }
+
+    /// The copy P takes back from X keeps alice's bottom Via: the re-INVITE in
+    /// flight at P again, not one racing it.
+    #[test]
+    fn a_spiral_copy_taken_again_is_no_race() {
+        let f = eval(&ConcurrentReInvite500Or491, &spiral("z9hG4bK-a"));
+        assert!(f.is_empty(), "no occasion: {f:?}");
+    }
+
+    /// The copy P sends on to bob is the re-INVITE it already sent to X.
+    #[test]
+    fn a_spiral_copy_sent_again_is_no_overlap() {
+        let f = hits(&NoReInviteWhileInviteInProgress, &spiral("z9hG4bK-a"));
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    /// Under another bottom branch the INVITE P takes is another request,
+    /// whatever its path: the race and the overlap stand.
+    #[test]
+    fn another_bottom_branch_is_another_invite() {
+        let msgs = spiral("z9hG4bK-a2");
+        assert_eq!(hits(&ConcurrentReInvite500Or491, &msgs).len(), 1);
+        assert_eq!(hits(&NoReInviteWhileInviteInProgress, &msgs).len(), 1);
+    }
+
+    /// A UA that reuses its bottom branch for a second re-INVITE, a higher
+    /// CSeq, routed to P by another path, sends another request: the race and
+    /// the overlap stand.
+    #[test]
+    fn a_reused_bottom_branch_under_a_higher_cseq_is_another_invite() {
+        let alice = ("z9hG4bK-a", "10.0.0.1:5060");
+        let msgs = vec![
+            via_req(1_000, ALICE, P, 2, &[alice]),
+            via_req(2_000, P, X, 2, &[("z9hG4bK-p1", P), alice]),
+            via_req(3_000, X, P, 3, &[("z9hG4bK-x", X), alice]),
+            via_req(4_000, P, BOB, 3, &[("z9hG4bK-p2", P), ("z9hG4bK-x", X), alice]),
+        ];
+        assert_eq!(hits(&ConcurrentReInvite500Or491, &msgs).len(), 1);
+        assert_eq!(hits(&NoReInviteWhileInviteInProgress, &msgs).len(), 1);
     }
 
     // ---- failed-reinvite-tears-down-dialog -------------------------------

@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
@@ -28,7 +28,7 @@ use crate::RoutingStrategy;
 
 const UAC: &str = "10.0.0.1";
 const W1: &str = "10.0.0.9";
-const PROXY: &str = "172.20.255.250";
+const PROXY: &str = "192.0.2.250";
 
 /// Endpoint double keeping every datagram the proxy sent.
 #[derive(Default)]
@@ -94,18 +94,14 @@ struct SheddingGate;
 
 impl ProxySelfGate for SheddingGate {
     fn try_admit_external(&self) -> AdmitDecision {
-        AdmitDecision {
-            admit: false,
-            reason: Some("proxy_overload_elu".to_string()),
-            retry_after_sec: 7,
-        }
+        AdmitDecision::Reject { reason: crate::self_gate::ShedReason::Elu, retry_after_sec: 7 }
     }
 }
 
 /// A trace gate that samples every call.
 fn sample_everything() -> Arc<ProxyTraces> {
     Arc::new(ProxyTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         false,
     ))
 }
@@ -210,10 +206,10 @@ fn forwarded_branch(sent: &Arc<Sent>) -> String {
         .expect("the forwarded request carries a proxy Via branch")
 }
 
-// Regression: `activate` reported success for a call that ALREADY had a span,
-// so the second INVITE of a digest-auth retry (and a retransmit whose memo has
-// been evicted) was recorded twice — once by the per-packet seam on the map hit
-// and once again by the activation that thought it had opened the span.
+// `activate` reports no success for a call that ALREADY has a span, so the
+// second INVITE of a digest-auth retry (and a retransmit whose memo has been
+// evicted) is recorded once — by the per-packet seam on the map hit — and not
+// again by an activation that thinks it opened the span.
 #[tokio::test]
 async fn a_call_that_reaches_activation_twice_records_each_datagram_once() {
     let (_guard, log) = observe::test_buffer();
@@ -272,9 +268,9 @@ async fn a_shed_call_records_the_503_it_was_answered_with() {
     assert!(!traces.any_sampled());
 }
 
-// Only a BYE final used to close a span, so a 486-rejected call held its root
-// span, its active-cap slot and the process-wide sampled flag for the full idle
-// TTL — keeping every shard on the map-lookup path for a call that was over.
+// A BYE final is not the only span close: a 486-rejected call must not hold its
+// root span, its active-cap slot and the process-wide sampled flag for the full
+// idle TTL — keeping every shard on the map-lookup path for a call that is over.
 // The ACK relayed on the remembered non-2xx final is the last fact this hop
 // sees; the CANCEL flow reaches the same seam through its 487's ACK.
 #[tokio::test]
@@ -300,11 +296,11 @@ async fn a_rejected_call_closes_its_span_when_the_ack_relays() {
     assert!(!traces.any_sampled(), "and the process-wide flag drops with the last span");
 }
 
-// Regression: the span closed on EVERY relayed non-2xx INVITE final's ACK, and
-// the proxy relays one for a mid-dialog re-INVITE too (a hold or codec
-// renegotiation the worker answers 488, or 491 on glare). That ended a LIVE
-// call's trace: `activate` runs only for a dialog-creating INVITE, so the span
-// could never be reopened and the rest of the call — the BYE included — went
+// The span does not close on EVERY relayed non-2xx INVITE final's ACK: the proxy
+// relays one for a mid-dialog re-INVITE too (a hold or codec renegotiation the
+// worker answers 488, or 491 on glare). Closing there would end a LIVE call's
+// trace: `activate` runs only for a dialog-creating INVITE, so the span could
+// never be reopened and the rest of the call — the BYE included — would go
 // unrecorded (ADR-0026 §2: one root span per call, closed at its terminal
 // state).
 #[tokio::test]
@@ -346,11 +342,11 @@ async fn a_rejected_re_invite_leaves_the_live_call_its_span() {
     assert!(!traces.any_sampled());
 }
 
-// Regression: an auth challenge is a relayed non-2xx INVITE final too, so its
-// ACK closed the span — and the credentialed retry then re-entered `activate`
-// with a FRESH Bernoulli draw (1e-4 in production), which refuses. The answered
-// call went untraced from that point, i.e. half-traced: worse than untraced
-// (ADR-0026 §3, sampling is monotonic).
+// An auth challenge is a relayed non-2xx INVITE final too, but its ACK keeps the
+// span — otherwise the credentialed retry re-enters `activate` with a FRESH
+// Bernoulli draw (1e-4 in production), which refuses, and the answered call goes
+// untraced from that point, i.e. half-traced: worse than untraced (ADR-0026 §3,
+// sampling is monotonic).
 #[tokio::test]
 async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
     let traces = sample_everything();

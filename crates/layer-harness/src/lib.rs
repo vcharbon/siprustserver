@@ -1,6 +1,5 @@
 //! layer-harness — the test-only contract + recording foundation shared by
-//! every migration layer (Rust port of sipjsserver's
-//! `src/test-harness/framework`).
+//! every layer (port of sipjsserver's `src/test-harness/framework`).
 //!
 //! This crate is the Rust home of the **effect-layer-test** pattern (see the
 //! `effect-layer-test` SKILL and ADR-0013 in the source). In the TypeScript

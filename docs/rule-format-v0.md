@@ -1,7 +1,7 @@
 # Correlation rule format v0
 
-Guidelines for issue 01. Iterated freely during the prototype; whatever survives
-becomes the schema frozen in issue 03.
+Guidelines for the correlation-rule prototype. Iterated freely; whatever survives
+becomes the frozen schema.
 
 ## Design stance (user ruling)
 
@@ -83,7 +83,7 @@ Join when both calls yield the same key. Optional `window_ms` between the two
 INVITEs (default: none).
 
 ### 3. `retry`
-Reroute / failover chain. A CALL-LEVEL rule (ruled 2026-08-20, friction F3): it
+Reroute / failover chain. A CALL-LEVEL rule (ruled 2026-08-20): it
 reads whole-call facts (this call's terminal failure, that call's start), never
 individual messages. Anchor: left call's terminal failure, right call's initial
 INVITE.
@@ -101,7 +101,7 @@ the left call. `match` is OPTIONAL:
   through other rules' joins (call-id generation, header-key, refer). This is
   the primary form: membership comes from stronger evidence, retry contributes
   the chain — order and cause. It never joins strangers, so dial-form identity
-  mismatches (`33000900001` vs its `+<trunk>CCNSN` form) are irrelevant.
+  mismatches (`15550900001` vs its `+<trunk>CCNSN` form) are irrelevant.
 - With `match` present (subset of `from-user | to-user | ruri-user`), retry may
   itself join, for captures where the attempts share no other token. Each name
   denotes the call-level SET of D1; two calls match when their digits-normalized
@@ -109,12 +109,12 @@ the left call. `match` is OPTIONAL:
   side read it from.
 
 A final joins the NEXT candidate INVITE only: the earliest one starting after it
-within `window_ms` (ruled 2026-08-20, friction F1 — a chain of N attempts is
+within `window_ms` (ruled 2026-08-20 — a chain of N attempts is
 N-1 ordered joins forming a list, not N² pairs; the order is what pivot
 `routing.attempts` consumes). Two INVITEs equally "next" within the window are
 an ambiguity, kept and flagged as usual.
 
-Rule-writing hazard (ruled 2026-08-20, friction F3): D1 identity sets include
+Rule-writing hazard (ruled 2026-08-20): D1 identity sets include
 B-leg destinations, and some of those are shared platform targets (e.g. an MRF)
 reached by many unrelated calls. A `to-user` match through such a target can
 join strangers if `finals` is generous — keep `finals` tight, and when a join

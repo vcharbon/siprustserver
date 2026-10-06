@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Effect Schema mirrors of the Rust-owned wire formats: pivot v3, run bundle, correlation rules, flows, lint, e2e records, triage registry.",
+  "description": "Effect Schema mirrors of the Rust-owned wire formats: pivot v3, run bundle, correlation rules, flows, lint, e2e records.",
   "exports": {
     ".": "./src/index.ts",
     "./*": "./src/*.ts"

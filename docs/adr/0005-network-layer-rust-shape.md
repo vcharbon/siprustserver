@@ -45,13 +45,11 @@ the available methods on Rust" directive, slice 2 reshapes this to tokio idioms.
 - `reuse_port` (SO_REUSEPORT) — accepted on `BindUdpOpts` but not yet wired;
   tokio has no direct knob, so honoring it needs a `socket2` detour. Loopback
   tests don't need it.
-- The `UdpTransport` facade (Tier-1 overload brake, Prometheus metrics shape,
-  `BufferedUdpEndpoint` per-peer drainer) — depends on `AppConfig` /
-  `MetricsRegistry`, which are later slices. The `PreIngressHook` primitive the
-  brake is built on **is** ported.
-  *Amendment (2026-08-01):* the brake + metrics shape now live in
-  `b2bua::tier1_brake` / `b2bua::UdpTransportMetrics`, still on this
-  `PreIngressHook`; only the per-peer drainer stays unported.
+- The `UdpTransport` facade (ingress brake, Prometheus metrics shape) lives
+  in `b2bua::ingress_brake` / `b2bua::UdpTransportMetrics`, on this crate's
+  `PreIngressHook`. The `BufferedUdpEndpoint` per-peer drainer is not ported:
+  a send takes a resolved `SocketAddr` and never blocks (ADR-0033), so there
+  is nothing per peer to isolate.
 - The legacy `NetworkTraceEntry` / `drainTrace` path — superseded by the typed
   `Recorder` channel (the single recording path in this port). The `realTracing`
   on/off boolean split therefore disappears: recording is a decorator, not a

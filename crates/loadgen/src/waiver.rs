@@ -59,6 +59,7 @@ mod tests {
     /// surfaces; a `.conditional()` one stays silent; a waiver used by SOME
     /// sampled call (not all) does not surface.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn per_campaign_unused_aggregation() {
         let scopes = vec![
             WaiverScope::rule("rfc3261.a", "stale hand-written").on_party("alice"),
@@ -76,6 +77,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn empty_campaign_reports_nothing() {
         let c = CampaignWaivers::new(vec![]);
         assert!(c.unused().is_empty());

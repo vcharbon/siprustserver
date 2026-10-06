@@ -1,11 +1,10 @@
-//! migration/08 — the worker-side `X-Overload` load signal the front proxy's
+//! The worker-side `X-Overload` load signal the front proxy's
 //! ELU-band AIMD consumes (port of the X-Overload publish surface of
 //! `OverloadController.ts` / `LoadSampler.ts`).
 //!
-//! Closes the producer→consumer loop the migration item is about: a *running*
-//! `B2buaCore` publishes `X-Overload: v=1; elu=…; gc=…; adm=…` and the front
-//! proxy's REAL parser (`sip_proxy::load_observer::parse_x_overload_header`,
-//! already ported as the consumer) accepts it. The unit-level publish-surface
+//! Closes the producer→consumer loop: a *running* `B2buaCore` publishes
+//! `X-Overload: v=1; elu=…; gc=…; adm=…` and the front proxy's REAL parser
+//! (`sip_proxy::load_observer::parse_x_overload_header`) accepts it. The unit-level publish-surface
 //! contracts (schema, adm counter, EWMA-starts-at-0, injected-sampler-drives-EWMA)
 //! are pinned in `b2bua::overload::tests`; the responder wiring (header on the
 //! 200, absent on the 503) in `b2bua::repl::s7_tests`. This file adds the
@@ -14,8 +13,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::overload::{simulated, OverloadSignal};
-use b2bua_harness::B2buaSut;
+use b2bua::overload::OverloadSignal;
+use b2bua_harness::{settle_until, B2buaSut};
+use load_shed::simulated;
 use scenario_harness::Harness;
 use sip_proxy::load_observer::parse_x_overload_header;
 
@@ -53,6 +53,8 @@ async fn running_worker_publishes_parseable_x_overload_after_sampling() {
     // Rust has no managed GC, so the live sampler's gc fraction is structurally 0.
     assert_eq!(parsed1.gc, 0.0);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -112,6 +114,8 @@ async fn injected_sampler_drives_published_elu_through_the_running_task() {
     // gc stays structurally 0 (no GC fraction injected; Rust has no managed GC).
     assert_eq!(parsed1.gc, 0.0);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -137,5 +141,7 @@ async fn admit_counter_advances_the_parsed_adm() {
         parse_x_overload_header(Some(&b2bua.overload().x_overload_header_value())).unwrap().adm;
     assert_eq!(after, before + 5.0, "proxy-parsed adm must track the worker's admits");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

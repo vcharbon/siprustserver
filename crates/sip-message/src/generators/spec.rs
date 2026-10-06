@@ -11,7 +11,10 @@ pub struct StackDialog {
     pub call_id: String,
     pub local_tag: String,
     pub remote_tag: String,
+    /// The From address without its tag: a URI, or a name-addr whose display
+    /// name and parameters ride every request (RFC 3261 §12.2.1.1).
     pub local_uri: String,
+    /// The To address without its tag, in the same forms.
     pub remote_uri: String,
     pub remote_target: String,
     pub local_cseq: u32,

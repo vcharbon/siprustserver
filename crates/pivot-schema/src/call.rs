@@ -148,8 +148,8 @@ pub struct Callee {
 pub struct JoinedBy {
     /// Which mechanism joined the leg.
     pub kind: JoinKind,
-    /// The flow step that performed the join — the REFER the platform accepted,
-    /// or the request that inserted the media resource. It must be a step of a
+    /// The flow step that performed the join — the REFER or INFO the platform
+    /// accepted, or the request that inserted the media resource. It must be a step of a
     /// leg of the SAME call: a join is an event inside one call, and naming
     /// another call's step would make the chain unreadable.
     pub step: String,
@@ -163,6 +163,8 @@ pub struct JoinedBy {
 pub enum JoinKind {
     /// A transfer: an accepted REFER dialed the transferee.
     Refer,
+    /// A transfer: an INFO accepted as a transfer order dialed the transferee.
+    Info,
     /// A media resource was inserted into the call.
     Mrf,
 }
@@ -391,6 +393,8 @@ mod tests {
     fn a_joined_leg_names_the_mechanism_and_the_step_that_joined_it() {
         let joined: JoinedBy = serde_json::from_str(r#"{"kind":"refer","step":"s8"}"#).unwrap();
         assert_eq!(joined.kind, JoinKind::Refer);
+        let joined: JoinedBy = serde_json::from_str(r#"{"kind":"info","step":"s8"}"#).unwrap();
+        assert_eq!(joined.kind, JoinKind::Info);
         assert_eq!(joined.step, "s8");
         assert_eq!(
             serde_json::to_string(&JoinedBy { kind: JoinKind::Mrf, step: "s3".into() }).unwrap(),

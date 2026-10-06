@@ -21,7 +21,7 @@
 //! - [`canonical`] — the normative formatter (keys sorted lexically at every
 //!   level, two-space indent, one trailing newline). Key order is the
 //!   formatter's problem, never an emitter's;
-//! - [`lint`] — the semantic rules a schema cannot state: every id resolves,
+//! - [`lint`](mod@lint) — the semantic rules a schema cannot state: every id resolves,
 //!   every `alt` branch is discriminable, a captured document stays inside the
 //!   generator subset, a CDR assertion is present or its absence is reasoned;
 //! - [`tiers`] — the NORMATIVE DATA a pivot's tier model rests on: the tier-1

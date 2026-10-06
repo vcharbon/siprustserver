@@ -2,10 +2,12 @@
 //! SIP message a leg received or sent, in handling order, with the values of
 //! the configured headers — and nothing for a retransmission, inbound or
 //! outbound (RFC 3261 §17.2.1 replays, §13.2.2.4 re-ACKs, §13.3.1.4 2xx
-//! repeats). The cap keeps the last N entries and counts the evicted; a cap of
-//! `0` (the default) records nothing.
+//! repeats). Every entry carries the number of the turn that handled it, so
+//! two turns sharing a millisecond stay apart. The cap keeps the last N
+//! entries and counts the evicted; a cap of `0` (the default) records
+//! nothing.
 //!
-//! The SUT is spawned bare so a probe [`CdrWriter`] hands the test the
+//! The SUT is the harness [`B2buaSut`], which hands the test every
 //! terminated `Call` — the ring as the record sees it — while the live copy
 //! is read mid-call for the steady-state body measurement, encoded the way the
 //! store flushes it (`MsgpackCodec`).
@@ -15,19 +17,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CdrConfig};
-use b2bua::decision::ScriptedDecisionEngine;
-use b2bua::limiter::NoopLimiter;
-use b2bua::metrics::B2buaMetrics;
-use b2bua::store::InMemoryCallStore;
-use b2bua::{B2buaCore, B2buaDeps};
-use b2bua_harness::settle_until;
+use b2bua::decision::test_adapter::route_to;
+use b2bua::decision::{
+    CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
 use scenario_harness::{Agent, Harness, WaiverScope};
-use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_txn::IdGen;
-
-use crate::common::probe_cdr::{ProbeCdr, TerminatedCalls};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -39,11 +36,10 @@ const BOB: &str = "127.0.0.1:5070";
 const B2BUA: &str = "127.0.0.1:5080";
 const ORDINAL: &str = "w0";
 
-/// A bare SUT routing everything to bob, its ring configured by `cdr`.
+/// The harness SUT routing everything to bob, its ring configured by `cdr`.
 struct Sut {
     addr: SocketAddr,
-    core: B2buaCore,
-    terminated: TerminatedCalls,
+    b2bua: B2buaSut,
 }
 
 impl Sut {
@@ -51,64 +47,54 @@ impl Sut {
         Self::spawn_tuned(h, cdr, |_| {}).await
     }
 
-    async fn spawn_tuned(h: &Harness, cdr: CdrConfig, tune: impl FnOnce(&mut B2buaConfig)) -> Self {
-        // A UA on both faces, as `B2buaSut` declares it; the harness baseline
-        // tuning (the keepalive cadence, the panic-ELU backstop off under a
-        // paused clock) as `B2buaSut::start` applies it.
-        let (endpoint, addr) = h
-            .bind_sut_with_roles(
-                "b2bua",
-                B2BUA,
-                std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-            )
+    async fn spawn_tuned(
+        h: &Harness,
+        cdr: CdrConfig,
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
+    ) -> Self {
+        Self::spawn_with(h, B2buaSut::route_all_to("127.0.0.1", 5070), cdr, tune).await
+    }
+
+    /// The SUT under `decision`'s answers instead of routing everything to bob.
+    async fn spawn_deciding(
+        h: &Harness,
+        decision: Arc<dyn CallDecisionEngine>,
+        cdr: CdrConfig,
+    ) -> Self {
+        Self::spawn_with(h, B2buaSut::builder(decision), cdr, |_| {}).await
+    }
+
+    async fn spawn_with(
+        h: &Harness,
+        builder: b2bua_harness::B2buaSutBuilder,
+        cdr: CdrConfig,
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
+    ) -> Self {
+        let b2bua = builder
+            .keep_terminated_calls()
+            .tune(move |config| {
+                config.worker_allowed_target_suffixes = vec!["*".into()];
+                config.cdr = cdr;
+                tune(config);
+            })
+            .start(h, "b2bua", B2BUA)
             .await;
-        let terminated = TerminatedCalls::default();
-        let mut config = B2buaConfig {
-            self_ordinal: ORDINAL.into(),
-            sip_local_ip: addr.ip().to_string(),
-            sip_local_port: addr.port(),
-            worker_allowed_target_suffixes: vec!["*".into()],
-            keepalive_interval_sec: 30,
-            keepalive_timeout_sec: 5,
-            overload_panic_elu_threshold: 1.1,
-            cdr,
-            ..Default::default()
-        };
-        tune(&mut config);
-        let deps = B2buaDeps {
-            config,
-            decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
-            limiter: Arc::new(NoopLimiter),
-            cdr: Arc::new(ProbeCdr::new(terminated.clone())),
-            store: Arc::new(InMemoryCallStore::new()),
-            store_faults: Default::default(),
-            wire_faults: Default::default(),
-            clock: Clock::test_at(0),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            replication: None,
-            metrics: B2buaMetrics::new(),
-            adaptation_http: None,
-            compose: b2bua::rules::ComposeOptions::default(),
-        };
-        let core = B2buaCore::spawn(endpoint, deps);
-        Self { addr, core, terminated }
+        Self { addr: b2bua.addr, b2bua }
     }
 
     fn live(&self, call_id: &str, from_tag: &str) -> Call {
         let call_ref = call::derive_call_ref(ORDINAL, call_id, from_tag);
-        self.core.live_call(&call_ref).expect("the call is live")
+        self.b2bua.live_call(&call_ref).expect("the call is live")
     }
 
     /// Every call created is reaped and the one CDR is written.
     async fn assert_reaped(&self) -> Call {
-        settle_until(|| self.terminated.snapshot().len() == 1).await;
-        settle_until(|| self.core.active_calls() == 0).await;
-        assert_eq!(self.core.active_calls(), 0, "the call is removed");
-        assert_eq!(self.core.lock_count(), 0, "no stranded per-call lock");
-        let m = self.core.metrics();
-        assert_eq!(m.creations_total(), m.removals_total(), "every call created is removed");
-        let terminated = self.terminated.snapshot();
+        settle_until(|| self.b2bua.terminated_calls().len() == 1).await;
+        settle_until(|| self.b2bua.is_reaped()).await;
+        self.b2bua.assert_fully_reaped();
+        let terminated = self.b2bua.terminated_calls();
         assert_eq!(terminated.len(), 1, "exactly one CDR per call");
+        assert_eq!(self.b2bua.cdr_records().len(), 1, "the record is written beside the call");
         terminated.into_iter().next().unwrap()
     }
 }
@@ -124,6 +110,11 @@ fn ring_on() -> CdrConfig {
 /// assertions read.
 fn rows(entries: &[MessageEntry]) -> Vec<(MessageDirection, &str, u32, Option<u16>)> {
     entries.iter().map(|e| (e.direction, e.method.as_str(), e.cseq, e.code)).collect()
+}
+
+/// The turn of every entry, in ring order.
+fn turns(entries: &[MessageEntry]) -> Vec<u32> {
+    entries.iter().map(|e| e.turn).collect()
 }
 
 fn b_leg(call: &Call) -> &call::Leg {
@@ -203,7 +194,7 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
             (Relayed, "INVITE", b_cseq, None),
             (Received, "INVITE", b_cseq, Some(180)),
             (Received, "INVITE", b_cseq, Some(200)),
-            (Authored, "ACK", b_cseq, None),
+            (Relayed, "ACK", b_cseq, None),
         ],
         "the b-leg so far"
     );
@@ -292,6 +283,62 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
     assert_eq!(b_leg(&done).messages.dropped, 0);
     // The turn's clock stamps every entry, and the seq keeps their order.
     assert!(done.a_leg.messages.entries.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
+    // Six turns recorded: the INVITE with its 100 and the INVITE sent on,
+    // the 180, the 200, the ACK, the caller's BYE with its 200 and the BYE
+    // sent on, the callee's 200 to it. A message received and what the turn
+    // sent for it share one number.
+    assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 4, 5, 5]);
+    assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(done.message_turn, 7, "the next turn's number");
+
+    let _report = h.finish().await;
+}
+
+/// A decision reply is a turn of its own: the callee's failure, with the
+/// ACK the layer answered it with, is one turn; the consult's reject folding
+/// back and sending the caller its final is the next — two numbers, though
+/// both turns run within the same millisecond.
+#[tokio::test(start_paused = true)]
+async fn two_turns_within_one_millisecond_carry_two_turn_numbers() {
+    let h = Harness::new("message-ring-turns-one-ms");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                CallTreatment::Reject(RejectDecision {
+                    reject_code: 486,
+                    reject_reason: Some("Busy Here".into()),
+                    update_headers: None,
+                    service_ext: Default::default(),
+                    label: None,
+                })
+            })
+            .build(),
+    );
+    let sut = Sut::spawn_deciding(&h, decision, ring_on()).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    call.expect(486).await;
+
+    let done = sut.assert_reaped().await;
+    let a = &done.a_leg.messages.entries;
+    let b = &b_leg(&done).messages.entries;
+    assert_eq!(
+        rows(b)[1..],
+        [(Received, "INVITE", b[0].cseq, Some(486)), (Authored, "ACK", b[0].cseq, None)]
+    );
+    assert_eq!(rows(a)[2], (Authored, "INVITE", a[0].cseq, Some(486)));
+    assert_eq!(b[1].at_ms, a[2].at_ms, "the failure and the reject share a millisecond");
+    assert_eq!(turns(b), vec![1, 2, 2], "the failure and its hop ACK are one turn");
+    assert_eq!(turns(a), vec![1, 1, 3], "the reject is the decision reply's turn");
 
     let _report = h.finish().await;
 }
@@ -365,10 +412,10 @@ async fn a_prack_round_and_a_reinvite_round_add_their_rows() {
             (Relayed, "PRACK", b_prack, None),
             (Received, "PRACK", b_prack, Some(200)),
             (Received, "INVITE", b_cseq, Some(200)),
-            (Authored, "ACK", b_cseq, None),
+            (Relayed, "ACK", b_cseq, None),
             (Relayed, "INVITE", b_reinvite, None),
             (Received, "INVITE", b_reinvite, Some(200)),
-            (Authored, "ACK", b_reinvite, None),
+            (Relayed, "ACK", b_reinvite, None),
         ],
         "the b-leg: the same rounds, as this stack sent them"
     );
@@ -427,6 +474,14 @@ async fn retransmissions_add_nothing() {
     assert_eq!(rows(&after.a_leg.messages.entries), rows(&baseline.a_leg.messages.entries));
     assert_eq!(rows(&b_leg(&after).messages.entries), rows(&b_leg(&baseline).messages.entries));
     assert_eq!(after.message_seq, baseline.message_seq);
+    // Each repeat was a turn, the re-ACK a quiet one: one number each though
+    // they appended nothing, so the next recorded turn leaves a gap.
+    assert_eq!(sut.b2bua.metrics().repl_quiet_turns_total("re-ack"), 1);
+    assert_eq!(
+        after.message_turn,
+        baseline.message_turn + 2,
+        "the re-ACK's turn and the absorbed ACK's took a number each"
+    );
 
     // The caller's BYE again: the non-INVITE server transaction replays its
     // 200 (§17.2.1); nothing reaches the call.
@@ -438,6 +493,10 @@ async fn retransmissions_add_nothing() {
     pump(&h, &[&alice]).await;
     let terminating = sut.live(&call.call_id(), dialog.local_tag());
     assert_eq!(terminating.a_leg.messages.entries.len(), 7);
+    assert_eq!(
+        terminating.a_leg.messages.entries[5].turn, after.message_turn,
+        "the BYE's turn is the one after the repeats'"
+    );
     assert_eq!(terminating.message_seq, baseline.message_seq + 3, "BYE, its 200, the relayed BYE");
     bob_bye.respond(200, "OK").await;
 
@@ -504,6 +563,10 @@ async fn a_cancelled_setup_records_the_layer_answered_cancel() {
     // like the INVITE it cancels, none.
     assert_eq!(done.a_leg.messages.entries[3].to_tag, None);
     assert_eq!(done.a_leg.messages.entries[5].to_tag, done.a_leg.messages.entries[2].to_tag);
+    // The layer's answers carry the turn that handles the CANCEL they answer,
+    // the CANCEL sent on too; the hop ACK the callee's 487 draws, the 487's.
+    assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 3, 3]);
+    assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 5]);
 
     let _report = h.finish().await;
 }
@@ -756,11 +819,13 @@ async fn a_late_first_ack_after_the_give_up_is_recorded() {
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let invite_cseq = call.invite_cseq();
-    bob.receive("ACK").await;
 
-    // Alice holds her ACK past the give-up: the stack BYEs both legs.
+    // Alice holds her ACK past the give-up. The callee's 2xx owes an ACK this
+    // stack can compose on its own (its INVITE carried the offer), so bob gets
+    // ACK then BYE (RFC 3261 §13.2.2.4) and alice gets the BYE.
     h.advance(Duration::from_secs(8)).await;
     alice.drain().await;
+    bob.receive("ACK").await;
     let mut alice_bye = alice.receive("BYE").await;
     let mut bob_bye = bob.receive("BYE").await;
     // Her ACK lands now, on a terminating call.
@@ -798,8 +863,13 @@ async fn a_stray_cancel_and_its_481_are_recorded() {
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
-    // No keepalive round inside the wait for Timer L (RFC 6026 §7.1, 32 s).
-    let sut = Sut::spawn_tuned(&h, ring_on(), |c| c.keepalive_interval_sec = 120).await;
+    // No keepalive round and no limiter refresh inside the wait for Timer L
+    // (RFC 6026 §7.1, 32 s): each would be a turn of its own.
+    let sut = Sut::spawn_tuned(&h, ring_on(), |c| {
+        c.keepalive_interval_sec = 120;
+        c.limiter_refresh_sec = 120;
+    })
+    .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -825,13 +895,40 @@ async fn a_stray_cancel_and_its_481_are_recorded() {
         [(Received, "CANCEL", invite_cseq, None), (Authored, "CANCEL", invite_cseq, Some(481))],
         "{a:?}"
     );
+    assert_eq!(
+        turns(&live.a_leg.messages.entries)[5..],
+        [5, 5],
+        "the refusal is a turn of its own, the 481 in it"
+    );
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    sut.assert_reaped().await;
+    let done = sut.assert_reaped().await;
+    assert_eq!(
+        turns(&done.a_leg.messages.entries)[7..],
+        [6, 6],
+        "the turn after the refusal takes the next number"
+    );
 
     let _report = h.finish().await;
+}
+
+/// A SUT built without `keep_terminated_calls()` keeps the records only:
+/// asking it for the terminated calls is a test bug, never an empty answer.
+#[tokio::test(start_paused = true)]
+async fn a_sut_not_keeping_terminated_calls_refuses_to_answer() {
+    let s = B2buaScene::new("ring-not-kept").await;
+    let mut dialog = s.establish().await;
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
+    assert_eq!(s.b2bua.cdr_records().len(), 1, "the record is written");
+    let asked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.b2bua.terminated_calls()));
+    assert!(asked.is_err(), "no terminated call is kept, and none is claimed");
+    let _report = s.finish().await;
 }
 
 /// The CANCEL of a recorded INVITE datagram (RFC 3261 §9.1): the same

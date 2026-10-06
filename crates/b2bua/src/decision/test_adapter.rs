@@ -5,15 +5,16 @@
 //! routes every call to a configured destination with mandatory platform
 //! features.
 
-use async_trait::async_trait;
-
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
+use call::LimiterEntry;
+
 use super::schemas::{
-    default_platform_features, BodyUpdate, CallLimiterEntry, CallTreatment, NewCallRequest,
-    NewCallResponse, RedirectContact, RedirectDecision, RejectDecision, RouteDecision,
-    SipDestination, SipHeaderUpdates,
+    default_platform_features, BodyUpdate, CallTreatment, NewCallRequest, NewCallResponse,
+    RedirectContact, RedirectDecision, RejectDecision, RouteDecision, SipDestination,
 };
+use super::SipHeaderUpdates;
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
@@ -84,7 +85,7 @@ impl ScriptedDecisionEngine {
     pub fn route_all_to_with_limiter(
         host: impl Into<String>,
         port: u16,
-        stress: Option<CallLimiterEntry>,
+        stress: Option<LimiterEntry>,
     ) -> Self {
         // Every route states the REFER arm: this engine answers `/call/refer`
         // (`.on_refer` below), i.e. it stands for a deployment whose backend
@@ -104,7 +105,7 @@ impl ScriptedDecisionEngine {
     fn api_call_engine(
         host: impl Into<String>,
         port: u16,
-        stress: Option<CallLimiterEntry>,
+        stress: Option<LimiterEntry>,
         refer_by_default: bool,
     ) -> Self {
         let dest = (host.into(), port);
@@ -239,15 +240,10 @@ fn api_call_has_routes(req: &NewCallRequest) -> bool {
     parse_api_call_plan(req).and_then(|v| v.get("routes").map(|r| r.is_array())).unwrap_or(false)
 }
 
-/// `{name: value | null}` → [`SipHeaderUpdates`] (`null` = remove).
+/// `{name: line | [lines] | null}` → [`SipHeaderUpdates`] (`null` = remove);
+/// absent or not an object = no statement.
 fn parse_update_headers(v: Option<&serde_json::Value>) -> Option<SipHeaderUpdates> {
-    v.and_then(|x| x.as_object()).map(|m| {
-        let mut out = SipHeaderUpdates::new();
-        for (k, val) in m {
-            out.insert(k.clone(), val.as_str().map(str::to_string));
-        }
-        out
-    })
+    v.filter(|x| x.is_object()).and_then(|x| serde_json::from_value(x.clone()).ok())
 }
 
 /// The optional `label` of a plan object: absent (or not a string) = none.
@@ -294,11 +290,15 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     }
     r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
     r.new_to = obj.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
-    // Per-route no-answer ring timer (047): `apply_route` arms
+    // Per-route no-answer ring timer: `apply_route` arms
     // `TimerType::NoAnswer` on the dialed b-leg, so a ring-forever hop advances
     // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
     r.no_answer_timeout_sec = obj.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
+    // The route's stated headers by scope (`StatedHeaders`); absent or
+    // unreadable states none.
+    r.features.stated_headers =
+        obj.get("stated_headers").and_then(|v| serde_json::from_value(v.clone()).ok());
     // The REFER arm: a plan states per call whether the platform processes a
     // transfer itself or relays the REFER on.
     r.features.refer = refer_feature_from_obj(obj);
@@ -312,7 +312,7 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
             if let (Some(id), Some(limit)) =
                 (e.get("id").and_then(|v| v.as_str()), e.get("limit").and_then(|v| v.as_i64()))
             {
-                r.call_limiter.push(CallLimiterEntry { id: id.to_string(), limit });
+                r.call_limiter.push(LimiterEntry { id: id.to_string(), limit });
             }
         }
     }
@@ -335,6 +335,7 @@ fn treatment_from_obj(obj: &serde_json::Value) -> Option<CallTreatment> {
             reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             contacts: parse_contacts(obj.get("contacts")),
             update_headers: parse_update_headers(obj.get("update_headers")),
+            service_ext: parse_service_ext(obj),
             label: parse_label(obj),
         })),
         "relay" => Some(CallTreatment::Relay { label: parse_label(obj) }),
@@ -420,7 +421,7 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
 ///   - `refer-allow-c`    → allow to `destination` (default 127.0.0.1:5667)
 ///   - default / missing  → reject 603/Declined
 pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
-    let raw = match req.sip_headers.get("X-Api-Call") {
+    let raw = match req.sip_header("X-Api-Call") {
         Some(v) => v,
         None => {
             return ReferOutcome::Allow(CallReferResponse::Reject {
@@ -477,14 +478,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 instruction.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
             let callback_context =
                 instruction.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
-            let update_headers =
-                instruction.get("update_headers").and_then(|v| v.as_object()).map(|m| {
-                    let mut out: super::schemas::SipHeaderUpdates = BTreeMap::new();
-                    for (k, val) in m {
-                        out.insert(k.clone(), val.as_str().map(str::to_string));
-                    }
-                    out
-                });
+            let update_headers = parse_update_headers(instruction.get("update_headers"));
             ReferOutcome::Allow(CallReferResponse::Allow {
                 destination: SipDestination::new(host, port),
                 new_refer_to,
@@ -527,7 +521,7 @@ fn refer_feature_from_api_call(req: &NewCallRequest) -> Option<call::features::R
 /// entries — `{"...","call_limiter":[{"id":"x","limit":20}]}`. Absent header,
 /// non-JSON, or a missing/!array `call_limiter` field all yield an empty vec
 /// (no limiting). Entries missing `id`/`limit` are skipped.
-pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEntry> {
+pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<LimiterEntry> {
     let raw = match req.sip_header("X-Api-Call") {
         Some(v) => v,
         None => return Vec::new(),
@@ -542,7 +536,7 @@ pub fn limiter_entries_from_api_call(req: &NewCallRequest) -> Vec<CallLimiterEnt
         .map(|arr| {
             arr.iter()
                 .filter_map(|e| {
-                    Some(CallLimiterEntry {
+                    Some(LimiterEntry {
                         id: e.get("id")?.as_str()?.to_string(),
                         limit: e.get("limit")?.as_i64()?,
                     })
@@ -662,8 +656,8 @@ pub fn route_to_with_18x(
     route_to_with_18x_messages(host, port, strategy, Default::default())
 }
 
-/// [`route_to_with_18x`] with an explicit `relay18x.messages` policy (the
-/// scripted equivalent of the Routing API `Relay18x.messages` field).
+/// [`route_to_with_18x`] with an explicit [`call::features::Relay18xMessages`] policy (the
+/// scripted equivalent of the feature's `messages` field).
 pub fn route_to_with_18x_messages(
     host: &str,
     port: u16,
@@ -806,7 +800,9 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         match &self.release {
             // Unscripted: the trait's back-compat default (local teardown).
-            None => Ok(CallReleaseResponse::Release { label: None }),
+            None => {
+                Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
+            }
             Some(f) => match f(&req) {
                 ReleaseOutcome::Respond(resp) => Ok(resp),
                 ReleaseOutcome::Error => {
@@ -847,7 +843,7 @@ mod tests {
 
     fn req_with_header(name: &str, value: &str) -> NewCallRequest {
         let mut r = req("bob");
-        r.sip_headers.insert(name.into(), vec![value.into()]);
+        r.sip_headers.push((name.into(), value.into()));
         r
     }
 
@@ -876,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_all_to_with_limiter_stress_and_header() {
-        let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
+        let stress = LimiterEntry { id: "global-stress".into(), limit: 999_999 };
         let eng =
             ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
 
@@ -959,17 +955,16 @@ mod tests {
         }
 
         // `destination.user` sets the R-URI userpart (host:port unchanged) so a
-        // downstream registrar front-proxy can resolve the AOR. This is the shape
-        // the portsource register E2E sends (sip:bob@<core>).
+        // downstream registrar front-proxy can resolve the AOR (sip:bob@<core>).
         let r = req_with_header(
             "X-Api-Call",
-            r#"{"destination":{"host":"172.20.0.1","port":25081,"user":"bob"}}"#,
+            r#"{"destination":{"host":"192.0.2.1","port":25081,"user":"bob"}}"#,
         );
         match eng.new_call(r).await.unwrap() {
             NewCallResponse::Route(d) => {
-                assert_eq!(d.destination.host, "172.20.0.1");
+                assert_eq!(d.destination.host, "192.0.2.1");
                 assert_eq!(d.destination.port(), 25081);
-                assert_eq!(d.new_ruri.as_deref(), Some("sip:bob@172.20.0.1:25081"));
+                assert_eq!(d.new_ruri.as_deref(), Some("sip:bob@192.0.2.1:25081"));
             }
             _ => panic!("expected route"),
         }
@@ -1005,19 +1000,19 @@ mod tests {
         // `routes` list fails over per route, each carrying its own `new_ruri`
         // userpart so a register front-proxy resolves bob1 → bob2. The `stress`
         // limiter is still appended to every leg.
-        let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
+        let stress = LimiterEntry { id: "global-stress".into(), limit: 999_999 };
         let eng =
             ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
         let plan = serde_json::json!({
             "action": "route",
             "routes": [
-                {"destination": {"host": "172.20.0.1", "port": 25081}, "new_ruri": "sip:bob1@172.20.0.1:25081"},
-                {"destination": {"host": "172.20.0.1", "port": 25081}, "new_ruri": "sip:bob2@172.20.0.1:25081"}
+                {"destination": {"host": "192.0.2.1", "port": 25081}, "new_ruri": "sip:bob1@192.0.2.1:25081"},
+                {"destination": {"host": "192.0.2.1", "port": 25081}, "new_ruri": "sip:bob2@192.0.2.1:25081"}
             ]
         });
         let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
             NewCallResponse::Route(r) => {
-                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob1@172.20.0.1:25081"));
+                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob1@192.0.2.1:25081"));
                 assert!(r.call_limiter.iter().any(|e| e.id == "global-stress"));
                 r.callback_context.expect("remainder context")
             }
@@ -1026,7 +1021,7 @@ mod tests {
         // b-leg 503 → walk to route #2 (bob2).
         match eng.call_failure(failure_req(Some(&ctx))).await.unwrap() {
             CallTreatment::Route(r) => {
-                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob2@172.20.0.1:25081"));
+                assert_eq!(r.new_ruri.as_deref(), Some("sip:bob2@192.0.2.1:25081"));
             }
             _ => panic!("expected route #2 (bob2)"),
         }
@@ -1093,11 +1088,11 @@ mod tests {
                 assert_eq!(r.new_to.as_deref(), Some("sip:+19005678@dest"));
                 let h = r.update_headers.unwrap();
                 assert_eq!(
-                    h.get("P-Asserted-Identity").unwrap().as_deref(),
+                    h.get("P-Asserted-Identity").unwrap().single(),
                     Some("sip:+15551000@me")
                 );
                 assert_eq!(
-                    h.get("P-Access-Network-Info").unwrap().as_deref(),
+                    h.get("P-Access-Network-Info").unwrap().single(),
                     Some("3GPP-E-UTRAN-FDD")
                 );
                 // No reroute / on_exhausted ⇒ no carried context.
@@ -1185,7 +1180,7 @@ mod tests {
                 assert_eq!(rj.reject_code, 603);
                 assert_eq!(rj.reject_reason.as_deref(), Some("Declined"));
                 assert_eq!(
-                    rj.update_headers.unwrap().get("Reason").unwrap().as_deref(),
+                    rj.update_headers.unwrap().get("Reason").unwrap().single(),
                     Some("Q.850;cause=21")
                 );
             }
@@ -1195,7 +1190,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_route_carries_per_route_no_answer_timeout() {
-        // 047: each plan route's `no_answer_timeout_sec` reaches the
+        // Each plan route's `no_answer_timeout_sec` reaches the
         // RouteDecision — on the FIRST route (apply_route arms the NoAnswer
         // ring timer) AND on the failover route popped by call_failure.
         let eng = ScriptedDecisionEngine::numbering_plan();

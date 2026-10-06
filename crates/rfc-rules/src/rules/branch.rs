@@ -1,13 +1,17 @@
 //! The per-branch reading: what ONE endpoint did on ONE top-Via branch.
 //!
 //! RFC 3261 §17 names a transaction by its top-Via `branch`, and every rule
-//! that pairs two messages of one transaction keys on it. Six families do: the
-//! §9.1 CANCEL pair ([`super::cancel`]), the §13.2.2.4 / §17.1.1.3 ACK-carries
-//! pair ([`super::ack`]), the §16.4 strict-route rewrite ([`super::proxy`]), the
-//! §10.2 REGISTER serialisation ([`super::register`]), the §14.1 abandoned
-//! re-INVITE ([`super::reinvite`]) and the §20.32 Require-on-ACK read
-//! ([`super::capability`]), which needs the branch's final status to know which
-//! ACK it is looking at. They share this ONE walk.
+//! that pairs two messages of one transaction keys on it. Five families share
+//! this walk: the §9.1 CANCEL Route echo and pre-1xx CANCEL
+//! ([`super::cancel`]), the §13.2.2.4 / §17.1.1.3 ACK-carries
+//! pair ([`super::ack`]), the §10.2 REGISTER serialisation
+//! ([`super::register`]), the §14.1 abandoned re-INVITE ([`super::reinvite`])
+//! and the §20.32 Require-on-ACK read ([`super::capability`]), which needs the
+//! branch's final status to know which ACK it is looking at. They share this
+//! ONE walk. The CANCEL family's
+//! transaction readings (§9.2 by the UAS, `no-cancel-after-final` by the UAC)
+//! keep their own: they read each INVITE final's status and To tag, and a
+//! 2xx's ACK riding a branch of its own.
 //!
 //! **It lives with the rules, not in [`crate::wire`].** The wire model is what
 //! the two adapters FILL; this is a reading DERIVED from it, identical for

@@ -151,9 +151,8 @@ pub enum ExpectBranch {
     Cancelled { code: u16 },
 }
 
-/// A scenario expressed as per-endpoint actors — the fork twin of
-/// [`RealCallScenario`](crate::realcall::RealCallScenario). `Send + Sync` and
-/// stateless: all per-call state is extracted (OWNED) into the returned
+/// A scenario expressed as per-endpoint actors. `Send + Sync` and stateless:
+/// all per-call state is extracted (OWNED) into the returned
 /// [`ActorCall`]. `build` is fallible for the linear bodies' guard errors
 /// (e.g. `refer` bound without a charlie leg) — those `StepError`s are part of
 /// the downstream contract and are returned byte-for-byte.

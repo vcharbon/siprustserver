@@ -16,11 +16,11 @@
 //! per-dialog CSeq (RFC 3261 §12.2.1.1) and response-correlation (§8.1.3.3) are
 //! exercised end-to-end and hard-gated by the harness RFC audit at `finish()`.
 
-use b2bua_harness::{B2buaScene, B2buaSut};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_message::header::{MediaType, RSeq};
+use sip_message::header::{HeaderName, RSeq};
 use sip_message::types::SipResponse;
 
 fn rseq_of(resp: &SipResponse) -> u32 {
@@ -37,7 +37,7 @@ const REANSWER_HELD: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP
 /// Confirmed dialog, alice → UPDATE with **no body** (RFC 4028-style session
 /// refresh). The bodyless UPDATE must relay to bob verbatim and its 200 come
 /// back — the "UPDATE without SDP" cell the SDP-carrying tests never touch.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn established_update_no_sdp_a_to_b() {
     let s = B2buaScene::new("upd-established-nosdp-a2b").await;
     let mut dialog = s.establish().await;
@@ -53,7 +53,7 @@ async fn established_update_no_sdp_a_to_b() {
 }
 
 /// Same, callee-initiated: bob → UPDATE with no body on the established dialog.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn established_update_no_sdp_b_to_a() {
     let h = Harness::new("upd-established-nosdp-b2a");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -78,14 +78,17 @@ async fn established_update_no_sdp_b_to_a() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 // ── Early dialog, NOT PRACKed (plain 180): UPDATE relayed A→B ─────────────────
 
 /// Plain 180 (unreliable) → early dialog. Alice sends an early-dialog UPDATE
-/// (RFC 3311 §5.1) that must relay to bob even though no PRACK ever happened.
-/// Runs with and without SDP.
+/// (RFC 3311 §5.1), no PRACK ever happened. Without a body it relays to bob.
+/// With an offer it meets her own INVITE offer, which nothing answered: RFC
+/// 3311 §5.2's 500 with a Retry-After, and bob never sees it.
 async fn early_not_pracked_a_to_b(
     name: &str,
     alice_port: &str,
@@ -94,6 +97,16 @@ async fn early_not_pracked_a_to_b(
     with_sdp: bool,
 ) {
     let h = Harness::new(name);
+    if with_sdp {
+        h.waive(
+            WaiverScope::rule(
+                "no-new-offer-while-offer-pending",
+                "alice deliberately offers in an UPDATE while her INVITE offer is unanswered",
+            )
+            .on_party("alice")
+            .conditional(),
+        );
+    }
     let alice = h.agent("alice", alice_port).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port_n}")).await;
     let b2bua =
@@ -113,14 +126,18 @@ async fn early_not_pracked_a_to_b(
         ub = ub.with_sdp(REOFFER_HOLD);
     }
     let mut update = ub.send().await;
-    let mut at_bob = bob.receive("UPDATE").await;
-    assert_eq!(at_bob.request().body().is_empty(), !with_sdp, "body presence relayed faithfully");
     if with_sdp {
-        at_bob.respond(200, "OK").with_sdp(ANSWER).await;
+        let refused = update.expect(500).await;
+        assert!(
+            refused.raw(HeaderName::RetryAfter).next().is_some(),
+            "the 500 carries a Retry-After"
+        );
     } else {
+        let mut at_bob = bob.receive("UPDATE").await;
+        assert!(at_bob.request().body().is_empty(), "body presence relayed faithfully");
         at_bob.respond(200, "OK").await;
+        update.expect(200).await;
     }
-    update.expect(200).await;
 
     // Answer (reusing the 180's To-tag → the early dialog is confirmed) + teardown.
     // The 180 carried no body, so the INVITE's offer is answered here (§13.2.1).
@@ -131,10 +148,12 @@ async fn early_not_pracked_a_to_b(
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn early_not_pracked_update_a_to_b_with_sdp() {
     early_not_pracked_a_to_b(
         "upd-early-nopr-a2b-sdp",
@@ -146,7 +165,7 @@ async fn early_not_pracked_update_a_to_b_with_sdp() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn early_not_pracked_update_a_to_b_no_sdp() {
     early_not_pracked_a_to_b(
         "upd-early-nopr-a2b-nosdp",
@@ -160,16 +179,26 @@ async fn early_not_pracked_update_a_to_b_no_sdp() {
 
 // ── Early dialog, NOT PRACKed: UPDATE B→A (callee early-media adjust) ─────────
 
-/// Callee adjusts early media before answering: bob sends an UPDATE on the
-/// **early** dialog toward alice (RFC 3311 §5.1). Must relay A-ward and the
-/// 200 come back to bob. Not PRACKed, with SDP.
-#[tokio::test]
-async fn early_not_pracked_update_b_to_a() {
+/// Callee adjusts early media before answering: bob sends an UPDATE offer on
+/// the **early** dialog, but he answered the stack's INVITE offer only in an
+/// unreliable 180, so that offer is still open on his face (RFC 3311 §5.1,
+/// §5.2): 491, and alice never sees it.
+#[tokio::test(start_paused = true)]
+async fn early_not_pracked_update_offer_b_to_a_is_refused_491() {
     let h = Harness::new("upd-early-nopr-b2a");
+    h.waive(
+        WaiverScope::rule(
+            "no-new-offer-while-offer-pending",
+            "bob deliberately offers in an UPDATE after answering only unreliably",
+        )
+        .on_party("bob")
+        .conditional(),
+    );
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let alice_addr: std::net::SocketAddr = "127.0.0.1:5063".parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -179,13 +208,8 @@ async fn early_not_pracked_update_b_to_a() {
     // bob's early dialog (local_tag = the auto-minted 180 To-tag).
     let mut bob_dialog = uas.dialog();
     let mut update = bob_dialog.request(InDialogMethod::Update, Some(REOFFER_HOLD)).await;
-    let mut at_alice = alice.receive("UPDATE").await;
-    assert!(
-        String::from_utf8_lossy(at_alice.request().body()).contains("a=sendonly"),
-        "callee early-media re-offer relayed to alice",
-    );
-    at_alice.respond(200, "OK").with_sdp(OFFER).await;
-    update.expect(200).await;
+    let refused = update.expect(491).await;
+    assert!(refused.raw(HeaderName::RetryAfter).next().is_none(), "a 491 with no Retry-After");
 
     // answer + teardown
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -195,14 +219,22 @@ async fn early_not_pracked_update_b_to_a() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    let _ = h.finish().await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let report = h.finish().await;
+    let to_alice = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"UPDATE "))
+        .count();
+    assert_eq!(to_alice, 0, "the refused offer never crossed the bridge");
 }
 
 // ── Early dialog, PRACKed: UPDATE WITHOUT SDP, A→B ───────────────────────────
 
 /// Reliable 183 + PRACK, then an early-dialog UPDATE with **no body**. Pins the
 /// "PRACKed early dialog, bodyless UPDATE" cell.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn early_pracked_update_no_sdp_a_to_b() {
     let h = Harness::new("upd-early-pracked-nosdp-a2b");
     let alice = h.agent("alice", "127.0.0.1:5064").await;
@@ -246,6 +278,8 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -291,6 +325,8 @@ async fn early_update_forking_no_sdp_second_fork() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -301,6 +337,8 @@ async fn early_update_forking_no_sdp_second_fork() {
 /// bookkeeping and pending-relay snapshot), not fork 1's — the
 /// source-dialog-by-From-tag case. Fork 1 gets an explicit tag; fork 2 uses the
 /// harness's auto-minted (sticky) tag so `uas.dialog()` originates on fork 2.
+/// Fork 2 answers alice's offer in a reliable 183 she PRACKs, so its UPDATE
+/// offer is the legal RFC 3311 §5.1 case.
 #[tokio::test]
 async fn early_update_forking_b_to_a_second_fork() {
     let h = Harness::with_transit_delay("upd-fork-b2a-f2", 1);
@@ -316,8 +354,17 @@ async fn early_update_forking_b_to_a_second_fork() {
     uas.respond(180, "Ringing").with_to_tag("bf1").await;
     call.expect(180).await;
     // Fork 2: auto-minted tag → becomes the sticky tag `uas.dialog()` adopts.
-    uas.respond(180, "Ringing").await;
-    call.expect(180).await;
+    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    let early = call.expect(183).await;
+    let f2_atag = early.to().tag().expect("fork 2's a-facing tag").to_string();
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&f2_atag)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&early)))
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack.expect(200).await;
 
     // bob originates the UPDATE on fork 2's early dialog toward the caller.
     let mut fork2 = uas.dialog();
@@ -338,6 +385,8 @@ async fn early_update_forking_b_to_a_second_fork() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -441,19 +490,29 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 // ── fake-prack (18x masking): a-leg early UPDATE ─────────────────────────────
 
-/// Under `fake-prack`, an early a-leg UPDATE carrying an **SDP offer** must NOT
-/// be answered with a bodyless local 200 (that would strand the offer, RFC 3264
-/// §5). It relays to the b-leg early dialog and the callee's real answer comes
-/// back — the fix behind this file's SDP-offer regression. (Bodyless refresh
-/// stays local; see `fake_prack_early_bodyless_update_answered_locally`.)
+/// Under `fake-prack`, alice saw only a bare 180 for the callee's reliable
+/// answer, so her INVITE offer is unanswered on her face: an early a-leg
+/// UPDATE carrying an offer draws RFC 3311 §5.2's 500 with a Retry-After,
+/// never a bodyless local 200 nor a relay. (Bodyless refresh stays local; see
+/// `fake_prack_early_bodyless_update_answered_locally`.)
 #[tokio::test]
-async fn fake_prack_early_update_with_offer_relays_to_bob() {
+async fn fake_prack_early_update_with_offer_is_refused_500() {
     let h = Harness::with_transit_delay("upd-fakeprack-a-offer", 1);
+    h.waive(
+        WaiverScope::rule(
+            "no-new-offer-while-offer-pending",
+            "alice deliberately offers in an UPDATE while her INVITE offer is unanswered",
+        )
+        .on_party("alice")
+        .conditional(),
+    );
     let alice = h.agent("alice", "127.0.0.1:5761").await;
     let bob = h.agent("bob", "127.0.0.1:5771").await;
     let b2bua =
@@ -482,22 +541,8 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
         .with_sdp(REOFFER_HOLD)
         .send()
         .await;
-    // The offer must reach bob (relayed, not locally short-circuited).
-    let mut at_bob = bob.receive("UPDATE").await;
-    assert!(
-        String::from_utf8_lossy(at_bob.request().body()).contains("a=sendonly"),
-        "alice's UPDATE offer relayed to bob",
-    );
-    at_bob.respond(200, "OK").with_sdp(ANSWER).await;
-    let resp = update.expect(200).await;
-    assert!(!resp.body().is_empty(), "bob's SDP answer relayed back to alice (offer answered)");
-    assert!(
-        resp.header::<MediaType>()
-            .expect("a Content-Type")
-            .expect("readable Content-Type")
-            .is("application/sdp"),
-        "answer carries application/sdp",
-    );
+    let refused = update.expect(500).await;
+    assert!(refused.raw(HeaderName::RetryAfter).next().is_some(), "the 500 carries a Retry-After");
 
     uas.respond(200, "OK").await;
     call.expect(200).await;
@@ -506,6 +551,8 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -548,6 +595,8 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -597,12 +646,14 @@ async fn fake_prack_confirmed_bodyless_update_from_b_relays_to_alice() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
 /// Same window, SDP arm: a b-leg UPDATE carrying a re-offer on the confirmed
 /// dialog must relay to alice and bring back HER answer. Answering it locally
-/// with a skeleton-fit body (the early-window behaviour) would leave alice's
+/// with a built body (the early-window behaviour) would leave alice's
 /// media view stale while bob believes the session was renegotiated.
 #[tokio::test]
 async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {
@@ -648,5 +699,7 @@ async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

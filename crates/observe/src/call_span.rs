@@ -233,13 +233,13 @@ pub const BODY_CAP_BYTES: usize = ATTR_CAP_BYTES;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::activation_bucket;
     use crate::admission::SampleAdmission;
     use crate::rate_draw::RateDraw;
     use crate::test_buffer::test_buffer;
-    use crate::token_bucket::TokenBucket;
 
     fn lease() -> TraceLease {
-        SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0))
+        SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0))
             .admit(None, 0)
             .expect("the gate is wide open in this fixture")
     }
@@ -395,8 +395,7 @@ mod tests {
 
     #[test]
     fn the_active_slot_returns_when_the_span_closes() {
-        let gate =
-            SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0));
+        let gate = SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0));
         let span = CallSpan::open(gate.admit(None, 0).expect("admitted"), identity());
         assert_eq!(gate.active(), 1);
         drop(span);

@@ -4,24 +4,24 @@
 //! `bind_sut` seam (ADR-0006/0009) to the B2BUA (ADR-0010).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
-use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
+use b2bua::cdr::{CdrRecord, CdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
-use b2bua::limiter::{CallLimiter, NoopLimiter};
+use b2bua::limiter::CallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use scenario_harness::{Agent, Dialog, Harness, RunReport};
 
-// The canonical INVITE/180/200/ACK choreography now lives in `scenario-harness`
-// (`scenario_harness::callflow`), so the single-SUT b2bua tests and the HA
-// failover tests share ONE implementation of the dance. Re-exported here so
-// existing `b2bua_harness::{establish, hangup, OFFER_SDP, …}` imports keep
-// working — the home for the dance is `scenario_harness::callflow`.
-pub use scenario_harness::callflow::{self, establish, hangup, Call, ANSWER_SDP, OFFER_SDP};
+// The canonical INVITE/180/200/ACK choreography lives in
+// `scenario_harness::callflow`, one implementation shared by the single-SUT
+// b2bua tests and the HA failover tests; the names the b2bua tests use are
+// re-exported here.
+pub use scenario_harness::callflow::{self, establish, hangup, ANSWER_SDP, OFFER_SDP};
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
@@ -34,6 +34,14 @@ use sip_proxy::{
 };
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
+
+pub mod limiter;
+pub mod terminated;
+pub mod witness;
+
+pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
+use terminated::{TerminatedCalls, TerminatedCallsWriter};
+pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
 // ===========================================================================
 // Shared b2bua spawn primitive
@@ -67,28 +75,29 @@ pub struct B2buaSpawnParams {
     pub replication: Option<ReplicationSetup>,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
-    /// CDR writer; cloned into the deps (the caller keeps its own handle to
-    /// snapshot records).
-    pub cdr: InMemoryCdrWriter,
-    /// Worker-side overload signal to inject (migration/08 sampler-injection
-    /// seam). `None` → the core mints a fresh [`OverloadSignal::live`] exactly as
-    /// before. A `start_paused` test passes one built over the `simulated()`
+    /// CDR writer handed to the deps (the caller keeps its own handle to
+    /// snapshot what it wrote).
+    pub cdr: Arc<dyn CdrWriter>,
+    /// Worker-side overload signal to inject. `None` → the core mints a fresh
+    /// [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live). A
+    /// `start_paused` test passes one built over the `simulated()`
     /// sampler (retaining its control) so it can drive a known ELU THROUGH the
     /// running 100 ms sampler task into the published `X-Overload` header.
     pub overload: Option<b2bua::overload::OverloadSignal>,
     /// Host-injected generic async-HTTP capability for a service's
-    /// `RuleAction::ServiceHttpRequest` (ADR-0016 seam). `None` → today's
-    /// behaviour. A test builds one over `SimulatedHttpNetwork` (mirroring the
-    /// limiter injection) to round-trip a binary adaptation body.
+    /// `RuleAction::ServiceHttpRequest` (ADR-0016 seam). `None` → a service
+    /// firing the effect gets an `outcome:"error"` re-entry. A test builds one
+    /// over `SimulatedHttpNetwork` (mirroring the limiter injection) to
+    /// round-trip a binary adaptation body.
     pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
     /// Compose-time built-in-machine selection (ADR-0016 opt-out seam).
     /// `Default` = every built-in included. A downstream that
     /// owns REFER via its own transfer machine passes
     /// `ComposeOptions::default().without_core_refer_transfer()`.
     pub compose: b2bua::rules::ComposeOptions,
-    /// [`CallStore`] override (ADR-0023). `None` → the historical fresh
-    /// [`InMemoryCallStore`] (behaviour-identical default). On the replicating
-    /// path this slot stays the unused legacy one either way.
+    /// [`CallStore`] override (ADR-0023). `None` → a fresh
+    /// [`InMemoryCallStore`]. On the replicating path the replication store is
+    /// the drain target and this slot is unused.
     pub store: Option<Arc<dyn CallStore>>,
     /// Store fault-injection handle (ADR-0023). `None` → no faults. `Some` does
     /// two things with the SAME handle: wraps the (default or overridden)
@@ -97,6 +106,13 @@ pub struct B2buaSpawnParams {
     pub store_faults: Option<StoreFaults>,
     /// Wire-fault handle (`b2bua::wire_faults`). `None` → compliant emission.
     pub wire_faults: Option<WireFaults>,
+    /// Memory admission gate (ADR-0037). `None` → the core builds one over the
+    /// real process. A test passes one over a simulated
+    /// [`SystemProbe`](b2bua::capacity::SystemProbe) to drive the RSS bounds.
+    pub capacity: Option<b2bua::capacity::CapacityGate>,
+    /// The deferred backlog's ceilings ([`B2buaDeps::deferred_ceilings`]).
+    /// `None` → the worker's own.
+    pub deferred_ceilings: Option<sip_txn::DeferredBound>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -104,12 +120,10 @@ pub struct B2buaSpawnParams {
 /// already-bound `endpoint`. The single home for the spawn wiring that
 /// `B2buaSut` and `failover-harness`'s `ReplicatedB2buaSut` share.
 ///
-/// The legacy `store` slot is a throwaway [`InMemoryCallStore`]: on the
-/// replicating path the repl store is the drain target (the legacy slot is
-/// unused), and on the non-replicating path each call site already passed a
-/// fresh in-memory store. `services` is honoured via `spawn_with_services`
-/// (`spawn` is just `spawn_with_services(.., vec![])`, so an empty vec is
-/// behaviour-identical to the old `spawn` path).
+/// The `store` slot defaults to a fresh [`InMemoryCallStore`]; on the
+/// replicating path the replication store is the drain target and the slot is
+/// unused. An empty `services` vec registers no callflow service: the engine runs
+/// the built-in rules `compose` selects.
 pub fn spawn_b2bua_core(
     endpoint: Box<dyn UdpEndpoint>,
     params: B2buaSpawnParams,
@@ -132,6 +146,8 @@ pub fn spawn_b2bua_core(
         store,
         store_faults,
         wire_faults,
+        capacity,
+        deferred_ceilings,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -141,10 +157,9 @@ pub fn spawn_b2bua_core(
         ..Default::default()
     };
     tune(&mut config);
-    // The historical hardcoded `InMemoryCallStore` is now the DEFAULT, not the
-    // only option (ADR-0023). A `store_faults` handle wraps whichever store is
-    // in play in the fault decorator AND rides into the core as the live-path
-    // probe — one handle, both halves of the seam.
+    // `InMemoryCallStore` is the default store (ADR-0023). A `store_faults`
+    // handle wraps whichever store is in play in the fault decorator AND rides
+    // into the core as the live-path probe — one handle, both halves of the seam.
     let base_store: Arc<dyn CallStore> =
         store.unwrap_or_else(|| Arc::new(InMemoryCallStore::new()));
     let (store, store_faults) = match store_faults {
@@ -153,27 +168,39 @@ pub fn spawn_b2bua_core(
         }
         None => (base_store, StoreFaults::default()),
     };
+    // The worker's refusals, from the tuned `Retry-After`, under a seeded
+    // To-tag secret so a simulated run is reproducible; an ingress brake takes
+    // them from the core ([`B2buaCore::refusals`]).
+    let refusals = b2bua::admission::Refusals::new(
+        config.retry_after_base_sec,
+        config.retry_after_jitter_sec,
+        sip_txn::REFUSED_MEMO_MAX,
+        &IdGen::seeded(0x0503),
+    );
     let deps = B2buaDeps {
         config,
         decision,
         limiter,
-        cdr: Arc::new(cdr),
+        cdr,
         store,
         store_faults,
         wire_faults: wire_faults.unwrap_or_default(),
         clock,
         id_gen,
+        refusals: Some(refusals),
+        deferred_ceilings,
         replication,
         metrics: B2buaMetrics::new(),
         adaptation_http,
         compose,
+        capacity,
     };
     B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
 }
 
 // The multi-node HA failover harness (FailoverHarness / ReplicatedB2buaSut /
-// ProxySut) moved to the dedicated `failover-harness` crate (ADR-0013 §0). This
-// crate is the single-SUT b2bua harness.
+// ProxySut) lives in the `failover-harness` crate (ADR-0013 §0). This crate is
+// the single-SUT b2bua harness.
 
 // ===========================================================================
 // Shared load-balancing ProxyCore spawn primitive
@@ -298,8 +325,7 @@ pub fn spawn_proxy_core_with(
 }
 
 /// Poll `cond` until it holds, yielding so spawned teardown / CDR-writer tasks
-/// drain. The single home for the "wait for the async teardown to land" loop
-/// every e2e test used to hand-roll.
+/// drain. The single home for the "wait for the async teardown to land" loop.
 ///
 /// Works under both wall-clock (`#[tokio::test]`) and `start_paused` tests:
 /// under a paused runtime the `sleep` auto-advances virtual time, so the
@@ -318,10 +344,22 @@ pub async fn settle_until(cond: impl Fn() -> bool) {
     }
 }
 
+/// The first value `req` states under header `name`, as written on the wire.
+pub fn stated(req: &sip_message::SipRequest, name: &str) -> Option<String> {
+    req.raw_text(sip_message::header::HeaderName::from(name)).next().map(|v| v.as_str().to_string())
+}
+
+/// The first value `resp` states under header `name`, as written on the wire.
+pub fn stated_by_response(resp: &sip_message::SipResponse, name: &str) -> Option<String> {
+    resp.raw_text(sip_message::header::HeaderName::from(name))
+        .next()
+        .map(|v| v.as_str().to_string())
+}
+
 /// The distinct final statuses delivered to `to` for its initial-INVITE
 /// transaction (CSeq method INVITE) — the RFC 3261 §17.2.1
-/// one-final-per-transaction oracle shared by the cancelled-call scenarios
-/// (068/069 family). Retransmits of the SAME final dedup to one status; a
+/// one-final-per-transaction oracle shared by the cancelled-call scenarios.
+/// Retransmits of the SAME final dedup to one status; a
 /// regression's second, different final shows up as a second element.
 pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
     use sip_message::parser::custom::CustomParser;
@@ -344,30 +382,38 @@ pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
     statuses
 }
 
+/// [`B2buaSut::force_brake_depth`]'s "no depth forced": the brake reads the live one.
+const NO_FORCED_DEPTH: usize = usize::MAX;
+
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).
 pub struct B2buaSut {
     pub addr: SocketAddr,
-    cdr: InMemoryCdrWriter,
+    cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
+    limiter: limiter::SutLimiter,
+    clock: Clock,
+    /// The ingress brake's counters and the queue depth forced on it, when the
+    /// SUT's bind carries one.
+    brake: Option<(b2bua::ingress_brake::IngressBrakeCounters, Arc<AtomicUsize>)>,
     _core: B2buaCore,
 }
 
-/// Composable builder for a single-SUT [`B2buaSut`] (slice 3). Replaces the
-/// former fan of `start*` / `route_all*` constructors: the decision engine is
+/// Composable builder for a single-SUT [`B2buaSut`]. The decision engine is
 /// fixed at construction (via [`B2buaSut::builder`] or one of the `route_all*`
 /// convenience constructors that pre-build a common decision engine), and every
 /// other axis — outbound proxy, limiter, callflow services, config tuning — is
 /// an optional chain method. [`start`](Self::start) is the single terminal that
-/// binds and spawns the core, preserving the exact wiring the old `start_inner`
-/// had (binds `{Uac, Uas}` roles; keepalive defaults 30/5 applied FIRST then the
-/// caller `tune` LAST so a test overriding keepalive still wins; `NoopLimiter`,
-/// empty services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`,
-/// ordinal `"w0"` defaults).
+/// binds and spawns the core (binds `{Uac, Uas}` roles; keepalive defaults 30/5
+/// applied FIRST then the caller `tune` LAST so a test overriding keepalive
+/// still wins; the default limiter (see [`limiter`](Self::limiter)), empty
+/// services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`, ordinal
+/// `"w0"` defaults).
 pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
     outbound_proxy: Option<(String, u16)>,
-    limiter: Arc<dyn CallLimiter>,
+    limiter: Option<Arc<dyn CallLimiter>>,
+    limiter_store: Option<Arc<call_limiter::CallStore>>,
     services: Vec<b2bua::rules::ServiceDef>,
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
     overload: Option<b2bua::overload::OverloadSignal>,
@@ -376,9 +422,29 @@ pub struct B2buaSutBuilder {
     store: Option<Arc<dyn CallStore>>,
     store_faults: Option<StoreFaults>,
     wire_faults: Option<WireFaults>,
+    capacity: Option<b2bua::capacity::CapacityGate>,
+    ingress_brake: Option<b2bua::ingress_brake::IngressBrakeConfig>,
+    deferred_ceilings: Option<sip_txn::DeferredBound>,
+    keep_terminated_calls: bool,
+    cdr_tap: Option<Arc<dyn CdrWriter>>,
 }
 
 impl B2buaSutBuilder {
+    /// Keep every terminated `Call` whole for [`B2buaSut::terminated_calls`].
+    /// Off by default: a long-running SUT keeps the records only.
+    pub fn keep_terminated_calls(mut self) -> Self {
+        self.keep_terminated_calls = true;
+        self
+    }
+
+    /// Hand every CDR write to `tap` as well, after the SUT's own writer and
+    /// within the same write: a probe of what holds at the instant the CDR is
+    /// written.
+    pub fn cdr_tap(mut self, tap: Arc<dyn CdrWriter>) -> Self {
+        self.cdr_tap = Some(tap);
+        self
+    }
+
     /// Route the b-leg through the front proxy at `(host, port)` (the
     /// `alice → proxy → b2bua → proxy → bob` topology; see
     /// [`B2buaConfig::b2b_outbound_proxy`]).
@@ -388,10 +454,21 @@ impl B2buaSutBuilder {
     }
 
     /// Use a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over the
-    /// simulated HTTP fabric serving a real `LimiterServer`). Defaults to
-    /// `NoopLimiter`.
+    /// simulated HTTP fabric serving a real `LimiterServer`); the decision
+    /// engine's routes are then left as the engine states them.
+    ///
+    /// Without one, the SUT runs the default limiter: a real store behind the
+    /// production HTTP client, with a [`DEFAULT_LIMITER_ID`] entry appended to
+    /// every route the engine returns, so every routed call holds it.
     pub fn limiter(mut self, limiter: Arc<dyn CallLimiter>) -> Self {
-        self.limiter = limiter;
+        self.limiter = Some(limiter);
+        self
+    }
+
+    /// The store behind the custom [`limiter`](Self::limiter): the reaped
+    /// check then also requires its count back to 0.
+    pub fn limiter_store(mut self, store: Arc<call_limiter::CallStore>) -> Self {
+        self.limiter_store = Some(store);
         self
     }
 
@@ -411,17 +488,45 @@ impl B2buaSutBuilder {
     }
 
     /// Inject the worker-side [`OverloadSignal`](b2bua::overload::OverloadSignal)
-    /// the running core publishes on its `X-Overload` header (migration/08
-    /// sampler-injection seam). Defaults to the core's own
-    /// [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live).
+    /// the running core publishes on its `X-Overload` header. Defaults to the
+    /// core's own [`OverloadSignal::live`](b2bua::overload::OverloadSignal::live).
     ///
     /// A `start_paused` test builds one over the `simulated()` sampler, keeps the
     /// returned control, then advances the clock so the spawned 100 ms sampler
-    /// task drives the injected ELU through the EWMA into the published header —
-    /// the faithful port of the TS `it.live` "injection drives eluEwma" test the
-    /// live sampler (~0 ELU under a paused runtime) cannot reach.
+    /// task drives the injected ELU through the EWMA into the published header, a
+    /// path the live sampler (~0 ELU under a paused runtime) cannot reach.
     pub fn overload(mut self, overload: b2bua::overload::OverloadSignal) -> Self {
         self.overload = Some(overload);
+        self
+    }
+
+    /// Inject the memory admission gate (ADR-0037). Defaults to one over the
+    /// real process; a test builds one over `b2bua::capacity::simulated()` and
+    /// keeps the control to set the RSS the gate samples. Its ceilings come
+    /// from `config.capacity` (set them through [`tune`](Self::tune)).
+    pub fn capacity(mut self, gate: b2bua::capacity::CapacityGate) -> Self {
+        self.capacity = Some(gate);
+        self
+    }
+
+    /// Install the ingress brake ([`b2bua::ingress_brake`]) on the SUT's
+    /// bind, as the production runner does; its counters feed
+    /// [`B2buaSut::new_calls`]. It refuses with the core's own refusals, under
+    /// the tuned `Retry-After`. The bind's queue holds 256 datagrams, so a
+    /// threshold of 0 % sheds every new non-emergency INVITE;
+    /// [`B2buaSut::force_brake_depth`] sets the depth the brake reads.
+    /// Default: none.
+    pub fn ingress_brake(mut self, config: b2bua::ingress_brake::IngressBrakeConfig) -> Self {
+        self.ingress_brake = Some(config);
+        self
+    }
+
+    /// Set the transaction layer's deferred-backlog ceilings
+    /// ([`b2bua::admission::ceilings`]) to `normal` and `emergency` events: `0`
+    /// refuses every new INVITE that reaches the layer, as a stalled router
+    /// would. Default: the worker's own.
+    pub fn deferred_backlog_ceilings(mut self, normal: usize, emergency: usize) -> Self {
+        self.deferred_ceilings = Some(b2bua::admission::ceilings(normal, emergency));
         self
     }
 
@@ -448,7 +553,7 @@ impl B2buaSutBuilder {
     }
 
     /// Override the [`CallStore`] (ADR-0023). Default: a fresh
-    /// [`InMemoryCallStore`] — the historical hardcoded wiring.
+    /// [`InMemoryCallStore`].
     pub fn with_store(mut self, store: Arc<dyn CallStore>) -> Self {
         self.store = Some(store);
         self
@@ -477,6 +582,7 @@ impl B2buaSutBuilder {
             decision,
             outbound_proxy,
             limiter,
+            limiter_store,
             services,
             tune,
             overload,
@@ -485,20 +591,61 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            capacity,
+            ingress_brake,
+            deferred_ceilings,
+            keep_terminated_calls,
+            cdr_tap,
         } = self;
+        let (decision, limiter, sut_limiter) = match limiter {
+            Some(own) => (decision, own, limiter::SutLimiter::own(limiter_store)),
+            None => {
+                assert!(limiter_store.is_none(), "limiter_store names a custom limiter's store");
+                let (client, sut_limiter) = limiter::SutLimiter::serve_default().await;
+                let decision: Arc<dyn CallDecisionEngine> =
+                    Arc::new(limiter::DefaultLimiterDecision { inner: decision });
+                (decision, client, sut_limiter)
+            }
+        };
+        let limiter: Arc<dyn CallLimiter> =
+            Arc::new(limiter::CountingLimiter { inner: limiter, ledger: sut_limiter.ledger() });
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
         // 100-within-200ms, unmatched-PRACK forwarding, strict-route rewrite)
         // do not judge this lane.
+        // The brake shares the core's refusals, so it is built once the core
+        // exists; until then (no datagram arrives before) the bind accepts.
+        let brake = ingress_brake.map(|config| {
+            let counters = b2bua::ingress_brake::IngressBrakeCounters::new();
+            let slot: Arc<OnceLock<sip_net::PreIngressHook>> = Arc::new(OnceLock::new());
+            let forced = Arc::new(AtomicUsize::new(NO_FORCED_DEPTH));
+            let (depth, installed) = (forced.clone(), slot.clone());
+            let hook: sip_net::PreIngressHook = Arc::new(move |raw, src, live| {
+                let Some(brake) = installed.get() else { return sip_net::PreIngressAction::Accept };
+                let forced = depth.load(Ordering::Relaxed);
+                brake(raw, src, if forced == NO_FORCED_DEPTH { live } else { forced })
+            });
+            ((config, counters, forced, slot), hook)
+        });
         let (endpoint, sa) = h
-            .bind_sut_with_roles(
+            .bind_sut_with_opts(
                 name,
                 addr,
                 std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
+                brake.as_ref().map(|(_, hook)| hook.clone()),
             )
             .await;
-        let cdr = InMemoryCdrWriter::new();
+        let cdr = if keep_terminated_calls {
+            TerminatedCallsWriter::new(TerminatedCalls::default())
+        } else {
+            TerminatedCallsWriter::records_only()
+        };
+        let cdr = match cdr_tap {
+            Some(tap) => cdr.with_tap(tap),
+            None => cdr,
+        };
+        let clock = Clock::test_at(0);
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
             sip_addr: sa,
@@ -507,56 +654,60 @@ impl B2buaSutBuilder {
             services,
             outbound_proxy,
             replication: None,
-            clock: Clock::test_at(0),
+            clock: clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            cdr: cdr.clone(),
+            cdr: Arc::new(cdr.clone()),
             overload,
             adaptation_http,
             compose,
             store,
             store_faults,
             wire_faults,
+            capacity,
+            deferred_ceilings,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
             // tests advance in 30 s steps, so the harness baseline stays at 30 s.
             // A scenario can still override via `tune`.
             config.keepalive_interval_sec = 30;
-            // Production default is now 32 s; the paused-clock keepalive-timeout
-            // tests advance a fixed 5 s after the probe, so the harness pins the
-            // old 5 s grace to keep those steps valid (a scenario can `tune` it).
+            // Production default is 32 s; the paused-clock keepalive-timeout
+            // tests advance a fixed 5 s after the probe, so the harness pins a
+            // 5 s grace to keep those steps valid (a scenario can `tune` it).
             config.keepalive_timeout_sec = 5;
-            // Tier-3 panic-ELU backstop (migration/09): DISABLE it in the harness
-            // baseline. The backstop reads the worker's own ELU via the
-            // `LiveLoadSampler`, whose busy-proxy is the wall time elapsed since
-            // the previous sample — and a paused-clock `Harness::advance` of, say,
-            // 1.5 s makes the very next 100 ms sampler tick land 1.5 s "late",
-            // which the proxy reads as a saturated loop (ELU ≈ 1.0). That clock
-            // artifact would then spuriously panic-503 the next new INVITE in any
-            // scenario that advances time between calls (it shed `limiter_refresh`'s
-            // second INVITE). The backstop is a *production* safety net for a real
-            // overloaded loop; its behaviour is pinned by the simulated-sampler
-            // unit tests (`overload::tests::panic_elu_*`), so disabling it here is
-            // semantics-preserving for the harness. A `tune` can re-enable it (and
-            // inject a `simulated()` sampler) to exercise it end-to-end.
-            config.overload_panic_elu_threshold = 1.1; // > clamped ELU max (1.0)
-                                                       // The caller's tune runs LAST so it can still override the keepalive
-                                                       // defaults above (preserving the prior ordering).
+            // Panic-ELU rung: off in the harness baseline. The live
+            // sampler reads a paused-clock `Harness::advance` as a saturated loop
+            // (ELU ≈ 1.0) and would panic-503 the next new INVITE; the backstop is
+            // pinned by the simulated-sampler unit tests (`overload::tests::panic_elu_*`).
+            // A `tune` can re-enable it with a `simulated()` sampler. 1.1 is above
+            // the clamped ELU max (1.0).
+            config.overload_panic_elu_threshold = 1.1;
+            // The caller's tune runs LAST so it can override the defaults above.
             tune(config);
         });
         let metrics = core.metrics().clone();
-        B2buaSut { addr: sa, cdr, metrics, _core: core }
+        let brake = brake.map(|((config, counters, forced, slot), _)| {
+            let hook = b2bua::ingress_brake::build_ingress_brake_hook(
+                config,
+                counters.clone(),
+                core.refusals().clone(),
+            );
+            assert!(slot.set(hook).is_ok(), "the brake is installed once");
+            (counters, forced)
+        });
+        B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, clock, brake, _core: core }
     }
 }
 
 impl B2buaSut {
     /// Base builder: a B2BUA driven by `decision`, every other axis at its
-    /// default (no outbound proxy, `NoopLimiter`, no services, no-op tune).
+    /// default (no outbound proxy, the default limiter, no services, no-op tune).
     pub fn builder(decision: Arc<dyn CallDecisionEngine>) -> B2buaSutBuilder {
         B2buaSutBuilder {
             decision,
             outbound_proxy: None,
-            limiter: Arc::new(NoopLimiter),
+            limiter: None,
+            limiter_store: None,
             services: Vec::new(),
             tune: Box::new(|_| {}),
             overload: None,
@@ -565,6 +716,11 @@ impl B2buaSut {
             store: None,
             store_faults: None,
             wire_faults: None,
+            capacity: None,
+            ingress_brake: None,
+            deferred_ceilings: None,
+            keep_terminated_calls: false,
+            cdr_tap: None,
         }
     }
 
@@ -613,7 +769,7 @@ impl B2buaSut {
 
     /// Builder for a B2BUA that routes every call to `dest` with the
     /// `relayFirst18xTo180` feature active under `strategy` and an explicit
-    /// `relay18x.messages` policy (Routing API `Relay18x.messages`).
+    /// [`call::features::Relay18xMessages`] policy.
     pub fn route_all_to_with_18x_messages(
         dest_host: &str,
         dest_port: u16,
@@ -671,7 +827,16 @@ impl B2buaSut {
     }
 
     pub fn cdr_records(&self) -> Vec<CdrRecord> {
-        self.cdr.snapshot()
+        self.cdr.records()
+    }
+
+    /// Every terminated `Call` as the CDR writer saw it, in write order: the
+    /// message rings, the decision log and the termination record whole.
+    /// Panics unless the builder was told to
+    /// [`keep_terminated_calls`](B2buaSutBuilder::keep_terminated_calls).
+    #[track_caller]
+    pub fn terminated_calls(&self) -> Vec<call::Call> {
+        self.cdr.terminated_calls().expect("the SUT was built without keep_terminated_calls()")
     }
 
     /// The transaction layer's own counters — what left under a bound,
@@ -684,13 +849,109 @@ impl B2buaSut {
         &self.metrics
     }
 
-    /// The worker-side overload signal (migration/08) the running core publishes
-    /// on its OPTIONS-200 `X-Overload` header. A test reads its EWMAs after
+    /// The clock the core stamps its records with.
+    pub fn clock(&self) -> &Clock {
+        &self.clock
+    }
+
+    /// The ingress brake's counters, when [`B2buaSutBuilder::ingress_brake`]
+    /// installed one.
+    pub fn ingress_brake(&self) -> Option<&b2bua::ingress_brake::IngressBrakeCounters> {
+        self.brake.as_ref().map(|(counters, _)| counters)
+    }
+
+    /// The ingress queue depth the brake reads from now on: `Some(d)` forces
+    /// `d`, `None` restores the bind's live depth. Panics without a brake.
+    pub fn force_brake_depth(&self, depth: Option<usize>) {
+        let (_, forced) = self.brake.as_ref().expect("the SUT carries no ingress brake");
+        forced.store(depth.unwrap_or(NO_FORCED_DEPTH), Ordering::Relaxed);
+    }
+
+    /// Every new call's admission outcome so far, every rung composed
+    /// ([`b2bua::new_calls::NewCallCounts`]).
+    pub fn new_calls(&self) -> b2bua::new_calls::NewCallCounts {
+        b2bua::new_calls::NewCallCounts::read(
+            self.metrics.new_calls(),
+            self._core.txn_metrics(),
+            self.ingress_brake(),
+        )
+    }
+
+    /// Every admission counter family
+    /// ([`b2bua::metrics::catalogue::ADMISSION`]) the worker renders, each
+    /// valued by the sum of its series.
+    pub fn catalogued_counts(&self) -> std::collections::BTreeMap<&'static str, f64> {
+        let udp = self.ingress_brake().map(|brake| {
+            b2bua::metrics::UdpTransportMetrics::new(
+                0,
+                brake.clone(),
+                Arc::new(|| 0),
+                Arc::new(|| 0),
+                Arc::new(|| 0),
+                Arc::new(|| 0),
+            )
+            .prometheus_text()
+        });
+        let text = [
+            self.metrics.prometheus_text(),
+            self.overload().prometheus_text(),
+            self.capacity().prometheus_text(),
+            self.new_calls().prometheus_text(),
+            udp.unwrap_or_default(),
+        ]
+        .concat();
+        b2bua::metrics::catalogue::ADMISSION
+            .iter()
+            .filter(|family| family.kind.as_str() == "counter")
+            .map(|family| {
+                let sum = text
+                    .lines()
+                    .filter(|line| {
+                        line.strip_prefix(family.name)
+                            .is_some_and(|rest| rest.starts_with('{') || rest.starts_with(' '))
+                    })
+                    .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+                    .sum();
+                (family.name, sum)
+            })
+            .collect()
+    }
+
+    /// Drain the worker as its runner does on a planned exit
+    /// ([`B2buaCore::drain`]): latch `Draining`, wait for the live calls,
+    /// then flush the limiter release queue.
+    pub async fn drain(&self, bounds: b2bua::drain::DrainBounds) -> b2bua::drain::DrainOutcome {
+        self._core.drain(bounds).await
+    }
+
+    /// Kill the process: its tasks stop and its socket closes, as on a crash,
+    /// and every call it held goes with its memory. A fresh [`B2buaSutBuilder::start`]
+    /// on the same address stands for the restarted process.
+    pub fn crash(&mut self) {
+        self._core.abort();
+    }
+
+    /// The worker-side overload signal the running core publishes on its
+    /// OPTIONS-200 `X-Overload` header. A test reads its EWMAs after
     /// advancing the paused clock (to prove the spawned 100 ms sampler task ran)
     /// and advances the `adm` counter via
     /// [`OverloadSignal::increment_non_emergency_admitted`].
+    ///
+    /// [`OverloadSignal::increment_non_emergency_admitted`]:
+    ///     b2bua::overload::OverloadSignal::increment_non_emergency_admitted
     pub fn overload(&self) -> &b2bua::overload::OverloadSignal {
         self._core.overload()
+    }
+
+    /// The memory admission gate (ADR-0037) the running core decides with.
+    pub fn capacity(&self) -> &b2bua::capacity::CapacityGate {
+        self._core.capacity()
+    }
+
+    /// [`active_calls`](Self::active_calls) as an owned probe, for a reader
+    /// that outlives a borrow of the SUT (a [`cdr_tap`](B2buaSutBuilder::cdr_tap)).
+    pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
+        self._core.active_calls_probe()
     }
 
     /// Ground-truth live call-map size (`inner.calls.len()`). An orphan-reject
@@ -701,6 +962,24 @@ impl B2buaSut {
         self._core.active_calls()
     }
 
+    /// Cancel `id` in the SUT's timer driver, the record untouched: a stand-in
+    /// for a fire the per-call queue dropped.
+    pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
+        self._core.cancel_driver_timer(call_ref, id).await;
+    }
+
+    /// Post `event` to the SUT's router as its timer driver or a callout
+    /// posts one: a stand-in for an event already in flight when it is posted.
+    pub fn post_event(&self, event: b2bua::CallEvent) {
+        self._core.post_event(event);
+    }
+
+    /// The live copy of `call_ref` this worker serves, if any (introspection:
+    /// what its rules read at the next event).
+    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
+        self._core.live_call(call_ref)
+    }
+
     /// Live per-call serialization-lock count. Should return to 0 once traffic
     /// drains; a residue is the orphan-reject lock leak (one stranded lock per
     /// in-dialog request that 481'd without tearing its per-call state down).
@@ -708,22 +987,117 @@ impl B2buaSut {
         self._core.lock_count()
     }
 
+    /// Every call created has been removed and every limiter release the
+    /// worker queued has been answered or dropped: the condition to settle on
+    /// before [`assert_fully_reaped`](Self::assert_fully_reaped). A call
+    /// leaves the map ([`active_calls`](Self::active_calls)) before its
+    /// removal is counted, so `active_calls() == 0` alone can hold while a
+    /// removal is still pending; and a call is removed before its release
+    /// leaves the worker's release queue.
+    pub fn is_reaped(&self) -> bool {
+        self.calls_reaped() && self.limiter_releases_waiting() == 0
+    }
+
+    /// Every call created has been removed and no admitted new call is left
+    /// unborn, whatever the limiter releases they owe.
+    pub fn calls_reaped(&self) -> bool {
+        self.metrics.removals_total() == self.metrics.creations_total()
+            && self._core.unborn_calls() == 0
+    }
+
+    /// Limiter releases the worker has queued and not yet had answered.
+    pub fn limiter_releases_waiting(&self) -> usize {
+        self._core.limiter().waiting()
+    }
+
+    /// The worker's handle on its call limiter, for a check that outlives a
+    /// borrow of the SUT (its release queue's drain surface).
+    pub fn limiter_worker(&self) -> b2bua::limiter::LimiterWorker {
+        self._core.limiter().clone()
+    }
+
+    /// The holds the SUT was granted and released so far, its fail-opens, and
+    /// its store's count when it has one. A release counts when the worker's
+    /// release queue sends it, after its call was removed.
+    pub fn limiter_count(&self) -> LimiterCount {
+        self.limiter.count()
+    }
+
+    /// An owned [`LimiterProbe`] on the same count, for a check that outlives
+    /// a borrow of the SUT.
+    pub fn limiter_probe(&self) -> LimiterProbe {
+        self.limiter.probe()
+    }
+
+    /// The store the reaped check reads: the default limiter's, or the one
+    /// registered with [`B2buaSutBuilder::limiter_store`]. Per-id probes read
+    /// it with `held(id)`.
+    pub fn limiter_store(&self) -> Option<&Arc<call_limiter::CallStore>> {
+        self.limiter.store()
+    }
+
     /// The named "no leak" oracle: every call created has been reaped and no
-    /// per-call state survives. Asserts the three invariants the reap tests
-    /// used to spell out by hand:
+    /// per-call state survives. Asserts:
     ///   1. `creations_total() == removals_total()` — every call's lifecycle
     ///      closed (the `active_calls` lens misses orphan-reject leaks, which
     ///      never insert a call; the paired counters + `lock_count` catch them).
     ///   2. `active_calls() == 0` — no live call left in the map.
     ///   3. `lock_count() == 0` — no stranded per-call serialization lock.
+    ///   4. the reaper's last-touched ledger is empty.
+    ///   5. no setup-CANCEL mark is left.
+    ///   6. every limiter hold the SUT was granted is released exactly once,
+    ///      its limiter store counts no hold, and the default limiter never
+    ///      failed open ([`limiter_count`](Self::limiter_count)).
+    ///   7. the worker's limiter release queue is empty.
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
     /// then checked by every reap test — the locality this oracle exists for.
     ///
-    /// Call it *after* the teardown has drained (see [`settle_until`]).
+    /// Call it *after* the teardown has drained: settle on
+    /// [`is_reaped`](Self::is_reaped) (see [`settle_until`]), which waits for
+    /// the worker's release queue too.
     #[track_caller]
     pub fn assert_fully_reaped(&self) {
+        self.assert_fully_reaped_leaving(LimiterLeak::NONE)
+    }
+
+    /// [`assert_fully_reaped`](Self::assert_fully_reaped) for a scenario that
+    /// leaves limiter holds or queued releases behind on purpose: checks 6
+    /// and 7 require exactly `leak`, every other check is unchanged.
+    #[track_caller]
+    pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
+        self.assert_calls_reaped();
+        // 6. every limiter hold granted is released once, the store counts
+        //    none, and the default limiter never failed open.
+        self.limiter.assert_drained(&leak);
+        // 7. the release queue holds exactly the releases declared queued.
+        assert_eq!(
+            self.limiter_waiting_keys(),
+            leak.queued_sorted(),
+            "limiter leak: the release queue holds other releases than declared"
+        );
+    }
+
+    /// [`is_reaped`](Self::is_reaped) for a scenario that leaves the releases
+    /// of `leak.queued` in the worker's release queue on purpose.
+    pub fn is_reaped_leaving(&self, leak: &LimiterLeak) -> bool {
+        self.calls_reaped() && self.limiter_waiting_keys() == leak.queued_sorted()
+    }
+
+    /// The keys whose release waits in the worker's release queue, sorted.
+    pub fn limiter_waiting_keys(&self) -> Vec<String> {
+        let mut keys = self._core.limiter().waiting_keys();
+        keys.sort();
+        keys
+    }
+
+    /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
+    /// call created was reaped and no per-call state survives, the limiter
+    /// aside. For a caller that judges the calls at one instant and the
+    /// limiter after a later settle, which a release still in flight needs.
+    #[track_caller]
+    pub fn assert_calls_reaped(&self) {
         let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
         assert_eq!(
             creations, removals,
@@ -735,6 +1109,12 @@ impl B2buaSut {
             0,
             "call leak: {} live call(s) left in the map",
             self.active_calls()
+        );
+        assert_eq!(
+            self._core.unborn_calls(),
+            0,
+            "admission leak: {} admitted new call(s) still counted unborn",
+            self._core.unborn_calls()
         );
         assert_eq!(
             self.lock_count(),
@@ -784,8 +1164,14 @@ pub const B2BUA_PORT: u16 = 5080;
 /// let mut dialog = s.establish().await;          // alice → b2bua → bob, confirmed
 /// // ... the interesting part, driving `s.alice` / `s.bob` / `s.b2bua` ...
 /// s.hangup(&mut dialog).await;                    // BYE / 200
-/// s.finish().await;                              // RFC gate + render
+/// s.finish().await;                              // reaped check + RFC gate + render
 /// ```
+///
+/// [`finish`](Self::finish) settles the SUT and runs
+/// [`B2buaSut::assert_fully_reaped`]: a call the scenario left up, or a
+/// limiter hold never released, fails the test. A scenario that leaves
+/// limiter holds behind on purpose declares them with
+/// [`finish_leaving`](Self::finish_leaving).
 ///
 /// Each `Harness` has its own simulated network namespace, so the fixed ports
 /// never collide between tests. For a non-default b2bua decision (refer, limiter,
@@ -842,9 +1228,18 @@ impl B2buaScene {
         callflow::hangup(dialog, &self.bob).await
     }
 
-    /// Gate RFC audit + render the report. Consumes the scene (`Harness::finish`
-    /// consumes `self`).
+    /// Settle until every call is reaped, run [`B2buaSut::assert_fully_reaped`],
+    /// then gate the RFC audit and render the report. Consumes the scene
+    /// (`Harness::finish` consumes `self`).
     pub async fn finish(self) -> RunReport {
+        self.finish_leaving(LimiterLeak::NONE).await
+    }
+
+    /// [`finish`](Self::finish) for a scenario that leaves limiter holds
+    /// behind on purpose: the reaped check requires exactly `leak`.
+    pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
+        settle_until(|| self.b2bua.is_reaped_leaving(&leak)).await;
+        self.b2bua.assert_fully_reaped_leaving(leak);
         self.h.finish().await
     }
 }

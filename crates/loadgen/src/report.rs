@@ -5,7 +5,8 @@
 //! HTML/markdown report.
 //!
 //! The memory ceiling is structural: counters and histograms are fixed-size;
-//! samples are capped per bucket; and the [`SamplingGate`] decides at call start
+//! samples are capped per bucket; and the sampling gate
+//! ([`Reporter::should_record`]) decides at call start
 //! whether to record at all, converging to ~zero recording once every bucket is
 //! full (with a small background fraction so a late-appearing error class still
 //! gets captured). Recording itself is per-call (freed when the call's binder
@@ -22,6 +23,8 @@ use e2e_model::{
     Canaries, CheckSummaryRow, CheckpointRow, CountRow, LatencyRow, LoadRunIndex, LoadRunMeta,
     SampleGroup,
 };
+
+use metric_catalogue::HistogramValue;
 
 use crate::chaos::ChaosTag;
 use crate::class::{CallOutcome, ResultClass};
@@ -83,6 +86,23 @@ impl Hist {
         self.max
     }
 
+    /// This histogram as one Prometheus histogram series: cumulative counts
+    /// at every bound (seconds), the sum (seconds) and the count. A bound's
+    /// bucket holds the values at or under it, as `record` files them.
+    fn histogram_value(&self) -> HistogramValue {
+        let mut cum = 0u64;
+        let buckets = self
+            .bounds
+            .iter()
+            .zip(&self.counts)
+            .map(|(bound_ms, n)| {
+                cum += n;
+                ((bound_ms * 1e6).round() / 1e9, cum)
+            })
+            .collect();
+        HistogramValue { buckets, sum: (self.sum * 1e6).round() / 1e9, count: self.total }
+    }
+
     fn mean_ms(&self) -> f64 {
         if self.total == 0 {
             0.0
@@ -137,7 +157,7 @@ type Bucket = (ScenarioId, String, String, ChaosTag);
 /// The run-dir-relative path of one sample page — THE single place the on-disk
 /// layout is spelled, used by both `finalize` (the writer) and `build_index`
 /// (the machine-readable listing) so the two can never disagree. An empty case
-/// keeps the historic `scenario/class/chaos` layout.
+/// uses the `scenario/class/chaos` layout.
 fn sample_rel(scenario: &str, class: &str, case: &str, chaos: &str, i: usize) -> String {
     if case.is_empty() {
         format!("callflows/{scenario}/{class}/{chaos}/{i}.html")
@@ -148,6 +168,8 @@ fn sample_rel(scenario: &str, class: &str, case: &str, chaos: &str, i: usize) ->
 
 #[derive(Default)]
 struct Inner {
+    /// The run's mix, written from the first scrape.
+    declared: std::collections::BTreeSet<ScenarioId>,
     counts: BTreeMap<Bucket, u64>,
     shed: BTreeMap<ScenarioId, u64>,
     e2e: BTreeMap<ScenarioId, Hist>,
@@ -332,7 +354,10 @@ impl Reporter {
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
         *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
-        g.e2e.entry(scenario).or_insert_with(Hist::new).record(e2e.as_secs_f64() * 1000.0);
+        // A rejected call never ran: it has no end-to-end time to fold in.
+        if class != ResultClass::Rejected {
+            g.e2e.entry(scenario).or_insert_with(Hist::new).record(e2e.as_secs_f64() * 1000.0);
+        }
         for (name, d) in checkpoints {
             g.checkpoints
                 .entry((scenario, name))
@@ -351,72 +376,85 @@ impl Reporter {
 
     // -- Prometheus ---------------------------------------------------------
 
+    /// The scenarios of the run's mix: each one's series are written from the
+    /// first scrape, at 0 before its first call.
+    pub fn declare_scenarios(&self, scenarios: impl IntoIterator<Item = ScenarioId>) {
+        let mut g = self.inner.lock().unwrap();
+        g.declared.extend(scenarios);
+    }
+
     /// Render the live `/metrics` text in Prometheus exposition format. Series
     /// mirror the SIPp exporter's naming so existing dashboards/queries extend.
     pub fn render_prometheus(&self) -> String {
+        use crate::catalogue as c;
         let g = self.inner.lock().unwrap();
         let mut out = String::new();
-        out.push_str("# HELP loadgen_calls_total Completed load calls by scenario, result class, and chaos proximity.\n");
-        out.push_str("# TYPE loadgen_calls_total counter\n");
         // The case dimension is a report/sample refinement only — the Prometheus
         // series stay (scenario, class, chaos)-keyed (stable dashboards, bounded
         // series), so aggregate over case here.
-        let mut prom_counts: BTreeMap<(ScenarioId, &String, ChaosTag), u64> = BTreeMap::new();
+        let mut calls: BTreeMap<(ScenarioId, String, &str), u64> = BTreeMap::new();
+        for scenario in &g.declared {
+            for class in c::CLASS.values {
+                for chaos in c::CHAOS.values {
+                    calls.insert((scenario, class.to_string(), chaos), 0);
+                }
+            }
+        }
         for ((scenario, class, _case, chaos), n) in &g.counts {
-            *prom_counts.entry((*scenario, class, *chaos)).or_default() += n;
+            *calls.entry((*scenario, class.clone(), chaos.label())).or_default() += n;
         }
-        for ((scenario, class, chaos), n) in &prom_counts {
-            out.push_str(&format!(
-                "loadgen_calls_total{{scenario=\"{scenario}\",class=\"{class}\",chaos=\"{}\"}} {n}\n",
-                chaos.label()
-            ));
-        }
-        out.push_str("# HELP loadgen_shed_total Calls dropped at the max-in-flight cap.\n");
-        out.push_str("# TYPE loadgen_shed_total counter\n");
-        for (scenario, n) in &g.shed {
-            out.push_str(&format!("loadgen_shed_total{{scenario=\"{scenario}\"}} {n}\n"));
-        }
-        out.push_str("# HELP loadgen_inflight Calls currently in flight.\n");
-        out.push_str("# TYPE loadgen_inflight gauge\n");
-        out.push_str(&format!("loadgen_inflight {}\n", self.inflight.load(Ordering::Relaxed)));
-        out.push_str("# HELP loadgen_started_total Calls started.\n");
-        out.push_str("# TYPE loadgen_started_total counter\n");
-        out.push_str(&format!("loadgen_started_total {}\n", self.started.load(Ordering::Relaxed)));
+        c::CALLS.render_rows(
+            &mut out,
+            calls
+                .into_iter()
+                .map(|((s, class, chaos), n)| ([s.to_string(), class, chaos.to_string()], n)),
+        );
+        let mut shed: BTreeMap<ScenarioId, u64> = g.declared.iter().map(|s| (*s, 0)).collect();
+        shed.extend(g.shed.iter().map(|(s, n)| (*s, *n)));
+        c::SHED.render_rows(&mut out, shed.into_iter().map(|(s, n)| ([s], n)));
+        c::INFLIGHT.render_value(&mut out, self.inflight.load(Ordering::Relaxed));
+        c::STARTED.render_value(&mut out, self.started.load(Ordering::Relaxed));
         // 18x-delivery gate: a non-PRACK ringing provisional is best-effort, so a
         // miss is EXPECTED. `received/expected` should stay > 0.99; a systemic 18x
         // regression drops it well below and IS a bug (unlike one dropped 18x).
-        out.push_str("# HELP loadgen_ringing_expected_total Calls that reached the ring→answer step (18x denominator).\n");
-        out.push_str("# TYPE loadgen_ringing_expected_total counter\n");
-        out.push_str(&format!(
-            "loadgen_ringing_expected_total {}\n",
-            self.ringing_expected.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_ringing_received_total Of those, calls whose caller received the 18x ringing provisional.\n");
-        out.push_str("# TYPE loadgen_ringing_received_total counter\n");
-        out.push_str(&format!(
-            "loadgen_ringing_received_total {}\n",
-            self.ringing_received.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_e2e_seconds End-to-end call latency quantiles.\n");
-        out.push_str("# TYPE loadgen_e2e_seconds gauge\n");
-        for (scenario, h) in &g.e2e {
-            for q in [0.5, 0.9, 0.99] {
-                out.push_str(&format!(
-                    "loadgen_e2e_seconds{{scenario=\"{scenario}\",quantile=\"{q}\"}} {:.6}\n",
-                    h.quantile_ms(q) / 1000.0
-                ));
-            }
-        }
-        out.push_str("# HELP loadgen_checkpoint_seconds Named-checkpoint latency quantiles.\n");
-        out.push_str("# TYPE loadgen_checkpoint_seconds gauge\n");
-        for ((scenario, name), h) in &g.checkpoints {
-            for q in [0.5, 0.9, 0.99] {
-                out.push_str(&format!(
-                    "loadgen_checkpoint_seconds{{scenario=\"{scenario}\",checkpoint=\"{name}\",quantile=\"{q}\"}} {:.6}\n",
-                    h.quantile_ms(q) / 1000.0
-                ));
-            }
-        }
+        c::RINGING_EXPECTED.render_value(&mut out, self.ringing_expected.load(Ordering::Relaxed));
+        c::RINGING_RECEIVED.render_value(&mut out, self.ringing_received.load(Ordering::Relaxed));
+        let empty = Hist::new();
+        let mut e2e: BTreeMap<ScenarioId, &Hist> =
+            g.declared.iter().map(|s| (*s, &empty)).collect();
+        e2e.extend(g.e2e.iter().map(|(s, h)| (*s, h)));
+        let quantiles = |h: &Hist| {
+            c::QUANTILE
+                .values
+                .iter()
+                .map(|q| match h.total {
+                    0 => "NaN".to_string(),
+                    _ => format!("{:.6}", h.quantile_ms(q.parse().unwrap_or(0.0)) / 1000.0),
+                })
+                .collect::<Vec<_>>()
+        };
+        let e2e_q = e2e.iter().flat_map(|(s, h)| {
+            c::QUANTILE
+                .values
+                .iter()
+                .zip(quantiles(h))
+                .map(move |(q, v)| ([s.to_string(), q.to_string()], v))
+        });
+        c::E2E_SECONDS.render_rows(&mut out, e2e_q.collect::<Vec<_>>());
+        let checkpoint_q = g.checkpoints.iter().flat_map(|((s, name), h)| {
+            c::QUANTILE
+                .values
+                .iter()
+                .zip(quantiles(h))
+                .map(move |(q, v)| ([s.to_string(), name.to_string(), q.to_string()], v))
+        });
+        c::CHECKPOINT_SECONDS.render_rows(&mut out, checkpoint_q.collect::<Vec<_>>());
+        c::E2E_LATENCY_SECONDS
+            .render_histogram_rows(&mut out, e2e.iter().map(|(s, h)| ([*s], h.histogram_value())));
+        c::CHECKPOINT_LATENCY_SECONDS.render_histogram_rows(
+            &mut out,
+            g.checkpoints.iter().map(|((s, name), h)| ([*s, *name], h.histogram_value())),
+        );
         out
     }
 
@@ -674,7 +712,7 @@ impl Reporter {
     /// await it BEFORE the final `finalize_run(finished: true)` write. The task
     /// loops forever; left running, a tick that lands on the run's last instant
     /// (any report interval that divides the duration) races the final write and
-    /// strands `finished: false` on disk (the 2026-07-03 validation finding).
+    /// strands `finished: false` on disk.
     /// Awaiting the aborted handle guarantees no snapshot write is in flight or
     /// pending when the final write starts.
     pub fn spawn_snapshots(
@@ -767,6 +805,7 @@ mod tests {
     /// sub-buckets across counts, the Prometheus surface, and the on-disk dirs;
     /// the un-tagged `count` still sums both (so existing summaries are intact).
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn chaos_splits_counts_samples_and_dirs() {
         let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
         let mk =
@@ -814,11 +853,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// The latency histograms are also exported as Prometheus histograms, so a
+    /// scrape series gives the latency of any time window (histogram_quantile
+    /// over an increase), which the cumulative quantile gauges cannot.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn latency_histograms_are_exported_as_prometheus_histograms() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+        for (setup, e2e) in [(5, 9_000), (50, 9_500), (900_000, 950_000)] {
+            r.record(
+                "basic_call",
+                &CallOutcome::Ok,
+                "",
+                Duration::from_millis(e2e),
+                &[("time_to_200", Duration::from_millis(setup))],
+                None,
+                ChaosTag::Clear,
+            );
+        }
+        let prom = r.render_prometheus();
+        assert!(prom.contains("# TYPE loadgen_checkpoint_latency_seconds histogram"), "{prom}");
+        assert!(prom.contains("# TYPE loadgen_e2e_latency_seconds histogram"), "{prom}");
+        let family = "loadgen_checkpoint_latency_seconds";
+        let labels = "scenario=\"basic_call\",checkpoint=\"time_to_200\"";
+        let buckets: Vec<(f64, u64)> = prom
+            .lines()
+            .filter_map(|l| l.strip_prefix(&format!("{family}_bucket{{{labels},le=\"")))
+            .map(|rest| {
+                let (le, n) = rest.split_once("\"} ").unwrap();
+                let le = if le == "+Inf" { f64::INFINITY } else { le.parse().unwrap() };
+                (le, n.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(buckets.len(), 49, "48 bounds and +Inf: {prom}");
+        assert!(buckets.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{buckets:?}");
+        let at = |secs: f64| buckets.iter().find(|(le, _)| *le >= secs).unwrap().1;
+        assert_eq!(at(0.005), 1, "5 ms falls in the first bucket reaching 5 ms");
+        assert_eq!(at(0.05), 2);
+        assert_eq!(buckets[47].1, 2, "900 s is past the last bound (~730 s)");
+        assert_eq!(buckets[48], (f64::INFINITY, 3));
+        assert!(prom.contains(&format!("{family}_count{{{labels}}} 3\n")), "{prom}");
+        assert!(prom.contains(&format!("{family}_sum{{{labels}}} 900.055\n")), "{prom}");
+        assert!(
+            prom.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 3\n"),
+            "{prom}"
+        );
+    }
+
     /// The case dimension splits ONE class into per-failure-mode sample buckets:
     /// two different RFC rules on the same scenario each keep their own first-N
     /// samples (the whole point — N samples of the first rule to fire no longer
     /// starve a second, rarer rule), and the counts table carries the case.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn case_splits_sample_buckets_within_a_class() {
         let r = Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 });
         let mk =
@@ -892,6 +979,7 @@ mod tests {
     /// reporter state, and every sample page it names actually exists on disk (the
     /// index and the HTML report never disagree).
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn writes_and_parses_the_machine_readable_index() {
         let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
         let mk =
@@ -983,13 +1071,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// Regression (2026-07-03 validation finding): the periodic snapshot task
-    /// races the final `finished:true` write whenever the report interval
-    /// divides the run duration — a tick fired at the run's last instant
-    /// overwrote the final index with a `finished:false` snapshot. The shutdown
-    /// sequence must abort+await the task BEFORE the final write; after that,
-    /// no tick may ever land again.
+    /// The periodic snapshot task races the final `finished:true` write whenever
+    /// the report interval divides the run duration — a tick fired at the run's
+    /// last instant would overwrite the final index with a `finished:false`
+    /// snapshot. The shutdown sequence must abort+await the task BEFORE the
+    /// final write; after that, no tick may ever land again.
     #[tokio::test(start_paused = true)]
+    #[ignore = "slow lane: loadgen"]
     async fn final_write_is_not_overwritten_by_snapshot_task() {
         let r = Arc::new(Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 }));
         r.record(

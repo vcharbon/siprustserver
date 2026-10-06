@@ -15,12 +15,12 @@
 //!
 //! [`Harness::callee_group`](crate::Harness::callee_group) binds ONE socket and
 //! vends several logical [`Agent`]s that share it, demultiplexed by a
-//! [`LegPicker`] (the shared [`crate::legpick`] primitive):
+//! [`LegPicker`](crate::LegPicker) (the shared [`crate::legpick`] primitive):
 //!
 //! * an **out-of-dialog INVITE** is routed to the logical agent whose R-URI
-//!   user-part prefix the picker matches (Charlie's ANNUAIRE digits, David's
-//!   reroute number, Bob's original callee number — already prefix-distinct on
-//!   the wire, so no routing-mock change is needed);
+//!   user-part prefix the picker matches (Charlie's transfer-target digits,
+//!   David's reroute number, Bob's original callee number — already
+//!   prefix-distinct on the wire, so the routing plan needs no change);
 //! * every **in-dialog** message (a re-INVITE, ACK, BYE, NOTIFY, or a response)
 //!   follows its dialog's owner — learned from the initial INVITE and keyed by
 //!   Call-ID thereafter.
@@ -200,12 +200,19 @@ impl UdpEndpoint for SubEndpoint {
 pub struct CalleeGroup {
     agents: HashMap<String, Agent>,
     addr: SocketAddr,
+    lane_name: String,
 }
 
 impl CalleeGroup {
     /// The shared bound address (the B2BUA's single ROUTE target).
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// The party name of the one recorded lane the members share: what an
+    /// RFC-audit waiver aimed at a member's deliberate deviation names.
+    pub fn lane_name(&self) -> &str {
+        &self.lane_name
     }
 
     /// The logical agent bound under `name`. Panics if `name` was not declared —
@@ -265,7 +272,7 @@ impl<'h> CalleeGroupBuilder<'h> {
         // One recorded lane for the shared socket — every leg's send/recv tees
         // onto it, so the RFC hard gate judges the (prefix-distinct) callee legs
         // as one peer, exactly as they land on the wire.
-        self.harness.register_lane(self.addr, lane_name, NetworkTag::Ext);
+        self.harness.register_lane(self.addr, lane_name.clone(), NetworkTag::Ext);
 
         let ep = self
             .harness
@@ -319,6 +326,6 @@ impl<'h> CalleeGroupBuilder<'h> {
             agents.insert(name.clone(), agent);
         }
 
-        CalleeGroup { agents, addr: self.addr }
+        CalleeGroup { agents, addr: self.addr, lane_name }
     }
 }

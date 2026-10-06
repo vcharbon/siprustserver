@@ -75,6 +75,28 @@ describe("the confrontation record", () => {
     expect(Confrontation.recordsPass([record, unknown])).toBe(false)
     expect(Confrontation.recordsPass([])).toBe(true)
   })
+
+  it("names the session-description rows no rule answers for, in record order", () => {
+    const sdp = (signature: string, cls: Confrontation.RecordClass) =>
+      ({ ...record, kind: "body" as const, signature, class: cls })
+    const first = sdp("body:sdp:m0:a=ptime:response:200:INVITE", "unknown")
+    const second = sdp("body:sdp:session:o=:initial-invite", "unlisted")
+    const records = [
+      sdp("body:sdp:session:o=:request:ACK:in-dialog", "accepted"),
+      first,
+      { ...record, class: "unknown" as const },
+      sdp("body:application/example+xml:request:INFO:in-dialog", "unknown"),
+      second
+    ]
+    expect(Confrontation.failingSdp(records)).toEqual([first, second])
+  })
+
+  it("orders records by the document's step order, unplaced ones last, stable within a step", () => {
+    const at = (step: string, signature = "s") => ({ ...record, step, signature })
+    const rows = [at("s9"), at(""), at("s2", "first"), at("s12"), at("s2", "second"), at("x")]
+    expect(Confrontation.inStepOrder(rows, ["s2", "s9", "s12"]).map((r) => `${r.step}:${r.signature}`))
+      .toEqual(["s2:first", "s2:second", "s9:s", "s12:s", ":s", "x:s"])
+  })
 })
 
 describe("the classification summary", () => {

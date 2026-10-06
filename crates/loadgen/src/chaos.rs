@@ -216,25 +216,19 @@ impl ChaosLog {
         self.total.load(Ordering::Relaxed)
     }
 
-    /// Prometheus surface: total markers recorded by kind, so the dashboard can
-    /// confirm the loadgen actually received the chaos flags.
+    /// Prometheus surface: total markers recorded, and those retained by kind
+    /// (bounded by the retained markers), so the dashboard can confirm the
+    /// loadgen actually received the chaos flags.
     pub fn render_prometheus(&self) -> String {
+        use crate::catalogue as c;
         let g = self.events.lock().unwrap();
         let mut by_kind: BTreeMap<&str, u64> = BTreeMap::new();
         for e in g.iter() {
             *by_kind.entry(e.kind.as_str()).or_default() += 1;
         }
         let mut out = String::new();
-        out.push_str("# HELP loadgen_chaos_markers_total Chaos markers recorded by the loadgen.\n");
-        out.push_str("# TYPE loadgen_chaos_markers_total counter\n");
-        out.push_str(&format!("loadgen_chaos_markers_total {}\n", self.total()));
-        out.push_str(
-            "# HELP loadgen_chaos_markers_retained Chaos markers currently retained, by kind.\n",
-        );
-        out.push_str("# TYPE loadgen_chaos_markers_retained gauge\n");
-        for (k, n) in &by_kind {
-            out.push_str(&format!("loadgen_chaos_markers_retained{{kind=\"{k}\"}} {n}\n"));
-        }
+        c::CHAOS_MARKERS.render_value(&mut out, self.total());
+        c::CHAOS_MARKERS_RETAINED.render_rows(&mut out, by_kind.into_iter().map(|(k, n)| ([k], n)));
         out
     }
 }
@@ -253,6 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn per_phase_classifier_excuses_transitions_and_setup_but_not_stable_calls() {
         let log = test_log().with_phase_tolerance(Duration::from_millis(200));
         let kill = Instant::now();
@@ -313,6 +308,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn record_at_back_dates_to_the_kill_so_a_transition_at_the_kill_is_near() {
         // The marker arrives ~1.5 s after the kill (the PF latency the live run
         // saw). Without back-dating, a `connected` transition AT the kill would
@@ -346,6 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn record_at_with_future_kill_ts_falls_back_to_now_not_panic() {
         // Clock skew: the supplied kill ts is in the future. saturating_sub keeps
         // delay at 0 → marker at ~now (no panic, no underflow).
@@ -367,6 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn markers_carry_back_dated_wall_clock_and_label() {
         let log = test_log();
         let now_wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -393,6 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn empty_log_is_always_clear() {
         let log = test_log();
         let now = Instant::now();
@@ -401,6 +400,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "slow lane: loadgen"]
     async fn ring_is_bounded_but_total_is_monotonic() {
         let log = test_log();
         for _ in 0..300 {

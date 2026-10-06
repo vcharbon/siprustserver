@@ -124,7 +124,7 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
 
     // ── The slow decision finally returns — and is dropped ────────────────────
     // The parked INVITE body resumes, reads the setup-CANCEL mark, and discards
-    // the route whole (069): bob is never dialed. The queued `handle-cancel`
+    // the route whole: bob is never dialed. The queued `handle-cancel`
     // then terminates the call — nothing is left ringing, nothing to CANCEL.
     h.advance(DECISION_DELAY + Duration::from_secs(1)).await;
     assert!(
@@ -141,7 +141,7 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     // With no b-leg pending, the queued `handle-cancel` finalizes the call
     // immediately — well before the 32 s TerminatingTimeout backstop.
     h.advance(Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // A CANCEL racing a slow decision must still reap the call.
     b2bua.assert_fully_reaped();
 

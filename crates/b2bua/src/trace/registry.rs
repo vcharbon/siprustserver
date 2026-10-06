@@ -238,7 +238,7 @@ pub fn install_process_traces(registry: Arc<CallTraces>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use observe::{RateDraw, TokenBucket};
+    use observe::{activation_bucket, RateDraw};
 
     fn gate(exporter: bool, rate: f64, max_active: usize) -> CallTraces {
         CallTraces::new(
@@ -247,7 +247,7 @@ mod tests {
                 rate,
                 max_active,
                 RateDraw::seeded(7),
-                TokenBucket::default_at(0),
+                activation_bucket(0),
             ),
             false,
         )
@@ -328,6 +328,7 @@ mod tests {
             &invite,
             std::net::SocketAddr::from(([10, 0, 0, 9], 5060)),
             &crate::config::B2buaConfig::default(),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         c.trace_id = Some(trace_id.to_string());

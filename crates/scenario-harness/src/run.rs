@@ -3,7 +3,8 @@
 //!
 //! Unlike the source interpreter, this driver maintains **no trace and no
 //! dialog state**. Its only job is to bind each agent on the
-//! recording-wrapped simulated [`SignalingNetwork`] and replay the step list.
+//! recording-wrapped simulated [`SignalingNetwork`](sip_net::SignalingNetwork)
+//! and replay the step list.
 //! Every `send_to` / `recv` flows through the recording decorator, so the
 //! `layer-harness` `Recorder` *is* the trace — the reports are projected from
 //! its channel snapshot afterwards (`sip_net::to_sip_entries`), exactly the
@@ -50,6 +51,10 @@ pub struct RunReport {
     /// The audit verdict from the recording layer's `close()` (informational;
     /// a basic harness run does not fail on it).
     pub audit: Result<(), SignalingAuditViolation>,
+    /// Findings the caller adds to the report beside the RFC fold — a
+    /// scripted HTTP service's verdicts among them. A gating one fails the
+    /// rendered doc; none is rule-sourced.
+    pub extra_anomalies: Vec<seq_report::Anomaly>,
     recorder: Recorder,
     events: Vec<Stamped<SignalingNetworkEvent>>,
     /// `(agent, anchor)` message labels the scenario attached via
@@ -81,6 +86,7 @@ impl RunReport {
             description,
             expects: Vec::new(),
             audit,
+            extra_anomalies: Vec::new(),
             recorder,
             events,
             anchors,
@@ -102,14 +108,23 @@ impl RunReport {
         self.rfc_findings.get_or_init(|| sip_net::evaluate_rfc_findings(&self.events))
     }
 
-    /// `true` when every `Expect` matched.
+    /// `true` when every `Expect` matched and no extra anomaly gates.
     pub fn passed(&self) -> bool {
         self.expects.iter().all(|e| e.passed)
+            && !self.extra_anomalies.iter().any(seq_report::Anomaly::is_gating)
     }
 
     /// The wire trace, projected from the recording channel.
     pub fn entries(&self) -> Vec<RecordedSipEntry> {
         to_sip_entries(&self.events)
+    }
+
+    /// The HTTP exchanges recorded on the run's recorder (any
+    /// `http_net::RecordingHttpNetwork` built on it), in request order.
+    pub fn http_entries(&self) -> Vec<http_net::RecordedHttpEntry> {
+        http_net::to_http_entries(
+            &self.recorder.for_tag::<http_net::HttpNetworkEvent>(http_net::HTTP_TAG).snapshot(),
+        )
     }
 
     /// The recorder's drained scenario state (lanes + anomalies).
@@ -154,8 +169,8 @@ pub async fn run(scenario: &Scenario) -> RunReport {
     // Timestamps ride a monotonic-anchored `Clock` constructed *inside* the
     // runtime, so under `#[tokio::test(start_paused = true)]` the recorded
     // `at_ms` (and thus the report's relative-time labels) advance in lockstep
-    // with `tokio::time::advance` / the `Advance` step's 100 ms chunks. Anchor
-    // at 0 → the first event sits at `T+0.000s`. See sip-clock crate docs.
+    // with every `Advance` step. Anchor at 0 → the first event sits at
+    // `T+0.000s`. See sip-clock crate docs.
     let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
     let sim = Arc::new(SimulatedSignalingNetwork::new(crate::SIMULATED_TRANSIT_DELAY_MS));
     let wrapped = with_all_contracts(
@@ -202,9 +217,9 @@ pub async fn run(scenario: &Scenario) -> RunReport {
                 expects.push(outcome);
             }
             Step::Advance { ms } => {
-                // Requires a paused runtime; the 100 ms chunking mirrors the
-                // source so in-flight delivery tasks observe intermediate time.
-                sip_clock::testkit::advance_in_100ms_chunks(Duration::from_millis(*ms)).await;
+                // Requires a paused runtime; in-flight deliveries land at
+                // their own instants inside the span.
+                sip_clock::testkit::advance_settled(Duration::from_millis(*ms)).await;
             }
         }
     }
@@ -220,6 +235,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         description: scenario.description.clone(),
         expects,
         audit,
+        extra_anomalies: Vec::new(),
         recorder,
         events,
         anchors: Vec::new(),

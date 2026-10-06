@@ -104,14 +104,15 @@ that split is a correctness requirement, not a convenience.
 ## Decision X3 — the canonical error-case status is 503, no Reason header
 
 `503 Service Unavailable` is the single code for every server-side inability to
-complete call setup: decision-backend error/timeout, target-admission reject,
+complete call setup: decision-backend error/timeout, destination allow-list reject,
 bogus-route, and the X2 unanswered-a-leg synthesis. Rationale: it is transient
 and retryable (unlike a 4xx caller-fault or a 500 "malformed request the server
 choked on"), it matches the TS reference and the existing Rust overload/decision
 paths, and it lets an upstream proxy or caller fail over. The X2 synthesis and
-the decision-error reject carry **no Reason header** (the bare canonical reject);
-the *overload* 503 deliberately still carries `Reason: SIP;cause=503` +
-`Retry-After` because those inform the LB's AIMD control loop.
+the decision-error reject carry **no Reason header** (the bare canonical reject).
+A new INVITE refused at admission — the overload and capacity gates, the
+ingress brake, the deferred backlog — gets the 503 with a jittered
+`Retry-After` and no `Reason` either (ADR-0037 item 3).
 
 ## Decision X4 — the LB proxy stays transaction-less; the caller's timer owns downstream silence
 
@@ -129,34 +130,36 @@ already own). All proxy-*internal* errors do answer immediately with a final
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, and the
 downstream-blackhole case — all three bounded by the caller's transaction timer.
 
-Coverage: `sip-proxy/tests/stateless_final_response_contract.rs` pins both halves
+Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + worker-100 absorbed + 18x/200 relay; blackhole → zero
 proxy-originated upstream messages, retransmit re-forwarded to the same target).
 
 ## Decision X6 — the per-call-cap shed: a new INVITE at capacity gets a 503, not a silent drop
 
-`PerCallDispatcher::dispatch` silently drops (and counts, `bump_cap_drop`) a
-brand-new call_ref's body when the live-queue map is at `per_call_queue_cap`
-(default 200 000). This is the **one** full-queue path X1 and X2 cannot reach:
-the drop happens in the dispatcher *before* any call/txn context is born, so
-there is no live call for the deadline to bound and no `→ terminated` edge for the
-synthesis to ride — the caller heard the auto-100 and then nothing.
+The per-call dispatcher refuses an event for a call with no queue once the
+live-queue map is at `per_call_queue_cap` (default 200 000), a normal new
+INVITE already at the cap less the new-call headroom (ADR-0037 item 10),
+counting it (`cap_drop`). This is the **one** full-queue path X1 and X2 cannot reach: the
+refusal happens *before* any call/txn context is born, so there is no live call
+for the deadline to bound and no `→ terminated` edge for the synthesis to ride.
 
-`router::on_event` closes it: for an **initial INVITE** (`res.initial_invite`)
-whose new call_ref `would_drop_new_at_cap`, it sends a **stateless 503** through
-the INVITE server txn (the same shape as the Tier-3 admission gate —
-`overload::build_reject_new_call_503`, no per-call state born) and returns, before
-`dispatch`. In-dialog events for an at-cap new call_ref keep the silent
-`dispatch` cap-drop: an in-dialog request with no live call is an orphan the peer
-481s / the protocol resends; only the initial INVITE owes a final. The check is
-race-free from the single-task router — only the router inserts queues, so between
-`would_drop_new_at_cap` and the following `dispatch` the count can only fall (a
-worker finishing), never rise. This path is unreachable under sane tuning (the
-Tier-1 ingress brake, Tier-3 CPS gate, and call-cap all shed with proper 503s far
-earlier); X6 exists so the guarantee is **total** — no INVITE that heard a 100 is
-ever left silent, at any scale. Coverage:
+The refusal of a **new INVITE** there is the at-cap cell of its row in the
+dispatch table (`dispatch/class.rs`): the offer hands the INVITE back owing the
+new-call 503 (X3) — a To-tag, a jittered `Retry-After`, no `Reason`, no per-call
+state born — which the router sends through the INVITE server txn that carried
+the 100, counted as a cap-shed new call. The rest of the table answers the
+other events refused there: a non-INVITE request has its server transaction
+forgotten, so its retransmission is admitted again once the cap frees; an
+in-dialog INVITE — silenced by its 100 like the initial one — is answered 500
+with a `Retry-After`. The threshold check and the creation of a queue happen in
+one offer under the dispatcher's map lock, so no other offer can take the last
+place between them. This path is unreachable under sane tuning (the
+ingress brake, the admission ladder's rungs, and call-cap all shed with proper 503s far
+earlier); X6 exists so the guarantee is **total** — no INVITE that heard a 100
+is ever left silent, at any scale. Coverage:
 `decision_deadline.rs::initial_invite_at_the_per_call_cap_is_shed_503_not_dropped`
-(cap = 1, one live call, next new INVITE → 503, no call born).
+(cap = 1, one live call, next new INVITE → 503, no call born) and
+`new_invite_at_queue_cap.rs` (the 503's shape and counting).
 
 ## Decision X5 — HA interaction: reclaim-discharge stays OFF the SIP wire
 

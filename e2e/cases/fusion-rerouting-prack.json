@@ -7,7 +7,7 @@
   ],
   "input": {
     "core": {
-      "from": "sip:+33123456789@fusion.example"
+      "from": "sip:+15551234567@fusion.example"
     }
   },
   "checks": [

@@ -1,8 +1,7 @@
-//! `ha-harness` — the **goal-1 pure-HA-framework test harness** (ADR-0011 X10 /
-//! plan Decision 7).
+//! `ha-harness` — the **pure-HA-framework test harness** (ADR-0011 X10).
 //!
 //! It packages the already-tested b2bua replication engine
-//! (`crates/b2bua/src/repl`, slices S4–S8) into a reusable N-node cluster
+//! (`crates/b2bua/src/repl`) into a reusable N-node cluster
 //! harness: in-process replication-subsystem nodes — `{ ReplicatingCallStore +
 //! per-peer Changelog + sim ReplicationNetwork + ReplServer + Puller /
 //! ReplicationSupervisor + Membership view + Clock + incarnation gen }` — with

@@ -31,7 +31,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
 };
-use b2bua_harness::{establish, settle_until, B2buaSut};
+use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -117,7 +117,7 @@ async fn hung_decision_is_rejected_503_at_the_default_deadline() {
     h.advance(Duration::from_millis(1_000)).await;
     call.expect(503).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR for the deadline-rejected call");
@@ -130,10 +130,10 @@ async fn hung_decision_is_rejected_503_at_the_default_deadline() {
 }
 
 /// The per-call global cap is the one full-queue path that fires BEFORE a call
-/// exists (`dispatch` drops a brand-new call_ref's body when the live-queue map
-/// is full). ADR-0022 sheds a new initial INVITE there with a stateless 503
-/// instead of silently, so a caller who already heard the auto-100 still gets a
-/// final. cap = 1: one live call fills the map, the next NEW INVITE is shed.
+/// exists: the dispatcher refuses a brand-new call's event when the live-queue
+/// map is full. A new INVITE refused there is answered 503 (ADR-0022 X6), so a
+/// caller who already heard the auto-100 still gets a final. cap = 1: one live
+/// call fills the map, the next NEW INVITE is refused.
 #[tokio::test(start_paused = true)]
 async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
     let h = Harness::new("decision-deadline-cap");
@@ -147,19 +147,22 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
             .await;
 
     // Call 1 establishes and stays up → its per-call queue occupies the cap.
-    let _d1 = establish(&alice, &bob, b2bua.addr).await;
+    let mut d1 = establish(&alice, &bob, b2bua.addr).await;
     settle_until(|| b2bua.active_calls() == 1).await;
 
-    // Call 2 is a brand-new INVITE while the map is at cap → stateless 503,
-    // never a silent drop. The caller heard the auto-100, then gets its final.
+    // Call 2 is a brand-new INVITE while the map is at cap → the shed rung's
+    // 503, never a silent drop. The caller heard the auto-100, then gets its final.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER_SDP).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(500)).await;
     call2.expect(503).await;
 
     // Call 1 is untouched (still the single live call); no CDR/limiter/state was
-    // born for the shed call 2 (stateless — like the Tier-3 gate).
+    // born for the shed call 2: it is refused at router ingress.
     assert_eq!(b2bua.active_calls(), 1, "the shed INVITE created no call");
 
+    hangup(&mut d1, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -184,7 +187,7 @@ async fn panicking_decision_is_rejected_503_immediately() {
     h.advance(Duration::from_secs(1)).await;
     call.expect(503).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 1, "the panic was observed, not swallowed");
     let cdrs = b2bua.cdr_records();

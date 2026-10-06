@@ -4,7 +4,9 @@
 
 use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
 
+use super::leg::{confirmed_dialog, find_leg};
 use super::lens::{update_dialog, update_leg};
+use super::peering::relay_peer_dialog;
 
 // ── CSeq ────────────────────────────────────────────────────────────────────
 
@@ -117,12 +119,64 @@ pub fn add_pending_request(
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
 /// §14.1): a transparently relayed INVITE awaiting its final response
-/// (rule 1), or a 2xx this side sent that still awaits its ACK (rule 2 —
-/// RFC 6026 names the interval *Accepted*). While either holds, a new INVITE
-/// on the dialog is glare and gets 491 Request Pending.
+/// (rule 1), or a 2xx un-ACKed on either face — one this side sent (a
+/// re-INVITE's or the call's own answer) or one taken here whose ACK has not
+/// left yet (rule 2; RFC 6026 names the interval *Accepted*). While any holds,
+/// a new INVITE on the dialog is glare and is refused, 491 or 500 by which
+/// INVITE is open (RFC 3261 §14.2).
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
     dialog.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
         || dialog.ext.pending_reinvite_2xx.is_some()
+        || dialog.ext.answered_2xx.is_some()
+        || dialog.ext.awaited_ack_cseq.is_some()
+}
+
+/// Whether an INVITE from `source_leg_id`'s peer, To-tag `request_to_tag`,
+/// meets glare (RFC 3261 §14.1): an INVITE transaction still open
+/// ([`invite_transaction_open`]) on the dialog it arrived on (the leg's
+/// confirmed dialog, else its first) or on the dialog its relay would be
+/// regenerated on ([`relay_peer_dialog`]).
+pub fn invite_glare(call: &Call, source_leg_id: &str, request_to_tag: Option<&str>) -> bool {
+    let source = find_leg(call, source_leg_id)
+        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()));
+    source.is_some_and(invite_transaction_open)
+        || relay_peer_dialog(call, source_leg_id, request_to_tag)
+            .is_some_and(|(_, d)| invite_transaction_open(d))
+}
+
+/// Whether `source_leg_id`'s peer, sending an INVITE with To-tag
+/// `request_to_tag`, has an earlier INVITE of its own on the dialog that this
+/// side has sent no final to (RFC 3261 §14.2, first clause): its relay awaits
+/// a final on the relay-target dialog and was not CANCELled.
+pub fn sender_invite_unanswered(
+    call: &Call,
+    source_leg_id: &str,
+    request_to_tag: Option<&str>,
+) -> bool {
+    relay_peer_dialog(call, source_leg_id, request_to_tag).is_some_and(|(_, d)| {
+        d.ext
+            .inbound_pending_requests
+            .iter()
+            .any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
+    })
+}
+
+/// Whether `source_leg_id`'s peer has an earlier INVITE of its own whose 2xx
+/// this side sent and still awaits the ACK for, on the source dialog (RFC 6026
+/// *Accepted*).
+pub fn sender_invite_unacknowledged(call: &Call, source_leg_id: &str) -> bool {
+    find_leg(call, source_leg_id)
+        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()))
+        .is_some_and(|d| d.ext.pending_reinvite_2xx.is_some() || d.ext.answered_2xx.is_some())
+}
+
+/// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
+/// final (RFC 3311 §5.2): its relay snapshot is on the dialog a request from
+/// that leg, To-tag `request_to_tag`, is relayed on.
+pub fn peer_update_pending(call: &Call, source_leg_id: &str, request_to_tag: Option<&str>) -> bool {
+    relay_peer_dialog(call, source_leg_id, request_to_tag).is_some_and(|(_, d)| {
+        d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
+    })
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.
@@ -227,6 +281,7 @@ pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }
@@ -251,6 +306,7 @@ pub fn make_dialog_from_incoming(
             pending_reinvite_2xx: None,
             answered_2xx: None,
             emitted_ack: None,
+            sdp_session: None,
             awaited_ack_cseq: None,
         },
     }

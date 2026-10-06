@@ -7,7 +7,7 @@ use call::{Call, RetainedEmission, TimerEntry};
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::TxnKind;
 
-use crate::event::CallEvent;
+use b2bua_sdk::event::CallEvent;
 
 /// How an outbound message reaches the wire.
 #[derive(Debug, Clone)]
@@ -79,16 +79,20 @@ pub enum CriticalStateEffect {
         id: String,
     },
     CancelAllTimers,
-    /// Flush the call to the store (replication path).
-    Flush,
     /// Remove the call from memory + store, cancel its txns, poison its queue.
     RemoveCall,
 }
 
-/// Soft-bounded effects — limiter decrements with a short timeout (never block).
+/// Soft-bounded effects — limiter work handed off the call's turn (never
+/// awaited by the call).
 #[derive(Debug, Clone)]
 pub enum SoftBoundedEffect {
-    DecrementLimiter { limiter_id: String, window: i64 },
+    /// Release the limiter set held under `key`: the key joins the worker's
+    /// release queue, and the call's turn goes on at once. Idempotent on the
+    /// server. The terminal settle emits it once for a call that owes its
+    /// release, under the call's own key; a route fold carrying another
+    /// call's key releases that key.
+    ReleaseLimiter { key: String },
 }
 
 /// Buffered observability effects — drop-on-overload is acceptable.
@@ -99,6 +103,14 @@ pub enum BufferedObservabilityEffect {
     /// transaction already carries `carried` (RFC 3261 §17.2.1). The router
     /// counts it as `second_final_refused`.
     SecondFinalRefused {
+        status: u16,
+        carried: u16,
+    },
+    /// A provisional of `status` toward the a-leg's initial INVITE was
+    /// refused: that transaction already sent its final `carried` and emits
+    /// no further provisional (RFC 3261 §13.3.1.1 / §17.2.1). The router
+    /// counts it as `provisional_after_final_refused`.
+    ProvisionalAfterFinalRefused {
         status: u16,
         carried: u16,
     },
@@ -142,10 +154,16 @@ pub enum FireAndForgetEffect {
     },
     /// Kick the async `/call/failure` decision (b-leg failover). Carries the
     /// request JSON the seed rule built; the router calls `decision.call_failure`
-    /// then re-enters via a `call-failure-result` internal event.
+    /// then re-enters via a `call-failure-result` internal event. The admits
+    /// of the failover chain are numbered from `limiter_change` on, in the
+    /// block the dispatching turn reserved. `deadline` names the answer
+    /// deadline the sending turn armed (ADR-0039), which the fold states;
+    /// `None` until armed, and for a consult with no deadline.
     FailureAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
+        limiter_change: u64,
+        deadline: Option<u64>,
     },
     /// Kick the async `call_release` consult for a subscribed internal release
     /// event. Carries the event-scoped request JSON the
@@ -155,12 +173,60 @@ pub enum FireAndForgetEffect {
     ReleaseAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
+        /// The change number a reroute's admit carries.
+        limiter_change: u64,
+    },
+    /// Replace the call's admission set on the call limiter with `entries`
+    /// under `change`, carrying the call's `held` set of the sending turn (a
+    /// service's `ReplaceAdmissionSet`), then re-enter via a
+    /// `limiter-admit-result` internal event echoing `correlation_id`.
+    LimiterAdmit {
+        call_ref: String,
+        correlation_id: String,
+        key: String,
+        change: u64,
+        held: call::LimiterHeld,
+        entries: Vec<call::LimiterEntry>,
     },
     /// Re-enter the handler chain with an internally-generated event.
     Reenter(Box<CallEvent>),
 }
 
-/// The five categories of effect a handler emits.
+/// A dialog-level retransmission turn that changes no replicated fact — the
+/// closed list of turns the store replaces without a version bump and the
+/// router persists without a flush (ADR-0014, "a counter counts writes that
+/// change the call, not progress"). A third member is an ADR line first.
+///
+/// A transaction-level retransmission never reaches the call model; every
+/// other turn is a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuietTurn {
+    /// A rung of this node's own ladder that left a copy and armed the next
+    /// rung: the un-ACKed 2xx ladder (RFC 3261 §13.3.1.4) or the un-PRACKed
+    /// reliable-provisional ladder (RFC 3262 §3). The turn's body delta is the
+    /// rung index and the rung timer's next due instant; a rung that ceases
+    /// the ladder or fires spent cancels a ledger entry and is a write.
+    OwnRung,
+    /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
+    /// ACK's bytes leave again and the body records nothing but the in-dialog
+    /// message count.
+    ReAck,
+}
+
+impl QuietTurn {
+    /// Every kind, in declaration order.
+    pub const ALL: [QuietTurn; 2] = [QuietTurn::OwnRung, QuietTurn::ReAck];
+
+    /// The `kind` label of `b2bua_repl_quiet_turns_total`.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            QuietTurn::OwnRung => "own-rung",
+            QuietTurn::ReAck => "re-ack",
+        }
+    }
+}
+
+/// The five categories of effect a handler emits, and the turn's class.
 #[derive(Debug, Clone, Default)]
 pub struct HandlerEffects {
     pub critical: Vec<CriticalStateEffect>,
@@ -168,6 +234,10 @@ pub struct HandlerEffects {
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
+    /// The [`QuietTurn`] candidate, set by exactly two authors — the
+    /// framework's rung turn and the bodyless re-ACK; the router persists the
+    /// turn quietly only when its whole effect set is that repeat.
+    pub quiet: Option<QuietTurn>,
 }
 
 impl HandlerEffects {
@@ -176,8 +246,10 @@ impl HandlerEffects {
     }
 
     /// Append another effect set (used to merge composed-rule / framework
-    /// effects into the rule's own).
+    /// effects into the rule's own). A quiet candidate carries over; the
+    /// merged effect set is what the router classifies.
     pub fn extend(&mut self, other: HandlerEffects) {
+        self.quiet = self.quiet.or(other.quiet);
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

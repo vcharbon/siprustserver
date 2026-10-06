@@ -25,7 +25,8 @@
 //! - **In-dialog request** (`LiveInDialog` — BYE, re-INVITE, …): fail
 //!   **closed** — `500` to that request; the call and its state stay untouched
 //!   (deliberately distinct from the `481` lookup-*miss*). A retry after the
-//!   store recovers proceeds normally.
+//!   store recovers proceeds normally. A request whose lookups found no call
+//!   (`router::unroutable`) is probed too, as is a failed replica-index read.
 //! - **Audit/keepalive timer** (`LiveAudit`): fail **open** — skip the probe
 //!   cycle, keep the call up, and RE-ARM the keepalive timer so liveness
 //!   detection resumes next interval (a store fault alone must never tear down
@@ -58,7 +59,6 @@ pub enum StoreFaultPoint {
     GetCall,
     PutCall,
     DeleteCall,
-    RefreshCall,
     GetIndex,
     ScanCalls,
     // ── live-path probes (the router's sync lookup sites) ──
@@ -75,7 +75,6 @@ struct Inner {
     get_call: AtomicBool,
     put_call: AtomicBool,
     delete_call: AtomicBool,
-    refresh_call: AtomicBool,
     get_index: AtomicBool,
     scan_calls: AtomicBool,
     live_initial_invite: AtomicBool,
@@ -103,7 +102,6 @@ impl StoreFaults {
             StoreFaultPoint::GetCall => &self.inner.get_call,
             StoreFaultPoint::PutCall => &self.inner.put_call,
             StoreFaultPoint::DeleteCall => &self.inner.delete_call,
-            StoreFaultPoint::RefreshCall => &self.inner.refresh_call,
             StoreFaultPoint::GetIndex => &self.inner.get_index,
             StoreFaultPoint::ScanCalls => &self.inner.scan_calls,
             StoreFaultPoint::LiveInitialInvite => &self.inner.live_initial_invite,
@@ -128,7 +126,6 @@ impl StoreFaults {
             StoreFaultPoint::GetCall,
             StoreFaultPoint::PutCall,
             StoreFaultPoint::DeleteCall,
-            StoreFaultPoint::RefreshCall,
             StoreFaultPoint::GetIndex,
             StoreFaultPoint::ScanCalls,
             StoreFaultPoint::LiveInitialInvite,
@@ -212,25 +209,11 @@ impl CallStore for FaultInjectingCallStore {
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.faults.check(StoreFaultPoint::DeleteCall)?;
-        self.inner.delete_call(role, primary, call_ref, indexes, opts).await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn refresh_call(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        indexes: &[String],
-        ttl_ms: i64,
-        call_gen: i64,
-        call_bgen: i64,
-    ) -> Result<(), StoreError> {
-        self.faults.check(StoreFaultPoint::RefreshCall)?;
-        self.inner.refresh_call(role, primary, call_ref, indexes, ttl_ms, call_gen, call_bgen).await
+        self.inner.delete_call(role, primary, call_ref, indexes, answered, opts).await
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
@@ -328,7 +311,7 @@ mod tests {
         assert!(faults.check(StoreFaultPoint::LiveInDialog).is_err());
         assert!(faults.check(StoreFaultPoint::LiveAudit).is_ok());
         // Decorator ops keep working — the live switches are router-side only.
-        assert!(s.get_index("leg:x").await.is_ok());
+        assert!(s.get_index("a:x|t").await.is_ok());
         faults.disarm_all();
         assert!(faults.check(StoreFaultPoint::LiveInDialog).is_ok());
     }

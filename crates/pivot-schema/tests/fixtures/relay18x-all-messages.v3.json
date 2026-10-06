@@ -59,7 +59,7 @@
           "SDP stripped: an upstream 18x carried SDP, the relayed 180 did not"
         ],
         "messages": "ALL",
-        "mode": "18X_TO_180_SDP_REMOVE"
+        "mode": "DOWNGRADE_NO_SDP"
       }
     }
   ],
@@ -67,13 +67,13 @@
     "annotations": {
       "flags": [
         {
-          "detail": "R-URI \"+199999433000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "R-URI \"+199999415550900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         }
       ]
     },
     "family": "fork",
-    "id": "capture_74d6f375-cf98-4ebc-9fd7-d9d2535242ea.pcap.gz-case1",
+    "id": "capture_relay18x-all-messages.pcap.gz-case1",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -85,9 +85,9 @@
       "call_groups": [
         0
       ],
-      "capture": "capture_74d6f375-cf98-4ebc-9fd7-d9d2535242ea.pcap.gz"
+      "capture": "capture_relay18x-all-messages.pcap.gz"
     },
-    "title": "capture_74d6f375-cf98-4ebc-9fd7-d9d2535242ea.pcap.gz basic call (groups 0)",
+    "title": "capture_relay18x-all-messages.pcap.gz basic call (groups 0)",
     "variant": "repro"
   },
   "endpoints": [
@@ -148,14 +148,14 @@
           },
           {
             "name": "Remote-Party-ID",
-            "value": "<sip:1044@6.1.2.1>;party=calling;screen=yes;privacy=off"
+            "value": "<sip:1044@203.0.113.21>;party=calling;screen=yes;privacy=off"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -167,13 +167,13 @@
             "value": "<tel:0009001>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "INVITE",
         "ruri": {
-          "frozen": "+199999433000900001"
+          "frozen": "+199999415550900001"
         },
         "to": {
           "form": "e164",
@@ -248,14 +248,14 @@
           },
           {
             "name": "Remote-Party-ID",
-            "value": "<sip:1044@6.1.2.1>;party=calling;screen=yes;privacy=off"
+            "value": "<sip:1044@203.0.113.21>;party=calling;screen=yes;privacy=off"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -264,11 +264,11 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "INVITE"
@@ -317,11 +317,11 @@
         "headers": [
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900004@192.0.2.57;user=phone>"
+            "value": "<sip:+15550900004@192.0.2.57;user=phone>"
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900004@sip.osp.com;user=phone>"
+            "value": "<sip:+15550900004@osp.example.com;user=phone>"
           },
           {
             "name": "Supported",
@@ -410,7 +410,7 @@
         "headers": [
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003@carrier.example.net;user=phone>"
           },
           {
             "name": "Privacy",
@@ -430,7 +430,7 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml,multipart/mixed"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml,multipart/mixed"
           },
           {
             "name": "Supported",
@@ -438,11 +438,11 @@
           },
           {
             "name": "Diversion",
-            "value": "\"Xxxxx XXXXX\" <sip:+33000900004@sip.osp.com;user=phone>;reason=no-answer;privacy=off;counter=1;user-id=\"0000900004@sip.osp.com\""
+            "value": "\"Xxxxx XXXXX\" <sip:+15550900004@osp.example.com;user=phone>;reason=no-answer;privacy=off;counter=1;user-id=\"0000900004@osp.example.com\""
           },
           {
-            "name": "P-Orig",
-            "value": "cl4.site.nbi.sd1"
+            "name": "X-Vendor-Orig",
+            "value": "core.example.sd1"
           }
         ],
         "method": "INVITE"
@@ -494,11 +494,11 @@
             "value": "INVITE,ACK,OPTIONS,CANCEL,BYE,NOTIFY"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -534,7 +534,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:0000900002@sip.osp.com;user=phone>"
+            "value": "<sip:0000900002@osp.example.com;user=phone>"
           },
           {
             "name": "Allow",
@@ -577,7 +577,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:0000900002@sip.osp.com;user=phone>"
+            "value": "<sip:0000900002@osp.example.com;user=phone>"
           },
           {
             "name": "Allow",
@@ -655,11 +655,11 @@
             "value": "INVITE,ACK,OPTIONS,CANCEL,BYE,NOTIFY"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -695,7 +695,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:0000900002@sip.osp.com;user=phone>"
+            "value": "<sip:0000900002@osp.example.com;user=phone>"
           },
           {
             "name": "Allow",
@@ -740,11 +740,11 @@
             "value": "sdp-anat"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -784,7 +784,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:0000900002@sip.osp.com;user=phone>"
+            "value": "<sip:0000900002@osp.example.com;user=phone>"
           },
           {
             "name": "P-Charging-Vector",
@@ -868,15 +868,15 @@
             "value": "INVITE,ACK,OPTIONS,CANCEL,BYE,NOTIFY"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900002@6.6.49.70>;device=sbc.site.111;reason=SIP;location=CUSTOMER;realm=2234649;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900002@198.51.100.70>;cause=200"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -919,7 +919,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:0000900002@sip.osp.com;user=phone>"
+            "value": "<sip:0000900002@osp.example.com;user=phone>"
           },
           {
             "name": "P-Charging-Vector",
@@ -931,11 +931,11 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@carrier2.example.net>;cause=200"
           }
         ],
         "reason": "OK",
@@ -978,11 +978,11 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900001@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900001@carrier2.example.net>;cause=200"
           }
         ],
         "reason": "OK",
@@ -1094,11 +1094,11 @@
             "value": "INVITE,ACK,OPTIONS,CANCEL,BYE,NOTIFY"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1106,8 +1106,8 @@
             "value": "icid-value=exampleicid080000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA;term-ioi=SbcNodeA"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "INVITE"
@@ -1173,15 +1173,15 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.pfs.nsn.npdi"
+            "name": "X-Vendor-Origin",
+            "value": "origin.example"
           }
         ],
         "method": "INVITE"
@@ -1244,15 +1244,15 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000"
           },
           {
-            "name": "P-OrigHeader",
-            "value": "sip.pfs.nsn.npdi"
+            "name": "X-Vendor-Origin",
+            "value": "origin.example"
           }
         ],
         "method": "INVITE"
@@ -1326,18 +1326,18 @@
           },
           {
             "name": "Remote-Party-ID",
-            "value": "<sip:1044@6.1.2.1>;party=called;screen=yes;privacy=off"
+            "value": "<sip:1044@203.0.113.21>;party=called;screen=yes;privacy=off"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:1044@6.1.2.1>;device=sbc.site.111;reason=SIP;location=CUSTOMER;realm=2231504;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:1044@203.0.113.21>;cause=200"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1390,18 +1390,18 @@
           },
           {
             "name": "Remote-Party-ID",
-            "value": "<sip:1044@6.1.2.1>;party=called;screen=yes;privacy=off"
+            "value": "<sip:1044@203.0.113.21>;party=called;screen=yes;privacy=off"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:1044@6.1.2.1>;device=sbc.site.111;reason=SIP;location=CUSTOMER;realm=2231504;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:1044@203.0.113.21>;cause=200"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1446,15 +1446,15 @@
           },
           {
             "name": "Accept",
-            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-broadworks-call-center+xml,multipart/mixed"
+            "value": "application/dtmf-relay,application/media_control+xml,application/sdp,application/x-example-cc+xml,multipart/mixed"
           },
           {
             "name": "P-Charging-Vector",
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:+33000900003@carrier.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sd1;code=200;text=\"OK\""
+            "name": "X-Vendor-History",
+            "value": "<sip:+15550900003@carrier.example.net>;cause=200"
           }
         ],
         "reason": "OK",
@@ -1551,15 +1551,15 @@
             "value": "Q.850;cause=16"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:6.1.2.1:5060>;device=sbc.site.111;reason=SIP;location=CUSTOMER;realm=2231504;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.21:5060>;cause=BYE"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1567,8 +1567,8 @@
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;term-ioi=SbcNodeA"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "BYE"
@@ -1627,15 +1627,15 @@
             "value": "Q.850;cause=16"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:6.1.2.1:5060>;device=sbc.site.111;reason=SIP;location=CUSTOMER;realm=2231504;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:203.0.113.21:5060>;cause=BYE"
           },
           {
-            "name": "P-Identifier",
-            "value": "112231504"
+            "name": "X-Vendor-Id",
+            "value": "119900005"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1643,8 +1643,8 @@
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;term-ioi=SbcNodeA"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "BYE"
@@ -1705,8 +1705,8 @@
             "value": "icid-value=exampleicid060000000000000000000000000000000000000000000"
           },
           {
-            "name": "P-HKH-RC-HIST",
-            "value": "<sip:172.20.146.100:5060>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sd1;code=BYE"
+            "name": "X-Vendor-History",
+            "value": "<sip:192.0.2.100:5060>;cause=BYE"
           }
         ],
         "method": "BYE"
@@ -1736,11 +1736,11 @@
             "value": "INVITE,ACK,OPTIONS,CANCEL,BYE,NOTIFY"
           },
           {
-            "name": "P-Identifier",
-            "value": "112234649"
+            "name": "X-Vendor-Id",
+            "value": "119900004"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -1774,7 +1774,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900001"
+      "observed": "+15550900001"
     },
     {
       "catalog": {
@@ -1788,7 +1788,7 @@
       ],
       "kind": "site",
       "name": "called-1-0",
-      "observed": "+33000900002"
+      "observed": "+15550900002"
     }
   ],
   "legs": [

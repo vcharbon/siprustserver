@@ -13,8 +13,10 @@ use sip_retransmit::{Class, Ladder, Schedule};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Repeat {
     /// On the ladder `class` paces. `rung` is the rung currently armed and is
-    /// the whole of the ladder's state (ADR-0032 X2): no epoch anchor rides in
-    /// the replicated body, so a takeover resumes the ladder where it stood.
+    /// the whole of the ladder's state (ADR-0032 X2). A replicated body holds
+    /// the rung of the last write that changed the call; a node restoring the
+    /// call restarts the ladder from it (ADR-0014, "a counter counts writes
+    /// that change the call, not progress").
     Paced { class: Class, rung: u32 },
     /// Only when the peer provokes it — the §13.2.2.4 re-ACK of a repeated
     /// 2xx. No rung, no timer of its own.
@@ -117,6 +119,17 @@ impl RetainedEmission {
     /// The bytes and the `(host, port)` they go to — the only way out.
     pub fn wire(&self) -> (&[u8], (&str, u16)) {
         (&self.datagram, (self.dest_host.as_str(), self.dest_port))
+    }
+
+    /// Rebind the bytes to `now` iff they are `was`: the sender restated the
+    /// message on its way out after it was retained, and a repeat is the
+    /// message as it left. Returns whether it rebound.
+    pub fn restate(&mut self, was: &[u8], now: &[u8]) -> bool {
+        if self.datagram != was {
+            return false;
+        }
+        self.datagram = now.to_vec();
+        true
     }
 
     /// How this emission is repeated.

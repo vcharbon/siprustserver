@@ -1,13 +1,13 @@
 //! 4-byte big-endian length-prefix framing.
 //!
-//! The real TCP transport (slice S3) carries a *stream* of bytes; this module
+//! The real TCP transport carries a *stream* of bytes; this module
 //! delimits it into discrete frame payloads. Each message on the wire is
 //! `[u32 BE length][payload]`. [`frame_with_len_prefix`] wraps one payload;
 //! [`try_read_framed`] pops exactly one complete payload off a growing receive
-//! buffer (or returns `None` if it has not all arrived yet) — the shape S3's
-//! TCP reader loop will call.
+//! buffer (or returns `None` if it has not all arrived yet) — the shape the
+//! TCP reader loop calls.
 //!
-//! The sim transport (also S3) moves whole `Vec<u8>` frames and does **not**
+//! The sim transport moves whole `Vec<u8>` frames and does **not**
 //! need this — length-prefixing is the real-transport-only concern, unit-tested
 //! here in isolation (ADR-0011 X2 / the migration plan).
 
@@ -55,7 +55,7 @@ pub fn frame_with_len_prefix(payload: &[u8]) -> Vec<u8> {
 ///   should drop the connection (the stream is desynced or hostile). `buf` is
 ///   left intact so the caller can inspect it.
 ///
-/// This is the streaming-decoder primitive S3's real TCP reader loops on:
+/// This is the streaming-decoder primitive the real TCP reader loops on:
 /// append socket reads to `buf`, then drain frames until it returns `None`.
 pub fn try_read_framed(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, ReplFramingError> {
     if buf.len() < 4 {

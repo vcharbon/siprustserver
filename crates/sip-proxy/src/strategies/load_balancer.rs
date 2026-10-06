@@ -33,7 +33,9 @@ use crate::load_observer::{EluBand, WorkerLoadObserver};
 use crate::observability::metrics::{HmacFailureReason, ProxyMetrics};
 use crate::registry::{WorkerHealth, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
-use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+use crate::strategy::{
+    DecodeResult, Promotion, RouteParams, RoutingStrategy, SelectError, SelectOpts,
+};
 
 use super::rendezvous::{rendezvous_select, RendezvousCandidate};
 
@@ -139,7 +141,7 @@ impl LoadBalancerStrategy {
         }
         match self.registry.resolve(backup_id) {
             Some(bak) if bak.health == WorkerHealth::Alive => {
-                DecodeResult::ForwardBackup { target: bak.address, is_emergency }
+                DecodeResult::ForwardBackup { target: bak.address, is_emergency, promotion: None }
             }
             _ => DecodeResult::Unknown { is_emergency },
         }
@@ -215,12 +217,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
                 self.metrics.record_lb_emergency_bypass();
             }
             self.observer.record_own_admitted(&winner.id);
-        } else if !self.observer.try_consume_for(&winner.id, now_ms) {
+        } else if let Err(retry_after_sec) = self.observer.try_consume_for(&winner.id, now_ms) {
+            // The Retry-After is the bucket's own time to a token, read from
+            // the failed take.
             self.metrics.record_overload_rejection("bucket_empty");
-            // `retry_after_sec_for` gives a real per-bucket Retry-After (seconds
-            // until ≥1 token refills) derived from the bucket's own cap/fill
-            // rate, not a constant. See `crate::load_observer`.
-            let retry_after_sec = self.observer.retry_after_sec_for(&winner.id, now_ms).max(1);
             return Err(SelectError::RateCapExhausted {
                 worker_id: winner.id.clone(),
                 retry_after_sec,
@@ -296,8 +296,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
         };
 
         // ACK/CANCEL exemption: an alive primary owns its in-flight UAS state.
+        let forward = |fresh_primary| DecodeResult::Forward {
+            target: primary.address.clone(),
+            is_emergency,
+            fresh_primary,
+        };
         if primary.health == WorkerHealth::Alive && is_ack_or_cancel(msg) {
-            return DecodeResult::Forward { target: primary.address, is_emergency };
+            return forward(false);
         }
         if primary.health == WorkerHealth::Alive {
             // Fresh-pod guard: a respawned pod whose Ready raced ahead of its
@@ -306,33 +311,43 @@ impl RoutingStrategy for LoadBalancerStrategy {
             if let Some(first_seen) = primary.first_seen_at_ms {
                 let age = self.now_ms().saturating_sub(first_seen);
                 if age < self.config.fresh_pod_guard_ms {
-                    let promoted = self.try_backup(w_bak, is_emergency);
-                    if matches!(promoted, DecodeResult::ForwardBackup { .. }) {
-                        self.metrics.record_decode_forward_promoted("unobserved-fresh-pod");
-                        return promoted;
-                    }
-                    // No usable backup — fall through to the (likely-empty) primary.
+                    return match self.try_backup(w_bak, is_emergency) {
+                        DecodeResult::ForwardBackup { target, is_emergency, .. } => {
+                            DecodeResult::ForwardBackup {
+                                target,
+                                is_emergency,
+                                promotion: Some(Promotion::FreshPod),
+                            }
+                        }
+                        // No usable backup: the fresh primary is the only place left.
+                        _ => forward(true),
+                    };
                 }
             }
-            return DecodeResult::Forward { target: primary.address, is_emergency };
+            return forward(false);
         }
         if primary.health == WorkerHealth::Draining {
             if let Some(since) = primary.draining_since {
                 if self.now_ms().saturating_sub(since) <= self.config.drain_grace_ms {
                     // Pre-grace: in-flight re-INVITE/UPDATE/INFO completes on the primary.
-                    return DecodeResult::Forward { target: primary.address, is_emergency };
+                    return forward(false);
                 }
             }
             return self.try_backup(w_bak, is_emergency);
         }
         // dead / unknown / not-ready → backup.
-        let promoted = self.try_backup(w_bak, is_emergency);
-        if primary.health == WorkerHealth::NotReady
-            && matches!(promoted, DecodeResult::ForwardBackup { .. })
-        {
-            self.metrics.record_decode_forward_promoted("not-ready");
+        match self.try_backup(w_bak, is_emergency) {
+            DecodeResult::ForwardBackup { target, is_emergency, .. }
+                if primary.health == WorkerHealth::NotReady =>
+            {
+                DecodeResult::ForwardBackup {
+                    target,
+                    is_emergency,
+                    promotion: Some(Promotion::NotReady),
+                }
+            }
+            other => other,
         }
-        promoted
     }
 
     fn encode_stickiness(&self, target: &ProxyAddr, msg: &SipMessage) -> Option<RouteParams> {
@@ -359,5 +374,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
         params.insert("kid".into(), signed.kid);
         params.insert("sig".into(), sig);
         Some(params)
+    }
+
+    fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
+        params.get("w_pri").map(String::as_str).filter(|w| !w.is_empty())
     }
 }

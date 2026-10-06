@@ -25,13 +25,13 @@ export const SUT_ADDRESSES = ["10.0.0.1"]
 
 export const sutSet = (): SutSet => new SutSet(SUT_ADDRESSES)
 
-export const CALLER_URI = "sip:+33600000001@10.0.0.9"
-export const CALLEE_URI = "sip:+33600000004@10.0.0.1"
+export const CALLER_URI = "sip:+15556000001@10.0.0.9"
+export const CALLEE_URI = "sip:+15556000004@10.0.0.1"
 
-/** A plan with one country, so a `+33` number classifies and anything else does not. */
+/** A plan with one country, so a `+1` number classifies and anything else does not. */
 export const PLAN_DOC: PlanDoc = {
-  default_cc: "33",
-  countries: [{ cc: "33", nsn_len: 9, national_prefix: "0" }],
+  default_cc: "1",
+  countries: [{ cc: "1", nsn_len: 10, national_prefix: "0" }],
   trunks: [],
   private_len: { min: 4, max: 6 },
   max_composed_prefix: 8,
@@ -75,6 +75,19 @@ interface Common {
   readonly hop?: number
 }
 
+/** One Via, as a fixture states it: the element that pushed it and its branch. */
+export interface ViaOf {
+  readonly sentBy: string
+  readonly branch: string
+}
+
+/** The Via chain a message carries, top first, as `sipflow` reports it beside the datagram. */
+const viaChain = (top: ViaOf, below: ReadonlyArray<ViaOf> = []): ReadonlyArray<Flows.Via> =>
+  [top, ...below].map((v) => ({ sent_by: v.sentBy, transport: "UDP", branch: v.branch }))
+
+const viaLines = (vias: ReadonlyArray<Flows.Via>): ReadonlyArray<string> =>
+  vias.map((v) => `Via: SIP/2.0/${v.transport} ${v.sent_by};branch=${v.branch}`)
+
 export const request = (
   o: Common & {
     readonly method: string
@@ -87,12 +100,18 @@ export const request = (
     readonly headers?: ReadonlyArray<string>
     /** The Via branch, where the message is not the first of its transaction. */
     readonly branch?: string
+    /** The Vias under the sender's own, top first: the elements it forwards for. */
+    readonly below?: ReadonlyArray<ViaOf>
     readonly body?: { readonly contentType: string; readonly text: string }
   }
 ): Flows.Msg => {
   const ruri = o.ruri ?? CALLEE_URI
   const fromUri = o.fromUri ?? CALLER_URI
   const fromTag = o.fromTag ?? `from-${o.callId}`
+  const vias = viaChain(
+    { sentBy: o.src, branch: o.branch ?? `z9hG4bK-${o.callId}-${o.seq}-${o.method}` },
+    o.below
+  )
   return {
     ts_us: o.ts_ms * 1000,
     src: o.src,
@@ -102,7 +121,7 @@ export const request = (
     probe: 0,
     raw:
       datagram(`${o.method} ${ruri} SIP/2.0`, [
-        `Via: SIP/2.0/UDP ${o.src};branch=${o.branch ?? `z9hG4bK-${o.callId}-${o.seq}-${o.method}`}`,
+        ...viaLines(vias),
         `From: <${fromUri}>;tag=${fromTag}`,
         `To: <${ruri}>${o.toTag === undefined ? "" : `;tag=${o.toTag}`}`,
         `Call-ID: ${o.callId}`,
@@ -115,6 +134,7 @@ export const request = (
     ...(o.body === undefined
       ? {}
       : { body: { content_type: o.body.contentType, len: o.body.text.length } }),
+    via: vias,
     identities: {
       from: identityOf(fromUri),
       to: identityOf(ruri),
@@ -144,11 +164,19 @@ export const response = (
     readonly headers?: ReadonlyArray<string>
     /** An SDP body, for the steps that store one. */
     readonly sdp?: string
+    /** The top Via's branch: the request's, where it named its own. */
+    readonly branch?: string
+    /** The request's Vias under its sender's, top first. */
+    readonly below?: ReadonlyArray<ViaOf>
   }
 ): Flows.Msg => {
   const fromUri = o.fromUri ?? CALLER_URI
   const toUri = o.toUri ?? CALLEE_URI
   const fromTag = o.fromTag ?? `from-${o.callId}`
+  const vias = viaChain(
+    { sentBy: o.dst, branch: o.branch ?? `z9hG4bK-${o.callId}-${o.seq}-${o.cseqMethod}` },
+    o.below
+  )
   return {
     ts_us: o.ts_ms * 1000,
     src: o.src,
@@ -157,7 +185,7 @@ export const response = (
     retx: false,
     probe: 0,
     raw: datagram(`SIP/2.0 ${o.status} ${o.reason}`, [
-      `Via: SIP/2.0/UDP ${o.dst};branch=z9hG4bK-${o.callId}-${o.seq}-${o.cseqMethod}`,
+      ...viaLines(vias),
       `From: <${fromUri}>;tag=${fromTag}`,
       `To: <${toUri}>${o.toTag === undefined ? "" : `;tag=${o.toTag}`}`,
       `Call-ID: ${o.callId}`,
@@ -169,6 +197,7 @@ export const response = (
     ...(o.sdp === undefined
       ? {}
       : { body: { content_type: "application/sdp", len: o.sdp.length } }),
+    via: vias,
     identities: { from: identityOf(fromUri), to: identityOf(toUri) },
     summary: {
       kind: "response",
@@ -356,6 +385,99 @@ export const reInviteFlows = (): Flows.FlowsDoc =>
     [{ legs: [0] }]
   )
 
+/** The two dialogs each leg of {@link twoForksAnsweredFlows} is answered under. */
+export const FORK_TAGS = {
+  caller: { first: "sut-fork-a", second: "sut-fork-b" },
+  callee: { first: "callee-fork-a", second: "callee-fork-b" }
+} as const
+
+/**
+ * One INVITE answered 2xx under TWO To-tags, on both legs of a relayed call:
+ * two forks ring, then each answers. RFC 3261 §13.2.2.4 makes every 2xx to the
+ * INVITE a dialog of its own that the UAC ACKs, so each leg carries two
+ * dialog-creating finals and two confirming ACKs; the caller BYEs the first
+ * dialog as soon as it is confirmed (seq 2), keeps the second, re-INVITEs it
+ * (seq 3), whose 200 and ACK sit inside a dialog already up, and BYEs it
+ * (seq 4). The callee leg carries the same shape from the answering side.
+ */
+export const twoForksAnsweredFlows = (): Flows.FlowsDoc => {
+  const a = FORK_TAGS.caller
+  const b = FORK_TAGS.callee
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 200, toTag: a.first }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 400, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: a.first }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_010, toTag: a.first, branch: "z9hG4bK-ack-a-first" }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_200, toTag: a.second }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_210, toTag: a.second, branch: "z9hG4bK-ack-a-second" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: CALLER, dst: SUT, ts_ms: 1_300, toTag: a.first }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 1_305, toTag: a.first }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 3_000, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 3_010, toTag: a.second }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "ACK", src: CALLER, dst: SUT, ts_ms: 3_015, toTag: a.second, branch: "z9hG4bK-ack-a-reinvite" }),
+        request({ callId: CALLER_CALL_ID, seq: 4, method: "BYE", src: CALLER, dst: SUT, ts_ms: 9_000, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 4, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 9_005, toTag: a.second })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10 }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 190, toTag: b.first }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 390, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: b.first }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_020, toTag: b.first, branch: "z9hG4bK-ack-b-first" }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 1_190, toTag: b.second }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_220, toTag: b.second, branch: "z9hG4bK-ack-b-second" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 1_310, toTag: b.first }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 1_315, toTag: b.first }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 3_005, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 3_008, toTag: b.second }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 3_020, toTag: b.second, branch: "z9hG4bK-ack-b-reinvite" }),
+        request({ callId: CALLEE_CALL_ID, seq: 4, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 9_010, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 4, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 9_015, toTag: b.second })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
+/**
+ * A re-INVITE sent OVER an un-ACKed 2xx, on both legs of a relayed call. The
+ * caller re-INVITEs (seq 2) before ACKing the dialog-creating 200 (seq 1); the
+ * platform answers 491 (RFC 3261 §14.1), the caller ACKs the 491 — that ACK is
+ * the re-INVITE transaction's (§17.1.1.3) — and only then ACKs the 200, which
+ * is the ACK that confirms the dialog (§13.2.2.4). The callee leg carries the
+ * same shape from the answering side: the platform re-INVITEs before its own
+ * ACK, the callee answers 491, and the 200's ACK is the last of the two.
+ */
+export const reInviteOverUnackedFinalFlows = (): Flows.FlowsDoc =>
+  doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 1_020, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 491, reason: "Request Pending", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_030, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_035, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_200, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: CALLER, dst: SUT, ts_ms: 9_000, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 9_005, toTag: "sut-tag" })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10 }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 1_025, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 491, reason: "Request Pending", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 1_028, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_040, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_210, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 9_010, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 9_015, toTag: "callee-tag" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+
 /**
  * The delayed offer, and the two ACK classes beside it. The re-INVITE at seq 2
  * carries NO offer, so the answer rides the ACK that confirms its 200 (RFC 3261
@@ -448,7 +570,7 @@ export const orphanBLegFlows = (): Flows.FlowsDoc =>
   )
 
 /**
- * TWO calls the capture keyed onto ONE Call-ID, as `capture_5e3fd853` shows
+ * TWO calls the capture keyed onto ONE Call-ID, as a captured trace shows
  * them: the first arrives on the SUT's :5060 node, is answered 404 and ACKed,
  * and the second arrives 40 ms later on its :5061 node — a fresh dialog with its
  * own outbound leg, not a second attempt of the first. Both ingress dialogs live
@@ -640,8 +762,8 @@ export const unackedProvisionalFlows = (): Flows.FlowsDoc => {
 export const rerouteFlows = (): Flows.FlowsDoc => {
   const FIRST = "attempt-1-call-id"
   const SECOND = "attempt-2-call-id"
-  const firstCallee = "sip:+33600000004@10.0.0.1"
-  const secondCallee = "sip:+33600000005@10.0.0.1"
+  const firstCallee = "sip:+15556000004@10.0.0.1"
+  const secondCallee = "sip:+15556000005@10.0.0.1"
   return doc(
     [
       leg(FIRST, oneHop(SUT, CALLEE), [
@@ -665,8 +787,8 @@ export const rerouteFlows = (): Flows.FlowsDoc => {
 }
 
 /**
- * The SUT HAIRPINS a call through the network, as
- * `capture_019089e6-b01a-432d-9d5c-41fecd2979a3` shows it: the b-leg it dials
+ * The SUT HAIRPINS a call through the network, as a captured trace shows it:
+ * the b-leg it dials
  * out (leg 1) is routed straight back to it, so the SAME Call-ID opens a dialog
  * in each direction at the one boundary hop, and the SUT then dials leg 2 for
  * the transit it made of its own INVITE.
@@ -705,8 +827,7 @@ export const hairpinLoopbackFlows = (): Flows.FlowsDoc => {
 }
 
 /**
- * A plain call and a hairpin in ONE capture, as
- * `capture_019089e6-b01a-432d-9d5c-41fecd2979a3` holds them: two families, the
+ * A plain call and a hairpin in ONE capture: two families, the
  * first cut as a case and the second refused. The selection file names both, and
  * a name is claimed once — so the refusal must not read the first family's.
  */
@@ -760,3 +881,312 @@ export const secondIngressTailFlows = (): Flows.FlowsDoc => {
     [{ legs: [0] }]
   )
 }
+
+/**
+ * A caller that CANCELs its INVITE and, once the 487 is ACKed, re-offers an
+ * INVITE on the same Call-ID, From tag and CSeq under a new branch: a new
+ * transaction (RFC 3261 §8.1.1.7, §17.2.3) opening a new dialog. Both INVITEs
+ * reach one SUT socket, so the cut anchors one vantage on the first and the
+ * second lands on it. The SUT dialled the callee for the first and answers the
+ * second 404.
+ */
+export const reofferAfterCancelFlows = (): Flows.FlowsDoc => {
+  const FIRST = "z9hG4bK-first-offer"
+  const AGAIN = "z9hG4bK-second-offer"
+  const OUT = "z9hG4bK-sut-out"
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: FIRST }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 5, branch: FIRST }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 200, toTag: "sut-tag", branch: FIRST }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "CANCEL", src: CALLER, dst: SUT, ts_ms: 1_000, branch: FIRST }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "CANCEL", src: SUT, dst: CALLER, ts_ms: 1_010, toTag: "sut-tag", branch: FIRST }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 487, reason: "Request Terminated", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_100, toTag: "sut-tag", branch: FIRST }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_105, toTag: "sut-tag", branch: FIRST }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 3_100, branch: AGAIN }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 3_105, branch: AGAIN }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 3_150, toTag: "sut-tag-2", branch: AGAIN }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 3_155, toTag: "sut-tag-2", branch: AGAIN })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10, branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 190, toTag: "callee-tag", branch: OUT }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "CANCEL", src: SUT, dst: CALLEE, ts_ms: 1_020, branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "CANCEL", src: CALLEE, dst: SUT, ts_ms: 1_025, toTag: "callee-tag", branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 487, reason: "Request Terminated", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 1_090, toTag: "callee-tag", branch: OUT }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_095, toTag: "callee-tag", branch: OUT })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
+/**
+ * The redirect retry of RFC 3261 §8.1.3.4: the SUT answers the caller's INVITE
+ * 302, and the caller retries on the same Call-ID and From tag with the CSeq
+ * one higher and a new branch, at the same SUT socket. The retry is answered
+ * and dialled out, and the call ends by BYE.
+ */
+export const redirectRetryFlows = (): Flows.FlowsDoc => {
+  const FIRST = "z9hG4bK-before-redirect"
+  const AGAIN = "z9hG4bK-after-redirect"
+  const OUT = "z9hG4bK-sut-out"
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: FIRST }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 302, reason: "Moved Temporarily", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 40, toTag: "sut-tag", branch: FIRST, headers: [`Contact: <${CALLEE_URI}>`] }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 45, toTag: "sut-tag", branch: FIRST }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 60, branch: AGAIN }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 250, toTag: "sut-tag-2", branch: AGAIN }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: "sut-tag-2", branch: AGAIN }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_005, toTag: "sut-tag-2" }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: CALLER, dst: SUT, ts_ms: 5_000, toTag: "sut-tag-2" }),
+        response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 5_005, toTag: "sut-tag-2" })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 70, branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 240, toTag: "callee-tag", branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: "callee-tag", branch: OUT }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_008, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 5_010, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 5_015, toTag: "callee-tag" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
+/**
+ * ONE request of the caller reaching the SUT twice through a proxy: the proxy
+ * forwards it, takes the SUT's 503, and forwards the same request again
+ * (RFC 3261 §16.7 recursion) under a fresh Via of its own over the caller's
+ * kept one. The second copy has no To tag and a new top branch after a final,
+ * and its bottom Via, sent-by and branch, is the first copy's: no new
+ * transaction of the caller's. The SUT answers it and the call ends by BYE.
+ * `secondOrigin` replaces the second copy's bottom Via.
+ */
+export const proxyRetriedCopyFlows = (
+  secondOrigin: ViaOf = { sentBy: CALLER, branch: "z9hG4bK-caller-own" }
+): Flows.FlowsDoc => {
+  const PROXY = OTHER
+  const CALLERS = { sentBy: CALLER, branch: "z9hG4bK-caller-own" }
+  const OUT = "z9hG4bK-sut-out"
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(PROXY, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: PROXY, dst: SUT, ts_ms: 0, branch: "z9hG4bK-proxy-1", below: [CALLERS] }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 503, reason: "Service Unavailable", cseqMethod: "INVITE", src: SUT, dst: PROXY, ts_ms: 40, toTag: "sut-tag", branch: "z9hG4bK-proxy-1", below: [CALLERS] }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: PROXY, dst: SUT, ts_ms: 45, toTag: "sut-tag", branch: "z9hG4bK-proxy-1" }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: PROXY, dst: SUT, ts_ms: 60, branch: "z9hG4bK-proxy-2", below: [secondOrigin] }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: PROXY, ts_ms: 250, toTag: "sut-tag-2", branch: "z9hG4bK-proxy-2", below: [CALLERS] }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: PROXY, ts_ms: 1_000, toTag: "sut-tag-2", branch: "z9hG4bK-proxy-2", below: [CALLERS] }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: PROXY, dst: SUT, ts_ms: 1_005, toTag: "sut-tag-2", branch: "z9hG4bK-proxy-ack", below: [{ sentBy: CALLER, branch: "z9hG4bK-caller-ack" }] }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: PROXY, dst: SUT, ts_ms: 5_000, toTag: "sut-tag-2", branch: "z9hG4bK-proxy-bye", below: [{ sentBy: CALLER, branch: "z9hG4bK-caller-bye" }] }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: PROXY, ts_ms: 5_005, toTag: "sut-tag-2", branch: "z9hG4bK-proxy-bye", below: [{ sentBy: CALLER, branch: "z9hG4bK-caller-bye" }] })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 70, branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 240, toTag: "callee-tag", branch: OUT }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: "callee-tag", branch: OUT }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_008, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 5_010, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 5_015, toTag: "callee-tag" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
+/** `flows` with one message rewritten: the shape a negative fixture varies. */
+export const withMsg = (
+  flows: Flows.FlowsDoc,
+  at: { readonly leg: number; readonly msg: number },
+  rewrite: (msg: Flows.Msg) => Flows.Msg
+): Flows.FlowsDoc => ({
+  ...flows,
+  legs: flows.legs.map((l, i) =>
+    i !== at.leg ? l : { ...l, msgs: l.msgs.map((m, j) => (j === at.msg ? rewrite(m) : m)) }
+  )
+})
+
+/** A message whose Via chain the vantage did not carry. */
+export const withoutVia = (msg: Flows.Msg): Flows.Msg => {
+  const { via: _dropped, ...rest } = msg
+  return rest as Flows.Msg
+}
+
+/** A caller leg at the SUT and nothing else: the SUT answers every INVITE itself. */
+const callerOnly = (msgs: ReadonlyArray<Flows.Msg>): Flows.FlowsDoc =>
+  doc([leg(CALLER_CALL_ID, oneHop(CALLER, SUT), msgs)], [{ legs: [0] }])
+
+/**
+ * A caller retrying under a NEW From tag on the same Call-ID, the CSeq one
+ * higher and a new branch, after the SUT's 404: a second dialog on the same
+ * Call-ID (RFC 3261 §12: a dialog is the Call-ID and both tags).
+ */
+export const newFromTagRetryFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, fromTag: "first-tag", branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 20, fromTag: "first-tag", toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 25, fromTag: "first-tag", toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 1_300, fromTag: "second-tag", branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 2, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_320, fromTag: "second-tag", toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_325, fromTag: "second-tag", toTag: "sut-tag-2", branch: "z9hG4bK-b" })
+  ])
+
+/**
+ * A caller opening a second dialog while its first INVITE has drawn only a
+ * provisional: the first transaction never ends at this hop, the second is
+ * answered and the call ends by BYE.
+ */
+export const reofferWhileRingingFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 50, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 400, branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 900, toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 905, toTag: "sut-tag-2" }),
+    request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: CALLER, dst: SUT, ts_ms: 5_000, toTag: "sut-tag-2" }),
+    response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 5_005, toTag: "sut-tag-2" })
+  ])
+
+/**
+ * A caller whose first dialog is answered and torn down, and which then opens
+ * another on the same Call-ID and From tag with a tagless INVITE.
+ */
+export const reofferAfterAnsweredFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 500, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 505, toTag: "sut-tag" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: CALLER, dst: SUT, ts_ms: 3_000, toTag: "sut-tag" }),
+    response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 3_005, toTag: "sut-tag" }),
+    request({ callId: CALLER_CALL_ID, seq: 3, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 4_000, branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 3, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 4_020, toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 3, method: "ACK", src: CALLER, dst: SUT, ts_ms: 4_025, toTag: "sut-tag-2", branch: "z9hG4bK-b" })
+  ])
+
+/**
+ * A caller that INVITEs (404), INVITEs again on a new branch (rung, never
+ * finalled at this hop) and a third time: the third opener follows the second,
+ * which drew no final.
+ */
+export const thriceOfferedFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 20, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 25, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 100, branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 2, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 150, toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 3, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 400, branch: "z9hG4bK-c" }),
+    response({ callId: CALLER_CALL_ID, seq: 3, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 420, toTag: "sut-tag-3", branch: "z9hG4bK-c" }),
+    request({ callId: CALLER_CALL_ID, seq: 3, method: "ACK", src: CALLER, dst: SUT, ts_ms: 425, toTag: "sut-tag-3", branch: "z9hG4bK-c" })
+  ])
+
+/**
+ * A caller whose INVITE drew a 404 and which then sends an INVITE carrying
+ * the To tag of that 404: a request inside a dialog that never existed, not a
+ * dialog-opening one. The SUT answers 481.
+ */
+export const taggedInviteAfterFinalFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 20, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 25, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 100, toTag: "sut-tag", branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 2, status: 481, reason: "Call/Transaction Does Not Exist", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 110, toTag: "sut-tag", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 115, toTag: "sut-tag", branch: "z9hG4bK-b" })
+  ])
+
+/**
+ * The SUT following a redirect on its OWN outgoing leg: the callee answers
+ * 302, and the SUT retries on the same Call-ID and From tag with the CSeq one
+ * higher and a new branch (RFC 3261 §8.1.3.4). The callee answers the retry
+ * and the call ends by BYE from the caller.
+ */
+export const sutRedirectRetryFlows = (): Flows.FlowsDoc => {
+  const SUT_TAG = "sut-out-tag"
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 260, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_005, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: CALLER, dst: SUT, ts_ms: 5_000, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 5_005, toTag: "sut-tag" })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10, fromTag: SUT_TAG, branch: "z9hG4bK-out-a" }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 302, reason: "Moved Temporarily", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 30, fromTag: SUT_TAG, toTag: "callee-tag", branch: "z9hG4bK-out-a", headers: [`Contact: <${CALLEE_URI}>`] }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 35, fromTag: SUT_TAG, toTag: "callee-tag", branch: "z9hG4bK-out-a" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 40, fromTag: SUT_TAG, branch: "z9hG4bK-out-b" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 250, fromTag: SUT_TAG, toTag: "callee-tag-2", branch: "z9hG4bK-out-b" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, fromTag: SUT_TAG, toTag: "callee-tag-2", branch: "z9hG4bK-out-b" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_008, fromTag: SUT_TAG, toTag: "callee-tag-2" }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 5_010, fromTag: SUT_TAG, toTag: "callee-tag-2" }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 5_015, fromTag: SUT_TAG, toTag: "callee-tag-2" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
+/** `flows` as a vantage that carried no Via on any message. */
+export const stripVias = (flows: Flows.FlowsDoc): Flows.FlowsDoc => ({
+  ...flows,
+  legs: flows.legs.map((l) => ({ ...l, msgs: l.msgs.map(withoutVia) }))
+})
+
+/**
+ * Three openers on one CSeq, each on its own branch: the first only rings, the
+ * second draws a 404, the third follows it. A final names its transaction by
+ * the branch (RFC 3261 §17.1.3), so the 404 ends the second, not the first.
+ */
+export const sameCseqOffersFlows = (): Flows.FlowsDoc =>
+  callerOnly([
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0, branch: "z9hG4bK-a" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 10, toTag: "sut-tag", branch: "z9hG4bK-a" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 100, branch: "z9hG4bK-b" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 120, toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 125, toTag: "sut-tag-2", branch: "z9hG4bK-b" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 200, branch: "z9hG4bK-c" }),
+    response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 220, toTag: "sut-tag-3", branch: "z9hG4bK-c" }),
+    request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 225, toTag: "sut-tag-3", branch: "z9hG4bK-c" })
+  ])
+
+/**
+ * Four openers under two From tags and three CSeqs, meant to be read with no
+ * Via: a final then names its transaction by CSeq AND From tag. The first
+ * (tag a, CSeq 1) only rings; the second (tag b, CSeq 1) and the third (tag a,
+ * CSeq 2) draw a 404; the fourth (tag a, CSeq 3) follows.
+ */
+export const twoTagOffersFlows = (): Flows.FlowsDoc => {
+  const offer = (tag: string, seq: number, at: number, status?: number): ReadonlyArray<Flows.Msg> => [
+    request({ callId: CALLER_CALL_ID, seq, method: "INVITE", src: CALLER, dst: SUT, ts_ms: at, fromTag: tag, branch: `z9hG4bK-${tag}-${seq}` }),
+    ...(status === undefined
+      ? [response({ callId: CALLER_CALL_ID, seq, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: at + 10, fromTag: tag, toTag: `sut-${tag}-${seq}`, branch: `z9hG4bK-${tag}-${seq}` })]
+      : [
+        response({ callId: CALLER_CALL_ID, seq, status, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: at + 20, fromTag: tag, toTag: `sut-${tag}-${seq}`, branch: `z9hG4bK-${tag}-${seq}` }),
+        request({ callId: CALLER_CALL_ID, seq, method: "ACK", src: CALLER, dst: SUT, ts_ms: at + 25, fromTag: tag, toTag: `sut-${tag}-${seq}`, branch: `z9hG4bK-${tag}-${seq}` })
+      ])
+  ]
+  return callerOnly([
+    ...offer("a", 1, 0),
+    ...offer("b", 1, 100, 404),
+    ...offer("a", 2, 200, 404),
+    ...offer("a", 3, 300, 404)
+  ])
+}
+
+/** Three openers on CSeq 1, each on its own branch, each answered 404 and ACKed. */
+export const repeatedNotFoundFlows = (): Flows.FlowsDoc =>
+  callerOnly(
+    ["a", "b", "c"].flatMap((b, i) => [
+      request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: i * 100, branch: `z9hG4bK-${b}` }),
+      response({ callId: CALLER_CALL_ID, seq: 1, status: 404, reason: "Not Found", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: i * 100 + 20, toTag: `sut-${b}`, branch: `z9hG4bK-${b}` }),
+      request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: i * 100 + 25, toTag: `sut-${b}`, branch: `z9hG4bK-${b}` })
+    ])
+  )

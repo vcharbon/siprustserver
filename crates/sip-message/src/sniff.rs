@@ -119,6 +119,13 @@ pub fn cseq_value(raw: &[u8]) -> String {
     }
 }
 
+/// The CSeq method token, uppercased; `None` when the CSeq is absent or
+/// carries no method.
+pub fn cseq_method_token(raw: &[u8]) -> Option<String> {
+    let line = cseq_line(raw)?;
+    line.split_whitespace().nth(1).map(str::to_ascii_uppercase)
+}
+
 /// The CSeq method mapped to a BOUNDED static label — safe as a low-cardinality
 /// metrics label AND usable for method comparison (every RFC 3261/3262/3515
 /// method maps to itself). `"none"` when absent, `"other"` for an unknown
@@ -304,6 +311,23 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
     None
 }
 
+/// The `branch` of every Via, top first, comma folds split (§7.3.1): the
+/// transactions a request was forwarded on, its sender's own on top. A Via
+/// naming no branch yields an empty entry, so positions stay those of the
+/// stack.
+pub fn via_branches(raw: &[u8]) -> Vec<String> {
+    header_rows_compact(raw, "via")
+        .iter()
+        .flat_map(|row| row.split(',').map(str::to_string).collect::<Vec<_>>())
+        .map(|via| {
+            let Some(pos) = via.find("branch=") else { return String::new() };
+            let rest = &via[pos + "branch=".len()..];
+            let end = rest.find([';', ' ', '\t']).unwrap_or(rest.len());
+            rest[..end].trim().to_string()
+        })
+        .collect()
+}
+
 /// Every row of `name`, resolving the RFC 3261 §7.3.3 compact spelling: a
 /// scanner asked for `Supported` also reads the `k` rows the wire may carry.
 fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
@@ -377,19 +401,44 @@ pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
 /// the header block (RFC 3261 §7). `None` where no such line is present — the
 /// head is unterminated and the datagram states nothing about a body.
 ///
-/// The empty line is CRLFCRLF on the wire; a bare LFLF is accepted the way the
-/// lenient parser accepts it, so a capture normalised to LF still reads. The
-/// declared `Content-Length` is NOT applied: this returns what the datagram
-/// carried, and a consumer that needs the declared length reads
-/// [`content_length`].
+/// ONE head-end rule ([`head_end`]): the arm a document writes a datagram in,
+/// the body layout it states and the check that reads them back all measure
+/// the head here, so they cannot disagree. The declared `Content-Length` is
+/// NOT applied: this returns what the datagram carried, and a consumer that
+/// needs the declared length reads [`content_length`].
 pub fn body(raw: &[u8]) -> Option<&[u8]> {
-    let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
-    let lf = raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
-    let cut = match (crlf, lf) {
-        (Some(a), Some(b)) => a.min(b),
-        (a, b) => a.or(b)?,
-    };
-    Some(&raw[cut..])
+    head_end(raw).map(|end| &raw[end..])
+}
+
+/// The offset just past the empty line that ends the header block (RFC 3261
+/// §7), `None` where the datagram has none. CRLF is the line terminator
+/// (§25.1); a bare CR or LF is accepted as the parser accepts it — a stated
+/// leniency, so a capture normalised to LF still reads and the parser and
+/// this reader end the head at the same byte.
+pub fn head_end(raw: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    loop {
+        if i >= raw.len() {
+            return None;
+        }
+        let line_start = i;
+        while i < raw.len() && raw[i] != b'\r' && raw[i] != b'\n' {
+            i += 1;
+        }
+        let empty = i == line_start;
+        if i < raw.len() && raw[i] == b'\r' {
+            i += 1;
+        }
+        if i < raw.len() && raw[i] == b'\n' {
+            i += 1;
+        }
+        if empty {
+            return Some(i);
+        }
+        if i == line_start {
+            return None;
+        }
+    }
 }
 
 /// The option tags a set-like header lists (`Require`, `Supported`,
@@ -428,6 +477,34 @@ pub fn name_addr_uri(raw: &[u8], name: &str) -> Option<String> {
     // this read discards.
     let addr = FromHeader::parse(&crate::sip_str::SipStr::owned(&row)).ok()?;
     Some(addr.uri().to_string())
+}
+
+/// The user part of the `From` URI (compact `f` included), or `None` when the
+/// header is absent, no reader accepts it, or its URI names no user. The
+/// display name, the URI host and parameters, and the header's own `;tag=`
+/// never affect the result; the user reads as [`address_user`] reads it
+/// (percent-unescaped, a `tel:` subscriber number without its parameters),
+/// and compares as written: RFC 3966 visual separators (`-`, `.`, `(`, `)`)
+/// are kept, so `+1-555-010` is not `+1555010`.
+pub fn from_user(raw: &[u8]) -> Option<String> {
+    address_user(&header_rows_compact(raw, "From").into_iter().next()?)
+}
+
+/// The URI user of an address value — a `name-addr` or `addr-spec`, as a
+/// From or To header carries it, header parameters allowed — or `None` when
+/// no reader accepts it or its URI names no user. The user is returned
+/// percent-unescaped, the form two users compare in (RFC 3261 §19.1.4); a
+/// `tel:` URI's user is its subscriber number, before any `;` parameter.
+pub fn address_user(value: &str) -> Option<String> {
+    use crate::header::{From as FromHeader, HeaderValue};
+    let addr = FromHeader::parse(&crate::sip_str::SipStr::owned(value)).ok()?;
+    let uri = addr.uri();
+    let user = if uri.scheme().eq_ignore_ascii_case("tel") {
+        uri.host().split(';').next().unwrap_or("")
+    } else {
+        uri.user()?
+    };
+    (!user.is_empty()).then(|| crate::param_codec::decode_param(user))
 }
 
 /// What one URI states about where a message goes: the canonical text, the
@@ -563,6 +640,38 @@ pub fn via_rport(raw: &[u8]) -> ViaRport {
     ViaRport::Absent
 }
 
+/// The originating hop of a request, read off its BOTTOM-most Via: every
+/// proxy pushes its own Via above the ones it received (RFC 3261 §16.6 step 8),
+/// so the bottom one is the originator's as it sent the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginVia {
+    /// Its sent-by.
+    pub sent_by: crate::header::SentBy,
+    /// Its `branch`, or `None` where it carries none.
+    pub branch: Option<String>,
+    /// How many Via values the request carried: one per hop it crossed.
+    pub depth: usize,
+}
+
+/// The bottom-most Via of `raw` as an [`OriginVia`], or `None` where the
+/// message carries no Via or one of its Via rows does not parse.
+pub fn bottom_via(raw: &[u8]) -> Option<OriginVia> {
+    use crate::header::{HeaderValue, SentBy, Via};
+    let mut depth = 0;
+    let mut bottom = None;
+    for row in header_rows_compact(raw, "via") {
+        let vias = Via::parse_line(&crate::sip_str::SipStr::owned(&row)).ok()?;
+        depth += vias.len();
+        bottom = vias.last().cloned().or(bottom);
+    }
+    let bottom = bottom?;
+    Some(OriginVia {
+        sent_by: SentBy::of(&bottom),
+        branch: bottom.branch().map(str::to_string),
+        depth,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +693,15 @@ mod tests {
             "body lines read the same way"
         );
         assert_eq!(line_at(raw, raw.len()), None, "past the end names nothing");
+    }
+
+    #[test]
+    fn via_branches_read_the_whole_stack_top_first() {
+        let raw = b"BYE sip:x SIP/2.0\r\n\
+            Via: SIP/2.0/UDP p;branch=z9hG4bK-p, SIP/2.0/UDP q;received=1.2.3.4\r\n\
+            v: SIP/2.0/UDP a;branch=z9hG4bK-a;rport\r\n\
+            CSeq: 2 BYE\r\n\r\n";
+        assert_eq!(via_branches(raw), vec!["z9hG4bK-p", "", "z9hG4bK-a"]);
     }
 
     #[test]
@@ -821,6 +939,22 @@ Content-Length: 0\r\n\r\n"
     }
 
     #[test]
+    fn bottom_via_reads_the_last_value_of_the_last_row() {
+        let raw = b"INVITE sip:x SIP/2.0\r\n\
+                    Via: SIP/2.0/UDP p.example;branch=z9-p\r\n\
+                    v: SIP/2.0/TCP q.example:5070;branch=z9-q, SIP/2.0/UDP UA.Example:5062;branch=z9-ua\r\n\r\n";
+        let origin = bottom_via(raw).expect("a bottom Via");
+        let sent_by = origin.sent_by.as_borrowed();
+        assert_eq!((sent_by.host(), sent_by.port()), ("UA.Example", Some(5062)));
+        assert_eq!((origin.branch.as_deref(), origin.depth), (Some("z9-ua"), 3));
+        let one = b"INVITE sip:x SIP/2.0\r\nVia: SIP/2.0/UDP ua.example\r\n\r\n";
+        let origin = bottom_via(one).expect("one Via is its own bottom");
+        assert_eq!(origin.branch, None);
+        assert_eq!((origin.sent_by.as_borrowed().host(), origin.depth), ("ua.example", 1));
+        assert_eq!(bottom_via(b"ACK sip:x SIP/2.0\r\n\r\n"), None);
+    }
+
+    #[test]
     fn via_branch_takes_topmost_via_only() {
         let raw = b"INVITE sip:x SIP/2.0\r\nVia: SIP/2.0/UDP a;branch=z9-top\r\nVia: SIP/2.0/UDP b;branch=z9-bot\r\n\r\n";
         assert_eq!(via_branch(raw).as_deref(), Some("z9-top"));
@@ -851,6 +985,60 @@ Content-Length: 0\r\n\r\n"
             "a bare addr-spec's `;tag=` is the header's parameter, not the URI's",
         );
         assert_eq!(name_addr_uri(raw, "Contact"), None, "an absent header reads None");
+    }
+
+    #[test]
+    fn address_user_reads_an_address_value() {
+        assert_eq!(address_user("sip:+15550100@pool.example").as_deref(), Some("+15550100"));
+        assert_eq!(
+            address_user("\"Pool\" <sip:+15550100@pool.example>;tag=1").as_deref(),
+            Some("+15550100")
+        );
+        assert_eq!(address_user("sip:pool.example"), None, "a userless URI");
+        assert_eq!(address_user("not an address"), None);
+    }
+
+    /// The user compares unescaped (RFC 3261 §19.1.4), and a tel URI's user is
+    /// its subscriber number before any `;` parameter.
+    #[test]
+    fn address_user_unescapes_and_reads_tel_uris() {
+        assert_eq!(address_user("sip:%2B1555010@h").as_deref(), Some("+1555010"));
+        assert_eq!(address_user("<sip:%2b1555%30%31@h>;tag=1").as_deref(), Some("+155501"));
+        assert_eq!(address_user("tel:+1555010").as_deref(), Some("+1555010"));
+        // Visual separators stay: the user is compared as written.
+        assert_eq!(address_user("tel:+1-555-010").as_deref(), Some("+1-555-010"));
+        assert_eq!(address_user("sip:+1-555-010@h").as_deref(), Some("+1-555-010"));
+        assert_eq!(
+            address_user("\"T\" <tel:+1555010;phone-context=example.com>;tag=2").as_deref(),
+            Some("+1555010")
+        );
+        assert_eq!(
+            from_user(b"INVITE sip:x@h SIP/2.0\r\nf: <tel:+1555010>;tag=3\r\n\r\n").as_deref(),
+            Some("+1555010")
+        );
+    }
+
+    #[test]
+    fn from_user_reads_the_from_uri_user_in_every_spelling() {
+        let with = |from: &str| {
+            format!("INVITE sip:x@h SIP/2.0\r\n{from}\r\nTo: <sip:other@h>\r\n\r\n").into_bytes()
+        };
+        let cases = [
+            ("From: <sip:+1555010@a.example>;tag=1", "name-addr"),
+            ("From: sip:+1555010@a.example;tag=1", "bare addr-spec"),
+            ("f: <sip:+1555010@a.example>;tag=1", "compact form"),
+            ("From: \"Caller Name\" <sip:+1555010@b.example:5070>;tag=9", "quoted display name"),
+            ("From: Caller <sip:+1555010@c.example;user=phone>;tag=x", "token display name"),
+        ];
+        for (row, shape) in cases {
+            assert_eq!(from_user(&with(row)).as_deref(), Some("+1555010"), "{shape}: {row}");
+        }
+        assert_eq!(from_user(&with("From: <sip:a.example>;tag=1")), None, "a userless URI");
+        assert_eq!(
+            from_user(b"INVITE sip:x@h SIP/2.0\r\nTo: <sip:+1555010@h>\r\n\r\n"),
+            None,
+            "an absent From reads None, whatever the To carries",
+        );
     }
 
     #[test]
@@ -969,5 +1157,27 @@ Content-Length: 0\r\n\r\n"
         );
         assert_eq!(body(b"INVITE sip:b SIP/2.0\nl: 3\n\nv=0"), Some(&b"v=0"[..]), "bare LF");
         assert_eq!(body(b"INVITE sip:b SIP/2.0\r\nCSeq: 1 INVITE\r\n"), None, "unterminated");
+    }
+
+    /// ONE head-end rule: an empty line terminated by CR, LF or CRLF ends the
+    /// head, exactly where the parser's scanner ends its header block, so the
+    /// arm choice, the layout and the decode check never disagree on where a
+    /// body starts.
+    #[test]
+    fn the_head_ends_where_the_parser_s_scanner_ends_it() {
+        use crate::parser::custom::scanner::header_block;
+        let head_end = |raw: &[u8]| raw.len() - body(raw).expect("terminated").len();
+        for raw in [
+            &b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\r\nv=0"[..],
+            b"INFO sip:b SIP/2.0\nContent-Length: 3\n\nv=0",
+            b"INFO sip:b SIP/2.0\nContent-Length: 3\n\r\nv=0",
+            b"INFO sip:b SIP/2.0\rContent-Length: 3\r\rv=0",
+            b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\rv=0",
+            b"INFO sip:b SIP/2.0\r\nContent-Length: 6\r\n\r\n\x00\xff\r\n\r\n",
+        ] {
+            assert_eq!(head_end(raw), header_block(raw).end, "{raw:?}");
+            assert_eq!(body(raw), Some(&raw[header_block(raw).end..]), "{raw:?}");
+        }
+        assert_eq!(body(b"INFO sip:b SIP/2.0\rContent-Length: 3\r"), None, "unterminated by CR");
     }
 }
