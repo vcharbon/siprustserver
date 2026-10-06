@@ -19,7 +19,7 @@ use crate::run::RunReport;
 /// Project a finished run into the neutral [`seq_report::SeqDoc`] — the SIP
 /// rows, the HTTP exchanges, the RFC cross-message anomaly fold and the
 /// report's extra anomalies — for callers that persist it (the E2E
-/// `result.json`, ADR-0018 Phase F, whose `rfc` field keeps the rule-sourced
+/// `result.json`, ADR-0018, whose `rfc` field keeps the rule-sourced
 /// findings only) and draw it later via `seq_report::render_svg`/`render_html`.
 /// Failed expects stay out.
 pub fn seq_doc(report: &RunReport) -> seq_report::SeqDoc {

@@ -273,7 +273,7 @@ async fn accepted_delta_default_reaction_on_cancel_never_strays() {
 /// The RFC scoping under FORKING (the reason the blessing is conditional):
 /// bob's script rings TWO early dialogs (the transaction's default tag +
 /// an explicit fork tag), so `early_dialog_count == 2` — the `== 1` policy
-/// declines and today's behavior stands (the CANCEL automatic as a
+/// declines and the default stands (the CANCEL automatic as a
 /// recorded stray, no acceptance). Pins the per-tag counting.
 #[tokio::test(start_paused = true)]
 async fn forked_early_dialogs_decline_bye_for_cancel() {

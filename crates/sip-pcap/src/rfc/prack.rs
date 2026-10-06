@@ -287,7 +287,7 @@ mod tests {
         assert_eq!((p.occasions, p.decided), (1, 1));
     }
 
-    /// The corpus shape, and the reason a hop is not a UAC: one Call-ID across
+    /// A common topology, and the reason a hop is not a UAC: one Call-ID across
     /// a proxy that does NOT record-route, captured on both of its wires. The
     /// caller PRACKs the far UAS DIRECTLY, so the proxy never sees the PRACK
     /// for a reliable provisional it demonstrably relayed. Charging the proxy

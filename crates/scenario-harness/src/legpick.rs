@@ -121,12 +121,12 @@ pub fn prefix_leg_picker(labels: impl IntoIterator<Item = impl Into<String>>) ->
 /// A [`prefix_leg_picker`] whose prefixes carry an EXPLICIT label — `entries`
 /// are `(ruri_prefix, label)` pairs, so a leg's on-wire routing key need not
 /// equal the receiver that owns it. That is the general case: an open-registry
-/// load shape's callee legs arrive under **number-plan digits** (`+041…`,
-/// `0491…`), never under the agent name, and several prefixes may select ONE
+/// load shape's callee legs arrive under **number-plan digits** (`+1555…`,
+/// `9007…`), never under the agent name, and several prefixes may select ONE
 /// leg (a callee reachable under more than one number form).
 ///
 /// The label of the **longest matching prefix** wins (nested number forms —
-/// a full transfer number vs its `0650033033…` sibling prefix — stay
+/// a full transfer number vs its `9001100100…` sibling prefix — stay
 /// unambiguous, the same rule `callee_group` applies); a duplicate prefix
 /// resolves to the first declared. No matching prefix yields `""` — the caller
 /// counts it a no-route orphan.
@@ -227,34 +227,34 @@ mod tests {
     }
 
     /// The labelled picker routes number-plan prefixes to their ROLE: the leg's
-    /// on-wire key (`+041…`, `0491…` — a Business-Layer number rewrite) never
+    /// on-wire key (`+1555…`, `9007…`) never
     /// contains the receiver's name, several prefixes select one leg, and the
     /// longest matching prefix beats a nested sibling (a transfer
-    /// target vs its `0650033033…` prefix).
+    /// target vs its `9001100100…` prefix).
     #[test]
     fn labelled_prefix_leg_picker_routes_number_prefixes_to_roles() {
         let pick = labelled_prefix_leg_picker([
             // The routed callee is reachable under TWO number forms.
-            ("+04", "bob"),
-            ("0590", "bob"),
+            ("+1555", "bob"),
+            ("9005", "bob"),
             // The MRF resource digits.
-            ("0491", "mrf"),
+            ("9007", "mrf"),
             // Nested by construction: the full transfer number must beat its
             // sibling prefix.
-            ("0650033033", "charlie"),
-            ("0650033033231089055", "xfer"),
+            ("9001100100", "charlie"),
+            ("9001100100555000111", "xfer"),
         ]);
         let route = |ruri: &str| {
             let raw = invite_ruri(ruri);
             pick(&LegInfo::new(raw.as_slice()))
         };
 
-        assert_eq!(route("sip:+0415551234@10.0.0.1:5070"), "bob");
-        assert_eq!(route("sip:059012345@10.0.0.1:5070"), "bob");
-        assert_eq!(route("sip:04912@10.0.0.1:5070"), "mrf");
-        assert_eq!(route("sip:065003303399@10.0.0.1:5070"), "charlie");
+        assert_eq!(route("sip:+15550101234@10.0.0.1:5070"), "bob");
+        assert_eq!(route("sip:900512345@10.0.0.1:5070"), "bob");
+        assert_eq!(route("sip:90072@10.0.0.1:5070"), "mrf");
+        assert_eq!(route("sip:900110010099@10.0.0.1:5070"), "charlie");
         // Longest matching prefix wins across legs, not first-declared.
-        assert_eq!(route("sip:0650033033231089055@10.0.0.1:5070"), "xfer");
+        assert_eq!(route("sip:9001100100555000111@10.0.0.1:5070"), "xfer");
         // No prefix matches → no route (a no_route orphan at the caller).
         assert_eq!(route("sip:999@10.0.0.1:5070"), "");
     }

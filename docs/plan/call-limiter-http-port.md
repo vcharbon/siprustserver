@@ -1,7 +1,7 @@
 # Call-limiter HTTP port — implementation-ready design
 
 > Status: the design below was implemented, then superseded by the call-keyed
-> protocol of [ADR-0038](../adr/0038-admission-holds-keyed-by-the-call.md)
+> protocol of [ADR-0040](../adr/0040-admission-holds-keyed-by-the-call.md)
 > (`crates/call-limiter/src/store.rs`). Kept as history.
 
 Source (TS, pinned): `portsource/sipjsserver` — `src/call/CallLimiter*.ts`,
@@ -111,8 +111,8 @@ crates/
     src/main.rs                     # RealHttpNetwork serve + janitor task + /metrics + /healthz; env config
 
 crates/b2bua/src/
-  limiter.rs                        # enriched CallLimiter trait + AdmitOutcome + Hold + NoopLimiter
-  limiter_http.rs                   # HttpCallLimiter: Arc<dyn HttpTransport> + addr + timeout budget; fail-open map
+  limiter/port.rs                   # enriched CallLimiter trait + AdmitOutcome + Hold + NoopLimiter
+  limiter/http.rs                   # HttpCallLimiter: Arc<dyn HttpTransport> + addr + timeout budget; fail-open map
   decision/apply_route.rs           # rewrite admission: transactional admit -> 486 | failover | fail-open
   rules/...                         # emit release(Hold) on terminate; limiter_refresh timer handler
 ```

@@ -13,7 +13,8 @@
 //! the transaction layer discards a late provisional itself, so only a later
 //! one shows what the call layer does. Every strategy the caller can be under
 //! is pinned: transparent relay, the bare-180 mask with every 18x relayed, and
-//! the mask that acknowledges reliable provisionals itself.
+//! the mask that acknowledges reliable provisionals itself, which offers a leg
+//! dialled after the answer no reliability of its own.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,6 +83,7 @@ mod consult {
                         callback_context: None,
                         body_override: None,
                         header_updates: vec![],
+                        header_adds: vec![],
                         kind: None,
                     },
                     RuleAction::SetState { machine: CONSULT, to: ConsultState::Dialled.label() },
@@ -303,26 +305,24 @@ async fn the_mask_shows_no_first_180_to_an_answered_caller() {
     let _ = p.h.finish().await;
 }
 
-/// `fake-prack`: the consult INVITE offers `100rel` on this stack's own
-/// behalf; the target's reliable 183 is PRACKed by the stack and shown to the
-/// answered caller as nothing.
+/// `fake-prack`: the mask covers the provisionals of the caller's INVITE, which
+/// has its final, so the consult INVITE offers no `100rel` of this stack's own
+/// (RFC 3262 §3); the target's unreliable 183 is shown to the answered caller
+/// as nothing.
 #[tokio::test(start_paused = true)]
-async fn the_fake_prack_mask_acknowledges_a_consult_provisional_and_shows_nothing() {
+async fn the_fake_prack_mask_offers_a_consult_no_reliability_and_shows_nothing() {
     let p = start("provisional-after-answer-fake-prack", masked(RelayFirst18xStrategy::FakePrack))
         .await;
     let (dialog, mut carol_uas) = answered_then_consult(&p, false, false).await;
     assert!(
-        carol_uas
+        !carol_uas
             .request()
             .header::<Supported>()
-            .expect("a Supported")
-            .expect("readable Supported")
-            .contains("100rel"),
-        "fake-prack offers 100rel on the consult INVITE",
+            .is_some_and(|s| s.expect("readable Supported").contains("100rel")),
+        "fake-prack offers no 100rel on a consult INVITE dialled after the answer",
     );
 
-    carol_uas.respond(183, "Session Progress").reliable(1).with_sdp(CONSULT_ANSWER).await;
-    p.carol.receive("PRACK").await.respond(200, "OK").await;
+    carol_uas.respond(183, "Session Progress").with_sdp(CONSULT_ANSWER).await;
 
     let cdrs = hangup_while_ringing(&p, dialog, carol_uas).await;
     assert_caller_heard_no_ring(&p);

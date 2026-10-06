@@ -12,7 +12,9 @@ use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 use sip_net::UdpEndpoint;
-use sip_txn::{IdGen, TransactionConfig, TransactionLayer};
+use sip_txn::{DeferredBound, IdGen, TransactionConfig, TransactionLayer};
+
+use crate::admission::Refusals;
 use topology::Membership;
 
 use crate::capacity::{CapacityGate, Occupancy};
@@ -39,6 +41,9 @@ pub struct B2buaCore {
     ctx: Arc<RouterCtx>,
     metrics: B2buaMetrics,
     cdr: Arc<dyn CdrWriter>,
+    /// The worker's refusals of new INVITEs; the transaction layer holds
+    /// their memo.
+    refusals: Refusals,
     /// Readiness handle (the supervisor-backed one when replication is wired,
     /// else the always-ready one of an unwired node). Kept so
     /// [`begin_draining`] can latch it.
@@ -51,7 +56,7 @@ pub struct B2buaCore {
     /// loop are not dropped). `None` on an unwired node.
     supervisor: Option<ReplicationSupervisor>,
     /// The replicating call store when replication is wired (`None` otherwise),
-    /// re-exposed so the S10b failover harness can introspect/assert replica
+    /// re-exposed so the failover harness can introspect/assert replica
     /// presence (`get_call(role, primary, call_ref)`).
     repl_store: Option<Arc<ReplicatingCallStore>>,
     /// Abort handles for the directly-spawned tasks (router loop + repl serve
@@ -66,19 +71,18 @@ pub struct B2buaCore {
 }
 
 /// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
-/// `B2buaCore` into a replicating worker; `None` keeps today's behaviour exactly
+/// `B2buaCore` into a replicating worker; `None` is a non-replicating worker
 /// (in-memory store, `always_ready()` OPTIONS, `PutOpts::default()` flush).
 ///
-/// ## Seams deferred past S10a
+/// ## Host-supplied seams
 /// - **`incarnation_gen`** — the per-boot incarnation seed for the
-///   [`ReplicatingCallStore`]'s changelog (mirrors `IdGen::seeded`). S10a takes it
-///   as an explicit input; **S11** derives the real source (e.g. a persisted /
-///   monotonic boot counter) and feeds it here.
+///   [`ReplicatingCallStore`]'s changelog (mirrors `IdGen::seeded`), an explicit
+///   input the host derives (the runner uses the boot wall clock).
 /// - **`addr_resolver`** — maps a cluster `Peer` to its replication
-///   [`SocketAddr`], **resolved per connect** (ADR-0012 D3). S10b's sim harness
-///   passes an explicit `ordinal → addr` map (`FnPeerResolver`);
-///   **S11 (prod)** derives it from `ordinal + host + config`. We deliberately do
-///   NOT invent an addressing grammar here — the resolver IS the seam.
+///   [`SocketAddr`], **resolved per connect** (ADR-0012 D3). The sim harness
+///   passes an explicit `ordinal → addr` map (`FnPeerResolver`); the runner
+///   derives it from `ordinal + host + config`. The core defines no addressing
+///   grammar — the resolver IS the seam.
 pub struct ReplicationSetup {
     /// The replication transport (sim or real). The server `listen`s on it and
     /// the supervisor's pullers `connect` through it.
@@ -90,9 +94,9 @@ pub struct ReplicationSetup {
     pub store: Arc<ReplicatingCallStore>,
     /// Local replication listen address (where this node serves its changelog).
     pub listen_addr: SocketAddr,
-    /// Resolves a peer to its replication address (the deferred S11 grammar seam).
+    /// Resolves a peer to its replication address (the host's addressing seam).
     pub addr_resolver: crate::repl::AddrResolver,
-    /// Per-boot incarnation seed for the changelog (deferred S11 real source).
+    /// Per-boot incarnation seed for the changelog (host-derived).
     pub incarnation_gen: u64,
 }
 
@@ -116,11 +120,17 @@ pub struct B2buaDeps {
     pub wire_faults: WireFaults,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
-    /// Seeds the secret the transaction layer's stateless refusals derive
-    /// their To-tags from ([`crate::deferred_bound`]); apart from `id_gen` so
-    /// drawing it leaves the core's identifier sequence untouched. A seeded
-    /// generator keeps a simulated run reproducible.
-    pub refusal_id_gen: Arc<IdGen>,
+    /// The worker's refusals of new INVITEs ([`crate::admission::Refusals`]),
+    /// shared with the transaction layer. A host that installs the ingress
+    /// brake passes the same instance it gave the brake, so every copy of one
+    /// INVITE draws one answer. `None` builds them from `config`'s
+    /// `Retry-After`, keyed by an entropy-drawn secret.
+    pub refusals: Option<Refusals>,
+    /// The deferred backlog's ceilings. `None` — production — sets one and two
+    /// event queues' worth ([`crate::admission::deferred_bound`]); a test sets
+    /// its own ([`crate::admission::ceilings`]) to
+    /// reach the backlog refusal without stalling the router.
+    pub deferred_ceilings: Option<DeferredBound>,
     /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
     pub replication: Option<ReplicationSetup>,
     /// Shared metrics handle. The host builds this so components it constructs
@@ -129,7 +139,7 @@ pub struct B2buaDeps {
     pub metrics: B2buaMetrics,
     /// Host-injected generic async-HTTP capability for
     /// [`RuleAction::ServiceHttpRequest`](crate::rules::RuleAction) (the
-    /// service-authorable adaptation callback). `None` = today's behaviour (a
+    /// service-authorable adaptation callback). `None` = no capability (a
     /// service firing the effect gets an `outcome:"error"` re-entry, never a
     /// stranded machine); `Some` maps the logical endpoint onto its base URL.
     pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
@@ -198,7 +208,8 @@ impl B2buaCore {
             wire_faults,
             clock,
             id_gen,
-            refusal_id_gen,
+            refusals,
+            deferred_ceilings,
             replication,
             metrics,
             adaptation_http,
@@ -207,7 +218,16 @@ impl B2buaCore {
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
-        let txn_config = txn_config(&config, &id_gen, &refusal_id_gen);
+        let refusals = refusals.unwrap_or_else(|| {
+            Refusals::new(
+                config.retry_after_base_sec,
+                config.retry_after_jitter_sec,
+                sip_txn::REFUSED_MEMO_MAX,
+                &IdGen::from_entropy(),
+            )
+        });
+        refusals.advertise(&config.minted_final_advertisement);
+        let txn_config = txn_config(&config, &id_gen, &refusals, deferred_ceilings);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
@@ -286,11 +306,9 @@ impl B2buaCore {
                 // each bootstrap pass signals `ReclaimAll` itself (puller.rs
                 // `signal_reclaim_all`) the instant it has imported bodies, and the
                 // steady-state tail materialises later reverse-flush stragglers per
-                // call. The old one-shot, readiness-gated, 10 s-bounded go-active
-                // sweep is GONE: it stranded every call that landed after its cliff
-                // (the endurance long-call-on-reboot 481). The reactive-only model
-                // needs no go-active handshake — a rebooting node just rebuilds from
-                // what it has pulled and keeps pulling.
+                // call. There is no bounded go-active sweep (one would strand every
+                // call landing after its cliff) and no go-active handshake — a
+                // rebooting node rebuilds from what it has pulled and keeps pulling.
 
                 let readiness = Readiness::new(Arc::new(supervisor.clone()));
                 // The worker's own withdrawal from routing latches Draining
@@ -337,13 +355,12 @@ impl B2buaCore {
             config.per_call_queue_cap,
             metrics.clone(),
         )
-        .with_failure_hook(reaper.failure_hook())
-        .with_overflow_hook(reaper.overflow_hook());
+        .with_new_call_bounds(config.new_call_permits(), config.new_call_queue_headroom())
+        .with_failure_hook(reaper.failure_hook());
         // Only the reaper's verdict ends a capped call: without the reaper the
         // cap would refuse the call's traffic and nothing would end it.
         let dispatcher = if config.reaper_enabled {
-            dispatcher
-                .with_lifetime_cap(config.max_messages_per_call_lifetime, reaper.lifetime_hook())
+            dispatcher.with_lifetime_cap(config.max_messages_per_call_lifetime)
         } else {
             dispatcher
         };
@@ -360,8 +377,8 @@ impl B2buaCore {
         // track load. A test may inject one over the `simulated()` sampler (the
         // sampler-injection seam) to drive a known ELU through the running task.
         let overload = overload.unwrap_or_else(OverloadSignal::live);
-        // Tier-3 admission gate: seed the CPS token bucket + the
-        // panic-ELU / Retry-After knobs from the now-final config (the harness
+        // The panic-ELU and bucket rungs' inputs: seed the CPS token bucket and
+        // the panic-ELU threshold from the now-final config (the harness
         // `tune` seam ran in `spawn_b2bua_core` before this). Must happen before
         // `config` is moved into the ctx below.
         overload.configure_admission(&config);
@@ -373,51 +390,16 @@ impl B2buaCore {
         // included) bypasses it. `<= 0` disables (the reaper-wedge escape hatch).
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout_ms);
-        // The limiter's lease as its answers state it: the release queue and
-        // the refresh batch give their entries up by it.
-        let limiter_lease =
-            crate::limiter_lease::LimiterLease::from_config(&config, metrics.clone());
-        limiter.report_to(crate::limiter::LimiterReports::new(&limiter_lease, metrics.clone()));
-        let limiter_releases = crate::limiter_release::ReleaseQueue::new(
-            limiter.clone(),
-            crate::limiter_release::ReleaseQueueConfig::from_config(&config, limiter_lease.clone()),
-            metrics.clone(),
-        );
-        tasks.push(tokio::spawn(limiter_releases.clone().run()));
-        // Every counted call's refresh goes through the refresh batch, whose
-        // answers come back to their calls as re-entrant events; a call whose
-        // release is queued is forgotten by the batch.
-        let limiter_refreshes = {
-            let answers = reentry_tx.clone();
-            crate::limiter_refresh_batch::RefreshBatch::new(
-                limiter.clone(),
-                crate::limiter_refresh_batch::RefreshBatchConfig::from_config(
-                    &config,
-                    limiter_lease.clone(),
-                ),
-                metrics.clone(),
-                move |answer| {
-                    let _ = answers.send(answer.into_event());
-                },
-            )
-        };
-        let forget = limiter_refreshes.clone();
-        let hooked = limiter_releases.on_push(move |key| forget.forget(key));
-        debug_assert!(hooked, "one refresh batch per release queue");
-        tasks.push(tokio::spawn(limiter_refreshes.clone().run()));
-        // The worker's circuit breaker sits in front of every admit and holds
-        // the release queue and the refresh batch while open; both send
-        // through the limiter itself.
-        let (limiter, breaker) = crate::limiter_breaker::BreakerLimiter::guard(
+        // The worker's handle on its call limiter: the lease, the release
+        // queue, the refresh batch and the bounded, breaker-guarded admit
+        // path. Their tasks join the node's, aborted with them.
+        let (limiter, limiter_tasks) = crate::limiter::LimiterWorker::start(
             limiter,
-            crate::limiter_breaker::BreakerConfig::from_config(&config),
-            limiter_releases.clone(),
-            limiter_refreshes.clone(),
+            &config,
             metrics.clone(),
+            reentry_tx.clone(),
         );
-        if let Some(breaker) = breaker {
-            tasks.push(tokio::spawn(breaker.run()));
-        }
+        tasks.extend(limiter_tasks);
         let ctx = Arc::new(RouterCtx {
             config,
             state,
@@ -426,11 +408,9 @@ impl B2buaCore {
             txn,
             timers,
             dispatcher,
+            reaper: reaper.clone(),
             decision,
             limiter,
-            limiter_releases,
-            limiter_refreshes,
-            limiter_lease,
             cdr: cdr.clone(),
             id_gen,
             clock,
@@ -443,6 +423,8 @@ impl B2buaCore {
             readiness: readiness.clone(),
             overload: overload.clone(),
             capacity: capacity.clone(),
+            refusals: refusals.clone(),
+            unborn: Default::default(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             reentry_tx,
@@ -472,7 +454,7 @@ impl B2buaCore {
         {
             let reaper = reaper.clone();
             let state = ctx.state.clone();
-            let dispatcher = ctx.dispatcher.clone();
+            let in_flight = ctx.dispatcher.in_flight();
             let ctx2 = ctx.clone();
             let interval = std::time::Duration::from_millis(reaper.sweep_interval_ms());
             let (m1, m2) = (ctx.metrics.clone(), ctx.metrics.clone());
@@ -480,9 +462,9 @@ impl B2buaCore {
             let reaper_step = crate::sweep::SweepStep::new(
                 "reaper",
                 move || {
-                    let (reaper, state, dispatcher, ctx) =
-                        (reaper.clone(), state.clone(), dispatcher.clone(), reaper_ctx.clone());
-                    async move { reaper.maybe_sweep(&state, &dispatcher, ctx.clock.now_ms()) }
+                    let (reaper, state, in_flight, ctx) =
+                        (reaper.clone(), state.clone(), in_flight.clone(), reaper_ctx.clone());
+                    async move { reaper.maybe_sweep(&state, &in_flight, ctx.clock.now_ms()) }
                 },
                 move || m1.bump_reaper_sweep_panic(),
             );
@@ -516,19 +498,19 @@ impl B2buaCore {
                     tick.tick().await;
                     overload.sample();
                     ctx2.capacity.sample(Occupancy {
-                        calls: ctx2.state.active_count() as u64,
+                        calls: ctx2.unborn.with_live(|| ctx2.state.active_count() as u64),
                         transactions: ctx2.txn.metrics().active_transactions() as u64,
                     });
                 }
             }));
         }
 
-        // Clock-skew divergence sampler (clock-skew hardening observability). Every
-        // ~30 s, read the RAW system wall clock and compare it to this node's
-        // monotonic-anchored `Clock::now_ms` — `now_ms` does NOT follow a host NTP
-        // step, so the gap names exactly the event that skews cross-node replicated
-        // timer deadlines (endurance-20260630). Publishes `clock_wall_divergence_ms`
-        // and rate-limits a warn line when the magnitude crosses 500 ms.
+        // Clock-skew divergence sampler (clock-skew hardening observability).
+        // Every ~30 s, read the RAW system wall clock and compare it to this
+        // node's monotonic-anchored `Clock::now_ms` — `now_ms` does NOT follow a
+        // host NTP step, so the gap names exactly the event that skews cross-node
+        // replicated timer deadlines. Publishes `clock_wall_divergence_ms` and
+        // rate-limits a warn line when the magnitude crosses 500 ms.
         // Observability only: does NOT re-anchor the clock (timestamps stay
         // monotonic; the behavioural fix is the replication-boundary re-anchor).
         // Rides `tokio::time::interval` so a paused-clock test advances it too;
@@ -569,6 +551,7 @@ impl B2buaCore {
             ctx,
             metrics,
             cdr,
+            refusals,
             readiness,
             overload,
             supervisor,
@@ -602,7 +585,7 @@ impl B2buaCore {
     }
 
     /// The replicating call store, when replication is wired (`None` on an
-    /// unwired node). The S10b failover harness reads it to assert a replica
+    /// unwired node). The failover harness reads it to assert a replica
     /// landed on the backup (`get_call`) and to introspect the reclaimed gen.
     pub fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
         self.repl_store.as_ref()
@@ -630,20 +613,23 @@ impl B2buaCore {
         &self.overload
     }
 
+    /// The worker's refusals of new INVITEs, shared with its transaction
+    /// layer: the instance an ingress brake installed after the core takes.
+    pub fn refusals(&self) -> &Refusals {
+        &self.refusals
+    }
+
     /// The memory admission gate (ADR-0037) the running core decides with.
     pub fn capacity(&self) -> &CapacityGate {
         &self.ctx.capacity
     }
 
     /// Readiness gate, routed through the SAME latched [`Readiness`] state
-    /// machine the SIP OPTIONS self-report uses (X6 anti-flap). The kube
-    /// `/ready` probe previously read the raw supervisor gates: with ready-gated
-    /// EndpointSlice membership, a desired-but-not-yet-current peer flipped the
-    /// un-latched predicate back to 503 within one probe period, unpublishing
-    /// the node — which removed it from every peer's desired set, vacuously
-    /// re-readying them, and the simultaneously-restarted cluster oscillated
-    /// published↔unpublished (the cold-start mutual-unpublish deadlock). The
-    /// latch makes Ready sticky on both probe surfaces; `Draining` reports
+    /// machine the SIP OPTIONS self-report uses (X6 anti-flap). With ready-gated
+    /// EndpointSlice membership, an un-latched predicate would flip back to 503
+    /// on a desired-but-not-yet-current peer and unpublish the node, and a
+    /// simultaneously-restarted cluster would oscillate published↔unpublished.
+    /// The latch makes Ready sticky on both probe surfaces; `Draining` reports
     /// not-ready (the probe's job during drain is to unpublish).
     pub fn is_ready(&self) -> bool {
         self.readiness.state() == crate::repl::ReadinessState::Ready
@@ -673,7 +659,7 @@ impl B2buaCore {
         // retransmits) until every surviving per-call task drops its cmd_tx clone.
         self.ctx.txn.abort_owner();
         // A crash loses the release queue; a drain still waiting flushes nothing.
-        self.ctx.limiter_releases.stop();
+        self.ctx.limiter.stop();
         if let Some(s) = &self.supervisor {
             s.shutdown();
         }
@@ -698,9 +684,9 @@ impl B2buaCore {
     /// OPTIONS then self-reports `503 draining` so the front proxy steers new
     /// calls away while in-flight calls finish. Terminal — never un-drains.
     ///
-    /// SIGTERM wiring: the **runner** (S11) should install a `tokio::signal`
-    /// SIGTERM hook that calls this. We expose the method rather than installing
-    /// the hook inside the library so tests/embedders control the signal surface.
+    /// SIGTERM wiring: the **runner** installs the `tokio::signal` SIGTERM hook
+    /// that calls this; the library exposes the method rather than installing
+    /// the hook so tests/embedders control the signal surface.
     pub fn begin_draining(&self) {
         self.readiness.set_draining();
     }
@@ -726,7 +712,7 @@ impl B2buaCore {
         let ctx = self.ctx.clone();
         let changelog = self.repl_store.as_ref().map(|r| r.changelog().clone());
         let supervisor = self.supervisor.clone();
-        let releases = self.ctx.limiter_releases.clone();
+        let limiter = self.ctx.limiter.clone();
         crate::drain::DrainInputs {
             active: self.active_calls_probe(),
             backups_caught_up: Arc::new(move || match &changelog {
@@ -735,13 +721,13 @@ impl B2buaCore {
             }),
             withdrawn: Arc::new(move || supervisor.as_ref().is_some_and(|s| s.is_withdrawn())),
             flush_releases: Arc::new({
-                let releases = releases.clone();
+                let limiter = limiter.clone();
                 move |within| {
-                    let releases = releases.clone();
-                    Box::pin(async move { releases.flush(within).await })
+                    let limiter = limiter.clone();
+                    Box::pin(async move { limiter.flush(within).await })
                 }
             }),
-            releases_waiting: Arc::new(move || releases.unsent()),
+            releases_waiting: Arc::new(move || limiter.unsent()),
         }
     }
 
@@ -774,22 +760,12 @@ impl B2buaCore {
         outcome
     }
 
-    /// A planned exit's last limiter send, for an exit that waits for no
-    /// call: the releases this worker still queues leave now, and the wait
-    /// for their answers lasts at most `within`; what is still queued then
-    /// (or held by an open breaker) is given up, counted (`reason=shutdown`)
-    /// and logged, and the lease frees it.
-    pub async fn flush_limiter_releases(
-        &self,
-        within: std::time::Duration,
-    ) -> crate::limiter_release::ReleaseFlush {
-        self.ctx.limiter_releases.flush(within).await
-    }
-
-    /// Give up every queued limiter release at once, counted and logged: an
-    /// exit that cuts its flush short.
-    pub fn give_up_limiter_releases(&self) -> usize {
-        self.ctx.limiter_releases.give_up_all()
+    /// This worker's handle on its call limiter: an exit that waits for no
+    /// call sends its queued releases last through it
+    /// ([`flush`](crate::limiter::LimiterWorker::flush)), or gives them up
+    /// ([`give_up_all`](crate::limiter::LimiterWorker::give_up_all)).
+    pub fn limiter(&self) -> &crate::limiter::LimiterWorker {
+        &self.ctx.limiter
     }
 
     pub fn metrics(&self) -> &B2buaMetrics {
@@ -836,21 +812,22 @@ impl B2buaCore {
         self.ctx.timers.cancel(call_ref.to_string(), id.to_string()).await;
     }
 
+    /// Post `event` to the router as a timer driver or a callout posts one: a
+    /// test's stand-in for an event already in flight when it is posted.
+    pub fn post_event(&self, event: b2bua_sdk::event::CallEvent) {
+        let _ = self.ctx.reentry_tx.send(event);
+    }
+
     /// The live copy of `call_ref` this worker serves, if any (introspection:
     /// what its rules read at the next event).
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
         self.ctx.state.peek(call_ref)
     }
 
-    /// Limiter releases this worker has queued and not yet had answered
-    /// (test/observability): a call is removed before its release leaves.
-    pub fn limiter_releases_waiting(&self) -> usize {
-        self.ctx.limiter_releases.waiting()
-    }
-
-    /// This worker's limiter release queue (test/observability).
-    pub fn limiter_releases(&self) -> Arc<crate::limiter_release::ReleaseQueue> {
-        self.ctx.limiter_releases.clone()
+    /// New calls admitted at ingress whose turn has not created their call
+    /// yet; 0 once every admitted turn has run or been dropped.
+    pub fn unborn_calls(&self) -> u64 {
+        self.ctx.unborn.count()
     }
 
     /// Live per-call serialization-lock count (test/observability). Should track
@@ -929,13 +906,14 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
 }
 
 /// The transaction layer's tunables for this worker: its event queue, the
-/// deployment's INVITE bounds and CANCEL policy, and the ceilings on the
-/// deferred backlog ([`crate::deferred_bound`]), whose refusals take their
-/// To-tag secret from `refusal_id_gen`.
+/// deployment's INVITE bounds and CANCEL policy, the worker's shared
+/// `refusals`, and the ceilings on the deferred backlog
+/// ([`crate::admission::deferred_bound`]) unless `ceilings` sets its own.
 fn txn_config(
     config: &B2buaConfig,
     id_gen: &Arc<IdGen>,
-    refusal_id_gen: &IdGen,
+    refusals: &Refusals,
+    ceilings: Option<DeferredBound>,
 ) -> TransactionConfig {
     let mut txn_config = TransactionConfig {
         // Sizes the events channel at 4096: room for a new-INVITE burst
@@ -957,13 +935,11 @@ fn txn_config(
             .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
         strict_to_tag: true,
         deferred_bound: None,
+        invite_refusals: Some(refusals.memo().clone()),
     };
-    txn_config.deferred_bound = Some(crate::deferred_bound::deferred_bound(
-        txn_config.event_capacity(),
-        config.retry_after_base_sec,
-        config.retry_after_jitter_sec,
-        refusal_id_gen,
-    ));
+    txn_config.deferred_bound = Some(
+        ceilings.unwrap_or_else(|| crate::admission::deferred_bound(txn_config.event_capacity())),
+    );
     txn_config
 }
 
@@ -975,8 +951,9 @@ mod txn_config_tests {
     /// queues.
     #[test]
     fn the_worker_bounds_the_deferred_backlog() {
+        let refusals = Refusals::new(5, 0, 16, &IdGen::seeded(2));
         let config =
-            txn_config(&B2buaConfig::default(), &Arc::new(IdGen::seeded(1)), &IdGen::seeded(2));
+            txn_config(&B2buaConfig::default(), &Arc::new(IdGen::seeded(1)), &refusals, None);
         assert_eq!(config.event_capacity(), 4096);
         let bound = config.deferred_bound.expect("the worker sets a deferred bound");
         assert_eq!((bound.normal, bound.emergency), (4096, 8192));

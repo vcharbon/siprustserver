@@ -1,7 +1,7 @@
-//! Per-transaction state: the [`Transaction`] record, its role/state enums,
-//! the [`Timer`] wheel entries, and the sweep-age policy. The FSM transitions
-//! do NOT live here — client (§17.1) side is `layer::client`, server (§17.2)
-//! side is `layer::server`.
+//! Per-transaction state: the [`Transaction`] record, its role/state enums
+//! and the [`Timer`] wheel entries. The FSM transitions do NOT live here —
+//! client (§17.1) side is `layer::client`, server (§17.2) side is
+//! `layer::server`; when a transaction leaves the map is `layer::lifetime`.
 
 use std::net::SocketAddr;
 
@@ -10,8 +10,10 @@ use sip_message::{Method, SipRequest};
 use tokio_util::time::delay_queue::Key;
 
 use crate::event::{TimeoutKind, TxnKind};
-use crate::timers::{ms, TXN_MAX_AGE};
 use sip_retransmit::Ladder;
+
+use super::key::{ServerTxnId, ServerTxnKey};
+use super::lifetime::Lifetime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnRole {
@@ -21,7 +23,7 @@ pub(super) enum TxnRole {
 
 /// Transaction lifecycle. There is no `Terminated` state: the hold that
 /// follows a final (Timer D/H/J, or Timer I after the ACK) ends by deleting
-/// the transaction from the map. A resident txn that has sent or received
+/// the transaction from the map ([`Lifetime`]). A resident txn that has sent or received
 /// its final is `Completed` or `Confirmed`; either refuses a second final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnState {
@@ -47,7 +49,49 @@ impl TxnState {
     }
 }
 
-/// Which DelayQueue entry a fired timer corresponds to (keyed by branch).
+/// A transaction's identity, owned: a client transaction's branch, a server
+/// transaction's [`ServerTxnKey`] (RFC 3261 §17.1.3, §17.2.3).
+#[derive(Debug, Clone)]
+pub(super) enum TxnId {
+    Client(String),
+    Server(ServerTxnKey),
+}
+
+impl TxnId {
+    pub(super) fn as_ref(&self) -> TxnRef<'_> {
+        match self {
+            TxnId::Client(branch) => TxnRef::Client(branch),
+            TxnId::Server(key) => TxnRef::Server(key.id()),
+        }
+    }
+}
+
+/// A transaction's identity, borrowed — from a message, a timer or the
+/// transaction itself.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TxnRef<'a> {
+    Client(&'a str),
+    Server(ServerTxnId<'a>),
+}
+
+impl TxnRef<'_> {
+    pub(super) fn role(self) -> TxnRole {
+        match self {
+            TxnRef::Client(_) => TxnRole::Client,
+            TxnRef::Server(_) => TxnRole::Server,
+        }
+    }
+
+    pub(super) fn to_id(self) -> TxnId {
+        match self {
+            TxnRef::Client(branch) => TxnId::Client(branch.to_string()),
+            TxnRef::Server(id) => TxnId::Server(id.to_key()),
+        }
+    }
+}
+
+/// Which DelayQueue entry a fired timer corresponds to: the transaction it
+/// belongs to, a client one by its branch, a server one by its key.
 #[derive(Debug, Clone)]
 pub(super) enum Timer {
     /// Timer A (INVITE) / Timer E (non-INVITE) — client retransmit.
@@ -55,13 +99,13 @@ pub(super) enum Timer {
     /// Timer G (RFC 3261 §17.2.1) — INVITE *server* txn retransmit of an unACKed
     /// non-2xx final. Disjoint from `ClientRetransmit` (a txn is client XOR server),
     /// so both reuse the `retransmit_*` fields without colliding.
-    ServerRetransmit(String),
+    ServerRetransmit(ServerTxnKey),
     /// Timer B (INVITE) / Timer F (non-INVITE) — client transaction timeout.
     ClientTimeout(String),
-    /// Delete-by-branch cleanup: Timer H/J/Timer-H-487 (server final-response hold)
-    /// AND Timer D (client non-2xx-final hold, §17.1.1.2). The fire handler just
-    /// `delete_txn`s the branch, so it serves both roles.
-    Cleanup(String),
+    /// The transaction's end of life, due at its [`Lifetime`] deadline — the
+    /// backstop of an active one, the end of a hold otherwise. Every resident
+    /// transaction has exactly one; firing removes the transaction.
+    Cleanup(TxnId),
     /// Held-CANCEL grace expiry (ADR-0028): the branch's first provisional never
     /// arrived inside the grace window, so the held CANCEL is sent regardless.
     CancelGrace(String),
@@ -118,8 +162,7 @@ impl HeldCancel {
 /// [`Transaction`] — cached responses, timer keys, the held CANCEL, the ladder
 /// — starts empty and is written by the path that arms it.
 pub(super) struct NewTransaction {
-    pub(super) branch: String,
-    pub(super) role: TxnRole,
+    pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     pub(super) method: Method,
     pub(super) call_id: String,
@@ -127,6 +170,7 @@ pub(super) struct NewTransaction {
     pub(super) original_request: Option<SipRequest>,
     pub(super) call_ref: Option<String>,
     pub(super) leg_id: Option<String>,
+    pub(super) incarnation_mark: Option<String>,
     pub(super) state: TxnState,
     pub(super) destination: Option<SocketAddr>,
 }
@@ -134,11 +178,10 @@ pub(super) struct NewTransaction {
 impl Transaction {
     /// The one constructor every path that puts a transaction in the map uses
     /// — a send, an admitted request, a seed — so the record's shape is written
-    /// once.
-    pub(super) fn new(head: NewTransaction) -> Self {
+    /// once. `lifetime` comes from `layer::lifetime`, which arms it.
+    pub(super) fn new(head: NewTransaction, lifetime: Lifetime) -> Self {
         Self {
-            branch: head.branch,
-            role: head.role,
+            id: head.id,
             kind: head.kind,
             method: head.method,
             call_id: head.call_id,
@@ -148,6 +191,7 @@ impl Transaction {
             last_response_status: None,
             call_ref: head.call_ref,
             leg_id: head.leg_id,
+            incarnation_mark: head.incarnation_mark,
             state: head.state,
             destination: head.destination,
             created_at: tokio::time::Instant::now(),
@@ -162,8 +206,9 @@ impl Transaction {
             retransmit_buf: None,
             ladder: None,
             timeout_kind: TimeoutKind::Response,
-            gave_up: false,
+            lifetime,
             orphaned: false,
+            held: false,
         }
     }
 
@@ -174,11 +219,39 @@ impl Transaction {
     pub(super) fn bound_to_tag(&self) -> Option<&str> {
         self.final_to_tag.as_deref().or(self.uas_to_tag.as_deref())
     }
+
+    pub(super) fn role(&self) -> TxnRole {
+        self.id.as_ref().role()
+    }
+
+    /// A server transaction's identity; `None` for a client one.
+    pub(super) fn server_id(&self) -> Option<ServerTxnId<'_>> {
+        match &self.id {
+            TxnId::Server(key) => Some(key.id()),
+            TxnId::Client(_) => None,
+        }
+    }
+
+    /// A server transaction's key, owned; `None` for a client one.
+    pub(super) fn server_key(&self) -> Option<ServerTxnKey> {
+        match &self.id {
+            TxnId::Server(key) => Some(key.clone()),
+            TxnId::Client(_) => None,
+        }
+    }
+
+    /// The top-Via branch of the request this transaction is for.
+    pub(super) fn branch(&self) -> &str {
+        match &self.id {
+            TxnId::Client(branch) => branch,
+            TxnId::Server(key) => key.branch(),
+        }
+    }
 }
 
 pub(super) struct Transaction {
-    pub(super) branch: String,
-    pub(super) role: TxnRole,
+    /// What this transaction is filed under (§17.1.3, §17.2.3).
+    pub(super) id: TxnId,
     pub(super) kind: TxnKind,
     /// The method of the request this transaction is for — the CSeq method
     /// of every message on it, and the `method` a rung of its ladder is
@@ -194,8 +267,15 @@ pub(super) struct Transaction {
     pub(super) last_response_status: Option<u16>,
     pub(super) call_ref: Option<String>,
     pub(super) leg_id: Option<String>,
+    /// The `ci` mark of the call incarnation that sent a client request,
+    /// read off its Via beside `cr` / `lg`; `None` for a server transaction.
+    pub(super) incarnation_mark: Option<String>,
     pub(super) state: TxnState,
     pub(super) destination: Option<SocketAddr>,
+    /// The instant this transaction entered the map — its first send, its
+    /// admission or its seed: the origin the client INVITE bound is measured
+    /// from (`rearm_invite_bound`). When the transaction leaves is its
+    /// [`lifetime`](Self::lifetime)'s alone.
     pub(super) created_at: tokio::time::Instant,
     /// UAS To-tag pinned on the first >100 response (RFC 3261 §17.2.1): the
     /// tag a CANCEL answer and the layer's 487 carry while no final has bound
@@ -208,6 +288,7 @@ pub(super) struct Transaction {
     // DelayQueue keys so a txn's timers cancel in O(1).
     pub(super) retransmit_key: Option<Key>,
     pub(super) timeout_key: Option<Key>,
+    /// The [`Timer::Cleanup`] at the [`lifetime`](Self::lifetime) deadline.
     pub(super) cleanup_key: Option<Key>,
     /// A CANCEL datagram held back because this INVITE client txn has received
     /// no response yet (RFC 3261 §9.1 — the CANCEL waits for the first
@@ -240,39 +321,22 @@ pub(super) struct Transaction {
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
     pub(super) timeout_kind: TimeoutKind,
-    /// This INVITE client txn gave up: its `Timeout` is delivered and it is
-    /// held 64·T1 (from its CANCEL's first send, RFC 3261 §9.1, else from the
-    /// give-up) for a late final, which it ACKs and hands up (§17.1.1.3). It
-    /// never times out again, and a CANCEL on it before any provisional stays
-    /// held.
-    pub(super) gave_up: bool,
+    /// When this transaction leaves the map, written only by
+    /// `layer::lifetime`. An INVITE client txn that gave up is held
+    /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:
+    /// its `Timeout` is delivered, a late final is ACKed and handed up
+    /// (§17.1.1.3), it never times out again, and a CANCEL on it before any
+    /// provisional stays held.
+    pub(super) lifetime: Lifetime,
     /// The call this transaction served has been released while it was still
     /// open (`cancel_txns_for_call`). The layer then closes the transaction's
     /// own obligations — the hop ACK of a non-2xx and Timer D, the bare ACK of a
     /// 2xx and Timer M, the held CANCEL, Timer B — and surfaces nothing to the
     /// consumer, which holds no state for it any more.
     pub(super) orphaned: bool,
-}
-
-/// Per-txn safety-net age for the sweep. A still-ringing INVITE (no final
-/// response yet — an inbound INVITE awaiting the app's answer, or an outbound
-/// INVITE past its retransmit window) legitimately outlives the 35 s net: a
-/// callee may ring for minutes and the no-answer timer / the configured
-/// initial-INVITE bound owns that deadline. Give it a backstop just above
-/// `invite_initial_timeout_ms` (the configured bound — BOTH roles: it is the
-/// ONLY pre-final bound on an INVITE server txn, so the a-leg admits the same
-/// ring window the b-leg client txn does) so the net never reaps a live call.
-/// Everything else — completed txns governed by Timer H/J, all non-INVITE —
-/// keeps the tight 35 s net just above 32 s, so the sweep still only ever
-/// catches what a missing-cleanup bug would otherwise leak.
-pub(super) fn sweep_max_age(
-    t: &Transaction,
-    invite_initial_timeout_ms: u64,
-) -> std::time::Duration {
-    match (t.kind, t.state) {
-        (TxnKind::Invite, TxnState::Trying | TxnState::Proceeding) => {
-            ms(invite_initial_timeout_ms + TXN_MAX_AGE)
-        }
-        _ => ms(TXN_MAX_AGE),
-    }
+    /// A server INVITE transaction — an admitted initial INVITE or a seed —
+    /// whose identity the node's shared refusals hold while it lives, so no
+    /// stage ahead of this layer refuses a copy of it; leaving the map
+    /// releases the hold.
+    pub(super) held: bool,
 }

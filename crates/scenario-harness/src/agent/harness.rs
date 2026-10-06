@@ -519,14 +519,16 @@ impl Harness {
     }
 
     /// Advance virtual time by `d` (requires a paused runtime —
-    /// `#[tokio::test(start_paused = true)]`). Advances in 100 ms chunks so
-    /// in-flight delivery tasks observe intermediate instants. Because the
-    /// report's `at_ms` rides the same tokio clock (via `sip-clock`), the
-    /// elapsed time shows up in the rendered timestamps. Call it *between*
-    /// protocol events (after the message just sent has been `expect`ed) so
-    /// each message keeps a clean send/receive timestamp.
+    /// `#[tokio::test(start_paused = true)]`), running the work in flight at
+    /// every instant a timer falls due inside the span
+    /// ([`sip_clock::testkit::advance_settled`]): a datagram lands and a
+    /// detached request is answered at its wire instant. Because the report's
+    /// `at_ms` rides the same tokio clock (via `sip-clock`), the elapsed time
+    /// shows up in the rendered timestamps. Call it *between* protocol events
+    /// (after the message just sent has been `expect`ed) so each message keeps
+    /// a clean send/receive timestamp.
     pub async fn advance(&self, d: Duration) {
-        sip_clock::testkit::advance_in_100ms_chunks(d).await;
+        sip_clock::testkit::advance_settled(d).await;
     }
 
     /// Drain the fabric before the trace snapshot: wait out in-flight

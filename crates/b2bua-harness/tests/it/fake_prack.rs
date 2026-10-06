@@ -604,6 +604,49 @@ async fn failover() {
     run_fake_prack_failover("fake-prack-failover", 5740, 5741, 5742, 5743).await;
 }
 
+/// A reroute leg is dialled while the caller's INVITE still awaits its final,
+/// so it takes the stack's own `100rel` offer like the first attempt, where the
+/// caller offered none (the offer is the stack's, never a relay of hers).
+#[tokio::test]
+async fn a_reroute_leg_is_offered_reliability_the_caller_never_offered() {
+    let h = Harness::with_transit_delay("fake-prack-reroute-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5755").await;
+    let bob1 = h.agent("bob1", "127.0.0.1:5756").await;
+    let bob2 = h.agent("bob2", "127.0.0.1:5757").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_failover(
+        "127.0.0.1",
+        5756,
+        5757,
+        "sip:+1234@127.0.0.1:5757",
+        RelayFirst18xStrategy::FakePrack,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5758")
+    .await;
+
+    let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas1 = bob1.receive("INVITE").await;
+    assert!(has_token(uas1.request().header::<Supported>(), "100rel"), "100rel offered to bob1");
+    uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await;
+
+    let mut uas2 = bob2.receive("INVITE").await;
+    assert!(
+        has_token(uas2.request().header::<Supported>(), "100rel"),
+        "the reroute leg is offered 100rel on the stack's own behalf",
+    );
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// A failover route that drops the body mints bob2's INVITE without an offer:
 /// `100rel` is withheld from it — a reliable provisional would carry an answer
 /// this stack cannot acknowledge — while the mask stays up: bob2's 18x are
@@ -682,6 +725,81 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The stack offers `100rel` on its own behalf only to mask the provisionals of
+/// the originator's INVITE. A transfer target is dialled after that INVITE took
+/// its final: no provisional of it reaches the originator, so its INVITE offers
+/// nothing of the stack's own (RFC 3262 §3).
+#[tokio::test(start_paused = true)]
+async fn a_transfer_target_is_offered_no_reliability_of_the_stacks_own() {
+    use b2bua::decision::test_adapter::{default_call_refer, route_to_processing_refer};
+    use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+    use call::features::{Relay18xMessages, RelayFirst18xTo180Feature};
+    use std::sync::Arc;
+
+    const CHARLIE_PORT: u16 = 5739;
+    let h = Harness::new("fake-prack-transfer-target");
+    let alice = h.agent("alice", "127.0.0.1:5709").await;
+    let bob = h.agent("bob", "127.0.0.1:5719").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let engine = ScriptedDecisionEngine::builder()
+        .fallback(|_req| {
+            let mut r = route_to_processing_refer("127.0.0.1", 5719);
+            r.features.relay_first_18x_to_180 = Some(RelayFirst18xTo180Feature {
+                strategy: RelayFirst18xStrategy::FakePrack,
+                messages: Relay18xMessages::First,
+            });
+            NewCallResponse::Route(r)
+        })
+        .on_refer(default_call_refer)
+        .build();
+    let b2bua = B2buaSut::builder(Arc::new(engine)).start(&h, "b2bua", "127.0.0.1:5729").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    assert!(
+        has_token(bob_uas.request().header::<Supported>(), "100rel"),
+        "the dialled leg is offered 100rel while the originator's INVITE awaits its final",
+    );
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let api = format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+    );
+    bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
+        .with_header("X-Api-Call", &api)
+        .send()
+        .await
+        .expect(202)
+        .await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    assert!(
+        !has_token(charlie_uas.request().header::<Supported>(), "100rel"),
+        "the transfer target is offered no 100rel of the stack's own: {:?}",
+        charlie_uas.request()
+    );
+    charlie_uas.respond(486, "Busy Here").await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut alice_bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.cdr_records().len() == 1).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one call, one CDR");
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;

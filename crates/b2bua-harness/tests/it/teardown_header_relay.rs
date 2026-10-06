@@ -9,6 +9,30 @@
 
 use b2bua_harness::{stated, B2buaScene};
 use sip_message::generators::InDialogMethod;
+use sip_message::header::HeaderName;
+use sip_message::SipRequest;
+
+/// An RFC 3204 ISUP release message, binary octets included.
+const ISUP: &str = "application/isup;version=itu-t92+";
+const ISUP_REL: &[u8] = b"\x0c\x02\x00\x02\x80\x90";
+
+/// The body's descriptors a releasing peer states beside its body (RFC 3204
+/// §3, RFC 2045 §4 / §6).
+const DESCRIPTORS: &[(&str, &str)] = &[
+    ("Content-Disposition", "signal;handling=optional"),
+    ("MIME-Version", "1.0"),
+    ("Content-Transfer-Encoding", "binary"),
+];
+
+/// The minted BYE carries the releasing peer's body as it was sent: its media
+/// type, its octets, and every header describing it.
+fn assert_carries_the_release_body(req: &SipRequest) {
+    assert_eq!(req.raw(HeaderName::ContentType).next(), Some(ISUP), "the body's media type");
+    assert_eq!(req.body(), ISUP_REL, "the body's octets, verbatim");
+    for (name, value) in DESCRIPTORS {
+        assert_eq!(stated(req, name).as_deref(), Some(*value), "{name} describes the body");
+    }
+}
 
 /// Alice releases with a cause, a charging correlation, a vendor annotation and
 /// end-to-end user data; the BYE the SUT mints toward bob restates all four.
@@ -49,6 +73,91 @@ async fn a_releasing_peers_headers_ride_the_bye_minted_for_the_other_leg() {
     }
     bob_uas.respond(200, "OK").await;
     bye.expect(200).await;
+
+    let _report = s.finish().await;
+}
+
+/// RFC 3261 §16.6 / §20.11: the body a releasing caller puts on its BYE is
+/// end-to-end data, so the BYE minted toward the callee carries it with its
+/// media type and descriptors, beside the release cause.
+#[tokio::test(start_paused = true)]
+async fn a_releasing_callers_body_rides_the_bye_minted_for_the_callee() {
+    let s = B2buaScene::new("b2bua-teardown-body-relay-caller").await;
+    let mut dialog = s.establish().await;
+
+    let mut bye = dialog
+        .send_request(InDialogMethod::Bye)
+        .with_header("Reason", "Q.850;cause=16")
+        .with_body(ISUP, ISUP_REL.to_vec());
+    for (name, value) in DESCRIPTORS {
+        bye = bye.with_header(name, value);
+    }
+    let mut bye = bye.send().await;
+
+    let mut bob_uas = s.bob.receive("BYE").await;
+    assert_carries_the_release_body(bob_uas.request());
+    assert_eq!(stated(bob_uas.request(), "Reason").as_deref(), Some("Q.850;cause=16"));
+    bob_uas.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _report = s.finish().await;
+}
+
+/// The callee-release twin: the BYE minted toward the caller carries the
+/// callee's body the same way.
+#[tokio::test(start_paused = true)]
+async fn a_releasing_callees_body_rides_the_bye_minted_for_the_caller() {
+    let s = B2buaScene::new("b2bua-teardown-body-relay-callee").await;
+    let mut call = s.alice.invite(&s.bob).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").await;
+    call.expect(200).await;
+    let _alice_dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    let mut bye = bob_dialog.send_request(InDialogMethod::Bye).with_body(ISUP, ISUP_REL.to_vec());
+    for (name, value) in DESCRIPTORS {
+        bye = bye.with_header(name, value);
+    }
+    let mut bye = bye.send().await;
+
+    let mut alice_uas = s.alice.receive("BYE").await;
+    assert_carries_the_release_body(alice_uas.request());
+    alice_uas.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _report = s.finish().await;
+}
+
+/// A CANCEL is hop-by-hop (RFC 3261 §9.1) and the one minted toward the callee
+/// carries no body, so no header describing a body rides on it: the source's
+/// descriptors stay behind while its cause travels.
+#[tokio::test(start_paused = true)]
+async fn a_minted_cancel_carries_no_body_descriptor() {
+    let s = B2buaScene::new("b2bua-cancel-no-body-descriptor").await;
+
+    let mut call = s.alice.invite(&s.bob).through(s.b2bua.addr).send().await;
+    let mut bob_uas = s.bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    let mut stating = vec![("Reason", "Q.850;cause=16")];
+    stating.extend_from_slice(DESCRIPTORS);
+    let mut cxl = call.cancel_stating(&stating).await;
+    cxl.expect(200).await;
+
+    let mut bob_cxl = s.bob.receive("CANCEL").await;
+    {
+        let req = bob_cxl.request();
+        assert_eq!(stated(req, "Reason").as_deref(), Some("Q.850;cause=16"));
+        for (name, _) in DESCRIPTORS {
+            assert_eq!(stated(req, name), None, "{name} describes no body on the minted CANCEL");
+        }
+    }
+    bob_cxl.respond(200, "OK").await;
+    bob_uas.respond(487, "Request Terminated").await;
+    call.expect(487).await;
 
     let _report = s.finish().await;
 }

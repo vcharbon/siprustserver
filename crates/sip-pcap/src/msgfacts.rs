@@ -144,18 +144,18 @@ mod tests {
         out
     }
 
-    const REFER: &[u8] = b"REFER sip:+33123@h SIP/2.0\r\n\
+    const REFER: &[u8] = b"REFER sip:+1555123@h SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bK2;received=10.0.0.9\r\n\
 v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK1\r\n\
 Max-Forwards: 70\r\n\
-From: <sip:0033900@h>;tag=f1\r\n\
-To: <sip:+33123@h;npdi>\r\n\
+From: <sip:001555900@h>;tag=f1\r\n\
+To: <sip:+1555123@h;npdi>\r\n\
 Call-ID: refer-1\r\n\
 CSeq: 2 REFER\r\n\
 P-Asserted-Identity: <tel:+41319852573>\r\n\
 X-Api-Call: call-9\r\n\
 x-api-call: call-10\r\n\
-Refer-To: <sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>\r\n\
+Refer-To: <sip:+1555456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>\r\n\
 l: 0\r\n\r\n";
 
     /// The Via chain reads top-first, compact spellings included, with the
@@ -187,7 +187,11 @@ l: 0\r\n\r\n";
             vec![
                 ("X-Api-Call", None, "call-9"),
                 ("X-Api-Call", Some("x-api-call"), "call-10"),
-                ("Refer-To", None, "<sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"),
+                (
+                    "Refer-To",
+                    None,
+                    "<sip:+1555456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"
+                ),
                 // `l` resolved to Content-Length before the projection saw it.
                 ("Content-Length", None, "0"),
             ]
@@ -200,12 +204,12 @@ l: 0\r\n\r\n";
     #[test]
     fn identities_normalize_users_beside_the_raw_uris() {
         let m = facts(REFER, &[]);
-        assert_eq!(m.identities.from.uri, "sip:0033900@h");
-        assert_eq!(m.identities.from.digits.as_deref(), Some("33900"));
-        assert_eq!(m.identities.to.uri, "sip:+33123@h;npdi");
-        assert_eq!(m.identities.to.user.as_deref(), Some("+33123"));
-        assert_eq!(m.identities.to.digits.as_deref(), Some("33123"));
-        assert_eq!(m.identities.ruri.as_ref().unwrap().digits.as_deref(), Some("33123"));
+        assert_eq!(m.identities.from.uri, "sip:001555900@h");
+        assert_eq!(m.identities.from.digits.as_deref(), Some("1555900"));
+        assert_eq!(m.identities.to.uri, "sip:+1555123@h;npdi");
+        assert_eq!(m.identities.to.user.as_deref(), Some("+1555123"));
+        assert_eq!(m.identities.to.digits.as_deref(), Some("1555123"));
+        assert_eq!(m.identities.ruri.as_ref().unwrap().digits.as_deref(), Some("1555123"));
         assert_eq!(m.identities.pai.len(), 1);
         assert_eq!(m.identities.pai[0].digits.as_deref(), Some("41319852573"));
     }
@@ -215,7 +219,7 @@ l: 0\r\n\r\n";
     fn refer_to_resolves_its_escaped_replaces() {
         let m = facts(REFER, &[]);
         let refer = m.refer_to.expect("REFER carries a Refer-To");
-        assert_eq!(refer.target.digits.as_deref(), Some("33456"));
+        assert_eq!(refer.target.digits.as_deref(), Some("1555456"));
         let replaces = refer.replaces.expect("attended transfer names a dialog");
         assert_eq!(replaces.call_id, "abc@h");
         assert_eq!(replaces.to_tag.as_deref(), Some("tt"));

@@ -6,10 +6,9 @@
 //! route time, and EVERY limit teardown path (max-duration BYE, message-cap
 //! 503, the crossing CANCEL/200) MUST release it — `current_total` back to 0 —
 //! exactly as a clean BYE would. A limit that tears the call down but forgets
-//! the limiter release pins a trunk's capacity forever (the endurance cap20
-//! pinning class, see [[stuck-setup-zombie-limiter-pinning]]).
+//! the limiter release pins a trunk's capacity forever.
 //!
-//! Coverage map (the user's enumerated limit cases):
+//! Coverage map (the enumerated limit cases):
 //!   - ring forever / no-answer → setup timeout: ALREADY covered with a limiter
 //!     in `setup_timeout.rs::ringing_forever_is_torn_down_at_setup_timeout_and_
 //!     releases_the_limiter` (150 s a-leg deadline, under the configured
@@ -21,6 +20,7 @@
 //!   - too many in-dialog messages on an up call → message cap: `in_dialog_*`.
 //! The 200/CANCEL crossing limit case lives in its sibling `cancel_200_crossing.rs`.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,11 +29,10 @@ use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
-    ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -82,7 +81,7 @@ fn route_limited(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 r.features.platform.max_duration_sec = max_duration_sec;
                 NewCallResponse::Route(r)
             })
@@ -97,7 +96,7 @@ fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
 /// **Call never hangs up → max-duration cap.** A perfectly healthy, established
 /// call that simply never sends a BYE must be torn down at the absolute
 /// `GlobalDuration` cap: the B2BUA BYEs *both* legs, writes the `max_duration`
-/// CDR, and — the leak this suite guards — releases its limiter hold. Pre-fix a
+/// CDR, and — the leak this suite guards — releases its limiter hold. A leaking
 /// "call that never hangs" would hold its trunk slot until the process died.
 #[tokio::test(start_paused = true)]
 async fn max_duration_byes_both_legs_and_releases_the_limiter() {
@@ -498,7 +497,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         ) -> Result<NewCallResponse, CallDecisionError> {
             let mut r = route_to("127.0.0.1", 5073);
             r.callback_context = Some("cap-failover".into());
-            r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
+            r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 1 }];
             r.features.platform.max_duration_sec = 3_600;
             Ok(NewCallResponse::Route(r))
         }

@@ -136,7 +136,7 @@ constructor that built a message without an image (`hydrate_response`) is
 gone, and `hydrate_request` renders one, so no typed message reaches the layer
 imageless. A second render at the socket would have to be written back into
 `sip-txn` against the doc contract on `send_response`, and
-`sip-txn/tests/response_leaves_as_its_image.rs` pins the wire to the image.
+`sip-txn/tests/it/response_leaves_as_its_image.rs` pins the wire to the image.
 
 `rfc_rules` gains the wire twin of the invariant: a rung must be byte-identical
 to the emission it repeats, checked in every harness `finish()` and across the
@@ -223,18 +223,18 @@ one token — which makes the oracle itself an assertion of the X3 invariant.
 
 `sip-retransmit`'s table-driven schedule test (one row per class, plus the
 authored forms and `tightened_to`), the existing
-`sip-txn/tests/{fsm,cancel_retransmit,cancel_hold}` suite unchanged,
-`sip-txn/tests/response_leaves_as_its_image.rs` (the wire is the image),
-`b2bua-harness/tests/{unacked_2xx_retransmit_is_faithful,
+`sip-txn/tests/it/{fsm,cancel_retransmit,cancel_hold}` suite unchanged,
+`sip-txn/tests/it/response_leaves_as_its_image.rs` (the wire is the image),
+`b2bua-harness/tests/it/{unacked_2xx_retransmit_is_faithful,
 unacked_2xx_reap,unacked_reinvite_2xx_reap,prack_reliable_ladder}.rs`
 (`unacked_2xx_reap` includes the Timer L ceiling under a 60 s deadline),
 `b2bua-harness/tests/unacked_2xx_reap.rs` also holds the X5 floor: a
 non-positive `ack_timeout_sec` still ends the session at Timer L, and a service
 rule that answers the give-up without terminating does not keep it up.
-`b2bua/tests/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
+`b2bua/tests/it/rules.rs` (answering the caller leaves a b-leg's pending re-INVITE
 2xx ladder alone; `settle_give_up` ends a session a service parked and leaves a
 `PrackOf` give-up to the rules), `b2bua-sdk/src/config.rs` (a non-positive
-deadline is refused and falls back to 32 s), `call/tests/model_helpers.rs` (the 2xx ladder never runs
+deadline is refused and falls back to 32 s), `call/tests/it/model_helpers.rs` (the 2xx ladder never runs
 past Timer L; `Scope::Provisionals` names no 2xx),
-`failover-harness/tests/prack_takeover.rs`, and the new byte-identity rule in
+`failover-harness/tests/it/prack_takeover.rs`, and the new byte-identity rule in
 the `rfc-rules` census.

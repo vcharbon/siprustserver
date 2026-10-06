@@ -45,7 +45,6 @@ pub struct MessageEntry {
     /// append): the message handled, what the transaction layer answered it
     /// with on its own and what the turn sent share one number. Turns count
     /// from `1` per call; `0` is no turn.
-    #[serde(default)]
     pub turn: u32,
 }
 

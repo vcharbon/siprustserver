@@ -238,6 +238,8 @@ mod tests {
             origin_now_ms: 0,
             indexes: vec!["a".into(), "b".into()],
             body: Some(StdArc::from(&b"the-encoded-call-body-bytes"[..])),
+            answered: false,
+            incarnation: None,
         };
 
         client.send(noop.clone()).await.unwrap();

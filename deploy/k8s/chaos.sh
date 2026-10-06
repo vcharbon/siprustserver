@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Goal-3 (S11) HA-replication CHAOS suite for the Rust SIP SUT on kind.
+# HA-replication CHAOS suite for the Rust SIP SUT on kind.
 #
 # This is the real-clock, real-TCP, real-k8s acceptance for peer-to-peer call
 # replication (ADR-0011): it stands up the full stack WITH replication enabled,
 # drives long-hold dialogs through the proxy, KILLS the worker holding a dialog
 # mid-call, and asserts the dialog SURVIVES — the in-dialog BYE lands on the
 # backup worker (which holds the replica) and is answered 200. That is "call
-# survival + convergence", the goal-3 bar.
+# survival + convergence", the HA acceptance bar.
 #
 # It is deliberately a SHELL script (not a `cargo test`): a real kind cluster +
 # image builds are slow and WSL2-flaky, so it must not gate `cargo test
@@ -29,21 +29,19 @@
 #   PASS_THRESHOLD=90  min % successful calls to PASS (best-effort failover, X5)
 #   KEEP=1             leave the cluster up after the run (default tear down off)
 #
-# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# >>> SOURCEABLE LIBRARY <<<
 # This file doubles as a function library: all logic lives in functions and the
 # subcommand dispatch is chaos_main(), executed ONLY when the script is run
 # directly. A downstream overlay (living in a DIFFERENT directory) can set knobs,
 # `source /path/to/deploy/k8s/chaos.sh` (executes nothing), then call/override
 # the primitives (kill_worker, kill_proxy, peak, cpu_starve*, assert_survival,
-# wait_brought_back, ...) or dispatch via `chaos_main kill`. The formerly-inline
-# kill/assert kubectl targets are parameterized (defaults reproduce the
-# historical behaviour exactly):
+# wait_brought_back, ...) or dispatch via `chaos_main kill`. The kill/assert
+# kubectl targets are parameterized (the defaults target this repo's manifests):
 #   WORKER_SELECTOR / WORKER_STS / WORKER_CONTAINER     worker pods / workload / container
 #   PROXY_SELECTOR / PROXY_DEPLOY / PROXY_VRRP_CONTAINER proxy pods / workload / VIP owner
 #   LIMITER_SELECTOR / LIMITER_DEPLOY
-# UAC streams are docker containers on the sipext bridge (lib/sipext-gen.sh) —
-# the old UAC_SELECTOR/ORPHAN_SELECTOR pod selectors and the 40-sipp-uac-job
-# template (MANIFEST_DIR) are retired; streams are addressed by container name.
+# UAC streams are docker containers on the sipext bridge (lib/sipext-gen.sh),
+# addressed by container name, not by pod selector.
 # NOTE: the cluster-lifecycle helpers are namespaced chaos_up/chaos_deploy/
 # chaos_down (they shell out to run.sh) so they never collide with run.sh's own
 # up/deploy/down when an overlay sources BOTH files.
@@ -51,8 +49,8 @@
 # Shares cluster name `sip-e2e` (WSL one-cluster switch) — see README/run.sh.
 set -euo pipefail
 # Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
-# into any script sourcing this library — issue 025); every path below that used
-# to be cwd-relative is now anchored on $K8S_DIR instead.
+# into any script sourcing this library); every path below is anchored on
+# $K8S_DIR, never cwd-relative.
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NS="${NS:-sip-test}"
@@ -63,11 +61,10 @@ PASS_THRESHOLD="${PASS_THRESHOLD:-90}"
 SCENARIO="uac-hold-failover.xml"
 JOB="sipp-uac-failover"
 
-# Kill-target / assert knobs (issue 025): the label selectors, workload names and
-# container names the chaos primitives act on — extracted from the formerly-
-# inline kubectl calls so a downstream overlay can retarget them. KILL_TARGET/
-# STARVE_TARGET pick the POD; these pick the POPULATION each primitive
-# selects/waits on. Defaults reproduce the historical behaviour exactly.
+# Kill-target / assert knobs: the label selectors, workload names and container
+# names the chaos primitives act on, so a downstream overlay can retarget them.
+# KILL_TARGET/STARVE_TARGET pick the POD; these pick the POPULATION each
+# primitive selects/waits on. Defaults target this repo's manifests.
 WORKER_SELECTOR="${WORKER_SELECTOR:-app=b2bua-worker}"       # worker pod label
 WORKER_STS="${WORKER_STS:-statefulset/b2bua-worker}"         # worker workload (rollout gate)
 WORKER_CONTAINER="${WORKER_CONTAINER:-b2bua-worker}"         # container cpu_starve throttles
@@ -76,8 +73,8 @@ PROXY_DEPLOY="${PROXY_DEPLOY:-deploy/sip-front-proxy}"       # proxy workload (r
 PROXY_VRRP_CONTAINER="${PROXY_VRRP_CONTAINER:-keepalived}"   # sidecar that owns the VIP
 LIMITER_SELECTOR="${LIMITER_SELECTOR:-app=call-limiter}"     # limiter pod label
 LIMITER_DEPLOY="${LIMITER_DEPLOY:-deploy/call-limiter}"      # limiter workload (rollout gate)
-# UAC_SELECTOR / ORPHAN_SELECTOR are RETIRED: UAC streams are docker containers
-# on sipext now, addressed by NAME ($JOB / $ORPHAN_JOB), not pod label.
+# UAC streams are docker containers on sipext, addressed by NAME ($JOB /
+# $ORPHAN_JOB), not pod label.
 
 # Replication ON, ≥2 workers so a primary + backup live on different app nodes.
 export REPL_ENABLE=1
@@ -230,17 +227,19 @@ sip_chaos_active{type=\"peak\"} 0"
 
 # CHAOS: cpu_starve — make ONE b2bua worker pod overloaded by SHRINKING the CPU
 # available to its container (NOT by piling on traffic). This is the faithful
-# "the platform itself is overloaded" lever: the old `peak` event just added
-# 200cps of NEW INVITEs, which saturated the SIPp generators long before it
-# stressed the platform, so the SUT's overload tiers never actually engaged. CPU
+# "the platform itself is overloaded" lever: adding 200cps of NEW INVITEs (the
+# `peak` event) saturates the SIPp generators long before it stresses the
+# platform, so the SUT's overload protection never engages. CPU
 # scarcity DOES engage them — the worker's ELU sampler (a 100ms tokio interval
-# whose reading is its own scheduling lag, crates/b2bua/src/overload.rs) lands
-# chronically late under a tight CPU quota, the published `elu` EWMA climbs past
-# B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75), and the Tier-3 admission gate
-# (overload.should_admit) starts returning the stateless `503 overload` for NEW
-# NON-emergency INVITEs while ALWAYS admitting emergency ones (Resource-Priority
-# esnet.0) and NEVER touching established in-dialog requests (re-INVITE/BYE/in-
-# dialog OPTIONS are not gated). That is exactly the trio the experiment asserts:
+# whose reading is its own scheduling lag, crates/b2bua/src/overload/sampler.rs)
+# lands chronically late under a tight CPU quota, the published `elu` EWMA climbs
+# past B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD (0.75), and the panic-ELU rung of the
+# admission ladder (crates/b2bua/src/admission) answers NEW NON-emergency
+# INVITEs 503 through their server transaction, while it admits emergency ones
+# (Resource-Priority esnet.0) and never judges in-dialog requests (re-INVITE/
+# BYE/in-dialog OPTIONS). Only the capacity, backlog and shed rungs refuse an
+# emergency call, at their emergency ceilings, which cpu_starve does not reach.
+# That is exactly the trio the experiment asserts:
 #   (1) in-dialog calls unaffected, (2) new calls MAY be rejected, (3) but only
 #   non-emergency ones.
 #
@@ -260,9 +259,9 @@ sip_chaos_active{type=\"peak\"} 0"
 # so the pod stays IN the LB (a pod that drops out reroutes new calls to the
 # healthy worker and the gate is never exercised). EXPECT TO CALIBRATE on the
 # first live run — too tight drops /ready (looks like a kill, not an overload);
-# too loose never crosses 0.75 ELU. Watch b2bua_overload_rejected_total rise and
+# too loose never crosses 0.75 ELU. Watch b2bua_new_calls_total{reason="panic_elu"} rise and
 # the worker stay Ready; nudge STARVE_QUOTA_US until both hold.
-# Defaults CALIBRATED 2026-06-20 on the default endurance profile (long@5,
+# Defaults CALIBRATED on the default endurance profile (long@5,
 # short 50em+50ne, reinvite@5, limiter@2; 2 workers on 24-core nodes). A worker
 # draws ~0.22 core at that baseline and ~0.33 under the +120cps non-emergency
 # peak the `overload` combo adds. 0.30 core (30000/100000) is JUST BELOW that
@@ -435,7 +434,7 @@ orphan_kill() {
   sleep "$ORPHAN_BUILD_SECS"   # let ~ORPHAN_CAPS*ORPHAN_BUILD_SECS dialogs establish
   log "CHAOS: abruptly killing the orphan UAC mid-call (dialogs orphaned on the B2BUA)"
   # docker rm -f = SIGKILL + remove: no BYE, no restart-policy resurrection —
-  # the same abruptness as the old --grace-period=0 pod delete.
+  # the same abruptness as a --grace-period=0 pod delete.
   sipext_sipp_uac_rm "$ORPHAN_JOB"
   push_metric 'sip_chaos_event{type="orphan_kill",phase="killed"} 1'
 }
@@ -444,7 +443,7 @@ orphan_kill() {
 # limiter FUNCTION only: while it is down the b2bua fails OPEN (the call runs
 # uncounted, 150ms budget), so calls keep flowing — the cap simply stops being
 # enforced. The Deployment (strategy: Recreate) brings a fresh, empty pod back;
-# the counted calls re-register their sets on their next refresh (ADR-0038).
+# the counted calls re-register their sets on their next refresh (ADR-0040).
 limiter_kill() {
   log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
   push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'
@@ -750,20 +749,21 @@ wait_brought_back() {
 }
 
 # Assert the brought-back worker actually RE-PULLED state from its peer (not just
-# came up empty): its repl_pull_applied counter must be > 0. A fresh worker that
-# reclaims its calls on reboot drains the peer's compacted changelog — zero here
-# means re-hydration silently delivered nothing (the goal-3 failure mode).
+# came up empty): the replication ops it applied (b2bua_repl_applied_total, every
+# flow, peer and op summed) must be > 0. A fresh worker that reclaims its calls
+# on reboot drains the peer's compacted changelog — zero here means
+# re-hydration silently delivered nothing (the HA failure mode).
 assert_rehydrated() {
-  log "asserting $KILL_TARGET re-pulled state from its peer (repl_pull_applied > 0)"
+  log "asserting $KILL_TARGET re-pulled state from its peer (repl_applied > 0)"
   local pf applied
   kubectl -n "$NS" port-forward "$KILL_TARGET" 19091:9091 >/dev/null 2>&1 &
   pf=$!
   sleep 3
   applied="$(curl -s --max-time 4 localhost:19091/metrics 2>/dev/null \
-    | grep -aE '^b2bua_repl_pull_applied_total ' | grep -oE '[0-9]+$' | tail -1)"
+    | awk '/^b2bua_repl_applied_total[{ ]/ { n += $NF } END { printf "%d", n }')"
   kill "$pf" 2>/dev/null || true
   applied="${applied:-0}"
-  printf '  %s repl_pull_applied_total = %s\n' "$KILL_TARGET" "$applied" >&2
+  printf '  %s repl_applied_total = %s\n' "$KILL_TARGET" "$applied" >&2
   if [ "$applied" -gt 0 ]; then
     ok "bring-back re-hydration: $KILL_TARGET re-pulled $applied entries from its peer"
   else
@@ -792,7 +792,7 @@ bringback() {
   assert_rehydrated
   # (3) the recreated pod has a fresh IP, but the proxy now discovers workers from
   # k8s EndpointSlices (ADR-0012 D4): the informer picks up the new IP on its own,
-  # so NO proxy redeploy is needed (this used to re-bake PROXY_WORKERS). Just
+  # so NO proxy redeploy is needed. Just
   # re-gate readiness before driving traffic again.
   wait_ready
   # (4) batch-2: NEW dialogs on the recovered topology must all succeed.
@@ -810,7 +810,7 @@ bringback() {
 }
 
 # Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
-# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+# direct CLI use) depends on: names and behaviour are FROZEN.
 chaos_main() {
   local cmd="${1:-failover}"; shift || true
   case "$cmd" in

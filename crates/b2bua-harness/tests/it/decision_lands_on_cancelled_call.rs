@@ -1,5 +1,4 @@
-//! A `/calls` decision result landing on a call the CALLER already CANCELed
-//!.
+//! A `/call/new` decision result landing on a call the CALLER already CANCELed.
 //!
 //! The caller gives up while the routing decision is still in flight: the txn
 //! layer finalizes the initial-INVITE transaction at once (200 to the CANCEL,
@@ -18,6 +17,7 @@
 //! land through the rule chain and read the call's own
 //! `Terminating`/`Terminated` state.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,11 +27,11 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::{reject, route_to};
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest,
-    NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest, NewCallResponse,
+    RejectDecision, ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{establish, hangup, invite_final_statuses, settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -42,7 +42,7 @@ use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// The scripted BL round trip the caller's CANCEL races (BC_02: up to the
+/// The scripted decision round trip the caller's CANCEL races (up to the
 /// adapter's 1 s budget — inside the 5 s decision deadline).
 const DECISION_DELAY: Duration = Duration::from_millis(900);
 
@@ -244,12 +244,8 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
-    // Fail-open budget well above the paused-clock HTTP round trip: the 1 ms
-    // simulated transits quantize to the 100 ms advance chunks the admit rides
-    // through (it lands mid-`h.advance`, unlike the agent-pumped callflow
-    // steps), so a production-sized 150 ms budget would fail open here.
     let limiter: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_millis(150)));
 
     let decision = Arc::new(DelayedDecisionEngine {
         new_call_delay: DECISION_DELAY,
@@ -258,7 +254,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_req| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 10 }];
+                    r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 10 }];
                     NewCallResponse::Route(r)
                 })
                 .build(),

@@ -1,7 +1,7 @@
 //! The subscribed release-event decision seam + the established-call reroute
 //! treatment:
 //!
-//!   1. UNSUBSCRIBED max-duration expiry → today's local teardown, and the
+//!   1. UNSUBSCRIBED max-duration expiry → the local teardown, and the
 //!      engine's `call_release` is NEVER consulted (even with a
 //!      callback_context — the subscription is the gate).
 //!   2. Subscribed + engine says `Release` → same local teardown, and the
@@ -20,6 +20,7 @@
 //!   5. A hung / erroring `call_release` falls back to local teardown,
 //!      bounded by the decision deadline — no wedged call.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,11 +28,11 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
-    CallLimiterEntry, CallReleaseRequest, CallReleaseResponse, NewCallResponse, ReleaseOutcome,
+    CallReleaseRequest, CallReleaseResponse, NewCallResponse, ReleaseOutcome,
     ScriptedDecisionEngine,
 };
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 
 use crate::common::sdp::apart_from_origin;
@@ -61,20 +62,13 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn H
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    // A 1 s fail-open budget (vs the 150 ms other suites use): the reroute
-    // admit runs inside the release fire-and-forget task, which is woken by a
-    // timer INSIDE a big `h.advance` — the harness advances in 100 ms chunks,
-    // so a 150 ms budget can expire between chunks before the simulated HTTP
-    // round-trip is delivered (a paused-clock pumping artifact, not SUT).
-    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_secs(1)))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// Re-answer a Timer-A retransmit of the replacement-leg INVITE as a real UAS
 /// would — the SAME 200 (same To-tag, same SDP), a faithful RFC 3261 §17.2.1
-/// 2xx retransmission. The release fold pipeline (timer fire → consult →
-/// re-entry → CreateLeg) spans several 100 ms pump chunks under the paused
-/// clock, so the b-leg INVITE's first 500 ms retransmit usually beats the
-/// test's 200; answering it with a FRESH tag (what `receive_tolerating`'s
+/// 2xx retransmission. The b-leg INVITE's first 500 ms retransmit can beat
+/// the test's 200; answering it with a FRESH tag (what `receive_tolerating`'s
 /// auto-200 does) would fabricate a phantom fork dialog and trip the
 /// `unacked-2xx-not-cleared` audit. Non-blocking: if no retransmit is
 /// queued (timing shifted), this is a no-op — the ACK cannot be queued yet
@@ -257,14 +251,14 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_with_cap(5072, true);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 10 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 10 }];
                 NewCallResponse::Route(r)
             })
             .on_release(move |_req| {
                 // Reroute the released call to the announcement target, with
                 // its own limiter hold (output parity: admitted + released).
                 let mut r = route_to("127.0.0.1", 5092);
-                r.call_limiter = vec![CallLimiterEntry { id: "announce-cap".into(), limit: 10 }];
+                r.call_limiter = vec![LimiterEntry { id: "announce-cap".into(), limit: 10 }];
                 r.label = Some("announce".into());
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })

@@ -309,7 +309,7 @@ pub struct RuleDefinition {
 
 impl RuleDefinition {
     /// A machine-less ("core") rule: always a selection candidate, regardless of
-    /// any machine cursor. Every pre-ADR-0016 rule is built through this; only
+    /// any machine cursor. Every core rule is built through this; only
     /// `sm_rule!`-generated service rules populate the machine fields directly.
     pub fn core(
         id: &'static str,
@@ -539,6 +539,24 @@ impl TimerDelay {
     }
 }
 
+/// How an INVITE that meets glare, or an UPDATE over an open offer, is
+/// refused (RFC 3261 §14.2, RFC 3311 §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlareRefusal {
+    /// The sender's earlier INVITE or UPDATE is still open here: 500 with a
+    /// `Retry-After` of 0 to 10 s (RFC 3261 §14.2, first clause; RFC 3311
+    /// §5.2).
+    Unanswered,
+    /// The sender's earlier INVITE has its 2xx, not yet ACKed: 491, with a
+    /// `Retry-After` from [`crate::config::B2buaConfig::glare_retry_after`]
+    /// when one is set.
+    Unacknowledged,
+    /// An INVITE or offer of this side's own is in progress on the dialog, or
+    /// on the dialog the request would be relayed onto: 491 with no
+    /// `Retry-After` (§14.2, second clause; RFC 3311 §5.2).
+    Crossing,
+}
+
 /// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
 /// cluster (provisional/prack/notify/reinvite/sdp/policy/refer) is defined for
 /// the deferred 18x/transfer service rules and is unused until they land.
@@ -556,6 +574,11 @@ pub enum RuleAction {
         reason: String,
         body: Vec<u8>,
         content_type: Option<String>,
+    },
+    /// Refuse the current INVITE that meets glare, or UPDATE over an open
+    /// offer, in place (RFC 3261 §14.2, RFC 3311 §5.2), by [`GlareRefusal`].
+    RefuseGlare {
+        refusal: GlareRefusal,
     },
     /// ACK a leg's confirmed dialog. `body` rides the ACK (delayed-offer answer,
     /// RFC 3261 §13.2.2.4 / RFC 3264 §4) — `None` for the ordinary bare ACK,
@@ -608,6 +631,10 @@ pub enum RuleAction {
         /// Header overrides applied to the C INVITE (`update_headers` from the
         /// /call/refer allow). `(name, Some(value))` sets, `(name, None)` removes.
         header_updates: Vec<(String, Option<String>)>,
+        /// Lines stated on the built INVITE only where it carries none of
+        /// the name, `(name, lines)` — the INVITE as minted, privacy
+        /// concealment and every relay applied.
+        header_adds: Vec<(String, Vec<String>)>,
         /// Leg role (ADR-0014/0016). `None` defaults to [`LegKind::Destination`];
         /// a service parks an unadopted media leg via `Some(LegKind::Media)`. The
         /// leg's `adopted` flag derives from this kind (`is_adopted`), so a media
@@ -617,8 +644,9 @@ pub enum RuleAction {
     /// End b-leg `leg_id` as its state asks: a confirmed dialog is BYE'd, a
     /// pending INVITE CANCELled (RFC 3261 §9.1), and the leg terminated.
     /// `headers` are application headers the rule states on that BYE or
-    /// CANCEL, verbatim — the RFC 3326 `Reason` of a release of its own; empty
-    /// states none.
+    /// CANCEL, verbatim — the RFC 3326 `Reason` of a release of its own. A BYE
+    /// stating no `Reason` in a turn no peer's BYE or CANCEL drives carries
+    /// the deployment's `own_release_reason`; a media leg gets none.
     DestroyLeg {
         leg_id: String,
         headers: Vec<(String, String)>,
@@ -689,7 +717,9 @@ pub enum RuleAction {
     },
     /// Graceful teardown of every unresolved leg, then `Terminating`.
     /// `reason` is a label — an RFC 3326 `SIP;cause=…` value rides the minted
-    /// BYEs, anything else is not emitted; `cause` and `by_leg` are the
+    /// BYEs, anything else is not emitted, and a BYE of a release no peer
+    /// asked for carries the deployment's `own_release_reason` where it states
+    /// no other `Reason`; `cause` and `by_leg` are the
     /// call's termination record (`Call::termination`, written once by the
     /// first termination: who ended the call and why).
     BeginTermination {
@@ -737,8 +767,8 @@ pub enum RuleAction {
     /// `headers` forwards arbitrary application headers verbatim onto the
     /// re-originated request (mirrors [`RuleAction::ServiceHttpRequest`]'s header
     /// list). This is the seam a service uses to **reconstruct a deferred relay**:
-    /// e.g. INFO_UUI RELAY stashes the inbound INFO's `User-To-User` header across
-    /// an async `/infouui` decision, then re-emits it toward the peer here with
+    /// e.g. a deferred User-to-User relay stashes the inbound INFO's
+    /// `User-To-User` header across an async decision, then re-emits it toward the peer here with
     /// `headers: [("User-To-User", value)]`. The B2BUA rebuilds
     /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
     /// only application headers belong here. `Content-Type`/`Content-Length` are
@@ -798,7 +828,7 @@ pub enum RuleAction {
     },
     /// Bare-180 downgrade relay (`relayFirst18xTo180`): mint an a-facing To-tag
     /// on the FIRST 18x (the executor owns the IdGen) — or reuse the stored one
-    /// on a later 18x the `relay18x.messages` policy relays again (the caller
+    /// on a later 18x the `Relay18xMessages` policy relays again (the caller
     /// keeps ONE stable early-dialog identity) — seed the tag map for this
     /// b-leg dialog, record `stored_a_tag` + `first_relayed` (+ the upstream
     /// status value for `ONE_PER_VALUE` dedupe), and relay the current 1xx to
@@ -842,8 +872,9 @@ pub enum RuleAction {
         request: serde_json::Value,
     },
     /// The **generic, service-authorable** async-HTTP callback (the seam that
-    /// generalizes [`ReferAsyncHttp`]/[`FailureAsyncHttp`]). A custom service
-    /// emits this mid-dialog to POST/GET a logical adaptation endpoint with a
+    /// generalizes [`ReferAsyncHttp`](Self::ReferAsyncHttp)/
+    /// [`FailureAsyncHttp`](Self::FailureAsyncHttp)). A custom service emits
+    /// this mid-dialog to POST/GET a logical adaptation endpoint with a
     /// **binary** body; the host-injected `AdaptationHttpPort` maps `endpoint`
     /// (a logical/relative path) onto its base URL, fires the request under
     /// `timeout_ms` (host default if `None`), and folds the response back as a
@@ -853,7 +884,10 @@ pub enum RuleAction {
     /// the result `payload`, so a consuming rule's `Match::internal_event()
     /// .topic("service-http-result").filter(..)` disambiguates concurrent
     /// in-flight requests. If no port is injected the interpreter still folds an
-    /// `outcome:"error"` result back, so the machine is never stranded.
+    /// `outcome:"error"` result back. A result lost with the node that sent the
+    /// request is folded back at the request's answer deadline wherever the
+    /// call is served then, as `outcome:"error"` with `"error":"no_answer"`; a
+    /// result landing past that deadline reaches no rule (ADR-0039).
     ServiceHttpRequest {
         /// Service-minted opaque id echoed back in the result `payload`.
         correlation_id: String,
@@ -882,7 +916,8 @@ pub enum RuleAction {
     /// Kick the async `/call/failure` decision: push a `FailureAsyncHttp`
     /// fire-and-forget effect carrying the request JSON. The router interpreter
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
-    /// internal event.
+    /// internal event. The emitting rule restates the failure image with it
+    /// ([`crate::failure_image::no_failure_image`] when no peer final failed).
     FailureAsyncHttp {
         request: serde_json::Value,
     },
@@ -934,28 +969,41 @@ pub enum RuleAction {
     SetFeatures {
         features: FeatureActivations,
     },
+    /// Replace the call's stated headers (`features.stated_headers`) with
+    /// `headers` from this turn on, `None` clearing them: what a decision that
+    /// applies no route states. A call with no features takes none.
+    SetStatedHeaders {
+        headers: Option<call::features::StatedHeaders>,
+    },
     /// Merge per-service ext slices into `call.ext` (the failover-route
     /// counterpart of `apply_route`'s `service_ext` seeding). `null` values
     /// clear the slice, mirroring `set_call_ext`.
     MergeCallExt {
         ext: ExtMap,
     },
-    /// State the call's admission state after a route fold: the fold's
-    /// dispatching task already replaced the set held under `key` on the
-    /// limiter (one `admit(key, ..)` net of the set the call held), so the
-    /// call is `counted` with `ids` as the limiter confirmed them, and
-    /// `release_owed` once any admit request left for the key (the call's
-    /// obligation only grows), `fail_open` when it runs uncounted on a route
-    /// naming ids the limiter did not confirm. On a live call the refresh cadence follows;
-    /// the terminal settle releases a call that owes it. A `key` that is not
-    /// the resident call's names an earlier call under the same `call_ref`:
-    /// the call's state is left alone and that key is released when owed.
-    SetLimiterState {
-        key: String,
-        counted: bool,
-        release_owed: bool,
-        fail_open: bool,
-        ids: Vec<String>,
+    /// Replace the call's admission set on the call limiter with `entries`:
+    /// one admit of the whole set under the call's next change number, all or
+    /// none, checked net of the set the call holds; a cap refusal keeps that
+    /// set. With `moves_call` the sending turn moves the call onto `entries`:
+    /// it runs on them whatever the outcome, and runs uncounted while the
+    /// limiter does not hold them all. The router re-enters with a [`LIMITER_ADMIT_RESULT`](crate::fold_payload::LIMITER_ADMIT_RESULT) internal event
+    /// whose outcome is the admit's and whose payload echoes `correlation_id`
+    /// beside the admit's report; the call's limiter state already states the
+    /// outcome ([`RuleCall::limiter_held`]) when a rule reads the event. The
+    /// call owes its release once the request left; a result landing on a
+    /// gone call releases the key. A result lost with the node that sent the
+    /// admit is folded back at its answer deadline as `unavailable`; a result
+    /// landing past that deadline is applied to the call and reaches no rule
+    /// (ADR-0039).
+    ReplaceAdmissionSet {
+        /// Service-minted opaque id echoed back in the result `payload`.
+        correlation_id: String,
+        /// The whole set the call is to hold.
+        entries: Vec<call::LimiterEntry>,
+        /// The call runs on `entries` from this turn whatever the outcome
+        /// (true), or keeps running on what it runs on (false: the service
+        /// waits for the result).
+        moves_call: bool,
     },
     /// Synthesize a final failure response on the a-leg INVITE server txn
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
@@ -968,8 +1016,8 @@ pub enum RuleAction {
     /// INVITE server txn (ADR-0017 failover path). `header_updates` add
     /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` (`uri`, `q`)
     /// render `Contact:` headers for a 3xx redirect. Distinct from
-    /// [`RelayFailureToALeg`], which relays the b-leg's own failure with the
-    /// B2BUA Contact.
+    /// [`RelayFailureToALeg`](Self::RelayFailureToALeg), which relays the b-leg's
+    /// own failure with the B2BUA Contact.
     RespondToALeg {
         status: u16,
         reason: String,
@@ -982,18 +1030,18 @@ pub enum RuleAction {
     /// the confirmed a-dialog, **superseding** any early-media dialog the caller
     /// saw on a prior `18x`.
     ///
-    /// The MRF / RBT early-media callflow answers ONE caller INVITE in two
-    /// stages with two *different* To-tags: a `183` (SDP-MRF, tag A1) then a
-    /// `200` (SDP-B, tag A2 ≠ A1). A1 and A2 carry different SDP answers to the
-    /// caller's single offer, so keeping A1 for both would put two answers in
-    /// one dialog (RFC 3264 §5.1 violation). This action delivers the
+    /// An early-media announcement callflow can answer ONE caller INVITE in two
+    /// stages with two *different* To-tags: a `183` (the media server's SDP, tag
+    /// A1) then a `200` (SDP-B, tag A2 ≠ A1). A1 and A2 carry different SDP
+    /// answers to the caller's single offer, so keeping A1 for both would put two
+    /// answers in one dialog (RFC 3264 §5.1 violation). This action delivers the
     /// RFC-correct tag change: it (i) mints a fresh a-facing To-tag A2 (or uses
     /// `to_tag` verbatim), (ii) sets/replaces the a-dialog `local_tag` to A2 and
     /// confirms the a-leg, and (iii) relays the final/SDP under A2. Only a `2xx`
     /// establishes a dialog — a non-2xx status is a no-op (the abandoned early
-    /// dialog / the ADR-0022 unanswered-a-leg funnel own the failure paths).
-    /// The body's `content_type` defaults to `application/sdp`;
-    /// `header_updates` follow the non-structural set/remove discipline of
+    /// dialog / the ADR-0022 unanswered-a-leg funnel own the failure paths). The
+    /// body's `content_type` defaults to `application/sdp`; `header_updates`
+    /// follow the non-structural set/remove discipline of
     /// [`Self::RespondToALeg`]; `relayed` is the delivered callee final's lines
     /// that ride onto this answer (RFC 3261 §16.6), exactly as the plain relay
     /// would carry them.
@@ -1046,6 +1094,7 @@ impl RuleAction {
             | RuleAction::RespondToALeg { .. }
             | RuleAction::AnswerALegNewDialog { .. }
             | RuleAction::Respond { .. }
+            | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
@@ -1089,8 +1138,9 @@ impl RuleAction {
             | RuleAction::MarkDecision { .. }
             | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
+            | RuleAction::SetStatedHeaders { .. }
             | RuleAction::MergeCallExt { .. }
-            | RuleAction::SetLimiterState { .. }
+            | RuleAction::ReplaceAdmissionSet { .. }
             | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
@@ -1108,7 +1158,7 @@ impl RuleAction {
 /// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
 /// `sampled`/`trace_id`/`root_span_id` (observability), `message_count`,
 /// `terminating_refresh_legs`, `a_leg_pending_vias`/`a_leg_pending_cseq`
-/// (relay frame state), `limiter`, `timers`, `active_rules`,
+/// (relay frame state), `limiter` (but its held and target sets), `timers`, `active_rules`,
 /// `policy_update_headers`/`policy_update_body`, `billing_context`,
 /// `emergency`. Add an accessor only when a real rule needs it — never
 /// speculatively.
@@ -1225,6 +1275,23 @@ impl<'a> RuleCall<'a> {
         call::helpers::all_peered_legs(self.0)
     }
 
+    // ── admission ──────────────────────────────────────────────────────────
+    /// The set the call limiter last stated it holds for the call: what a
+    /// service computes its next replacement from
+    /// ([`RuleAction::ReplaceAdmissionSet`]), never from an admit whose
+    /// answer it has not seen.
+    pub fn limiter_held(&self) -> &'a [call::LimiterEntry] {
+        self.0.limiter.held()
+    }
+    /// The set the call's latest admit asked for, from the turn that sends
+    /// it (a replacement's) or from its report (a consult's); after a refused
+    /// or superseded change, the held set. With
+    /// [`limiter_held`](Self::limiter_held), what a service tells a confirmed
+    /// hold from an unconfirmed add.
+    pub fn limiter_target(&self) -> &'a [call::LimiterEntry] {
+        self.0.limiter.target()
+    }
+
     // ── service slices (typed data backing; the cursor lives in sm_cursors) ──
     pub fn ext(&self) -> Option<&'a ExtMap> {
         self.0.ext.as_ref()
@@ -1249,7 +1316,7 @@ impl<'a> RuleCall<'a> {
     pub fn relay_first_18x_stored_a_tag(&self) -> Option<&'a str> {
         call::helpers::relay_first_18x_stored_a_tag(self.0)
     }
-    /// The active `relay18x.messages` policy (defaults to `FIRST`).
+    /// The active `Relay18xMessages` policy (defaults to `FIRST`).
     pub fn relay_first_18x_messages(&self) -> call::features::Relay18xMessages {
         call::helpers::relay_first_18x_messages(self.0)
     }
@@ -1405,7 +1472,7 @@ impl<'a> RuleContext<'a> {
         }
     }
     /// Is the leg a [`RuleAction::RelayToPeer`] of the current request would
-    /// target in a **relayable** state (GAP-P8b-2)? `false` exactly when the
+    /// target in a **relayable** state? `false` exactly when the
     /// relay would go nowhere useful: no peer leg resolves, the peer leg is
     /// `Terminated` (e.g. a failed b-leg whose `/call/failure` reroute is still
     /// pending), or the target dialog has no remote tag yet (a replacement leg
@@ -1419,6 +1486,55 @@ impl<'a> RuleContext<'a> {
     pub fn peer_relay_ready(&self) -> bool {
         let to_tag = self.request().and_then(|r| r.to().tag());
         call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, to_tag)
+    }
+
+    /// Whether the current INVITE meets glare (RFC 3261 §14.1), by the same
+    /// predicate the exchange count reads ([`call::helpers::invite_glare`]):
+    /// an INVITE transaction still open on the source dialog or on the
+    /// dialog its relay would be regenerated on.
+    pub fn invite_glare(&self) -> bool {
+        let to_tag = self.request().and_then(|r| r.to().tag());
+        call::helpers::invite_glare(self.call.0, self.source_leg_id, to_tag)
+    }
+
+    /// The refusal the current UPDATE draws (RFC 3311 §5.2), if any: 500 over
+    /// its sender's UPDATE still awaiting its final, whatever its body; with an
+    /// offer, 500 over the sender's open INVITE offer and 491 over this stack's
+    /// ([`crate::open_offer::open_offer`]).
+    pub fn update_refusal(&self) -> Option<GlareRefusal> {
+        let req = self.request().filter(|r| *r.method() == Method::Update)?;
+        if call::helpers::peer_update_pending(self.call.0, self.source_leg_id, req.to().tag()) {
+            return Some(GlareRefusal::Unanswered);
+        }
+        req.sdp()?;
+        match crate::open_offer::open_offer(self.call.0, self.source_leg_id, req)? {
+            crate::open_offer::OpenOffer::Sender => Some(GlareRefusal::Unanswered),
+            crate::open_offer::OpenOffer::Stack => Some(GlareRefusal::Crossing),
+        }
+    }
+
+    /// The §14.2 / RFC 3311 §5.2 refusal the current request draws, if any:
+    /// an INVITE meeting glare by [`Self::glare_refusal`], an UPDATE by
+    /// [`Self::update_refusal`].
+    pub fn offer_refusal(&self) -> Option<GlareRefusal> {
+        if let Some(refusal) = self.update_refusal() {
+            return Some(refusal);
+        }
+        let invite = self.request().is_some_and(|r| *r.method() == Method::Invite);
+        (invite && self.invite_glare()).then(|| self.glare_refusal())
+    }
+
+    /// How the current INVITE's glare is refused (RFC 3261 §14.2): by what is
+    /// open on the dialog, the sender's own earlier INVITE first.
+    pub fn glare_refusal(&self) -> GlareRefusal {
+        let to_tag = self.request().and_then(|r| r.to().tag());
+        if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, to_tag) {
+            GlareRefusal::Unanswered
+        } else if call::helpers::sender_invite_unacknowledged(self.call.0, self.source_leg_id) {
+            GlareRefusal::Unacknowledged
+        } else {
+            GlareRefusal::Crossing
+        }
     }
 
     /// Does the current response answer a request THIS STACK RELAYED — i.e.

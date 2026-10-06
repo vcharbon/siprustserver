@@ -77,8 +77,8 @@ pub enum RfcRule {
 
 impl RfcRule {
     /// The merged vocabulary's id (`rfc_rules::RuleId`) this wire token names.
-    /// This enum IS `RuleId::WIRE` (issue 29 R2: a member arrives with its
-    /// detector, its conservatism and its corpus numbers); the conformance
+    /// This enum IS `RuleId::WIRE` (a member arrives with its detector, its
+    /// conservatism and its corpus numbers); the conformance
     /// test below pins the two position for position, so growing either side
     /// alone fails the build.
     pub fn rule_id(self) -> rfc_rules::RuleId {

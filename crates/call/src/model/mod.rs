@@ -21,7 +21,8 @@
 //!
 //! Concern map:
 //!   - [`record`] — master [`Call`] record + call-level satellites (lifecycle
-//!     state, topology, peering, limiter state, INVITE snapshot, tag map, policy)
+//!     state, topology, peering, INVITE snapshot, tag map, policy)
+//!   - [`limiter`] — the call's admission state on the call limiter
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
 //!   - [`dialog`] — §12 dialog state + B2BUA-only dialog extensions
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
@@ -41,6 +42,7 @@ pub mod dialog;
 pub mod emission;
 pub mod invite_txn;
 pub mod leg;
+pub mod limiter;
 pub mod message_ring;
 pub mod obligation;
 pub mod record;
@@ -56,11 +58,15 @@ pub use dialog::{B2buaDialogExt, Dialog, Direction, PendingRequest, StackDialog,
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};
 pub use leg::{ByeDisposition, Leg, LegDisposition, LegKind, LegState, RemoteInfo};
+pub use limiter::{
+    AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
+    Replacement, CHANGE_EPOCH,
+};
 pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
-pub use obligation::Obligation;
+pub use obligation::{Obligation, ObligationKind};
 pub use record::{
-    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
+    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
+    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
 };
 pub use sdp_session::LegSdpSession;
 pub use services::{

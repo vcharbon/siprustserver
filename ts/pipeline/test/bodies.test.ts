@@ -60,7 +60,7 @@ describe("expectBody", () => {
   })
 
   it("flags an unrecognized text body carrying number-like digits, as the send side does", () => {
-    const stored = expectBody(info({ contentType: "application/vnd.example", text: "id=0033612345678" }), "uac1_r0")
+    const stored = expectBody(info({ contentType: "application/vnd.example", text: "id=0015551234567" }), "uac1_r0")
     expect(stored.body).toMatchObject({ ref: "resources/uac1_r0_0.bin", mode: "frozen" })
     expect(stored.flags.map((f) => f.kind)).toEqual(["unrecognized-body-part"])
   })

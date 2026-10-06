@@ -1,5 +1,5 @@
-//! The interface is the test surface: one table over every class, so the five
-//! sites that used to write this arithmetic each cannot drift apart again.
+//! The interface is the test surface: one table over every class, so the sites
+//! that consume this arithmetic cannot drift apart.
 
 use super::*;
 

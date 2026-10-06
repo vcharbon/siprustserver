@@ -22,7 +22,7 @@ b2bua-runner-kit = { path = "../b2bua-runner-kit" }
 # /debug/flamegraph pprof route — one module shared with the front proxy.
 # (The kit spawns the server; this binary passes the jemalloc extras in.)
 probe-http = { path = "../probe-http" }
-# Out-of-tree callflow service (ADR-0016 slice 8) — composed into the production
+# Out-of-tree callflow service (ADR-0016) — composed into the production
 # service registry (`compose_services`) so its diagram is generated alongside.
 announcement = { path = "../announcement" }
 call = { path = "../call" }
@@ -30,10 +30,6 @@ tokio = { workspace = true }
 # Lifecycle logging (ADR-0026). The subscriber itself is installed by the kit's
 # `bind`; this binary only emits.
 tracing = { workspace = true }
-
-[dev-dependencies]
-# tests/overload_dashboard_names.rs parses the Grafana dashboard JSON.
-serde_json = { workspace = true }
 
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never

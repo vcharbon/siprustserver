@@ -17,6 +17,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 sip-retransmit = { path = "../sip-retransmit" }
 sip-message = { path = "../sip-message" }
+metric-catalogue = { path = "../metric-catalogue" }
 sip-net = { path = "../sip-net" }
 tracing.workspace = true
 # Identifiers are HMAC-SHA256 over a counter, keyed from the OS RNG (`rng.rs`).

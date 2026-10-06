@@ -117,8 +117,8 @@ mod tests {
         // The national prefix hiding inside an entry the whitespace makes equal.
         assert!(!header_forms_equivalent(
             "History-Info",
-            &["\"N\" <sip:0009001@h>;index=1", "<sip:0033000900004@h>;index=1.1"],
-            &["\"N\"<sip:0009001@h>;index=1, <sip:+33000900004@h>;index=1.1"],
+            &["\"N\" <sip:0009001@h>;index=1", "<sip:0015550900004@h>;index=1.1"],
+            &["\"N\"<sip:0009001@h>;index=1, <sip:+15550900004@h>;index=1.1"],
         ));
     }
 

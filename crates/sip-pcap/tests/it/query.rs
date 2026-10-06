@@ -22,11 +22,11 @@ fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
 
 fn req(method: &str, call_id: &str, cseq: u32, branch: &str, to_tag: &str) -> Vec<u8> {
     format!(
-        "{method} sip:+33123456789@example.net SIP/2.0\r\n\
+        "{method} sip:+15551234567@example.net SIP/2.0\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
          Max-Forwards: 70\r\n\
-         From: <sip:+33999@caller.example>;tag=f1\r\n\
-         To: <sip:+33123456789@example.net>{to_tag}\r\n\
+         From: <sip:+1555999@caller.example>;tag=f1\r\n\
+         To: <sip:+15551234567@example.net>{to_tag}\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: {cseq} {method}\r\n\
          Content-Length: 0\r\n\r\n"
@@ -38,8 +38,8 @@ fn resp(status: u16, call_id: &str, cseq: u32, method: &str, branch: &str, body:
     format!(
         "SIP/2.0 {status} X\r\n\
          Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
-         From: <sip:+33999@caller.example>;tag=f1\r\n\
-         To: <sip:+33123456789@example.net>;tag=t1\r\n\
+         From: <sip:+1555999@caller.example>;tag=f1\r\n\
+         To: <sip:+15551234567@example.net>;tag=t1\r\n\
          Call-ID: {call_id}\r\n\
          CSeq: {cseq} {method}\r\n\
          {}Content-Length: {}\r\n\r\n{body}",
@@ -221,7 +221,7 @@ fn projection_yields_the_named_fields() {
     let row =
         summary_row(&flows, 0, &[KeyField::CallId, KeyField::RuriUser, KeyField::FinalStatus]);
     assert_eq!(row["call_id"], json!(["scope-2"]));
-    assert_eq!(row["ruri_user"], json!(["+33123456789"]), "host and params stripped");
+    assert_eq!(row["ruri_user"], json!(["+15551234567"]), "host and params stripped");
     assert_eq!(row["final"], json!([200]));
 }
 

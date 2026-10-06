@@ -168,7 +168,7 @@
   <nop next="end"/>
 
   <!-- The admission shed: the SUT refused the new call with a 503 carrying
-       Retry-After, as its admission tiers do. The ACK takes the INVITE's branch
+       Retry-After, as every admission rung does. The ACK takes the INVITE's branch
        (RFC 3261 section 17.1.1.3) and the call ends counted on GenericCounter1,
        apart from the calls that completed and from the failures. A 503 without
        Retry-After is authored on the call path: the recv above fails the call

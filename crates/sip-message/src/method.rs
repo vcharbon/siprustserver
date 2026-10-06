@@ -56,6 +56,25 @@ impl PartialEq<Method> for &Method {
 }
 
 impl Method {
+    /// The wire token of every method modelled natively, in declaration
+    /// order.
+    pub const NATIVE_TOKENS: [&'static str; 14] = [
+        "INVITE",
+        "ACK",
+        "BYE",
+        "CANCEL",
+        "OPTIONS",
+        "REGISTER",
+        "INFO",
+        "UPDATE",
+        "PRACK",
+        "SUBSCRIBE",
+        "NOTIFY",
+        "PUBLISH",
+        "MESSAGE",
+        "REFER",
+    ];
+
     /// The canonical wire spelling. Known methods are RFC uppercase; an
     /// [`Other`](Method::Other) returns its preserved token verbatim.
     pub fn as_str(&self) -> &str {
@@ -165,8 +184,8 @@ impl From<Method> for String {
 }
 
 // Ergonomic, case-insensitive comparison against string literals so the existing
-// `req.method == "INVITE"` call sites keep working (and become case-insensitive,
-// matching the old `eq_ignore_ascii_case` checks) without a `Method::` rewrite.
+// `req.method == "INVITE"` call sites work, case-insensitively (as
+// `eq_ignore_ascii_case`), without a `Method::` rewrite.
 impl PartialEq<str> for Method {
     fn eq(&self, other: &str) -> bool {
         self.as_str().eq_ignore_ascii_case(other)
@@ -194,6 +213,15 @@ impl PartialEq<Method> for &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_native_token_reads_back_as_a_native_method_of_that_spelling() {
+        for token in Method::NATIVE_TOKENS {
+            let m = Method::from_wire(token);
+            assert!(!matches!(m, Method::Other(_)), "{token} is not native");
+            assert_eq!(m.as_str(), token);
+        }
+    }
 
     #[test]
     fn known_methods_fold_case_insensitively() {

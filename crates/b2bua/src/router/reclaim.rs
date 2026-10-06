@@ -38,7 +38,7 @@ use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 /// progress, so a re-delivered flush no longer dominates.
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // A read that sees an expired body too: an expired reverse-flushed terminal
-    // is still folded and discharged here (#7).
+    // is still folded and discharged here.
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
@@ -52,6 +52,9 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     let _guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
     match ctx.state.peek(call_ref) {
+        // The stored body is another call than the live one (the release of
+        // the stored call is still queued): it is not this call's progress.
+        Some(live) if replica.incarnation() != live.incarnation() => {}
         Some(live) => {
             if !reverse_flush_dominates(&replica, &live) {
                 ctx.metrics.bump_repl_reverse_flush_refused();
@@ -141,7 +144,7 @@ pub(super) async fn discharge_materialized_terminal(
         // Already-terminal reclaimed body: whoever served it to terminal
         // answered on the wire (or its caller died with the crashed node).
         // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
-        false,
+        crate::rules::invariants::UnansweredCaller::Leave,
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -168,7 +171,7 @@ async fn discharge_folded_terminal(
         now_ms,
         // Folded already-terminal body: same off-the-wire contract as
         // `discharge_materialized_terminal` above.
-        false,
+        crate::rules::invariants::UnansweredCaller::Leave,
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -202,13 +205,13 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 }
 
 /// Release the cluster-wide limiter set a never-reclaimed deferred terminal
-/// still owns, WITHOUT writing a CDR or propagating a delete. Mirrors the
-/// `LimiterObligations` derivation (a call that sent no admit owes nothing).
-/// The backup is the only node that can free this slot once its primary is
-/// dead for good.
+/// still owns (`CallLimiterState::owed_release`: a call that sent no admit
+/// owes nothing), WITHOUT writing a CDR or propagating a delete. No turn
+/// serves the body, so the release goes to the worker directly. The backup is
+/// the only node that can free this slot once its primary is dead for good.
 fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
-    if call.limiter.release_owed {
-        ctx.limiter_releases.push(&call.limiter.key);
+    if let Some(key) = call.limiter.owed_release() {
+        ctx.limiter.release(key);
     }
 }
 
@@ -298,6 +301,11 @@ pub(super) async fn fold_refused_flush(
         ctx.state.discard_orphan(call_ref);
         return;
     };
+    // Another call on the ref (the one the live call retried, or one a
+    // takeover copy still serves) is never this call's progress.
+    if replica.incarnation() != live.incarnation() {
+        return;
+    }
     if !lifecycle_advances(&replica, &live) {
         direction.count_refused(&ctx.metrics);
         adopt_seen_counter(ctx, direction, &live, &replica);
@@ -416,7 +424,7 @@ async fn resync_timers(
         ctx.config.keepalive_interval_sec * 1000,
         None,
     );
-    ctx.timers.restore(folded.timers.clone(), call_ref.to_string()).await;
+    ctx.timers.restore(folded.timers.clone(), call_ref.to_string(), folded.incarnation()).await;
 }
 
 /// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
@@ -526,7 +534,7 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
         now_ms,
         // LIVE call the rules path failed on twice — if its a-leg is still
         // unanswered the caller is waiting on OUR server txn: answer it.
-        true,
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
     );
     process_result(ctx, call_ref, result, now_ms).await;
 }
@@ -543,7 +551,8 @@ mod tests {
     };
 
     use super::{
-        fold_refused_flush, reap_expired_replicas, reverse_flush_dominates, FlushDirection,
+        fold_refused_flush, reap_expired_replicas, reconcile_reverse_flush,
+        reverse_flush_dominates, FlushDirection,
     };
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
@@ -765,11 +774,16 @@ mod tests {
     async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_once() {
         let n = node("w1").await;
         let ctx = n.core.router_ctx();
-        ctx.limiter_releases.hold();
+        ctx.limiter.hold_releases();
         let mut terminal = answered(1, 2, CallModelState::Terminated);
         terminal.limiter = call::CallLimiterState::admitted(
             "fold-key".into(),
-            vec!["x".into(), "x".into(), "y".into()],
+            1,
+            vec![
+                call::LimiterEntry { id: "x".into(), limit: 10 },
+                call::LimiterEntry { id: "x".into(), limit: 10 },
+                call::LimiterEntry { id: "y".into(), limit: 10 },
+            ],
         );
         let call_ref = terminal.call_ref.clone();
         let body = MsgpackCodec::new().encode(&terminal);
@@ -794,7 +808,7 @@ mod tests {
 
         reap_expired_replicas(ctx, n.clock.now_ms()).await;
         assert_eq!(
-            ctx.limiter_releases.waiting_keys(),
+            ctx.limiter.waiting_keys(),
             vec!["fold-key".to_string()],
             "the reap released the call by its key"
         );
@@ -805,7 +819,7 @@ mod tests {
         );
 
         reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter_releases.waiting(), 1, "a second pass releases nothing");
+        assert_eq!(ctx.limiter.waiting(), 1, "a second pass releases nothing");
         assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "and counts nothing");
     }
 
@@ -816,10 +830,16 @@ mod tests {
     async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release() {
         let n = node("w1").await;
         let ctx = n.core.router_ctx();
-        ctx.limiter_releases.hold();
+        ctx.limiter.hold_releases();
         let mut terminal = answered(1, 2, CallModelState::Terminated);
-        terminal.limiter =
-            call::CallLimiterState::admitted("upkeep-key".into(), vec!["x".into(), "y".into()]);
+        terminal.limiter = call::CallLimiterState::admitted(
+            "upkeep-key".into(),
+            1,
+            vec![
+                call::LimiterEntry { id: "x".into(), limit: 10 },
+                call::LimiterEntry { id: "y".into(), limit: 10 },
+            ],
+        );
         let call_ref = terminal.call_ref.clone();
         let body = MsgpackCodec::new().encode(&terminal);
         n.store
@@ -844,10 +864,116 @@ mod tests {
             async move { reap_expired_replicas(&ctx, ctx.clock.now_ms()).await }
         });
         assert!(pass.await.is_ok(), "the reap pass completes");
-        assert_eq!(ctx.limiter_releases.waiting_keys(), vec!["upkeep-key".to_string()]);
+        assert_eq!(ctx.limiter.waiting_keys(), vec!["upkeep-key".to_string()]);
         assert_eq!(n.metrics.repl_terminal_lost_total(), 1);
         reap_expired_replicas(ctx, n.clock.now_ms()).await;
-        assert_eq!(ctx.limiter_releases.waiting(), 1, "released once");
+        assert_eq!(ctx.limiter.waiting(), 1, "released once");
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
+    }
+
+    /// `call` as another call on the same ref: its own incarnation, holding
+    /// `x` under it.
+    fn as_call(mut call: Call, key: &str) -> Call {
+        call.limiter = call::CallLimiterState::admitted(
+            key.into(),
+            1,
+            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
+        );
+        call
+    }
+
+    /// **A refused flush of another call never folds into the live one.** The
+    /// primary serves a retry on the identity of a call a backup took over and
+    /// ended; that call's terminal, refused by the store, reaches the fold. It
+    /// carries lifecycle progress over the retry's live copy, but it is another
+    /// call: folding it would end the retry.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_flush_of_another_call_never_ends_the_live_one() {
+        let n = node("w0").await;
+        let ctx = n.core.router_ctx();
+        let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        let replica = as_call(answered(1, 3, CallModelState::Terminated), "first-key");
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Reverse, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the retry is still served");
+        assert_eq!(after.incarnation(), "retry-key");
+        assert_eq!(after.state, CallModelState::Active, "the retry plays on");
+        assert!(n.cdr.snapshot().is_empty(), "nothing was discharged");
+    }
+
+    /// **The reverse reconcile reads only its own call.** The primary's store
+    /// still holds a call its release is about to delete (the write is queued)
+    /// when the retry on the same identity is already live; a reconcile of the
+    /// ref reads that stored call, which is not the live one, and leaves the
+    /// retry alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
+        let n = node("w0").await;
+        let ctx = n.core.router_ctx();
+        let live = as_call(answered(1, 0, CallModelState::Active), "retry-key");
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+        let stored = as_call(answered(2, 1, CallModelState::Terminated), "first-key");
+        n.store
+            .put_call(
+                PartitionRole::Primary,
+                "w0",
+                &call_ref,
+                MsgpackCodec::new().encode(&stored),
+                &[],
+                60_000,
+                2,
+                1,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+
+        reconcile_reverse_flush(ctx, &call_ref).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the retry is still served");
+        assert_eq!(after.incarnation(), "retry-key");
+        assert_eq!(after.state, CallModelState::Active, "the retry plays on");
+        assert!(n.cdr.snapshot().is_empty(), "nothing was discharged");
+    }
+
+    /// **A deferred terminal another call replaced is released by its own
+    /// key.** A backup holds the terminal its takeover copy deferred to the
+    /// primary; the primary's next write on the ref is a retry, which replaces
+    /// it. The reap releases the replaced call's own key and counts its CDR
+    /// lost, once; the retry's key is never touched.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        ctx.limiter.hold_releases();
+        let terminal = as_call(answered(1, 2, CallModelState::Terminated), "first-key");
+        let retry = as_call(unanswered(1, 0, CallModelState::Active), "retry-key");
+        let call_ref = terminal.call_ref.clone();
+        for (call, (p, b), ttl_ms) in [(&terminal, (1, 2), 30_000), (&retry, (1, 0), 600_000)] {
+            let opts = PutOpts {
+                origin_now_ms: Some(0),
+                incarnation: Some(call.incarnation().to_string()),
+                ..PutOpts::default()
+            };
+            let body = MsgpackCodec::new().encode(call);
+            n.store
+                .put_call(PartitionRole::Backup, "w0", &call_ref, body, &[], ttl_ms, p, b, &opts)
+                .await
+                .unwrap();
+        }
+
+        reap_expired_replicas(ctx, n.clock.now_ms()).await;
+        assert_eq!(ctx.limiter.waiting_keys(), vec!["first-key".to_string()]);
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "its CDR counted lost");
+        reap_expired_replicas(ctx, n.clock.now_ms()).await;
+        assert_eq!(ctx.limiter.waiting(), 1, "released once");
         assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
     }
 }

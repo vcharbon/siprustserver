@@ -1,4 +1,4 @@
-//! Slice 3b: real RTP media through the real B2BUA.
+//! Real RTP media through the real B2BUA.
 //!
 //! Port of `../sipjsserver/tests/media/basic-call-media.test.ts`. Alice and Bob
 //! run real [`MediaTransport`]s; the SDP offer/answer is built by the production
@@ -8,8 +8,8 @@
 //! advertises — so this exercises the same end-to-end path as the TS slice and
 //! would catch a B2BUA that mangled the relayed c=/m=.
 //!
-//! The SIP harness runs on real wall-clock (not a paused runtime), so media uses
-//! a separate simulated fabric and real sleeps for pacing.
+//! Media rides its own simulated fabric, paced by tokio timers on the paused
+//! clock like the SIP harness.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +24,7 @@ use sip_net::SimulatedSignalingNetwork;
 const ALICE_RTP: u16 = 10000;
 const BOB_RTP: u16 = 20000;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn alice_and_bob_hear_each_other_through_b2bua() {
     let h = Harness::with_transit_delay("b2bua-basic-media", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -75,7 +75,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     alice_session.play(PlayScript::Pcm(reference_clip(ClipName::Alice)));
     bob_session.play(PlayScript::Pcm(reference_clip(ClipName::Bob)));
 
-    // Real wall-clock: 2 s clip @ 20 ms = 100 frames ≈ 2 s of pacing.
+    // 2 s clip @ 20 ms = 100 frames ≈ 2 s of pacing.
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
     // Final-sweep verdicts: each peer hears the other's clip.

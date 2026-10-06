@@ -1,8 +1,8 @@
 //! pivot-interpreter — the pivot v3 scenario interpreter.
 //!
 //! **Compile once, run many** (`PCAP2TEST_PIVOT_V3.md` §14): a document
-//! compiles to an immutable [`Plan`](plan::Plan); a run instance is that plan
-//! plus an identity substitution ([`instance::Instance`]), and every accessor
+//! compiles to an immutable [`Plan`]; a run instance is that plan
+//! plus an identity substitution (`instance::Instance`), and every accessor
 //! resolves against runner dialog state — never against document text. Nothing
 //! is re-parsed per call.
 //!

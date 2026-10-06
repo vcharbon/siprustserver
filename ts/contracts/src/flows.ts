@@ -380,8 +380,7 @@ export const headerValues = (msg: Msg, name: string): Array<string> =>
 
 /**
  * Refuse a document that does not project a header a rule names. Without this
- * the rule silently matches nothing — the quiet-mismatch failure friction E6
- * records, one level up.
+ * the rule silently matches nothing — a quiet mismatch, one level up.
  */
 export const requireHeaders = (doc: FlowsDoc, wanted: ReadonlyArray<string>): void => {
   const have = new Set(doc.emit_headers.map((h) => h.toLowerCase()))
@@ -475,3 +474,31 @@ export const isSuccessToInvite = (msg: Msg): boolean => {
 /** An INVITE with no To-tag: the request that OPENS a dialog, never a re-INVITE. */
 export const opensDialog = (msg: Msg): boolean =>
   isInvite(msg) && msg.summary.kind === "request" && msg.summary.to.tag === null
+
+/**
+ * The host of a `host[:port]` address — a Via sent-by or a captured socket —
+ * IPv6 brackets kept, the port dropped.
+ */
+export const hostOf = (hostport: string): string => {
+  if (hostport.startsWith("[")) {
+    const end = hostport.indexOf("]")
+    return end < 0 ? hostport : hostport.slice(0, end + 1)
+  }
+  const colon = hostport.indexOf(":")
+  return colon >= 0 && colon === hostport.lastIndexOf(":") ? hostport.slice(0, colon) : hostport
+}
+
+/**
+ * Whether two Vias name the same host: case-insensitively (RFC 3261 §19.1.4)
+ * and whatever the port, since a UA on TCP may name a new one per connection
+ * (§18.1.1).
+ */
+export const sameViaHost = (a: Via, b: Via): boolean =>
+  hostOf(a.sent_by).toLowerCase() === hostOf(b.sent_by).toLowerCase()
+
+/**
+ * The bottom Via: the originator's, as it sent the request, since every proxy
+ * pushes its own above the ones it received (RFC 3261 §16.6 step 8).
+ * `undefined` where the vantage carried no Via.
+ */
+export const originVia = (msg: Msg): Via | undefined => msg.via?.at(-1)

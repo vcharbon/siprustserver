@@ -4,13 +4,12 @@
 //! teardown) the peer leg sits at `ByeSent` — a *non-terminal* disposition — so
 //! `is_fully_resolved` never passes, the call wedges in `Terminating` forever,
 //! `RemoveCall` is never emitted, and `b2bua_active_calls` never decrements. In
-//! k8s this leaked ~8700 dead dialogs (active_calls pinned flat for HOURS after
-//! all traffic stopped), growing worker memory without bound until the load
-//! generators OOM'd.
+//! production each such call is a dead dialog held for good, and worker memory
+//! grows without bound.
 //!
 //! The 32 s `TerminatingTimeout` safety timer (armed by `begin_termination`)
 //! must force-resolve the wedged leg and reap the call. This guards the
-//! `terminating-safety-timeout` rule, which used to be a no-op.
+//! `terminating-safety-timeout` rule.
 
 use std::time::Duration;
 

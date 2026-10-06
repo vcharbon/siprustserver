@@ -83,13 +83,13 @@
       "id": "c1",
       "relay18x": {
         "evidence": [
-          "redistribution after a provisional: called[1][1] was INVITEd 9819 ms after called[1][0] answered 180; announcement leg called[0][0] answered 92 ms after its own INVITE and the SUT released it",
+          "redistribution after a provisional: called[1][1] was INVITEd 9800 ms after called[1][0] answered 180; announcement leg called[0][0] answered 100 ms after its own INVITE and the SUT released it",
           "the caller's 18x stream [183] is the platform's own: no rewrite mode composes a non-180",
           "PRACK toward the callee with none from the caller: 100rel answered by the SUT"
         ],
         "messages": "FIRST",
-        "mode": "18X_TO_180_SDP_REMOVE",
-        "prack": "PRACK_MANAGED_BY_AS"
+        "mode": "DOWNGRADE_NO_SDP",
+        "prack": "PRACK_ANSWERED_LOCALLY"
       }
     }
   ],
@@ -97,17 +97,17 @@
     "annotations": {
       "flags": [
         {
-          "detail": "R-URI \"+199999233000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "R-URI \"+199999215550900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         },
         {
-          "detail": "To \"+3315032000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "To \"+1555032000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         }
       ]
     },
     "family": "prack",
-    "id": "case_108663-auto",
+    "id": "capture_prack-noanswer-chain.pcap.gz-auto",
     "lanes": {
       "hosted": "blocked:claim-ambiguous",
       "kind": "blocked:claim-ambiguous",
@@ -120,9 +120,9 @@
         1,
         4
       ],
-      "capture": "case_108663"
+      "capture": "capture_prack-noanswer-chain.pcap.gz"
     },
-    "title": "case_108663 basic call (groups 1+4)",
+    "title": "capture_prack-noanswer-chain.pcap.gz basic call (groups 1+4)",
     "variant": "repro"
   },
   "endpoints": [
@@ -175,10 +175,10 @@
         ],
         "method": "INVITE",
         "ruri": {
-          "frozen": "+199999233000900001"
+          "frozen": "+199999215550900001"
         },
         "to": {
-          "frozen": "+3315032000900001"
+          "frozen": "+1555032000900001"
         }
       },
       "observed": {
@@ -494,7 +494,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unconditional;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unconditional;counter=1"
           }
         ],
         "method": "INVITE"
@@ -751,7 +751,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unconditional;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unconditional;counter=1"
           }
         ],
         "method": "INVITE"

@@ -19,7 +19,7 @@ use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, Provenance};
-use crate::event::CallEvent;
+use b2bua_sdk::event::CallEvent;
 
 /// The ring's configuration for one turn: the cap and the header names
 /// resolved once. `None` while the ring is off, so an unconfigured stack pays

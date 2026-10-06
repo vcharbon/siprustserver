@@ -30,6 +30,12 @@ sip-txn = { path = "../sip-txn" }
 # The class a retained emission's ladder paces by (ADR-0032 X3).
 sip-retransmit = { path = "../sip-retransmit" }
 sip-clock = { path = "../sip-clock" }
+# The token bucket, EWMA, load-sampler seam and Retry-After policy the
+# admission ladder sheds with.
+load-shed = { path = "../load-shed" }
+# Declared Prometheus families: the catalogue the worker renders its
+# admission and dispatch counts from (metrics/catalogue.rs).
+metric-catalogue = { path = "../metric-catalogue" }
 repl-net = { path = "../repl-net" }
 topology = { path = "../topology" }
 # Limiter client: the transport SEAM only (real impl injected by the runner; sim
@@ -38,6 +44,8 @@ http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 
 [dev-dependencies]
+# Tests that set an exact call admission state (`CallLimiterState::from_parts`).
+call = { path = "../call", features = ["testkit"] }
 # Paused-clock lever for timer tests (tokio::time::pause/advance).
 tokio = { workspace = true, features = ["test-util"] }
 # The counting global allocator behind the trace machinery's zero-cost budget

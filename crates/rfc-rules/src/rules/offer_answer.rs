@@ -707,10 +707,10 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
 /// left to latch on.
 ///
 /// The occasion is a 2xx an agent sent on a transaction whose request it took
-/// an offer on — `INVITE` or `UPDATE` ([`offer_answer_method`]) — and on the
+/// an offer on — `INVITE` or `UPDATE` (`offer_answer_method`) — and on the
 /// dialog that offer named, since two early dialogs number their requests
 /// independently (§12.2.1.1). It is met by a description on that 2xx, or by one
-/// that already BOUND the dialog ([`binds`]): a reliable provisional's answer
+/// that already BOUND the dialog (`binds`): a reliable provisional's answer
 /// discharges the 2xx, while early media in an unreliable provisional is a plan
 /// the peer may re-latch on (RFC 3960) and binds nothing.
 ///
@@ -783,7 +783,7 @@ impl Obligation for Final2xxAnswersTheOffer {
 /// sending to different places.
 ///
 /// The occasion is a description that BINDS — a final, or a reliable
-/// provisional ([`binds`]) — on a dialog where one already did. Early media in
+/// provisional (`binds`) — on a dialog where one already did. Early media in
 /// an unreliable provisional binds nothing: an announcement source the peer may
 /// re-latch on before the callee answers is RFC 3960's shape, not this
 /// obligation's.
@@ -905,13 +905,15 @@ impl Obligation for AnswerStreamMatchesOffer {
 
 /// **RFC 4566 §5.2 / RFC 3264 §8 — every session description an agent sends on
 /// one call describes the SAME session, and its `sess-version` counts the
-/// revisions.** `o=<username> <sess-id> <sess-version> <nettype> <addrtype>
-/// <address>` identifies it: a later description repeats all five identity
-/// fields, raises `sess-version` by exactly one when the rest of the
-/// description changed, and leaves it alone when nothing did. A changed
-/// identity makes the description a different session the peer must treat as
-/// unrelated; a version that does not track the changes leaves the peer unable
-/// to tell a re-offer from a repeat.
+/// revisions.**
+/// `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>`
+/// identifies it: a later description repeats all five identity
+/// fields and raises `sess-version` by exactly one when the rest of the
+/// description changed. A byte-identical description may keep its version or
+/// raise it by one: §8 only has an unchanged version promise an identical
+/// description. A changed identity makes the description a different session
+/// the peer must treat as unrelated; a version that does not track the changes
+/// leaves the peer unable to tell a re-offer from a repeat.
 ///
 /// Charges the description's SENDER, against its own previous description on
 /// that call. A description whose `o=` line no reader accepts settles nothing —
@@ -948,7 +950,7 @@ impl Obligation for SdpOriginContinuity {
             let same_session = before.identifies_same_session(now);
             let body_changed = before.body_excluding_origin != now.body_excluding_origin;
             let delta = i128::from(now.session_version) - i128::from(before.session_version);
-            let ok = same_session && delta == i128::from(body_changed);
+            let ok = same_session && (delta == 1 || (delta == 0 && !body_changed));
             let decision = if ok {
                 Decision::Compliant
             } else {
@@ -2491,8 +2493,10 @@ m=audio 27500 RTP/AVP 8\r\n";
         assert!(!same_session);
     }
 
-    /// The version tracks the changes: a changed description owes exactly +1
-    /// and a byte-identical one owes the version it already had.
+    /// RFC 3264 §8: "If the version in the origin line does not increment, the
+    /// SDP MUST be identical to the SDP with that version number." A changed
+    /// description owes exactly +1; an identical one may keep its version or
+    /// take +1, and nothing more.
     #[test]
     fn the_version_tracks_what_the_description_says() {
         const BUMPED_TWICE: &str = "v=0\r\n\
@@ -2509,7 +2513,26 @@ a=sendonly\r\n";
         let f = violations(&SdpOriginContinuity, &msgs);
         assert_eq!(f.len(), 1, "a changed body owes exactly +1: {f:?}");
 
-        const BUMPED_FOR_NOTHING: &str = "v=0\r\n\
+        const CHANGED_UNBUMPED: &str = "v=0\r\n\
+o=alice 424242 1 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n\
+a=sendonly\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(CHANGED_UNBUMPED)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert_eq!(f.len(), 1, "a changed body under an unchanged version: {f:?}");
+        let Decision::Violated(Evidence::SdpOriginDiverged { body_changed, .. }) = &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision);
+        };
+        assert!(body_changed);
+
+        const BUMPED_UNCHANGED: &str = "v=0\r\n\
 o=alice 424242 2 IN IP4 10.0.0.1\r\n\
 s=-\r\n\
 c=IN IP4 10.0.0.1\r\n\
@@ -2517,15 +2540,36 @@ t=0 0\r\n\
 m=audio 27500 RTP/AVP 8\r\n";
         let msgs = vec![
             req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
-            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(BUMPED_FOR_NOTHING)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(BUMPED_UNCHANGED)),
         ];
         let f = violations(&SdpOriginContinuity, &msgs);
-        assert_eq!(f.len(), 1, "a byte-identical description owes an unchanged version: {f:?}");
-        let Decision::Violated(Evidence::SdpOriginDiverged { body_changed, .. }) = &f[0].decision
-        else {
-            panic!("{:?}", f[0].decision);
-        };
-        assert!(!body_changed);
+        assert!(f.is_empty(), "an identical description may take +1: {f:?}");
+
+        const REPEATED: &str = "v=0\r\n\
+o=alice 424242 1 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(REPEATED)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert!(f.is_empty(), "an identical description may keep its version: {f:?}");
+
+        const IDENTICAL_BUMPED_TWICE: &str = "v=0\r\n\
+o=alice 424242 3 IN IP4 10.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 10.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 27500 RTP/AVP 8\r\n";
+        let msgs = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            req(2, ALICE, BOB, "INVITE", 3, Some("bt"), Some(IDENTICAL_BUMPED_TWICE)),
+        ];
+        let f = violations(&SdpOriginContinuity, &msgs);
+        assert_eq!(f.len(), 1, "an identical description takes at most +1: {f:?}");
     }
 
     #[test]

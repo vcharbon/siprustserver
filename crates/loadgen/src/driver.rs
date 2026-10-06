@@ -83,8 +83,8 @@ pub struct CallConfig {
 }
 
 /// Robustness knobs applied per call, resolved per scenario (a global default
-/// overridden by any per-scenario entry). Both default off, so an un-tuned run is
-/// byte-for-byte the historic behaviour.
+/// overridden by any per-scenario entry). Both default off: an un-tuned run
+/// drops and retransmits nothing extra.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CallTuning {
     /// Simulated packet-drop probability on this call's mux legs (0 = off). Each
@@ -496,7 +496,7 @@ async fn run_one(
         bob2: agent_for("bob2"),
         charlie: agent_for("charlie"),
         // Every named leg, so a load body resolves ANY declared role
-        // (`callee_agent("mrf")`), not just the historic trio.
+        // (`callee_agent("mrf")`), not just bob / bob2 / charlie.
         callees: callee_agents.iter().map(|(role, agent)| (*role, agent)).collect(),
         via: call.via,
         stamp: transport.correlation.stamp(&token),
@@ -632,9 +632,9 @@ async fn run_one(
     // BUT a protocol-defect class (RfcAuditFail/WrongMethod/Unexpected/…) is NEVER
     // excused even if a transition coincided with the kill: the post-reboot reclaim
     // bug CONNECTS near the kill yet desyncs at teardown, so excusing it on the
-    // near-kill connect would HIDE it (proven 2026-06-29 — neither self-heal path
-    // recovers). Only transient/transport failures (the real kill collateral) are
-    // eligible. See `CallOutcome::chaos_excusable`.
+    // near-kill connect would HIDE it (neither self-heal path recovers). Only
+    // transient/transport failures (the real kill collateral) are eligible. See
+    // `CallOutcome::chaos_excusable`.
     let chaos_tag = match chaos.as_ref() {
         Some(c) if outcome.chaos_excusable() => {
             c.classify_call(ctx.start_instant(), Instant::now(), &ctx.phases())
@@ -694,13 +694,13 @@ const KEY_DRAWS: usize = 8;
 /// Two-tier callee demux. The token is the FIRST tier — it selects the call
 /// INSTANCE (mux `by_token`); the SUT carries it onto every downstream leg, so
 /// every callee leg shares it. Every callee-side leg (the shape's named
-/// `LegSpec`s — historically bob, the rerouting `bob2`, the transfer
+/// `LegSpec`s — by default bob, the rerouting `bob2`, the transfer
 /// `charlie`) shares ONE socket (`transport.uas_addr`); the SECOND tier —
 /// WHICH leg of this instance — is the R-URI-prefix leg picker, fed each leg's
 /// declared `ruri_prefixes` labelled with its role. The in-house shapes' legs
 /// arrive under their role (`sip:bob2@…`, `sip:charlie@…`: the reroute plan's
 /// `new_ruri`, the transfer's Refer-To user); an open-registry shape's legs
-/// arrive under number-plan digits (`+041…`, `0491…`) that its specs map back
+/// arrive under number-plan digits (`+1555…`, `9007…`) that its specs map back
 /// to the role. Either way no leg needs a per-leg socket.
 fn call_routing(transport: &MuxTransport, legs: &[LegSpec], token: &str) -> CallRouting {
     let mut routing = CallRouting::new(token);
@@ -983,6 +983,7 @@ mod load_body_tests {
     /// The load driver mints the declarative actor body from a shape that
     /// declares one, and nothing from a functional-only shape.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn from_shape_mints_the_actor_body() {
         let inputs = ScenarioInputs::default();
 

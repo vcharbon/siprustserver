@@ -385,10 +385,10 @@ async fn empty_bak_partition_immediate_terminal_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// Review regression (#9): an unreachable, NEVER-connected peer that only goes
-// bootstrap-complete via the hard timer must NOT pin readiness NotReady — the
-// node must boot and serve (Decision 4). A reachable-then-blipped peer keeps the
-// strict sticky-current gate (covered elsewhere).
+// An unreachable, NEVER-connected peer that only goes bootstrap-complete via the
+// hard timer must NOT pin readiness NotReady — the node must boot and serve. A
+// reachable-then-blipped peer keeps the strict sticky-current gate (covered
+// elsewhere).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
@@ -415,11 +415,11 @@ async fn readiness_not_pinned_by_unreachable_peer() {
 }
 
 // ---------------------------------------------------------------------------
-// Review regression (#5): a node whose bootstrap hard timer fired against an
-// unreachable peer (bootstrap_complete=true, W still (0,0)) must STILL bootstrap
-// — not cold-Replog — once the peer becomes reachable, or it silently misses the
-// `bak:{me}` backups the peer holds (which live only in the peer's bak keyset,
-// never in its changelog-for-me).
+// A node whose bootstrap hard timer fired against an unreachable peer
+// (bootstrap_complete=true, W still (0,0)) must STILL bootstrap — not cold-Replog
+// — once the peer becomes reachable, or it silently misses the `bak:{me}` backups
+// the peer holds (which live only in the peer's bak keyset, never in its
+// changelog-for-me).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

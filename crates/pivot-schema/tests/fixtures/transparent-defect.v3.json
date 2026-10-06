@@ -43,7 +43,7 @@
       }
     },
     "family": "transparent",
-    "id": "capture_199850.pcap.gz-case2",
+    "id": "capture_refer-transfer.pcap.gz-case2",
     "lanes": {
       "hosted": "ok",
       "kind": "ok",
@@ -55,9 +55,9 @@
       "call_groups": [
         3
       ],
-      "capture": "capture_199850.pcap.gz"
+      "capture": "capture_refer-transfer.pcap.gz"
     },
-    "title": "capture_199850.pcap.gz basic call (groups 3)",
+    "title": "capture_refer-transfer.pcap.gz basic call (groups 3)",
     "variant": "repro"
   },
   "deviations": [
@@ -113,7 +113,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@carrier.example.net;user=phone>"
           },
           {
             "name": "Accept",
@@ -121,7 +121,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
           }
         ],
         "method": "INVITE",
@@ -190,7 +190,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@carrier.example.net;user=phone>"
           },
           {
             "name": "Accept",
@@ -198,7 +198,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
           }
         ],
         "method": "INVITE"
@@ -246,7 +246,7 @@
         "cseq-method": "INVITE",
         "headers": [
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "62"
           }
         ],
@@ -299,7 +299,7 @@
         "cseq-method": "INVITE",
         "headers": [
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "62"
           },
           {
@@ -346,7 +346,7 @@
       ],
       "kind": "external-caller",
       "name": "caller",
-      "observed": "+33000900002"
+      "observed": "+15550900002"
     },
     {
       "catalog": {
@@ -358,7 +358,7 @@
       ],
       "kind": "site",
       "name": "called-0-0",
-      "observed": "+33000900004"
+      "observed": "+15550900004"
     }
   ],
   "legs": [

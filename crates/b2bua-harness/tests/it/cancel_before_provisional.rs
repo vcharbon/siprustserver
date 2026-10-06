@@ -6,7 +6,7 @@
 //! longer exists) and flushed on the first provisional. A branch that stays
 //! response-less past the grace window gets the CANCEL REGARDLESS — a callee
 //! that answers nothing must still hear the cancellation
-//! (`sip-txn/tests/cancel_hold.rs` pins the layer seam; this pins the
+//! (`sip-txn/tests/it/cancel_hold.rs` pins the layer seam; this pins the
 //! end-to-end callflow). Decision: ADR-0028.
 
 use std::sync::Arc;

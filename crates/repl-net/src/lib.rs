@@ -1,10 +1,10 @@
-//! `repl-net` — the HA replication **wire + transport layer** (slices S2–S3).
+//! `repl-net` — the HA replication **wire + transport layer**.
 //!
-//! This crate is the call-agnostic frame model + codec + framing (S2) plus the
-//! transport seam (S3) that the peer-to-peer replication engine (ADR-0011)
-//! speaks over. The S2 wire layer is the replication analogue of `sip-message`:
+//! This crate is the call-agnostic frame model + codec + framing plus the
+//! transport seam that the peer-to-peer replication engine (ADR-0011) speaks
+//! over. The wire layer is the replication analogue of `sip-message`:
 //! pure, synchronous, no transport. The transport seam
-//! ([`ReplicationNetwork`][transport::ReplicationNetwork]: sim + real TCP +
+//! ([`ReplicationNetwork`]: sim + real TCP +
 //! recording) is the analogue of `sip-net`'s `SignalingNetwork`, but for a
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
@@ -19,12 +19,12 @@
 //! - [`encode_frame`] / [`decode_frame`] — exact positional-msgpack codec for a
 //!   single frame (`[tag, ...]` array; field order is the contract, ADR-0008).
 //! - [`frame_with_len_prefix`] / [`try_read_framed`] — the 4-byte BE
-//!   length-prefix framing the real TCP transport (S3) will delimit with.
+//!   length-prefix framing the real TCP transport delimits with.
 //!
 //! ## Call-agnostic by design
 //! A [`Frame::Data`] body is opaque bytes ([`std::sync::Arc<[u8]>`]) — the
 //! encoded `Call` is read straight from the store and forwarded verbatim; this
-//! layer never decodes it (ADR-0011 X9, Decision 9). That keeps the wire layer
+//! layer never decodes it (ADR-0011 X9). That keeps the wire layer
 //! decoupled from `crates/call`.
 //!
 //! ## Positional-msgpack ethos (ADR-0008)

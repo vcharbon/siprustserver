@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use crate::infra::InfraRuntime;
 
 pub use e2e_model::shape::Anchor;
-/// The shared input CORE a Test case supplies to a shape (moved to
-/// `e2e-model` as `CoreInput`; the historical `shape::Input` name is kept).
+/// The shared input CORE a Test case supplies to a shape (`e2e-model`'s
+/// `CoreInput`, re-exported as `shape::Input`).
 pub use e2e_model::shape::CoreInput as Input;
 
 /// Whether a Callflow shape exchanges RTP audio alongside the signaling.

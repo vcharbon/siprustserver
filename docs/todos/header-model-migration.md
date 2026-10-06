@@ -75,7 +75,7 @@ teardown phase is green.
 - Reimplement `generators::*` bodies over `Draft` (public signatures kept for
   now). `hydrate_request` leaves the generator path; built messages carry an
   image. `Generate*Opts` gain typed twins; stringly fields marked deprecated.
-- Acceptance: workspace green; `sip-message/tests/generators.rs` +
+- Acceptance: workspace green; `sip-message/tests/it/generators.rs` +
   scenario-harness lanes green; first build-path alloc measurement recorded.
 
 ### M4..M11 — consumer ports, one crate per commit, in this order
@@ -692,7 +692,7 @@ had to move together. `b2bua` + `b2bua-sdk` have **zero**
 `message_helpers::{headers,name_addr,via,uri}` call sites left, tests included;
 the survivors are `is_emergency_request` (the `emergency` module, not on the
 M12 list), the `param_codec` re-export in `stack_identity.rs` (same reason as
-M4's `decode_param`) and the four buffer scanners the Tier-1 brake uses
+M4's `decode_param`) and the four buffer scanners the ingress brake uses
 (`sniff`-side, also off the list).
 
 **`MessageTransform` is typed at both axes.** `remove_headers: Vec<&'static str>`
@@ -1057,7 +1057,7 @@ before and after (3 lib + 1 test, all pre-existing SDP/loop-index categories).
 `src`, `bin` and `tests` alike. **`loadgen` needed no port** — the plan's guess
 was right: its mux reads unparsed datagrams by design, so every sip-message call
 it makes is `sniff::*` plus `message_helpers::is_invite_request_buffer`
-(`preparse`, the Tier-1 brake's classifier, not on the M12 list). Nothing in it
+(`preparse`, the ingress brake's classifier, not on the M12 list). Nothing in it
 touches a header value, a typed field or a header name string.
 
 Three readers were missing and landed in their own sip-message commit:
@@ -1151,7 +1151,7 @@ added to `sip-message`. Workspace: 2127 tests passed, 0 failed.
 | eight copies of `assert_notify`'s `get_header("event"/"subscription-state")` + `starts_with(prefix)` | `header::<Event>()?.is("refer")` + `header::<SubscriptionState>()?.is(state)` |
 | `numbering_plan.rs` From/To `contains("+1555…@trunk.example")`, PAI equality, the two `headers.iter().any(name == "to" && value.contains(..))` scans, `get_headers("contact")` + `contains("q=1")` | `from()/to().uri().user()/host()`, `header::<PAssertedIdentity>()?.uri().text()`, `list::<Contact>()` → `uri().text()` + `param("q")` |
 | `proxy_b2bua.rs` `rr.contains("127.0.0.1:5080") && rr.contains(";lr")` ×2 | `record_route_set()` → `is_lb_proxy_route` (`host_port()` + `is_loose_route()`) |
-| `tier3_admission_gate.rs` / `promote_pem.rs` Reason `contains("text=\"overload\"" / "cause=NNN")` ×3 | `header::<Reason>()` → `param("text"/"cause")` |
+| `promote_pem.rs` Reason `contains("cause=NNN")` | `header::<Reason>()` → `param("cause")` |
 | `fake_prack.rs` / `update_matrix.rs` `content-type.to_ascii_lowercase().contains("application/sdp")` ×3, `announcement.rs` / `refer_gating.rs` Content-Type equality | `header::<MediaType>()?.is(..)` |
 | `keepalive_via_proxy.rs` `get_headers(.., "via").len()` ×2 | `req.via().len()` |
 | `reinvite_cancel.rs` `via.first().branch` / `cseq.seq` field reads, `refer_*` `req.cseq.seq`, 56 `to.tag` field reads | `top_via().branch()`, `cseq().seq()`, `to().tag()` |
@@ -1187,7 +1187,7 @@ yields its first ENTRY rather than the whole line.
   an unreadable entry must not be able to hide one.
 
 **Suspicions raised, not fixed:**
-- **`b2bua/tests/rules.rs` still does header-vec string surgery** — the top-Via
+- **`b2bua/tests/it/rules.rs` still does header-vec string surgery** — the top-Via
   and Route reads at `:734`, `:783`, `:795`, the Content-Type census at
   `:1041`, and the §7.3.1 duplicate counts at `:1365`/`:1407` all walk
   `.headers` with `eq_ignore_ascii_case`, and `:864` pushes a `SipHeader`
@@ -1195,7 +1195,7 @@ yields its first ENTRY rather than the whole line.
   `message_helpers`/`get_header` call sites, which these are not), and
   `raw(HeaderName::X)` says every one of them. M12 privatizes `.headers`, so
   they must move before the teardown compiles.
-- `scenario-harness/tests/template_emission.rs` reads `.headers` the same way,
+- `scenario-harness/tests/it/template_emission.rs` reads `.headers` the same way,
   but there it is the *subject*: the lane exists to pin captured header-name
   spelling, which only the raw entry carries. It needs the spelling-preserving
   `thaw` M7 logged, not a typed read.
@@ -1261,9 +1261,8 @@ The surviving members of the old namespace were NOT deleted, they were promoted
 out of it: `sip_message::{emergency, param_codec, preparse}` are top-level
 modules now, because each is its own concern (emergency classification, the
 B2BUA correlation-param codec, the strict pre-parse classifiers) and none of
-them is header access. (`reject_503` was promoted alongside them and later
-deleted — the Tier-1 503 template was scrapped for a parse + the shared
-`b2bua::overload::build_reject_new_call_503`.)
+them is header access. (`reject_503` was promoted alongside them and is gone:
+every new-call refusal is rendered by `b2bua::admission::Refusals`.)
 
 **The message shape**
 
@@ -1672,7 +1671,7 @@ a deployment with several front proxies the fallback would pin the dialog to the
 configured one rather than to the recorder — still better than pod-direct, but
 it is a deployment assumption living in a rules action.
 
-**2. `b2bua/tests/rules.rs` reads headers through the typed surface.** The six
+**2. `b2bua/tests/it/rules.rs` reads headers through the typed surface.** The six
 raw scans M11 logged (`headers().iter().find/filter(|h|
 h.name.eq_ignore_ascii_case(..))` for the b-leg INVITE's Via, the CANCEL's Route
 set and Via, the Content-Type dedup census, and the two §7.3.1 duplicate counts
@@ -1691,7 +1690,7 @@ identical warning set before and after.
 
 **3. Reconciling M11 with M12, and two commit-hygiene misses.**
 
-M11 logged the raw scans in `b2bua/tests/rules.rs` as "M12 privatizes `.headers`,
+M11 logged the raw scans in `b2bua/tests/it/rules.rs` as "M12 privatizes `.headers`,
 so they must move before the teardown compiles". M12 then landed with all six
 intact and never came back to the claim, so the log carried a prediction its own
 next section falsified. The prediction was wrong on the mechanism, not on the

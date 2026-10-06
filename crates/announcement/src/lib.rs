@@ -1,4 +1,4 @@
-//! # announcement — an out-of-tree callflow service (ADR-0016 slice 8 capstone)
+//! # announcement — an out-of-tree callflow service (ADR-0016)
 //!
 //! An early-media **MRF announcement** service, built against the public Rule
 //! SDK ([`b2bua_sdk`]) **alone** — it has no dependency on `b2bua`. It proves the
@@ -145,6 +145,7 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             callback_context: None,
             body_override: None,
             header_updates: vec![],
+            header_adds: vec![],
             kind: None,
         },
         // The announcement is done: hand off to the destination leg + core bridge
@@ -172,15 +173,14 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 /// caller only ever saw a `183` early dialog, so this is a reject-teardown: answer
 /// the INFO, send the caller its 4xx final, and terminate.
 ///
-/// This path is the whole point of announce-then-reject. The parked media leg is an
-/// **unadopted** `Media` leg, so core `confirm-dialog` (correctly, since the fix)
-/// does NOT mark the a-leg `Confirmed` off its 200 — the a-leg is still `Early`.
-/// `BeginTermination` sees the 4xx among the turn's effects and resolves the
-/// a-leg (`ByeDisposition::None` + `Terminated`) — no BYE toward
-/// the caller, and no spurious ADR-0022 503 on a later turn (e.g. a crossing BYE
-/// from the media leg). No un-confirm repair (a wire-silent
-/// `TerminateLeg{Rejected}` on the a-leg) is needed — the generic layer keeps
-/// the a-side honest.
+/// This path is the whole point of announce-then-reject. The parked media leg is
+/// an **unadopted** `Media` leg, so core `confirm-dialog` does NOT mark the a-leg
+/// `Confirmed` off its 200 — the a-leg is still `Early`. `BeginTermination` sees
+/// the 4xx among the turn's effects and resolves the a-leg
+/// (`ByeDisposition::None` + `Terminated`) — no BYE toward the caller, and no
+/// spurious ADR-0022 503 on a later turn (e.g. a crossing BYE from the media
+/// leg). No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the
+/// a-leg) is needed — the generic layer keeps the a-side honest.
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
@@ -272,6 +272,7 @@ define_service! {
                     callback_context: None,
                     body_override: None,
                     header_updates: vec![],
+                    header_adds: vec![],
                     kind: Some(call::LegKind::Media),
                 },
             ]),

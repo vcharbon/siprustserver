@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! HA: a takeover of a SAMPLED call opens the survivor's OWN root span, linked
 //! to the nominal's (ADR-0026 §5).
 //!
@@ -17,23 +18,22 @@
 //! this file holds exactly ONE test and installs its own gate. It is a test OF
 //! the trace machinery, so it may assert on the captured subscriber buffer.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::trace::{install_process_traces, CallTraces};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
-use observe::{CapturedSpan, RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, CapturedSpan, RateDraw, SampleAdmission};
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -50,7 +50,7 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 /// wins, and the header is not honored (this process did not opt in).
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         false,
     )));
 }
@@ -62,7 +62,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 8 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 8 }];
                 NewCallResponse::Route(r)
             })
             .build(),

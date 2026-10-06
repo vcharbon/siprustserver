@@ -1,6 +1,6 @@
 //! The Check **field-selector vocabulary**, as the single source the JSON schema
 //! draws on for `Check.field` autocomplete. The grammar this mirrors is the one
-//! [`crate::checks::extract`] actually evaluates (ADR-0019):
+//! `checks::extract` actually evaluates (ADR-0019):
 //!
 //! - transport endpoints: `source.ip/.port`, `dest.ip/.port`;
 //! - the payload: `body`;

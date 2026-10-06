@@ -56,13 +56,14 @@ async fn promote_pem_happy_no_resync() {
     uas.respond(183, "Session Progress")
         .with_header("P-Early-Media", "sendrecv")
         .with_header("Allow", "INVITE, ACK, BYE, CANCEL")
-        .with_header("Supported", "100rel, timer")
+        .with_header("Supported", "100rel, timer, replaces")
         .with_sdp(EARLY)
         .await;
 
     // Alice sees a 200 OK carrying bob's early SDP, P-Early-Media stripped,
-    // bob's Allow verbatim and his Supported minus the 100rel the service may
-    // not claim on her behalf (no reliable provisional reached her).
+    // bob's Allow verbatim and his Supported minus the 100rel and timer the
+    // service may not claim on her behalf (no reliable provisional reached
+    // her, and the promoted 200 states no session interval).
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "synthetic 200 carries bob's early SDP");
     assert_eq!(ok.body(), EARLY.as_bytes(), "early SDP relayed verbatim");
@@ -70,7 +71,8 @@ async fn promote_pem_happy_no_resync() {
     let allow = ok.header::<Allow>().expect("an Allow").expect("readable Allow");
     assert_eq!(allow.to_wire(), "INVITE, ACK, BYE, CANCEL", "bob's Allow relayed verbatim");
     assert!(!has_token(ok.header::<Supported>(), "100rel"), "no 100rel");
-    assert!(has_token(ok.header::<Supported>(), "timer"), "bob's other tag relayed");
+    assert!(!has_token(ok.header::<Supported>(), "timer"), "no timer");
+    assert!(has_token(ok.header::<Supported>(), "replaces"), "bob's other tag relayed");
 
     // Alice ACKs — absorbed locally; bob receives nothing yet.
     let mut dialog = call.ack().await;
@@ -386,4 +388,152 @@ async fn in_dialog_rejection() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// alice re-INVITEs before ACKing the promoted 200: her INVITE's 2xx is
+/// un-ACKed, so the window's refusal is the 491 with the configured
+/// `Retry-After`, not a plain 491.
+#[tokio::test]
+async fn a_reinvite_before_the_promoted_200_is_acked_carries_the_configured_retry_after() {
+    use b2bua::config::RetryAfterRange;
+    use b2bua_harness::stated_by_response;
+    use scenario_harness::WaiverScope;
+    use sip_message::generators::InDialogMethod;
+
+    let h = Harness::with_transit_delay("promote-pem-reinvite-before-ack", 0);
+    h.waive(
+        WaiverScope::rule(
+            "no-re-invite-while-invite-in-progress",
+            "alice deliberately re-INVITEs before ACKing the promoted 200",
+        )
+        .on_party("alice"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5844").await;
+    let bob = h.agent("bob", "127.0.0.1:5845").await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5845, RelayFirst18xStrategy::PromotePemTo200)
+            .tune(|c| c.glare_retry_after = Some(RetryAfterRange { min_sec: 2, max_sec: 2 }))
+            .start(&h, "b2bua", "127.0.0.1:5846")
+            .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress")
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(EARLY)
+        .await;
+    call.expect(200).await;
+
+    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(OFFER).send().await;
+    let refused = early.expect(491).await;
+    assert_eq!(stated_by_response(&refused, "Retry-After").as_deref(), Some("2"));
+
+    let mut dialog = call.ack().await;
+    uas.respond(200, "OK").with_sdp(EARLY).await;
+    bob.receive("ACK").await;
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// alice offers in an early UPDATE after a reliable answer, relayed to bob and
+/// unanswered; bob's 183 + P-Early-Media promotes the call; alice sends a
+/// second UPDATE (`second`, an offer or bodyless). Her first is still pending,
+/// so the window's refusal is RFC 3311 §5.2's 500, not a plain 491.
+async fn second_update_in_the_window_over_a_pending_one(
+    name: &str,
+    ports: (&str, u16, &str),
+    second: Option<&str>,
+) {
+    use b2bua_harness::stated_by_response;
+    use sip_message::generators::InDialogMethod;
+
+    const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    let (alice_addr, bob_port, b2bua_addr) = ports;
+    let h = Harness::with_transit_delay(name, 0);
+    let alice = h.agent("alice", alice_addr).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
+    let b2bua = b2bua_pem(&h, "b2bua", b2bua_addr, bob_port).await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    // A reliable 180 answers alice's offer; she PRACKs it.
+    uas.respond(180, "Ringing").reliable(1).with_sdp(EARLY).await;
+    let ringing = call.expect(180).await;
+    let a_tag = ringing.to().tag().expect("an early dialog").to_string();
+    let rseq = stated_by_response(&ringing, "RSeq").expect("a reliable 180");
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&a_tag)
+        .with_rack(&format!("{rseq} 1 INVITE"))
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack.expect(200).await;
+
+    // alice's early UPDATE offer reaches bob, who holds his answer.
+    let mut u1 = call
+        .send_request(InDialogMethod::Update)
+        .with_to_tag(&a_tag)
+        .with_sdp(REOFFER)
+        .send()
+        .await;
+    let mut bob_u1 = bob.receive("UPDATE").await;
+
+    // bob's 183 + P-Early-Media promotes the call.
+    uas.respond(183, "Session Progress")
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(EARLY)
+        .await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+
+    let mut u2 = match second {
+        Some(sdp) => dialog.request(InDialogMethod::Update, Some(sdp)).await,
+        None => dialog.request(InDialogMethod::Update, None).await,
+    };
+    let refused = u2.expect(500).await;
+    let secs: u32 = stated_by_response(&refused, "Retry-After")
+        .expect("the 500 carries a Retry-After")
+        .parse()
+        .expect("delta-seconds");
+    assert!(secs <= 10, "{secs}");
+
+    bob_u1.respond(200, "OK").with_sdp(REANSWER).await;
+    u1.expect(200).await;
+    uas.respond(200, "OK").with_sdp(EARLY).await;
+    bob.receive("ACK").await;
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+#[tokio::test]
+async fn a_second_update_offer_in_the_window_over_a_pending_one_is_refused_500() {
+    const REOFFER2: &str = "v=0\r\no=alice 1 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10004 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+    second_update_in_the_window_over_a_pending_one(
+        "promote-pem-second-update-offer",
+        ("127.0.0.1:5834", 5835, "127.0.0.1:5836"),
+        Some(REOFFER2),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_bodyless_update_in_the_window_over_a_pending_one_is_refused_500() {
+    second_update_in_the_window_over_a_pending_one(
+        "promote-pem-second-update-bodyless",
+        ("127.0.0.1:5809", 5819, "127.0.0.1:5829"),
+        None,
+    )
+    .await;
 }

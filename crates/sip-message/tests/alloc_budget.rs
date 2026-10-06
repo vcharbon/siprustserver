@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the global allocation counter.
 //! Allocation budget for the shared parse, forwarding and origination paths.
 //!
 //! Every SIP-handling process in the workspace (b2bua worker, front proxy, load

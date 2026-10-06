@@ -7,8 +7,6 @@
 //! Observationally pure: internal helpers may use early returns as control
 //! flow, but every escape is translated into `Err(SipParseError)` at this
 //! entry point. No panic ever crosses the boundary.
-//!
-//! STATUS: scaffolded, not yet ported. See MIGRATION_STATUS.md.
 
 use bytes::Bytes;
 
@@ -19,6 +17,7 @@ use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
 pub(crate) mod compact_forms;
+pub mod contact_entries;
 pub mod extract_fields;
 pub mod header_index;
 pub mod headers;

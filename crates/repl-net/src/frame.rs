@@ -149,7 +149,7 @@ pub enum Frame {
         /// Watermark to resume from; `(0,0)` ⇒ bootstrap-then-tail.
         since: Watermark,
     },
-    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, origin_now_ms, indexes, body]`
+    /// `[1, gen, counter, op, partition, call_ref, call_gen, call_bgen, body_ttl_ms, origin_now_ms, indexes, body, answered, incarnation]`
     ///
     /// Server → client: one changelog entry. `body` is opaque msgpack `bin`
     /// (the `Arc<[u8]>` read straight from the store) or `nil` for
@@ -188,6 +188,19 @@ pub enum Frame {
         indexes: Vec<String>,
         /// Opaque encoded call body, or `None` for delete/expired.
         body: Option<Arc<[u8]>>,
+        /// On a `Delete`: the deleting node states that its own copy of the
+        /// call had answered the caller when it deleted it. A `Delete` is the
+        /// only frame that can carry this — the body is gone. `false` on a
+        /// `Put` (its body says it) and on a `Delete` whose sender held no
+        /// answer; a receiver reads `false` as "not stated", never as a
+        /// retraction.
+        answered: bool,
+        /// Which of the successive calls on `call_ref` the frame is of (an
+        /// opaque id, unique over time where `call_ref` is not): the body a
+        /// `Put` carries, the call a `Delete` removed. The `(call_gen,
+        /// call_bgen)` vector orders versions of one incarnation only. Not the
+        /// node incarnation `at.gen`. `None` when the sender named none.
+        incarnation: Option<String>,
     },
     /// `[2, gen, counter]`
     ///

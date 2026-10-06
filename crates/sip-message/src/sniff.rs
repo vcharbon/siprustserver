@@ -119,6 +119,13 @@ pub fn cseq_value(raw: &[u8]) -> String {
     }
 }
 
+/// The CSeq method token, uppercased; `None` when the CSeq is absent or
+/// carries no method.
+pub fn cseq_method_token(raw: &[u8]) -> Option<String> {
+    let line = cseq_line(raw)?;
+    line.split_whitespace().nth(1).map(str::to_ascii_uppercase)
+}
+
 /// The CSeq method mapped to a BOUNDED static label — safe as a low-cardinality
 /// metrics label AND usable for method comparison (every RFC 3261/3262/3515
 /// method maps to itself). `"none"` when absent, `"other"` for an unknown
@@ -302,6 +309,23 @@ pub fn via_branch(raw: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// The `branch` of every Via, top first, comma folds split (§7.3.1): the
+/// transactions a request was forwarded on, its sender's own on top. A Via
+/// naming no branch yields an empty entry, so positions stay those of the
+/// stack.
+pub fn via_branches(raw: &[u8]) -> Vec<String> {
+    header_rows_compact(raw, "via")
+        .iter()
+        .flat_map(|row| row.split(',').map(str::to_string).collect::<Vec<_>>())
+        .map(|via| {
+            let Some(pos) = via.find("branch=") else { return String::new() };
+            let rest = &via[pos + "branch=".len()..];
+            let end = rest.find([';', ' ', '\t']).unwrap_or(rest.len());
+            rest[..end].trim().to_string()
+        })
+        .collect()
 }
 
 /// Every row of `name`, resolving the RFC 3261 §7.3.3 compact spelling: a
@@ -616,6 +640,38 @@ pub fn via_rport(raw: &[u8]) -> ViaRport {
     ViaRport::Absent
 }
 
+/// The originating hop of a request, read off its BOTTOM-most Via: every
+/// proxy pushes its own Via above the ones it received (RFC 3261 §16.6 step 8),
+/// so the bottom one is the originator's as it sent the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginVia {
+    /// Its sent-by.
+    pub sent_by: crate::header::SentBy,
+    /// Its `branch`, or `None` where it carries none.
+    pub branch: Option<String>,
+    /// How many Via values the request carried: one per hop it crossed.
+    pub depth: usize,
+}
+
+/// The bottom-most Via of `raw` as an [`OriginVia`], or `None` where the
+/// message carries no Via or one of its Via rows does not parse.
+pub fn bottom_via(raw: &[u8]) -> Option<OriginVia> {
+    use crate::header::{HeaderValue, SentBy, Via};
+    let mut depth = 0;
+    let mut bottom = None;
+    for row in header_rows_compact(raw, "via") {
+        let vias = Via::parse_line(&crate::sip_str::SipStr::owned(&row)).ok()?;
+        depth += vias.len();
+        bottom = vias.last().cloned().or(bottom);
+    }
+    let bottom = bottom?;
+    Some(OriginVia {
+        sent_by: SentBy::of(&bottom),
+        branch: bottom.branch().map(str::to_string),
+        depth,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +693,15 @@ mod tests {
             "body lines read the same way"
         );
         assert_eq!(line_at(raw, raw.len()), None, "past the end names nothing");
+    }
+
+    #[test]
+    fn via_branches_read_the_whole_stack_top_first() {
+        let raw = b"BYE sip:x SIP/2.0\r\n\
+            Via: SIP/2.0/UDP p;branch=z9hG4bK-p, SIP/2.0/UDP q;received=1.2.3.4\r\n\
+            v: SIP/2.0/UDP a;branch=z9hG4bK-a;rport\r\n\
+            CSeq: 2 BYE\r\n\r\n";
+        assert_eq!(via_branches(raw), vec!["z9hG4bK-p", "", "z9hG4bK-a"]);
     }
 
     #[test]
@@ -871,6 +936,22 @@ Content-Length: 0\r\n\r\n"
             header_values(raw, "contact"),
             vec!["<sip:a@1>".to_string(), "<sip:a@2>".to_string()],
         );
+    }
+
+    #[test]
+    fn bottom_via_reads_the_last_value_of_the_last_row() {
+        let raw = b"INVITE sip:x SIP/2.0\r\n\
+                    Via: SIP/2.0/UDP p.example;branch=z9-p\r\n\
+                    v: SIP/2.0/TCP q.example:5070;branch=z9-q, SIP/2.0/UDP UA.Example:5062;branch=z9-ua\r\n\r\n";
+        let origin = bottom_via(raw).expect("a bottom Via");
+        let sent_by = origin.sent_by.as_borrowed();
+        assert_eq!((sent_by.host(), sent_by.port()), ("UA.Example", Some(5062)));
+        assert_eq!((origin.branch.as_deref(), origin.depth), (Some("z9-ua"), 3));
+        let one = b"INVITE sip:x SIP/2.0\r\nVia: SIP/2.0/UDP ua.example\r\n\r\n";
+        let origin = bottom_via(one).expect("one Via is its own bottom");
+        assert_eq!(origin.branch, None);
+        assert_eq!((origin.sent_by.as_borrowed().host(), origin.depth), ("ua.example", 1));
+        assert_eq!(bottom_via(b"ACK sip:x SIP/2.0\r\n\r\n"), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! REFER safety-timer scenario (slice 5f). Port of
+//! REFER safety-timer scenario. Port of
 //! `tests/scenarios/refer-timers.ts`.
 //!
 //! Exercises the `refer_overall_safety` watchdog (the cross-phase end-to-end

@@ -3,7 +3,7 @@
 //!
 //! Matrix rows covered here (the ledger semantics — monotonic stamps,
 //! takeover exclusion, reclaim re-stamping — are unit-pinned in
-//! `b2bua/tests/reaper_ledger.rs`; the verdict confirm matrix incl. the
+//! `b2bua/tests/it/reaper_ledger.rs`; the verdict confirm matrix incl. the
 //! no-resurrection rule is unit-pinned in `b2bua::reaper::tests`):
 //! - **stale Active call** (lost timers / dropped events) → swept + reaped;
 //! - **handler panic, strike 1** → `fatal-error` verdict through the normal
@@ -161,8 +161,8 @@ async fn handler_panic_strike1_reaps_via_rules() {
 
     let mut dialog = establish(&alice, &bob, b2bua.addr).await;
 
-    // The INFO trips the panicking probe rule: pre-ADR-0020 this leaked the
-    // call forever with zero CDR; now it is strike 1 → fatal-error → reaped.
+    // The INFO trips the panicking probe rule: strike 1 → fatal-error → reaped
+    // with its CDR (ADR-0020), never leaked.
     let _txn = dialog.request(InDialogMethod::Info, None).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
@@ -256,7 +256,7 @@ async fn wedged_setup_is_aborted_and_reaped() {
         reasons.iter().any(|r| r == "reaper-stale" || r == "handler-panic"),
         "the CDR names the forced reap: {reasons:?}"
     );
-    // ADR-0022: the reap is no longer silent toward the caller — the
+    // ADR-0022: the reap is not silent toward the caller — the
     // `→ terminated` funnel answers the still-unanswered a-leg INVITE with a
     // 503 through its (still-live, < 193 s) server txn. Late, but alice is
     // released instead of stranded on 100-then-silence.

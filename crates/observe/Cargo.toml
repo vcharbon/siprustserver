@@ -22,7 +22,10 @@ otlp = [
 ]
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 tracing = { workspace = true }
+# The trace-activation token bucket (`activation_bucket`).
+load-shed = { path = "../load-shed" }
 # The lossless payload encoding: only the non-UTF-8 remainder of a recorded
 # message is base64'd (`attr::shape_body`).
 base64 = { workspace = true }

@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! ADR-0026 §5 — trace adoption at the store's hydration seam.
 //!
 //! A node that materialises a replicated call opens THIS node's own root span
@@ -16,7 +17,7 @@ use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -78,7 +79,7 @@ fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
 
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(3), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(3), activation_bucket(0)),
         false,
     )));
 }

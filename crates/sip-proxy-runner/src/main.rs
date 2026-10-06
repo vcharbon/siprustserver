@@ -4,14 +4,13 @@
 //! (`sip_net::RealSignalingNetwork`) into the production data path:
 //!   - `LoadBalancerStrategy` — HRW worker selection + HMAC-signed Record-Route
 //!     stickiness cookie (rotation-overlap aware).
-//!   - `StaticWorkerRegistry` — worker pool from `id@host:port,...` (the k8s
-//!     watcher registry is a deferred slice).
+//!   - `StaticWorkerRegistry` — worker pool from `id@host:port,...`.
 //!   - `HealthProbe` — periodic OPTIONS to workers, feeding the
 //!     `WorkerLoadObserver` band classifier (above-critical workers are excluded
 //!     from new-dialog selection). Health writes flow through the registry's
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
 //!     Draining) and routing reacts — for the static pool too.
-//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed intake pressure
+//!   - `EluCpsGate` self-gate: EWMA-smoothed intake pressure
 //!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
 //!     token bucket shed external new-dialog non-emergency INVITEs under
 //!     self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
@@ -171,7 +170,7 @@ fn parse_f64(key: &str, default: f64) -> f64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Depth-watermark selective intake shed (062): the LAST-line guard below the
+/// Depth-watermark selective intake shed: the LAST-line guard below the
 /// admission layer (the self-gate, 063, is the first-line brake). At or above
 /// `watermark` queued datagrams the socket pump drops only what
 /// [`sip_message::sniff::is_sheddable_new_invite`] classifies as a NEW
@@ -247,18 +246,17 @@ struct ProbeTimingConfig {
 /// and cannot be enforced by either component's own defaults in isolation: by the
 /// time the observer is built, the probe timings have already been handed to the
 /// probe layer and are no longer visible to it. This assembles the cross-cutting
-/// facts and rejects misconfigurations that have caused real outages. It is
+/// facts and rejects misconfigurations that silently degrade the cluster. It is
 /// deliberately **pure** (no I/O, no logging, no `tokio`) so it is trivial to
 /// unit-test and so [`assert_valid_config`] can abort boot *before* a single
 /// socket is bound — a misconfigured pod MUST NOT come up unhealthy.
 ///
-/// Background: on 2026-05-25 the deployed chart used `interval_ms=2000
-/// timeout_ms=1500` (cycle=3500 ms) but the observer shipped with
-/// `payload_stale_ms=3000`. The 1 s sweep caught `age > 3000` between probe-recv
-/// events on ~half of cycles, halving the per-worker admit cap each time; within
-/// ~20 s the cap collapsed to `cap_floor_cps=1` and never recovered — the cluster
-/// silently throttled every worker to 1 cps per LB. The `payload_stale_ms ≥ 2 ×
-/// probe_cycle` check below would have refused to start that pod.
+/// Example: `interval_ms=2000 timeout_ms=1500` (cycle=3500 ms) with
+/// `payload_stale_ms=3000` lets the 1 s sweep catch `age > 3000` between
+/// probe-recv events on ~half of cycles, halving the per-worker admit cap each
+/// time; within ~20 s the cap collapses to `cap_floor_cps=1` and never recovers —
+/// the cluster silently throttles every worker to 1 cps per LB. The
+/// `payload_stale_ms ≥ 2 × probe_cycle` check below refuses to start that pod.
 ///
 /// Returns `Ok(())` when every invariant holds, else `Err(violations)` with one
 /// human-readable line per problem (operators see ALL problems on the first boot
@@ -292,7 +290,7 @@ fn validate_config(
         ));
     }
 
-    // PRIMARY INVARIANT — the bug from the 2026-05-25 RCA.
+    // PRIMARY INVARIANT — payload staleness outlasts a probe cycle.
     //
     // `HealthProbe` runs sleep(interval) → fanOutOptions → sleep(timeout) → reap,
     // so successive OPTIONS replies arrive `interval + timeout` apart. If
@@ -395,7 +393,7 @@ fn env_f64_opt(key: &str) -> Option<f64> {
 }
 
 /// Apply the operator's band/AIMD/cap env overrides onto a base
-/// [`LoadObserverConfig`] (migration/32). Each `LB_*` var, when present and
+/// [`LoadObserverConfig`]. Each `LB_*` var, when present and
 /// parseable, replaces one field; anything else leaves the shipped default. The
 /// result is NOT validated here — `assert_valid_config` does that (so an
 /// incoherent override set fails the boot preflight loudly). Every applied
@@ -429,78 +427,6 @@ fn load_observer_cfg_from_env(mut cfg: LoadObserverConfig) -> LoadObserverConfig
         tracing::info!(overrides = %applied.join(" "), "load-observer band/AIMD overrides applied");
     }
     cfg
-}
-
-/// Render the proxy-self gate's gauges/counters as Prometheus exposition,
-/// appended to the `/metrics` body (mirrors how `jemalloc_stats::prometheus_text`
-/// is appended). Only the real [`EluCpsGate`] has state to surface; with the
-/// always-admit gate (`None`) this returns empty.
-fn self_gate_prometheus_text(gate: &Option<EluCpsGate>) -> String {
-    let Some(g) = gate else {
-        return String::new();
-    };
-    let m = g.metrics();
-    let mut s = String::new();
-    let gauge = |s: &mut String, name: &str, help: &str, val: f64| {
-        s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {val}\n"));
-    };
-    let counter = |s: &mut String, name: &str, help: &str, val: u64| {
-        s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}\n"));
-    };
-    gauge(
-        &mut s,
-        "sip_proxy_self_elu_ewma",
-        "Proxy-self ELU EWMA (0..1). Crosses elu_critical -> 503.",
-        m.elu_ewma,
-    );
-    gauge(
-        &mut s,
-        "sip_proxy_self_gc_fraction",
-        "Proxy-self GC fraction (0..1). Informational only.",
-        m.gc_fraction,
-    );
-    gauge(
-        &mut s,
-        "sip_proxy_self_cps_bucket_level",
-        "Proxy-self CPS bucket level (tokens remaining).",
-        m.cps_bucket_level,
-    );
-    gauge(
-        &mut s,
-        "sip_proxy_self_cps_bucket_max",
-        "Proxy-self CPS bucket capacity (constant per config).",
-        m.cps_bucket_max,
-    );
-    counter(
-        &mut s,
-        "sip_proxy_self_external_invites_admitted_total",
-        "External new-dialog non-emergency INVITEs admitted by the proxy-self gate.",
-        m.external_admitted_total,
-    );
-    // Per-reason rejection split (reason=proxy_overload_elu | proxy_overload_cps).
-    s.push_str("# HELP sip_proxy_self_external_invites_rejected_total External new-dialog non-emergency INVITEs rejected by the proxy-self gate.\n");
-    s.push_str("# TYPE sip_proxy_self_external_invites_rejected_total counter\n");
-    s.push_str(&format!(
-        "sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_elu\"}} {}\n",
-        m.rejected_elu_total
-    ));
-    s.push_str(&format!(
-        "sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_cps\"}} {}\n",
-        m.rejected_cps_total
-    ));
-    counter(
-        &mut s,
-        "sip_proxy_self_emergency_bypassed_total",
-        "Emergency INVITEs that bypassed the proxy-self gate.",
-        m.emergency_bypassed_total,
-    );
-    counter(
-        &mut s,
-        "sip_proxy_self_internal_bypassed_total",
-        "Worker-originated INVITEs that bypassed the proxy-self gate.",
-        m.internal_bypassed_total,
-    );
-    s
 }
 
 /// Bounded bind retry for a port a predecessor process may still hold.
@@ -698,21 +624,21 @@ async fn main() {
     // initial/ceiling ordering, ELU band ordering + hysteresis bounds, cooldown ≥
     // one probe cycle) can be checked *before* the first socket bind. A violation
     // panics → non-zero exit → CrashLoopBackOff, rather than letting a pod boot
-    // unhealthy (the 2026-05-25 RCA: a too-short payload_stale_ms silently floored
-    // every worker's admit cap to cap_floor_cps). These same values are reused for
+    // unhealthy (a too-short payload_stale_ms silently floors every worker's
+    // admit cap to cap_floor_cps). These same values are reused for
     // the observer/probe below — read once.
     let probe_cfg = HealthProbeConfig {
         interval_ms: parse_u64("HEALTH_INTERVAL_MS", 1_000),
         timeout_ms: parse_u64("HEALTH_TIMEOUT_MS", 1_500),
         threshold: parse_u64("HEALTH_THRESHOLD", 2) as u32,
     };
-    // Operator env surface for the band/AIMD/cap knobs (migration/32). Overload
+    // Operator env surface for the band/AIMD/cap knobs. Overload
     // calibration is iterative on the cluster, so these must be tunable WITHOUT a
     // rebuild. Each override is applied only when its env var is set AND parses;
     // a malformed value is ignored (the shipped default stays). An INCOHERENT
     // result (reversed bands, hysteresis ≥ a band gap, cap ordering) is caught
     // loudly by `assert_valid_config` below — it refuses to boot rather than
-    // silently mis-shedding (commit e0b17d7 coherence checks).
+    // silently mis-shedding.
     let observer_cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
     assert_valid_config(
         ProbeTimingConfig { interval_ms: probe_cfg.interval_ms, timeout_ms: probe_cfg.timeout_ms },
@@ -751,7 +677,7 @@ async fn main() {
     //
     // Every signaling bind (both faces, all shards) carries the selective
     // intake-shed hook — a blind tail-drop at the queue cap would otherwise
-    // kill emergency and in-dialog traffic first-come-first-served (062).
+    // kill emergency and in-dialog traffic first-come-first-served.
     let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max));
     // ONE process clock, built before the first bind: every signaling endpoint
     // stamps `UdpPacket::arrival_ms` on it and every `ProxyCore` ages dequeued
@@ -853,7 +779,7 @@ async fn main() {
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::from_entropy());
 
-    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the ELU
+    // Proxy-self ELU/CPS admission gate. On by default; the ELU
     // arm observes intake saturation — every recv shard records each packet's
     // age at dequeue into this ONE shared recorder, and the 100 ms sampler task
     // spawned below drains the window max into the gate's EWMA.
@@ -921,7 +847,7 @@ async fn main() {
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
 
     // Named-target resolver tuning + startup prewarm. A COLD
-    // name (fresh deploy, CoreDNS restart, TTL expiry) used to cost the first
+    // name (fresh deploy, CoreDNS restart, TTL expiry) would cost the first
     // b-leg forward a full in-path resolve — 3.5–7.5 s under kube ndots:5
     // search expansion, blowing the downstream 2 s connect timer. Prewarm
     // targets are resolved off the serving path right after core construction
@@ -1102,8 +1028,8 @@ async fn main() {
     // only fires when telemetry actually dries up. Shares the probe's observer
     // `Arc`; owns no per-call state, so no release path. Each sweep's floored-worker
     // count feeds the coarse `stale_decrease` aggregate counter so a silently
-    // floored cap is diagnosable in Prometheus (the per-worker `worker_id`-labelled
-    // push is a deferred slice — awaits a per-worker Prometheus surface).
+    // floored cap is diagnosable in Prometheus (there is no per-worker
+    // `worker_id`-labelled surface).
     {
         let obs = sweep_observer;
         let clk = clock.clone();
@@ -1122,11 +1048,10 @@ async fn main() {
         });
     }
 
-    // Proxy-self gate sampler (migration/14). Rides `tokio::time::interval` (NOT
-    // the TS raw `setInterval`) so behaviour stays on one clock; each tick
-    // drains the shared intake-age recorder's window max into the gate's EWMA.
-    // Only spawned when the real gate is enabled. Owns no per-call state, so it
-    // needs no release path.
+    // Proxy-self gate sampler. Rides `tokio::time::interval` so behaviour stays
+    // on one clock; each tick drains the shared intake-age recorder's window max
+    // into the gate's EWMA. Only spawned when the real gate is enabled. Owns no
+    // per-call state, so it needs no release path.
     if let Some(g) = self_gate.clone() {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(g.sampler_interval());
@@ -1142,18 +1067,17 @@ async fn main() {
     // Prometheus + readiness endpoint (shared `probe-http`). NOTE: `ProbeServer`
     // aborts its accept loop on Drop, so the handle must stay live for the whole
     // process lifetime. The `/metrics` body appends the proxy-self gate gauges
-    // (migration/14) + the jemalloc mallctl exposition (footprint/purge/decay
-    // config) per scrape — the latter same cfg as the allocator dep.
+    // + the jemalloc mallctl exposition (footprint/purge/decay config) per
+    // scrape — the latter same cfg as the allocator dep.
     let metrics_gate = self_gate.clone();
     let routes = probe_http::ProbeRoutes {
         metrics: Arc::new(move || {
-            let mut t = metrics.prometheus_text();
-            t.push_str(&self_gate_prometheus_text(&metrics_gate));
-            // Dropped log lines + trace-admission denials (ADR-0026).
-            t.push_str(&observe::counters::prometheus_text());
-            #[cfg(not(target_env = "msvc"))]
-            t.push_str(&jemalloc_stats::prometheus_text());
-            t
+            let gate = metrics_gate.as_ref().map(EluCpsGate::metrics);
+            sip_proxy_runner::metrics_body::body(
+                &metrics,
+                gate.as_ref(),
+                &jemalloc_stats::prometheus_text,
+            )
         }),
         ready,
         // No heap profiling on the proxy (not the leak target; profiling build
@@ -1183,9 +1107,9 @@ async fn main() {
     // exit. Ctrl-C (interactive) exits at once.
     let drain_grace_ms: u64 = env_or("PROXY_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000);
 
-    // Supervise every data-path task: a panicked/exited recv loop used to
-    // leave the process alive with /healthz green — k8s never restarted the
-    // pod and every datagram was silently black-holed. Exiting non-zero makes
+    // Supervise every data-path task: a panicked/exited recv loop must not
+    // leave the process alive with /healthz green — k8s would never restart the
+    // pod and every datagram would be silently black-holed. Exiting non-zero makes
     // the container restart the moment ANY recv shard or the probe dies.
     //
     // The select only DECIDES the exit code: `process::exit` runs no
@@ -1493,7 +1417,7 @@ mod tests {
         assert!(!f.contains_ip("192.168.60.9".parse().unwrap()));
     }
 
-    // ── load_observer_cfg_from_env — LB_* operator overrides (migration/32) ──
+    // ── load_observer_cfg_from_env — LB_* operator overrides ─────────────────
     //
     // The process env is global, so these serialise behind one mutex and clean up
     // every var they touch. They never spawn a runtime — pure CPU, default lane.
@@ -1665,7 +1589,7 @@ mod tests {
 
 #[cfg(test)]
 mod intake_shed_tests {
-    //! Pins [`intake_shed_hook`] (062): the hook is pure over `(raw, depth)`
+    //! Pins [`intake_shed_hook`]: the hook is pure over `(raw, depth)`
     //! — no socket needed — so each case invokes it directly.
 
     use super::*;

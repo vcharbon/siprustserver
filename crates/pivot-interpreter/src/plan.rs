@@ -10,7 +10,7 @@
 //! compilation FAILURES, surfaced in the run bundle rather than tolerated.
 //!
 //! The plan is shared across call instances and never mutated; per-call
-//! identity substitution rides [`crate::instance::Instance`].
+//! identity substitution rides `crate::instance::Instance`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1369,6 +1369,9 @@ impl Compiler {
                             out.push((site(what), owner.clone(), kind.clone()));
                         }
                     }
+                }
+                if let Some(addr) = r.addr() {
+                    out.push((site(what), owner.clone(), addr.to_string()));
                 }
             }
             if let Some(body) = &msg.body {

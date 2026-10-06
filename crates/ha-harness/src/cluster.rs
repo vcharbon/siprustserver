@@ -1,4 +1,4 @@
-//! [`HaCluster`] — the goal-1 cluster harness: N in-process nodes over one
+//! [`HaCluster`] — the cluster harness: N in-process nodes over one
 //! shared, **recording** simulated replication fabric + a shared paused
 //! [`Clock`], with put/delete/crash/reboot/partition drivers + convergence
 //! assertions + the recording report.
@@ -45,7 +45,7 @@ fn addr_for(index: usize) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9300 + index as u16))
 }
 
-/// The N-node goal-1 cluster. Holds the shared fabric + clock + the node map.
+/// The N-node cluster. Holds the shared fabric + clock + the node map.
 pub struct HaCluster {
     clock: Clock,
     /// The recording decorator (capture sink) wrapping the sim fabric.
@@ -74,7 +74,7 @@ const DEFAULT_REPLICA_BACKSTOP_MS: i64 = 3_600_000;
 impl HaCluster {
     /// Build an N-node cluster from `node_ordinals` with a fresh paused clock at
     /// t=0 and a 1 ms-transit recording fabric. Every node lists every OTHER
-    /// node as a peer (the natural goal-1 full mesh); pass `with_clock` /
+    /// node as a peer (the natural full mesh); pass `with_clock` /
     /// `with_peers` builders if a custom topology is needed.
     pub async fn new(node_ordinals: &[&str]) -> Self {
         Self::with_clock(node_ordinals, Clock::test_at(0)).await
@@ -321,7 +321,7 @@ impl HaCluster {
 
     /// `reconnect(a,b)` — heal the pair so a fresh connect succeeds and a
     /// [`cut`](Self::cut) between the two is lifted (an alias for
-    /// [`heal`](Self::heal) named per the slice API; recorded as `reconnect`).
+    /// [`heal`](Self::heal); recorded as `reconnect`).
     pub fn reconnect(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.addrs[a], self.addrs[b]);
         self.sim.apply_fault(Fault::Heal { a: aa, b: ba });
@@ -330,9 +330,10 @@ impl HaCluster {
 
     // -- clock -------------------------------------------------------------
 
-    /// Advance the paused clock by `dur`, driving the deep sim pipeline with the
-    /// proven settle/advance/settle discipline (CLAUDE.md). Drive the protocol
-    /// BETWEEN advances: advance to the deadline, then assert.
+    /// Advance the paused clock by `dur` in settled 100 ms chunks
+    /// (`sip_clock::testkit::pump`), so the deep sim pipeline runs each hop at
+    /// its own instant. Drive the protocol BETWEEN advances: advance to the
+    /// deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
         sip_clock::testkit::pump(dur).await;
     }

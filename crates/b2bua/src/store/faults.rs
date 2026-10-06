@@ -209,10 +209,11 @@ impl CallStore for FaultInjectingCallStore {
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.faults.check(StoreFaultPoint::DeleteCall)?;
-        self.inner.delete_call(role, primary, call_ref, indexes, opts).await
+        self.inner.delete_call(role, primary, call_ref, indexes, answered, opts).await
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
@@ -310,7 +311,7 @@ mod tests {
         assert!(faults.check(StoreFaultPoint::LiveInDialog).is_err());
         assert!(faults.check(StoreFaultPoint::LiveAudit).is_ok());
         // Decorator ops keep working — the live switches are router-side only.
-        assert!(s.get_index("leg:x").await.is_ok());
+        assert!(s.get_index("a:x|t").await.is_ok());
         faults.disarm_all();
         assert!(faults.check(StoreFaultPoint::LiveInDialog).is_ok());
     }

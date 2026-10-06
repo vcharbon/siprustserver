@@ -19,11 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
+use call::LimiterEntry;
 use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
@@ -58,7 +57,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 8 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 8 }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -360,7 +359,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     // One subdir per cell, with a `baseline`/`variant` stem, under the workspace
     // `target/seq-reports/<cell>/`. Reads the recordings NON-consuming (the SIP
     // harness is NOT finished), so it never disturbs the run. No env gating
-    // (ADR-0013 / user decision 2).
+    // (ADR-0013).
     let out = seq_reports_dir().join(&name);
     let title = format!("{name} ({run})");
     if let Err(e) = fh.write_unified_report(&out, run, &title, true) {
@@ -379,9 +378,9 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
 /// the StatefulSet endpoint). Under reactive-only takeover (ADR-0014) the survivor
 /// takes the dialog over when the proxy reroutes its in-dialog traffic
-/// (`router::materialise`); the membership delta no longer drives an eager
-/// takeover (removed with ADR-0014), it just keeps the survivor's view honest. The
-/// reboot re-adds the endpoint ([`reboot_and_reclaim`]).
+/// (`router::materialise`); the membership delta drives no takeover, it only
+/// keeps the survivor's view honest. The reboot re-adds the endpoint
+/// ([`reboot_and_reclaim`]).
 async fn inject_failover(
     fh: &mut FailoverHarness,
     primary: &mut ReplicatedB2buaSut,
@@ -546,12 +545,12 @@ async fn keepalive_tick(
     // reboot variant (`reclaim_into_live` re-arms a fresh interval) — so the two
     // runs start the tick at different absolute times and a fixed `advance(300s)`
     // would overshoot the variant's deadline + its 5 s reap and tear the call
-    // down (the CLAUDE.md keepalive hazard, and exactly the long-call-on-reboot
-    // loss the endurance run flagged). Instead poll-advance toward whichever
-    // deadline applies in sub-reap (2 s) steps, draining each leg's OPTIONS the
-    // instant it is queued so every leg is answered strictly inside its 5 s
-    // dead-peer window. Both legs are probed together (one keepalive fires
-    // OPTIONS to every peered leg), so they surface in the same step.
+    // down (the keepalive hazard: a long idle call lost across a reboot). Instead
+    // poll-advance toward whichever deadline applies in sub-reap (2 s) steps,
+    // draining each leg's OPTIONS the instant it is queued so every leg is
+    // answered strictly inside its 5 s dead-peer window. Both legs are probed
+    // together (one keepalive fires OPTIONS to every peered leg), so they surface
+    // in the same step.
     let tol = ["INVITE", "ACK", "UPDATE", "INFO", "BYE"];
     let mut a_txn = None;
     let mut b_txn = None;

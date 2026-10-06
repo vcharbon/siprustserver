@@ -39,7 +39,7 @@ const replayCell = (over: Partial<Campaign.PivotReplayCell> = {}): Campaign.Pivo
   ...over
 })
 
-const rustCell = (name = "bc_02::transparent"): Campaign.RustTestCell => ({
+const rustCell = (name = "relay::transparent"): Campaign.RustTestCell => ({
   kind: "rust-test",
   crate: "stub-crate",
   name

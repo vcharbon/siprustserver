@@ -18,7 +18,7 @@ use crate::obligations::ObligationSet;
 
 use super::actions::ActionExecutor;
 use super::invariants;
-use super::model::{
+use b2bua_sdk::model::{
     EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
 };
 
@@ -85,7 +85,7 @@ fn select<'a>(rules: &'a [RuleDefinition], call: &Call, ctx: &RuleContext) -> Se
     Selection { ranked: candidates.into_iter().map(|(_, r)| r).collect(), absorbed }
 }
 
-/// The ranked candidates for `ctx` on `call` (see [`select`]).
+/// The ranked candidates for `ctx` on `call` (see `select`).
 pub fn pick_ranked<'a>(
     rules: &'a [RuleDefinition],
     call: &Call,
@@ -137,7 +137,13 @@ pub fn execute_rules(
                 );
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors, torn_down);
             let result = invariants::finalize(result);
-            let mut enforced = invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            let mut enforced = invariants::enforce(
+                obligations,
+                &before,
+                result,
+                exec.now_ms,
+                invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+            );
             // Recorded from the FINAL call, so the trace carries what finalize
             // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
             // otherwise shows on a traced call as a `sip.out` with no matching

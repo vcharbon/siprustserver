@@ -152,9 +152,6 @@ struct Episode {
 pub struct Wave {
     summary_every: Duration,
     idle_close_after: Duration,
-    /// Bumped on every rising edge, so a driver spawned for a previous episode
-    /// recognises that it is stale.
-    generation: u64,
     open: Option<Episode>,
 }
 
@@ -167,12 +164,7 @@ impl Default for Wave {
 impl Wave {
     /// Build with an explicit summary cadence and idle-close window.
     pub fn new(summary_every: Duration, idle_close_after: Duration) -> Self {
-        Self { summary_every, idle_close_after, generation: 0, open: None }
-    }
-
-    /// The current episode generation; changes on each rising edge.
-    pub fn generation(&self) -> u64 {
-        self.generation
+        Self { summary_every, idle_close_after, open: None }
     }
 
     /// Whether an episode is open.
@@ -208,7 +200,6 @@ impl Wave {
                     tally,
                     close_requested: false,
                 });
-                self.generation = self.generation.wrapping_add(1);
                 Some(WaveReport { edge: Edge::Rising, elapsed_ms: 0, tally })
             }
             Some(ep) => {
@@ -349,7 +340,6 @@ mod tests {
         let mut w = Wave::new(Duration::from_secs(12), Duration::from_secs(5));
         let rising = w.record("shed", 1).expect("first shed opens the episode");
         assert_eq!(rising.edge, Edge::Rising);
-        let gen_first = w.generation();
 
         // 1000 reject/admit flaps well inside the cadence: not one further line.
         for _ in 0..1_000 {
@@ -358,7 +348,6 @@ mod tests {
             tokio::time::advance(Duration::from_millis(1)).await;
             assert!(w.record("shed", 1).is_none(), "a flap revives, it does not re-rise");
         }
-        assert_eq!(w.generation(), gen_first, "still the same episode");
         assert!(!w.is_close_requested(), "the last event revived it");
 
         // Only real quiet ends it: arm, then let the idle window elapse.
@@ -373,10 +362,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn immediate_close_is_idempotent_and_reopening_bumps_the_generation() {
+    async fn immediate_close_is_idempotent_and_reopening_opens_a_new_episode() {
         let mut w = Wave::default();
         w.record("fail_open", 1).unwrap();
-        let gen_first = w.generation();
 
         tokio::time::advance(Duration::from_secs(2)).await;
         let falling = w.close_now().expect("an immediate close ends the episode");
@@ -390,7 +378,6 @@ mod tests {
         let rising = w.record("fail_open", 1).expect("new episode");
         assert_eq!(rising.edge, Edge::Rising);
         assert_eq!(rising.tally.get("fail_open"), 1);
-        assert_ne!(w.generation(), gen_first);
     }
 
     #[test]

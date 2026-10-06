@@ -1,10 +1,11 @@
 //! sip-txn — the SIP transaction layer.
 //!
 //! RFC 3261 §17 client/server transaction state machines: duplicate detection
-//! (Via branch), retransmission + timeout timers (A/B for INVITE, E/F for
-//! non-INVITE, G non-2xx-final retransmit, D/H/J holds), CANCEL→200+487, ACK
-//! absorption for non-2xx, and cached-final-response retransmission. In-memory
-//! only (≤ ~32 s txn lifetime).
+//! (§17.2.3: top-Via branch, sent-by and method), retransmission + timeout
+//! timers (A/B for INVITE, E/F for non-INVITE, G non-2xx-final retransmit,
+//! D/H/J holds), CANCEL→200+487, ACK absorption for non-2xx, and
+//! cached-final-response retransmission. In-memory only (≤ ~32 s txn
+//! lifetime).
 //!
 //! Sits on a [`sip_net::UdpEndpoint`] (it parses raw datagrams itself, via a
 //! [`sip_message::SipParser`]) and emits a stream of [`TransactionEvent`]s to
@@ -18,18 +19,20 @@
 //! the transaction map (see [`layer`] and docs/adr/0007, which also covers the
 //! scalability rationale: flat `DelayQueue` memory vs. task-per-timer).
 
+pub mod catalogue;
 pub mod event;
 pub mod layer;
 pub mod metrics;
 pub mod rng;
 pub mod seed;
+mod stateless_tag;
 pub mod timers;
 
 // The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release,
-// and the deferred-backlog ceiling on new calls.
+// the deferred-backlog ceiling on new calls and the node's shared refusals.
 pub use layer::{
-    DeferredBound, NewCallRefusal, RefusedClass, RefusedMemo, TransactionConfig, TransactionLayer,
-    TransactionLayerClosed,
+    DeferredBound, InviteClass, InviteRefusals, NewCallRefusal, ServerTxnKey, TransactionConfig,
+    TransactionLayer, TransactionLayerClosed, Verdict, REFUSED_MEMO_MAX,
 };
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
@@ -37,5 +40,7 @@ pub use seed::{Reoffer, TxnSeed};
 pub use event::{ClientTransactionHandle, EventQueueClass, TimeoutKind, TransactionEvent, TxnKind};
 // Observability read handle (shared atomics, readable off the actor thread).
 pub use metrics::{RetransmitRow, TransactionMetrics};
-// Identifier generation seam (Via branch / To-tag).
+// Identifier generation seam (Via branch / To-tag), and the request-derived
+// identity of a stateless answer.
 pub use rng::IdGen;
+pub use stateless_tag::StatelessTagger;

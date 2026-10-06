@@ -60,7 +60,7 @@ const blindTransferFlows = (): Flows.FlowsDoc =>
         response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: 990, toTag: "callee-tag" }),
         request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: sut, dst: callee, ts_ms: 1_010, toTag: "callee-tag" }),
         // The callee asks for the transfer, inside the dialog it answered.
-        request({ callId: CALLEE_CALL_ID, seq: 1, method: "REFER", src: callee, dst: sut, ts_ms: 3_000, fromUri: CALLEE_URI, fromTag: "callee-tag", ruri: CALLER_URI, toTag: `from-${CALLEE_CALL_ID}`, headers: ["Refer-To: <sip:+33600000007@10.0.0.1>"] }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "REFER", src: callee, dst: sut, ts_ms: 3_000, fromUri: CALLEE_URI, fromTag: "callee-tag", ruri: CALLER_URI, toTag: `from-${CALLEE_CALL_ID}`, headers: ["Refer-To: <sip:+15556000007@10.0.0.1>"] }),
         response({ callId: CALLEE_CALL_ID, seq: 1, status: 202, reason: "Accepted", cseqMethod: "REFER", src: sut, dst: callee, ts_ms: 3_010, fromUri: CALLEE_URI, fromTag: "callee-tag", toUri: CALLER_URI, toTag: `from-${CALLEE_CALL_ID}` }),
         request({ callId: CALLEE_CALL_ID, seq: 2, method: "BYE", src: sut, dst: callee, ts_ms: 4_100, toTag: "callee-tag" }),
         response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: callee, dst: sut, ts_ms: 4_105, toTag: "callee-tag" })

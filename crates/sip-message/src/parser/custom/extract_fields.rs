@@ -8,11 +8,12 @@
 //! `Hydrate` runs only the baseline presence/range/tag checks for already-
 //! trusted internal construction.
 
+use super::contact_entries::{contact_entry_spans, read_contact_entry, ContactEntry};
 use super::header_index::HeaderIndex;
 use super::scanner::{is_token_char, strict_non_negative_decimal};
 use super::structured_headers::{
-    parse_contact, parse_cseq, parse_name_addr, parse_sip_uri_string, parse_via,
-    top_level_comma_entries, validate_strict_host, validate_strict_sip_uri,
+    parse_cseq, parse_name_addr, parse_sip_uri_string, parse_via, top_level_comma_entries,
+    validate_strict_host, validate_strict_sip_uri,
 };
 use crate::error::SipParseError;
 use crate::header::{self, HostPort, NameAddr, Uri};
@@ -30,6 +31,18 @@ const INT_32_MAX: u64 = (1u64 << 31) - 1;
 pub enum ExtractMode {
     Wire,
     Hydrate,
+}
+
+/// How a message's Contact set is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactReading {
+    /// The Contact names a dialog target or a binding (a request, a 1xx / 2xx):
+    /// a misplaced wildcard or an unreadable entry refuses the message.
+    Strict,
+    /// The Contact names no dialog target (a final of 300 or more): a misplaced
+    /// wildcard or an unreadable entry is dropped and the message kept, so the
+    /// transaction it ends still completes.
+    Lenient,
 }
 
 /// Request eager fields = the shared core + the parsed Request-URI.
@@ -66,7 +79,7 @@ fn to_contact(p: super::structured_headers::ParsedContact) -> header::Contact {
 // ---------------------------------------------------------------------------
 // Byte-scan strict gates. All structural bytes tested below are ASCII, so a
 // UTF-8 lead/continuation byte can never alias one — byte scans visit exactly
-// the positions the old `Vec<char>` walks did, without the per-call collect.
+// the positions a `Vec<char>` walk would, without a per-call collect.
 // ---------------------------------------------------------------------------
 
 /// True iff the URI carries unescaped control bytes (0x00-0x1F except HTAB,
@@ -320,6 +333,7 @@ pub fn extract_common_fields(
     idx: &HeaderIndex,
     limits: &SipParserLimits,
     mode: ExtractMode,
+    contact_reading: ContactReading,
 ) -> Result<CoreHeaders, SipParseError> {
     let wire = mode == ExtractMode::Wire;
 
@@ -491,35 +505,7 @@ pub fn extract_common_fields(
         ));
     }
 
-    // Contact — fold comma-list and repeated lines. `Contact: *` must stand
-    // alone, which is settled over every entry before any is parsed.
-    let contact_segments = || {
-        idx.contact
-            .iter()
-            .flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
-            .filter(|(_, seg)| !seg.is_empty())
-    };
-    let contact_wildcard = contact_segments().any(|(_, seg)| seg == "*");
-    if contact_wildcard && contact_segments().any(|(_, seg)| seg != "*") {
-        return Err(SipParseError::new(
-            "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
-        ));
-    }
-    let mut contact_list: Vec<header::Contact> = Vec::new();
-    for (value, seg) in contact_segments().filter(|(_, seg)| *seg != "*") {
-        let parsed = parse_contact(&value.reslice(seg));
-        if wire {
-            if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-                return Err(SipParseError::new(format!(
-                    "Strict Contact URI: {reason} (\"{}\")",
-                    parsed.uri
-                )));
-            }
-        }
-        contact_list.push(to_contact(parsed));
-    }
-    let contacts =
-        if contact_wildcard { ContactSet::Wildcard } else { ContactSet::Contacts(contact_list) };
+    let contacts = read_contacts(idx, wire, contact_reading)?;
 
     let mut hops = vias.into_iter();
     let top = hops.next().ok_or_else(|| SipParseError::new("Missing mandatory Via header"))?;
@@ -562,6 +548,49 @@ fn sent_by_extra_colons(raw: &str) -> Option<i32> {
     (colon_count > 1).then_some(colon_count)
 }
 
+/// The message's Contact set, folded over comma-lists and repeated lines.
+/// `Contact: *` must stand alone, which is settled over every entry before any
+/// is parsed; `contact_reading` says whether a misplaced wildcard or an
+/// unreadable entry refuses the message or is dropped.
+fn read_contacts(
+    idx: &HeaderIndex,
+    wire: bool,
+    contact_reading: ContactReading,
+) -> Result<ContactSet, SipParseError> {
+    let spans = || idx.contact.iter().flat_map(|v| contact_entry_spans(v));
+    let strict = contact_reading == ContactReading::Strict;
+    let contact_wildcard = spans().any(|e| e.as_str() == "*");
+    if strict && contact_wildcard && spans().any(|e| e.as_str() != "*") {
+        return Err(SipParseError::new(
+            "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
+        ));
+    }
+    let mut contact_list: Vec<header::Contact> = Vec::new();
+    for span in spans() {
+        match read_contact_entry(&span) {
+            ContactEntry::Wildcard => {}
+            ContactEntry::Readable(contact) => contact_list.push(to_contact(contact)),
+            // The strict URI gate holds on wire bytes only.
+            ContactEntry::Unreadable { contact, .. } if !wire => {
+                contact_list.push(to_contact(contact));
+            }
+            ContactEntry::Unreadable { .. } if !strict => {}
+            ContactEntry::Unreadable { contact, reason } => {
+                return Err(SipParseError::new(format!(
+                    "Strict Contact URI: {reason} (\"{}\")",
+                    contact.uri
+                )));
+            }
+        }
+    }
+    // A lenient read keeps the readable entries beside a misplaced wildcard.
+    Ok(if contact_wildcard && contact_list.is_empty() {
+        ContactSet::Wildcard
+    } else {
+        ContactSet::Contacts(contact_list)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // extractRequestFields
 // ---------------------------------------------------------------------------
@@ -573,7 +602,7 @@ pub fn extract_request_fields(
     method: Option<&str>,
     mode: ExtractMode,
 ) -> Result<RequestEager, SipParseError> {
-    let common = extract_common_fields(idx, limits, mode)?;
+    let common = extract_common_fields(idx, limits, mode, ContactReading::Strict)?;
     let wire = mode == ExtractMode::Wire;
 
     // Contact cardinality on dialog-creating requests.
@@ -669,7 +698,10 @@ pub fn extract_response_fields(
     limits: &SipParserLimits,
     mode: ExtractMode,
 ) -> Result<CoreHeaders, SipParseError> {
-    let common = extract_common_fields(idx, limits, mode)?;
+    // A final of 300 or more names no dialog target (RFC 3261 §12.1.1 governs
+    // the 1xx / 2xx that establish one): its Contact set never refuses it.
+    let reading = if status >= 300 { ContactReading::Lenient } else { ContactReading::Strict };
+    let common = extract_common_fields(idx, limits, mode, reading)?;
     if status > 100 && common.to().tag().is_none() {
         return Err(SipParseError::new(format!(
             "Non-100 response (status={status}) missing mandatory To-tag"
@@ -677,8 +709,7 @@ pub fn extract_response_fields(
     }
     if mode == ExtractMode::Wire {
         let cseq_method = common.cseq().method().as_str().to_string();
-        let is_redirect = status == 485 || (300..400).contains(&status);
-        if !is_redirect
+        if reading == ContactReading::Strict
             && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER")
         {
             match common.contacts() {

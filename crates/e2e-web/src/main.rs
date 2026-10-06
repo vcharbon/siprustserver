@@ -1,4 +1,4 @@
-//! `e2e-web` — the E2E test-management website (ADR-0018 Phase I).
+//! `e2e-web` — the E2E test-management website (ADR-0018).
 //!
 //! ```sh
 //! cargo run -p e2e-web                       # serves ./e2e on 127.0.0.1:8378

@@ -174,10 +174,10 @@ mod tests {
     #[test]
     fn ruri_pos_matches_a_bound_number_exactly() {
         let mut index = ClaimIndex::new(vec![
-            candidate("B", ClaimBy::RuriPos, &["+33000900004", "0900004"], 0),
-            candidate("C", ClaimBy::RuriPos, &["+33000900005"], 1),
+            candidate("B", ClaimBy::RuriPos, &["+15550900004", "0900004"], 0),
+            candidate("C", ClaimBy::RuriPos, &["+15550900005"], 1),
         ]);
-        assert_eq!(index.claim("ep0", "+33000900005", &invite()).unwrap(), "C");
+        assert_eq!(index.claim("ep0", "+15550900005", &invite()).unwrap(), "C");
         assert_eq!(index.claim("ep0", "0900004", &invite()).unwrap(), "B");
         // A leg claims once.
         assert!(index.has_claimed("B") && index.has_claimed("C"));
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn a_number_that_merely_contains_the_bound_one_does_not_claim() {
         let mut index = ClaimIndex::new(vec![candidate("B", ClaimBy::RuriPos, &["900004"], 0)]);
-        let err = index.claim("ep0", "+331999999900004", &invite()).unwrap_err();
+        let err = index.claim("ep0", "+15551999999900004", &invite()).unwrap_err();
         assert!(matches!(err, ClaimError::NoMatch { .. }), "{err}");
         assert!(!index.has_claimed("B"), "a refused claim leaves the leg open");
     }

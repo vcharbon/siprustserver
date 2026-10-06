@@ -234,7 +234,11 @@ async fn an_untagged_request_naming_no_call_draws_its_rfc_answer_under_a_fresh_t
     let m = s.b2bua.metrics();
     assert_eq!(m.unroutable_refused_of("BYE", 481), 1, "the keyed BYE was routable");
     assert_eq!(m.unroutable_refused_of("MESSAGE", 405), 1);
-    assert_eq!(m.unroutable_refused_of("other", 405), 1, "an extension method's label is bounded");
+    assert_eq!(
+        m.unroutable_refused_of("FROB", 405),
+        1,
+        "an extension method keeps its own label, under the family's cap"
+    );
     assert_eq!(m.unroutable_dropped_total(), 0, "an answered request is no drop");
 
     settle_until(|| s.b2bua.is_reaped()).await;

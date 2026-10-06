@@ -126,12 +126,6 @@ pub enum BodyUpdate {
     AttachParts(Vec<sip_message::MultipartPart>),
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CallLimiterEntry {
-    pub id: String,
-    pub limit: i64,
-}
-
 /// A "route" decision — bridge the call to `destination`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RouteDecision {
@@ -147,25 +141,21 @@ pub struct RouteDecision {
     pub update_headers: Option<SipHeaderUpdates>,
     pub update_body: BodyUpdate,
     pub no_answer_timeout_sec: Option<i64>,
-    pub call_limiter: Vec<CallLimiterEntry>,
+    pub call_limiter: Vec<call::LimiterEntry>,
     pub callback_context: Option<String>,
     pub features: FeatureActivations,
     pub service_ext: BTreeMap<String, serde_json::Value>,
     /// Internal release events the backend wants consulted on (`call_release`)
-    /// instead of handled locally — the Routing API's `subscribe[]`
-    ///. Recorded on the call at route-apply time (initial
-    /// route: `apply_route`; async failover/reroute route: the
-    /// `SetSubscriptions` fold), so it survives replication/takeover like
-    /// `features`. Empty = no subscriptions = today's local handling. (This
-    /// in-process type carries no serde; the persistence/back-compat default
-    /// lives on `Call.subscriptions`, which is `#[serde(default)]`.)
+    /// instead of handled locally — the route's subscription list. Recorded
+    /// on the call at route-apply time (initial route: `apply_route`; async
+    /// failover/reroute route: the `SetSubscriptions` fold), so it survives
+    /// replication/takeover like `features`. Empty = no subscriptions = local
+    /// handling.
     pub subscriptions: Vec<call::ReleaseEventKind>,
-    /// **Engine force-enable** for per-call tracing (ADR-0026). An absent field
-    /// is `false`, so an engine that never heard of tracing keeps today's
-    /// behaviour and the ADR-0017 response contract is unchanged. Honoring it
+    /// **Engine force-enable** for per-call tracing (ADR-0026): `true` asks
+    /// for the call's trace, `false` leaves it to the sampler. Honoring it
     /// still runs the full admission chain (bucket + active cap) and is
     /// monotonic: it can only turn a call's trace ON.
-    #[serde(default)]
     pub trace: bool,
     /// An opaque string the decision layer may attach to the decision,
     /// recorded on the call's decision log and read by nothing here.
@@ -200,7 +190,8 @@ pub struct RedirectContact {
 /// on a redirect (ADR-0017 header-ownership matrix).
 #[derive(Debug, Clone, Serialize)]
 pub struct RedirectDecision {
-    /// 3xx status (300/301/302/305); defaults to 302 when built via helpers.
+    /// A 3xx (RFC 3261 §21.3, an unknown 3xx included, §8.1.3.2); any other
+    /// code is refused. Defaults to 302 when built via helpers.
     pub code: u16,
     pub reason: Option<String>,
     pub contacts: Vec<RedirectContact>,
@@ -282,9 +273,9 @@ pub struct LegSnapshot {
     pub disposition: call::LegDisposition,
     /// How the leg was (or is being) torn down; `None` while it is live.
     pub bye_disposition: Option<call::ByeDisposition>,
-    /// The B2BUA's local URI on this leg.
+    /// The B2BUA's local address on this leg, display name included.
     pub local_uri: Option<String>,
-    /// The remote party's URI on this leg.
+    /// The remote party's address on this leg, display name included.
     pub remote_uri: Option<String>,
     /// Request-URI of the outbound INVITE (post-rewrite).
     pub invite_request_uri: Option<String>,
@@ -296,7 +287,7 @@ pub struct LegSnapshot {
 /// from the authoritative `Call` at dispatch time and attached to every
 /// decision-point request that has a call behind it ([`CallFailureRequest`],
 /// [`CallReferRequest`]). One generic carrier instead of one upstream field per
-/// downstream need: a decision backend derives what it wants (a `prov18x`
+/// downstream need: a decision backend derives what it wants (an "18x seen"
 /// flag is "any `Provisional` event ≥ 180 on the failed leg", ringing duration
 /// is two timestamps, REFER authorization can read per-service state) without
 /// the platform learning any of those semantics. Cost: one clone per
@@ -317,7 +308,7 @@ pub struct CallSnapshot {
     pub sm_cursors: BTreeMap<String, String>,
     /// What the routing decision activated.
     pub features: Option<FeatureActivations>,
-    /// The ids of the limiter set the call last admitted.
+    /// The ids of the limiter set the call holds.
     pub limiter_ids: Vec<String>,
 }
 
@@ -356,13 +347,13 @@ impl CallSnapshot {
                 .map(|(m, s)| (m.as_str().to_string(), s.as_str().to_string()))
                 .collect(),
             features: call.features.clone(),
-            limiter_ids: call.limiter.ids.clone(),
+            limiter_ids: call.limiter.held_ids(),
         }
     }
 }
 
 /// The release-event consult sent when a **subscribed** internal release
-/// event fires (the Routing API's `POST /calls/events/release`).
+/// event fires (the decision API's `/call/release`).
 /// Built by the `max-duration` rule's `ReleaseAsyncHttp` seed; the framework
 /// attaches the snapshot at dispatch, exactly like [`CallFailureRequest`].
 #[derive(Debug, Clone)]
@@ -458,10 +449,32 @@ pub fn default_platform_features() -> FeatureActivations {
         refer: None,
         relay_first_18x_to_180: None,
         no_answer_timeout_sec: None,
-        call_limiters: None,
         advertise_capabilities: None,
         charging_vector: None,
         withhold_option_tags: None,
-        stated_charging_vector: None,
+        stated_headers: None,
+        uncharged_media_legs: false,
+        withhold_on_relayed_provisionals: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use call::LimiterEntry;
+
+    /// A route decision's `call_limiter` encodes as `[{"id":…,"limit":…}]` in
+    /// stated order, and that encoding decodes back to the same entries.
+    #[test]
+    fn route_call_limiter_json_is_id_then_limit_in_stated_order() {
+        let mut r = crate::decision::test_adapter::route_to("127.0.0.1", 5060);
+        r.call_limiter = vec![
+            LimiterEntry { id: "trunk-A".into(), limit: 3 },
+            LimiterEntry { id: "site-B".into(), limit: 100 },
+        ];
+        let encoded = serde_json::to_string(&r).unwrap();
+        let pinned = r#"[{"id":"trunk-A","limit":3},{"id":"site-B","limit":100}]"#;
+        assert!(encoded.contains(&format!(r#""call_limiter":{pinned}"#)), "{encoded}");
+        let decoded: Vec<LimiterEntry> = serde_json::from_str(pinned).unwrap();
+        assert_eq!(decoded, r.call_limiter);
     }
 }

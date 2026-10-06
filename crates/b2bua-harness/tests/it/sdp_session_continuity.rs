@@ -498,3 +498,84 @@ async fn an_answer_relayed_into_an_early_dialog_is_what_it_confirms_with() {
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+/// After B transfers A to C, C's offerless re-INVITEs reach A offerless, and
+/// A's 2xx carries the offer (RFC 3264 §5). Each such INVITE transaction is a
+/// new exchange on C's dialog: A's unchanged description reaches C one version
+/// above the previous one each time (RFC 3264 §8), and C's answer in the ACK
+/// reaches A under B's session.
+#[tokio::test]
+async fn each_offerless_reinvite_after_a_splice_is_a_new_version() {
+    let h = Harness::with_transit_delay("sdp-session-continuity-offerless-reinvite", 1);
+    let alice = h.agent("alice", "127.0.0.1:5937").await;
+    let bob = h.agent("bob", "127.0.0.1:5947").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5947)
+        .start(&h, "b2bua", "127.0.0.1:5957")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(ALICE_OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(BOB_ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &format!("<sip:charlie@127.0.0.1:{CHARLIE_PORT}>"))
+        .with_header("X-Api-Call", &x_api_allow_c())
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    let (user, sess_id, held_version, address) = origin_of(charlie_uas.request().body());
+    let c_session = |version: u64| format!("{user} {sess_id} {version} {address}");
+    charlie_uas.respond(200, "OK").with_sdp(CHARLIE_HELD_ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_dialog = charlie_uas.dialog();
+
+    let mut c_realign = charlie.receive("INVITE").await;
+    assert_eq!(body_of(&c_realign), continued(ALICE_OFFER, &c_session(held_version + 1)));
+    c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE).await;
+    charlie.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    assert_eq!(body_of(&a_realign), continued(CHARLIE_ACTIVE, "bob 202 2 IN IP4 127.0.0.2"));
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGNED).await;
+    alice.receive("ACK").await;
+
+    // ── C's offerless re-INVITEs: A offers the same description each time. ──
+    for (c_version, a_version) in [(held_version + 2, 3), (held_version + 3, 4)] {
+        let mut reinvite = charlie_dialog.request(InDialogMethod::Invite, None).await;
+        let mut at_alice = alice.receive("INVITE").await;
+        assert!(at_alice.request().body().is_empty(), "the re-INVITE reaches A offerless");
+        at_alice.respond(200, "OK").with_sdp(ALICE_REALIGNED).await;
+        let ok = reinvite.expect(200).await;
+        assert_eq!(
+            String::from_utf8_lossy(ok.body()),
+            continued(ALICE_REALIGNED, &c_session(c_version)),
+            "A's unchanged offer reaches C one version above the previous 2xx",
+        );
+        charlie_dialog.ack(Some(CHARLIE_ACTIVE)).await;
+        let ack = alice.receive("ACK").await;
+        assert_eq!(
+            body_of(&ack),
+            continued(CHARLIE_ACTIVE, &format!("bob 202 {a_version} IN IP4 127.0.0.2")),
+            "C's answer reaches A under B's session",
+        );
+    }
+
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let _ = h.finish().await;
+}

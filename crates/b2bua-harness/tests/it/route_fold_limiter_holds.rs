@@ -18,6 +18,7 @@
 //! own, so a surplus release reads below the witness. The store is probed per
 //! id while the call holds its set and drained to the witnesses after it ends.
 
+use call::LimiterEntry;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,8 +26,8 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, CallTreatment,
+    NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, WitnessRig, WITNESS_LIMITER_ADDR,
@@ -46,10 +47,9 @@ const RELEASE_DELAY: Duration = Duration::from_secs(3);
 /// The route-supplied ring deadline of the first b-leg.
 const NO_ANSWER_SEC: i64 = 5;
 
-/// The witness rig with a fail-open budget above the paused-clock HTTP round
-/// trip (a detached admit is woken inside a coarse `h.advance`).
+/// The witness rig with a 150 ms fail-open budget.
 async fn limiter_rig() -> WitnessRig {
-    WitnessRig::serve(LimiterConfig::default(), Duration::from_secs(2), None).await
+    WitnessRig::serve(LimiterConfig::default(), Duration::from_millis(150), None).await
 }
 
 /// Delay `call_failure` / `call_release` before delegating.
@@ -86,8 +86,8 @@ impl CallDecisionEngine for DelayedDecisionEngine {
     }
 }
 
-fn limiters(ids: &[&str]) -> Vec<CallLimiterEntry> {
-    ids.iter().map(|id| CallLimiterEntry { id: (*id).into(), limit: 10 }).collect()
+fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
+    ids.iter().map(|id| LimiterEntry { id: (*id).into(), limit: 10 }).collect()
 }
 
 /// The initial route: toward `port`, the ring deadline, a callback context
@@ -389,8 +389,8 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
                     let mut r = route_to("127.0.0.1", 5071);
                     // `z` at cap 1 is refused: its witness already holds one.
                     r.call_limiter = vec![
-                        CallLimiterEntry { id: "y".into(), limit: 10 },
-                        CallLimiterEntry { id: "z".into(), limit: 1 },
+                        LimiterEntry { id: "y".into(), limit: 10 },
+                        LimiterEntry { id: "z".into(), limit: 1 },
                     ];
                     CallTreatment::Route(r)
                 })
@@ -431,9 +431,10 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
 
 /// Failover fold on a gone call that was uncounted at its end. The initial
 /// route states no limiter; bob busies out; the consult parks; the caller
-/// CANCELs and the call is evicted, releasing nothing (an uncounted call
-/// leaves no release fence). The fold's admit of `x` + `y` is then granted: no
-/// call is left to state it on, and the router releases the call.
+/// CANCELs and the call is evicted, releasing its key: the failure consult it
+/// sent owes the release from its dispatching turn. The fold's admit of
+/// `x` + `y` then lands on the release fence and holds nothing; no call is
+/// left to take the fold, and the router's release of it frees nothing more.
 #[tokio::test(start_paused = true)]
 async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router() {
     let h = Harness::new("failover-fold-uncounted-gone-call");
@@ -469,20 +470,21 @@ async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router
     b2bua.assert_calls_reaped();
     let released_before = rig.store.stats().releases_total;
 
-    // ── the fold's admit is granted; the router releases the gone call ─────
+    // ── the fold's admit meets the fence; the router releases the gone call ─
     h.advance(Duration::from_secs(2)).await;
     assert!(
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no leg for a call that is gone",
     );
-    rig.expect_drained("the router released the gone call's set").await;
+    rig.expect_drained("the call's release fenced the fold's admit").await;
+    assert_eq!(released_before, 1, "the call's own release at its end");
     assert_eq!(
         rig.store.stats().releases_total,
         released_before + 1 + 3,
-        "one release for the call"
+        "the router's release of the gone call's fold, then the witnesses'"
     );
     let count = b2bua.limiter_count();
-    assert_eq!((count.admitted, count.released), (2, 2));
+    assert_eq!((count.admitted, count.released), (0, 0), "the fenced admit held nothing");
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;

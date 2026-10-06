@@ -1,10 +1,11 @@
+// Own binary (ADR-0030 X2): counts every thread of the process (`/proc/self/task`).
 //! Every connection the RabbitMQ CDR sink abandons ends its client IO thread
 //! and its tasks: a broker that stalls the handshake or never confirms leaves
 //! no thread, task or socket behind, however many times the sink reconnects. One test per
 //! binary, so no other test's connections are counted.
 
+#[path = "it/support/mod.rs"]
 mod support;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,6 +91,7 @@ async fn io_loop_threads_reach(want: usize) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow lane: real clock >= 1 s"]
 async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
     let broker = FakeBroker::start(Reply::Silent).await;
     // The broker's accept loop is the only task before the sink runs.

@@ -25,13 +25,11 @@
       stall taint reads against unexpected_msg. The hold carries no bound of
       its own.
 
-  Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
-  relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
-  OPTIONS during the pause. That was incorrect: sipp's `pingreply`
-  only handles the legacy literal PING method, not OPTIONS. Every
-  long-call therefore lost its A-leg keepalive, the B2BUA terminated
-  the call ~5 min in, and the scenario's BYE 15 min later hit a dead
-  dialog (481). See endurance run chaos-endurance-2h-20260511.
+  A flat `<pause milliseconds="1200000"/>` relying on sipp's default
+  `pingreply` cannot replace this loop: `pingreply` only handles the
+  legacy literal PING method, not OPTIONS. Such a long call would lose
+  its A-leg keepalive, the B2BUA would terminate it ~5 min in, and the
+  scenario's BYE 15 min later would hit a dead dialog (481).
 
   Loop pattern mirrors `uas-basic.xml` (the B-leg UAS). 200 OK echoes
   `[last_From:]` / `[last_To:]` / `[last_Call-ID:]` / `[last_CSeq:]` so
@@ -98,31 +96,30 @@
        arriving for `timeout` ms (B2BUA terminated the call, chaos event,
        network failure) → exit to the BYE phase.
 
-       There is deliberately NO per-call OPTIONS cap. An earlier revision
-       capped the loop at 4 iterations (UAC sends its own BYE after ~20 min)
-       to bound sipp's CurrentCall growth, but that cap CORRUPTED the
-       reboot-survival measurement: once a call passed its 4th OPTIONS it
-       left this recv, so the rebooted worker's smoothed keepalive-replay
-       burst (router::reclaim_all) landed OPTIONS on a UAC no longer parked
-       here → sipp scored them OutOfCallMsgs and aborted the call with
-       `unexpected_msg`, which read as a (false) ~130% long-call loss across
-       every reboot even though the server's reclaim was 100% complete and
-       correctly routed. A real UAC answers in-dialog OPTIONS for the life
+       There is deliberately NO per-call OPTIONS cap. Capping the loop (e.g.
+       at 4 iterations, the UAC sending its own BYE after ~20 min) to bound
+       sipp's CurrentCall growth CORRUPTS the reboot-survival measurement:
+       once a call passes its last OPTIONS it leaves this recv, so the
+       rebooted worker's smoothed keepalive-replay burst
+       (router::reclaim_all) lands OPTIONS on a UAC no longer parked here →
+       sipp scores them OutOfCallMsgs and aborts the call with
+       `unexpected_msg`, which reads as a (false) long-call loss across every
+       reboot even though the server's reclaim is complete and correctly
+       routed. A real UAC answers in-dialog OPTIONS for the life
        of the call, so this models reality AND removes the artifact: a
        reclaimed dialog's replayed OPTIONS always lands on a parked recv and
        is answered. CurrentCall growth is bounded operationally by the job's
        `-l MAX_CONCURRENT` ceiling + `-recv_timeout` dead-call reaper
        (lib/sipext-gen.sh, the docker UAC stream launcher), not by a per-call message count. -->
   <label id="hold_loop"/>
-  <!-- An AS-initiated BYE (max-duration cap, keepalive-timeout, any policy
+  <!-- A SUT-initiated BYE (max-duration cap, keepalive-timeout, any policy
        teardown) is a LEGITIMATE call end a real UAC answers with 200 — NOT a
-       loss. Parked solely on the OPTIONS recv, it scored unexpected_msg: the
-       2026-06-11 run's "peak 6.5% / kill_worker 16.6% long-loss" was in fact
-       the SUT's 1 h GlobalDuration mowing down the lockstep-aged long cohort
+       loss. Parked solely on the OPTIONS recv, it would score unexpected_msg:
+       the SUT's 1 h GlobalDuration mows down the lockstep-aged long cohort
        (the `-l` ceiling freezes creation ~14 min in, so the whole population
-       hits the cap together at run-start+1h, echoing hourly) — both chaos
-       events merely coincided with the wave. With this branch only true
-       silence (the lane's -recv_timeout) reads as loss. -->
+       hits the cap together at run-start+1h, echoing hourly), and any chaos
+       event coinciding with the wave would read as long-call loss. With this
+       branch only true silence (the lane's -recv_timeout) reads as loss. -->
   <recv request="BYE" optional="true" next="answer_bye"/>
   <recv request="OPTIONS" crlf="true"/>
   <send>

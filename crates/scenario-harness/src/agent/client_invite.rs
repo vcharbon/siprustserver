@@ -15,7 +15,7 @@ use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
-use super::client_txn::{try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{stated_lines, try_expect_response, try_send_cancel, AckCtx};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
 use super::step::{unwrap_step, StepError};
 use super::Agent;
@@ -430,8 +430,9 @@ impl ClientInvite {
     /// reuses the INVITE's Request-URI / Call-ID / From / To / topmost Via branch
     /// and the INVITE's CSeq *number* with method `CANCEL`, and is sent to the
     /// SAME wire destination the INVITE took (the proxy / B2BUA when
-    /// [`Invite::through`] was used). Returns a client transaction so the caller
-    /// can `expect` the `200 OK` to the CANCEL; the matching `487 Request
+    /// [`Invite::through`](crate::agent::Invite::through) was used). Returns a
+    /// client transaction so the caller can `expect` the `200 OK` to the
+    /// CANCEL; the matching `487 Request
     /// Terminated` for the INVITE arrives on this same UA and is consumed via
     /// [`ClientInvite::expect`]. CANCEL is a dedicated primitive: it takes no
     /// template in v1 (a captured CANCEL's frozen-header quirks are not
@@ -489,7 +490,8 @@ impl ClientInvite {
     /// [`try_prack`](Self::try_prack) that also returns the PRACK request as
     /// sent — the reactive actor keys its "PRACK awaiting 200" ledger obligation
     /// on the returned request's CSeq (the 200 carries the same number). Same
-    /// RAck derivation; the linear lane uses the request-less [`try_prack`].
+    /// RAck derivation; the linear lane uses the request-less
+    /// [`try_prack`](Self::try_prack).
     ///
     /// FORK-addressed: the PRACK belongs to the early dialog the reliable 1xx
     /// CREATED (RFC 3262 §5), so it is addressed under the response's own
@@ -558,12 +560,26 @@ impl ClientInvite {
     /// declared `delayed-automatic` (holds the ACK first), so a plain `ack()`
     /// after a declaration still delays.
     pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
+        self.ack_with_stating(sdp, &[]).await
+    }
+
+    /// [`ack`](Self::ack) with the acknowledging party's own header lines on
+    /// the ACK (RFC 3261 §13.2.2.4 makes it a request of its own, so it may
+    /// state end-to-end headers like any other).
+    pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) -> Dialog {
+        self.ack_with_stating(None, stated).await
+    }
+
+    /// [`ack_with`](Self::ack_with) and [`ack_stating`](Self::ack_stating) at
+    /// once: the delayed-offer answer and the party's own lines on one ACK.
+    pub async fn ack_with_stating(&mut self, sdp: Option<&str>, stated: &[(&str, &str)]) -> Dialog {
         self.honour_delayed_automatic().await;
         let handle =
             InviteClientTransactionHandle { original_invite: self.original_invite.clone() };
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
             body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            extra_headers: stated_lines(stated),
             ..Default::default()
         };
         let ack = generate_ack_for_2xx(Some(&handle), &self.dialog, &opts);

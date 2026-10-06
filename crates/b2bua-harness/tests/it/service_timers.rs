@@ -1,9 +1,9 @@
 //! Service-owned per-call timers (`TimerType::Service`) end-to-end — the
-//! ADR-0016 watchdog seam that unblocks the Routing API's `callTimers.timer18x`
-//! downstream.
+//! ADR-0016 watchdog seam a service arms a per-call deadline on (such as a
+//! route-supplied 18x deadline).
 //!
 //! A test-only **ringwatch** service models the real 18x deadline: `init` arms
-//! `Service{ringwatch, timer18x}`; a rule disarms it on the first 18x
+//! `Service{ringwatch, deadline18x}`; a rule disarms it on the first 18x
 //! (`RuleAction::cancel_timer` — the id-recipe symmetric cancel); another rule
 //! catches ONLY its own `(service_id, key)` firing and reaps the still-silent
 //! call with a 480. A second **dualkeys** service pins key identity: two keys
@@ -25,7 +25,7 @@ fn reasons_of(cdr: &b2bua::cdr::CdrRecord) -> Vec<String> {
     cdr.events.iter().filter_map(|e| e.reason.clone()).collect()
 }
 
-/// The 18x watchdog service — the exact downstream `timer18x` shape.
+/// The 18x watchdog service — the shape of a route-supplied `deadline18x` deadline.
 mod ringwatch {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
@@ -35,18 +35,18 @@ mod ringwatch {
     use call::{CdrEventType, Direction, LegState, TimerType};
 
     pub const DEADLINE_SEC: i64 = 5;
-    const T18X: TimerType = TimerType::service(RINGWATCH, "timer18x");
+    const T18X: TimerType = TimerType::service(RINGWATCH, "deadline18x");
 
     define_service! {
         id: "ringwatch",
         machine: RINGWATCH,
         states: RwState { Armed, Disarmed },
-        // Arm the per-call 18x deadline at call setup (in production the delay
-        // comes from the decision envelope's callTimers.timer18x).
+        // Arm the per-call 18x deadline at call setup (a deployment takes the
+        // delay from its routing decision).
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(RwState::Armed.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(RINGWATCH, "timer18x"),
+                    timer_type: TimerType::service(RINGWATCH, "deadline18x"),
                     delay: TimerDelay::secs(DEADLINE_SEC),
                     leg_id: None,
                 },
@@ -66,7 +66,7 @@ mod ringwatch {
             transitions: [ RwState::Armed => RwState::Disarmed ],
             effects: [
                 Effect::Relay { label: "relay the 18x onward" },
-                Effect::GuardTimer { timer: T18X, label: "disarm timer18x" },
+                Effect::GuardTimer { timer: T18X, label: "disarm deadline18x" },
             ],
             matcher: Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             handle: |ctx: &RuleContext| {
@@ -105,12 +105,12 @@ mod ringwatch {
                 Effect::Respond { status: 480, label: "no 18x before the deadline" },
                 Effect::LifecycleCommand { label: "terminate the silent call" },
             ],
-            matcher: Match::timer().timer_type(TimerType::service(RINGWATCH, "timer18x")),
+            matcher: Match::timer().timer_type(TimerType::service(RINGWATCH, "deadline18x")),
             handle: |ctx: &RuleContext| {
                 // The fired event carries the key intact.
                 let (sid, key) = ctx.service_timer_key().expect("service timer fire");
                 assert_eq!(sid.as_str(), "ringwatch");
-                assert_eq!(key, "timer18x");
+                assert_eq!(key, "deadline18x");
                 Some(RuleHandleResult::new(vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Timeout,

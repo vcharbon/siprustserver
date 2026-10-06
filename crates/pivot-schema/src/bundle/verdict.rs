@@ -99,7 +99,7 @@ pub enum Failure {
     ExpectTimedOut { step: String, leg: String, gated_on: String, within_ms: u64 },
     /// A datagram arrived on the leg that the armed expect does not match, and
     /// no background policy answers it. Neither absorbed nor tolerated (§14
-    /// item 4, K2). `reason` is the closest gate's own words for the refusal.
+    /// item 4). `reason` is the closest gate's own words for the refusal.
     UnmatchedDatagram {
         step: String,
         leg: String,

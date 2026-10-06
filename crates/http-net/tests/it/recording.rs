@@ -13,7 +13,7 @@ use http_net::{
     SimulatedHttpNetwork, HTTP_TAG,
 };
 use layer_harness::{lane_key, NetworkTag, Recorder, TransportKind};
-use sip_clock::testkit::advance_in_100ms_chunks;
+use sip_clock::testkit::advance_settled;
 use sip_clock::Clock;
 
 const CLIENT: &str = "10.0.0.5:5060";
@@ -65,7 +65,7 @@ async fn send(rec: &RecordingHttpNetwork, dst: std::net::SocketAddr, path: &str)
         let req = HttpRequest::post(path, b"{\"k\":1}".to_vec());
         async move { rec.request(dst, req).await }
     });
-    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    advance_settled(Duration::from_millis(10)).await;
     let _ = h.await.unwrap();
 }
 
@@ -79,7 +79,7 @@ async fn a_client_exchange_rides_the_recorder_sequence_between_other_channels() 
     let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
 
     other.record("before");
-    send(&rec, dst, "/calls").await;
+    send(&rec, dst, "/call/new").await;
     other.record("after");
 
     let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();
@@ -91,7 +91,7 @@ async fn a_client_exchange_rides_the_recorder_sequence_between_other_channels() 
         HttpNetworkEvent::Sent { client, dst: to, request } => {
             assert_eq!(client, CLIENT);
             assert_eq!(*to, dst);
-            assert_eq!(request.path, "/calls");
+            assert_eq!(request.path, "/call/new");
         }
         other => panic!("expected the request first, got {other:?}"),
     }
@@ -112,7 +112,7 @@ async fn serve_records_the_served_side_paired_with_the_recording_client() {
     let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
     let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
 
-    send(&rec, dst, "/calls").await;
+    send(&rec, dst, "/call/new").await;
 
     let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
     assert_eq!(entries.len(), 1, "one exchange, drawn once: {entries:?}");
@@ -120,7 +120,7 @@ async fn serve_records_the_served_side_paired_with_the_recording_client() {
     assert!(e.served, "a recorded service saw it, so the served side is the row source");
     assert_eq!(e.requester.as_deref(), Some(CLIENT), "paired with the client's lane");
     assert_eq!(e.service, lane_key(dst));
-    assert_eq!(e.request.path, "/calls");
+    assert_eq!(e.request.path, "/call/new");
     match &e.outcome {
         Some(HttpOutcome::Response(resp)) => assert_eq!(resp.status, 200),
         other => panic!("expected a response, got {other:?}"),
@@ -153,9 +153,9 @@ async fn a_request_from_an_unrecorded_client_is_served_without_a_requester() {
 
     let h = tokio::spawn({
         let sim = sim.clone();
-        async move { sim.request(dst, HttpRequest::post("/calls", Vec::new())).await }
+        async move { sim.request(dst, HttpRequest::post("/call/new", Vec::new())).await }
     });
-    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    advance_settled(Duration::from_millis(10)).await;
     h.await.unwrap().unwrap();
 
     let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
@@ -200,12 +200,12 @@ async fn a_withheld_answer_is_abandoned_on_both_sides_when_the_caller_gives_up()
         async move {
             tokio::time::timeout(
                 Duration::from_millis(150),
-                rec.request(dst, HttpRequest::post("/calls", b"asked".to_vec())),
+                rec.request(dst, HttpRequest::post("/call/new", b"asked".to_vec())),
             )
             .await
         }
     });
-    advance_in_100ms_chunks(Duration::from_millis(200)).await;
+    advance_settled(Duration::from_millis(200)).await;
     assert!(h.await.unwrap().is_err(), "the caller's budget fires");
 
     let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();
@@ -246,9 +246,9 @@ async fn serve_forwards_answer_so_a_reset_stays_a_reset() {
 
     let h = tokio::spawn({
         let rec = rec.clone();
-        async move { rec.request(dst, HttpRequest::post("/calls", Vec::new())).await }
+        async move { rec.request(dst, HttpRequest::post("/call/new", Vec::new())).await }
     });
-    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    advance_settled(Duration::from_millis(10)).await;
     let err = h.await.unwrap().unwrap_err();
     assert!(matches!(err, HttpError::Io { .. }), "a reset reaches the client: {err:?}");
 
@@ -272,7 +272,7 @@ async fn the_client_view_is_stamped_on_the_recorder_clock_in_request_order() {
         let rec = rec.clone();
         async move { rec.request(dst, HttpRequest::get("/x")).await }
     });
-    advance_in_100ms_chunks(Duration::from_millis(2000)).await;
+    advance_settled(Duration::from_millis(2000)).await;
     h.await.unwrap().unwrap();
     send(&rec, dst, "/y").await;
 
@@ -296,7 +296,7 @@ async fn a_request_served_on_a_real_socket_records_its_peer() {
     let server = rec.serve(addr("127.0.0.1:0"), Arc::new(Ok200)).await.unwrap();
     let dst = server.local_addr();
 
-    let resp = real.request(dst, HttpRequest::post("/calls", b"x".to_vec())).await.unwrap();
+    let resp = real.request(dst, HttpRequest::post("/call/new", b"x".to_vec())).await.unwrap();
     assert_eq!(resp.status, 200);
 
     let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
@@ -322,7 +322,7 @@ async fn both_sides_recorded_on_real_sockets_draw_one_exchange() {
     let dst = server.local_addr();
 
     for body in [&b"one"[..], &b"two"[..]] {
-        let resp = rec.request(dst, HttpRequest::post("/calls", body.to_vec())).await.unwrap();
+        let resp = rec.request(dst, HttpRequest::post("/call/new", body.to_vec())).await.unwrap();
         assert_eq!(resp.status, 200);
     }
 
@@ -355,12 +355,12 @@ async fn a_caller_that_gives_up_during_the_reply_transit_is_drawn_without_the_re
         async move {
             tokio::time::timeout(
                 Duration::from_millis(150),
-                rec.request(dst, HttpRequest::post("/calls", Vec::new())),
+                rec.request(dst, HttpRequest::post("/call/new", Vec::new())),
             )
             .await
         }
     });
-    advance_in_100ms_chunks(Duration::from_millis(300)).await;
+    advance_settled(Duration::from_millis(300)).await;
     assert!(h.await.unwrap().is_err(), "the caller gave up");
 
     let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();

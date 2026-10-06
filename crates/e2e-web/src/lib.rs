@@ -1,4 +1,4 @@
-//! The E2E test-management website (ADR-0018 Phase I): axum + maud + htmx over
+//! The E2E test-management website (ADR-0018): axum + maud + htmx over
 //! the `e2e-core` registry. **One content-negotiated route set** — each handler
 //! renders Maud HTML for a browser and the mirrored JSON when the client sends
 //! `Accept: application/json` — so the website and the API can never drift.
@@ -754,7 +754,7 @@ async fn cell_detail(
                         b { "not" }
                         " fail the test. The RFC suite runs role-aware over the recorded wire: "
                         "each rule judges only the endpoints whose declared role (UA / proxy) it "
-                        "governs, so a proxy rule can no longer flag a UA lane. A gating "
+                        "governs, so a proxy rule never flags a UA lane. A gating "
                         "violation would FAIL the cell and show here in red."
                     }
                 }
@@ -815,7 +815,7 @@ async fn cell_detail(
 
 /// A single run-name path segment, rejected if it could escape the load-runs
 /// root (no separators, no `..`, non-empty). Load run dir names are simple
-/// (`loadgen-report`, `endurance-20260630`), so this is strict, not clever.
+/// (`loadgen-report`, `endurance-<stamp>`), so this is strict, not clever.
 fn safe_segment(name: &str) -> bool {
     !name.is_empty()
         && name != "."

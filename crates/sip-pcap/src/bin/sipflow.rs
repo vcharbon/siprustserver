@@ -22,7 +22,7 @@
 //!   sipflow /tmp/sipcap --list
 //!   sipflow /tmp/sipcap --call-id 7f3a... --full
 //!   sipflow /tmp/sipcap --final-status none
-//!   sipflow /tmp/sipcap --ruri 166601009 --final-status 5xx
+//!   sipflow /tmp/sipcap --ruri 15550100 --final-status 5xx
 //!   sipflow /tmp/sipcap --json > flows.json
 //!   sipflow /tmp/sipcap --query update-rejected.json
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},

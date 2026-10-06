@@ -31,30 +31,30 @@
 //! auto-generation only changes *who writes the bytes*.
 //!
 //! Module map (one concern per file):
-//! - [`harness`] — the session: recording-wrapped network, agent binding,
+//! - `harness` — the session: recording-wrapped network, agent binding,
 //!   virtual-time advance, `finish()` + the RFC hard gate.
-//! - [`run_guards`] — Drop-armed backstops: panic-time trace dump, the
+//! - `run_guards` — Drop-armed backstops: panic-time trace dump, the
 //!   forgot-to-`finish` RFC gate.
-//! - [`log_dump`] — the panic-time dump of what the SUT logged and traced.
-//! - [`artifact_dump`] — the Drop-time report-artifact writer
+//! - `log_dump` — the panic-time dump of what the SUT logged and traced.
+//! - `artifact_dump` — the Drop-time report-artifact writer
 //!   (`SCENARIO_ARTIFACT_DIR`-gated), so a run that never reaches `finish()`
 //!   still leaves its SVG/HTML/text ladders.
-//! - [`panic_note`] — the chained process-wide panic hook that captures the
+//! - `panic_note` — the chained process-wide panic hook that captures the
 //!   panic message the artifact writer stamps into its FAIL banner.
-//! - [`step`] — [`StepError`], the fallible-core step vocabulary.
-//! - [`ua`] + [`tolerant_recv`] — [`Agent`]: the send/receive cores and the
+//! - `step` — [`StepError`], the fallible-core step vocabulary.
+//! - `ua` + `tolerant_recv` — [`Agent`]: the send/receive cores and the
 //!   method-filtered receive policies.
 //! The §17.2 receive view itself is NOT here: it lives once for the whole tree
 //! in [`crate::absorption`], which every agent mode reads.
-//! - [`invite`] / [`client_invite`] / [`out_of_dialog`] / [`dialog`] —
+//! - `invite` / `client_invite` / `out_of_dialog` / `dialog` —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
-//! - [`server_txn`] — the UAS side: [`ServerTxn`] + the [`Respond`] builder.
-//! - [`client_txn`] — the shared client-side expect core, §17.1.1.3 auto-ACK,
+//! - `server_txn` — the UAS side: [`ServerTxn`] + the [`Respond`] builder.
+//! - `client_txn` — the shared client-side expect core, §17.1.1.3 auto-ACK,
 //!   CANCEL build+send.
-//! - [`proxy`] — the minimal scripted loose-routing [`Proxy`].
-//! - [`rr_fold`] — the per-UA Record-Route folding coin flip.
-//! - [`addressing`] — wire-address resolution (next hop, Via sent-by); SIP
+//! - `proxy` — the minimal scripted loose-routing [`Proxy`].
+//! - `rr_fold` — the per-UA Record-Route folding coin flip.
+//! - `addressing` — wire-address resolution (next hop, Via sent-by); SIP
 //!   parsing does NOT live here — the values come from `sip_message::header`.
 
 mod addressing;
@@ -83,7 +83,9 @@ pub use dialog::{ClientReinvite, Dialog, InDialogRequest, InDialogTxn};
 pub use harness::Harness;
 pub use invite::Invite;
 pub use out_of_dialog::OutOfDialogRequest;
-pub use proxy::Proxy;
+pub use proxy::{
+    forwarded_request, forwarded_response, request_next_hop, response_next_hop, Proxy,
+};
 pub use rr_fold::RecordRouteFold;
 pub use server_txn::{Respond, ServerTxn};
 pub use step::StepError;

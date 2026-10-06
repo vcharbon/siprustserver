@@ -29,17 +29,21 @@ tokio = { workspace = true, features = ["test-util"] }
 sip-proxy = { path = "../sip-proxy" }
 # The `CdrWriter` impl that keeps each terminated `Call` (`src/terminated.rs`).
 async-trait = { workspace = true }
-# The SUT's default call limiter (`src/limiter.rs`): a real `CallStore` served
+# The SUT's default call limiter (`src/limiter/mod.rs`): a real `CallStore` served
 # by a `LimiterServer` on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 
 [dev-dependencies]
+# The rule vocabulary (`model::Body`) a test-authored rule builds its actions from.
+b2bua-sdk = { path = "../b2bua-sdk" }
 tokio = { workspace = true, features = ["test-util"] }
+# The simulated load sampler a test injects worker readings through.
+load-shed = { path = "../load-shed" }
 # The one schedule the SUT walks, so a test counts the rungs an RFC class
 # owes rather than restating T1/T2 arithmetic (ADR-0032 X1).
 sip-retransmit = { path = "../sip-retransmit" }
-# Slice 3b: real RTP media through the signalling-only B2BUA. Media flows
+# Real RTP media through the signalling-only B2BUA. Media flows
 # peer-to-peer on a separate simulated fabric to the addresses the SDP (relayed
 # by the B2BUA) advertises; the classifier proves it reached the right peer.
 media = { path = "../media" }
@@ -48,6 +52,6 @@ serde_json = { workspace = true }
 # The trace-machinery tests install their own admission gate and read the
 # thread-scoped capture buffer (ADR-0026); no OTel tree in tests.
 observe = { path = "../observe", default-features = false }
-# Slice 8 capstone: the out-of-tree `announcement` callflow service, injected
+# The out-of-tree `announcement` callflow service, injected
 # into the SUT via `B2buaSut::builder(..).services(..)` for the early-media e2e.
 announcement = { path = "../announcement" }

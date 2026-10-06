@@ -2,8 +2,10 @@
 //!
 //! A pure, synchronous leaf crate: the [`Call`]→[`model::Leg`]→[`model::Dialog`]
 //! data model ([`model`]), its lens/accessor/timer helpers ([`helpers`]),
-//! `callRef` + index-key derivation ([`callref`]), decision-engine feature
-//! activations ([`features`]), and the pluggable body [`codec`].
+//! `callRef` derivation ([`callref`]), the call [`incarnation`] grammar, the
+//! SIP routing index grammar ([`index_key`]), decision-engine feature
+//! activations ([`features`]), the header statements a decision makes
+//! ([`header_update`]), and the pluggable body [`codec`].
 //!
 //! ## What this crate is NOT (deferred — see ADR-0008)
 //!
@@ -19,21 +21,31 @@
 pub mod callref;
 pub mod codec;
 pub mod features;
+pub mod header_update;
 pub mod helpers;
+pub mod incarnation;
+pub mod index_key;
 pub mod model;
 
 // callRef derivation + parsing (a-leg identity → replicated key).
-pub use callref::{
-    call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref,
-    parse_call_ref, ParsedCallRef,
+pub use callref::{call_ref_primary, derive_call_ref, parse_call_ref, ParsedCallRef};
+// Which of the successive calls on one callRef: `{call_ref}#{mark}`.
+pub use incarnation::{derive_incarnation, incarnation_mark};
+// The SIP routing index: a call's keys and the lookups that read them.
+pub use index_key::{
+    call_index_keys, call_index_keys_from_unknown, IndexHit, IndexLookup, KeyKind, Probe,
 };
 // Pluggable body codec (msgpack default).
 pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
-    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, Leg, PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
-    TagMapping,
+    ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,
+    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
+};
+// The call's admission state on the call limiter (ADR-0040).
+pub use model::{
+    AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
+    Replacement, CHANGE_EPOCH,
 };
 // Leg + dialog state.
 pub use model::{

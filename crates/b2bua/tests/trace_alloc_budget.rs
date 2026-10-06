@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the global allocation counter.
 //! Allocation budget for the per-call trace machinery on an UNSAMPLED call
 //! (ADR-0026).
 //!

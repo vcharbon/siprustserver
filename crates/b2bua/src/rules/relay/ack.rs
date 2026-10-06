@@ -3,9 +3,10 @@
 //! the CSeq of the INVITE the ACK acknowledges.
 //!
 //! The ACK a relayed INVITE's 2xx owes is the acknowledging peer's own ACK,
-//! relayed: §13.2.2.4 gives one ACK per 2xx received, so the body that peer put
-//! on it travels with it and a repeated 2xx re-passes that same datagram. Only
-//! an INVITE this stack originated is ACKed on its own account. A non-2xx
+//! relayed: §13.2.2.4 gives one ACK per 2xx received, so the body and the
+//! end-to-end headers that peer put on it travel with it and a repeated 2xx
+//! re-passes that same datagram. Only an INVITE this stack originated is ACKed
+//! on its own account, with nothing of a peer's. A non-2xx
 //! final's hop-by-hop ACK (§17.1.1.3) is the transaction layer's, whichever node
 //! sent the INVITE (a taken-over call seeds that transaction,
 //! `router::materialise`).
@@ -14,6 +15,7 @@ use call::{Dialog, Leg, LegState};
 use sip_message::generators;
 use sip_message::generators::GenerateAckFor2xxOpts;
 use sip_message::header::MediaType;
+use sip_message::SipHeader;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
@@ -21,11 +23,13 @@ use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenanc
 
 use super::dialog::{target_dest, to_gen_dialog};
 use super::egress::apply_b_leg_egress;
-use super::identity::leg_via;
+use super::identity::{leg_via, CallMarks};
 
 /// Build an ACK-for-2xx on a b-leg dialog (toward bob), sent raw. `body` carries
 /// the inbound ACK's payload through (the delayed-offer re-INVITE answer rides
-/// the ACK, RFC 3264 §4); pass empty for a bodyless ACK.
+/// the ACK, RFC 3264 §4); pass empty for a bodyless ACK. `extra_headers` are
+/// the relayed ACK's end-to-end lines, already filtered for this leg; empty for
+/// an ACK this stack composes on its own account.
 ///
 /// Returns the effect **and the Via branch it used**, so the caller can retain
 /// the branch on the dialog ([`call::helpers::retain_ack_branch`]) for a
@@ -33,13 +37,13 @@ use super::identity::leg_via;
 /// is: the peer's relayed, or one this stack composes on its own account.
 #[allow(clippy::too_many_arguments)]
 pub fn ack_b_leg(
-    call_ref: &str,
+    marks: CallMarks,
     leg: &Leg,
-    is_emergency: bool,
     config: &B2buaConfig,
     id_gen: &IdGen,
     body: Vec<u8>,
     content_type: Option<MediaType>,
+    extra_headers: Vec<SipHeader>,
     provenance: Provenance,
 ) -> Option<(OutboundSipEffect, String)> {
     let dialog = leg.dialogs.first()?;
@@ -69,10 +73,11 @@ pub fn ack_b_leg(
     // INVITE transaction handle.
     let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.sip.local_cseq.max(0) as u32);
     let opts = GenerateAckFor2xxOpts {
-        via: Some(leg_via(config, call_ref, &leg.leg_id, is_emergency, branch.clone())),
+        via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
         cseq: Some(ack_cseq),
         body,
         content_type,
+        extra_headers,
         ..Default::default()
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);

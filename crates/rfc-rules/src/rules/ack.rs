@@ -18,7 +18,7 @@
 //! What it carried is a comparison against the INVITE it acknowledges, paired
 //! on the branch the two share (§17.1.1.3) — [`AckRequireSubsetOfInvite`] and
 //! [`AckPreservesInviteRoute`], both charging the ACK's sender and both reading
-//! the branch walk in [`super::branch`].
+//! the branch walk in `super::branch`.
 //!
 //! **One ACK is owed per 2xx RECEIVED.** §13.2.2.4 puts the ACK in the UAC
 //! CORE, not in the INVITE client transaction (§17.1.1.3), which is why a
@@ -743,8 +743,8 @@ mod tests {
         assert_eq!(f[0].emitter, UAC, "the UAC owed the ACK");
     }
 
-    /// D1, resolved (issue 29): one trace — a dialog-creating 2xx that is
-    /// BYE'd but never ACKed — and the pair states BOTH obligations: the UAC
+    /// One trace — a dialog-creating 2xx that is BYE'd but never ACKed — and
+    /// the pair states BOTH obligations: the UAC
     /// broke §13.2.2.4 (a BYE is corroboration, never a discharge), and the
     /// UAS met §13.3.1.4 (the BYE is exactly its clearing duty).
     #[test]

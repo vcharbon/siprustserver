@@ -2,21 +2,21 @@
 //! callflow-service registry** ([`compose_services`]) so it is single-sourced:
 //! the `xtask state-machine-docs` doc generator and the CI freshness test read
 //! the same composed list the process runs — including in-tree and separate-crate
-//! services (ADR-0016 X5). Empty until a service is retrofitted (slices 7/8).
+//! services (ADR-0016 X5).
 
 use b2bua::rules::ServiceDef;
 
 /// The composed production service registry: the callflow services this process
-/// runs, in priority order. Separate-crate integrators (e.g. `announcement`,
-/// slice 8) are appended here. The doc generator prepends the framework
-/// `global-call` machine itself.
+/// runs, in priority order. Separate-crate integrators (e.g. `announcement`) are
+/// appended here. The doc generator prepends the framework `global-call` machine
+/// itself.
 pub fn compose_services() -> Vec<ServiceDef> {
     vec![
         b2bua::rules::transfer_service_def(),
         // The early-media masking service (ADR-0016) — in-tree like `transfer`,
         // rides `default_rules()` at runtime; registered here for its diagram.
         b2bua::rules::relay_first_18x_service_def(),
-        // The out-of-tree announcement service (ADR-0016 slice 8) — depends only
+        // The out-of-tree announcement service (ADR-0016) — depends only
         // on `b2bua-sdk`, injected here as a separate-crate integrator.
         announcement::service(),
     ]

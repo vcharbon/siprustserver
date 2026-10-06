@@ -1,12 +1,12 @@
 //! ADR-0020 X2 — the terminal `RemoveCall` is interpreted AFTER the buffered
 //! `WriteCdr`, so the CDR is enqueued while the call (and its replicated
-//! Element) still exists. Regression guard for the old lane order, where the
-//! eviction — and the propagated replica delete — ran before the CDR was even
-//! enqueued, so a failure in that window lost the CDR everywhere.
+//! Element) still exists. Were the eviction — and the propagated replica
+//! delete — to run before the CDR is enqueued, a failure in that window would
+//! lose the CDR everywhere.
 //!
 //! The probe: a CDR tap that samples the SUT's live-call count at write
-//! time. New order → the call is still resident (`1`); the old order would
-//! observe `0`.
+//! time. The call is still resident (`1`); the reverse order would observe
+//! `0`.
 
 use std::sync::{Arc, Mutex, OnceLock};
 

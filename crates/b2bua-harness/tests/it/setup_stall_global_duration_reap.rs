@@ -5,15 +5,13 @@
 //! what arms GlobalDuration + Keepalive. So a call stuck mid-setup — the b-leg
 //! INVITE rings forever / its 200 is lost / the UAS drops the INVITE under load
 //! — has NEITHER timer. Its only other reaper is the NoAnswer ring timer, but
-//! that is armed only when the route supplies `no_answer_timeout_sec`; the
-//! scripted endurance adapter (`route_all_to`) supplies `None`. The result was
-//! ~0.4% of calls reaching `Active` with an empty `call.timers`: no timer ever
-//! fired and they leaked forever — surviving past even the 1h GlobalDuration cap
-//! (it was never armed). Observed in k8s as ~1095 ESTABLISHED calls pinned flat
-//! for >4 HOURS on a never-killed worker.
+//! that is armed only when the route supplies `no_answer_timeout_sec`, and a
+//! route (here `route_all_to`) may supply `None`. Such a call would reach
+//! `Active` with an empty `call.timers`, no timer would ever fire, and it would
+//! leak forever.
 //!
-//! The fix arms a GlobalDuration backstop at call creation (apply_route), so
-//! every call carries the absolute duration cap. Here bob rings then goes
+//! A GlobalDuration backstop is armed at call creation (apply_route), so every
+//! call carries the absolute duration cap. Here bob rings then goes
 //! silent (no 200, no answer timeout); after the cap the existing `max-duration`
 //! rule must reap the wedged call (active_calls -> 0).
 
@@ -28,12 +26,12 @@ use scenario_harness::Harness;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
 /// A short max-duration, deliberately set *below* the b-leg INVITE client
-/// transaction's Timer B (32 s). In production the leak is a stalled-setup call
-/// whose Timer B timeout never reaches the rule engine — the txn was swept
-/// (`TXN_MAX_AGE` 35 s) before a load-delayed Timer B fired, so `fire_timeout`
-/// found no txn and emitted nothing (`sip-txn/layer.rs::fire_timeout` early
-/// return). With GlobalDuration armed only at *answer*, such a call has no
-/// reaper at all. By capping below Timer B we make GlobalDuration the sole
+/// transaction's Timer B (32 s). The leak is a stalled-setup call whose Timer B
+/// timeout never reaches the rule engine — the txn swept (`TXN_MAX_AGE` 35 s)
+/// before a load-delayed Timer B fires, so `fire_timeout` finds no txn and
+/// emits nothing (`sip-txn/layer.rs::fire_timeout` early return). With
+/// GlobalDuration armed only at *answer*, such a call would have no reaper at
+/// all. By capping below Timer B we make GlobalDuration the sole
 /// reaper here: the call MUST be torn down by the creation-time backstop, not by
 /// the txn timeout — exactly the production safety net.
 const MAX_DURATION_SEC: i64 = 20;
@@ -44,8 +42,8 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     let h = Harness::new("b2bua-setup-stall-reap");
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", "127.0.0.1:5079").await;
-    // Route every call to bob with NO `no_answer_timeout_sec` (the endurance
-    // config) but a short `max_duration_sec`: the only reaper for a never-
+    // Route every call to bob with NO `no_answer_timeout_sec` but a short
+    // `max_duration_sec`: the only reaper for a never-
     // answered call is the GlobalDuration backstop.
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
@@ -64,7 +62,7 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
     uas.respond(180, "Ringing").await;
     call.expect(180).await; // alice reads the relayed 180 (early dialog)
                             // Deliberately never send a final response — the call wedges `Active` with
-                            // its b-leg in `Early` and (before the fix) zero timers.
+                            // its b-leg in `Early` and only the creation-time backstop.
 
     assert_eq!(
         b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
@@ -74,8 +72,8 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
 
     // ── Safety net: at the GlobalDuration cap the wedged call must be reaped ───
     // GlobalDuration fires at the cap → `max-duration` rule begins termination,
-    // CANCELing the ringing b-leg. Teardown now HOLDS until that CANCEL resolves
-    // (the call-liveness ordering fix: a ringing b-leg's internal CANCEL must
+    // CANCELing the ringing b-leg. Teardown HOLDS until that CANCEL resolves
+    // (the call-liveness ordering: a ringing b-leg's internal CANCEL must
     // quiesce — its 487, or a crossing 200 reaped by ACK+BYE — before RemoveCall,
     // so a 200 crossing the CANCEL is never stranded on a removed call), so a
     // well-behaved ringing UAS's 487 completes the GlobalDuration-triggered reap.

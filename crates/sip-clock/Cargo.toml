@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Monotonic-anchored clock (slice 0 foundation) — Rust re-expression of the source's Effect Clock/TestClock. Behaviour (timers/deadlines) runs on tokio's monotonic time directly; this crate provides only the injectable wall-ish `now_ms()` timestamp source for logs + call records. See docs/MIGRATION_PLAN_B2B.md §2."
+description = "Monotonic-anchored clock — Rust re-expression of the source's Effect Clock/TestClock. Behaviour (timers/deadlines) runs on tokio's monotonic time directly; this crate provides only the injectable wall-ish `now_ms()` timestamp source for logs + call records. See docs/MIGRATION_PLAN_B2B.md §2."
 
 [lints]
 workspace = true
@@ -19,6 +19,6 @@ tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
 
 [features]
-# Pulls in the chunked-advance test helper (mirrors the source's 100 ms-chunk
-# `TestClock.adjust` loop). Test-only — requires tokio's test-util.
+# Pulls in the paused-clock advance and settle helpers. Test-only — requires
+# tokio's test-util.
 testkit = ["tokio/test-util"]

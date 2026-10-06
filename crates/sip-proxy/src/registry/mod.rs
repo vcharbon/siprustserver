@@ -67,8 +67,7 @@ impl WorkerEntry {
 ///
 /// There is no delta/`changes()` subscription: the worker set is a projection of
 /// `topology::Membership` ⊕ health, and consumers read the projection directly.
-/// (The old `RegistryEvent` broadcast had no consumer outside the registries' own
-/// tests; membership deltas, where needed, are observed via `topology::Membership`.)
+/// Membership deltas, where needed, are observed via `topology::Membership`.
 pub trait WorkerRegistry: Send + Sync {
     /// Snapshot the current worker set.
     fn snapshot(&self) -> Vec<WorkerEntry>;

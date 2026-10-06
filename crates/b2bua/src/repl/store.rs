@@ -26,10 +26,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use repl_net::frame::{Op, Partition, Watermark};
+use repl_net::frame::{Partition, Watermark};
 use sip_clock::Clock;
 
 use super::changelog::{BodySource, Changelog, RefMeta};
+use super::incarnation::is_another_call;
+use super::resurrection::{Burial, ResurrectionTombstones};
 use super::shed_marks::ShedMarks;
 use crate::store::{
     locked, CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
@@ -48,7 +50,9 @@ pub const DEFAULT_REPLICATED_TTL_MS: i64 = 3_600_000;
 /// alone and rewritten by every local writer, so a `put_call` replaces only
 /// the fields the write carries and carries over every other one (`backup`,
 /// `skew_offset_ms`, `authority_answered`): each of those is written by its own
-/// writer and would otherwise be cleared by the next write of another.
+/// writer and would otherwise be cleared by the next write of another. A write
+/// of another call incarnation carries nothing over: those facts were about
+/// the call it replaces.
 #[derive(Clone, Debug)]
 struct CallMeta {
     meta: RefMeta,
@@ -79,23 +83,14 @@ struct CallMeta {
     /// adoption flush) carries it over, so it keeps naming what the AUTHORITY
     /// published and not what this node did afterwards. Monotone, like the fact
     /// it records: an answered call never un-answers. The `Delete` guard reads
-    /// it — an authority that never published the answer is ending a call it does
-    /// not know happened (ADR-0031 D3).
+    /// it, beside the answer a `Delete` itself states — an authority that never
+    /// published the answer is ending a call it does not know happened (ADR-0031
+    /// D3).
     authority_answered: bool,
 }
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
 /// + a per-peer compacted [`Changelog`]. Clone-cheap (Arcs); share the handle.
-/// How long a deleted `call_ref` rejects re-creating `Put`s (the apply-side
-/// resurrection guard). A discharge deletes the call and propagates the delete,
-/// but a peer's late reverse-flush (e.g. a backup finishing its deferred teardown
-/// just after the primary discharged the reclaimed copy — `FixCallTerminateOnBackup`
-/// C7/C10) would otherwise re-create the body via the Reverse "no local copy →
-/// accept" rule and trigger a SECOND discharge. The window need only outlive
-/// replication latency + the served call's residual timers (Timer F ~32 s) + a
-/// reboot; 5 min is comfortably past that and bounds the set to `delete_rate × 5min`.
-const RESURRECTION_TOMBSTONE_MS: i64 = 300_000;
-
 #[derive(Clone)]
 pub struct ReplicatingCallStore {
     inner: Arc<InMemoryCallStore>,
@@ -110,11 +105,15 @@ pub struct ReplicatingCallStore {
     /// Backup replicas left unstored at a backup ceiling (ADR-0037). A mark
     /// clears when the ref's body is stored or deleted, or expires.
     shed: Arc<Mutex<ShedMarks>>,
-    /// `callRef → deleted_at_ms`: the apply-side resurrection guard. A `Put` for a
-    /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
-    /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
-    /// from the replica to the apply path). Pruned in [`reap`](Self::reap).
-    tombstones: Arc<Mutex<HashMap<String, i64>>>,
+    /// The apply-side resurrection guard: a `Put` of a call deleted inside the
+    /// tombstone window is ignored, so a late reverse-flush cannot re-create a
+    /// just-discharged call (delete-wins, extended from the replica to the apply
+    /// path). Pruned in [`reap`](Self::reap).
+    tombstones: Arc<Mutex<ResurrectionTombstones>>,
+    /// Backup bodies of calls a write of another call on their ref replaced,
+    /// the latest write of each by incarnation: nobody settled them, so
+    /// [`take_displaced`](Self::take_displaced) hands them to the replica reap.
+    displaced: Arc<Mutex<HashMap<String, Arc<[u8]>>>>,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
     default_ttl_ms: i64,
@@ -135,7 +134,8 @@ impl ReplicatingCallStore {
             meta: Arc::new(Mutex::new(HashMap::new())),
             backups: Arc::new(AtomicU64::new(0)),
             shed: Arc::new(Mutex::new(ShedMarks::default())),
-            tombstones: Arc::new(Mutex::new(HashMap::new())),
+            tombstones: Arc::new(Mutex::new(ResurrectionTombstones::default())),
+            displaced: Arc::new(Mutex::new(HashMap::new())),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
         }
     }
@@ -169,13 +169,13 @@ impl ReplicatingCallStore {
         }
     }
 
-    /// The owned changelog (S5's server loop subscribes/drains through this).
+    /// The owned changelog (the server loop subscribes/drains through this).
     pub fn changelog(&self) -> &Changelog {
         &self.changelog
     }
 
     /// The full `(p,b)` version vector stored for a callRef, or `None` if absent
-    /// / expired. The S5 puller reads this to drive the ADR-0014 asymmetric apply
+    /// / expired. The puller reads this to drive the ADR-0014 asymmetric apply
     /// rule (a reverse-flush applies iff `p_in == p_cur && b_in > b_cur`; a
     /// forward update applies always; deletes apply unconditionally) and as the
     /// presence probe on the Delete path. The `(role, primary)` args are accepted
@@ -205,7 +205,7 @@ impl ReplicatingCallStore {
     }
 
     /// Snapshot the LIVE callRef KEYS stored in `(role, primary)` under a BRIEF
-    /// lock (Decision 3 / X4). Bootstrap uses this to copy the `bak:{primary}`
+    /// lock (ADR-0011 X4). Bootstrap uses this to copy the `bak:{primary}`
     /// keyset, drop the lock, then read each body lazily per batch — so a
     /// slow/crashing puller never holds the call-map lock across the socket.
     ///
@@ -223,8 +223,10 @@ impl ReplicatingCallStore {
 
     /// Read a body whatever its TTL. [`get_call`](Self::get_call) reads an
     /// expired body as absent; the live reverse-flush reconcile reads through
-    /// here ([`peek_reclaimable_raw`]) so it can still fold an expired terminal.
-    /// Pure read of the backing store; no meta change.
+    /// here ([`CallState::peek_reclaimable_raw`]) so it can still fold an
+    /// expired terminal. Pure read of the backing store; no meta change.
+    ///
+    /// [`CallState::peek_reclaimable_raw`]: crate::store::CallState::peek_reclaimable_raw
     pub async fn peek_body_raw(
         &self,
         role: PartitionRole,
@@ -301,13 +303,35 @@ impl ReplicatingCallStore {
         locked(&self.shed, "shed marks").clear_primary(primary);
     }
 
-    /// Whether a `Put` of `call_ref` falls in its resurrection-tombstone
-    /// window, so [`put_call`](CallStore::put_call) would ignore it.
-    pub fn is_tombstoned(&self, call_ref: &str) -> bool {
+    /// Whether a `Put` of `incarnation` of `call_ref` would resurrect a call
+    /// deleted or replaced inside the tombstone window, so
+    /// [`put_call`](CallStore::put_call) would ignore it.
+    pub fn buries(&self, call_ref: &str, incarnation: Option<&str>) -> bool {
         let now = self.clock.now_ms();
         locked(&self.tombstones, "resurrection tombstones")
+            .burial(call_ref, incarnation, now)
+            .is_some()
+    }
+
+    /// Take the backup bodies of calls another call on their ref replaced
+    /// here, each call's latest once: a deferred terminal among them is owed a
+    /// settlement nobody else will make (the authority moved on to the new
+    /// call without a delete this node saw), so the replica reap settles it as
+    /// it settles an expired one. Calls written again after the take are
+    /// handed again.
+    pub fn take_displaced(&self) -> Vec<Arc<[u8]>> {
+        locked(&self.displaced, "displaced bodies").drain().map(|(_, body)| body).collect()
+    }
+
+    /// The call incarnation of the body stored for a callRef, or `None` when
+    /// absent / expired or stored by a write that named none.
+    pub fn incarnation(&self, call_ref: &str) -> Option<String> {
+        if self.is_expired(call_ref) {
+            return None;
+        }
+        locked(&self.meta, "replica metadata")
             .get(call_ref)
-            .is_some_and(|&deleted_at| now - deleted_at < RESURRECTION_TOMBSTONE_MS)
+            .and_then(|m| m.meta.incarnation.clone())
     }
 
     /// Standing shed marks, all primaries.
@@ -411,15 +435,96 @@ impl ReplicatingCallStore {
     /// after advancing the clock.
     #[must_use = "an evicted body may owe a release the caller must settle"]
     pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
-        // A resurrection tombstone only matters inside its window (`put_call`
-        // reads nothing older), so the map holds at most
-        // `delete_rate × RESURRECTION_TOMBSTONE_MS` entries.
-        locked(&self.tombstones, "resurrection tombstones")
-            .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
+        locked(&self.tombstones, "resurrection tombstones").prune(now_ms);
         locked(&self.shed, "shed marks").reap(now_ms);
         self.changelog.reap(now_ms);
         let expired = self.expired_snapshot(now_ms);
         self.evict_snapshot(expired, now_ms)
+    }
+}
+
+/// What a write is, for the incarnation rule of [`ReplicatingCallStore::admits`].
+#[derive(Clone, Copy)]
+struct Write {
+    role: PartitionRole,
+    direction: Option<PropagateDirection>,
+    now: i64,
+}
+
+impl ReplicatingCallStore {
+    /// The incarnation rule of a write of `incarnation` of `call_ref`, under
+    /// the metadata lock (ADR-0014, "`(p,b)` orders one call incarnation").
+    /// `false` leaves the store as it is:
+    ///
+    /// - a buried call stays buried (the resurrection guard); a write of a call
+    ///   another one replaced re-stamps its burial, and a backup keeps it for
+    ///   the replica reap;
+    /// - an acting backup's write (`Reverse`) never replaces another call: the
+    ///   authority replaced the call it serves, so the call is buried as
+    ///   replaced and its body kept for the reap.
+    ///
+    /// `true` stores the write. When it replaces another call, that call's
+    /// record, body and index keys go first and the call is buried as
+    /// replaced; a backup keeps its body for the reap when the body is a
+    /// version a backup authored (`b > 0`).
+    // FIXME(repl): the tombstone refuses a deferred terminal for a ref this node
+    // already discharged, losing the record; yield to a terminal it never saw.
+    fn admits(
+        &self,
+        meta: &mut HashMap<String, CallMeta>,
+        call_ref: &str,
+        incarnation: Option<&str>,
+        body: &Arc<[u8]>,
+        write: Write,
+    ) -> bool {
+        let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
+        let keep_for_reap = |incarnation: Option<&str>, body: &Arc<[u8]>| {
+            if let Some(id) = incarnation {
+                locked(&self.displaced, "displaced bodies").insert(id.to_string(), body.clone());
+            }
+        };
+        match tombstones.burial(call_ref, incarnation, write.now) {
+            Some(Burial::Deleted) => return false,
+            Some(Burial::Replaced) => {
+                // A copy still writing the replaced call keeps it buried for as
+                // long as it writes, not just the window after the replacement.
+                if let Some(id) = incarnation {
+                    tombstones.bury(call_ref, Some(id.to_string()), Burial::Replaced, write.now);
+                }
+                if write.role == PartitionRole::Backup {
+                    keep_for_reap(incarnation, body);
+                }
+                return false;
+            }
+            None => {}
+        }
+        let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.clone());
+        if !is_another_call(held.as_deref(), incarnation) {
+            return true;
+        }
+        if write.direction == Some(PropagateDirection::Reverse) {
+            let owned = incarnation.map(str::to_string);
+            tombstones.bury(call_ref, owned, Burial::Replaced, write.now);
+            if write.role == PartitionRole::Backup {
+                keep_for_reap(incarnation, body);
+            }
+            return false;
+        }
+        if let Some(gone) = meta.remove(call_ref) {
+            self.account_role(Some(gone.role), None);
+            let removed =
+                self.inner.remove_body(gone.role, &gone.primary, call_ref, &gone.meta.indexes);
+            tombstones.bury(call_ref, gone.meta.incarnation.clone(), Burial::Replaced, write.now);
+            // Only a version a backup authored (`b > 0`) can be a terminal it
+            // deferred; the authority settles its own (`b == 0`).
+            let backup_authored = gone.meta.call_bgen > 0;
+            if let (PartitionRole::Backup, true, Some(removed)) =
+                (gone.role, backup_authored, removed)
+            {
+                keep_for_reap(gone.meta.incarnation.as_deref(), &removed);
+            }
+        }
+        true
     }
 }
 
@@ -461,8 +566,13 @@ impl CallStore for ReplicatingCallStore {
         // Everything the write carries is built before the lock: the critical
         // section is map operations only.
         let body: Arc<[u8]> = Arc::from(body);
-        let ref_meta =
-            RefMeta { call_gen, call_bgen, body_ttl_ms: ttl_ms, indexes: indexes.to_vec() };
+        let mut ref_meta = RefMeta {
+            call_gen,
+            call_bgen,
+            body_ttl_ms: ttl_ms,
+            indexes: indexes.to_vec(),
+            incarnation: opts.incarnation.clone(),
+        };
         // A Forward flush carries the backup ordinal as `opts.peer`.
         let flushed_backup = match (opts.direction, &opts.peer) {
             (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
@@ -478,17 +588,13 @@ impl CallStore for ReplicatingCallStore {
         // silently clear each of them.
         {
             let mut meta = locked(&self.meta, "replica metadata");
-            // Resurrection guard (apply-side delete-wins): a `Put` for a ref
-            // deleted within the tombstone window is ignored, so a late
-            // reverse-flush racing a discharge never re-creates a just-discharged
-            // call (a SECOND discharge). Checked under the metadata lock, the lock
-            // the delete tombstones under, so no Put lands between the two.
-            // FIXME(repl): the tombstone refuses a deferred terminal for a ref this node
-            // already discharged, losing the record; yield to a terminal it never saw.
-            let tombstoned = locked(&self.tombstones, "resurrection tombstones")
-                .get(call_ref)
-                .is_some_and(|&deleted_at| now - deleted_at < RESURRECTION_TOMBSTONE_MS);
-            if tombstoned {
+            // An unnamed write is one of the held call: it takes its name.
+            ref_meta.incarnation = ref_meta
+                .incarnation
+                .take()
+                .or_else(|| meta.get(call_ref).and_then(|m| m.meta.incarnation.clone()));
+            let write = Write { role, direction: opts.direction, now };
+            if !self.admits(&mut meta, call_ref, ref_meta.incarnation.as_deref(), &body, write) {
                 return Ok(());
             }
             self.inner.store_body(role, primary, call_ref, body, indexes);
@@ -531,7 +637,7 @@ impl CallStore for ReplicatingCallStore {
         // HA path only: non-blocking changelog bump for the pulling peer.
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
-            self.changelog.bump(peer, call_ref, Op::Put, partition);
+            self.changelog.bump_put(peer, call_ref, partition);
         }
         Ok(())
     }
@@ -542,25 +648,38 @@ impl CallStore for ReplicatingCallStore {
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         let deleted_at = self.clock.now_ms();
-        {
+        let incarnation = {
             let mut meta = locked(&self.meta, "replica metadata");
+            let held = meta.get(call_ref).and_then(|m| m.meta.incarnation.as_deref());
+            let mut tombstones = locked(&self.tombstones, "resurrection tombstones");
+            // A delete of another call than the held one ends that call alone:
+            // the held call stays, and nothing propagates over its entry.
+            if meta.contains_key(call_ref) && is_another_call(held, opts.incarnation.as_deref()) {
+                tombstones.bury(call_ref, opts.incarnation.clone(), Burial::Deleted, deleted_at);
+                return Ok(());
+            }
             self.inner.remove_body(role, primary, call_ref, indexes);
-            if let Some(gone) = meta.remove(call_ref) {
+            let gone = meta.remove(call_ref);
+            if let Some(gone) = &gone {
                 self.account_role(Some(gone.role), None);
             }
-            // Tombstone the ref in the same step, so a late reverse-flush cannot
-            // resurrect it (see `put_call`); pruned in `reap`.
-            locked(&self.tombstones, "resurrection tombstones")
-                .insert(call_ref.to_string(), deleted_at);
-        }
+            // Tombstone the call in the same step, so a late reverse-flush cannot
+            // resurrect it (see `put_call`); pruned in `reap`. The delete names
+            // the call it removes, or the body it finds names it.
+            let incarnation =
+                opts.incarnation.clone().or_else(|| gone.and_then(|g| g.meta.incarnation));
+            tombstones.bury(call_ref, incarnation.clone(), Burial::Deleted, deleted_at);
+            incarnation
+        };
         locked(&self.shed, "shed marks").clear(call_ref);
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
-            self.changelog.bump(peer, call_ref, Op::Delete, partition);
+            self.changelog.bump_delete(peer, call_ref, partition, answered, incarnation);
         }
         Ok(())
     }
@@ -595,6 +714,23 @@ impl BodySource for ReplicatingCallStore {
 
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta> {
         locked(&self.meta, "replica metadata").get(call_ref).map(|m| m.meta.clone())
+    }
+
+    /// Body and metadata under the metadata lock, the lock every write holds,
+    /// so the two are of one write. An expired body reads as absent.
+    async fn read_entry(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> Option<(Arc<[u8]>, RefMeta)> {
+        let now = self.clock.now_ms();
+        let meta = locked(&self.meta, "replica metadata");
+        let m = meta.get(call_ref)?;
+        if matches!(m.expiry_at_ms, Some(e) if now >= e) {
+            return None;
+        }
+        Some((self.inner.body(role, primary, call_ref)?, m.meta.clone()))
     }
 
     fn scan_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {
@@ -730,7 +866,7 @@ mod backup_count_tests {
         check(2);
 
         store
-            .delete_call(PartitionRole::Backup, "w0", "w0|b|t", &[], &PutOpts::default())
+            .delete_call(PartitionRole::Backup, "w0", "w0|b|t", &[], false, &PutOpts::default())
             .await
             .unwrap();
         check(1);

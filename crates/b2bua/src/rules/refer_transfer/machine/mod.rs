@@ -14,7 +14,7 @@
 use b2bua_sdk::define_service;
 use call::{Call, StateLabel, TransferPhase, TransferState};
 
-use crate::rules::model::{RuleContext, RuleDefinition};
+use b2bua_sdk::model::{RuleContext, RuleDefinition};
 
 mod authorizing;
 mod c_ringing;

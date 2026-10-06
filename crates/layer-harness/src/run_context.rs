@@ -11,10 +11,9 @@
 //!   - [`RunContext::UnitTestOfLayer`]  → rules targeting `tag` get promoted
 //!     to `fatal`; others stay `advisory`.
 //!
-//! Where the TS source reads `RunContext` from the Effect service map (with a
-//! `real-run` fallback when absent), the Rust decorators take a `RunContext`
-//! value by construction. There is no implicit fallback to fall into in a
-//! test — the absence is a compile error, which is stricter and better.
+//! The decorators take a `RunContext` value by construction. There is no
+//! implicit `real-run` fallback to fall into in a test — the absence is a
+//! compile error.
 
 use crate::anomaly::Severity;
 

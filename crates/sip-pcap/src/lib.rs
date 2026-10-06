@@ -1,8 +1,8 @@
 //! Capture decoder for SIP triage (test tooling, never in a runner).
 //!
 //! Reads tcpdump ring files and archived capture corpora — **classic pcap and
-//! pcapng, plain or gzipped, detected from the bytes** ([`source`],
-//! [`classic`], [`pcapng`]) — walks the link layer (Ethernet / Linux SLL /
+//! pcapng, plain or gzipped, detected from the bytes** (`source`,
+//! `classic`, `pcapng`) — walks the link layer (Ethernet / Linux SLL /
 //! SLL2 / raw-IP / null-loopback), the IP layer (IPv4 + IPv6, **with fragment
 //! reassembly** — a full INVITE with SDP regularly exceeds the MTU), and UDP,
 //! yielding `(timestamp, src, dst, payload)` datagrams ready for the real

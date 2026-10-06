@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use crate::event::{EventQueueClass, TransactionEvent};
 use crate::timers::ms;
 
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::txn::Timer;
 
@@ -39,7 +40,7 @@ impl Owner {
     /// auto-ACKed a non-2xx final, answered a CANCEL, or 100-silenced an inbound
     /// INVITE). A full queue DEFERS it onto the retry deque instead of dropping it,
     /// so the consumer sees it once capacity returns — unless it is a request
-    /// whose server transaction the sweep deletes first
+    /// whose server transaction leaves the map unanswered first
     /// ([`drop_deferred_requests_of`](Self::drop_deferred_requests_of)).
     pub(super) fn emit_critical(&mut self, event: TransactionEvent) {
         self.offer(event, true);
@@ -114,9 +115,10 @@ impl Owner {
         }
     }
 
-    /// Remove the deferred requests the swept server transactions admitted: a
-    /// request whose transaction is gone would reach the consumer with no
-    /// transaction left to carry its answer, long after its sender gave up.
+    /// Remove the deferred requests that `swept` — server transactions
+    /// leaving the map unanswered — admitted: a request whose transaction is
+    /// gone would reach the consumer with no transaction left to carry its
+    /// answer, long after its sender gave up.
     /// Deferred responses, `Timeout`s, `Cancelled`s and `CallQuiesced`s stay:
     /// each is the consumer's only notice of an outcome, whatever became of the
     /// transaction behind it.
@@ -125,7 +127,7 @@ impl Owner {
             return;
         }
         let by_branch: HashMap<&str, &SweptServer> =
-            swept.iter().map(|s| (s.branch.as_str(), s)).collect();
+            swept.iter().map(|s| (s.key.branch(), s)).collect();
         let before = self.deferred_events.len();
         self.deferred_events.retain(|ev| !admitted_by_any(ev, &by_branch));
         let removed = before - self.deferred_events.len();
@@ -161,20 +163,22 @@ impl Owner {
     }
 }
 
-/// The identity of a server transaction the sweep deleted: the Via branch it
-/// was keyed by (RFC 3261 §17.2.3) and the dialog identity it admitted.
+/// The identity of a server transaction that left the map unanswered — at its
+/// backstop, or reaped by the sweep: the key it was filed under (RFC 3261
+/// §17.2.3) and the dialog identity it admitted.
 pub(super) struct SweptServer {
-    pub(super) branch: String,
+    pub(super) key: ServerTxnKey,
     pub(super) call_id: String,
     pub(super) from_tag: String,
 }
 
-/// Whether `event` is the request one of the swept transactions, keyed by
-/// branch, admitted.
+/// Whether `event` is the request one of the swept transactions admitted.
 fn admitted_by_any(event: &TransactionEvent, by_branch: &HashMap<&str, &SweptServer>) -> bool {
     let TransactionEvent::Message { message, .. } = event else { return false };
     let SipMessage::Request(req) = message.as_ref() else { return false };
-    let Some(swept) = req.top_via().branch().and_then(|b| by_branch.get(b)) else { return false };
-    req.call_id().as_str() == swept.call_id
+    let Some(id) = ServerTxnId::of_request(req) else { return false };
+    let Some(swept) = by_branch.get(id.branch()) else { return false };
+    id == swept.key.id()
+        && req.call_id().as_str() == swept.call_id
         && req.from().tag().unwrap_or_default() == swept.from_tag
 }

@@ -64,7 +64,7 @@
       "description": "`sip_messages_total` — every SIP MESSAGE the proxy moves (requests + responses, both directions), NOT calls. The Rust proxy emits a single `label` dimension holding `direction:result` (e.g. `inbound:forwarded`, `outbound:responded`, `inbound:dropped`).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (label) (rate(sip_messages_total{pod=~\"$pod\", label!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{label}}" }],
+      "targets": [{ "expr": "sum by (label) (rate(sip_messages_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{label}}" }],
       "fieldConfig": { "defaults": { "unit": "msg/s" } }
     },
     {
@@ -72,7 +72,7 @@
       "description": "`sip_routing_decision_total{kind}` — select_new / decode_forward / decode_forward_backup / loose_route / worker_outbound / cancel / reject.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{kind}}" }],
+      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{kind}}" }],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
@@ -87,17 +87,16 @@
       "id": 9, "type": "timeseries", "title": "HMAC failures / sec by reason",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (reason) (rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{reason}}" }],
+      "targets": [{ "expr": "sum by (reason) (rate(sip_proxy_hmac_failures_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{reason}}" }],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
-      "id": 10, "type": "timeseries", "title": "Record-Route inserted & ACK synthesized / sec",
-      "description": "`sip_proxy_record_route_inserted_total` (stickiness tokens stamped) and `sip_proxy_ack_synthesized_total` (hop-by-hop ACKs synthesized for non-2xx final responses).",
+      "id": 10, "type": "timeseries", "title": "Record-Route inserted / sec",
+      "description": "`sip_proxy_record_route_inserted_total` (stickiness tokens stamped). The proxy synthesizes no hop-by-hop ACK: the upstream's ACK to a non-2xx final is relayed end to end.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum(rate(sip_proxy_record_route_inserted_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "record-route inserted" },
-        { "expr": "sum(rate(sip_proxy_ack_synthesized_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "ack synthesized" }
+        { "expr": "sum(rate(sip_proxy_record_route_inserted_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "record-route inserted" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
@@ -128,7 +127,7 @@
       "description": "`sip_proxy_requests_total{method}` — every inbound SIP request the proxy handles, split by method (INVITE / ACK / BYE / CANCEL / OPTIONS / …).",
       "gridPos": { "h": 8, "w": 9, "x": 6, "y": 37 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (method) (rate(sip_proxy_requests_total{pod=~\"$pod\", method!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{method}}" }],
+      "targets": [{ "expr": "sum by (method) (rate(sip_proxy_requests_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}}" }],
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     },
@@ -137,8 +136,25 @@
       "description": "`sip_proxy_responses_total{method,code}` — every inbound SIP response, keyed by its CSeq method and status code (e.g. INVITE 200, INVITE 487, BYE 200, OPTIONS 200).",
       "gridPos": { "h": 8, "w": 9, "x": 15, "y": 37 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (method, code) (rate(sip_proxy_responses_total{pod=~\"$pod\", method!=\"none\"}[1m]))", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
+      "targets": [{ "expr": "sum by (method, code) (rate(sip_proxy_responses_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "{{method}} {{code}}" }],
       "fieldConfig": { "defaults": { "unit": "cps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1, "stacking": { "mode": "normal", "group": "A" } } } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 30, "type": "row", "title": "Stickiness",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 }, "collapsed": false
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "CANCEL lookups, backup promotions, fresh-pod forwards / sec",
+      "description": "`sip_proxy_cancel_lookups_total{outcome}`: a CANCEL that found its INVITE's hop (hit) or was routed on its own (miss). `sip_proxy_decode_forward_promotions_total{reason}`: in-dialog requests sent to the cookie's backup although the primary is up (fresh_pod: inside its fresh-pod guard; not_ready). `sip_proxy_fresh_pod_forwards_total`: in-dialog requests sent to a primary inside its fresh-pod guard because the cookie names no usable backup.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(sip_proxy_cancel_lookups_total{pod=~\"$pod\"}[1m])) > 0", "refId": "A", "legendFormat": "CANCEL lookup {{outcome}}" },
+        { "expr": "sum by (reason) (rate(sip_proxy_decode_forward_promotions_total{pod=~\"$pod\"}[1m])) > 0", "refId": "B", "legendFormat": "promoted to backup: {{reason}}" },
+        { "expr": "sum(rate(sip_proxy_fresh_pod_forwards_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "fresh-pod forward (no backup)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 12, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
     }
   ]

@@ -391,8 +391,8 @@ mod tests {
         // moves what it may burn.
         assert_eq!(paused.wall_ceiling_ms(0, 32_000), paused.wall_ceiling_ms(282_000, 32_000));
 
-        // A real clock sleeps them: the longest capture in the corpus clears its
-        // own span and its settle budget, and a longer one gets a wider ceiling.
+        // A real clock sleeps them: a long capture clears its own span and its
+        // settle budget, and a longer one gets a wider ceiling.
         assert!(real.wall_ceiling_ms(282_000, 32_000) > 282_000 + 32_000);
         assert!(real.wall_ceiling_ms(282_000, 32_000) > real.wall_ceiling_ms(119_000, 32_000));
 

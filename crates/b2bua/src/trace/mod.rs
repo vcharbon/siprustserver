@@ -3,7 +3,7 @@
 //! One concern per submodule: [`registry`] owns the process's admission gate
 //! and the live root spans; [`emit`] owns the guarded emission vocabulary — the
 //! SIP messages, rule transitions, limiter and HTTP round trips a traced call
-//! records; [`intake`] owns the two doors a call becomes traced through (the
+//! records; `intake` owns the two doors a call becomes traced through (the
 //! INVITE draw and the decision-engine force-enable) and the backfill both owe.
 //!
 //! **Explicit-guard discipline.** Every emission site is wrapped in

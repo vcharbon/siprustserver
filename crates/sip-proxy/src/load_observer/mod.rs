@@ -18,9 +18,9 @@
 //!   - Stale payloads (older than `payload_stale_ms`) trigger one conservative
 //!     decrease on the next [`sweep_stale`](WorkerLoadObserver::sweep_stale) tick.
 //!
-//! Module map: [`payload`] — the `X-Overload` value codec; [`band`] — ELU band
-//! classification with hysteresis; [`config`] — tunables + the band-config
-//! validator the runner preflight calls; [`observer`] — the per-worker AIMD
+//! Module map: `payload` — the `X-Overload` value codec; `band` — ELU band
+//! classification with hysteresis; `config` — tunables + the band-config
+//! validator the runner preflight calls; `observer` — the per-worker AIMD
 //! state machine and its admit/sweep/snapshot API.
 //!
 //! ## Clock — explicit `now_ms`, NOT `tokio::time`
@@ -46,5 +46,7 @@ mod tests;
 
 pub use band::EluBand;
 pub use config::LoadObserverConfig;
-pub use observer::{AimdAction, AimdSnapshot, WorkerLoadObserver};
+#[cfg(test)]
+pub use observer::AimdSnapshot;
+pub use observer::{AimdAction, WorkerLoadObserver};
 pub use payload::{parse_x_overload_header, OverloadPayload, X_OVERLOAD};

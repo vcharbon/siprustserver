@@ -52,8 +52,8 @@ pub(crate) fn lenient_parser() -> CustomParser {
 pub mod msg_reads;
 pub mod relay_lanes;
 
-// The rfc-rules live adapter (issue 29): merged rule bodies surfaced as
-// cross-message findings, replacing their dotted-id predecessors rung by rung.
+// The rfc-rules live adapter: merged rule bodies surfaced as cross-message
+// findings.
 pub mod wire_adapter;
 
 /// The full default set of **cross-message** RFC rules every test harness

@@ -58,7 +58,7 @@ pub(crate) fn pin_fragmentation(socket: &socket2::Socket, ipv4: bool) -> std::io
 }
 
 /// The path-MTU-discovery mode a socket currently carries — what
-/// [`pin_fragmentation`] set, read back from the kernel. Linux only; the
+/// `pin_fragmentation` set, read back from the kernel. Linux only; the
 /// values are the `IP_PMTUDISC_*` / `IPV6_PMTUDISC_*` constants, so
 /// `!= IP_PMTUDISC_DO` is the property an oversize SIP message depends on.
 #[cfg(target_os = "linux")]

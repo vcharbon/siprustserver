@@ -21,11 +21,11 @@
 #     - <slot>       deterministic IP slot: IP = SIPEXT_UAC_BASE_IP + slot
 #                    (.100+; see the slot plan in lib/net-env.sh). Callers own
 #                    the slot assignment so parallel streams never collide.
-#     - <max_calls>/<max_concurrent>  sipp -m / -l (same semantics as before).
-#   Env knobs (defaults reproduce the old job template):
+#     - <max_calls>/<max_concurrent>  sipp -m / -l.
+#   Env knobs:
 #     UAC_CPU_LIM (k8s qty, default 8)     -> docker --cpus   (hard cap; docker
 #     UAC_MEM_LIM (k8s qty, default 1536Mi)-> docker --memory  has no "request")
-#     UAC_RESTART (default on-failure:4)   -> docker --restart (the old Job
+#     UAC_RESTART (default on-failure:4)   -> docker --restart (the Job
 #                    backoffLimit:4 analog: a SIPp exit-255 timer-wheel abort
 #                    is recreated in place; docker kill/rm never triggers it)
 #     LIMITER_CAP (default 20)             -> the -key xapi limiter JSON

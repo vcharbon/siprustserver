@@ -21,7 +21,7 @@ use crate::{ProxyMetrics, RoutingStrategy};
 // stamps as its Via sent-by). The downstream UAC the keepalive targets.
 const W1_POD: &str = "10.244.5.8";
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 
 async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
@@ -56,7 +56,7 @@ Content-Length: 0\r\n\r\n"
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
-// Regression for the steady-state long-call-loss class: behind the keepalived
+// The steady-state long-call-loss class: behind the keepalived
 // VIP a worker→proxy packet is SNAT'd to the NODE ip:ephemeral-port, so the
 // proxy's UDP source is NOT a registered worker. The worker-outbound
 // classification must therefore key off the SNAT-immune top Via sent-by, not
@@ -73,7 +73,7 @@ async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_work
     let core = core(reg).await;
 
     // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
-    let snat_src = "172.20.0.11:63522".parse().unwrap();
+    let snat_src = "192.0.2.11:63522".parse().unwrap();
     let msg = keepalive_options();
     let outcome = core.route_request(&msg, snat_src).await;
 
@@ -89,7 +89,7 @@ async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_work
     );
 }
 
-// Regression for the recv-loop head-of-line block: a worker-outbound
+// The recv-loop head-of-line block: a worker-outbound
 // request whose R-URI is a DNS name must NOT make routing wait on the
 // resolver — resolution happens on a spawned task (see crate::resolver).
 // Under an inline-await design a resolver that never answers would
@@ -221,7 +221,7 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr;outbound>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let snat_src = "172.20.0.12:51000".parse().unwrap();
+    let snat_src = "192.0.2.12:51000".parse().unwrap();
     let outcome = core.route_request(&msg, snat_src).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
@@ -261,7 +261,7 @@ Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
-    let snat_src = "172.20.0.12:51000".parse().unwrap(); // node IP, not a worker
+    let snat_src = "192.0.2.12:51000".parse().unwrap(); // node IP, not a worker
     let outcome = core.route_request(&msg, snat_src).await;
 
     assert_eq!(
@@ -311,4 +311,95 @@ Content-Length: 0\r\n\r\n"
         "cookie on top → decode to the worker; the trailing ;outbound half must not flip direction"
     );
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1_POD, 5060)));
+}
+
+// ── Spiral: several passes of this proxy in one route set ──────────────────
+
+const W2_POD: &str = "10.244.5.9";
+/// A third-party proxy the route set may cross between two passes.
+const THIRD_PARTY: &str = "10.244.9.1";
+
+/// A re-INVITE from the worker holding call 1, toward call 2, a call the
+/// same dialog's INVITE spiralled into (§16.3): its route set holds this
+/// proxy's pair recorded relaying it out of w1, then `between`, then the pair
+/// recorded relaying it in to w2. The Request-URI is call 2's Contact at the
+/// pod that held it before a takeover.
+fn spiralled_reinvite(between: &str) -> SipMessage {
+    let raw = format!(
+        "INVITE sip:b2bua@10.244.5.77:5060;leg=a SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKspiral;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{PROXY_VIP}>;tag=c1b\r\n\
+To: <sip:bob@{PROXY_VIP}>;tag=c2a\r\n\
+Call-ID: b-1@{W1_POD}\r\n\
+CSeq: 2 INVITE\r\n\
+Contact: <sip:b2bua@{W1_POD}:5060;leg=b-1>\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+{between}\
+Route: <sip:{PROXY_VIP}:5060;target={W2_POD}:5060;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    CustomParser::default().parse(raw.as_bytes()).unwrap()
+}
+
+fn two_workers() -> Arc<dyn WorkerRegistry> {
+    Arc::new(StaticWorkerRegistry::from_entries(vec![
+        WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060)),
+        WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
+    ]))
+}
+
+// Two passes back to back: the request leaves w1 through the first pair and
+// enters call 2 through the second, whose cookie decides. Read from the first
+// pair's `;outbound`, it would go to the Request-URI, a pod no longer serving.
+#[tokio::test]
+async fn a_route_set_with_two_own_pairs_back_to_back_follows_the_last_pair() {
+    let core = core(two_workers()).await;
+    let outcome = core
+        .route_request(&spiralled_reinvite(""), format!("{W1_POD}:5060").parse().unwrap())
+        .await;
+
+    assert_eq!(outcome.decision, RoutingDecisionKind::DecodeForward);
+    assert_eq!(outcome.target, Some(ProxyAddr::new(W2_POD, 5060)));
+}
+
+// A Record-Routing hop between the passes ends the run of own entries at the
+// first pair: worker-outbound, loose-routed to that hop, as before.
+#[tokio::test]
+async fn a_third_party_between_two_passes_keeps_the_first_pair_direction() {
+    let core = core(two_workers()).await;
+    let between = format!("Route: <sip:{THIRD_PARTY}:5060;lr>\r\n");
+    let outcome = core
+        .route_request(&spiralled_reinvite(&between), format!("{W1_POD}:5060").parse().unwrap())
+        .await;
+
+    assert_eq!(outcome.decision, RoutingDecisionKind::LooseRoute);
+    assert_eq!(outcome.target, Some(ProxyAddr::new(THIRD_PARTY, 5060)));
+}
+
+// An odd run of own entries is no run of pairs this proxy recorded: the first
+// entry decides, and the worker Via still makes the request worker-outbound.
+#[tokio::test]
+async fn an_odd_run_of_own_entries_from_a_worker_goes_to_the_request_uri() {
+    let core = core(two_workers()).await;
+    let raw = format!(
+        "OPTIONS sip:sipp@{UAC}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKodd;rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
+Call-ID: odd-1@{UAC}\r\n\
+CSeq: 2 OPTIONS\r\n\
+Route: <sip:{PROXY_VIP}:5060;target={W1_POD}:5060;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;outbound;lr>\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr>\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    let msg = CustomParser::default().parse(raw.as_bytes()).unwrap();
+    let outcome = core.route_request(&msg, format!("{W1_POD}:5060").parse().unwrap()).await;
+
+    assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
+    assert_eq!(outcome.target, Some(ProxyAddr::new(UAC, 5060)));
 }

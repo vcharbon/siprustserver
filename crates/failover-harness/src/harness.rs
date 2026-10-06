@@ -1,5 +1,5 @@
-//! S10b — the **goal-2 simulated-failover harness** (plan "Goal-2 acceptance";
-//! ADR-0011 X10). It composes, under ONE fake clock:
+//! The **simulated-failover harness** (ADR-0011 X10). It composes, under ONE
+//! fake clock:
 //!
 //! - the `scenario-harness` SIP plane (alice/bob UAs + the SIP recorder),
 //! - a real load-balancing `ProxyCore` SUT over a [`SimulatedWorkerRegistry`]
@@ -16,8 +16,8 @@
 //!
 //! ## Fake-clock discipline (CLAUDE.md hazards)
 //! Everything runs under `#[tokio::test(start_paused = true)]`. [`FailoverHarness::advance`]
-//! drives BOTH the SIP and replication sim pipelines with the proven
-//! settle/advance/settle discipline. Both fabrics use transit delay `>= 1 ms`
+//! drives BOTH the SIP and replication sim pipelines in settled 100 ms chunks
+//! (`sip_clock::testkit::pump_sampled`). Both fabrics use transit delay `>= 1 ms`
 //! (the SIP harness coerces 0→1; the repl fabric is built with 1). Drive the
 //! protocol BETWEEN advances: advance to the deadline, then react. The cross-plane
 //! pipeline is deep (txn → router → dispatcher → SIP net AND changelog → server →
@@ -175,6 +175,11 @@ pub struct ReplicatedB2buaSut {
     tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
     /// The callflow services each incarnation registers.
     services: fn() -> Vec<ServiceDef>,
+    /// The adaptation HTTP port each incarnation's services send their
+    /// `ServiceHttpRequest`s through; `None` answers every one `error`.
+    adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    /// The rule composition each incarnation runs.
+    compose: b2bua::rules::ComposeOptions,
     /// The cluster's views ledger, shared with the harness: this node registers
     /// each incarnation it spawns and records its own lifecycle beliefs here.
     views: Arc<ViewLedger>,
@@ -336,9 +341,9 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().and_then(|c| c.repl_store()).map(|s| s.changelog().head())
     }
 
-    /// This incarnation's limiter release queue. `None` while crashed.
-    pub fn limiter_release_queue(&self) -> Option<Arc<b2bua::limiter_release::ReleaseQueue>> {
-        self.core.as_ref().map(|c| c.limiter_releases())
+    /// This incarnation's handle on its call limiter. `None` while crashed.
+    pub fn limiter_worker(&self) -> Option<b2bua::limiter::LimiterWorker> {
+        self.core.as_ref().map(|c| c.limiter().clone())
     }
 
     /// Whether `peer`'s flow on `partition` is connected to THIS node's
@@ -376,7 +381,8 @@ impl ReplicatedB2buaSut {
     }
 
     /// The primary version counter (`p`) currently stored for a ref, or `None`
-    /// — projected from the `(p,b)` version vector ([`current_cv`]).
+    /// — projected from the `(p,b)` version vector
+    /// ([`ReplicatingCallStore::current_cv`]).
     pub fn call_gen(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<i64> {
         self.store.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
@@ -555,7 +561,7 @@ impl ReplicatedB2buaSut {
     /// CRASH: abort the core's tasks + park its pullers, then drop it and replace
     /// the store with a fresh empty one (memory wiped). The node is inert until
     /// [`reboot`](Self::reboot). Closing the core's tasks closes its repl
-    /// connections cleanly (the S9 note: crash-to-close, not a fabric partition).
+    /// connections cleanly (crash-to-close, not a fabric partition).
     pub fn crash(&mut self) {
         if let Some(mut core) = self.core.take() {
             core.abort();
@@ -639,7 +645,7 @@ impl ReplicatedB2buaSut {
             core.drain_probe()
         });
         let metrics = self.core.as_ref().map(|core| core.metrics().clone());
-        let releases = self.core.as_ref().map(|core| core.limiter_releases());
+        let limiter = self.core.as_ref().map(|core| core.limiter().clone());
         let mut pending = PendingDrain {
             fut: Box::pin(async move {
                 match probe {
@@ -648,7 +654,7 @@ impl ReplicatedB2buaSut {
                         // borrow of the core; it records the same exit, unless
                         // the incarnation was killed mid-drain.
                         let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
-                        let killed = releases.is_some_and(|r| r.is_stopped());
+                        let killed = limiter.is_some_and(|l| l.is_stopped());
                         if let (Some(m), false) = (metrics, killed) {
                             m.record_drain_exit(&out);
                         }
@@ -672,9 +678,9 @@ impl ReplicatedB2buaSut {
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
     /// view. The node's supervisor reconciles it to a Park. Under reactive-only
-    /// takeover (ADR-0014) this no longer drives an eager takeover (removed); the
-    /// survivor takes a dialog over only when the proxy reroutes its in-dialog
-    /// traffic. Kept so the survivor's membership view stays honest across a kill.
+    /// takeover (ADR-0014) this drives no takeover: the survivor takes a dialog
+    /// over only when the proxy reroutes its in-dialog traffic. It keeps the
+    /// survivor's membership view honest across a kill.
     pub fn simulate_peer_removed(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }
@@ -702,9 +708,9 @@ impl ReplicatedB2buaSut {
     }
 
     /// REBOOT: same ordinal + same repl listen addr, a fresh SIP endpoint on a
-    /// NEW address (new pod IP — [`reboot_sip_addr`](Self::reboot_sip_addr)), an
+    /// NEW address (new pod IP — `reboot_sip_addr`), an
     /// EMPTY store at a NEW higher incarnation gen, a fresh server + supervisor →
-    /// it re-bootstraps + resubscribes from its peers (the S6 reboot path).
+    /// it re-bootstraps + resubscribes from its peers (the reboot path).
     /// Returns the new SIP address so the caller re-learns it into the proxy
     /// registry (and the report). After driving the clock its
     /// [`is_ready`](Self::is_ready) flips true once re-hydration completes.
@@ -791,24 +797,22 @@ impl ReplicatedB2buaSut {
             // runs HOT during busy cold-start (spawning both workers + proxy +
             // limiter + health-probe, replication bootstrap). It nondeterministically
             // crossed the 0.75 panic-ELU threshold and shed the establish INVITE with
-            // a Tier-3 `panic_elu` 503 (the ~1/5 "cold-start-503" flake; worse under
+            // a panic-ELU rung `panic_elu` 503 (the ~1/5 "cold-start-503" flake; worse under
             // parallel/CI load). Inject a `simulated()` sampler left at ELU 0 so the
             // panic-ELU backstop never trips on runtime busyness; a test that WANTS to
             // exercise it drives a known ELU through the control instead.
             overload: Some(b2bua::overload::OverloadSignal::new(Arc::new(
-                b2bua::overload::simulated().0,
+                load_shed::simulated().0,
             ))),
-            // No service here fires a `ServiceHttpRequest`.
-            adaptation_http: None,
-            // Default composition (every built-in CORE machine, incl. the
-            // `refer_transfer` seed) — the failover harness does not opt out.
-            compose: b2bua::rules::ComposeOptions::default(),
+            adaptation_http: self.adaptation_http.clone(),
+            compose: self.compose.clone(),
             // Default store + no injected store faults (ADR-0023): the HA
             // stack's behaviour is identical to the pre-seam wiring.
             store: None,
             store_faults: None,
             wire_faults: None,
             capacity: Some(b2bua::capacity::CapacityGate::new(Arc::new(self.system.probe()))),
+            deferred_ceilings: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
@@ -988,7 +992,7 @@ pub struct FailoverHarness {
     /// The ONE shared global recording-order sequencer (the SIP recorder's
     /// `EventSequencer`). Markers are stamped from it at the instant of
     /// `mark()`/`partition()`/`heal()`/crash/reboot so they interleave with SIP
-    /// messages and repl frames in true append order (Issue 1).
+    /// messages and repl frames in true append order.
     event_seq: Arc<layer_harness::EventSequencer>,
     /// The SIP harness handle (shared so workers can re-bind on reboot). It also
     /// carries this run's log/trace capture: the inner `scenario_harness::Harness`
@@ -1000,12 +1004,12 @@ pub struct FailoverHarness {
     /// `Clock` can carry a DIFFERENT wall anchor: a node with offset `+30_000`
     /// reads `now_ms()` 30 s ahead of a node at offset `0`, while behaviour timers
     /// stay on the shared monotonic clock. That is exactly deterministic inter-node
-    /// wall skew under a paused runtime — the one thing the single-clock harness
-    /// could not previously reproduce (CLAUDE.md "single-clock fidelity gap"). A
-    /// node's clock is `Clock::test_at(offset)` (the harness base anchor is 0);
-    /// every clock consumer for that node (b2bua core, changelog/store, membership)
-    /// uses it, so a replica it flushes stamps `origin_now_ms` in ITS frame and the
-    /// receiver computes the true cross-node offset. Default 0 (no skew).
+    /// wall skew under a paused runtime, which a single shared clock cannot
+    /// reproduce. A node's clock is `Clock::test_at(offset)` (the harness base
+    /// anchor is 0); every clock consumer for that node (b2bua core,
+    /// changelog/store, membership) uses it, so a replica it flushes stamps
+    /// `origin_now_ms` in ITS frame and the receiver computes the true cross-node
+    /// offset. Default 0 (no skew).
     worker_clock_offsets: HashMap<String, i64>,
     /// This run's declared RFC-audit scoping — lifetime waivers plus acceptance
     /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
@@ -1019,6 +1023,14 @@ pub struct FailoverHarness {
     /// [`with_worker_services`](Self::with_worker_services) registers, on each
     /// of its incarnations. None by default.
     worker_services: fn() -> Vec<ServiceDef>,
+    /// The adaptation HTTP port every worker spawned after
+    /// [`with_worker_adaptation_http`](Self::with_worker_adaptation_http)
+    /// hands its services, on each of its incarnations. None by default.
+    worker_adaptation_http: Option<b2bua::AdaptationHttpPort>,
+    /// The rule composition every worker spawned after
+    /// [`with_worker_compose`](Self::with_worker_compose) runs; every built-in
+    /// CORE machine by default.
+    worker_compose: b2bua::rules::ComposeOptions,
     /// The views ledger: every observer's belief about every worker, written by
     /// the cluster primitives and by the per-chunk sampler in
     /// [`advance`](Self::advance). Shared with each worker SUT.
@@ -1124,7 +1136,7 @@ impl FailoverHarness {
         // render strictly in TRUE append order. `at_ms` then serves only as the
         // displayed time label — never the cross-source tiebreaker — so a reboot
         // marker appended just before the bootstrap pull it triggers sorts first
-        // even though both land on the same paused-clock millisecond (Issue 1).
+        // even though both land on the same paused-clock millisecond.
         let event_seq = harness.recording().recorder().sequencer();
         let capture_seq: repl_net::transport::CaptureSeq = {
             let s = event_seq.clone();
@@ -1167,6 +1179,8 @@ impl FailoverHarness {
             rfc_acceptance: RfcAcceptance::default(),
             worker_tune: Arc::new(|_| {}),
             worker_services: Vec::new,
+            worker_adaptation_http: None,
+            worker_compose: b2bua::rules::ComposeOptions::default(),
             views: ViewLedger::new(clock, event_seq_for_views),
             worker_specs: HashMap::new(),
             sip_cut,
@@ -1195,6 +1209,22 @@ impl FailoverHarness {
         self
     }
 
+    /// Hand every worker spawned from now on, and each of its incarnations,
+    /// `port` for its services' `ServiceHttpRequest`s (the failover twin of
+    /// `B2buaSutBuilder::adaptation_http`).
+    pub fn with_worker_adaptation_http(mut self, port: b2bua::AdaptationHttpPort) -> Self {
+        self.worker_adaptation_http = Some(port);
+        self
+    }
+
+    /// Run `compose` on every worker spawned from now on, and each of its
+    /// incarnations (the failover twin of
+    /// `B2buaSutBuilder::without_core_refer_transfer`).
+    pub fn with_worker_compose(mut self, compose: b2bua::rules::ComposeOptions) -> Self {
+        self.worker_compose = compose;
+        self
+    }
+
     /// Waive one RFC-audit rule (by its `name()`) on this harness's Drop-time hard
     /// gate for the **whole harness lifetime** — establishment included, before any
     /// fault exists. It leaves no baseline in this recording: nothing this run
@@ -1213,7 +1243,8 @@ impl FailoverHarness {
 
     /// Accept `rule`'s findings on messages recorded from **now** until
     /// [`resume_rfc_gate`](Self::resume_rfc_gate) (or the end of the run) — the
-    /// window-scoped counterpart of [`allow_rfc_violation`]. Call it at the instant
+    /// window-scoped counterpart of
+    /// [`allow_rfc_violation`](Self::allow_rfc_violation). Call it at the instant
     /// the scenario injects its fault: establishment, every message before the
     /// injection, and every no-fault scenario keep the rule fully gating, so a new
     /// regression outside the window still fails the test.
@@ -1224,7 +1255,7 @@ impl FailoverHarness {
     /// millisecond.
     ///
     /// A finding the rule cannot pin to a wire entry is unattributable and stays
-    /// gated (only [`allow_rfc_violation`] covers it).
+    /// gated (only [`allow_rfc_violation`](Self::allow_rfc_violation) covers it).
     ///
     /// Accepted findings are classified, not masked: they leave the gate but land
     /// in [`accepted_rfc_deviations`](Self::accepted_rfc_deviations) and in the
@@ -1263,7 +1294,7 @@ impl FailoverHarness {
     }
 
     /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
-    /// see [`worker_clock_offsets`](Self::worker_clock_offsets). Call BEFORE
+    /// see `worker_clock_offsets`. Call BEFORE
     /// [`spawn_worker`](Self::spawn_worker) for `ordinal` (the offset is read at
     /// spawn and carried across reboots). A positive offset anchors the node AHEAD
     /// of true time (skew-ahead), negative BEHIND. Returns `self` for chaining.
@@ -1297,6 +1328,35 @@ impl FailoverHarness {
     /// Bind a named UA at `addr` on the SIP fabric (alice/bob).
     pub async fn agent(&self, name: &str, addr: &str) -> Agent {
         self.harness.agent(name, addr).await
+    }
+
+    /// [`agent`](Self::agent) with explicit RFC-audit roles — a third-party
+    /// proxy on the fabric binds with `{Proxy}`.
+    pub async fn agent_with_roles(
+        &self,
+        name: &str,
+        addr: &str,
+        roles: std::collections::HashSet<sip_net::UaRole>,
+    ) -> Agent {
+        self.harness.agent_with_roles(name, addr, roles).await
+    }
+
+    /// Bind a scripted third-party proxy at `addr` on the SIP fabric: the test
+    /// forwards each message it receives, and may alter it on the way.
+    pub async fn scripted_proxy(&self, name: &str, addr: &str) -> scenario_harness::Proxy {
+        self.harness.proxy(name, addr).await
+    }
+
+    /// One callee socket at `addr` shared by logical agents, each owning the
+    /// requests whose Request-URI user part starts with its prefix (longest
+    /// match) — the failover twin of `scenario_harness::Harness::callee_group`.
+    /// `callees` lists `(name, prefix)`; a name may own several prefixes.
+    pub async fn callee_group(
+        &self,
+        addr: &str,
+        callees: &[(&str, &str)],
+    ) -> scenario_harness::CalleeGroup {
+        self.harness.callee_group(addr, callees).await
     }
 
     /// [`agent`](Self::agent) with an arrival-time [`sip_net::PreIngressHook`]
@@ -1613,6 +1673,8 @@ impl FailoverHarness {
             limiter: spec.limiter.clone(),
             tune: self.worker_tune.clone(),
             services: self.worker_services,
+            adaptation_http: self.worker_adaptation_http.clone(),
+            compose: self.worker_compose.clone(),
             views: self.views.clone(),
             alive: Arc::new(AtomicBool::new(true)),
             system: b2bua::capacity::simulated().1,
@@ -1634,7 +1696,7 @@ impl FailoverHarness {
     /// interleaves with SIP messages and repl frames in TRUE append order. Called
     /// at the instant the transition occurs (crash/reboot/drain/failover/
     /// partition/heal/cut) in the runner, so e.g. the reboot marker naturally
-    /// precedes the bootstrap pull it triggers (Issue 1).
+    /// precedes the bootstrap pull it triggers.
     pub fn mark(&mut self, node: &str, peer: Option<&str>, kind: &str, detail: &str) {
         self.markers.push(Marker {
             at_ms: self.clock.now_ms(),
@@ -1954,15 +2016,16 @@ impl FailoverHarness {
 
     // -- clock -------------------------------------------------------------
 
-    /// Advance the paused clock by `dur`, driving BOTH the SIP and repl sim
-    /// pipelines with the proven settle/advance/settle discipline (CLAUDE.md).
-    /// Drive the protocol BETWEEN advances: advance to the deadline, then assert.
+    /// Advance the paused clock by `dur` in settled 100 ms chunks, driving BOTH
+    /// the SIP and repl sim pipelines and sampling the views ledger after each
+    /// chunk (`ceil(dur/100 ms) + 1` chunks: never less than 200 ms). Drive the
+    /// protocol BETWEEN advances: advance to the deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
         sip_clock::testkit::pump_sampled(dur, || self.views.sample()).await;
     }
 
     /// **Fine-grained pump toward an unknown timer deadline.** Advances the
-    /// paused clock in `step` increments (each a full settle/advance/settle pump
+    /// paused clock in `step` increments (each an [`advance`](Self::advance)
     /// across both planes), running the async `ready` probe *after every step*
     /// and returning `true` the instant it is satisfied — `false` if `max` total
     /// elapses first.
@@ -2001,8 +2064,8 @@ impl FailoverHarness {
     }
 
     /// **Mutualised long-wait teardown settle** (TODO `FixCallTerminateOnBackup`
-    /// §5.4). After a call's terminal request, pump the paused clock under the
-    /// settle/advance/settle discipline until `drained` is satisfied — first in
+    /// §5.4). After a call's terminal request, [`advance`](Self::advance) the
+    /// paused clock until `drained` is satisfied — first in
     /// fine 200 ms steps for the immediate flush (CDR write + soft limiter release
     /// + reverse-delete drain + an acting-backup takeover copy's self-release on
     /// Timer H/J ~32 s), then in coarse 5 s steps **past one full
@@ -2109,7 +2172,8 @@ impl FailoverHarness {
     /// Run the FULL RFC audit suite — the per-bind **peer** rules (Via echo /
     /// response↔transaction correlation, tags, CANCEL/RAck correlation, …) on
     /// top of the cross-message rules — over the recorded trace and panic on
-    /// any non-advisory finding, honouring [`allow_rfc_violation`] waivers.
+    /// any non-advisory finding, honouring
+    /// [`allow_rfc_violation`](Self::allow_rfc_violation) waivers.
     ///
     /// The Drop-time gate deliberately runs only the endpoint-scoped
     /// cross-message rules (a transparent failover splits one dialog's CSeq
@@ -2229,7 +2293,7 @@ impl FailoverHarness {
     ///
     /// **Every reboot that re-points traffic at the new address calls this** —
     /// a worker bind the exclusion set does not name is audited as if it were a
-    /// real UA, which [`audited_events`](Self::audited_events) exists to prevent.
+    /// real UA, which `audited_events` exists to prevent.
     pub fn note_worker_rebound(&mut self, _ordinal: &str, new_addr: SocketAddr) {
         self.all_worker_sip_addrs.push(new_addr);
     }
@@ -2363,7 +2427,7 @@ impl FailoverHarness {
     /// Render the COMBINED unified report as the `global.txt` string: the SIP
     /// exchange, the lifecycle markers, AND the replication exchange interleaved
     /// on one time-ordered axis (see [`unified_doc`](Self::unified_doc)).
-    /// Consumes the harness (parity with the historic signature; call last). The
+    /// Consumes the harness (call last). The
     /// non-consuming [`unified_doc`](Self::unified_doc) /
     /// [`write_unified_report`](Self::write_unified_report) are preferred for the
     /// always-write artifacts.
@@ -2517,6 +2581,43 @@ impl HarnessHandle {
         let a = h.agent(name, addr).await;
         *self.inner.lock().unwrap() = Some(h);
         a
+    }
+
+    /// [`agent`](Self::agent) with explicit RFC-audit roles.
+    async fn agent_with_roles(
+        &self,
+        name: &str,
+        addr: &str,
+        roles: std::collections::HashSet<sip_net::UaRole>,
+    ) -> Agent {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let a = h.agent_with_roles(name, addr, roles).await;
+        *self.inner.lock().unwrap() = Some(h);
+        a
+    }
+
+    /// A scripted proxy bound on the shared fabric (under a brief lock).
+    async fn proxy(&self, name: &str, addr: &str) -> scenario_harness::Proxy {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let p = h.proxy(name, addr).await;
+        *self.inner.lock().unwrap() = Some(h);
+        p
+    }
+
+    /// A callee group bound on the shared fabric (under a brief lock).
+    async fn callee_group(
+        &self,
+        addr: &str,
+        callees: &[(&str, &str)],
+    ) -> scenario_harness::CalleeGroup {
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
+        let mut group = h.callee_group(addr);
+        for (name, prefix) in callees {
+            group = group.callee(*name, *prefix);
+        }
+        let built = group.build().await;
+        *self.inner.lock().unwrap() = Some(h);
+        built
     }
 
     /// [`agent`](Self::agent) with a pre-ingress hook on the UA's bind.

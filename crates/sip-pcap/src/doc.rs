@@ -145,7 +145,7 @@ pub struct MsgJson {
     #[serde(default, skip_serializing_if = "is_first_probe")]
     pub probe: u32,
     /// Index into this leg's `msgs` of the EARLIEST message this one repeats,
-    /// under the criterion in [`crate::callfacts::mark_repeats`]: `retx` is the
+    /// under the criterion in `crate::callfacts::mark_repeats`: `retx` is the
     /// same-branch half, and a fresh-branch re-answer (a peer ACKing a
     /// retransmitted final in a new transaction) is the half `retx` cannot see.
     /// Both are bounded by the transaction envelope, so matching bytes emitted

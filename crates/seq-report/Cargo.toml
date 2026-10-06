@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 # serde stays the ONLY dependency (external, cycle-free): the neutral SeqDoc is
-# the persisted diagram half of the E2E result.json (ADR-0018 Phase F).
+# the persisted diagram half of the E2E result.json (ADR-0018).
 serde = { workspace = true }
 
 [dev-dependencies]

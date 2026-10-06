@@ -168,19 +168,13 @@ mod tests {
 
     use super::intake_rate;
     use crate::trace::CallTraces;
-    use observe::{RateDraw, SampleAdmission, TokenBucket};
+    use observe::{activation_bucket, RateDraw, SampleAdmission};
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser, SipRequest};
 
     fn traces(exporter: bool, honors_header: bool) -> CallTraces {
         CallTraces::new(
-            SampleAdmission::new(
-                exporter,
-                1e-4,
-                200,
-                RateDraw::seeded(3),
-                TokenBucket::default_at(0),
-            ),
+            SampleAdmission::new(exporter, 1e-4, 200, RateDraw::seeded(3), activation_bucket(0)),
             honors_header,
         )
     }

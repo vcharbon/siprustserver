@@ -64,6 +64,11 @@ impl IdGen {
         u64::from_le_bytes(out[..8].try_into().expect("a SHA-256 output holds 8 bytes"))
     }
 
+    /// A uniform 64-bit draw, for a value picked at random (a `Retry-After`).
+    pub fn draw(&self) -> u64 {
+        self.next_u64()
+    }
+
     /// RFC 3261 From/To tag — 8 base-36 chars.
     pub fn new_tag(&self) -> String {
         to_base36(self.next_u64(), 8)

@@ -17,7 +17,9 @@ use crate::rng::IdGen;
 use crate::seed::{Reoffer, TxnSeed};
 
 use super::backlog::DeferredBound;
+use super::key::ServerTxnKey;
 use super::owner::{run, Owner};
+use super::refusals::InviteRefusals;
 
 /// Tunables for the transaction layer.
 pub struct TransactionConfig {
@@ -28,9 +30,9 @@ pub struct TransactionConfig {
     pub id_gen: Arc<IdGen>,
     /// The INVITE transaction bound once a provisional has arrived, ms — the
     /// client txn's give-up timer for an INVITE in Proceeding (initial or
-    /// in-dialog; before any response it is on Timer B) AND the server-side
-    /// sweep age for a pre-final INVITE derive from this one value, so both
-    /// halves of a call admit the same ring window. Default
+    /// in-dialog; before any response it is on Timer B) AND the backstop of
+    /// every active INVITE transaction, either role, derive from this one
+    /// value, so both halves of a call admit the same ring window. Default
     /// [`INVITE_INITIAL_TIMEOUT`](crate::timers::INVITE_INITIAL_TIMEOUT)
     /// (158 s); the consumer validates its own range and MUST keep every
     /// app-level setup deadline strictly below it, or the txn layer CANCELs
@@ -64,11 +66,18 @@ pub struct TransactionConfig {
     /// correction itself turns it off.
     pub strict_to_tag: bool,
     /// The ceilings on the deferred backlog past which an INVITE no
-    /// transaction holds is refused ([`DeferredBound`]). `None` — the default —
-    /// sets none: the backlog then grows with the INVITEs admitted while the
-    /// consumer does not drain, until the sweep removes them with their
-    /// transactions.
+    /// transaction holds is refused ([`DeferredBound`]), with
+    /// [`invite_refusals`](Self::invite_refusals)' answer, which it requires.
+    /// `None` — the default — sets none: the backlog then grows with the
+    /// INVITEs admitted while the consumer does not drain, until their
+    /// transactions' backstops remove them.
     pub deferred_bound: Option<DeferredBound>,
+    /// The node's refusals of new INVITEs, shared with any stage ahead of this
+    /// layer that refuses one ([`InviteRefusals`]): a copy of an INVITE they
+    /// hold refused draws that refusal here, before any transaction exists,
+    /// and an initial INVITE this layer admits is held there while its
+    /// transaction lives. `None` — the default — shares nothing.
+    pub invite_refusals: Option<InviteRefusals>,
 }
 
 impl TransactionConfig {
@@ -88,6 +97,7 @@ impl Default for TransactionConfig {
             cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
             strict_to_tag: true,
             deferred_bound: None,
+            invite_refusals: None,
         }
     }
 }
@@ -142,10 +152,10 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
-    /// Forget the non-INVITE server transaction at `branch` if it has sent
+    /// Forget the non-INVITE server transaction `key` names if it has sent
     /// nothing yet (`Trying`) and holds the request's dialog identity; no reply.
     ForgetUnanswered {
-        branch: String,
+        key: ServerTxnKey,
         call_id: String,
         from_tag: String,
     },
@@ -235,7 +245,7 @@ impl TransactionLayer {
     }
 
     /// Send an outbound SIP request, allocating a client transaction and
-    /// returning its handle. `Err` if the owner task is gone (see [`roundtrip`]).
+    /// returning its handle. `Err` if the owner task is gone (see `roundtrip`).
     pub async fn send_request(
         &self,
         msg: SipRequest,
@@ -271,8 +281,8 @@ impl TransactionLayer {
     /// Rebuild the in-flight INVITE transactions a call materialised from a
     /// replica names (ADR-0014), each as a `Proceeding` transaction attributed
     /// to `call_ref` — see [`TxnSeed`] for what each seed becomes. Returns how
-    /// many went in; a seed whose branch already holds a transaction is skipped
-    /// and counted (`txn_seed_skipped`), never displaced.
+    /// many went in; a seed whose identity already holds a transaction of its
+    /// role is skipped and counted (`txn_seed_skipped`), never displaced.
     pub async fn seed(
         &self,
         call_ref: &str,
@@ -284,8 +294,8 @@ impl TransactionLayer {
     /// Hand back a datagram this layer already emitted, to be processed
     /// against the transactions now in the map — the ones [`seed`](Self::seed)
     /// just rebuilt. A response matching a client transaction, a CANCEL
-    /// matching an active INVITE server transaction and a request whose branch
-    /// holds a server transaction run their first-arrival path and are
+    /// matching an active INVITE server transaction and a request matching a
+    /// server transaction (RFC 3261 §17.2.3) run their first-arrival path and are
     /// [`Reoffer::Matched`] (the consumer drops its copy: whatever that path
     /// emits arrives as a fresh event); anything else is
     /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
@@ -307,7 +317,7 @@ impl TransactionLayer {
 
     /// How many transactions for `call_ref` are still resident in the map (any
     /// role/state). The acting-backup self-release (ADR-0014) reads it as a
-    /// defensive re-check — see [`Command::ActiveTxnCount`].
+    /// defensive re-check — see `Command::ActiveTxnCount`.
     pub async fn active_txn_count_for_call(
         &self,
         call_ref: &str,
@@ -317,16 +327,17 @@ impl TransactionLayer {
     }
 
     /// The consumer discarded the non-INVITE request whose server transaction
-    /// is `branch` before answering it: forget that transaction if it is still
-    /// `Trying`, so the UAC's retransmission (RFC 3261 §17.1.2.2) is admitted
-    /// afresh instead of absorbed unanswered. The request's `call_id` and
-    /// `from_tag` must match the transaction's, so another peer's request on a
-    /// colliding branch is never forgotten; a transaction that has sent a
-    /// response is kept. Never waits: a full command queue refuses the request
-    /// and counts it (`forget_refused`).
-    pub fn forget_unanswered(&self, branch: &str, call_id: &str, from_tag: &str) {
+    /// is `key` ([`ServerTxnKey::of`] the request) before answering it: forget
+    /// that transaction if it is still `Trying`, so the UAC's retransmission
+    /// (RFC 3261 §17.1.2.2) is admitted afresh instead of absorbed unanswered.
+    /// Another request on the same branch — another sent-by or method — is
+    /// another transaction and is never forgotten, and the request's `call_id`
+    /// and `from_tag` must match the transaction's; a transaction that has
+    /// sent a response is kept. Never waits: a full command queue refuses the
+    /// request and counts it (`forget_refused`).
+    pub fn forget_unanswered(&self, key: &ServerTxnKey, call_id: &str, from_tag: &str) {
         let cmd = Command::ForgetUnanswered {
-            branch: branch.to_string(),
+            key: key.clone(),
             call_id: call_id.to_string(),
             from_tag: from_tag.to_string(),
         };

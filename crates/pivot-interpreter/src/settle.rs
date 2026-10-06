@@ -170,7 +170,7 @@ pub fn open_reasons(
 /// exactly, then the deployment observables.
 ///
 /// A CDR `checks` entry asserts over the record SET — "some record shows this" —
-/// because `{ count, checks }` has no per-record scoping (friction K8). The
+/// because `{ count, checks }` has no per-record scoping. The
 /// failure says so rather than implying it pinned one record.
 ///
 /// Each finding carries its check's CLASS; what that costs on this lane is the

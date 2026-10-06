@@ -134,10 +134,11 @@ impl CallStore for CountingStore {
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
-        self.inner.delete_call(role, primary, call_ref, indexes, opts).await
+        self.inner.delete_call(role, primary, call_ref, indexes, answered, opts).await
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {

@@ -152,7 +152,7 @@ impl<'a> Invite<'a> {
         self
     }
 
-    /// Override the From URI (e.g. `"sip:+33123456789@example.com"`) — drives
+    /// Override the From URI (e.g. `"sip:+15551234567@example.com"`) — drives
     /// From from Test-case input instead of the default `sip:caller@ip`.
     pub fn from(mut self, uri: impl Into<String>) -> Self {
         self.from_uri = Some(uri.into());

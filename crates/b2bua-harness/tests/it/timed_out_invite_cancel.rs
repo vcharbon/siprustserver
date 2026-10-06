@@ -52,7 +52,7 @@ async fn a_callee_silent_past_the_invite_bound_is_cancelled_and_its_487_acked() 
 /// The same silence while a parked call holds the only handler permit: the
 /// Timeout waits past the full queue until the permit frees at 40.8 s, and
 /// alice is answered then, well before her INVITE server transaction ages out
-/// (the bound plus the sweep's 35 s).
+/// (its backstop: the bound plus 35 s).
 #[tokio::test(start_paused = true)]
 async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
     let s = one_permit_one_deep_with("timed-out-invite-late-turn", |c| {

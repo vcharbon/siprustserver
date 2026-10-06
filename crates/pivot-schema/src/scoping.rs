@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum CheckClass {
     /// A header only the origin platform emits (`P-Charging-Vector`,
-    /// `P-Identifier`, `P-Orig`). Another platform relays a compliant message
+    /// `X-Vendor-Id`, `X-Vendor-Orig`). Another platform relays a compliant message
     /// that simply does not carry it.
     OriginPlatformHeader,
     /// The origin platform's CDR record vocabulary: event names, disposition

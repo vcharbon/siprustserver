@@ -20,8 +20,8 @@ use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, S
 
 const W1_POD: &str = "10.244.5.8";
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
-const SNAT_NODE: &str = "172.20.0.11";
+const PROXY_VIP: &str = "192.0.2.250";
+const SNAT_NODE: &str = "192.0.2.11";
 
 /// Strategy double that records the address handed to `encode_stickiness`
 /// — the contract under test: for a worker-originated dialog-creating
@@ -48,6 +48,9 @@ impl RoutingStrategy for CookieCaptureStrategy {
     }
     fn encode_stickiness(&self, target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
         *self.encoded_for.lock().unwrap() = Some(target.clone());
+        None
+    }
+    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
         None
     }
 }
@@ -92,7 +95,7 @@ Content-Length: 0\r\n\r\n"
     CustomParser::default().parse(raw.as_bytes()).unwrap()
 }
 
-// Regression for the b-leg long-call-loss class: behind the keepalived VIP
+// The b-leg long-call-loss class: behind the keepalived VIP
 // the worker's INVITE arrives with src = SNAT node IP + ephemeral port. The
 // cookie must be encoded for the worker's REGISTRY identity (the SNAT-immune
 // top-Via sent-by) — encoding it for `src` makes encode_stickiness miss the

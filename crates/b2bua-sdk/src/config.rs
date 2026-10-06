@@ -27,6 +27,20 @@ pub struct B2buaConfig {
     pub per_call_queue_depth: usize,
     /// Max number of live per-call queues (memory bound).
     pub per_call_queue_cap: usize,
+    /// The share of `event_dispatch_concurrency`, in percent, that turns of
+    /// normal initial INVITEs may hold at once (1..=100, default 50). Such a
+    /// turn holds its permit across the decision round trip. An emergency
+    /// INVITE draws from the whole pool, so established calls keep the rest
+    /// of it less what emergency turns hold. See
+    /// [`new_call_permits`](Self::new_call_permits).
+    pub new_call_permit_share_percent: u8,
+    /// The share of `per_call_queue_cap`, in percent, kept back from normal
+    /// new INVITEs (0..=99, default 5): such an INVITE opens a call's queue
+    /// only below the cap less this headroom, while an emergency INVITE and
+    /// every in-dialog event (the first one of a taken-over call included)
+    /// open one up to the full cap. See
+    /// [`new_call_queue_headroom`](Self::new_call_queue_headroom).
+    pub new_call_queue_headroom_percent: u8,
     /// Auto-terminate a call whose in-dialog event count exceeds this WITHIN
     /// one keepalive interval (loop guard). The keepalive tick resets the
     /// counter, so the budget is a rate: a runaway dialog lands >cap events
@@ -49,11 +63,11 @@ pub struct B2buaConfig {
     /// Bounded CDR submit queue; `0` disables buffering (passthrough).
     pub cdr_buffer_queue_max: usize,
     /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
-    /// intercept; fires while still `refer-authorizing` (HTTP hung). TS default 60.
+    /// intercept; fires while still `refer-authorizing` (HTTP hung). Default 60.
     pub refer_subscription_expiry_sec: i64,
-    /// Per re-INVITE answer watchdog during REFER realignment, seconds. TS default 32.
+    /// Per re-INVITE answer watchdog during REFER realignment, seconds. Default 32.
     pub refer_reinvite_answer_sec: i64,
-    /// Overall REFER safety timer covering the whole transfer FSM, seconds. TS default 120.
+    /// Overall REFER safety timer covering the whole transfer FSM, seconds. Default 120.
     pub refer_overall_safety_sec: i64,
     /// Overall safety timer covering the whole **established-call reroute**
     /// (a `Route`-shaped `call_release` decision): replacement
@@ -163,28 +177,27 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
-    /// **Setup timeout**, seconds — the call-level a-leg initial-INVITE
-    /// deadline: armed at route time, cancelled at answer, deliberately NOT
-    /// reset by reroute/failover (each new b-leg gets its own `NoAnswer`; this
-    /// caps the caller's *total* wait for a final response). It rides the
-    /// replicated `call.timers` ledger, so it survives a crash → reclaim —
-    /// the sip-txn transaction bound
+    /// **Setup timeout**, seconds — the call-level a-leg initial-INVITE deadline:
+    /// armed at route time, cancelled at answer, deliberately NOT reset by
+    /// reroute/failover (each new b-leg gets its own `NoAnswer`; this caps the
+    /// caller's *total* wait for a final response). It rides the replicated
+    /// `call.timers` ledger, so it survives a crash → reclaim — the sip-txn
+    /// transaction bound
     /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) cannot (the
-    /// transactions die with the node), which is how a worker kill stranded
-    /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration
-    /// (endurance 2026-06-12). Default **150 s**: strictly below the
-    /// configured transaction bound (enforced by [`validate`](Self::validate))
-    /// so the rules path owns the teardown (408 to the caller, CANCEL to
-    /// pending b-legs, obligations settled), above any sane no-answer timeout
-    /// so a route-supplied `NoAnswer` still fires first. `<= 0` disables (the
-    /// txn backstop and GlobalDuration remain). Overridable via
-    /// `B2BUA_SETUP_TIMEOUT_SEC`.
+    /// transactions die with the node), so without it a worker kill strands
+    /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration.
+    /// Default **150 s**: strictly below the configured transaction bound
+    /// (enforced by [`validate`](Self::validate)) so the rules path owns the
+    /// teardown (408 to the caller, CANCEL to pending b-legs, obligations
+    /// settled), above any sane no-answer timeout so a route-supplied `NoAnswer`
+    /// still fires first. `<= 0` disables (the txn backstop and GlobalDuration
+    /// remain). Overridable via `B2BUA_SETUP_TIMEOUT_SEC`.
     pub setup_timeout_sec: i64,
     /// **Initial-INVITE transaction bound**, seconds — the sip-txn
     /// out-of-dialog INVITE give-up window
     /// (`TransactionConfig::invite_initial_timeout_ms`), bounding BOTH halves
     /// of a call: the b-leg client txn's give-up AND the a-leg server txn's
-    /// pre-final sweep age derive from it. The last-resort backstop under every
+    /// pre-final backstop derive from it. The last-resort backstop under every
     /// app-level setup deadline: [`validate`](Self::validate) requires
     /// `setup_timeout_sec < invite_txn_timeout_sec` (when enabled) and
     /// range-checks [`MIN_INVITE_TXN_TIMEOUT_SEC`](Self::MIN_INVITE_TXN_TIMEOUT_SEC)
@@ -239,76 +252,79 @@ pub struct B2buaConfig {
     /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) does.
     /// Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
     pub ack_timeout_sec: i64,
-    /// **Tier-3 CPS token-bucket capacity** (migration/09 — port of
+    /// **CPS bucket rung capacity** (port of
     /// `AppConfig.cpsBucketSize`). The hard ceiling on a *burst* of new-dialog
     /// INVITEs this worker will admit: tokens accrue at
     /// [`cps_bucket_rate`](Self::cps_bucket_rate)/s up to this cap, and the
     /// admission gate consumes one per new INVITE (an emergency caller is
     /// admitted on an empty bucket and owes nothing). `0` disables the
     /// hard CPS gate (every non-emergency INVITE passes the bucket — the
-    /// panic-ELU backstop still applies). TS default **1000**. Overridable via
+    /// panic-ELU backstop still applies). Default **1000**. Overridable via
     /// `B2BUA_CPS_BUCKET_SIZE`.
     pub cps_bucket_size: u32,
-    /// **Tier-3 CPS token refill rate** (tokens/sec; port of
+    /// **CPS bucket rung refill rate** (tokens/sec; port of
     /// `AppConfig.cpsBucketRate`). The sustained new-INVITE rate the bucket
-    /// permits once its burst capacity is drained. TS default **500**.
+    /// permits once its burst capacity is drained. Default **500**.
     /// Overridable via `B2BUA_CPS_BUCKET_RATE`.
     pub cps_bucket_rate: u32,
-    /// **Tier-3 panic-ELU threshold** (`0..1`; port of
-    /// `AppConfig.overloadPanicEluThreshold`, slice 7 of the overload rework).
+    /// **Panic-ELU rung threshold** (`0..1`; port of
+    /// `AppConfig.overloadPanicEluThreshold`).
     /// A *backstop* on the worker's OWN EWMA-smoothed Event-Loop Utilization:
     /// above it, a non-emergency new INVITE that already passed the CPS bucket
     /// is still 503'd locally, regardless of the LB's AIMD cap. The LB-side AIMD
     /// (`sip_proxy::load_observer`) is the primary control loop; this catches the
     /// cases where the LB is absent, misconfigured, or itself overloaded. Kept
-    /// high so it almost never fires in normal operation. TS env default
-    /// **0.75** (the `OverloadController.ts` source carries a stale `0.98`
-    /// comment; the shipped `OVERLOAD_PANIC_ELU_THRESHOLD` fallback is `0.75`).
+    /// high so it almost never fires in normal operation. Default **0.75**.
     /// `>= 1.0` effectively disables it (the clamped ELU never exceeds 1).
     /// Overridable via `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD`.
     pub overload_panic_elu_threshold: f64,
     /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) of
-    /// the new-call 503s: the panic-ELU reject, the capacity reject, the Tier-1
-    /// brake and the dispatcher cap shed. The `bucket_empty` 503 instead derives
-    /// its Retry-After from the bucket's time-to-next-token. A new-call reject
-    /// never carries less than 1 s, whatever this value. TS default **5**.
+    /// every new-call 503: the panic-ELU and capacity rejects, the ingress
+    /// brake, the deferred backlog and the dispatcher cap shed. The
+    /// `bucket_empty` 503 starts from the later of this and the bucket's
+    /// time-to-next-token. A new-call reject never carries less than 1 s,
+    /// whatever this value. Default **5**.
     /// Overridable via `B2BUA_RETRY_AFTER_BASE_SEC`.
     pub retry_after_base_sec: u32,
-    /// **Retry-After jitter span** (seconds) of the capacity 503 (ADR-0037) and
-    /// the Tier-1 brake: uniform over `[b, b + jitter]` with
-    /// `b = max(retry_after_base_sec, 1)`, so callers refused together do not
-    /// return together. `0` pins it to `b`.
+    /// **Retry-After jitter span** (seconds) of every new-call 503 (ADR-0037
+    /// item 3): uniform over `[b, b + jitter]` with `b` the base above floored
+    /// at 1 s, so callers refused together do not return together. `0` pins it
+    /// to `b`.
     /// Overridable via `B2BUA_RETRY_AFTER_JITTER_SEC`.
     pub retry_after_jitter_sec: u32,
-    /// **b-leg target admission allow-list** (port of
+    /// The `Retry-After` range a `491 Request Pending` carries when it refuses
+    /// an INVITE whose sender's earlier INVITE has its 2xx from this side and
+    /// has not ACKed it yet (RFC 3261 §20.33 leaves the header optional there).
+    /// `None`, the default: no `Retry-After` on any 491.
+    pub glare_retry_after: Option<RetryAfterRange>,
+    /// **b-leg destination allow-list** (port of
     /// `AppConfig.workerAllowedTargetSuffixes`). The decision boundary classifies
-    /// `route.destination.host` against this list (see `target_admission`): an IP
-    /// literal always passes; otherwise the host must end with one of these
-    /// suffixes (case-insensitive), else the gate emits a `503` and terminates the
-    /// call *before* any b-leg state is allocated. This stops a bogus host (a typo,
-    /// a `.svc.cluster.local` name the K8s runner constructs, a dev `/etc/hosts`
-    /// entry) from reaching the send path and blocking on `getaddrinfo`/`EAI_AGAIN`.
-    /// The literal `"*"` matches every host (a rollback sentinel — restores
-    /// pre-admission behaviour without a redeploy). TS env default
-    /// `".svc.cluster.local"` (the K8s in-cluster DNS suffix); an empty list
-    /// rejects every non-IP host. Overridable via `WORKER_ALLOWED_TARGET_SUFFIXES`
-    /// (comma-separated, trimmed, empties dropped).
+    /// `route.destination.host` against this list (see `destination_allowlist`):
+    /// an IP literal always passes; otherwise the host must end with one of these
+    /// suffixes (case-insensitive), else the gate emits a `503` and terminates
+    /// the call *before* any b-leg state is allocated. This stops a bogus host (a
+    /// typo, a `.svc.cluster.local` name the K8s runner constructs, a dev
+    /// `/etc/hosts` entry) from reaching the send path and blocking on
+    /// `getaddrinfo`/`EAI_AGAIN`. The literal `"*"` matches every host (a
+    /// rollback sentinel — restores admit-everything behaviour without a
+    /// redeploy). Default `".svc.cluster.local"` (the K8s in-cluster DNS suffix);
+    /// an empty list rejects every non-IP host. Overridable via
+    /// `WORKER_ALLOWED_TARGET_SUFFIXES` (comma-separated, trimmed, empties
+    /// dropped).
     pub worker_allowed_target_suffixes: Vec<String>,
     /// **Decision-backend deadline** (ms) — the hard per-round-trip bound on a
     /// caller-blocking `CallDecisionEngine` call (`new_call` and `call_failure`;
     /// `call_refer` is bounded by the refer subscription/safety timers instead —
-    /// see [`crate::…`] `DeadlineDecisionEngine`), enforced by the CORE
+    /// see `DeadlineDecisionEngine`), enforced by the CORE
     /// (`b2bua::decision::DeadlineDecisionEngine` wraps whatever engine the host
     /// injects at `B2buaCore::spawn`). This is the load-bearing half of the
     /// initial-INVITE guarantee (ADR-0022): sip-txn auto-answers 100 Trying
     /// before the router ever sees the INVITE, so the caller is already waiting
     /// — a decision backend that hangs must NOT strand them. On expiry the call
     /// takes the ordinary decision-error path (503 to the caller for
-    /// `new_call`; the per-site `Err` fallback for failure/refer). The TS
-    /// system enforced this INSIDE its `HttpReferenceAdapter`
-    /// (`callControlNewCallTimeoutMs`/`callControlFailureTimeoutMs`, both
-    /// default 5000); the Rust port moves it into the core as ONE knob so a
-    /// third-party adapter cannot forget it. Default **5000**. `<= 0` disables
+    /// `new_call`; the per-site `Err` fallback for failure/refer). The core owns
+    /// this as ONE knob, not each adapter, so a third-party adapter cannot
+    /// forget it. Default **5000**. `<= 0` disables
     /// (escape hatch for tests that need a genuinely wedged decision await —
     /// the reaper ladder still cleans up, see `reaper.rs`). Overridable via
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS`.
@@ -323,6 +339,26 @@ pub struct B2buaConfig {
     /// relayable even if named here, so a misconfiguration cannot corrupt the
     /// dialog. Overridable per worker via `B2BUA_RELAY_HEADERS` (comma-separated).
     pub relay_headers: Vec<String>,
+    /// **Privacy service** (RFC 3323 §5, RFC 3325 §7). `true` (the default):
+    /// this worker is the trust boundary, so a relayed message whose `Privacy`
+    /// conceals the identity leaves the asserted identity behind. `false`: the
+    /// next hop is the boundary, and the asserted identity rides beside the
+    /// privacy request. Overridable via `B2BUA_PRIVACY_SERVICE`.
+    pub privacy_service: bool,
+    /// **Relay policy.** The headers a relayed message leaves behind, by
+    /// header, message and direction ([`RelayPolicy`]), consulted at every
+    /// relay site except the originated INVITE, whose headers the routing
+    /// decision states. Transparent by default; a deployment sets it in code.
+    ///
+    /// [`RelayPolicy`]: sip_message::generators::RelayPolicy
+    pub relay_policy: sip_message::generators::RelayPolicy,
+    /// How a CANCEL this stack mints toward a pending leg restates the
+    /// canceller's `Reason` (RFC 3326 §2): verbatim by default.
+    pub relayed_cancel_reason: crate::release_reason::CancelReason,
+    /// The `Reason` (RFC 3326) on every BYE of a release the stack makes on
+    /// its own, never one a peer's BYE or CANCEL asked for, where no other
+    /// `Reason` is stated. `None` (the default) states none.
+    pub own_release_reason: Option<String>,
     /// **Default SDP source** (a service parameter). A canned SDP body a service
     /// rule can source (via `ctx.config`) to originate a deliberate *fake-offer*
     /// INVITE — e.g. a delayed-offer flow where the service sends `INVITE(SDP)` it
@@ -330,7 +366,7 @@ pub struct B2buaConfig {
     /// `body_override: ctx.config.default_sdp.clone()`; it is **never** an
     /// automatic fallback (a normal reroute/failover `CreateLeg` passes
     /// `body_override: None` on purpose to relay the caller's own offer). `None`
-    /// (the default) = no canned SDP, today's behaviour.
+    /// (the default) = no canned SDP.
     pub default_sdp: Option<Vec<u8>>,
     /// The service's hook deciding the form an in-dialog session description
     /// leaves in ([`SdpFormPolicy`]); [`AsWritten`] by default.
@@ -342,6 +378,11 @@ pub struct B2buaConfig {
     /// stack set; the health path borrows this value, so a keepalive probe
     /// resolves its advertisement without allocating.
     pub node_capabilities: sip_message::generators::CapabilitySet,
+    /// **Minted-final advertisement.** The `Allow`/`Supported`/`Accept` this
+    /// worker states on a failure final to an INVITE it mints in its own name,
+    /// restating no peer's final (a reject, a refusal, a timeout's final; not
+    /// 487). Silent by default; a deployment sets it in code.
+    pub minted_final_advertisement: sip_message::generators::CapabilitySet,
     /// The call record's raw context — the per-leg message ring and the
     /// headers it captures. Off by default: the runner turns it on.
     pub cdr: CdrConfig,
@@ -421,6 +462,22 @@ impl CapacityConfig {
     }
 }
 
+/// An inclusive range of `Retry-After` seconds (RFC 3261 §20.33), one value
+/// drawn uniformly per response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryAfterRange {
+    pub min_sec: u32,
+    pub max_sec: u32,
+}
+
+impl RetryAfterRange {
+    /// The value `roll` (any `u64`) picks, uniform over `[min_sec, max_sec]`.
+    pub fn pick(&self, roll: u64) -> u32 {
+        let span = u64::from(self.max_sec.saturating_sub(self.min_sec)) + 1;
+        self.min_sec.saturating_add((roll % span) as u32)
+    }
+}
+
 /// What the call keeps of its own SIP traffic for the record it writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CdrConfig {
@@ -445,12 +502,12 @@ impl Default for B2buaConfig {
             event_dispatch_concurrency: 1024,
             per_call_queue_depth: 64,
             per_call_queue_cap: 200_000,
+            new_call_permit_share_percent: 50,
+            new_call_queue_headroom_percent: 5,
             // Loop/runaway guard, per keepalive interval (the tick resets the
-            // counter — see the field doc). TS default is 100
-            // (MAX_MESSAGES_PER_CALL); kept a touch higher (200) so any
-            // legitimate per-interval burst stays well under it while a
-            // flood/glare loop is still capped inside one window. Override with
-            // `B2BUA_MAX_MESSAGES_PER_CALL`.
+            // counter — see the field doc): 200, so a legitimate per-interval
+            // burst stays well under it while a flood/glare loop is still capped
+            // inside one window. Override with `B2BUA_MAX_MESSAGES_PER_CALL`.
             max_messages_per_call: 200,
             max_messages_per_call_lifetime: 100_000,
             cdr_buffer_queue_max: 1_024,
@@ -477,33 +534,39 @@ impl Default for B2buaConfig {
             invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
             cancel_strict_rfc3261_wait: false,
             ack_timeout_sec: Self::DEFAULT_ACK_TIMEOUT_SEC,
-            // Tier-3 admission gate (migration/09). TS defaults
-            // (CPS_BUCKET_SIZE / CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD /
-            // RETRY_AFTER_BASE_SEC). The hard CPS ceiling is 1000-burst @ 500/s;
+            // CPS bucket and panic-ELU rungs. Defaults match the env knobs
+            // (B2BUA_CPS_BUCKET_SIZE / B2BUA_CPS_BUCKET_RATE /
+            // B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD / B2BUA_RETRY_AFTER_BASE_SEC).
+            // The hard CPS ceiling is 1000-burst @ 500/s;
             // the panic-ELU backstop sits at 0.75 EWMA-ELU.
             cps_bucket_size: 1000,
             cps_bucket_rate: 500,
             overload_panic_elu_threshold: 0.75,
             retry_after_base_sec: 5,
             retry_after_jitter_sec: 5,
-            // b-leg admission allow-list. TS env default is the single K8s
-            // in-cluster DNS suffix `.svc.cluster.local`; production traffic
-            // (pod FQDNs) always passes, bogus hostnames are 503'd pre-leg. The
-            // paused-clock test harness builds configs directly; a fixture that
-            // routes to a non-suffixed host (e.g. `bob` / a loopback name) must
-            // set `["*"]` or add its suffix to opt out of the gate.
+            glare_retry_after: None,
+            // b-leg admission allow-list. Default is the single K8s in-cluster
+            // DNS suffix `.svc.cluster.local`; production traffic (pod FQDNs)
+            // always passes, bogus hostnames are 503'd pre-leg. The paused-clock
+            // test harness builds configs directly; a fixture that routes to a
+            // non-suffixed host (e.g. `bob` / a loopback name) must set `["*"]`
+            // or add its suffix to opt out of the gate.
             worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
-            // Decision-backend deadline: TS CALL_CONTROL_*_TIMEOUT_MS parity
-            // (both were 5000). One knob for all three methods (ADR-0022).
+            // Decision-backend deadline: one knob for all three methods (ADR-0022).
             call_control_timeout_ms: 5_000,
             // Opt-in transparent header relay: empty = no relay (production
             // default, strict no-op). Set names via `B2BUA_RELAY_HEADERS`.
             relay_headers: Vec::new(),
+            privacy_service: true,
+            relay_policy: sip_message::generators::RelayPolicy::transparent(),
+            relayed_cancel_reason: crate::release_reason::CancelReason::Verbatim,
+            own_release_reason: None,
             // Default SDP source: None = no canned offer. Opt-in per-CreateLeg
             // via `body_override`, never an automatic fallback.
             default_sdp: None,
             sdp_form: std::sync::Arc::new(AsWritten),
             node_capabilities: sip_message::generators::CapabilitySet::default(),
+            minted_final_advertisement: sip_message::generators::CapabilitySet::silent(),
             cdr: CdrConfig::default(),
             capacity: CapacityConfig::default(),
         }
@@ -512,12 +575,13 @@ impl Default for B2buaConfig {
 
 impl B2buaConfig {
     /// Absolute minimum OPTIONS keepalive (s). Below 2 min a mid-dialog OPTIONS
-    /// poke breaks long-hold traffic (see [`keepalive_interval_sec`] doc). A
+    /// poke breaks long-hold traffic (see
+    /// [`keepalive_interval_sec`](Self::keepalive_interval_sec) doc). A
     /// **production** floor only — the paused-clock test harness builds configs
     /// directly and skips [`validate`](Self::validate) to use a faster cadence.
     pub const MIN_KEEPALIVE_SEC: i64 = 120;
     /// Absolute minimum reboot budget (s): a backup must survive a primary's
-    /// reboot. The effective floor is usually higher — see [`validate`].
+    /// reboot. The effective floor is usually higher — see [`validate`](Self::validate).
     pub const MIN_REBOOT_BUDGET_SEC: i64 = 60;
     /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
     /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.
@@ -552,6 +616,28 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(r) = self.glare_retry_after {
+            if r.min_sec > r.max_sec {
+                return Err(format!(
+                    "glare_retry_after={}..={}: an empty range picks no Retry-After",
+                    r.min_sec, r.max_sec
+                ));
+            }
+        }
+        if !(1..=100).contains(&self.new_call_permit_share_percent) {
+            return Err(format!(
+                "new_call_permit_share_percent={} outside 1..=100: new calls need at least \
+                 one handler permit and can hold no more than the whole pool",
+                self.new_call_permit_share_percent
+            ));
+        }
+        if self.new_call_queue_headroom_percent > 99 {
+            return Err(format!(
+                "new_call_queue_headroom_percent={} above 99: a headroom of the whole cap \
+                 refuses every normal new call",
+                self.new_call_queue_headroom_percent
+            ));
+        }
         if self.limiter_refresh_sec <= 0 {
             return Err(format!(
                 "limiter_refresh_sec={}: a counted call refreshes at a positive period",
@@ -635,7 +721,7 @@ impl B2buaConfig {
                 self.reaper_idle_max_sec, self.keepalive_interval_sec
             ));
         }
-        // ── Worker overload protection (Tier-3 CPS bucket + panic-ELU backstop) ──
+        // ── Worker overload protection (CPS bucket + panic-ELU rungs) ──
         // The panic-ELU backstop 503s a new INVITE when the worker's own
         // EWMA-smoothed Event-Loop Utilization exceeds this fraction. ELU is
         // clamped to [0, 1], so a threshold <= 0 (or NaN) would trip for *every*
@@ -717,7 +803,7 @@ impl B2buaConfig {
                 Self::DEFAULT_ACK_TIMEOUT_SEC
             ));
         }
-        // The Tier-3 CPS bucket refills at `cps_bucket_rate` tokens/s up to
+        // The CPS bucket refills at `cps_bucket_rate` tokens/s up to
         // `cps_bucket_size`. If the gate is enabled (size > 0) but the rate is 0,
         // the bucket drains once and never refills — after the first burst EVERY
         // new INVITE is 503'd forever. (size == 0 disables the hard CPS gate, so
@@ -759,6 +845,28 @@ impl B2buaConfig {
         u64::try_from(sec).unwrap_or(default as u64).saturating_mul(1000)
     }
 
+    /// The privacy-service role every relay site mints under
+    /// ([`privacy_service`](Self::privacy_service)).
+    pub fn identity_privacy(&self) -> sip_message::generators::IdentityPrivacy {
+        use sip_message::generators::IdentityPrivacy;
+        if self.privacy_service {
+            IdentityPrivacy::Conceal
+        } else {
+            IdentityPrivacy::Relay
+        }
+    }
+
+    /// `base` as a relay site mints it in this deployment: under the
+    /// privacy-service role ([`identity_privacy`](Self::identity_privacy)) and
+    /// the [`relay_policy`](Self::relay_policy) read for `situation`.
+    pub fn relay_scope<'a>(
+        &'a self,
+        base: sip_message::generators::RelayScope<'static>,
+        situation: sip_message::generators::RelaySituation<'a>,
+    ) -> sip_message::generators::RelayScope<'a> {
+        base.with_identity(self.identity_privacy()).under(&self.relay_policy, situation)
+    }
+
     /// The un-ACKed 2xx give-up deadline in ms — what arms a 2xx ladder's
     /// give-up. `<= 0` is NOT "disabled" (unlike
     /// [`setup_timeout_sec`](Self::setup_timeout_sec)): a non-positive value
@@ -783,6 +891,22 @@ impl B2buaConfig {
     pub fn clamp_no_answer_sec(&self, requested: i64) -> i64 {
         let ceiling = self.invite_txn_timeout_sec - Self::NO_ANSWER_CANCEL_MARGIN_SEC;
         requested.min(ceiling)
+    }
+
+    /// The handler permits turns of normal initial INVITEs may hold at once:
+    /// [`new_call_permit_share_percent`](Self::new_call_permit_share_percent)
+    /// of `event_dispatch_concurrency`, rounded down, at least one.
+    pub fn new_call_permits(&self) -> usize {
+        let share = usize::from(self.new_call_permit_share_percent);
+        (self.event_dispatch_concurrency.saturating_mul(share) / 100).max(1)
+    }
+
+    /// The live per-call queues kept back from normal new INVITEs:
+    /// [`new_call_queue_headroom_percent`](Self::new_call_queue_headroom_percent)
+    /// of `per_call_queue_cap`, rounded down.
+    pub fn new_call_queue_headroom(&self) -> usize {
+        let share = usize::from(self.new_call_queue_headroom_percent);
+        self.per_call_queue_cap.saturating_mul(share) / 100
     }
 
     /// The effective reaper idle threshold, ms (ADR-0020 X4): the explicit
@@ -835,6 +959,33 @@ mod tests {
         assert!(e.contains("limiter_breaker_failures=0"), "{e}");
         let e = with(|c| c.limiter_breaker_probe_ms = 0).expect_err("zero probe period");
         assert!(e.contains("limiter_breaker_probe_ms=0"), "{e}");
+    }
+
+    /// New calls hold half the handler permits and stop 5 % below the queue
+    /// cap by default; each share is a bounded percentage.
+    #[test]
+    fn the_new_call_thresholds_are_shares_of_their_pools() {
+        let c = B2buaConfig::default();
+        assert_eq!((c.new_call_permits(), c.new_call_queue_headroom()), (512, 10_000));
+        let tiny =
+            B2buaConfig { event_dispatch_concurrency: 1, per_call_queue_cap: 1, ..c.clone() };
+        assert_eq!(
+            (tiny.new_call_permits(), tiny.new_call_queue_headroom()),
+            (1, 0),
+            "a new call keeps one permit and the last queue"
+        );
+        for (share, headroom, ok) in [(1, 0, true), (100, 99, true), (0, 5, false), (101, 5, false)]
+        {
+            let c = B2buaConfig {
+                new_call_permit_share_percent: share,
+                new_call_queue_headroom_percent: headroom,
+                ..Default::default()
+            };
+            assert_eq!(c.validate().is_ok(), ok, "share {share} headroom {headroom}");
+        }
+        let c = B2buaConfig { new_call_queue_headroom_percent: 100, ..Default::default() };
+        let e = c.validate().expect_err("a headroom of the whole cap");
+        assert!(e.contains("new_call_queue_headroom_percent=100"), "{e}");
     }
 
     #[test]
@@ -1091,5 +1242,34 @@ mod tests {
         assert_eq!(hard_only.for_class(false), Some(12), "the hard ceiling bounds everyone");
         let soft_only = Ceilings { normal: Some(10), emergency: None };
         assert_eq!(soft_only.for_class(true), None);
+    }
+
+    #[test]
+    fn a_retry_after_range_picks_inside_its_bounds() {
+        let range = RetryAfterRange { min_sec: 0, max_sec: 10 };
+        assert_eq!(range.pick(0), 0);
+        assert_eq!(range.pick(10), 10);
+        assert_eq!(range.pick(11), 0, "the roll wraps over the 11 values");
+        for roll in [1u64, 7, 12_345, u64::MAX] {
+            assert!((0..=10).contains(&range.pick(roll)), "roll={roll}");
+        }
+        assert_eq!(RetryAfterRange { min_sec: 2, max_sec: 2 }.pick(u64::MAX), 2);
+        let widest = RetryAfterRange { min_sec: 0, max_sec: u32::MAX };
+        assert_eq!(widest.pick(u64::from(u32::MAX)), u32::MAX, "no overflow at the widest");
+    }
+
+    #[test]
+    fn an_empty_glare_retry_after_range_is_refused() {
+        let c = B2buaConfig {
+            glare_retry_after: Some(RetryAfterRange { min_sec: 5, max_sec: 4 }),
+            ..B2buaConfig::default()
+        };
+        let err = c.validate().expect_err("an empty range");
+        assert!(err.contains("glare_retry_after"), "{err}");
+        let c = B2buaConfig {
+            glare_retry_after: Some(RetryAfterRange { min_sec: 0, max_sec: 10 }),
+            ..B2buaConfig::default()
+        };
+        assert!(c.validate().is_ok(), "{:?}", c.validate());
     }
 }

@@ -15,20 +15,20 @@ use super::call_store::{CallStore, PartitionRole, PutOpts, StoreError};
 struct Inner {
     /// Encoded bodies as immutable shared slices: a rewrite REPLACES the `Arc`
     /// (never mutates in place), so an in-flight drain holding an older clone is
-    /// safe (Decision 9 / ADR-0011 X8 immutable-shared-body invariant).
+    /// safe (ADR-0011 X8 immutable-shared-body invariant).
     bodies: HashMap<String, Arc<[u8]>>,
     /// `idx:{key}` → callRef SIP routing index.
     indexes: HashMap<String, String>,
     /// `callRef → the `idx:*` keys it currently owns` — the reverse index that
     /// makes index teardown COMPLETE and idempotent regardless of what the caller
-    /// passes. Without it the index map leaked: `put_call` was insert-only (a call
-    /// whose index keys changed across re-flushes stranded the old ones) and,
-    /// worse, a **replicated `Delete` frame carries NO index keys** (changelog
-    /// `delete_frame` sets `indexes: Vec::new()`), so the backup's `delete_call`
-    /// removed the body but none of its `idx:*` entries — they accumulated at the
-    /// peer's call rate (~4 keys/call) until OOM (the no-chaos RSS climb). The
-    /// store now owns the call→keys mapping, so `delete_call` reclaims every key
-    /// the call owns even with an empty `indexes` argument.
+    /// passes. An insert-only `put_call` would strand a call's old index keys
+    /// when they change across re-flushes, and a **replicated `Delete` frame
+    /// carries NO index keys** (changelog `delete_frame` sets
+    /// `indexes: Vec::new()`), so without this map the backup's `delete_call`
+    /// would remove the body but none of its `idx:*` entries — accumulating at
+    /// the peer's call rate (~4 keys/call) until OOM. The store owns the
+    /// call→keys mapping, so `delete_call` reclaims every key the call owns
+    /// even with an empty `indexes` argument.
     idx_by_ref: HashMap<String, Vec<String>>,
 }
 
@@ -99,6 +99,18 @@ impl InMemoryCallStore {
             }
             inner.idx_by_ref.insert(call_ref.to_string(), new_keys);
         }
+    }
+
+    /// The body stored for `call_ref` in `(role, primary)`. The synchronous
+    /// core of [`get_call`](CallStore::get_call), for a caller that must read
+    /// under its own lock.
+    pub(crate) fn body(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> Option<Arc<[u8]>> {
+        self.locked().bodies.get(&Self::body_key(role, primary, call_ref)).cloned()
     }
 
     /// Remove the body and every index key `call_ref` owns in one step and
@@ -172,6 +184,7 @@ impl CallStore for InMemoryCallStore {
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        _answered: bool,
         _opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.remove_body(role, primary, call_ref, indexes);
@@ -204,7 +217,7 @@ mod tests {
     use super::*;
 
     fn keys() -> Vec<String> {
-        vec!["leg:cid|tag".to_string(), "leg:bcid".to_string()]
+        vec!["a:cid|tag".to_string(), "b:bcid".to_string()]
     }
 
     // The production leak: a replicated `Delete` frame carries NO index keys
@@ -230,14 +243,13 @@ mod tests {
         .unwrap();
         assert_eq!(s.lens(), (1, 2), "body + 2 idx after put");
         // Replicated delete: EMPTY indexes (the changelog delete frame).
-        s.delete_call(PartitionRole::Backup, "w1", "w1|c|t", &[], &PutOpts::default())
+        s.delete_call(PartitionRole::Backup, "w1", "w1|c|t", &[], false, &PutOpts::default())
             .await
             .unwrap();
         assert_eq!(s.lens(), (0, 0), "delete reclaims body AND all idx via reverse map");
     }
 
-    // Re-flush with changed keys must not strand the old ones (put_call was
-    // insert-only before).
+    // Re-flush with changed keys must not strand the old ones.
     #[tokio::test]
     async fn reput_with_changed_keys_drops_the_old() {
         let s = InMemoryCallStore::new();
@@ -246,7 +258,7 @@ mod tests {
             "w0",
             "w0|c|t",
             b"b1".to_vec(),
-            &["leg:a".into()],
+            &["a:x|a".into()],
             0,
             1,
             0,
@@ -259,7 +271,7 @@ mod tests {
             "w0",
             "w0|c|t",
             b"b2".to_vec(),
-            &["leg:b".into()],
+            &["a:x|b".into()],
             0,
             1,
             0,
@@ -268,8 +280,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(s.lens(), (1, 1), "only the new key remains");
-        assert_eq!(s.get_index("leg:a").await.unwrap(), None, "stale key gone");
-        assert_eq!(s.get_index("leg:b").await.unwrap().as_deref(), Some("w0|c|t"));
+        assert_eq!(s.get_index("a:x|a").await.unwrap(), None, "stale key gone");
+        assert_eq!(s.get_index("a:x|b").await.unwrap().as_deref(), Some("w0|c|t"));
     }
 
     // N create→delete cycles must return the index map to empty (the unit-level
@@ -279,7 +291,7 @@ mod tests {
         let s = InMemoryCallStore::new();
         for i in 0..1000 {
             let cr = format!("w0|c{i}|t");
-            let ks = vec![format!("leg:cid{i}|tag"), format!("leg:b{i}")];
+            let ks = vec![format!("a:cid{i}|tag"), format!("b:b{i}")];
             s.put_call(
                 PartitionRole::Primary,
                 "w0",
@@ -294,7 +306,7 @@ mod tests {
             .await
             .unwrap();
             // delete as the replicated path does: empty indexes.
-            s.delete_call(PartitionRole::Primary, "w0", &cr, &[], &PutOpts::default())
+            s.delete_call(PartitionRole::Primary, "w0", &cr, &[], false, &PutOpts::default())
                 .await
                 .unwrap();
         }

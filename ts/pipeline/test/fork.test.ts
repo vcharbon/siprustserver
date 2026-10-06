@@ -155,7 +155,7 @@ describe("early dialogs", () => {
   })
 
   it("names each leg's final from its own To-tag, where the two legs reject apart", () => {
-    // `capture_178328`'s shape: the callee rejects under the SECOND dialog it
+    // A captured shape: the callee rejects under the SECOND dialog it
     // rang while the platform relays that final to the caller under the FIRST,
     // so a leg that copied its neighbour's name would get one of the two wrong.
     const flow = flowOf(forkedOnBothLegs({ rejects: { relay: RELAY_A, fork: FORK_B } }))

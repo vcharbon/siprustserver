@@ -85,7 +85,7 @@ mod tests {
                 A,
                 response(487, "Request Terminated", 1, "INVITE", "d2", "fa", Some("tb")),
             ),
-            dg(5_000, A, B, request("ACK", 1, "d2", "fa", Some("tb"))),
+            dg(5_000, A, B, ack_of_non_2xx(1, "d2", "fa", "tb")),
         ]));
         let p = obeyed.population["no-200-after-cancel"];
         assert_eq!(
@@ -109,12 +109,12 @@ mod tests {
                 A,
                 response(487, "Request Terminated", 1, "INVITE", "c1", "fa", Some("tb")),
             ),
-            dg(6_000, A, B, request("ACK", 1, "c1", "fa", Some("tb"))),
+            dg(6_000, A, B, ack_of_non_2xx(1, "c1", "fa", "tb")),
         ]));
         assert!(hits.is_empty(), "487 is what §9.2 asks for: {hits:?}");
     }
 
-    /// The two-key proof, half one. The callee's OWN re-INVITE carries CSeq
+    /// The direction proof, half one. The callee's OWN re-INVITE carries CSeq
     /// number 1 — the two directions of a dialog number independently — and the
     /// caller answers it 200 after a CANCEL was seen on this leg. Different
     /// transaction, so no violation: the CANCEL went TO the callee, and the
@@ -137,15 +137,15 @@ mod tests {
         ]));
         // The stray CANCEL leaves after this emitter ACKed the 200, so
         // `no-cancel-after-final` charges it on its own account; what this test
-        // pins is the two-key reading of the rule this module is about.
+        // pins is the direction key of the rule this module is about.
         let crossed: Vec<_> = hits.iter().filter(|h| h.rule == RfcRule::No200AfterCancel).collect();
         assert!(
             crossed.is_empty(),
-            "the CSeq number collides but the direction does not: {hits:?}"
+            "the CSeq number and branch collide but the direction does not: {hits:?}"
         );
     }
 
-    /// The two-key proof, half two — the SAME document with the CANCEL's
+    /// The direction proof, half two — the SAME document with the CANCEL's
     /// direction flipped, so it really does cancel the re-INVITE. Now the
     /// caller answered 200 to a transaction it had taken the CANCEL for, and
     /// the detector fires. Direction is what separates this from the case
@@ -211,7 +211,7 @@ mod tests {
                 A,
                 response(487, "Request Terminated", 1, "INVITE", "leg-a", "fa", Some("tp")),
             ),
-            dg(5_100, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
+            dg(5_100, A, P, ack_of_non_2xx(1, "leg-a", "fa", "tp")),
         ]));
         assert_eq!(hits.len(), 1, "only the callee broke the rule: {hits:?}");
         assert_eq!(hits[0].emitter, B);
@@ -219,7 +219,37 @@ mod tests {
         assert!(!hits[0].relayed);
     }
 
-    /// The corpus shape: one Call-ID crossing a proxy, captured on both of its
+    /// A caller re-offers its cancelled INVITE on the same Call-ID, From tag
+    /// and CSeq number under a new branch: a new transaction no CANCEL named,
+    /// so its 200 is no violation.
+    #[test]
+    fn a_re_offer_on_a_new_branch_answered_200_is_not_a_violation() {
+        const B1: &str = "z9hG4bK-reoffer-1";
+        const B2: &str = "z9hG4bK-reoffer-2";
+        let inv = |b| request_on("INVITE", 1, "ro", "fa", None, b);
+        let to_invite = |status, reason, tag, b| {
+            response_on(status, reason, 1, "INVITE", "ro", "fa", Some(tag), b)
+        };
+        let doc = doc_of(vec![
+            dg(1_000, A, B, inv(B1)),
+            dg(2_000, B, A, to_invite(180, "Ringing", "t1", B1)),
+            dg(3_000, A, B, request_on("CANCEL", 1, "ro", "fa", None, B1)),
+            dg(3_100, B, A, response_on(200, "OK", 1, "CANCEL", "ro", "fa", Some("t1"), B1)),
+            dg(3_200, B, A, to_invite(487, "Request Terminated", "t1", B1)),
+            dg(3_300, A, B, request_on("ACK", 1, "ro", "fa", Some("t1"), B1)),
+            dg(6_000, A, B, inv(B2)),
+            dg(7_000, B, A, to_invite(200, "OK", "t2", B2)),
+            dg(7_100, A, B, request_on("ACK", 1, "ro", "fa", Some("t2"), "z9hG4bK-reoffer-ack")),
+        ]);
+        let census = scan(&doc);
+        let p = census.population["no-200-after-cancel"];
+        assert_eq!(p.occasions, 1, "the cancelled transaction is the one occasion");
+        let hits: Vec<_> =
+            detect(&doc).into_iter().filter(|h| h.rule == RfcRule::No200AfterCancel).collect();
+        assert!(hits.is_empty(), "the re-offer's 200 answers its own transaction: {hits:?}");
+    }
+
+    /// A common topology: one Call-ID crossing a proxy, captured on both of its
     /// wires. The far UAS ORIGINATES the violation; the proxy in the middle,
     /// which had already forwarded the CANCEL, then relays that same 200
     /// upstream. Both are hits and the report tells them apart — and the proxy

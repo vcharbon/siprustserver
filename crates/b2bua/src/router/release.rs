@@ -57,11 +57,11 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             // its retransmission meets the orphan path.
             let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
             answer_unanswered_invites(ctx, call_ref).await;
-            // Poison the per-call dispatch queue; its worker exits and bumps
-            // `removal` exactly once (dispatch.rs). We deliberately do NOT
-            // bump here — removal is counted at the single dispatch-queue
+            // Release the per-call dispatch queue; its worker exits and bumps
+            // `removal` exactly once (`dispatch::worker`). We deliberately do
+            // NOT bump here — removal is counted at the single dispatch-queue
             // teardown site so creations/removals stay a matched pair.
-            ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Terminated);
+            ctx.dispatcher.release(call_ref, RemovalClass::Terminated);
         }
         ReleaseKind::SelfRelease { ended } => {
             if ctx.state.drop_local(call_ref) {
@@ -71,7 +71,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                     let _ = ctx.txn.forget_unanswered_of_call(call_ref).await;
                     answer_unanswered_invites(ctx, call_ref).await;
                 }
-                ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::SelfRelease);
+                ctx.dispatcher.release(call_ref, RemovalClass::SelfRelease);
                 ctx.metrics.bump_repl_self_release();
                 // Folded into the dead peer's takeover episode, never its own
                 // line: shedding is the tail of the takeover it ends.
@@ -80,9 +80,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         }
         ReleaseKind::Orphan => {
             ctx.state.discard_orphan(call_ref);
-            ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Orphan);
+            ctx.dispatcher.release(call_ref, RemovalClass::Orphan);
         }
     }
+    // No call is resident on `call_ref` now: a setup-CANCEL mark stands only
+    // for an INVITE admitted and still waiting for its turn behind this
+    // release.
+    ctx.state.retain_setup_cancelled(call_ref, |cseq| ctx.unborn.holds(call_ref, cseq));
 }
 
 /// Answer 481 every in-dialog INVITE of the ended call `call_ref` that has no

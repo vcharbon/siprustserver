@@ -113,7 +113,7 @@ advisory by default — see the knobs above) before creating the cluster.
 
 ## HA replication chaos suite — `deploy/k8s/chaos.sh`
 
-Goal-3 (S11) acceptance: the **real-clock, real-TCP, real-k8s** test of
+HA acceptance: the **real-clock, real-TCP, real-k8s** test of
 peer-to-peer call replication (ADR-0011). It stands up the stack with
 replication **on** (`REPL_ENABLE=1`, ≥2 workers), drives long-hold dialogs, then
 kills the worker holding a dialog mid-call and asserts the dialog **survives**
@@ -146,12 +146,11 @@ and the b2bua-runner module docs for the env grammar
 
 ## Sharing with sipjsserver (vendored, divergeable)
 
-This runner is **independent** (its own bash + manifests). As of S11 the two
-pieces it used to **symlink** from a sibling `sipjsserver` checkout are now
-**vendored copies** in-tree, so the runner stands alone and the artifacts may
-diverge (the chaos/endurance scenarios especially):
+This runner is **independent** (its own bash + manifests). The pieces it shares
+with `sipjsserver` are **vendored copies** in-tree, so the runner stands alone
+and the artifacts may diverge (the chaos/endurance scenarios especially):
 
-| Artifact | Location (was a symlink) | Note |
+| Artifact | Location | Note |
 |---|---|---|
 | Cluster topology | `deploy/k8s/cluster.yaml` | Copied from `sipjsserver/tests/k8s/cluster.yaml`; **same cluster name `sip-e2e`** (the one-cluster switch) |
 | SIPp scenarios | `deploy/k8s/sipp/scenarios/` | Copied from the sipjs sipp chart; free to diverge |

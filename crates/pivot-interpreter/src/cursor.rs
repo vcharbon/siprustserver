@@ -954,7 +954,7 @@ mod tests {
     /// A relay stands behind however many sends the leg has not made yet: the
     /// walk crosses a RUN of them, not exactly one. Real-clock replay puts the
     /// arrival one step earlier in the list than virtual time does, and the
-    /// document is the same document (issue 195).
+    /// document is the same document.
     #[test]
     fn an_arrival_another_leg_has_caused_arms_behind_a_run_of_sends() {
         let p = plan(&format!(

@@ -1,8 +1,8 @@
 # Observability — VictoriaMetrics + Grafana (Rust SUT)
 
 Self-contained metrics/logs stack for the Rust SIP SUT running in kind. This is
-the siprustserver-owned copy (it no longer depends on the sibling sipjsserver
-checkout). Host-side storage + UI, in-cluster scraper/forwarder.
+the siprustserver-owned copy (it depends on no sibling sipjsserver checkout).
+Host-side storage + UI, in-cluster scraper/forwarder.
 
 ```
             host (docker compose)                     kind cluster (sip-e2e)

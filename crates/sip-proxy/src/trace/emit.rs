@@ -117,19 +117,13 @@ impl RouteFacts<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use observe::{RateDraw, SampleAdmission, TokenBucket};
+    use observe::{activation_bucket, RateDraw, SampleAdmission};
 
     const WIRE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\r\n";
 
     fn traces(exporter: bool) -> ProxyTraces {
         ProxyTraces::new(
-            SampleAdmission::new(
-                exporter,
-                1.0,
-                10,
-                RateDraw::seeded(5),
-                TokenBucket::default_at(0),
-            ),
+            SampleAdmission::new(exporter, 1.0, 10, RateDraw::seeded(5), activation_bucket(0)),
             false,
         )
     }

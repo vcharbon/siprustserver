@@ -1,6 +1,6 @@
-//! `replication` — the **write-side policy** (migration slice S8). Given a node
-//! ordinal and a `callRef`, it answers the two questions a mutation must resolve
-//! before it touches the [`CallStore`](crate::store::CallStore):
+//! `replication` — the **write-side policy**. Given a node ordinal and a
+//! `callRef`, it answers the two questions a mutation must resolve before it
+//! touches the [`CallStore`](crate::store::CallStore):
 //!
 //! 1. **Which partition does the body land in?** — `pri:{primary}` if I am the
 //!    call's natural primary, `bak:{primary}` if I am acting-backup for a crashed
@@ -10,7 +10,7 @@
 //!    acting-backup pushes **Reverse** to the original primary so the primary
 //!    RECLAIMS the latest state on reboot.
 //!
-//! The apply side (S5/S6) already maps the direction back: `Reverse` rides the
+//! The apply side already maps the direction back: `Reverse` rides the
 //! frame as `partition=Pri` (see [`ReplicatingCallStore`] / [`Changelog`]) and
 //! the puller imports a `partition=Pri` frame as `pri:{primary}` — so a reverse
 //! write by the acting-backup arrives on the rebooting primary as its own
@@ -29,10 +29,10 @@
 //! applies iff `p_in == p_cur && b_in > b_cur`; deletes win both ways. (Was a
 //! single `call_gen` LWW — see ADR-0014 §5.2 for the divergence that closed.)
 //!
-//! The actual `topology.gen += 1` increment is wired in the b2bua dispatch /
-//! `CallState` mutation path — **S10 wiring point**. At this layer the tests
-//! drive `call_gen` explicitly on the encoded body; this module only routes the
-//! already-stamped gen to the right partition/peer/direction.
+//! The actual `topology.gen += 1` increment lives in the b2bua dispatch /
+//! `CallState` mutation path. At this layer the tests drive `call_gen` explicitly
+//! on the encoded body; this module only routes the already-stamped gen to the
+//! right partition/peer/direction.
 
 use crate::store::{
     partition_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
@@ -61,14 +61,14 @@ fn primary_of(self_ordinal: &str, call_ref: &str) -> String {
 ///
 /// `backup_resolver` is **injected**, not computed here.
 ///
-/// ### S10 seam — sourcing the backup peer (do NOT build HRW in the b2bua)
-/// S10 sources the backup peer: the proxy already computed it as the rendezvous
-/// (HRW) **2nd-best** keyed by Call-ID and signed it into the `w_bak` stickiness
-/// cookie; the b2bua will read `w_bak` from the cookie so the two AGREE by
-/// construction rather than risk a divergent recompute (the proxy keys HRW off
-/// the *alive-set* + Call-ID, which the b2bua cannot reproduce locally). See the
-/// sip-proxy `rendezvous_select` / `load_balancer.rs`. Until then this resolver
-/// is injected (tests pass a trivial 2-node "the other node" closure).
+/// ### Sourcing the backup peer (no HRW in the b2bua)
+/// The proxy computes the backup peer as the rendezvous (HRW) **2nd-best** keyed
+/// by Call-ID and signs it into the `w_bak` stickiness cookie; the b2bua reads
+/// `w_bak` from the cookie so the two AGREE by construction rather than risk a
+/// divergent recompute (the proxy keys HRW off the *alive-set* + Call-ID, which
+/// the b2bua cannot reproduce locally). See the sip-proxy `rendezvous_select` /
+/// `load_balancer.rs`. Here the resolver is injected (tests pass a trivial
+/// 2-node "the other node" closure).
 pub fn replication_target(
     self_ordinal: &str,
     call_ref: &str,
@@ -127,12 +127,10 @@ impl ReplicationPlan {
     }
 }
 
-/// Flush a call's already-encoded body to `store` under the S8 write-side policy:
+/// Flush a call's already-encoded body to `store` under the write-side policy:
 /// resolve the partition + propagate target for `call_ref`, then `put_call` with
 /// the matching `(role, primary)` and [`PutOpts`].
 ///
-/// This is the reusable seam **S10 calls from `CallState::flush`** (today that
-/// flush still uses `PutOpts::default()` — no propagation; S10 swaps it for this).
 /// The caller supplies the body / indexes / ttl / `call_gen` (the primary counter
 /// `p` of the `(p,b)` version vector, = `CallTopology.gen`); this routes them.
 #[allow(clippy::too_many_arguments)]

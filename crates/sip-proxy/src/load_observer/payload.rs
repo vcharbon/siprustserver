@@ -3,6 +3,7 @@
 //! header off a message is sip-message's job (`msg.raw(X_OVERLOAD)`).
 //! The emit side lives in the worker (`b2bua::overload`).
 
+use load_shed::clamp01;
 use std::collections::HashMap;
 
 use sip_message::sip_str::SipStr;
@@ -50,7 +51,6 @@ pub fn parse_x_overload_header(value: Option<&str>) -> Option<OverloadPayload> {
     if !elu.is_finite() || !gc.is_finite() || !adm.is_finite() || adm < 0.0 {
         return None;
     }
-    let clamp01 = |n: f64| n.clamp(0.0, 1.0);
     Some(OverloadPayload { elu: clamp01(elu), gc: clamp01(gc), adm })
 }
 

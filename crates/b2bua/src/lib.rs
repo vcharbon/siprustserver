@@ -5,13 +5,15 @@
 //! - [`store`] — the in-memory call map + per-call serialization over a
 //!   replication-aware [`store::CallStore`] seam (HA drops in later, no changes
 //!   to rules/dispatch).
-//! - [`dispatch`] — the per-call FIFO: a bounded queue + worker task per call,
-//!   capped globally (ADR-0004/0005).
-//! - [`timers`] — one `DelayQueue` driver firing [`event::CallEvent::Timer`].
+//! - [`dispatch`] — the per-call FIFO: a queue + worker task per call, capped
+//!   globally, each event treated by its dispatch class's row (ADR-0010 X2).
+//! - [`timers`] — one `DelayQueue` driver firing [`CallEvent::Timer`].
 //! - [`decision`] — the call-decision adapter seam + a scripted test impl.
 //! - [`rules`] — first-match, layer-ranked rule engine + invariant enforcement.
 //! - [`router`] — consumes the transaction-layer event stream, resolves the
 //!   `callRef`, runs the handler, interprets the typed [`effects`].
+//! - [`admission`] — the ordered ladder of rungs that may refuse a new
+//!   INVITE, and the one answer a refusal draws (ADR-0037).
 //! - [`lifecycle`] — the aggregated lifecycle-log vocabulary (ADR-0026).
 //! - [`trace`] — the per-call trace gate, root spans and guarded emission
 //!   vocabulary (ADR-0026).
@@ -20,26 +22,23 @@
 //! Builds on the `call` data model (ADR-0010).
 
 pub(crate) mod abort_on_drop;
+pub mod admission;
+pub mod answer_deadline;
 pub mod b2bua_core;
 pub mod capacity;
 pub mod cdr;
 pub mod config;
 pub mod decision;
 pub(crate) mod decision_log;
-pub mod deferred_bound;
+pub mod destination_allowlist;
 pub mod dispatch;
 pub mod drain;
 pub mod effects;
-pub mod event;
+pub(crate) mod failure_terminate;
+pub mod ingress_brake;
 pub mod initial_invite;
 pub mod lifecycle;
 pub mod limiter;
-pub mod limiter_breaker;
-pub mod limiter_http;
-pub mod limiter_lease;
-pub mod limiter_refresh_batch;
-pub mod limiter_release;
-pub mod limiter_target;
 pub(crate) mod message_ring;
 pub mod metrics;
 pub mod new_calls;
@@ -48,13 +47,12 @@ pub mod overload;
 pub mod peer_failures;
 pub mod reaper;
 pub mod repl;
+pub mod resolved_target;
 pub mod router;
 pub mod rules;
 pub mod stack_identity;
 pub mod store;
 pub(crate) mod sweep;
-pub mod target_admission;
-pub mod tier1_brake;
 pub mod timers;
 pub mod trace;
 pub mod wire_faults;
@@ -62,17 +60,15 @@ pub mod wire_faults;
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;
 
+pub use b2bua_sdk::event::CallEvent;
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};
-pub use event::CallEvent;
-pub use metrics::{
-    B2buaMetrics, BufferedSendCounters, LiveGauge, RemovalClass, UdpTransportMetrics,
-};
+pub use metrics::{B2buaMetrics, LiveGauge, RemovalClass, UdpTransportMetrics};
 /// The id generator the initial call mints its limiter key with.
 pub use sip_txn::IdGen;
 pub use wire_faults::{WireFaultPoint, WireFaults};
-// The callflow-service authoring macros live in the public Rule SDK (ADR-0016
-// slice 6); re-export them so in-tree services keep using `b2bua::define_service!`
-// / `b2bua::sm_rule!`. (`$crate` inside the macro resolves to `b2bua_sdk`, where
+// The callflow-service authoring macros live in the public Rule SDK (ADR-0016);
+// re-export them so in-tree services keep using `b2bua::define_service!` /
+// `b2bua::sm_rule!`. (`$crate` inside the macro resolves to `b2bua_sdk`, where
 // the SDK vocabulary the expansion references lives.)
 pub use b2bua_sdk::{define_service, sm_rule};

@@ -355,6 +355,11 @@ async fn service_http_request_round_trips_a_binary_body_verbatim() {
     assert_eq!(ra.1, req_a(), "server received corr-a request body verbatim");
     assert_eq!(rb.1, req_b(), "server received corr-b request body verbatim");
 
+    // Past both answers' deadlines (ADR-0039): the answers closed them, so
+    // nothing more re-enters.
+    h.advance(Duration::from_secs(6)).await;
+    assert_eq!(binprobe::RESULTS.lock().unwrap().len(), 2, "no lost answer after the answers");
+
     hangup(&mut dialog, &bob).await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
@@ -390,6 +395,10 @@ async fn service_http_request_reenters_error_when_no_port_injected() {
     assert_eq!(corr, errprobe::CORR, "error re-entry echoes the correlation id");
     assert_eq!(outcome, "error", "absent port folds an error re-entry (machine not stranded)");
     assert!(!err.is_empty(), "error re-entry carries a reason: {err:?}");
+
+    // The error re-entry closed the request's deadline (ADR-0039): nothing more.
+    h.advance(Duration::from_secs(6)).await;
+    assert_eq!(errprobe::RESULTS.lock().unwrap().len(), 1, "no lost answer after the answer");
 
     hangup(&mut dialog, &bob).await;
     settle_until(|| b2bua.is_reaped()).await;

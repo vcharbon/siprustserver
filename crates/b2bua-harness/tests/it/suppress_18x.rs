@@ -311,8 +311,8 @@ async fn failover_no_answer() {
     let _ = h.finish().await;
 }
 
-// ── relay18x.messages policy (GAP-P7-2) ─────────────────────────────────────
-// The Routing API `Relay18x.messages` field picks WHICH 18x are relayed (each
+// ── Relay18xMessages policy ────────────────────────────────────────────────
+// The `Relay18xMessages` policy picks WHICH 18x are relayed (each
 // relayed one still downgraded to a bare 180 under the SAME stored To-tag):
 // FIRST (default, covered by the tests above), ALL, ONE_PER_VALUE (one per
 // distinct *upstream* status value). `expect` is strict (anything but the
@@ -467,8 +467,8 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
 }
 
 /// No policy → normal behaviour: every 180 is relayed verbatim (no suppression,
-/// no bare-180 downgrade). Regression guard the new code stays off the default
-/// path. (TS `suppress18xDisabled`.)
+/// no bare-180 downgrade): the policy stays off the default path.
+/// (TS `suppress18xDisabled`.)
 #[tokio::test]
 async fn disabled() {
     let h = Harness::with_transit_delay("suppress-18x-disabled", 0);

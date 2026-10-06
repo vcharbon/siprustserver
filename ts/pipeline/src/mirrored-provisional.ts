@@ -1,7 +1,7 @@
 /**
  * A relayed provisional crosses the vantage TWICE — arriving on the leg it was
  * sent to, leaving on the leg it is relayed to — and the document has to say the
- * same thing about both halves (§6.9, issue 116).
+ * same thing about both halves (§6.9).
  *
  * An unreliable provisional rides no timer, so it does not retransmit: a
  * platform that rings twice has SENT TWICE, and a B2BUA relays each one as it

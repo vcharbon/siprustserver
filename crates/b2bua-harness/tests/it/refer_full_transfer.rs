@@ -1,4 +1,4 @@
-//! REFER full-transfer scenarios (slice 5c). Port of
+//! REFER full-transfer scenarios. Port of
 //! `tests/scenarios/refer-full-transfer.ts`.
 //!
 //! Drive the complete A↔B↔C transfer through both re-INVITEs to completion

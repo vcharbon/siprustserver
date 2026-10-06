@@ -160,7 +160,7 @@ pub enum Fault {
     /// Arm buffer-overflow → drop-subscriber on `src → dst`: when the bounded
     /// inbound buffer is full, the delivery actor cuts the connection instead
     /// of awaiting space (the "buffer-full → drop subscriber → reconnect"
-    /// goal-1 scenario).
+    /// scenario).
     DropOnOverflow {
         /// Source endpoint.
         src: SocketAddr,
@@ -1084,7 +1084,7 @@ mod tests {
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
-    use sip_clock::testkit::advance_in_100ms_chunks;
+    use sip_clock::testkit::advance_settled;
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
@@ -1102,6 +1102,8 @@ mod tests {
             origin_now_ms: 0,
             indexes: vec!["idx".into()],
             body: Some(StdArc::from(body)),
+            answered: false,
+            incarnation: None,
         }
     }
 
@@ -1132,7 +1134,7 @@ mod tests {
         let client = net.connect(b).await.unwrap();
         let server = listener.accept().await.unwrap();
         client.send(pull_request(caller)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(server.recv().await, Some(pull_request(caller)));
         (client, server)
     }
@@ -1175,13 +1177,13 @@ mod tests {
         // A → B
         let f = noop(1);
         client.send(f.clone()).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(server.recv().await, Some(f));
 
         // B → A (bidirectional, identical frame round-trips through bytes)
         let g = data_frame(2, b"hello-body");
         server.send(g.clone()).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(client.recv().await, Some(g));
     }
 
@@ -1193,7 +1195,7 @@ mod tests {
         for i in 0..10 {
             client.send(noop(i)).await.unwrap();
         }
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         for i in 0..10 {
             assert_eq!(server.recv().await, Some(noop(i)));
         }
@@ -1211,7 +1213,7 @@ mod tests {
         let early = tokio::time::timeout(Duration::from_micros(1), server.recv()).await;
         assert!(early.is_err(), "delivered before transit delay (0 not coerced?)");
 
-        advance_in_100ms_chunks(Duration::from_millis(2)).await;
+        advance_settled(Duration::from_millis(2)).await;
         assert_eq!(server.recv().await, Some(noop(1)));
     }
 
@@ -1221,11 +1223,11 @@ mod tests {
         let (client, server, _l) = connected_pair(&net, addr(1003), addr(2003)).await;
         client.send(noop(1)).await.unwrap();
 
-        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        advance_settled(Duration::from_millis(40)).await;
         let before = tokio::time::timeout(Duration::from_micros(1), server.recv()).await;
         assert!(before.is_err(), "delivered before 50ms");
 
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(server.recv().await, Some(noop(1)));
     }
 
@@ -1238,7 +1240,7 @@ mod tests {
         // Cut both directions of this pair.
         net.apply_fault(Fault::Cut { src: a, dst: b });
         net.apply_fault(Fault::Cut { src: b, dst: a });
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
 
         assert_eq!(server.recv().await, None, "recv should yield None after cut");
         assert_eq!(client.recv().await, None);
@@ -1257,13 +1259,13 @@ mod tests {
         for i in 0..5 {
             client.send(noop(i)).await.unwrap();
         }
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         // Stalled: nothing delivered.
         let blocked = tokio::time::timeout(Duration::from_micros(1), server.recv()).await;
         assert!(blocked.is_err(), "stall leaked a frame");
 
         net.apply_fault(Fault::Resume { src: a, dst: b });
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         for i in 0..5 {
             assert_eq!(server.recv().await, Some(noop(i)), "out of order after resume");
         }
@@ -1276,7 +1278,7 @@ mod tests {
         let (client, server, listener) = connected_pair(&net, a, b).await;
 
         net.apply_fault(Fault::Partition { a, b });
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(client.recv().await, None);
         assert_eq!(server.recv().await, None);
 
@@ -1289,7 +1291,7 @@ mod tests {
         let client2 = net.connect_from(a, b).await.unwrap();
         let server2 = listener.accept().await.unwrap();
         client2.send(noop(99)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(server2.recv().await, Some(noop(99)));
     }
 
@@ -1319,7 +1321,7 @@ mod tests {
         for _ in 0..5 {
             tokio::task::yield_now().await;
         }
-        advance_in_100ms_chunks(Duration::from_millis(100)).await;
+        advance_settled(Duration::from_millis(100)).await;
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
@@ -1353,7 +1355,7 @@ mod tests {
         // Drain one at a time, advancing between each so the parked delivery
         // actor wakes and refills the bounded buffer.
         for i in 0..6 {
-            advance_in_100ms_chunks(Duration::from_millis(10)).await;
+            advance_settled(Duration::from_millis(10)).await;
             assert_eq!(server.recv().await, Some(noop(i)));
         }
     }
@@ -1388,13 +1390,13 @@ mod tests {
         });
 
         // The window holds 2; the 3rd send BLOCKS because the peer isn't pulling.
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(sent.load(Ordering::SeqCst), 2, "writer blocks once the window fills");
         assert!(!h.is_finished(), "send is parked — no error, no close");
 
         // The peer pulls one frame → releases a window slot → the 3rd completes.
         assert_eq!(server.recv().await, Some(noop(0)));
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(sent.load(Ordering::SeqCst), 3, "writer unblocks once the peer drains");
         let _client = h.await.unwrap();
     }
@@ -1417,13 +1419,13 @@ mod tests {
             }
         });
 
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(sent.load(Ordering::SeqCst), 1, "blocked at the 1-frame window");
 
         // Resume clears the block (peer recovers) → the parked write completes
         // without the peer ever pulling.
         net.apply_fault(Fault::Resume { src: a, dst: b });
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(sent.load(Ordering::SeqCst), 2, "Resume unblocks the writer");
         h.await.unwrap();
     }
@@ -1437,11 +1439,11 @@ mod tests {
         let (client, server, _l) = connected_pair(&net, a, b).await;
 
         client.send(noop(1)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(5)).await;
+        advance_settled(Duration::from_millis(5)).await;
         assert_eq!(server.recv().await, Some(noop(1)), "healthy before the error");
 
         net.apply_fault(Fault::ErrorAfter { src: a, dst: b, ms: 50 });
-        advance_in_100ms_chunks(Duration::from_millis(60)).await;
+        advance_settled(Duration::from_millis(60)).await;
 
         // After the delay the direction errors. Drive the teardown via the peer's
         // recv first (it parks, letting the error-timer + actor run) → the peer
@@ -1462,7 +1464,7 @@ mod tests {
 
         let net2 = net.clone();
         let h = tokio::spawn(async move { net2.connect_from(a, b).await });
-        advance_in_100ms_chunks(Duration::from_millis(60)).await;
+        advance_settled(Duration::from_millis(60)).await;
 
         let r = h.await.unwrap();
         assert!(
@@ -1489,14 +1491,14 @@ mod tests {
 
         net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
         send_now(&*server, noop(1)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        advance_settled(Duration::from_millis(40)).await;
         assert_eq!(
             has_frame(&*client).await,
             None,
             "a delay named on the listen pair did not reach the attributed stream: the frame \
              landed before 50 ms"
         );
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(client.recv().await, Some(noop(1)), "the frame lands once the delay elapses");
     }
 
@@ -1513,7 +1515,7 @@ mod tests {
         for i in 0..3 {
             send_now(&*server, noop(i)).await.unwrap();
         }
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         assert_eq!(
             has_frame(&*client).await,
             None,
@@ -1521,7 +1523,7 @@ mod tests {
              landed"
         );
         net.apply_fault(Fault::Resume { src: b, dst: a });
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         for i in 0..3 {
             assert_eq!(client.recv().await, Some(noop(i)), "in order after the resume");
         }
@@ -1542,7 +1544,7 @@ mod tests {
             "a cut named on the listen pair did not reach the attributed stream: the send after \
              the cut was accepted"
         );
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(
             client.recv().await,
             None,
@@ -1570,7 +1572,7 @@ mod tests {
         // A node fault on another pair wakes every wire: the held wire re-reads
         // its hold.
         net.apply_fault(Fault::Delay { src: c, dst: d, ms: 5 });
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         assert_eq!(
             has_frame(&*server).await,
             None,
@@ -1591,14 +1593,14 @@ mod tests {
         net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
         let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
         send_now(&*server, noop(1)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        advance_settled(Duration::from_millis(40)).await;
         assert_eq!(
             has_frame(&*client).await,
             None,
             "a stream opened after the fault did not inherit the delay named on the listen \
              pair: the frame landed before 50 ms"
         );
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(client.recv().await, Some(noop(1)));
     }
 
@@ -1627,9 +1629,9 @@ mod tests {
         let server = listener.accept().await.unwrap();
         net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
         send_now(&*server, noop(1)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        advance_settled(Duration::from_millis(40)).await;
         assert_eq!(has_frame(&*client).await, None, "attributed at connect: the frame waits");
-        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        advance_settled(Duration::from_millis(20)).await;
         assert_eq!(client.recv().await, Some(noop(1)));
     }
 
@@ -1652,7 +1654,7 @@ mod tests {
         // The actor's first poll — and the frame's stamping — happen here, with
         // the handle already gone; then the transit elapses.
         sip_clock::testkit::settle().await;
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         assert_eq!(
             has_frame(&*server).await,
             None,
@@ -1673,7 +1675,7 @@ mod tests {
         // The listener's end names A on a `PullRequest`: its address stays its
         // own owner, and the client's attribution stands.
         server.send(pull_request("A")).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(client.recv().await, Some(pull_request("A")));
         let owners = net.shared.stream_owner.lock().unwrap().clone();
         assert!(!owners.contains_key(&b), "the listener end was attributed: {owners:?}");
@@ -1694,7 +1696,7 @@ mod tests {
         net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
         send_now(&*explicit_server, noop(1)).await.unwrap();
         send_now(&*synthetic_server, noop(2)).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(
             has_frame(&*explicit).await,
             None,
@@ -1706,7 +1708,7 @@ mod tests {
             "an undeclared synthetic-local stream is not the direction named: its frame lands \
              on the default transit"
         );
-        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        advance_settled(Duration::from_millis(50)).await;
         assert_eq!(explicit.recv().await, Some(noop(1)));
     }
 }

@@ -1,11 +1,12 @@
 //! Requests the B2BUA originates itself: the new-b-leg INVITE (`CreateLeg`,
-//! behind the target-admission gate), the resync re-INVITE, NOTIFY, PRACK and
+//! behind the destination allow-list), the resync re-INVITE, NOTIFY, PRACK and
 //! the generic in-dialog request (`SendRequestToLeg`). Relaying an *inbound*
 //! request does NOT live here — see [`super::relay_request`].
 
 use call::helpers::{add_cdr_event, add_originated_b_leg, bump_local_cseq};
 use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
+use sip_message::header::HeaderName;
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
 use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
@@ -14,8 +15,8 @@ use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities;
-use crate::rules::model::{Body, RuleContext};
 use crate::rules::relay;
+use b2bua_sdk::model::{Body, RuleContext};
 
 use super::select::{dialog_identity_tag, in_dialog_method, leg_at, leg_index};
 use super::teardown::terminate_all;
@@ -23,7 +24,7 @@ use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
     /// Build and send a new b-leg INVITE toward `destination`
-    /// ([`crate::rules::model::RuleAction::CreateLeg`]). Admission gate — same
+    /// ([`b2bua_sdk::model::RuleAction::CreateLeg`]). Admission gate — same
     /// policy as `apply_route`: a rule-driven destination that doesn't pass the
     /// suffix allow-list is a config bug; surface it as a terminate so the call
     /// doesn't hang waiting for an answer that will never come. No leg /
@@ -44,12 +45,13 @@ impl ActionExecutor<'_> {
         callback_context: Option<&str>,
         body_override: Option<&Body>,
         header_updates: &[(String, Option<String>)],
+        header_adds: &[(String, Vec<String>)],
         kind: Option<LegKind>,
     ) {
-        if crate::target_admission::classify_admission(
+        if crate::destination_allowlist::classify_admission(
             &destination.0,
             &self.config.worker_allowed_target_suffixes,
-        ) == crate::target_admission::AdmissionVerdict::Reject
+        ) == crate::destination_allowlist::AdmissionVerdict::Reject
         {
             *call = add_cdr_event(
                 call.clone(),
@@ -76,14 +78,24 @@ impl ActionExecutor<'_> {
             .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let offers_sdp = relay::mints_offer(&a_invite, body_override);
+        // The originator's `Accept` states what she takes; a media leg answers
+        // the service that dialled it, so that line stays behind unless an
+        // update states one.
+        let mut header_updates = header_updates.to_vec();
+        if kind == Some(LegKind::Media)
+            && !header_updates.iter().any(|(n, _)| HeaderName::Accept.matches(n))
+        {
+            header_updates.push((HeaderName::Accept.as_wire_str().to_string(), None));
+        }
+        let header_updates = header_updates.as_slice();
+        let advertised = capabilities::relaying_for_leg(call, &leg_id, a_invite.headers());
         // Same refusal as the admission reject above, for the other way a
-        // decision can name no destination: an address field that does not read
-        // (055). The leg is not created and no INVITE goes out — originating on
+        // decision can name no destination: an address field that does not read.
+        // The leg is not created and no INVITE goes out — originating on
         // a fabricated target would dial an address the decision never stated.
-        let (mut leg, effect) = match relay::build_b_leg(
-            &call.call_ref,
+        let (mut leg, mut effect) = match relay::build_b_leg(
+            relay::CallMarks::of(call),
             &leg_id,
-            call.emergency == Some(true),
             &a_invite,
             destination.clone(),
             new_ruri,
@@ -94,11 +106,13 @@ impl ActionExecutor<'_> {
             self.id_gen,
             body_override,
             header_updates,
-            &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
-            crate::rules::charging::minting_arm(call),
+            &advertised,
+            crate::rules::charging::minting_arm(call, &leg_id, kind),
             &capabilities::withheld_option_tags(call, kind, offers_sdp),
             &capabilities::offered_option_tags(call, kind),
             kind,
+            call.a_leg.invite_final_sent.is_none(),
+            self.now_ms,
         ) {
             Ok(built) => built,
             Err(err) => {
@@ -123,6 +137,14 @@ impl ActionExecutor<'_> {
                 return;
             }
         };
+        crate::rules::charging::uncharge_media_leg(
+            call,
+            kind,
+            header_updates,
+            &mut leg,
+            &mut effect,
+        );
+        crate::rules::stated_headers::add_to_minted(&mut leg, &mut effect, header_adds);
         let author = match body_override {
             Some(body) => relay::Author::from(&body.author),
             None => relay::Author::Leg(&call.a_leg.leg_id),
@@ -169,19 +191,8 @@ impl ActionExecutor<'_> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-                branch,
-            )),
-            contact: Some(relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-            )),
+            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
+            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
@@ -217,7 +228,8 @@ impl ActionExecutor<'_> {
         });
     }
 
-    /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer plus
+    /// Originate a re-INVITE on `leg_id` carrying `body` as the new offer, typed
+    /// `content_type` (`None`: SDP) and described by `descriptors`, plus
     /// `add_headers` (Allow/Supported), the leg's capability set
     /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
     /// CSeq = dialog.localCSeq + 1. Used by
@@ -225,12 +237,15 @@ impl ActionExecutor<'_> {
     /// early-media SDP promoted into the synthetic 200 OK. The response comes back
     /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
     /// `promote-resync-reinvite-response` rule.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_reinvite(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
         body: &[u8],
+        content_type: Option<&str>,
+        descriptors: &[sip_message::SipHeader],
         add_headers: &[sip_message::draft::Entry],
         author: relay::Author<'_>,
     ) {
@@ -243,33 +258,46 @@ impl ActionExecutor<'_> {
             None => return,
         };
         let t_id = dialog_identity_tag(leg_id, &dialog);
+        // The INVITE that created this leg's dialog: the originator's own on
+        // hers, the one the stack sent on a leg it dialled.
+        let creating = if leg_id == call.a_leg.leg_id {
+            Some(relay::rebuild_a_leg_invite(&call.a_leg_invite))
+        } else {
+            relay::dialling_invite(leg_at(call, idx))
+        };
         let outbound_cseq = dialog.sip.local_cseq + 1;
         *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
-        let extra: Vec<sip_message::SipHeader> = add_headers
+        let mut extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|e| sip_message::SipHeader {
                 name: sip_message::SipStr::owned(e.name().as_wire_str()),
                 value: e.text(),
             })
             .collect();
+        // RFC 7315 §5.6: the arm's vector for the leg, unless the action states one.
+        let vector = sip_message::header::ChargingVector::header_name();
+        if !extra.iter().any(|h| vector.matches(&h.name)) {
+            if let Some(line) = crate::rules::charging::in_dialog_invite_vector(call, leg_id) {
+                extra.push(sip_message::SipHeader {
+                    name: sip_message::SipStr::owned(vector.as_wire_str()),
+                    value: sip_message::SipStr::owned(&line),
+                });
+            }
+        }
+        relay::describe_body(&mut extra, body, descriptors);
+        let content_type = (!body.is_empty())
+            .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(
                 self.config,
-                &call.call_ref,
+                relay::CallMarks::of(call),
                 leg_id,
-                call.emergency == Some(true),
                 branch.clone(),
             )),
-            contact: Some(relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-            )),
-            content_type: (!body.is_empty()).then(relay::sdp),
+            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             body: relay::continue_on_leg(
                 call,
                 leg_id,
@@ -277,16 +305,13 @@ impl ActionExecutor<'_> {
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
-                (!body.is_empty()).then(relay::sdp).as_ref(),
+                content_type.as_ref(),
                 self.config.sdp_form.as_ref(),
             ),
+            content_type,
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
-            capabilities: Some(capabilities::for_reinvite(
-                call,
-                leg_id,
-                relay::dialling_invite(leg_at(call, idx)).as_ref(),
-            )),
+            capabilities: Some(capabilities::for_reinvite(call, leg_id, creating.as_ref())),
             ..Default::default()
         };
         let res =
@@ -326,7 +351,7 @@ impl ActionExecutor<'_> {
     }
 
     /// Originate an in-dialog request on `leg_id`'s confirmed dialog
-    /// ([`crate::rules::model::RuleAction::SendRequestToLeg`]): keepalive
+    /// ([`b2bua_sdk::model::RuleAction::SendRequestToLeg`]): keepalive
     /// OPTIONS, opaque-body INFO (MSCML), deferred-relay re-emission.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_request_to_leg(
@@ -338,6 +363,7 @@ impl ActionExecutor<'_> {
         body: &[u8],
         content_type: Option<&str>,
         headers: &[(String, String)],
+        descriptors: &[sip_message::SipHeader],
         author: relay::Author<'_>,
     ) {
         let m = match in_dialog_method(&Method::from_wire(method)) {
@@ -399,11 +425,11 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         // Forward the service-nominated application headers verbatim (e.g. a held
-        // `User-To-User` re-emitted toward the peer on a deferred INFO_UUI relay).
+        // `User-To-User` re-emitted toward the peer on a deferred User-to-User relay).
         // Body-owned headers are dropped: `body`/`content_type` own
         // Content-Type/Content-Length via `append_body_headers`, so listing them
         // here would duplicate them.
-        let extra_headers: Vec<sip_message::SipHeader> = headers
+        let mut extra_headers: Vec<sip_message::SipHeader> = headers
             .iter()
             .filter(|(n, _)| {
                 let named = sip_message::HeaderName::from(n.as_str());
@@ -415,22 +441,12 @@ impl ActionExecutor<'_> {
                 value: value.clone().into(),
             })
             .collect();
+        relay::describe_body(&mut extra_headers, body, descriptors);
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-                branch,
-            )),
-            contact: Some(relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-            )),
+            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
+            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             cseq: Some(outbound_cseq as u32),
             body: relay::continue_on_leg(
                 call,
@@ -477,6 +493,7 @@ impl ActionExecutor<'_> {
     /// per provisional: the acknowledgement is recorded, and a repeat of it —
     /// the responder's §3 retransmission — sends nothing (§4), so no second
     /// PRACK names the same `RAck` on a fresh CSeq.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_prack_to_leg(
         &self,
         call: &mut Call,
@@ -485,6 +502,7 @@ impl ActionExecutor<'_> {
         rseq: i64,
         invite_cseq: i64,
         b_tag: &str,
+        responder_sdp: bool,
     ) {
         let idx = match leg_index(call, leg_id) {
             Some(i) => i,
@@ -514,6 +532,7 @@ impl ActionExecutor<'_> {
             b_tag,
             invite_cseq,
             rseq,
+            responder_sdp,
         );
         *call = updated;
         if !first {
@@ -530,19 +549,8 @@ impl ActionExecutor<'_> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-                branch,
-            )),
-            contact: Some(relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                leg_id,
-                call.emergency == Some(true),
-            )),
+            via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
+            contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             rack: Some(RAck::new(rseq.max(0) as u32, invite_cseq.max(0) as u32, Method::Invite)),
             cseq: Some(outbound_cseq as u32),
             ..Default::default()

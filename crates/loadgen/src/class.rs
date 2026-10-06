@@ -87,9 +87,9 @@ impl ResultClass {
     /// (acceptable kill collateral) when the **per-phase** rule also holds (a
     /// dialog-state transition occurred within the phase tolerance of the fault).
     ///
-    /// The accepted constraint (2026-06-29): *a call whose dialog state changed
-    /// within ~200 ms of the kill may take a small impact — established and
-    /// ringing calls are what we protect.* So a SIP **protocol** symptom of a
+    /// The accepted constraint: *a call whose dialog state changed within
+    /// ~200 ms of the kill may take a small impact — established and ringing
+    /// calls are what we protect.* So a SIP **protocol** symptom of a
     /// concurrent-with-the-kill state change (a `RfcAuditFail` CSeq desync, a
     /// `WrongMethod` phantom CANCEL, an `Unexpected` 481) IS excusable — those are
     /// exactly the forked-b-leg confirm-race collateral, which only ever hits a
@@ -253,6 +253,7 @@ mod tests {
     /// a fault's doing, so those rejections are chaos-excusable; a missing or
     /// unusable key is not.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn only_key_contention_rejections_are_chaos_excusable() {
         for reason in ["key_in_flight", "key_cooling"] {
             assert!(CallOutcome::Rejected(reason).chaos_excusable(), "{reason}");

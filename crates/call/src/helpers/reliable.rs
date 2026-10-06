@@ -34,7 +34,9 @@ use crate::model::{
 /// in THIS dialog plus exactly one (§4); the first in a dialog is `initial`,
 /// drawn at random (§3) and ignored once that dialog's ladder began. `a_cseq`
 /// is the CSeq number of the INVITE on the shown face, recorded so the PRACK
-/// can be matched on the whole `RAck` (§7.2).
+/// can be matched on the whole `RAck` (§7.2); `carried_sdp` whether the
+/// provisional carries a description there, `responder_sdp` whether the
+/// responder's did.
 #[allow(clippy::too_many_arguments)]
 pub fn assign_a_rseq(
     mut call: Call,
@@ -45,6 +47,8 @@ pub fn assign_a_rseq(
     b_cseq: i64,
     b_rseq: i64,
     initial: i64,
+    carried_sdp: bool,
+    responder_sdp: bool,
 ) -> (Call, i64) {
     if let Some(known) = call.reliable_provisionals.iter().find(|r| {
         r.b_leg_id == b_leg_id && r.b_tag == b_tag && r.b_cseq == b_cseq && r.b_rseq == b_rseq
@@ -71,7 +75,9 @@ pub fn assign_a_rseq(
         b_rseq,
         acknowledged: false,
         emission: None,
-        a_cseq: Some(a_cseq),
+        a_cseq,
+        carried_sdp,
+        responder_sdp,
     });
     (call, a_rseq)
 }
@@ -189,13 +195,15 @@ pub fn reliable_provisional_relayed(
 /// invite_cseq, rseq)` provisional itself. Returns whether this is the FIRST
 /// acknowledgement of it: a repeat of an acknowledged provisional is the
 /// responder's §3 retransmission, and RFC 3262 §4 has the receiver discard it
-/// — the caller PRACKs exactly when this returns `true`.
+/// — the caller PRACKs exactly when this returns `true`. `responder_sdp`:
+/// the provisional carried a description.
 pub fn record_pracked_provisional(
     mut call: Call,
     leg_id: &str,
     remote_tag: &str,
     invite_cseq: i64,
     rseq: i64,
+    responder_sdp: bool,
 ) -> (Call, bool) {
     if pracked_provisional(&call, leg_id, remote_tag, invite_cseq, rseq) {
         return (call, false);
@@ -205,6 +213,7 @@ pub fn record_pracked_provisional(
         remote_tag: remote_tag.to_string(),
         invite_cseq,
         rseq,
+        responder_sdp,
     });
     (call, true)
 }
@@ -314,8 +323,7 @@ pub fn leg_shown<'a>(call: &'a Call, shown_tag: &str) -> Option<&'a str> {
 /// ([`owns_rseq_numbering`]).
 ///
 /// A match needs every §7.2 token: the method `INVITE`, `rseq` an entry of this
-/// dialog, and `cseq` that entry's recorded a-facing INVITE. An entry that
-/// recorded no CSeq cannot disprove the token and admits it. The books state
+/// dialog, and `cseq` that entry's recorded a-facing INVITE. The books state
 /// WAS NEVER SHOWN, narrower than §4's "unacknowledged": a repeat PRACK for a
 /// rung already acknowledged still matches, and relays. The books are
 /// complete: every reliable provisional shown on either face is recorded
@@ -333,9 +341,10 @@ pub fn unacknowledgeable_rack(
 /// dialog on all three §7.2 tokens.
 fn acknowledges_recorded(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
     rack.names_invite
-        && call.reliable_provisionals.iter().any(|r| {
-            r.a_tag == a_tag && r.a_rseq == rack.rseq && r.a_cseq.is_none_or(|c| c == rack.cseq)
-        })
+        && call
+            .reliable_provisionals
+            .iter()
+            .any(|r| r.a_tag == a_tag && r.a_rseq == rack.rseq && r.a_cseq == rack.cseq)
 }
 
 /// Whether the `a_tag` early dialog has shown the caller a reliable provisional

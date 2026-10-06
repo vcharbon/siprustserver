@@ -61,18 +61,23 @@ pub(super) async fn try_send_cancel(
     wire_dst: SocketAddr,
     stated: &[(&str, &str)],
 ) -> Result<(), StepError> {
-    let stated: Vec<SipHeader> = stated
-        .iter()
-        .map(|(name, value)| SipHeader {
-            name: (*name).to_string().into(),
-            value: (*value).to_string().into(),
-        })
-        .collect();
+    let stated = stated_lines(stated);
     let cancel = generate_cancel(
         &InviteClientTransactionHandle { original_invite: original_invite.clone() },
         &stated,
     );
     agent.try_send(&SipMessage::Request(cancel), wire_dst).await
+}
+
+/// A scenario's own header lines, name and value as the test wrote them.
+pub(super) fn stated_lines(stated: &[(&str, &str)]) -> Vec<SipHeader> {
+    stated
+        .iter()
+        .map(|(name, value)| SipHeader {
+            name: (*name).to_string().into(),
+            value: (*value).to_string().into(),
+        })
+        .collect()
 }
 
 /// Panicking veneer over [`try_expect_response`].

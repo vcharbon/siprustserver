@@ -1,17 +1,14 @@
 //! The scenario DSL — scenarios as **data** (port of the *useful* half of
 //! `src/test-harness/framework/dsl.ts`, MIGRATION_PLAN_B2B §4(ii) decision B).
 //!
-//! The source DSL is a fluent builder (`alice.invite(...).expect(200).ack()`)
-//! over a two-phase recorder/interpreter that maintains its own dialog state
-//! (CSeq, route sets, tags, offer/answer) and its own `trace`. That machinery
-//! *is* the transaction + call-context layers, which are not ported yet, and
-//! there is no SUT to drive against. So we keep only what is load-bearing now:
+//! It holds no dialog state of its own (CSeq, route sets, tags, offer/answer
+//! belong to the transaction and call-context layers), only:
 //!
 //!   - **named agents** (`alice`, `bob`) bound to wire addresses,
 //!   - a flat `Vec<Step>` of `Send` / `Expect` / `Advance`,
 //!
-//! and we drop the SUT/tier machinery, `or`-branching, `parallel`, media, and
-//! chaos steps (see MIGRATION_STATUS.md for the per-feature justification).
+//! and carries no SUT/tier machinery, `or`-branching, `parallel`, media, or
+//! chaos steps.
 //! The trace the reports render is **not** built here — it is projected from
 //! the recording layer after the run (`sip_net::to_sip_entries`).
 
@@ -58,7 +55,7 @@ impl Match {
     }
 }
 
-/// One scripted action. Executed in order by the driver ([`crate::run`]).
+/// One scripted action. Executed in order by the driver ([`crate::run`](fn@crate::run)).
 #[derive(Clone, Debug)]
 pub enum Step {
     /// `from` sends `raw` bytes addressed to `to`.
@@ -66,8 +63,8 @@ pub enum Step {
     /// `agent` must receive a datagram matching `matcher` within the driver's
     /// per-expect timeout.
     Expect { agent: AgentId, matcher: Match },
-    /// Advance virtual time by `ms` (requires a paused tokio runtime; mirrors
-    /// the source's 100 ms-chunk `TestClock.adjust`).
+    /// Advance virtual time by `ms` (requires a paused tokio runtime), running
+    /// the deliveries in flight at their own instants.
     Advance { ms: u64 },
 }
 

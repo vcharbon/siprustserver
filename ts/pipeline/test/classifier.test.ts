@@ -5,8 +5,8 @@ import type { Probe } from "../src/probe.js"
 
 const context: Classifier.CaseContext = {
   relay18x: [],
-  run: { messages: 1, legs: 1, legsTornDownBySystem: 0 },
-  document: { unackedFinals: [], steps: [] }
+  run: { messages: 1, legs: 1, legsTornDownBySystem: 0, sentRSeqs: new Map(), openers: new Map() },
+  document: { unackedFinals: [], calls: 1, steps: [], attempts: [] }
 }
 
 const probe = (name: string): Probe => ({
@@ -19,7 +19,10 @@ const probe = (name: string): Probe => ({
   inbound: false,
   inboundValues: [],
   driven: undefined,
-  bodiless: false
+  bodiless: false,
+  inReplayedParts: [],
+  inAnsweredRequest: [],
+  replayedCarriesBody: false
 })
 
 describe("Classifier", () => {

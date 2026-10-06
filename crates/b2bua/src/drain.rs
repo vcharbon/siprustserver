@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crate::limiter_release::ReleaseFlush;
+use crate::limiter::release_queue::ReleaseFlush;
 
 /// How often the drain re-reads its inputs while waiting. Small enough that a
 /// node which clears its last call mid-grace exits promptly, not at the next
@@ -59,8 +59,12 @@ impl DrainExit {
         matches!(self, DrainExit::Quiescent | DrainExit::CaughtUp)
     }
 
+    /// Every exit, in declaration order.
+    pub const ALL: [DrainExit; 4] =
+        [DrainExit::Quiescent, DrainExit::CaughtUp, DrainExit::Grace, DrainExit::GracePeersBehind];
+
     /// The snake_case reason label — the metric's `reason` value and the log field.
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             DrainExit::Quiescent => "quiescent",
             DrainExit::CaughtUp => "caught_up",

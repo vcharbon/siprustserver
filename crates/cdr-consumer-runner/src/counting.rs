@@ -1,8 +1,10 @@
 //! What the consumer counts off each delivery, per the payload mode the
-//! `CDR_PAYLOAD` variable selects, and the Prometheus text it exposes.
+//! `CDR_PAYLOAD` variable selects, and the Prometheus text it exposes, every
+//! family in both modes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use metric_catalogue::{Family, Labels};
 use serde::Deserialize;
 
 /// How deliveries are read, `CDR_PAYLOAD`.
@@ -66,30 +68,41 @@ impl Metrics {
         }
     }
 
-    /// The exposition of the counters `payload` keeps: `cdr_consumed_total`
-    /// always, the duration and parse-error counters in `json` mode only.
-    pub fn prometheus_text(&self, payload: Payload) -> String {
+    /// The exposition of every counter of [`FAMILIES`], in either payload
+    /// mode: in `opaque` mode no duration is summed and nothing is decoded,
+    /// so both stay at 0.
+    pub fn prometheus_text(&self) -> String {
         let mut s = String::new();
-        s.push_str("# HELP cdr_consumed_total total CDRs consumed from the RabbitMQ queue\n");
-        s.push_str("# TYPE cdr_consumed_total counter\n");
-        s.push_str(&format!("cdr_consumed_total {}\n", self.consumed.load(Ordering::Relaxed)));
-        if payload == Payload::Json {
-            s.push_str("# HELP cdr_call_duration_ms_total summed call duration in ms across all consumed CDRs (terminated_at - created_at)\n");
-            s.push_str("# TYPE cdr_call_duration_ms_total counter\n");
-            s.push_str(&format!(
-                "cdr_call_duration_ms_total {}\n",
-                self.duration_ms.load(Ordering::Relaxed)
-            ));
-            s.push_str("# HELP cdr_parse_errors_total CDR payloads that failed to decode\n");
-            s.push_str("# TYPE cdr_parse_errors_total counter\n");
-            s.push_str(&format!(
-                "cdr_parse_errors_total {}\n",
-                self.parse_errors.load(Ordering::Relaxed)
-            ));
-        }
+        CONSUMED.render_value(&mut s, self.consumed.load(Ordering::Relaxed));
+        CALL_DURATION_MS.render_value(&mut s, self.duration_ms.load(Ordering::Relaxed));
+        PARSE_ERRORS.render_value(&mut s, self.parse_errors.load(Ordering::Relaxed));
         s
     }
 }
+
+/// CDRs consumed.
+pub const CONSUMED: Family = Family::counter(
+    "cdr_consumed_total",
+    Labels::None,
+    "total CDRs consumed from the RabbitMQ queue",
+);
+
+/// Summed call duration.
+pub const CALL_DURATION_MS: Family = Family::counter(
+    "cdr_call_duration_ms_total",
+    Labels::None,
+    "summed call duration in ms across all consumed CDRs (terminated_at - created_at); 0 in opaque mode, which sums none",
+);
+
+/// Payloads that did not decode.
+pub const PARSE_ERRORS: Family = Family::counter(
+    "cdr_parse_errors_total",
+    Labels::None,
+    "CDR payloads that failed to decode (none in opaque mode, which decodes nothing)",
+);
+
+/// Every family [`Metrics::prometheus_text`] renders, in order.
+pub const FAMILIES: &[Family] = &[CONSUMED, CALL_DURATION_MS, PARSE_ERRORS];
 
 #[cfg(test)]
 mod tests {
@@ -118,7 +131,7 @@ mod tests {
         let m = Metrics::default();
         m.count(Payload::Json, br#"{"created_at":1000,"terminated_at":3500,"x":1}"#).unwrap();
         assert!(m.count(Payload::Json, b"<cdr/>").is_err());
-        let text = m.prometheus_text(Payload::Json);
+        let text = m.prometheus_text();
         assert_eq!(line(&text, "cdr_consumed_total").as_deref(), Some("cdr_consumed_total 1"));
         assert_eq!(
             line(&text, "cdr_call_duration_ms_total").as_deref(),
@@ -136,9 +149,15 @@ mod tests {
         for data in [&b"<cdr/>"[..], b"", br#"{"created_at":1000,"terminated_at":3500}"#, b"\xff"] {
             m.count(Payload::Opaque, data).unwrap();
         }
-        let text = m.prometheus_text(Payload::Opaque);
+        let text = m.prometheus_text();
         assert_eq!(line(&text, "cdr_consumed_total").as_deref(), Some("cdr_consumed_total 4"));
-        assert_eq!(line(&text, "cdr_call_duration_ms_total"), None);
-        assert_eq!(line(&text, "cdr_parse_errors_total"), None);
+        assert_eq!(
+            line(&text, "cdr_call_duration_ms_total").as_deref(),
+            Some("cdr_call_duration_ms_total 0")
+        );
+        assert_eq!(
+            line(&text, "cdr_parse_errors_total").as_deref(),
+            Some("cdr_parse_errors_total 0")
+        );
     }
 }

@@ -3,7 +3,7 @@
 **Status:** accepted (2026-09-13)
 
 **Source:** this codebase. Triggered by the failover-harness scenario
-`crates/failover-harness/tests/withdrawn_primary_answers_in_its_window.rs` and its views
+`crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
 ledger, which showed that the *graceful* exit — the most frequent one — opens the same
 unreplicated window as a forced kill, for its whole drain grace. Amends ADR-0012 D4
 (what membership deletion means) and ADR-0014 §3 (the forward apply rule) and §12 (the
@@ -109,7 +109,7 @@ reactive, so a proxied worker's calls are served on the next in-dialog request, 
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
 *replicated crash*, deliberately: ringing calls wait for the caller's next request or its
 own timers, as after any crash. Before any exit the worker flushes its queued limiter
-releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0038 decision 9); an exit is
+releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0040 decision 9); an exit is
 taken only with the queue empty, and a quiescent or caught-up one only if it still holds
 once the flush is done, since the worker serves its calls meanwhile; the drain never
 outlasts the grace plus the flush.
@@ -342,23 +342,40 @@ the `Put` rule is "refuse a branch, and refuse a `b'` behind the Element's `b`".
 
 **The `Delete` guard keys on the answer.** The one fact worth refusing delete-wins for is an
 answer the authority never had: a forward `Delete` is refused exactly when the Element is
-still there, its body is `Active`, its caller **was** answered, and no forward flush has
-ever carried the authority's own answer to it. Each of the other cases takes the delete. An
-ending Element (`Terminating` or `Terminated`) goes with it: the call is over whoever ended
-it, and whatever record is owed rides the reverse path. An expired Element has no call left
-to protect. An authority that once flushed an answered body is ending a call it knows
-about, however far behind its vector. A live takeover copy beside the Element is **not** an
-escape either: it is ephemeral by construction and self-releases the moment its
-transactions clear, so honouring a delete under it leaves the answered call recorded
-nowhere. This paragraph and the one above supersede D3's `Put` and `Delete` rules and its
-"folded only where a live copy exists" clause.
+still there, its body is `Active`, its caller **was** answered, and the authority has never
+published its own answer to it. Each of the other cases takes the delete. An ending Element
+(`Terminating` or `Terminated`) goes with it: the call is over whoever ended it, and
+whatever record is owed rides the reverse path. An expired Element has no call left to
+protect. An authority that once flushed an answered body, or whose `Delete` states the
+answer, is ending a call it knows about, however far behind its vector. A live takeover copy
+beside the Element is **not** an escape either: it is ephemeral by construction and
+self-releases the moment its transactions clear, so honouring a delete under it leaves the
+answered call recorded nowhere. This paragraph and the one above supersede D3's `Put` and
+`Delete` rules and its "folded only where a live copy exists" clause.
 
-The authority publishes its answer by **flushing** it, taken or refused. A refusal decides
-which body the Element keeps, never what its sender saw — and two live owners of one call
-refuse each other's counters for as long as both serve it, so an authority that answered
-through the reverse fold may land no further `Put`. The mark is monotone, like the fact it
-records: an answered call never un-answers, and the backup's own writes carry it over
-untouched.
+The authority publishes its answer by **flushing** it, taken or refused, **or by its
+`Delete` stating it**. A refusal decides which body the Element keeps, never what its sender
+saw — and two live owners of one call refuse each other's counters for as long as both serve
+it, so an authority that answered through the reverse fold may land no further `Put`. The
+changelog keeps one entry per call, so the last flush written within one drain of the delete
+that follows it never leaves the node: the `Delete` is all the backup sees. The deleting
+node therefore records on the delete's tombstone whether its own copy had answered the
+caller when it removed it, and every `Delete` frame drained from that tombstone, tail or
+cold, carries it (`Frame::Data.answered`). A call removed with no resident copy propagates
+no delete at all. A `Put` whose body is gone by the drain is skipped when a delete has been
+recorded since (that entry drains with its own answer), and otherwise (an expired body)
+goes out as a `Delete` stating no answer. The mark is monotone, like the fact it records:
+an answered call never un-answers, the backup's own writes carry it over untouched, a later
+`Delete` of the same ref keeps an answer an earlier one stated, and a `Delete` stating no
+answer clears nothing — the guard then reads the flushed mark alone. A `Put` of the ref
+starts it afresh: a new call reusing the ref never inherits a former call's answer. Pinned
+by `an_authority_that_answered_ends_the_call_within_one_drain` and its refusal twin
+`an_authority_that_never_answered_ends_the_call_within_one_drain` (`b2bua` repl S12).
+
+Rejected: compaction keeping a `Put` ahead of a `Delete`. Bodies are read live at drain
+time, so the kept `Put` would need the last body retained past the delete, every call end
+would ship that body plus a `Delete`, and a puller re-bootstrapping after the pair would
+still see the `Delete` alone.
 
 **The fold is one rule, but only a primary discharges.** A refused flush folded toward a
 PRIMARY may end the call — the primary is the sole discharge authority (ADR-0014 §2 /

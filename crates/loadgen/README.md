@@ -31,11 +31,11 @@ and drive the load driver against it:
 ```bash
 # all loadgen smoke tests (correlation/demux, no-leak, orphans, picker,
 # emergency-under-overload, post-call cleanup across failure modes)
-cargo test -p loadgen --test smoke
+cargo test -p loadgen --test it smoke::
 
 # one test, with its full SIP trace printed:
-cargo test -p loadgen --test smoke loadgen_mux_emergency_split_under_overload -- --nocapture
-cargo test -p loadgen --test smoke loadgen_post_call_cleanup_no_leak -- --nocapture
+cargo test -p loadgen --test it smoke::loadgen_mux_emergency_split_under_overload -- --nocapture
+cargo test -p loadgen --test it smoke::loadgen_post_call_cleanup_no_leak -- --nocapture
 ```
 
 These run in the **default test lane** (`just test`) — they are fast and require
@@ -158,7 +158,7 @@ therefore fires **no catch-up burst** (the old, faster grid's backlog of past-du
 slots is discarded, the new grid starts *now*), and a **raise** takes effect
 within one slot of the shorter period. A transient catch-up (after a stall) is
 still bounded by `--max-in-flight` (the excess is shed+counted). Coverage:
-`crates/loadgen/tests/governor.rs` (cadence, cut-without-burst, pause/resume) and
+`crates/loadgen/tests/it/governor.rs` (cadence, cut-without-burst, pause/resume) and
 the `post_rate_retargets_the_running_server` HTTP smoke test.
 
 ### The environment axis: `--endpoint-config`
@@ -204,7 +204,7 @@ per run with `--correlate`; all mux endpoints share the one strategy:
 
 - **`--correlate header`** (default) — the token rides one transparent header
   the SUT must **relay** onto every leg it originates (our b2bua:
-  `B2BUA_RELAY_HEADERS`). Untuned this is byte-for-byte the historic behaviour:
+  `B2BUA_RELAY_HEADERS`). Untuned:
   `X-Loadgen-Id: <token>`, extraction = the whole header value.
   - `--correlation-header <name>` picks the header.
   - `--correlation-template <tpl>` shapes the VALUE around a `${token}`
@@ -279,7 +279,7 @@ several legs, the R-URI picker). The layout is independent of `--correlate`.
 ### Packet loss + auto-retransmit (robustness testing)
 
 Two default-off knobs let you exercise the SUT (and the loadgen itself) against a
-lossy fabric — an un-tuned run is byte-for-byte the historic behaviour.
+lossy fabric — an un-tuned run drops and retransmits nothing extra.
 
 - **`--drop-rate <f>`** (or **`--drop`** = the `0.001` default, 1/1000 so
   `P(3 drops in a row) ≈ 1e-9`): each datagram this call's mux endpoints send OR
@@ -400,17 +400,17 @@ The worked example, `e2e/cases/load-basic-pooled.json`:
   "bindings": {
     "mode": "seq",
     "entries": [
-      { "core": { "from": "sip:+3310${seq:4}@pool.example",
-                  "to":   "sip:+3390${seq:4}@callee.example" } },
+      { "core": { "from": "sip:+155510${seq:4}@pool.example",
+                  "to":   "sip:+155590${seq:4}@callee.example" } },
       { "core": { "from": "sip:+4420${rand:6}@pool.example" } }
     ]
   }
 }
 ```
 
-Call 0 dials `From: sip:+33100000@pool.example` → `To: sip:+33900000@…`, call 1
+Call 0 dials `From: sip:+1555100000@pool.example` → `To: sip:+1555900000@…`, call 1
 `From: sip:+4420<6 random digits>@…` (falling back to the base/default To), call
-2 wraps to entry 0 with `+33100002`, and so on. What the resolution drives:
+2 wraps to entry 0 with `+1555100002`, and so on. What the resolution drives:
 
 - the resolved **core `from`/`to`/`ruri`** ride the same egress
   `outgoing_invite` path as an e2e Test case's `core` (folded in before the
@@ -432,7 +432,7 @@ A malformed token (`${bogus}`, `${seq:}`, an unclosed `${…`) or an empty pool
 fails **at startup** (the same load-time validation `validate_case` applies on
 the e2e surface), never silently mid-run. Absent `bindings`, the case's single
 `input` is used for every call (tokens still expand), and with no `--case` at
-all the historic flag-only behaviour is byte-for-byte unchanged. Smoke
+all the run is driven by the flags alone. Smoke
 coverage: `loadgen_pooled_case_identities_and_dwell_overrides`.
 
 ### Test-case checks on sampled calls (`checks` / `checkSets`)
@@ -468,8 +468,8 @@ fail the sample.
 A case may also carry **`allowViolations`: `["no-contact-on-bye", …]`** —
 the authored analogue of `Harness::allow_violation` for a flow that
 legitimately deviates. The named RFC audit rules are exempted per call, so the
-finding no longer reclassifies the sampled call to `rfc_audit_fail`. Absent /
-empty = today's full audit, byte-for-byte. Smoke coverage:
+finding does not reclassify the sampled call to `rfc_audit_fail`. Absent /
+empty = the full audit. Smoke coverage:
 `loadgen_case_checks_pass_and_render_verdicts`,
 `loadgen_failing_check_reclassifies_to_check_fail`,
 `loadgen_allow_violations_waives_named_rfc_rule`.
@@ -558,13 +558,13 @@ page with its one-line reason.
   `Send` `AgentBinder` (`scenario-harness/src/loadbind.rs`) so thousands of calls
   run as ordinary tokio tasks. Recording + the RFC 3261/3262/3264 audit are the
   **same** decorators the harness report uses, layered per-sampled-call.
-- **The smoke suite is the regression gate.** `crates/loadgen/tests/smoke.rs`
+- **The smoke suite is the regression gate.** `crates/loadgen/tests/it/smoke.rs`
   runs the driver against an in-process `B2buaSut` and asserts correlation/demux,
   no dialog mixing, no mux/SUT leak, orphan observability, the multi-receiver
   picker, the emergency/overload 503-split, and post-call cleanup across every
   teardown path. These are real-clock but short, so they live in the **default
   lane** (`just test`). Keep them green; they have caught real B2BUA bugs (e.g.
-  the Tier-3 overload-shed per-call-lock leak).
+  the overload-shed per-call-lock leak).
 - **It does not replace the conformance tests.** Strict per-message RFC oracles
   live in `b2bua-harness` (e.g. `refer_allow.rs`). Load scenarios are
   interleaving-tolerant on purpose — a load tool must be robust to reordering.
@@ -659,7 +659,7 @@ drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
 
 ### Add a smoke test
 
-Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/smoke.rs`: call
+Add a `#[tokio::test(flavor = "multi_thread")]` to `tests/it/smoke.rs`: call
 `setup(base_port, Correlation::header("X-Loadgen-Id"), sample_cap)` (or
 `setup_with(.., |c| …)` to tune the in-process B2BUA, e.g. exhaust the CPS bucket
 for an overload test; `setup_no_relay(..)` for the third-party-SUT shape with no
@@ -736,7 +736,7 @@ so adding digest is one object:
   §17.1.2.2), asks the responder for a credential, and resends the request with
   the credential header + a **bumped CSeq** + a fresh Via branch, exactly **once**
   (a challenge to the resend is a plain `status_401/407`). **Without** a responder
-  the behaviour is byte-for-byte today's — no retry.
+  a challenge is final — no retry.
 
 - **How to plug one in.** Set it on the run's `CallEnv`
   (`CallEnv::with_challenge_responder(Arc::new(MyDigest{…}))`) or, on the load

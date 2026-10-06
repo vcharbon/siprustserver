@@ -147,7 +147,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum by (op, cause)(rate(b2bua_limiter_failures_total[1m]))", "refId": "A", "legendFormat": "{{op}} {{cause}}" }
+        { "expr": "sum by (op, cause)(rate(b2bua_limiter_failures_total[1m])) > 0", "refId": "A", "legendFormat": "{{op}} {{cause}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
@@ -171,9 +171,9 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "sum by (reason)(rate(b2bua_limiter_release_given_up_total[1m]))", "refId": "A", "legendFormat": "release given up: {{reason}}" },
-        { "expr": "sum by (reason)(rate(b2bua_limiter_refresh_given_up_total[1m]))", "refId": "B", "legendFormat": "refresh given up: {{reason}}" },
-        { "expr": "sum by (outcome)(rate(b2bua_limiter_refresh_answers_total{outcome!=\"extended\"}[1m]))", "refId": "C", "legendFormat": "refresh answered {{outcome}}" }
+        { "expr": "sum by (reason)(rate(b2bua_limiter_release_given_up_total[1m])) > 0", "refId": "A", "legendFormat": "release given up: {{reason}}" },
+        { "expr": "sum by (reason)(rate(b2bua_limiter_refresh_given_up_total[1m])) > 0", "refId": "B", "legendFormat": "refresh given up: {{reason}}" },
+        { "expr": "sum by (outcome)(rate(b2bua_limiter_refresh_answers_total{outcome!=\"extended\"}[1m])) > 0", "refId": "C", "legendFormat": "refresh answered {{outcome}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }

@@ -1,15 +1,17 @@
 //! Callflow-service authoring surface (ADR-0016) — the declarative macros
-//! ([`define_service!`] / [`sm_rule!`]) and the registry types ([`ServiceDef`] /
+//! ([`define_service!`](crate::define_service!) /
+//! [`sm_rule!`](crate::sm_rule!)) and the registry types ([`ServiceDef`] /
 //! [`ServiceSeed`]).
 //!
 //! A **service** is a per-call state machine: a [`MachineId`](call::MachineId)
-//! (== the service id), a set of state-gated rules ([`sm_rule!`]), and an `init`
-//! hook (X8) run once at call setup that may seed the machine's initial cursor,
-//! install its data backing, and fire an initial action batch. Everything a
-//! service does rides the normal [`RuleAction`](crate::model::RuleAction)/effects
-//! pipeline — there is no privileged back-door that writes call state outside
-//! the executor. The engine-side composition glue (`compose_rules` /
-//! `seed_services`, which need the executor) lives in `b2bua`, not here.
+//! (== the service id), a set of state-gated rules
+//! ([`sm_rule!`](crate::sm_rule!)), and an `init` hook (X8) run once at call
+//! setup that may seed the machine's initial cursor, install its data backing,
+//! and fire an initial action batch. Everything a service does rides the normal
+//! [`RuleAction`]/effects pipeline — there is no privileged back-door that
+//! writes call state outside the executor. The engine-side composition glue
+//! (`compose_rules` / `seed_services`, which need the executor) lives in
+//! `b2bua`, not here.
 
 use call::StateLabel;
 // `Call` is nameable here ONLY for the [`ServiceSeed::data_write`] installer
@@ -23,7 +25,7 @@ use crate::model::{RuleAction, RuleCall, RuleDefinition};
 /// The terminal-state marker for a `sm_rule!` transition (ADR-0016 X9). Writing
 /// `transitions: [ State::Bridging => Terminal ]` declares that the rule
 /// **deactivates** the machine from `Bridging` (its handler emits
-/// [`RuleAction::ClearState`](crate::model::RuleAction::ClearState), removing the
+/// [`RuleAction::ClearState`], removing the
 /// cursor). It carries the [`StateLabel::terminal`] sentinel, rendered as
 /// Mermaid's `[*]` sink. A unit value with a `const label()` so it drops straight
 /// into the macro's transition column beside the state-enum variants.

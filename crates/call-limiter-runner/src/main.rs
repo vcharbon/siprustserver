@@ -6,10 +6,10 @@
 //! lease lapsed (the sweep-on-access path only fires on traffic).
 //!
 //! Stateless, no persistence: on restart the store is empty; the counted calls
-//! re-register their sets on their next refresh (ADR-0038). The b2bua fails
+//! re-register their sets on their next refresh (ADR-0040). The b2bua fails
 //! open during the downtime. Deployed as a single replica (ClusterIP).
 //!
-//! Configured from the env: [`env`] states the grammar.
+//! Configured from the env: [`env`](mod@env) states the grammar.
 
 mod env;
 

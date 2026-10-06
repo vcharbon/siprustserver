@@ -31,7 +31,7 @@ use crate::contracts::SignalingNetworkEvent;
 use crate::types::RecvDisposition;
 
 /// The socket address behind a lane/bind key. A key is either the bare
-/// `ip:port` or the labelled `ip:port#<logical-endpoint>` form (036 ask C).
+/// `ip:port` or the labelled `ip:port#<logical-endpoint>` form.
 pub fn lane_addr(bind_key: &str) -> Option<SocketAddr> {
     bind_key.split('#').next()?.parse().ok()
 }
@@ -50,7 +50,7 @@ pub enum RecvNote {
     /// Discarded by the simulated packet-loss model (loadgen `--drop-rate`).
     LossModel,
     /// Correlated to the call but no live logical endpoint accepted it —
-    /// rendered on the `ip:port#noendpoint` sub-lane (036 ask C).
+    /// rendered on the `ip:port#noendpoint` sub-lane.
     Unrouted,
     /// Absorbed as a duplicate by the retransmit engine (`--auto-retransmit`).
     AbsorbedRetransmit,
@@ -97,7 +97,7 @@ pub struct RecordedSipEntry {
     pub reemit: Option<crate::types::ReEmitKind>,
     /// The sender's full lane key (`ip:port` or `ip:port#label`) when the send
     /// half is in the recording — lets the projector place the row on the
-    /// logical sub-lane instead of the collapsed socket (036 ask C).
+    /// logical sub-lane instead of the collapsed socket.
     pub from_lane: Option<String>,
     /// The receiver's full lane key, when a receive half was matched.
     pub to_lane: Option<String>,
@@ -329,8 +329,8 @@ fn paired_sip_entries(
 
     // Orphan deliveries from EXTERNAL senders: one entry per packet, stamped at
     // its arrival. (An orphan whose src IS a recorded bind — e.g. a fake
-    // fabric's pre-ingress synthetic reply — keeps the historic behaviour of
-    // not being an entry, so fully-recorded reports are byte-identical.)
+    // fabric's pre-ingress synthetic reply — is not an
+    // entry, so fully-recorded reports carry no duplicate.)
     for r in &recvs {
         if r.paired || recorded_binds.contains(&r.src) {
             continue;

@@ -1,5 +1,5 @@
 //! The `transfer-refer-media` Callflow shape: a **blind call transfer via SIP
-//! REFER** with RTP media re-exchange (Phase L). alice↔bob1 is established; bob1
+//! REFER** with RTP media re-exchange. alice↔bob1 is established; bob1
 //! then REFERs the call to bob2; the SUT authorizes the transfer (the scripted
 //! `/call/refer` backend keyed on `X-Api-Call.refer_key`), drives the C-leg
 //! INVITE to bob2 + the implicit-subscription NOTIFYs (`Event: refer`), and

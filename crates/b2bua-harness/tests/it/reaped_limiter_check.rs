@@ -7,78 +7,24 @@
 //! that leaves holds behind on purpose declares them with
 //! `assert_fully_reaped_leaving`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallLimiterEntry, CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine,
-};
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
-    ReleaseAnswer,
-};
+use b2bua::decision::{CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine};
+use b2bua::limiter::LimiterEntry;
+use b2bua_harness::limiter::doubles::{drop_releases, in_process, spy};
 use b2bua_harness::{
     settle_until, B2buaScene, B2buaSut, LimiterLeak, BOB_PORT, DEFAULT_LIMITER_ID,
 };
-use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, RefreshResult};
+use call_limiter::{CallStore, LimiterConfig};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
-/// A limiter backend over a real store that applies every admit and drops
-/// every release: the SUT releases its calls, the store keeps counting them.
-/// With `answers` off no release is ever answered either, so each stays in
-/// the SUT's release queue.
-struct DropsReleases {
-    store: Arc<CallStore>,
-    answers: bool,
-    /// Every key admitted, in order.
-    admitted: Mutex<Vec<String>>,
-}
-
-#[async_trait]
-impl CallLimiter for DropsReleases {
-    async fn admit(
-        &self,
-        key: &str,
-        entries: &[LimiterEntry],
-        release_on_refusal: bool,
-    ) -> AdmitOutcome {
-        self.admitted.lock().unwrap().push(key.to_string());
-        let wire: Vec<AdmitEntry> =
-            entries.iter().map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit }).collect();
-        match self.store.admit(key, &wire, release_on_refusal) {
-            AdmitResult::Admitted => AdmitOutcome::Admitted,
-            AdmitResult::Rejected { limiter_id } => AdmitOutcome::Rejected { limiter_id },
-            AdmitResult::Released => AdmitOutcome::Released,
-        }
-    }
-    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        if self.answers {
-            ReleaseAnswer::Released
-        } else {
-            ReleaseAnswer::Unavailable
-        }
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        let named = calls.iter().map(|c| (c.key.as_str(), c.ids.as_slice()));
-        let outcomes = self.store.refresh_all(named).into_iter().map(|outcome| match outcome {
-            RefreshResult::Extended => RefreshOutcome::Extended,
-            RefreshResult::Reregistered => RefreshOutcome::Reregistered,
-            RefreshResult::Released => RefreshOutcome::Released,
-            RefreshResult::Dropped => RefreshOutcome::Dropped,
-        });
-        RefreshAnswer::Answered(outcomes.collect())
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
-fn limiters(ids: &[(&str, i64)]) -> Vec<CallLimiterEntry> {
-    ids.iter().map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit }).collect()
+fn limiters(ids: &[(&str, i64)]) -> Vec<LimiterEntry> {
+    ids.iter().map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit }).collect()
 }
 
 /// A route to bob holding `ids`.
@@ -107,9 +53,10 @@ async fn call_through_a_backend_that_drops_releases(name: &str) -> B2buaScene {
 /// call's limiter key with the scene.
 async fn call_through_a_backend(name: &str, answers: bool) -> (B2buaScene, String) {
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
-    let limiter =
-        Arc::new(DropsReleases { store: store.clone(), answers, admitted: Mutex::default() });
-    let backend = limiter.clone();
+    // A backend over the store that applies every admit and drops every
+    // release: the SUT releases its calls, the store keeps counting them.
+    let backend = spy(drop_releases(answers, in_process(store.clone())));
+    let limiter = backend.clone();
     let s = B2buaScene::with_b2bua(name, move |_| {
         B2buaSut::builder(routes_holding(&[("x", 10), ("y", 10)]))
             .limiter(limiter)
@@ -119,18 +66,18 @@ async fn call_through_a_backend(name: &str, answers: bool) -> (B2buaScene, Strin
     let mut dialog = s.establish().await;
     s.hangup(&mut dialog).await;
     settle_until(|| s.b2bua.calls_reaped() && s.b2bua.limiter_count().released == 2).await;
-    let key = backend.admitted.lock().unwrap().first().cloned().expect("the call was admitted");
+    let key = backend.admitted_keys().first().cloned().expect("the call was admitted");
     (s, key)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[should_panic(expected = "limiter leak: the store still counts 2 hold(s)")]
 async fn a_limiter_backend_that_keeps_released_holds_fails_the_reaped_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-limiter-backend-leak").await;
     s.b2bua.assert_fully_reaped();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_declared_limiter_leak_passes_the_reaped_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-limiter-declared-leak").await;
     let count = s.b2bua.limiter_count();
@@ -138,14 +85,14 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
     let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: vec![] }).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[should_panic(expected = "the release queue holds other releases than declared")]
 async fn a_release_left_in_the_release_queue_fails_the_reaped_check() {
     let (s, _key) = call_through_a_backend("reaped-limiter-release-queued", false).await;
     s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: vec![] });
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[should_panic(expected = "the release queue holds other releases than declared")]
 async fn a_queued_release_declared_under_another_key_fails_the_reaped_check() {
     let (s, _key) = call_through_a_backend("reaped-limiter-release-queued-other", false).await;
@@ -153,7 +100,7 @@ async fn a_queued_release_declared_under_another_key_fails_the_reaped_check() {
     s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2, queued });
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_declared_queued_release_passes_the_reaped_check() {
     let (s, key) = call_through_a_backend("reaped-limiter-declared-queued", false).await;
     assert_eq!(s.b2bua.limiter_waiting_keys(), [key.clone()]);
@@ -162,7 +109,7 @@ async fn a_declared_queued_release_passes_the_reaped_check() {
 
 /// The call-state checks judge the calls alone: a hold the store still
 /// counts is left to the full check.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-calls-only").await;
     s.b2bua.assert_calls_reaped();
@@ -171,7 +118,7 @@ async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
 
 /// A call still established fails the call-state checks; once it ends they
 /// pass.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_call_not_yet_reaped_fails_the_call_state_checks() {
     let s = B2buaScene::new("reaped-calls-live").await;
     let mut dialog = s.establish().await;
@@ -186,7 +133,7 @@ async fn a_call_not_yet_reaped_fails_the_call_state_checks() {
     let _ = s.finish().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_routed_call_holds_the_default_limiter_until_it_ends() {
     let s = B2buaScene::new("reaped-limiter-default").await;
     let mut dialog = s.establish().await;
@@ -205,7 +152,7 @@ async fn every_routed_call_holds_the_default_limiter_until_it_ends() {
 
 /// The route's own entries `[x, x, y]` (the same id twice, a distinct id)
 /// are admitted with the default in one set and all released.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_route_s_own_limiters_are_held_with_the_default() {
     let s = B2buaScene::with_b2bua("reaped-limiter-own-and-default", |_| {
         B2buaSut::builder(routes_holding(&[("x", 10), ("x", 10), ("y", 10)]))
@@ -244,7 +191,7 @@ async fn a_route_refused_on_its_second_limiter_holds_nothing() {
 
 /// Initial `[x, y]`, failover `[y, z]`: the failover route carries the default
 /// too, and replaces the initial route's holds, default included.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failover_route_holds_its_own_limiters_with_the_default() {
     let h = Harness::new("reaped-limiter-failover");
     let alice = h.agent("alice", "127.0.0.1:5060").await;

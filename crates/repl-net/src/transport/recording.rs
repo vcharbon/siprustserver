@@ -1,12 +1,12 @@
 //! `RecordingReplicationNetwork` — a decorator that tees every decoded frame
-//! into a shared capture sink for the S9 report.
+//! into a shared capture sink for the replication report.
 //!
 //! Wraps any [`ReplicationNetwork`]; every connection it yields — client (via
 //! `connect`) or server (via the wrapped listener's `accept`) — is itself
 //! wrapped so each `send`/`recv` records a decoded [`CapturedFrame`] into a
 //! shared sink, stamped with the injected [`Clock`]'s timestamp. This is the
-//! raw feed the report will project onto the scenario-harness renderers; the
-//! renderer itself is **not** built here (later slice).
+//! raw feed a report projects onto a renderer; the renderer itself is **not**
+//! built here.
 //!
 //! Mirrors `sip-net`'s recording decorator pattern (decorator struct
 //! implementing the same trait), but minimal: just capture + decode, no audit
@@ -222,7 +222,7 @@ mod tests {
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
-    use sip_clock::testkit::advance_in_100ms_chunks;
+    use sip_clock::testkit::advance_settled;
 
     use crate::transport::SimulatedReplicationNetwork;
 
@@ -256,14 +256,16 @@ mod tests {
             origin_now_ms: 0,
             indexes: vec!["i".into()],
             body: Some(StdArc::from(&b"body"[..])),
+            answered: false,
+            incarnation: None,
         };
 
         client.send(req.clone()).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(server.recv().await, Some(req.clone()));
 
         server.send(data.clone()).await.unwrap();
-        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        advance_settled(Duration::from_millis(10)).await;
         assert_eq!(client.recv().await, Some(data.clone()));
 
         let cap = rec.captured();

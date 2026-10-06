@@ -8,12 +8,12 @@ use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
+use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 
 /// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped). The referrer's
 /// peer is answered, so C's provisional is shown to no one: C keeps what it is
@@ -91,6 +91,13 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             // A's current description (her ACK answer) instead.
             let a_leg = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
             let a_sdp = a_leg.sdp().unwrap_or_default();
+            // A's lines describe the offer only where it is her whole body.
+            let a_offer = Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string());
+            let a_offer = if a_sdp == a_leg.body().as_ref() {
+                a_offer.described_by(a_leg.headers())
+            } else {
+                a_offer
+            };
 
             let mut new_state = st.clone();
             new_state.phase = TransferPhase::CRealigning;
@@ -116,7 +123,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                 },
                 RuleAction::SendReinvite {
                     leg_id: c_leg_id.clone(),
-                    body: Some(Body::from_leg(a_sdp.to_vec(), ctx.call.a_leg().leg_id.to_string())),
+                    body: Some(a_offer),
                     add_headers: vec![],
                 },
                 RuleAction::AddCdrEvent {
@@ -197,7 +204,7 @@ pub(super) fn c_no_answer() -> RuleDefinition {
             .timer_type(call::TimerType::NoAnswer)
             .filter(|ctx| {
                 let timer_leg = match ctx.event {
-                    crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
+                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                     _ => None,
                 };
                 state(ctx).and_then(|s| s.c_leg_id.as_deref()).is_some()

@@ -158,7 +158,7 @@ describe("a 2xx whose ACK the leg never captured", () => {
   })
 
   it("leaves a 2xx REPEAT the leg's own ACK preceded alone — the trace lost nothing", () => {
-    // capture_139737: the answer rode leg B's ACK, the SUT carried it to leg A,
+    // A captured shape: the answer rode leg B's ACK, the SUT carried it to leg A,
     // leg A ACKed at s6 and re-sent its 200 afterwards. That repeat crossed the
     // ACK in flight (§13.3.1.4); the datagram is on the wire and in the trace.
     expect(
@@ -187,7 +187,7 @@ describe("a 2xx whose ACK the leg never captured", () => {
   })
 
   it("leaves a 2xx the document states as REPEATED alone — the ladder proves the wire", () => {
-    // capture_50d3690c: the peer re-sent its 200 and no ACK ever came, which a
+    // A captured shape: the peer re-sent its 200 and no ACK ever came, which a
     // UAS does only while none has arrived — a source violation, not a hole.
     expect(
       unackedFinals([
@@ -216,7 +216,7 @@ describe("a 2xx whose ACK the leg never captured", () => {
   })
 
   it("charges the terminal re-INVITE though every earlier one was ACKed", () => {
-    // capture_92628: two re-INVITEs relayed to the caller, the last one's ACK
+    // A captured shape: two re-INVITEs relayed to the caller, the last one's ACK
     // absent from every vantage.
     const charged = unackedFinals([
       invite("s1", "A", "expect"),

@@ -32,14 +32,11 @@ pub(super) fn proxy_reason(status: u16, text: &str) -> Reason {
         .with_param("text", ParamValue::Quoted(SipStr::owned(text)))
 }
 
-/// The least `Retry-After` (seconds) a proxy reject carries: a value of `0`
+/// The `Retry-After` of a reject this proxy answers itself, floored by
+/// [`retry_after::floored`](load_shed::retry_after::floored): a value of `0`
 /// (RFC 3261 §20.33) asks for no wait, which a reject must never invite.
-const MIN_REJECT_RETRY_AFTER_SEC: u32 = 1;
-
-/// The `Retry-After` of a reject this proxy answers itself, floored at
-/// [`MIN_REJECT_RETRY_AFTER_SEC`].
 pub(super) fn reject_retry_after(retry_after_sec: u32) -> RetryAfter {
-    RetryAfter::new(retry_after_sec.max(MIN_REJECT_RETRY_AFTER_SEC).to_string())
+    RetryAfter::new(load_shed::retry_after::floored(retry_after_sec).to_string())
 }
 
 impl ProxyCore {
@@ -81,24 +78,25 @@ impl ProxyCore {
         // the matching ACK rather than relay it (no downstream exists for a
         // self-generated reject; relaying would run the strategy and hand a
         // worker a stray ACK matching no transaction it ever created).
-        if (300..700).contains(&status) && req.method() == Method::Invite {
-            if let Some(upstream_branch) = top_via_branch(req) {
-                let from = req.from();
-                self.cancel_lru.remember(
-                    &crate::cancel_lru::ack_hop_key(
-                        req.call_id().as_str(),
-                        from.tag(),
-                        req.cseq().seq(),
-                    ),
-                    crate::cancel_lru::CancelEntry {
-                        target: self.advertised.clone(),
-                        branch: String::new(),
-                        upstream_branch,
-                        stickiness: None,
-                    },
-                    crate::cancel_lru::RTX_ENTRY_TTL_MS,
-                );
-            }
+        if (300..700).contains(&status)
+            && req.method() == Method::Invite
+            && top_via_branch(req).is_some()
+        {
+            let from = req.from();
+            self.cancel_lru.remember(
+                &crate::cancel_lru::ack_hop_key(
+                    req.top_via(),
+                    req.call_id().as_str(),
+                    from.tag(),
+                    req.cseq().seq(),
+                ),
+                crate::cancel_lru::CancelEntry {
+                    target: self.advertised.clone(),
+                    branch: String::new(),
+                    stickiness: None,
+                },
+                crate::cancel_lru::RTX_ENTRY_TTL_MS,
+            );
         }
     }
 

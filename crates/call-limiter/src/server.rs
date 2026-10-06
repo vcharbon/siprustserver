@@ -3,7 +3,8 @@
 //!
 //! Routes: `POST /v1/admit`, `POST /v1/release`, `POST /v1/refresh`,
 //! `GET /v1/health`, `GET /metrics`, `GET /healthz`. Every admit, refresh and
-//! health answer states the store's lease. `/healthz` answers the
+//! health answer states the store's lease, and every admit and refresh answer
+//! the set held for its key. `/healthz` answers the
 //! process; `/v1/health` answers only once the store has, so a client's
 //! breaker probing it learns that a request can be served. A malformed body
 //! is `400`; an unknown route is `404`. The handler is pure compute (no real
@@ -18,8 +19,8 @@ use http_net::{HttpRequest, HttpResponse, HttpService};
 use crate::metrics::LimiterMetrics;
 use crate::store::{AdmitResult, CallStore, RefreshResult};
 use crate::wire::{
-    AdmitRequest, AdmitResponse, HealthResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
-    ReleaseRequest,
+    AdmitAnswer, AdmitRequest, AdmitResponse, HealthResponse, HeldSet, RefreshAnswer, RefreshReply,
+    RefreshRequest, RefreshResponse, ReleaseRequest,
 };
 
 /// The limiter HTTP service: a call store + its metrics.
@@ -70,31 +71,21 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad admit body: {e}")),
                 };
+                let AdmitRequest { key, change, held, entries, release_on_refusal } = parsed;
                 let outcome =
-                    self.store.admit(&parsed.key, &parsed.entries, parsed.release_on_refusal);
+                    self.store.admit_carrying(&key, change, &held, &entries, release_on_refusal);
                 self.metrics.on_admit(&outcome);
-                let lease_ms = self.lease_ms();
-                let resp = match outcome {
-                    AdmitResult::Admitted => AdmitResponse {
-                        admitted: true,
-                        rejected_id: None,
-                        released: false,
-                        lease_ms,
-                    },
-                    AdmitResult::Rejected { limiter_id } => AdmitResponse {
-                        admitted: false,
-                        rejected_id: Some(limiter_id),
-                        released: false,
-                        lease_ms,
-                    },
-                    AdmitResult::Released => AdmitResponse {
-                        admitted: false,
-                        rejected_id: None,
-                        released: true,
-                        lease_ms,
-                    },
+                let (outcome, rejected_id, held) = match outcome {
+                    AdmitResult::Admitted => {
+                        (AdmitAnswer::Admitted, None, Some(HeldSet { change, entries }))
+                    }
+                    AdmitResult::Rejected { limiter_id, held } => {
+                        (AdmitAnswer::Rejected, Some(limiter_id), Some(held))
+                    }
+                    AdmitResult::Superseded { held } => (AdmitAnswer::Superseded, None, Some(held)),
+                    AdmitResult::Released => (AdmitAnswer::Released, None, None),
                 };
-                json_ok(&resp)
+                json_ok(&AdmitResponse { outcome, rejected_id, held, lease_ms: self.lease_ms() })
             }
             ("POST", "/v1/release") => {
                 let parsed: ReleaseRequest = match serde_json::from_slice(&req.body) {
@@ -110,16 +101,20 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let calls = parsed.calls.iter().map(|c| (c.key.as_str(), c.ids.as_slice()));
+                let calls =
+                    parsed.calls.iter().map(|c| (c.key.as_str(), c.change, c.entries.as_slice()));
                 let results = self.store.refresh_all(calls);
-                self.metrics.on_refresh(&results);
+                self.metrics.on_refresh(results.iter().map(|r| &r.result));
                 let outcomes = results
                     .into_iter()
-                    .map(|outcome| match outcome {
-                        RefreshResult::Extended => RefreshAnswer::Extended,
-                        RefreshResult::Reregistered => RefreshAnswer::Reregistered,
-                        RefreshResult::Released => RefreshAnswer::Released,
-                        RefreshResult::Dropped => RefreshAnswer::Dropped,
+                    .map(|refreshed| RefreshReply {
+                        outcome: match refreshed.result {
+                            RefreshResult::Extended => RefreshAnswer::Extended,
+                            RefreshResult::Reregistered => RefreshAnswer::Reregistered,
+                            RefreshResult::Released => RefreshAnswer::Released,
+                            RefreshResult::Dropped => RefreshAnswer::Dropped,
+                        },
+                        held: refreshed.held,
                     })
                     .collect();
                 json_ok(&RefreshResponse { outcomes, lease_ms: self.lease_ms() })

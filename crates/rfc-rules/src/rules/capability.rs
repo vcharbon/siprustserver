@@ -580,7 +580,7 @@ fn response_finding(rule: RuleId, mi: usize, msg: &Msg, owed: &[&str]) -> Findin
 /// **A CANCEL is an occasion on its own bytes.** An ACK is one only where this
 /// vantage can SHOW it acknowledges a non-2xx: §17.1.1.3 has that ACK generated
 /// by the client transaction on the INVITE's own branch, so the branch walk
-/// ([`super::branch`]) pairs it with the final its sender took there. An ACK on
+/// (`super::branch`) pairs it with the final its sender took there. An ACK on
 /// a branch carrying no such final is the §13.2.2.4 2xx ACK — a fresh
 /// transaction, out of §8.2.2.3's scope — and opens nothing.
 ///

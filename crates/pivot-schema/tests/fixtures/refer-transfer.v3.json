@@ -104,17 +104,17 @@
     "annotations": {
       "flags": [
         {
-          "detail": "R-URI \"+199999333000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "R-URI \"+199999315550900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         },
         {
-          "detail": "To \"+3319114000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "detail": "To \"+1555914000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
           "kind": "number-bearing-frozen-ref"
         }
       ]
     },
     "family": "refer",
-    "id": "capture_199850.pcap.gz-case1",
+    "id": "capture_refer-transfer.pcap.gz-case1",
     "lanes": {
       "hosted": "blocked:claim-ambiguous",
       "kind": "blocked:claim-ambiguous",
@@ -127,9 +127,9 @@
         1,
         6
       ],
-      "capture": "capture_199850.pcap.gz"
+      "capture": "capture_refer-transfer.pcap.gz"
     },
-    "title": "capture_199850.pcap.gz basic call (groups 1+6)",
+    "title": "capture_refer-transfer.pcap.gz basic call (groups 1+6)",
     "variant": "repro"
   },
   "endpoints": [
@@ -173,7 +173,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@192.0.2.201;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@192.0.2.201;user=phone>"
           },
           {
             "name": "Accept",
@@ -182,10 +182,10 @@
         ],
         "method": "INVITE",
         "ruri": {
-          "frozen": "+199999333000900001"
+          "frozen": "+199999315550900001"
         },
         "to": {
-          "frozen": "+3319114000900001"
+          "frozen": "+1555914000900001"
         }
       },
       "observed": {
@@ -244,11 +244,11 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@192.0.2.201;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@192.0.2.201;user=phone>"
           },
           {
             "name": "P-Access-Network-Info",
-            "value": "GSTN;cc=33;oc=00;lac=92000"
+            "value": "GSTN;cc=1;oc=00;lac=92000"
           }
         ],
         "method": "INVITE"
@@ -667,7 +667,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@carrier.example.net;user=phone>"
           },
           {
             "name": "Accept",
@@ -675,7 +675,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
           }
         ],
         "method": "INVITE"
@@ -723,7 +723,7 @@
         "cseq-method": "INVITE",
         "headers": [
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "62"
           },
           {
@@ -788,7 +788,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@carrier.example.net;user=phone>"
           },
           {
             "name": "Accept",
@@ -796,7 +796,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
           }
         ],
         "method": "INVITE"
@@ -859,7 +859,7 @@
             "value": "uui"
           },
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "62"
           }
         ],
@@ -922,7 +922,7 @@
             "value": "uui"
           },
           {
-            "name": "P-Identifier",
+            "name": "X-Vendor-Id",
             "value": "62"
           }
         ],
@@ -1019,7 +1019,7 @@
         "headers": [
           {
             "name": "Refer-To",
-            "value": "<sip:+33000900006@203.0.113.185:5060;parent-party-uuid=01MSL41TFSDB37KTLEOH9B5AES00026F>"
+            "value": "<sip:+15550900006@203.0.113.185:5060;x-param=1>"
           }
         ],
         "method": "REFER"
@@ -1113,7 +1113,7 @@
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900003;x-user=1@carrier.example.net;user=phone>"
           },
           {
             "name": "Accept",
@@ -1121,7 +1121,7 @@
           },
           {
             "name": "Diversion",
-            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+            "value": "<sip:+15550900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
           }
         ],
         "method": "INVITE"
@@ -1833,7 +1833,7 @@
       ],
       "kind": "external-caller",
       "name": "caller",
-      "observed": "+33000900002"
+      "observed": "+15550900002"
     },
     {
       "catalog": {
@@ -1856,7 +1856,7 @@
       ],
       "kind": "site",
       "name": "called-1-0",
-      "observed": "+33000900004"
+      "observed": "+15550900004"
     },
     {
       "catalog": {
@@ -1867,7 +1867,7 @@
       ],
       "kind": "site",
       "name": "called-1-1",
-      "observed": "+33000900005"
+      "observed": "+15550900005"
     },
     {
       "catalog": {
@@ -1878,7 +1878,7 @@
       ],
       "kind": "site",
       "name": "called-2-0",
-      "observed": "+33000900006"
+      "observed": "+15550900006"
     }
   ],
   "legs": [

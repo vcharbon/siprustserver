@@ -12,7 +12,8 @@
 //! module reassembles them.
 //!
 //! A tier-2 ref resolves through the lane's identity binding where it is
-//! positional, and rides verbatim where the document froze it. A `${…}` is
+//! positional, and rides verbatim where the document froze it. A ref that
+//! states its captured name-addr renders that, its `${num:…}` bound. A `${…}` is
 //! substituted wherever it appears, including inside a frozen value: §8.1 states
 //! there is no position where an accessor is literal text.
 
@@ -22,7 +23,8 @@ use std::path::Path;
 use pivot_schema::body::Body;
 use pivot_schema::bundle::RunConfig;
 use pivot_schema::msg::{MsgSpec, Ref};
-use sip_message::{HeaderName, MessageTemplate, Method, MultipartPart, TemplateHeader};
+use sip_message::header::NameAddr;
+use sip_message::{HeaderName, MessageTemplate, Method, MultipartPart, SipStr, TemplateHeader};
 
 use crate::deviation::StepEffects;
 use crate::media::{Booking, MediaMode};
@@ -51,6 +53,9 @@ pub enum RenderError {
     /// A `malformed-header` deviation naming a header the step does not carry:
     /// it would reproduce nothing.
     MalformedHeaderAbsent { site: String, header: String },
+    /// A ref's `addr` that is no From/To identity: stated on a Request-URI,
+    /// unreadable as a name-addr once resolved, or carrying the stack's tag.
+    AddrRefused { site: String, addr: String, detail: String },
     /// The message states neither a method nor a status.
     NoStartLine,
 }
@@ -82,6 +87,9 @@ impl std::fmt::Display for RenderError {
                 f,
                 "{site}: a malformed-header deviation names {header:?}, which the step does not carry"
             ),
+            RenderError::AddrRefused { site, addr, detail } => {
+                write!(f, "{site}: name-addr {addr:?} refused: {detail}")
+            }
             RenderError::NoStartLine => write!(f, "the message states neither a method nor a status"),
         }
     }
@@ -191,7 +199,8 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
     })
 }
 
-/// One tier-2 ref, resolved.
+/// One tier-2 ref, resolved: the name-addr it states, accessors substituted, or
+/// else the URI the lane composes for it.
 fn uri(
     r: Option<&Ref>,
     site: &str,
@@ -202,6 +211,24 @@ fn uri(
 ) -> Result<Option<String>, RenderError> {
     let Some(r) = r else { return Ok(None) };
     let site = format!("{site} {what}");
+    if let Some(addr) = r.addr() {
+        let refused = |detail: String| RenderError::AddrRefused {
+            site: site.clone(),
+            addr: addr.to_string(),
+            detail,
+        };
+        if is_ruri {
+            return Err(refused("a Request-URI is an addr-spec the lane composes".into()));
+        }
+        let text = resolver.text(addr).map_err(|e| RenderError::from((site.as_str(), e)))?;
+        return match NameAddr::parse(&SipStr::owned(&text)) {
+            Err(error) => Err(refused(error.reason)),
+            Ok(parsed) if parsed.params().has("tag") => {
+                Err(refused("it carries a tag, which the stack mints".into()))
+            }
+            Ok(_) => Ok(Some(text)),
+        };
+    }
     match r {
         Ref::Positional(p) => {
             let pos = resolver.text(&p.pos).map_err(|e| RenderError::from((site.as_str(), e)))?;
@@ -411,12 +438,18 @@ mod tests {
             ruri: Some(Ref::Positional(PositionalRef {
                 pos: "called[0][0]".into(),
                 form: Some("trunk-composed".into()),
+                addr: None,
             })),
             from: Some(Ref::Positional(PositionalRef {
                 pos: "caller".into(),
                 form: Some("private".into()),
+                addr: None,
             })),
-            headers: vec![Header { name: "P-Orig".into(), value: "sbc.111".into(), class: None }],
+            headers: vec![Header {
+                name: "X-Vendor-Orig".into(),
+                value: "sbc.111".into(),
+                class: None,
+            }],
             ..MsgSpec::default()
         };
         let rendered = render(
@@ -438,8 +471,79 @@ mod tests {
         assert_eq!(rendered.from.as_deref(), Some("sip:0009001@lane.invalid"));
         let names: Vec<&str> =
             rendered.template.headers().iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(names, ["P-Orig", "X-Lane"], "the lane's own header rides last");
+        assert_eq!(names, ["X-Vendor-Orig", "X-Lane"], "the lane's own header rides last");
         assert_eq!(rendered.template.method(), Some(&Method::Invite));
+    }
+
+    #[test]
+    fn a_ref_that_states_its_name_addr_renders_it_around_the_bound_number() {
+        let state = RunState::new();
+        let bindings = IdentityBindings::new().bind("caller", "e164", "+15556000777");
+        let resolver = Resolver::new(&state, &bindings);
+        let msg: MsgSpec = serde_json::from_str(
+            r#"{
+              "method": "INVITE",
+              "from": { "pos": "caller", "form": "e164",
+                        "addr": "\"Alice\" <sip:${num:caller:e164};verstat=x@h.invalid;user=phone>;x-param=1" },
+              "to": { "frozen": "+15556000004",
+                      "addr": "<sip:+15556000004@example.invalid;x-uri=2;user=phone>" }
+            }"#,
+        )
+        .expect("a message");
+        let rendered = render(
+            &msg,
+            "step \"s1\"",
+            &Context {
+                resolver: &resolver,
+                config: &config(),
+                effects: &StepEffects::default(),
+                composer: &TestComposer,
+                base_dir: Path::new("."),
+                media: &Booking::new("127.0.0.1", 40000),
+                leg: "A",
+                call_headers: &BTreeMap::new(),
+            },
+        )
+        .expect("the message composes");
+        assert_eq!(
+            rendered.from.as_deref(),
+            Some("\"Alice\" <sip:+15556000777;verstat=x@h.invalid;user=phone>;x-param=1")
+        );
+        assert_eq!(
+            rendered.to.as_deref(),
+            Some("<sip:+15556000004@example.invalid;x-uri=2;user=phone>")
+        );
+    }
+
+    #[test]
+    fn a_name_addr_that_does_not_read_or_rides_a_request_uri_is_refused() {
+        let state = RunState::new();
+        let bindings = IdentityBindings::new();
+        let resolver = Resolver::new(&state, &bindings);
+        let cx = Context {
+            resolver: &resolver,
+            config: &config(),
+            effects: &StepEffects::default(),
+            composer: &TestComposer,
+            base_dir: Path::new("."),
+            media: &Booking::new("127.0.0.1", 40000),
+            leg: "A",
+            call_headers: &BTreeMap::new(),
+        };
+        for (field, addr) in
+            [("from", "\"open <sip:x@h"), ("to", "<sip:x@h>;tag=t1"), ("ruri", "<sip:x@h>")]
+        {
+            let msg: MsgSpec = serde_json::from_value(serde_json::json!({
+                "method": "INVITE",
+                field: { "frozen": "x", "addr": addr }
+            }))
+            .expect("a message");
+            let refused = render(&msg, "step \"s1\"", &cx);
+            assert!(
+                matches!(refused, Err(RenderError::AddrRefused { .. })),
+                "{field} {addr}: {refused:?}"
+            );
+        }
     }
 
     #[test]
@@ -488,7 +592,7 @@ mod tests {
         let leg = state.leg_mut("B");
         leg.call_id = Some("cid-b".into());
         leg.remote_tag = Some("t9".into());
-        let bindings = IdentityBindings::new().bind("transferee", "e164", "+33000900006");
+        let bindings = IdentityBindings::new().bind("transferee", "e164", "+15550900006");
         let resolver = Resolver::new(&state, &bindings);
         let msg = MsgSpec {
             method: Some("REFER".into()),
@@ -517,7 +621,7 @@ mod tests {
         .expect("the message composes");
         assert_eq!(
             rendered.template.headers()[0].value,
-            "<sip:+33000900006@h?Replaces=cid-b%3Bto-tag%3Dt9>"
+            "<sip:+15550900006@h?Replaces=cid-b%3Bto-tag%3Dt9>"
         );
     }
 

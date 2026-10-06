@@ -10,15 +10,16 @@
 //!
 //! Every call holds three limiters.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::{LimiterFailure, LimiterOp, ReleaseGiveUp};
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -104,7 +105,7 @@ impl Scene {
                     let mut r = route_to("127.0.0.1", 5070);
                     r.call_limiter = HOLDS
                         .iter()
-                        .map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit })
+                        .map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit })
                         .collect();
                     NewCallResponse::Route(r)
                 })
@@ -139,7 +140,7 @@ impl Scene {
         let mut bye = dialog.bye().await;
         self.bob.receive("BYE").await.respond(200, "OK").await;
         bye.expect(200).await;
-        b2bua_harness::advance(SIMULATED_TRANSIT_DELAY_MS).await;
+        self.h.advance(Duration::from_millis(SIMULATED_TRANSIT_DELAY_MS)).await;
     }
 
     /// Requests the client sent on `path` so far.
@@ -184,12 +185,6 @@ impl Scene {
         assert_eq!(self.holds(), [0, 0, 0], "every limiter drained to 0");
         self.b2bua.assert_fully_reaped();
     }
-}
-
-/// Advance `d` in the harness's settled steps, fine enough that a limiter
-/// request in flight is answered inside its budget.
-async fn advance(d: Duration) {
-    b2bua_harness::advance(d.as_millis() as u64).await;
 }
 
 /// The distinct keys of `keys`, sorted.
@@ -239,7 +234,7 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // The counted call ends while the breaker is open: its release waits.
     let releases = s.sent_on("/v1/release");
     s.hang_up(&mut counted).await;
-    advance(3 * PROBE).await;
+    s.h.advance(3 * PROBE).await;
     assert_eq!(s.sent_on("/v1/release"), releases, "no release request while open");
     assert_eq!(s.b2bua.limiter_releases_waiting(), 1, "the counted call's release waits");
     assert_eq!(s.holds(), [1, 1, 1], "the counted call is still held");
@@ -247,7 +242,7 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // The limiter answers again: within one probe period the breaker
     // closes, the waiting release leaves and the next call is counted.
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    advance(PROBE + Duration::from_millis(200)).await;
+    s.h.advance(PROBE + Duration::from_millis(200)).await;
     assert!(!metrics.limiter().breaker_open(), "the probe closed the breaker");
     assert_eq!(metrics.limiter().breaker_transitions_total(false), 1);
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "the release left on close");
@@ -285,11 +280,11 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
     for n in 4..=5 {
         dialogs.push(s.establish().await.0);
         assert_eq!(s.sent_on("/v1/admit"), 3, "call {n} sent no admit");
-        advance(2 * PROBE).await;
+        s.h.advance(2 * PROBE).await;
     }
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    advance(PROBE + Duration::from_millis(200)).await;
+    s.h.advance(PROBE + Duration::from_millis(200)).await;
     dialogs.push(s.establish().await.0);
     assert_eq!(s.sent_on("/v1/admit"), 4, "the breaker closed: the next call admits");
     let metrics = s.b2bua.metrics();
@@ -350,14 +345,14 @@ async fn a_refresh_held_while_open_re_registers_a_lapsed_set_on_close() {
         s.hang_up(dialog).await;
     }
 
-    advance(Duration::from_secs(130)).await;
+    s.h.advance(Duration::from_secs(130)).await;
     assert!(s.b2bua.metrics().limiter().breaker_open(), "still open while stalled");
     assert_eq!(s.sent_on("/v1/refresh"), 0, "no refresh request while open");
     assert_eq!(s.b2bua.metrics().limiter().refresh_due(), 1, "the counted call's refresh is held");
     assert_eq!(s.holds(), [0, 0, 0], "the call's set lapsed on the limiter");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    advance(PROBE + Duration::from_millis(200)).await;
+    s.h.advance(PROBE + Duration::from_millis(200)).await;
     assert!(!s.b2bua.metrics().limiter().breaker_open(), "the probe closed the breaker");
     assert_eq!(s.holds(), [1, 1, 1], "the held refresh re-registered the set on close");
 

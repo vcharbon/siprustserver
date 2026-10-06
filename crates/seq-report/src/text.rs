@@ -2,8 +2,8 @@
 //!
 //! One line per row, in `(at_ms, seq)` order, tagged with the plane so SIP,
 //! replication, lifecycle and views events are distinguishable in a terminal. A
-//! lifecycle row renders as a centred `=== … ===` band (matching the historic
-//! ha-harness text band); a belief change renders as a `[VIEW]` line on its
+//! lifecycle row renders as a centred `=== … ===` band (the ha-harness
+//! text band); a belief change renders as a `[VIEW]` line on its
 //! observer. Message rows carry their detail (full wire text for SIP) indented
 //! under the line so the file is self-contained. The views table and the
 //! disagreements list close the file, mirroring the HTML report.

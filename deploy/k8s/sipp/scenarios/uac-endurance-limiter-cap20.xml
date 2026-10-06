@@ -12,11 +12,10 @@
   below, which branches to the `rejected` label so the call ends cleanly and is
   counted "Successful" (an expected cap rejection), NOT FailedUnexpectedMessage.
   sipp auto-ACKs the 486 in UAC mode, so the transaction closes with no leak.
-  Earlier this scenario had NO 486 branch, so every cap rejection (a flat ~1.3/s
-  baseline at 2 cps vs cap 20 — the cap working AS DESIGNED) aborted the call and
-  inflated sipp_failed_total{cause="unexpected_msg"}; an instrumented peak repro
-  (2026-06-09) traced those "failures" to exactly these correct 486 responses, so
-  they are now scored as the expected outcome they are. The suite still scores
+  Without a 486 branch every cap rejection (a flat ~1.3/s baseline at 2 cps vs
+  cap 20 — the cap working AS DESIGNED) would abort the call and inflate
+  sipp_failed_total{cause="unexpected_msg"}, so these correct 486 responses are
+  scored as the expected outcome they are. The suite still scores
   role=limiter by cap RECONVERGENCE (snap_limiter_conc), apart from the long|short
   success ratio — flipping these 486s Failed→Successful does not touch that gate.
 

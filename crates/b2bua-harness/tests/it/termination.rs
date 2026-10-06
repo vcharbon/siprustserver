@@ -13,18 +13,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use b2bua::cdr::CdrRecord;
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::test_adapter::ReleaseOutcome;
 use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, CallReleaseResponse, CallTreatment, NewCallResponse,
-    RejectDecision, ScriptedDecisionEngine,
+    CallDecisionEngine, CallReleaseResponse, CallTreatment, NewCallResponse, RejectDecision,
+    ScriptedDecisionEngine,
 };
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::limiter::{CallLimiter, LimiterEntry};
+use b2bua_harness::limiter::doubles::{fail_open, refuse_on};
 use b2bua_harness::{settle_until, B2buaSut, B2buaSutBuilder};
 use call::{Call, MessageDirection, MessageEntry, Termination, TerminationCause, TimeoutKind};
 use scenario_harness::Harness;
@@ -520,26 +518,6 @@ async fn the_ring_off_leaves_the_cut_at_zero() {
     let _report = h.finish().await;
 }
 
-/// A limiter that refuses every admission naming `refused`.
-struct RefusingLimiter(&'static str);
-
-#[async_trait]
-impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        match entries.iter().find(|e| e.id == self.0) {
-            Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
-            None => AdmitOutcome::Unavailable,
-        }
-    }
-    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        ReleaseAnswer::Released
-    }
-    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
-        RefreshAnswer::Unavailable
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// A route to bob ringing at most `no_answer_sec`, consulted on failure when
 /// `consult` (a callback context).
 fn ringing_route(no_answer_sec: i64, consult: bool) -> Arc<dyn CallDecisionEngine> {
@@ -725,10 +703,10 @@ async fn a_limiter_refused_reroute_ends_the_call_under_the_decision() {
     let bob = h.agent("bob", BOB).await;
     let decision = released_route(|| {
         let mut r = route_to("127.0.0.1", 5071);
-        r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+        r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
         ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
     });
-    let sut = Sut::spawn_with(&h, decision, Arc::new(RefusingLimiter("cap")), |_| {}).await;
+    let sut = Sut::spawn_with(&h, decision, refuse_on("cap", fail_open()), |_| {}).await;
 
     establish_past_cap(&h, &alice, &bob, &sut).await;
 

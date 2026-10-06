@@ -1,5 +1,5 @@
-//! sip-clock — the clock seam (slice 0 of the migration; re-expression of the
-//! source's Effect `Clock` / `TestClock`).
+//! sip-clock — the clock seam (re-expression of the source's Effect `Clock` /
+//! `TestClock`).
 //!
 //! # Why this exists (and why it is *narrow*)
 //!
@@ -34,10 +34,10 @@
 //!   **and** `now_ms()` together, consistently. No separately-settable
 //!   `TestClock` counter is needed — pause/advance is the one lever.
 //!
-//! # HA note — failover timer reconstruction (landed)
+//! # HA note — failover timer reconstruction
 //!
 //! Monotonic `Instant`s are not portable across processes / restarts / replicas,
-//! so a replicated timer can never ship a raw `Instant`. The failover slice chose
+//! so a replicated timer can never ship a raw `Instant`. Replicated timers use
 //! the **absolute-wall-deadline** option: each `call::TimerEntry` carries
 //! `fire_at` as an epoch-ms deadline (`now_ms()` at schedule time + the delay),
 //! which IS replicated as part of the `Call`. On takeover the standby rebuilds its
@@ -99,7 +99,7 @@ impl Clock {
     /// and monotonic (never decreasing) thereafter.
     pub fn system() -> Self {
         // FAIL LOUDLY on a pre-epoch clock instead of silently anchoring to 1970
-        // (the old `unwrap_or(0)`): a node that anchored at 0 would compute a
+        // (`unwrap_or(0)`): a node that anchored at 0 would compute a
         // ~55-year skew offset against every healthy peer, so every replicated
         // timer it reclaimed would be reaped or deferred by decades — a silent,
         // catastrophic corruption. A `SystemTime` before 1970 in production is a
@@ -142,10 +142,10 @@ impl Clock {
     /// host clock jumps, `now_ms()` (monotonic-derived) does NOT follow, so a fresh
     /// `SystemTime::now()` reading and `now_ms()` diverge by the step size. A
     /// large, sudden magnitude names exactly the event that skews replicated timer
-    /// deadlines across pods (the endurance-20260630 artifact), turning a
+    /// deadlines across pods, turning a
     /// days-later failover mystery into a live signal. Do NOT re-anchor `Clock`
     /// from this — timestamps must stay monotonic; the behavioural correction is
-    /// the Stage 1/2 replication-boundary re-anchor, not a clock rewrite.
+    /// the replication-boundary re-anchor, not a clock rewrite.
     pub fn wall_divergence_ms(&self, raw_wall_ms: i64) -> i64 {
         raw_wall_ms - self.now_ms()
     }
@@ -160,31 +160,84 @@ pub fn raw_system_wall_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// Test helpers mirroring the source's virtual-time advance loop
-/// (`tests/harness/runner.ts`). Behind the `testkit` feature so prod builds
-/// never pull tokio's `test-util`.
-#[cfg(feature = "testkit")]
+/// Test helpers driving the paused tokio clock. Behind the `testkit` feature so
+/// prod builds never pull tokio's `test-util`; this crate's own tests always
+/// build them (its dev-dependencies carry `test-util`).
+#[cfg(any(test, feature = "testkit"))]
 pub mod testkit {
+    use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
-    /// Advance paused tokio time in fixed `chunk`s up to `total`, awaiting
-    /// between chunks so in-flight timer fibers observe intermediate values —
-    /// the behaviour the source relied on by adjusting `TestClock` in 100 ms
-    /// steps rather than one big jump (tokio's auto-advance otherwise leaps
-    /// straight to the next deadline).
-    pub async fn advance_in_chunks(total: Duration, chunk: Duration) {
-        assert!(!chunk.is_zero(), "chunk must be non-zero");
-        let mut remaining = total;
-        while !remaining.is_zero() {
-            let step = remaining.min(chunk);
-            tokio::time::advance(step).await;
-            remaining -= step;
-        }
+    /// Advance paused tokio time by `total`, running the work in flight at every
+    /// instant a timer falls due inside the span: the caller sleeps, so the
+    /// runtime polls every ready task until none is left and only then
+    /// auto-advances, to the next due timer. A request a detached task sends
+    /// inside the span is answered at its wire instant, within its budget. The
+    /// trailing [`settle`] runs the work due at the span's last instant before
+    /// the caller resumes. Panics outside a paused runtime; a task that never
+    /// goes idle (a `yield_now` loop) holds the clock and the advance with it.
+    pub async fn advance_settled(total: Duration) {
+        // tokio's own check that the clock is paused; moves no time.
+        tokio::time::advance(Duration::ZERO).await;
+        tokio::time::sleep(total).await;
+        settle().await;
     }
 
-    /// [`advance_in_chunks`] with the source's canonical 100 ms step.
-    pub async fn advance_in_100ms_chunks(total: Duration) {
-        advance_in_chunks(total, Duration::from_millis(100)).await;
+    /// Real time [`run_paused_within`] gives a runtime to take its abort.
+    pub const ABORT_GRACE: Duration = Duration::from_secs(1);
+
+    /// Run `scenario` on a paused current-thread runtime of its own thread and
+    /// return its output, or `None` when it has not finished after `wall` of real
+    /// time. A task that keeps yielding but never goes idle holds the paused
+    /// clock, so a scenario that sleeps behind it would hang: this bounds such a
+    /// test in real time, and drops the runtime and every task on it before it
+    /// returns. A panic in the scenario is re-raised. A task stuck in a
+    /// synchronous loop never lets the runtime see the abort: after
+    /// [`ABORT_GRACE`] this panics and leaves that thread running.
+    pub fn run_paused_within<F, Fut, T>(wall: Duration, scenario: F) -> Option<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T>,
+        T: Send + 'static,
+    {
+        let (abort, aborted) = tokio::sync::oneshot::channel::<()>();
+        let (done, finished) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("a paused current-thread runtime");
+            let out = rt.block_on(async move {
+                tokio::select! {
+                    biased;
+                    _ = aborted => None,
+                    out = scenario() => Some(out),
+                }
+            });
+            drop(rt);
+            let _ = done.send(out);
+        });
+        let out = match finished.recv_timeout(wall) {
+            Ok(out) => out,
+            // The runner panicked; the join below re-raises it.
+            Err(RecvTimeoutError::Disconnected) => None,
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = abort.send(());
+                match finished.recv_timeout(ABORT_GRACE) {
+                    Ok(out) => out,
+                    Err(RecvTimeoutError::Disconnected) => None,
+                    Err(RecvTimeoutError::Timeout) => panic!(
+                        "the scenario's runtime did not take the abort within {ABORT_GRACE:?}: \
+                         a task is stuck in a synchronous loop (its thread is left running)"
+                    ),
+                }
+            }
+        };
+        if let Err(panic) = runner.join() {
+            std::panic::resume_unwind(panic);
+        }
+        out
     }
 
     /// Generous settle count, sized for the deepest test pipeline (the failover
@@ -197,49 +250,38 @@ pub mod testkit {
 
     /// Let every spawned task in the sim pipeline hop forward without advancing
     /// time. One `yield_now` only advances one task hop and the pipeline is many
-    /// hops deep, so this yields [`SETTLE_YIELDS`] times. The single home for the
-    /// "settle generously" idiom the repl slice tests and the ha / failover
-    /// harnesses each used to re-implement.
+    /// hops deep, so this yields `SETTLE_YIELDS` times. The single home for the
+    /// "settle generously" idiom the repl tests and the ha / failover harnesses
+    /// share.
     pub async fn settle() {
         for _ in 0..SETTLE_YIELDS {
             tokio::task::yield_now().await;
         }
     }
 
-    /// Advance paused tokio time by `total`, driving the deep sim pipeline with
-    /// the settle/advance/settle discipline (see the CLAUDE.md fake-clock
-    /// hazards): [`settle`] so staged frames are produced, advance one 100 ms
-    /// chunk, settle so they are delivered + applied before the next chunk. A
-    /// trailing advance+settle trips the transit timer for frames produced
-    /// during the final settle (e.g. a just-woken server drain).
+    /// Advance paused tokio time by `total` in settled 100 ms chunks: each chunk
+    /// is an [`advance_settled`], so work falling due inside a chunk runs at its
+    /// own instant. The body behind the replication and failover harnesses'
+    /// `advance()` and the repl tests' `tick()`.
     ///
-    /// This is the shared body behind every harness `advance()` and the repl
-    /// slice tests' `tick()`. Prefer it over [`advance_in_chunks`] (which only
-    /// moves time, with no settling) for anything that drives spawned actors.
-    ///
-    /// Note the trailing chunk: `pump(d)` advances `ceil(d/100ms) + 1` chunks of
-    /// virtual time — behaviour preserved verbatim from the helpers it replaces.
+    /// `pump(d)` advances `ceil(d/100ms) + 1` chunks of virtual time: the
+    /// trailing chunk delivers the frames produced at the span's last instant.
     pub async fn pump(total: Duration) {
         pump_sampled(total, || {}).await;
     }
 
-    /// [`pump`] with `on_chunk` run after every settled advance chunk — the
-    /// sampling seam for a harness that observes component state as time moves
-    /// (it sees the pipeline at 100 ms granularity, never between two chunks).
-    /// Timing is identical to [`pump`]; `on_chunk` is synchronous so it cannot
-    /// perturb the pipeline it observes.
+    /// [`pump`] with `on_chunk` run after every chunk — the sampling seam for a
+    /// harness that observes component state as time moves (it sees the
+    /// pipeline at 100 ms granularity, never between two chunks). Timing is
+    /// identical to [`pump`]; `on_chunk` is synchronous so it cannot perturb the
+    /// pipeline it observes.
     pub async fn pump_sampled(total: Duration, mut on_chunk: impl FnMut()) {
+        const CHUNK: Duration = Duration::from_millis(100);
         let chunks = (total.as_millis() as u64).div_ceil(100).max(1);
-        for _ in 0..chunks {
-            settle().await;
-            tokio::time::advance(Duration::from_millis(100)).await;
-            settle().await;
+        for _ in 0..=chunks {
+            advance_settled(CHUNK).await;
             on_chunk();
         }
-        // Trailing pass so frames produced during the last settle also land.
-        tokio::time::advance(Duration::from_millis(100)).await;
-        settle().await;
-        on_chunk();
     }
 }
 
@@ -320,19 +362,129 @@ mod tests {
         assert_eq!(a.now_ms(), 1_250);
     }
 
-    #[cfg(feature = "testkit")]
     #[tokio::test(start_paused = true)]
-    async fn chunked_advance_lands_on_total_and_steps_through() {
+    async fn a_settled_advance_lands_on_total_and_runs_each_timer_at_its_instant() {
         let clock = Clock::test_at(0);
-        // 250 ms in 100 ms chunks → observable steps at 100, 200, 250.
-        crate::testkit::advance_in_chunks(Duration::from_millis(250), Duration::from_millis(100))
-            .await;
+        let (done, landed) = tokio::sync::oneshot::channel();
+        let hops = clock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            let _ = done.send(hops.now_ms());
+        });
+        crate::testkit::advance_settled(Duration::from_millis(250)).await;
         assert_eq!(clock.now_ms(), 250);
+        assert_eq!(landed.await.unwrap(), 120, "the second sleep starts where the first fired");
     }
 
-    // The linear law that replaces the old draft's "deadline = f(injected now,
-    // timeout)" property: deadlines are now monotonic, so the only thing to pin
-    // about `now_ms` is that it is exactly `anchor + advanced`.
+    #[test]
+    fn a_bounded_scenario_returns_its_output_after_its_virtual_time() {
+        let out = crate::testkit::run_paused_within(Duration::from_secs(10), || async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            7
+        });
+        assert_eq!(out, Some(7));
+    }
+
+    #[test]
+    fn a_bounded_scenario_behind_a_task_that_never_goes_idle_is_none() {
+        let out = crate::testkit::run_paused_within(Duration::from_millis(200), || async {
+            tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn a_bounded_scenario_that_panics_re_raises_its_panic() {
+        let caught = std::panic::catch_unwind(|| {
+            crate::testkit::run_paused_within(Duration::from_secs(10), || async {
+                panic!("expected: the scenario panics")
+            })
+        });
+        let payload = caught.expect_err("the panic is re-raised");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"expected: the scenario panics"));
+    }
+
+    #[test]
+    fn a_bounded_scenario_stuck_in_a_synchronous_loop_panics_after_the_grace() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let release = Arc::new(AtomicBool::new(false));
+        let stuck = release.clone();
+        let caught = std::panic::catch_unwind(|| {
+            crate::testkit::run_paused_within(Duration::from_millis(100), move || async move {
+                while !stuck.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        });
+        // Let the abandoned thread end.
+        release.store(true, Ordering::Relaxed);
+        let payload = caught.expect_err("a runtime that cannot take the abort panics");
+        let message = payload.downcast_ref::<String>().expect("a formatted message");
+        assert!(message.contains("synchronous loop"), "{message}");
+    }
+
+    /// One hop of a request or of its answer between two tasks.
+    #[cfg(feature = "testkit")]
+    const HOP: Duration = Duration::from_millis(60);
+
+    /// A caller asks a service task under a 150 ms budget; the service answers
+    /// after one [`HOP`] in and one back. The receiver yields the virtual time
+    /// the answer took, `None` for a timeout.
+    #[cfg(feature = "testkit")]
+    fn ask_under_budget() -> tokio::sync::oneshot::Receiver<Option<Duration>> {
+        use tokio::sync::{mpsc, oneshot};
+        let (to_service, mut requests) = mpsc::channel::<oneshot::Sender<()>>(1);
+        tokio::spawn(async move {
+            while let Some(reply) = requests.recv().await {
+                tokio::time::sleep(HOP).await;
+                tokio::spawn(async move {
+                    tokio::time::sleep(HOP).await;
+                    let _ = reply.send(());
+                });
+            }
+        });
+        let (done, outcome) = oneshot::channel();
+        tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            let (reply, answer) = oneshot::channel();
+            to_service.send(reply).await.expect("the service task runs");
+            let answered = tokio::time::timeout(Duration::from_millis(150), answer).await;
+            let _ = done.send(answered.ok().and_then(Result::ok).map(|()| started.elapsed()));
+        });
+        outcome
+    }
+
+    #[cfg(feature = "testkit")]
+    #[tokio::test(start_paused = true)]
+    async fn a_pump_answers_a_request_from_another_task_at_its_wire_instant() {
+        let outcome = ask_under_budget();
+        crate::testkit::pump(Duration::from_secs(1)).await;
+        assert_eq!(
+            outcome.await.unwrap(),
+            Some(2 * HOP),
+            "the answer lands one round trip after the request, inside its budget"
+        );
+    }
+
+    #[cfg(feature = "testkit")]
+    #[tokio::test(start_paused = true)]
+    async fn a_sampled_pump_samples_after_every_100ms_chunk_and_once_more() {
+        let clock = Clock::test_at(0);
+        let mut seen = Vec::new();
+        crate::testkit::pump_sampled(Duration::from_millis(250), || seen.push(clock.now_ms()))
+            .await;
+        assert_eq!(seen, vec![100, 200, 300, 400]);
+    }
+
+    // The linear law: deadlines are monotonic, so the only thing to pin about
+    // `now_ms` is that it is exactly `anchor + advanced`.
     proptest! {
         #[test]
         fn now_ms_equals_anchor_plus_advance(

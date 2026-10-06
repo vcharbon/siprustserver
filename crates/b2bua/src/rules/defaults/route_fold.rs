@@ -1,26 +1,24 @@
 //! The shared decoder for **route-shaped internal-event payloads** (built by
 //! the router's `route_result_payload`) and the parity actions both async
 //! route folds — `failover-create-leg` (`call-failure-result`) and
-//! `release-reroute` (`call-release-result`) — must apply identically, and the
-//! reader of the limiter state those consults' folds carry
-//! ([`route_fold_limiter_state`]). One parser +
-//! one parity-action builder so the folds cannot drift from each other or from
-//! the initial `apply_route`.
+//! `release-reroute` (`call-release-result`) — must apply identically. One
+//! parser + one parity-action builder so the folds cannot drift from each
+//! other or from the initial `apply_route`. The admit a fold carries is the
+//! router's to apply before any rule reads it (`crate::limiter::report`).
 
 use call::{CallModelState, TimerType};
 
-use crate::event::CallEvent;
-use crate::rules::model::{Body, RuleAction, RuleContext, TimerDelay};
-use b2bua_sdk::header_update::payload_lines;
+use b2bua_sdk::header_update::{payload_adds, payload_lines};
+use b2bua_sdk::model::{Body, RuleAction, RuleContext, TimerDelay};
 
 /// Whether a decision fold has landed on a call already going away — the
-/// call-scoped clause of [`call::helpers::leg_is_going_away`]. A `/calls`
+/// call-scoped clause of [`call::helpers::leg_is_going_away`]. A `/call/new`
 /// result (route or reject, any outcome) applied to a `Terminating`/
 /// `Terminated` call is moot: the caller already holds its final, so the fold
 /// drives no forward progress — no new leg toward a callee whose caller is
 /// gone, no second final on the a-leg's completed transaction (RFC 3261
-/// §17.2.1). The termination in progress owns the teardown; the limiter state
-/// a route fold carries still becomes the call's ([`route_fold_limiter_state`]).
+/// §17.2.1). The termination in progress owns the teardown; the admit a route
+/// fold carries was applied to the call before the rules read it.
 pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
     matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
 }
@@ -41,10 +39,15 @@ pub(crate) struct RouteFold {
     pub no_answer: Option<i64>,
     pub callback_context: Option<String>,
     pub header_updates: Vec<(String, Option<String>)>,
+    /// The adds of the payload's `update_headers`, yielding to the INVITE as
+    /// minted.
+    pub header_adds: Vec<(String, Vec<String>)>,
     pub features: Option<call::features::FeatureActivations>,
     pub service_ext: call::ExtMap,
-    /// `None` = field absent from the payload (an old emitter) → leave the
-    /// call's registry untouched; `Some` (possibly empty) = the route owns it.
+    /// `Some` (possibly empty) = the route owns the call's registry; the
+    /// emitter (`callouts::route_result_payload`) always writes the list.
+    /// `None` = the value does not read as a list of events, a malformed fold
+    /// that leaves the registry untouched rather than clearing it.
     pub subscriptions: Option<Vec<call::ReleaseEventKind>>,
     /// `update_body` wire shape: absent = keep A's INVITE body, null = drop
     /// (`Some(vec![])`), string = substitute.
@@ -52,9 +55,6 @@ pub(crate) struct RouteFold {
     /// `attach_parts`: A's session description sent beside these parts
     /// (`BodyUpdate::AttachParts`); absent = none attached.
     pub attach_parts: Option<Vec<sip_message::MultipartPart>>,
-    /// The call's admission state after the dispatching task replaced its
-    /// set on the limiter; `None` on a payload that carries none.
-    pub limiter: Option<call::CallLimiterState>,
 }
 
 /// Parse a route-shaped payload. `None` only when the mandatory
@@ -83,6 +83,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             .and_then(|v| v.as_str())
             .map(str::to_string),
         header_updates: parse_header_updates(payload),
+        header_adds: payload_adds(payload.get("update_headers")),
         features: payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok()),
         service_ext: parse_service_ext(payload),
         subscriptions: payload
@@ -97,7 +98,6 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
         attach_parts: payload
             .get("attach_parts")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
-        limiter: admitted_state(payload),
     })
 }
 
@@ -117,58 +117,6 @@ impl RouteFold {
             (None, None) => None,
         }
     }
-}
-
-/// The `(topic, outcome)` of the folds whose dispatching task may have changed
-/// the call's set on the limiter: the two route-shaped folds (a failover
-/// route, a release reroute), and the resolutions a refused route ends in (the
-/// failure chain's reject, redirect or terminate after a refusal, a release
-/// whose reroute was refused). Only these carry a limiter state.
-const ROUTE_FOLDS: [(&str, &str); 6] = [
-    ("call-failure-result", "failover"),
-    ("call-failure-result", "reject"),
-    ("call-failure-result", "redirect"),
-    ("call-failure-result", "terminate"),
-    ("call-release-result", "reroute"),
-    ("call-release-result", "release"),
-];
-
-/// The call's admission state a route fold carries: its dispatching task
-/// replaced the call's set on the limiter, or a refusal dropped it, before the
-/// fold was posted, so the call the fold names owns that outcome from then
-/// on — stated on its record, or released when no call is left to state it
-/// on. `None` for any other event, or a fold whose task left the set as it
-/// was.
-pub(crate) fn route_fold_limiter_state(event: &CallEvent) -> Option<call::CallLimiterState> {
-    let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
-        return None;
-    };
-    if !ROUTE_FOLDS.iter().any(|(t, o)| t == topic && o == outcome) {
-        return None;
-    }
-    admitted_state(payload)
-}
-
-/// The [`RuleAction::SetLimiterState`] a non-route resolution states when its
-/// fold carries a limiter state (a refused route dropped the call's set).
-pub(crate) fn fold_limiter_state_action(event: &CallEvent) -> Option<RuleAction> {
-    route_fold_limiter_state(event).map(set_limiter_state)
-}
-
-/// The [`RuleAction::SetLimiterState`] stating `limiter` on the call.
-pub(crate) fn set_limiter_state(limiter: call::CallLimiterState) -> RuleAction {
-    RuleAction::SetLimiterState {
-        key: limiter.key,
-        counted: limiter.counted,
-        release_owed: limiter.release_owed,
-        fail_open: limiter.fail_open,
-        ids: limiter.ids,
-    }
-}
-
-/// A route payload's `call_limiter` object: `None` when absent or malformed.
-fn admitted_state(payload: &serde_json::Value) -> Option<call::CallLimiterState> {
-    serde_json::from_value(payload.get("call_limiter")?.clone()).ok()
 }
 
 /// The decision's `label` on a fold payload, read by the router's fold mark
@@ -195,11 +143,10 @@ pub(crate) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
 
 /// The output-parity bookkeeping actions BOTH async route folds emit before
 /// their `CreateLeg` — what the initial `apply_route` applies at route time:
-/// features (incl. the GlobalDuration re-arm), service_ext merge, the
-/// release-subscription registry, and the limiter state (+ the LimiterRefresh
-/// cadence that keeps a counted call's lease alive). The applied route owns
-/// the call's set: the dispatching task replaced it on the limiter, and the
-/// fold states whether the call is counted.
+/// features (incl. the GlobalDuration re-arm), service_ext merge and the
+/// release-subscription registry. The limiter state is the router's, applied
+/// from the fold's admit before the rules read it; the refresh cadence of a
+/// counted call follows from it (`limiter::call::arm_refresh`).
 pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<RuleAction> {
     let mut actions = Vec::new();
     if let Some(f) = &fold.features {
@@ -223,16 +170,6 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // The latest applied route OWNS the registry (empty clears), exactly
         // like `apply_route` on the initial path.
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
-    }
-    if let Some(limiter) = &fold.limiter {
-        actions.push(set_limiter_state(limiter.clone()));
-    }
-    if fold.limiter.as_ref().is_some_and(|l| l.counted) {
-        actions.push(RuleAction::ScheduleTimer {
-            timer_type: TimerType::LimiterRefresh,
-            delay: TimerDelay::secs(ctx.config.limiter_refresh_sec),
-            leg_id: None,
-        });
     }
     actions
 }

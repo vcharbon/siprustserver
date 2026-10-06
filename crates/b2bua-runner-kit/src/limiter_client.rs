@@ -1,4 +1,4 @@
-//! The call limiter client a runner builds from its env (ADR-0038 decision 10).
+//! The call limiter client a runner builds from its env (ADR-0040 decision 10).
 //!
 //! No `LIMITER_URL`: [`NoopLimiter`], no call is counted. Otherwise the HTTP
 //! client to its `host:port`, whose name is looked up once at boot, waiting
@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua::limiter_target::{LimiterTarget, NameResolver};
+use b2bua::resolved_target::{NameResolver, ResolvedTarget};
 use http_net::HttpTransport;
 
 /// What the limiter client is built from.
@@ -41,7 +41,7 @@ pub(crate) async fn limiter_client(
     };
     let client = HttpCallLimiter::with_target(
         transport,
-        LimiterTarget::name_with(hostport, resolver),
+        ResolvedTarget::name_with(hostport, resolver),
         settings.timeout,
     )
     .with_refresh_timeout(settings.refresh_timeout)
@@ -62,11 +62,12 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use b2bua::limiter::{AdmitOutcome, LimiterEntry, LimiterReports, ReleaseAnswer};
-    use b2bua::limiter_breaker::{BreakerConfig, BreakerLimiter};
-    use b2bua::limiter_lease::LimiterLease;
-    use b2bua::limiter_refresh_batch::{RefreshBatch, RefreshBatchConfig};
-    use b2bua::limiter_release::{ReleaseQueue, ReleaseQueueConfig};
+    use b2bua::limiter::bounded::BoundedLimiter;
+    use b2bua::limiter::breaker::{BreakerConfig, BreakerLimiter};
+    use b2bua::limiter::lease::LimiterLease;
+    use b2bua::limiter::refresh_batch::{RefreshBatch, RefreshBatchConfig};
+    use b2bua::limiter::release_queue::{ReleaseQueue, ReleaseQueueConfig};
+    use b2bua::limiter::{AdmitOutcome, LimiterEntry, LimiterHeld, LimiterReports, ReleaseAnswer};
     use b2bua::metrics::B2buaMetrics;
     use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
     use http_net::{
@@ -187,8 +188,12 @@ mod tests {
             self.net.sent.load(Ordering::SeqCst)
         }
 
-        /// The runner's client for [`NAME`], behind a worker's breaker (3
-        /// failures, [`PROBE`]) with its probe and release queue running.
+        /// The runner's client for [`NAME`], behind the worker's admit bound
+        /// and breaker (3 failures, [`PROBE`]) with its probe and release
+        /// queue running. Composed by hand rather than by the worker handle:
+        /// these tests read each release's own answer and the learnt lease,
+        /// which the handle (a queued release, the refresh period) does not
+        /// state.
         async fn worker(&self) -> Worker {
             let settings = LimiterClientSettings {
                 hostport: Some(NAME.into()),
@@ -209,7 +214,7 @@ mod tests {
             let refreshes = RefreshBatch::new(client.clone(), bounds, metrics.clone(), |_| {});
             tokio::spawn(refreshes.clone().run());
             let (limiter, breaker) = BreakerLimiter::guard(
-                client,
+                BoundedLimiter::wrap(client, metrics.clone()),
                 BreakerConfig { failures: 3, probe: PROBE },
                 releases,
                 refreshes,
@@ -235,7 +240,7 @@ mod tests {
                 LimiterEntry { id: "x".into(), limit: 100 },
                 LimiterEntry { id: "y".into(), limit: 100 },
             ];
-            self.limiter.admit(key, &entries, false).await
+            self.limiter.admit(key, 1, &LimiterHeld::default(), &entries, false).await
         }
 
         async fn release(&self, key: &str) -> ReleaseAnswer {
@@ -424,7 +429,10 @@ mod tests {
             limiter_client(&settings, Arc::new(SimulatedHttpNetwork::new()), names.clone()).await;
         assert!(client.health().is_none(), "no breaker");
         let entries = [LimiterEntry { id: "x".into(), limit: 1 }];
-        assert_eq!(client.admit("c#k", &entries, false).await, AdmitOutcome::NotSent);
+        assert_eq!(
+            client.admit("c#k", 2, &LimiterHeld::default(), &entries, false).await,
+            AdmitOutcome::NotSent
+        );
         assert_eq!(names.lookups.load(Ordering::SeqCst), 0);
     }
 }

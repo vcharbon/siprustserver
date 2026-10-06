@@ -1,4 +1,4 @@
-//! The egress routing policy for worker-originated requests: loose-route wire
+//! The egress routing policy for worker-originated requests: route-set wire
 //! destinations and the b-leg front-proxy bootstrap (RFC 3261 §16.12). The
 //! deployment invariant: every B2BUA→callee message traverses the front proxy,
 //! never pod-direct.
@@ -11,12 +11,13 @@ use crate::config::B2buaConfig;
 /// Apply the egress routing policy to an outbound in-dialog request.
 ///
 /// Two effects, both RFC 3261 §16.12:
-///   1. **Loose-route wire destination** (any leg): when the dialog's route set
-///      is non-empty and its first route is a loose router (`;lr`), the request
-///      is *sent* to that route's host:port while the Request-URI stays at the
-///      remote target. The generator already emitted the Route headers from the
-///      route set; this fixes only the wire destination so in-dialog requests
-///      toward a record-routing proxy traverse it instead of going pod-direct.
+///   1. **Route-set wire destination** (any leg): when the dialog's route set
+///      is non-empty, the request is *sent* to its first route's host:port
+///      (§8.1.2, §12.2.1.1). Behind a loose router (`;lr`) the Request-URI
+///      stays at the remote target; behind a strict one the generator already
+///      put that route's URI in the Request-URI and the remote target last in
+///      the Route set. Either way the first route is the next hop, so
+///      in-dialog requests toward a record-routing proxy traverse it.
 ///   2. **b-leg outbound-proxy bootstrap**: when the route set is empty (the
 ///      pre-confirmation initial INVITE), `leg_id` is a b-leg, and
 ///      `config.b2b_outbound_proxy` is set, preload a *plain* loose `Route` at the
@@ -37,9 +38,9 @@ pub fn apply_b_leg_egress(
     req: SipRequest,
     dest: (String, u16),
 ) -> (SipRequest, (String, u16)) {
-    // (1) Loose-route: send to the top route's host:port (R-URI unchanged).
+    // (1) Route set: send to the first route's host:port.
     if let Some(first) = route_set.first() {
-        if let Some(uri) = loose_route_uri(first) {
+        if let Some(uri) = route_uri(first) {
             // The worker forwards the route set verbatim and stamps nothing:
             // under double-record-routing, the worker-facing half of the dialog
             // route set — captured from the dialog-creating message
@@ -50,8 +51,6 @@ pub fn apply_b_leg_egress(
             let (host, port) = uri.host_port();
             return (req, (host.to_string(), port));
         }
-        // Strict routing is handled by the generator's R-URI rewrite; the wire
-        // destination already resolves to the first route via `remote_target`.
         return (req, dest);
     }
     // (2) Empty route set (pre-confirmation INVITE) + b-leg outbound-proxy
@@ -107,10 +106,9 @@ pub fn outbound_proxy_route_set(config: &B2buaConfig) -> Vec<String> {
     outbound_proxy_route(config).map(|(route, _)| route.to_wire()).into_iter().collect()
 }
 
-/// The URI of `route` when it names a loose router (RFC 3261 §19.1.1 `;lr`).
-fn loose_route_uri(route: &str) -> Option<Uri> {
-    let entry = RouteEntry::parse(&SipStr::owned(route)).ok()?;
-    entry.uri().is_loose_route().then(|| entry.uri().clone())
+/// The URI of a dialog route-set entry, loose or strict.
+fn route_uri(route: &str) -> Option<Uri> {
+    RouteEntry::parse(&SipStr::owned(route)).ok().map(|entry| entry.uri().clone())
 }
 
 /// Egress-aware wire destination for a leg's in-dialog request, WITHOUT mutating
@@ -125,7 +123,7 @@ pub fn leg_egress_dest(
     base_dest: (String, u16),
 ) -> (String, u16) {
     if let Some(first) = route_set.first() {
-        if let Some(uri) = loose_route_uri(first) {
+        if let Some(uri) = route_uri(first) {
             let (host, port) = uri.host_port();
             return (host.to_string(), port);
         }
@@ -211,7 +209,7 @@ Content-Length: 0\r\n\r\n"
             ("10.244.2.7".to_string(), 5060),
         );
         let forwarded = top_route(&out);
-        let uri = loose_route_uri(&forwarded).expect("a loose route");
+        let uri = route_uri(&forwarded).expect("a route");
         assert!(
             uri.param("outbound").is_none(),
             "egress must not stamp ;outbound; got {forwarded}"
@@ -244,9 +242,31 @@ Content-Length: 0\r\n\r\n",
             preloaded, "<sip:10.0.0.9:5060;lr>",
             "bootstrap preload must be a plain loose Route"
         );
-        let uri = loose_route_uri(&preloaded).expect("a loose route");
+        let uri = route_uri(&preloaded).expect("a route");
+        assert!(uri.is_loose_route(), "the bootstrap preload is loose");
         assert!(uri.param("outbound").is_none(), "no ;outbound on the bootstrap preload");
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");
+    }
+
+    // A strict first route (no `;lr`) is the next hop too: the generator put
+    // its URI in the Request-URI, and the request is sent there, not to the
+    // remote target (RFC 3261 §8.1.2, §12.2.1.1).
+    #[test]
+    fn a_strict_first_route_is_the_wire_destination() {
+        let route = "<sip:10.0.0.9:5060>";
+        let base = ("10.244.2.7".to_string(), 5060);
+        let (_, dest) = apply_b_leg_egress(
+            &B2buaConfig::default(),
+            "b-1",
+            &[route.to_string()],
+            in_dialog_options(route),
+            base.clone(),
+        );
+        assert_eq!(dest, ("10.0.0.9".to_string(), 5060));
+        assert_eq!(
+            leg_egress_dest(&B2buaConfig::default(), "b-1", &[route.to_string()], base),
+            ("10.0.0.9".to_string(), 5060),
+        );
     }
 
     // `leg_egress_dest` mirrors apply_b_leg_egress's destination decision WITHOUT

@@ -1,13 +1,13 @@
-//! REFER c-realigning scenarios (slice 5b). Port of
+//! REFER c-realigning scenarios. Port of
 //! `tests/scenarios/refer-c-realign.ts`.
 //!
-//! Build on the slice-5a C-leg lifecycle by adding the B2BUA-originated
+//! Builds on the C-leg lifecycle of `refer_allow.rs` by adding the B2BUA-originated
 //! re-INVITE to C carrying A's SDP (the c-realign re-INVITE). The charlie UA
 //! therefore plays a UAS role for that re-INVITE. Once C answers 200 and the
 //! B2BUA ACKs, the phase advances to `a-realigning` and the B2BUA fires the
-//! a-realign re-INVITE toward A. Slice 5b STOPS once that a-realign INVITE
+//! a-realign re-INVITE toward A. These scenarios STOP once that a-realign INVITE
 //! lands (verifying its body is C's active answer and Contact carries `leg=a`);
-//! the a-realign 200 / merge live in slice 5c (`refer-full-transfer.ts`), and
+//! the a-realign 200 / merge live in `refer_full_transfer.rs`, and
 //! a happy case here answers it only to end the call.
 //!
 //! The rollback cases (CReject488, CTimeout) drive `begin-termination`, which
@@ -439,6 +439,83 @@ async fn refer_allow_c_realign_b_non_bye() {
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
     // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+// ── 6. The answer C gives the c-realign reaches A whole ─────────────────
+
+/// C answers the c-realign re-INVITE with a `multipart/mixed` body framing its
+/// active answer beside another part, stating its MIME framing and the body's
+/// role. The a-realign re-INVITE carries that body as C sent it: the same media
+/// type, the same lines describing it (RFC 3261 §20.11 / §20.15, RFC 2045 §4).
+#[tokio::test]
+async fn refer_allow_c_realign_carries_the_answer_whole() {
+    let h = Harness::with_transit_delay("refer-allow-c-realign-whole-answer", 1);
+    let alice = h.agent("alice", "127.0.0.1:5936").await;
+    let bob = h.agent("bob", "127.0.0.1:5946").await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5946)
+        .start(&h, "b2bua", "127.0.0.1:5956")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", &refer_to_charlie())
+        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .send()
+        .await;
+    refer.expect(202).await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+    let mut charlie_uas = charlie.receive("INVITE").await;
+    charlie_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    charlie.receive("ACK").await;
+    bob.receive("NOTIFY").await.respond(200, "OK").await;
+
+    let framed = sip_message::compose_multipart(
+        "multipart/mixed",
+        &[
+            sip_message::MultipartPart::new(
+                "application/sdp",
+                CHARLIE_ACTIVE_ANSWER.as_bytes().to_vec(),
+            ),
+            sip_message::MultipartPart::new("application/vnd.example.data", b"AB".to_vec()),
+        ],
+    )
+    .expect("the answer frames");
+    let mut c_realign = charlie.receive("INVITE").await;
+    c_realign
+        .respond(200, "OK")
+        .with_header("MIME-Version", "1.0")
+        .with_header("Content-Disposition", "session;handling=required")
+        .with_body(&framed.content_type, framed.body.clone())
+        .await;
+    charlie.receive("ACK").await;
+
+    let mut a_realign = alice.receive("INVITE").await;
+    let req = a_realign.request().clone();
+    let lines = |name: &str| -> Vec<String> {
+        req.raw(sip_message::header::HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(lines("Content-Type"), [framed.content_type.clone()], "C's own media type");
+    assert_eq!(lines("MIME-Version"), ["1.0"]);
+    assert_eq!(lines("Content-Disposition"), ["session;handling=required"]);
+    let body = String::from_utf8_lossy(req.body()).into_owned();
+    assert!(body.contains("application/vnd.example.data"), "the body whole: {body}");
+
     a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
     alice.receive("ACK").await;
     end_transferred_call(&mut alice_dialog, &bob, &charlie).await;

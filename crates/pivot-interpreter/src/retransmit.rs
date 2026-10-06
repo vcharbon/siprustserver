@@ -64,10 +64,10 @@ const MAX_RUNGS: u32 = 64;
 /// none.
 ///
 /// The document's own gaps where it states them (§6.9), one per rung: a
-/// captured platform's ladder is not the RFC's — measured across the corpus it
-/// runs from 409 ms to 17.5 s where T1 says 500 — and 92 ms of error is enough
-/// to put a reliable provisional's rung on the far side of the PRACK that ends
-/// it, which is a sequence the capture never held. A count longer than the
+/// captured platform's ladder need not be the RFC's — an implementation may
+/// configure any T1 (RFC 3261 §17.1.1.1) — and a fraction of T1 of error is
+/// enough to put a reliable provisional's rung on the far side of the PRACK
+/// that ends it, which is a sequence the capture never held. A count longer than the
 /// stated gaps repeats the last one ([`Schedule::exact`]), so a malformed
 /// document paces steadily rather than falling back onto a class it never
 /// chose.
@@ -657,7 +657,7 @@ mod tests {
     }
 
     /// A captured platform's ladder is not the RFC's, and where the document
-    /// measured it the document wins (§6.9, issue 90).
+    /// measured it the document wins (§6.9).
     #[test]
     fn a_measured_ladder_paces_by_the_documents_own_gaps() {
         let ladder = schedule_of(INVITE.as_bytes(), &[408, 17_480])
@@ -940,21 +940,21 @@ mod tests {
         ));
     }
 
-    /// `capture_191724` case1 s15, to the millisecond: the SUT's BYE ladder on
+    /// A captured BYE ladder, to the millisecond: the SUT's BYE ladder on
     /// T1 = 500 puts a second rung on the wire 8 ms before the callee's 200,
-    /// where the captured platform on a 638 ms T1 fired only one. The SUT paced
+    /// where the captured platform on a 700 ms T1 fired only one. The SUT paced
     /// this ladder, so the RFC states its length and the run HOLDS — the
     /// document's count stays beside it as the evidence it is.
     #[test]
     fn an_expect_ladder_is_held_to_the_rfcs_rungs_not_the_documents_count() {
-        let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 682945 BYE\r\n\r\n";
-        let ok = b"SIP/2.0 200 OK\r\nCSeq: 682945 BYE\r\n\r\n";
+        let bye = b"BYE sip:b@h SIP/2.0\r\nCSeq: 7 BYE\r\n\r\n";
+        let ok = b"SIP/2.0 200 OK\r\nCSeq: 7 BYE\r\n\r\n";
         let mut repeats = Repeats::new();
-        // s15 matched the original at 34788 ms; the two rungs are the repeats.
-        repeats.claim("s15", "B", LadderSide::Expect, Some(1), &[638], bye, 34_788_000);
-        repeats.note("B", bye, 35_288_000);
-        repeats.note("B", bye, 36_288_000);
-        repeats.answered("B", ok, 36_296_000);
+        // s15 matched the original at 30 000 ms; the two rungs are the repeats.
+        repeats.claim("s15", "B", LadderSide::Expect, Some(1), &[700], bye, 30_000_000);
+        repeats.note("B", bye, 30_500_000);
+        repeats.note("B", bye, 31_500_000);
+        repeats.answered("B", ok, 31_508_000);
         assert!(
             repeats.mismatches(40_000_000).is_empty(),
             "the SUT paced it, so the oracle is the RFC and 2 is what it owed"
@@ -967,7 +967,7 @@ mod tests {
                 side: LadderSide::Expect,
                 declared: 1,
                 observed: 2,
-                intervals_ms: vec![638],
+                intervals_ms: vec![700],
                 dwell_us: Some(1_508_000),
                 rfc_rungs: Some(2)
             }],
@@ -1039,7 +1039,7 @@ mod tests {
         // A measured ladder EXTRAPOLATES its last gap ([`Schedule::exact`]),
         // so it states how a peer PACES a count and never how many rungs the
         // capture held: that count is the document's `retransmits` itself.
-        let measured = schedule_of(bye.as_bytes(), &[638]).expect("stated gaps pace it");
+        let measured = schedule_of(bye.as_bytes(), &[700]).expect("stated gaps pace it");
         assert_eq!(rungs_within(&measured, ms(1_508)), 2);
         // And a class that rides no timer counts none: `once`, not "by the RFC".
         let ack = b"ACK sip:b@h SIP/2.0\r\nCSeq: 7 ACK\r\n\r\n";

@@ -8,16 +8,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, CallTreatment, NewCallResponse, ScriptedDecisionEngine,
-};
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::decision::{CallDecisionEngine, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::{CallLimiter, LimiterEntry};
 use b2bua::rules::ServiceDef;
+use b2bua_harness::limiter::doubles::{fail_open, refuse_on};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CdrEventType, LegKind};
 use scenario_harness::Harness;
@@ -253,27 +249,6 @@ async fn a_media_leg_holds_its_invite_sent() {
     let _report = h.finish().await;
 }
 
-/// A limiter that refuses every admission naming `refused` and admits the
-/// rest without holds.
-struct RefusingLimiter(&'static str);
-
-#[async_trait]
-impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        match entries.iter().find(|e| e.id == self.0) {
-            Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
-            None => AdmitOutcome::Unavailable,
-        }
-    }
-    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        ReleaseAnswer::Released
-    }
-    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
-        RefreshAnswer::Unavailable
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// A route the limiter refuses dials nothing and leaves no `InviteSent`; the
 /// failover route the refusal raises dials the one leg, recorded once.
 #[tokio::test(start_paused = true)]
@@ -286,7 +261,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx".into());
-                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 NewCallResponse::Route(r)
             })
             .on_failure(|req| {
@@ -295,7 +270,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
             })
             .build(),
     );
-    let sut = Sut::spawn(&h, decision, Some(Arc::new(RefusingLimiter("cap"))), Vec::new()).await;
+    let sut = Sut::spawn(&h, decision, Some(refuse_on("cap", fail_open())), Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -314,7 +289,7 @@ async fn a_limiter_refused_route_holds_no_invite_sent() {
     let _report = h.finish().await;
 }
 
-/// A leg the target admission refuses in the executor is never minted: the
+/// A leg the destination allow-list refuses in the executor is never minted: the
 /// call ends on the `Reject` the refusal writes and holds no `InviteSent`.
 #[tokio::test(start_paused = true)]
 async fn an_admission_refused_leg_holds_no_invite_sent() {

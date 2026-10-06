@@ -4,10 +4,10 @@
  * The cut proposes a case per call (`./cut.ts`); this file decides whether each
  * one is written. The ORDER is the whole of it:
  *
- * 1. every refusal the policy states that needs no document is decided first —
- *    the CAPTURE tier (the family alone) ahead of the CASE tier (the family
- *    plus the cut's vantages), so a rule never sees more than its decision
- *    needs — and such a case is never assembled;
+ * 1. every refusal that needs no document is decided first — the CAPTURE tier
+ *    (the family alone) ahead of the CASE tier (the family plus the cut's
+ *    vantages, the pipeline's own rules ahead of the policy's), so a rule never
+ *    sees more than its decision needs — and such a case is never assembled;
  * 2. what is left is a DEFERRED refusal — the case is assembled, and the refusal
  *    is withdrawn exactly where the document DECLARES every charged coordinate
  *    it names;
@@ -40,7 +40,7 @@ import type { PartsIndex } from "./parts.js"
 import type { Plan } from "./plan.js"
 import { withdrawnBy, type CasePolicy, type Refusal } from "./policy.js"
 import type { CaptureInput, CaptureRule } from "./capture-rules.js"
-import type { CaseRule, RefusalInput } from "./case-rules.js"
+import { CASE_RULES, type CaseRule, type RefusalInput } from "./case-rules.js"
 import { DOCUMENT_RULES, type DocumentInput, type DocumentRule } from "./document-rules.js"
 import { refusalOf, type RefusalSite } from "./refusal-rule.js"
 import type { SutSet } from "./sut.js"
@@ -191,7 +191,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     const site = { caseId: spec.id, capture: input.capture }
     const refusals = [
       ...atCapture(input.policy.refuseAtCapture, site, captured),
-      ...atCase(input.policy.refuse, site, { ...captured, spec })
+      ...atCase([...CASE_RULES, ...input.policy.refuse], site, { ...captured, spec })
     ]
 
     // A case refused on a rule no declaration can answer is never assembled, so

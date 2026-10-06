@@ -17,6 +17,7 @@
 //! Every route holds three limiters; the failover route overlaps the initial
 //! one (`[x, y, z]` → `[y, z, w]`).
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,11 +25,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallLimiterEntry, CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::{LimiterFailure, LimiterOp};
 use b2bua_harness::B2buaSut;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -123,8 +122,7 @@ impl HttpTransport for Recording {
 fn limited_route(port: u16, ids: &[&str]) -> RouteDecision {
     let mut r = route_to("127.0.0.1", port);
     r.callback_context = Some("failover-ctx".into());
-    r.call_limiter =
-        ids.iter().map(|id| CallLimiterEntry { id: (*id).into(), limit: 10 }).collect();
+    r.call_limiter = ids.iter().map(|id| LimiterEntry { id: (*id).into(), limit: 10 }).collect();
     r
 }
 
@@ -226,7 +224,7 @@ impl Scene {
         bye.expect(200).await;
         let answered = start.elapsed();
         uas.respond(200, "OK").await;
-        b2bua_harness::advance(SIMULATED_TRANSIT_DELAY_MS).await;
+        self.h.advance(Duration::from_millis(SIMULATED_TRANSIT_DELAY_MS)).await;
         (relayed, answered)
     }
 
@@ -299,14 +297,30 @@ impl Scene {
     /// limiter drains to 0, only a call that sent an admit releases, and the
     /// releases freed the calls, not the lease. Then the reaped check.
     async fn back_and_drained(&self) {
+        self.back_and_drained_releasing(0).await;
+    }
+
+    /// [`back_and_drained`](Self::back_and_drained) where `extra` more calls
+    /// release than admitted on the wire: calls whose admit was owed from a
+    /// sending turn but never left.
+    async fn back_and_drained_releasing(&self, extra: usize) {
         self.net.apply_fault(Fault::Resume { dst: laddr() });
         let deadline = Instant::now() + DRAIN_BOUND;
         while !(self.b2bua.is_reaped() && self.store.stats().current_total == 0) {
             assert!(Instant::now() < deadline, "not drained within {DRAIN_BOUND:?}");
-            b2bua_harness::advance(100).await;
+            self.h.advance(Duration::from_millis(100)).await;
         }
         assert_eq!(self.holds(), [0; 4], "every limiter drained to 0");
-        assert_eq!(self.released_keys(), self.admitted_keys(), "every call that admitted released");
+        let (admitted, released) = (self.admitted_keys(), self.released_keys());
+        if extra == 0 {
+            assert_eq!(released, admitted, "every call that admitted released");
+        } else {
+            assert!(
+                admitted.iter().all(|k| released.contains(k)),
+                "every call that admitted released"
+            );
+            assert_eq!(released.len(), admitted.len() + extra, "and the calls owing it");
+        }
         assert_eq!(self.store.stats().lease_expired_calls, 0, "released, not lapsed");
         self.b2bua.assert_fully_reaped();
     }
@@ -458,7 +472,7 @@ async fn a_call_waiting_on_its_admit_delays_no_other_call(limiter: Limiter) {
     s.fail();
     let dave_sent = Instant::now();
     let dave_call = dave.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
-    b2bua_harness::advance(50).await;
+    s.h.advance(Duration::from_millis(50)).await;
     let erin_sent = Instant::now();
     let erin_call = erin.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut bye = counted.bye().await;
@@ -509,13 +523,13 @@ async fn a_refresh_in_flight_delays_no_in_dialog_request(limiter: Limiter) {
     no_limiter_time(healthy, "the re-INVITE on the healthy limiter");
 
     let quiet = counted_at + Duration::from_secs(REFRESH_SEC as u64) - 10 * HOP;
-    b2bua_harness::advance((quiet - Instant::now()).as_millis() as u64).await;
+    s.h.advance(quiet - Instant::now()).await;
     assert_eq!(s.sent_on("/v1/refresh"), 0, "no refresh left yet");
     s.fail();
     let deadline = Instant::now() + Duration::from_secs(3);
     while s.sent_on("/v1/refresh") == 0 {
         assert!(Instant::now() < deadline, "no refresh request left");
-        b2bua_harness::advance(10).await;
+        s.h.advance(Duration::from_millis(10)).await;
     }
     let took = s.reinvite(&mut dialog, 3).await;
     assert_eq!(took, healthy, "the re-INVITE waited on the refresh in flight");
@@ -543,7 +557,8 @@ async fn slow_limiter_a_refresh_in_flight_delays_no_in_dialog_request() {
 
 /// Three admits without an answer open the breaker. From then on an INVITE,
 /// a failover and a BYE take transit time only and send nothing to the
-/// limiter; the releases owed wait, held. Within one probe period of the
+/// limiter; the releases owed wait, held: the rerouted call's too, owed from
+/// the turn that sent its failure consult. Within one probe period of the
 /// limiter's return the breaker closes and every release leaves.
 async fn an_open_breaker_costs_no_limiter_time(limiter: Limiter) {
     let s = Scene::new(&format!("limiter-{limiter:?}-breaker-open"), limiter).await;
@@ -585,19 +600,22 @@ async fn an_open_breaker_costs_no_limiter_time(limiter: Limiter) {
     let (bye, ok) = s.hang_up(&mut rerouted, &s.carol).await;
     no_limiter_time(bye, "the rerouted call's BYE");
     no_limiter_time(ok, "the rerouted call's 200");
-    s.assert_ended(2, 3, 1).await;
+    s.assert_ended(2, 3, 2).await;
     for dialog in &mut outage {
         s.hang_up(dialog, &s.bob).await;
     }
-    s.assert_ended(5, 0, 4).await;
+    s.assert_ended(5, 0, 5).await;
     assert_eq!(s.sent_on("/v1/release"), 0, "the open breaker holds every release");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    b2bua_harness::advance((PROBE + Duration::from_millis(200)).as_millis() as u64).await;
+    s.h.advance(PROBE + Duration::from_millis(200)).await;
     assert!(!metrics.limiter().breaker_open(), "the probe closed the breaker");
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "every release left on close");
-    s.back_and_drained().await;
+    // The rerouted call's failure consult owes its release although the open
+    // breaker sent its admit nowhere.
+    s.back_and_drained_releasing(1).await;
     assert_eq!(s.admitted_keys().len(), 4, "the counted call and the three outage calls");
+    assert_eq!(s.released_keys().len(), 5, "and the rerouted call, which sent a failure consult");
     let _ = s.h.finish().await;
 }
 

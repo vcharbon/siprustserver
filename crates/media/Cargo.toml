@@ -22,5 +22,6 @@ webrtc-util = { workspace = true }
 
 [dev-dependencies]
 # `test-util` adds the paused-clock lever (tokio::time::pause/advance) — the
-# test analogue of Effect's TestClock, used by the play→record slices.
+# test analogue of Effect's TestClock, used by the play→record tests.
 tokio = { workspace = true, features = ["test-util"] }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }

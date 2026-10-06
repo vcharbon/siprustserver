@@ -1,6 +1,7 @@
 //! Where the B2BUA's own `Contact` rides an a-facing response (RFC 3261
 //! Table 3): a 1xx keeps the early dialog reachable, a 2xx to INVITE must
-//! carry one, a 3xx/485 names where to retry. Every other final ends the
+//! carry one; a relayed 3xx/485 carries the peer's retry targets instead
+//! (`relayed_retry_targets.rs`). Every other final ends the
 //! transaction and names no reachable dialog, so it carries none — a Contact
 //! there is noise the caller cannot use and leaks the call reference.
 
@@ -21,7 +22,7 @@ fn contacts(resp: &SipResponse) -> Vec<String> {
 /// Initial INVITE: the ring reaches the caller with the B2BUA's Contact (she
 /// may address the early dialog), the refusal that ends the transaction
 /// carries none.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_ring_names_the_b2bua_and_the_refusal_names_nothing() {
     let s = B2buaScene::new("contact-scope-initial-refusal").await;
 
@@ -42,7 +43,7 @@ async fn the_ring_names_the_b2bua_and_the_refusal_names_nothing() {
 /// In-dialog: the relayed re-INVITE failure carries no Contact, while the 2xx
 /// that renegotiates the session still carries the target the caller addresses
 /// (RFC 3261 §12.2.1.2).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_relayed_reinvite_answer_names_the_target_and_its_failure_does_not() {
     let s = B2buaScene::new("contact-scope-reinvite").await;
     let mut dialog = s.establish().await;
@@ -73,7 +74,7 @@ async fn a_relayed_reinvite_answer_names_the_target_and_its_failure_does_not() {
 
 /// The a-leg 200 the B2BUA mints on the answered call carries its Contact —
 /// the gate keeps what RFC 3261 §13.3.1.4 makes mandatory.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_answer_carries_the_contact_the_caller_addresses() {
     let s = B2buaScene::new("contact-scope-answer").await;
 

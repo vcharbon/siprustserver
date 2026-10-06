@@ -312,7 +312,7 @@ export const synthesize = (
     : { derived: [], left: [] }
 
   // Before the delays, so a derived arrival is classified like any other: the
-  // relay it is (§6.9, issue 116). Every array below indexes the others.
+  // relay it is (§6.9). Every array below indexes the others.
   const derived = transparent18x
     ? mirrorRelayedProvisionals({ resources, sources, steps, timings })
     : []
@@ -596,7 +596,8 @@ const bodyStorable = (
  * Whether the final this ACK answers was a 2xx, read off the ACK's own captured
  * leg: the nearest earlier INVITE final sharing its CSeq number. A leg holding
  * no such final reads as non-2xx — a body the stack cannot place is worse than
- * a body the capture never had, and a capture missing its own final is issue 71.
+ * a body the capture never had, and a capture missing its own final is a
+ * capture defect.
  */
 const ackedFinalIs2xx = (
   flows: Flows.FlowsDoc,
@@ -661,7 +662,7 @@ const unpaced = (msg: Flows.Msg): boolean =>
  * The extractor decides `retx` and `repeat_of` together, so `retx` IMPLIES the
  * field by construction: a `retx` message carrying none is a document from a
  * producer that did not compute it. Absence is not "no repeats": it is a reason
- * to keep the old collapse and warn.
+ * to keep the retx+type+CSeq collapse and warn.
  */
 const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean => {
   const known = repeatOfCarriage.get(flows)

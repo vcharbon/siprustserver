@@ -3,7 +3,7 @@
 //! Two independent planes, deliberately not coupled:
 //!
 //! - **Lifecycle logs** always go to stdout as compact single-line `key=value`
-//!   records through a bounded, lossy, non-blocking writer ([`writer`]). They
+//!   records through a bounded, lossy, non-blocking writer (`writer`). They
 //!   are traffic-independent: a SIP task never blocks on a log line and an
 //!   overloaded writer drops lines against a counter instead of applying back
 //!   pressure.
@@ -40,13 +40,12 @@ mod payload_targets;
 mod plane;
 mod rate_draw;
 mod test_buffer;
-mod token_bucket;
 pub mod trace_ids;
 mod wave;
 mod wave_set;
 mod writer;
 
-pub use admission::{Denied, SampleAdmission, TraceLease, DEFAULT_MAX_ACTIVE};
+pub use admission::{activation_bucket, Denied, SampleAdmission, TraceLease, DEFAULT_MAX_ACTIVE};
 pub use attr::{
     cap_bytes, cap_str, shape_body, BinaryTail, ShapedBody, ATTR_CAP_BYTES,
     BASE64_SOURCE_CAP_BYTES, BODY_ENCODING_BASE64, TRUNCATED_FIELD,
@@ -59,7 +58,6 @@ pub use rate_draw::RateDraw;
 pub use test_buffer::{
     current_test_buffer, test_buffer, CapturedEvent, CapturedSpan, TestLogGuard, TestLogHandle,
 };
-pub use token_bucket::TokenBucket;
 pub use wave::{
     Edge, Tally, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY, MAX_COUNTERS,
 };

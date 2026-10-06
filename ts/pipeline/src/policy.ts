@@ -21,7 +21,7 @@
 import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
 import type { CaptureRule } from "./capture-rules.js"
-import type { CaseRule } from "./case-rules.js"
+import { CASE_RULES, type CaseRule } from "./case-rules.js"
 import { CUT_RULES } from "./cut.js"
 import { neverDerives, type CallIdDerivation } from "./derivation.js"
 import { DOCUMENT_RULES, type DocumentRule } from "./document-rules.js"
@@ -235,7 +235,7 @@ export interface CasePolicy {
   /** The informative family label. Never interpreted by anything downstream. */
   readonly familyOf: (view: CaseView) => string
   /**
-   * One flag per DETECTOR this deployment runs, stating its outcome on this
+   * One flag per DETECTOR the deployment runs, stating its outcome on this
    * case (`detected:` / `detected-none:` / `detection-unavailable:`).
    *
    * The roster is complete or it is worthless: a silent detector and an absent
@@ -255,7 +255,10 @@ export interface CasePolicy {
    * before {@link CasePolicy.refuse} because it needs strictly less.
    */
   readonly refuseAtCapture: ReadonlyArray<CaptureRule>
-  /** Why a proposed case is not generated, decided on the cut's vantages. */
+  /**
+   * Why a proposed case is not generated, decided on the cut's vantages. Runs
+   * after the pipeline's own case rules, which every deployment gets.
+   */
   readonly refuse: ReadonlyArray<CaseRule>
   /**
    * Why an ASSEMBLED case is not written, decided on the document alone. Runs
@@ -329,7 +332,7 @@ export interface TieredRoster {
 /** Every refusal rule a policy runs, by tier, in the order a capture meets them. */
 export const tieredRoster = (policy: CasePolicy): TieredRoster => ({
   capture: [...CUT_RULES, ...policy.refuseAtCapture],
-  case: policy.refuse,
+  case: [...CASE_RULES, ...policy.refuse],
   document: [...DOCUMENT_RULES, ...policy.refuseOnDocument]
 })
 

@@ -8,7 +8,7 @@
 # never resolve external names (sipext dual-plane invariant; the external zone
 # is deliberately NXDOMAIN in-cluster). Pinned to tier=app like the sipjs worker.
 #
-# HA replication (S11) is opt-in via ${REPL_ENABLE} (default "0" for the plain
+# HA replication is opt-in via ${REPL_ENABLE} (default "0" for the plain
 # load runner; the chaos suite sets "1"). When on, each worker:
 #   - serves its changelog on the repl TCP port (B2BUA_REPL_LISTEN);
 #   - discovers peers by watching the headless b2bua-worker Service's
@@ -72,7 +72,7 @@ spec:
             # (X-Api-Call [field0] from the run-generated uas-targets.csv) are
             # sipext IP literals for the same reason.
             - { name: B2BUA_DEST,    value: "${SIPEXT_UAS_IP}:5060" }
-            # b-leg TargetAdmission allow-list (target_admission.rs). A non-IP
+            # b-leg destination allow-list (destination_allowlist.rs). A non-IP
             # callee host that matches none of these suffixes is 503'd + terminated
             # BEFORE the send path, so one unresolvable target can't stall the
             # send path on getaddrinfo/EAI_AGAIN. Under the sipext layout every

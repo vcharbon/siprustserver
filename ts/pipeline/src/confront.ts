@@ -39,6 +39,7 @@ import { diffSdp, maskOf } from "./sdpfold.js"
 import { answering, collecting, type Driven, identitiesIn, type Ledger, readOrigins, type Reception, type Sighting } from "./sdporigin.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
+import { legPlaces } from "./leg-role.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -96,11 +97,16 @@ export const confront = (input: ConfrontInput): Confronted => {
   const inbound = inboundEvidence(input.pivot)
   const shape = shapeProbes(input.verdict, steps, input.recordings)
   const headers = headerProbes(input, steps, inbound)
+  const placeOf = legPlaces(input.pivot.calls)
+  const placed = (at: ProbeAt): ProbeAt => {
+    const leg = steps.get(at.step)?.leg
+    return leg === undefined ? at : { ...at, probe: { ...at.probe, leg: placeOf(leg) } }
+  }
   const probes = [
     ...shape,
     ...retransmissionProbes(input.pivot.deviations ?? [], input.recordings),
     ...suppressCrossFinal(shape, [...headers.probes, ...bodyProbes(input, steps)])
-  ]
+  ].map(placed)
   return {
     probes,
     compared: headers.compared,
@@ -147,7 +153,16 @@ const documentShape = (pivot: Pivot.PivotV3): CaseContext["document"] => {
       repeated: (step.retransmits ?? 0) > 0
     })
   }
-  return { unackedFinals, steps: steps.map(documentStep) }
+  const attempts = pivot.calls.flatMap((call) =>
+    call.attempts.map((a) => ({
+      call: call.id,
+      callerLeg: call.caller_leg,
+      leg: a.leg,
+      ...(a.final === undefined ? {} : { status: a.final.status }),
+      ...(a.cause === undefined ? {} : { cause: a.cause })
+    }))
+  )
+  return { unackedFinals, calls: pivot.calls.length, steps: steps.map(documentStep), attempts }
 }
 
 /** One flow step, transcribed. Absent stays absent: the document's silence is a fact. */
@@ -164,9 +179,31 @@ const documentStep = (step: Flow.Step): DocumentStep => {
     ...(step.msg.cseq === undefined ? {} : { cseq: step.msg.cseq }),
     auto: step.auto ?? false,
     optional: step.optional ?? false,
-    inDialog: step.in_dialog ?? false
+    inDialog: step.in_dialog ?? false,
+    ...(carriesSdp(step.msg.body) ? { sdp: true as const } : {}),
+    ...(statesReliable(step.msg) ? { reliable: true as const } : {})
   }
 }
+
+const isSdpType = (contentType: string | undefined): boolean =>
+  contentType === undefined || /application\/sdp/i.test(contentType)
+
+/** Whether a step's body is a session description, bare, framed in a multipart, or by shape. */
+const carriesSdp = (body: Flow.Step["msg"]["body"]): boolean => {
+  if (body === undefined) return false
+  if ("multipart" in body) return body.multipart.parts.some((p) => isSdpType(p["content-type"]))
+  if ("ref" in body) return isSdpType(body["content-type"])
+  return body.mode === "sdp-present" || body.mode === "multipart-present"
+}
+
+/** Whether a step states the provisional reliable: an `RSeq`, or `Require: 100rel`. */
+const statesReliable = (msg: Flow.Step["msg"]): boolean =>
+  (msg["headers-present"] ?? []).some((n) => n.toLowerCase() === "rseq") ||
+  (msg.headers ?? []).some(
+    (h) =>
+      h.name.toLowerCase() === "rseq" ||
+      (h.name.toLowerCase() === "require" && /\b100rel\b/i.test(h.value))
+  )
 
 /** Whether a recorded datagram is a BYE request. */
 const isBye = (message: Bundle.RecordedMessage): boolean => {
@@ -188,8 +225,30 @@ const runShape = (
     ...(verdict.abandoned?.step === undefined ? {} : { abandonedAt: verdict.abandoned.step }),
     messages: legs.reduce((total, leg) => total + leg.length, 0),
     legs: legs.length,
-    legsTornDownBySystem: legs.filter((leg) => leg.some((m) => m.dir === "in" && isBye(m))).length
+    legsTornDownBySystem: legs.filter((leg) => leg.some((m) => m.dir === "in" && isBye(m))).length,
+    sentRSeqs: new Map(
+      [...recordings]
+        .map(([leg, recording]) =>
+          [leg, recording.flatMap((m) => (m.dir === "out" && m.repeat_of === undefined ? sentRSeqOf(m) : []))] as const
+        )
+        .filter(([, numbers]) => numbers.length > 0)
+    ),
+    openers: new Map(
+      [...recordings].flatMap(([leg, recording]) => {
+        const opener = recording.find((m) => m.repeat_of === undefined && scopeOf(m)?.kind === "initial-invite")
+        return opener === undefined ? [] : [[leg, headersInOrder(opener)] as const]
+      })
+    )
   }
+}
+
+/** The `RSeq` a recorded provisional states, read as a number; none on any other datagram. */
+const sentRSeqOf = (message: Bundle.RecordedMessage): ReadonlyArray<number> => {
+  const head = headText(message)
+  const start = startLineOf(head)
+  if (start === undefined || start.kind !== "response" || start.status <= 100 || start.status >= 200) return []
+  const value = headerValuesOf(headersInOrderRaw(head), "RSeq")[0]?.trim() ?? ""
+  return /^[0-9]+$/.test(value) ? [Number(value)] : []
 }
 
 /** One classified row, ready for `confrontation.ndjson`. */
@@ -270,6 +329,11 @@ const headerProbes = (
       if (scope === undefined) continue
       const driven = drivenNames(driving, leg, message.at_us, scope)
       const bodiless = !carriesBody(reference) && recordedBodiless(message)
+      const around: ReceptionFacts = {
+        replayedParts: partHeaders(message.body),
+        answeredRequest: answeredRequestHeaders(recording, message, scope),
+        replayedCarriesBody: !recordedBodiless(message)
+      }
       for (
         const probe of diffHeaders(
           headersInOrder(reference),
@@ -278,7 +342,8 @@ const headerProbes = (
           inbound,
           driven,
           step.id,
-          bodiless
+          bodiless,
+          around
         )
       ) {
         probes.push({ step: step.id, probe })
@@ -673,10 +738,65 @@ export const scopeOfRaw = (raw: string): MsgScope | undefined => {
 }
 
 /**
+ * The entity headers the parts of a recorded multipart body state, keyed
+ * canonically, values in body order: each part's Content-Type and Content-ID
+ * beside its other headers, as the layout records them. Empty for a body that
+ * is no multipart, or a line with no layout.
+ */
+const partHeaders = (layout: Flows.MsgBody | undefined): ReadonlyMap<string, ReadonlyArray<string>> => {
+  const out = new Map<string, Array<string>>()
+  const add = (name: string, value: string) => {
+    const key = canonicalName(name)
+    out.set(key, [...(out.get(key) ?? []), value])
+  }
+  for (const part of layout?.parts ?? []) {
+    add("Content-Type", part.content_type)
+    if (part.content_id !== undefined) add("Content-ID", part.content_id)
+    for (const header of part.headers ?? []) add(header.name, header.value)
+  }
+  return out
+}
+
+/**
+ * On a recorded response, the headers of the request it answers as the run
+ * sent it on the same leg (its CSeq, number and method), keyed canonically;
+ * empty on a request or where the leg sent no such request.
+ */
+const answeredRequestHeaders = (
+  recording: ReadonlyArray<Bundle.RecordedMessage>,
+  response: Bundle.RecordedMessage,
+  scope: MsgScope
+): ReadonlyMap<string, ReadonlyArray<string>> => {
+  if (scope.kind !== "response") return new Map()
+  const cseqOf = (m: Wire.Msg) => headerValuesOf(headersInOrder(m), "CSeq")[0]?.trim().split(/\s+/).join(" ").toUpperCase()
+  const cseq = cseqOf(response)
+  const request = recording.find(
+    (m) => m.dir === "out" && m.repeat_of === undefined && startLineOf(headText(m))?.kind === "request" && cseqOf(m) === cseq
+  )
+  const out = new Map<string, Array<string>>()
+  for (const header of request === undefined ? [] : headersInOrder(request)) {
+    const key = canonicalName(header.name)
+    out.set(key, [...(out.get(key) ?? []), header.value])
+  }
+  return out
+}
+
+/** What the recording states around one reception, beside its own headers. */
+export interface ReceptionFacts {
+  /** What the replayed body's multipart parts state ({@link partHeaders}). */
+  readonly replayedParts?: ReadonlyMap<string, ReadonlyArray<string>>
+  /** The headers of the request a response answers ({@link answeredRequestHeaders}). */
+  readonly answeredRequest?: ReadonlyMap<string, ReadonlyArray<string>>
+  /** Whether the replayed message carries a body; absent reads as `!bodiless`. */
+  readonly replayedCarriesBody?: boolean
+}
+
+/**
  * One probe per header name whose two sides disagree under the name's fold.
  * First-appearance order, captured side first; a side that never states the
  * name is the empty occurrence list, and a name whose items are empty on both
- * sides states nothing on either.
+ * sides states nothing on either. `around` carries what the recording states
+ * beside the message ({@link ReceptionFacts}); it never makes a probe itself.
  */
 export const diffHeaders = (
   captured: ReadonlyArray<WireHeader>,
@@ -685,7 +805,8 @@ export const diffHeaders = (
   inbound: ReadonlyMap<string, ReadonlyArray<string>>,
   driven?: ReadonlySet<string>,
   step = "",
-  bodiless = false
+  bodiless = false,
+  around: ReceptionFacts = {}
 ): ReadonlyArray<HeaderProbe> => {
   const order: Array<string> = []
   const names = new Map<string, { name: string; captured: Array<string>; replayed: Array<string> }>()
@@ -725,7 +846,10 @@ export const diffHeaders = (
       inbound: inbound.has(key),
       inboundValues: inbound.get(key) ?? [],
       driven: driven === undefined ? undefined : driven.has(key),
-      bodiless
+      bodiless,
+      inReplayedParts: around.replayedParts?.get(key) ?? [],
+      inAnsweredRequest: around.answeredRequest?.get(key) ?? [],
+      replayedCarriesBody: around.replayedCarriesBody ?? !bodiless
     })
   }
   return out

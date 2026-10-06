@@ -167,7 +167,7 @@ pub struct FlowMsg {
     /// transaction envelope — a SIP retransmission (capture-stack duplicates
     /// are collapsed earlier and never reach the model, see
     /// [`FlowStats::capture_dups`]). The MODEL's own view: the emitted
-    /// document's `retx` is decided by [`crate::callfacts::mark_repeats`] on
+    /// document's `retx` is decided by `crate::callfacts::mark_repeats` on
     /// the same two bounds.
     pub retx: bool,
     /// Which probe wrote this copy ([`crate::Datagram::probe`]). Carried, not
@@ -1378,28 +1378,28 @@ mod tests {
         .into_bytes()
     }
 
-    const ICID: &str = "8agh3007ghb23oo5h9cc3ns6hpj4l0p96qsq28l5kqn651d8g6-5";
+    const ICID: &str = "icid-0001-example-5";
 
-    /// The MOH01 AS-B2B shape: every URI differs across the AS (hosts and
-    /// params rewritten, `tel:` vs `sip:` forms) but both INVITEs carry the
+    /// A B2BUA in the path that rewrites every URI (hosts and params
+    /// rewritten, `tel:` vs `sip:` forms), while both INVITEs carry the
     /// same P-Charging-Vector icid-value among mutating sibling params — the
     /// header-param strategy pairs the legs and the evidence names it.
     #[test]
-    fn header_param_strategy_pairs_as_b2b_legs_on_icid() {
+    fn header_param_strategy_pairs_b2bua_legs_on_icid() {
         let a = invite_custom(
-            "moh01-a",
+            "b2b-a",
             "ba",
-            "sip:+33000900011@foo.example.com;user=phone",
-            "\"SiteA\" <sip:+33000900012;verstat=TN-Validation-Passed@bar.example.com:5060;user=phone>",
-            "<tel:+33000900011>",
+            "sip:+15550900011@foo.example.com;user=phone",
+            "\"SiteA\" <sip:+15550900012;verstat=TN-Validation-Passed@bar.example.com:5060;user=phone>",
+            "<tel:+15550900011>",
             &format!("P-Charging-Vector: icid-value={ICID};icid-generated-at=198.51.100.63\r\n"),
         );
         let b = invite_custom(
-            "moh01-b",
+            "b2b-b",
             "bb",
-            "sip:+33000900011@ims.mnc001.example;user=phone",
-            "<sip:+33000900012;verstat=No-TN-Validation@baz.example.com;user=phone>",
-            "<sip:+33000900011@ims.mnc001.example>",
+            "sip:+15550900011@ims.mnc001.example;user=phone",
+            "<sip:+15550900012;verstat=No-TN-Validation@baz.example.com;user=phone>",
+            "<sip:+15550900011@ims.mnc001.example>",
             // Param order variance + mutated siblings: only the icid matches.
             &format!("P-Charging-Vector: orig-ioi=op2.example;icid-value={ICID}\r\n"),
         );
@@ -1408,7 +1408,7 @@ mod tests {
             dg(1_100_000, "198.51.100.226:54448", "10.20.0.1:5060", &b),
         ];
         let flows = build_flows(&datagrams, &FlowConfig::default());
-        assert_eq!(flows.groups.len(), 1, "icid must pair the AS-B2B legs");
+        assert_eq!(flows.groups.len(), 1, "icid must pair the B2BUA legs");
         let g = &flows.groups[0];
         assert_eq!(g.legs, vec![0, 1]);
         assert_eq!(g.evidence.len(), 1);

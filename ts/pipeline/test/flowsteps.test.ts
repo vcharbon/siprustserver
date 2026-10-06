@@ -57,9 +57,9 @@ describe("every captured message is a step", () => {
     expect(flow.steps[1]!.check).toBe("record")
   })
 
-  // Issue 76: `auto` marks who COMPOSES the message, never what the document
-  // may hold. The closed field list left an ACK's frozen headers and the
-  // delayed offer's answer with no home at all.
+  // `auto` marks who COMPOSES the message, never what the document may hold:
+  // an ACK's frozen headers and the delayed offer's answer are stored like any
+  // other step's content.
   it("stores a transaction-derived step's content like any other step's", () => {
     const flow = flowOf(delayedOfferFlows(), CALLER_ONLY)
     const [confirming, answering, refused] = flow.steps.filter(
@@ -185,7 +185,7 @@ const relayedB2bFlows = (
 ): Flows.FlowsDoc => {
   const { caller, callee, sut } = SOCKETS
   const pcv = "P-Charging-Vector: icid-value=abc123"
-  const pai = "P-Asserted-Identity: <sip:+33600000004@10.0.0.1>"
+  const pai = "P-Asserted-Identity: <sip:+15556000004@10.0.0.1>"
   return doc(
     [
       leg(CALLER_CALL_ID, oneHop(caller, sut), [
@@ -376,7 +376,7 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
             ...l,
             msgs: l.msgs.map((m) =>
               m.summary.kind === "response" && m.summary.status === 180
-                ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: ["P-Charging-Vector: icid-value=abc123", "P-Asserted-Identity: <sip:+33600000004@10.0.0.1>", minted] })
+                ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: ["P-Charging-Vector: icid-value=abc123", "P-Asserted-Identity: <sip:+15556000004@10.0.0.1>", minted] })
                 : m
             )
           }
@@ -411,8 +411,143 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
   })
 })
 
+/** The datagram a fixture message carries as text. */
+const rawOf = (m: Flows.Msg): string => (m as { readonly raw?: string }).raw ?? ""
+
+/**
+ * `flows` with leg `legIdx`'s dialog-opening INVITE carrying `from` / `to` as
+ * its From and To lines, the summary's URIs following them.
+ */
+const withIdentityLines = (
+  flows: Flows.FlowsDoc,
+  legIdx: number,
+  lines: { readonly from: string; readonly fromUri: string; readonly to: string; readonly toUri: string }
+): Flows.FlowsDoc => ({
+  ...flows,
+  legs: flows.legs.map((l, i) =>
+    i !== legIdx
+      ? l
+      : {
+        ...l,
+        ...(l.invite === null ? {} : { invite: { ...l.invite, from_uri: lines.fromUri, to_uri: lines.toUri } }),
+        msgs: l.msgs.map((m, j) =>
+          j !== 0 || m.summary.kind !== "request"
+            ? m
+            : {
+              ...m,
+              raw: rawOf(m)
+                .replace(/^From: .*$/m, `From: ${lines.from}`)
+                .replace(/^To: .*$/m, `To: ${lines.to}`),
+              summary: {
+                ...m.summary,
+                from: { ...m.summary.from, uri: lines.fromUri },
+                to: { ...m.summary.to, uri: lines.toUri }
+              }
+            }
+        )
+      }
+  )
+})
+
+describe("the dialog identity around the role number (§8)", () => {
+  const callerLines = {
+    from: "\"Alice\" <sip:+15556000001;verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1>;x-param=1;tag=from-a",
+    fromUri: "sip:+15556000001;verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1",
+    to: "<sip:+15556000004@example.invalid;x-uri=2;user=phone>",
+    toUri: "sip:+15556000004@example.invalid;x-uri=2;user=phone"
+  }
+
+  it("states the caller INVITE's captured From and To around the number the lane leases", () => {
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, callerLines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.from).toEqual({
+      pos: "caller",
+      form: "e164",
+      addr: "\"Alice\" <sip:${num:caller:e164};verstat=TN-Validation-Passed@10.0.0.9;user=phone;x-uri=1>;x-param=1"
+    })
+    expect(invite.msg.to).toEqual({
+      pos: "called[0][0]",
+      form: "e164",
+      addr: "<sip:${num:called-0-0:e164}@example.invalid;x-uri=2;user=phone>"
+    })
+  })
+
+  it("brackets a bare addr-spec, so its parameters stay the header's own (RFC 3261 §20.10)", () => {
+    const lines = {
+      ...callerLines,
+      to: "sip:+15556000004@example.invalid;user=phone",
+      toUri: "sip:+15556000004@example.invalid"
+    }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, lines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.to?.addr).toBe("<sip:${num:called-0-0:e164}@example.invalid>;user=phone")
+  })
+
+  it("states the identity the platform launched on the INVITE a callee receives, and no R-URI", () => {
+    const launched = {
+      from: "<sip:+15556000001;x-user=1@platform.invalid;user=phone>;tag=from-b",
+      fromUri: "sip:+15556000001;x-user=1@platform.invalid;user=phone",
+      to: "<sip:+15556000004@example.invalid:5060>",
+      toUri: "sip:+15556000004@example.invalid:5060"
+    }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 1, launched), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "B" && s.op === "expect" && s.msg.method === "INVITE")!
+    expect(invite.msg.ruri).toBeUndefined()
+    expect(invite.msg.from?.addr).toBe("<sip:${num:caller:e164};x-user=1@platform.invalid;user=phone>")
+    expect(invite.msg.to?.addr).toBe("<sip:${num:called-0-0:e164}@example.invalid:5060>")
+  })
+
+  it("declares the dial form of a caller whose From writes its number with user parameters", () => {
+    // Every message writes the caller's number with user parameters only.
+    const base = withIdentityLines(relayedB2bFlows(), 0, callerLines)
+    const flows: Flows.FlowsDoc = {
+      ...base,
+      legs: base.legs.map((l) => ({
+        ...l,
+        msgs: l.msgs.map((m) => ({
+          ...m,
+          raw: rawOf(m).split("<sip:+15556000001@10.0.0.9>").join("<sip:+15556000001;verstat=x@10.0.0.9>")
+        }))
+      }))
+    }
+    const layout = build(flows, BOTH_VANTAGES, sutSet(), plan(), derivesOnePrefix)
+    expect(layout.topology.caller.forms).toEqual(["e164"])
+  })
+
+  it("states the bare positional ref where the captured From writes no number the plan composes", () => {
+    const lines = { ...callerLines, from: "<sip:alice@10.0.0.9>;tag=from-a" }
+    const flow = flowOf(withIdentityLines(relayedB2bFlows(), 0, lines), BOTH_VANTAGES)
+    const invite = flow.steps.find((s) => s.leg === "A" && s.op === "send" && s.msg.method === "INVITE")!
+    expect(invite.msg.from).toEqual({ pos: "caller", form: "e164" })
+  })
+
+  it("composes a number in the URI user part and an equal display name only, never in a host or a parameter", () => {
+    const pai = "P-Asserted-Identity: \"+15556000004\" <sip:+15556000004@h.invalid;x=+15556000004>"
+    const flow = flowOf(relayedB2bFlows([pai]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "\"${num:called-0-0:e164}\" <sip:${num:called-0-0:e164}@h.invalid;x=+15556000004>"
+    )
+    const named = "P-Asserted-Identity: \"Call +15556000004\" <sip:+15556000004@h.invalid>"
+    const flow2 = flowOf(relayedB2bFlows([named]), BOTH_VANTAGES)
+    const b180 = flow2.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(b180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "\"Call +15556000004\" <sip:${num:called-0-0:e164}@h.invalid>"
+    )
+  })
+
+  it("composes a number a header writes with user parameters (3GPP TS 24.229 verstat)", () => {
+    const pai = "P-Asserted-Identity: <sip:+15556000004;verstat=TN-Validation-Passed@10.0.0.1;user=phone>"
+    const flow = flowOf(relayedB2bFlows([pai]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.filter((h) => h.name === "P-Asserted-Identity").map((h) => h.value)).toContain(
+      "<sip:${num:called-0-0:e164};verstat=TN-Validation-Passed@10.0.0.1;user=phone>"
+    )
+  })
+})
+
 describe("body descriptors (RFC 3261 §20.11–§20.13, §20.24)", () => {
-  const SDP = "v=0\r\no=- 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n"
+  const SDP ="v=0\r\no=- 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n"
   const descriptors = [
     "P-Charging-Vector: icid-value=abc123",
     "Content-Disposition: session; handling=required",

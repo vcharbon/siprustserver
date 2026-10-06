@@ -92,6 +92,7 @@ Severity = operational risk if the behaviour is wrong.
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | REINV-1 | 14.1 | re-INVITE forwarded per leg | Per-leg CSeq++/new branch, target preserved | high | ✅ | reinvite `alice_reinvite`/`bob_reinvite` |
 | REINV-2 | 14.2 | Both legs re-INVITE (glare) | Incoming gets 491, no deadlock | high | ✅ | reinvite `crossing_reinvite_glare`; rfc-audit `concurrent-re-invite-500-or-491` |
+| REINV-2b | 14.2, 20.33 | re-INVITE while the sender's earlier INVITE is open | no final yet: 500 with a 0–10 s `Retry-After`; 2xx un-ACKed: 491 with `glare_retry_after` when configured; crossing: 491, none | med | ✅ | reinvite_glare_retry_after; rfc-audit `concurrent-re-invite-500-or-491` |
 | REINV-3 | 14.1 | B-leg returns 491 | Back off + retry, no instant loop | med | ❌ | add `bleg_491_backoff_before_retry` |
 | REINV-4 | 14.1 | Failed re-INVITE (4xx/5xx) | Keep prior session, don't drop call | high | 🟡 | fake_prack `update_codec_mismatch` (UPDATE); add re-INVITE `failed_reinvite_keeps_dialog_state` |
 
@@ -106,6 +107,7 @@ Severity = operational risk if the behaviour is wrong.
 | BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua `confirm_dialog_captures_b_leg_route_set...`, relay tests |
 | BYE-6 | 12.2.1.1 | Per-leg CSeq monotonic | Each leg own CSeq counter | med | ✅ | rfc-audit `cseq` rules, generators |
 | BYE-7 | 15.1.1 | BYE mid B-leg re-INVITE | Abort in-flight re-INVITE, BYE | med | 🟡 | refer a-bye-during-realign analogue; add `bye_during_reinvite_aborts_reinvite` |
+| BYE-8 | 16.6, 20.11 | A/B BYE carries a body | The minted BYE carries the body verbatim with its Content-Type and descriptors (Content-Disposition, MIME-Version, Content-Transfer-Encoding); a minted CANCEL carries no body and no descriptor | med | ✅ | teardown_header_relay `a_releasing_*_body_rides_*`, `a_minted_cancel_carries_no_body_descriptor` |
 
 ### Per-leg identity / Via / Max-Forwards (the load-bearing B2BUA invariants)
 
@@ -127,8 +129,10 @@ Severity = operational risk if the behaviour is wrong.
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | RR-1 | 12/16.6 | B2BUA does NOT Record-Route | It's a UA, not a proxy | high | ✅ | rfc-audit `recordRouteOnlyOnDialogCreating` (proxy RRs, B2BUA doesn't) |
 | RR-4 | 16.6 | Strict-route first-hop swap | Apply strict-route shuffle on send | med | ✅ | rfc-audit `strict-route-shuffle-on-send`/`strict-route-rewrite-handled`, generators |
+| RR-5 | 12.2.1.1/8.1.2 | Dialog behind a strict router (no `;lr`) | In-dialog requests sent to the strict route named in the Request-URI, target in the last Route | med | ✅ | b2bua-harness `in_dialog_request_uri_not_ours::strict_*`, rfc-audit `mid-dialog-wire-destination` |
+| RR-6 | 12.2.2 | In-dialog request whose Request-URI an element rewrote (no `callRef`/`leg`) | Call and source leg found by dialog identity (index namespace names the side) | med | ✅ | b2bua-harness `in_dialog_request_uri_not_ours::rewrite_*` |
 | LOOP-1 | 16.3 | B-leg target loops to B2BUA (self) | App-level loop guard (Via blind due to new Call-ID) | med | ❌ | add `b2bua_self_loop_detected` |
-| MERGE-1 | 8.2.2.2 | Forked dup A-INVITE | 482 Loop Detected on 2nd copy | med | ❌ | add `merged_invite_482_second_copy` |
+| MERGE-1 | 8.2.2.2 | Forked dup A-INVITE | 482 Loop Detected on 2nd copy | med | ✅ | `retry_on_an_ending_identity::a_merged_copy_of_an_established_calls_invite_is_answered_482` (a new CSeq is a new request: `a_retry_inside_the_challenged_calls_last_turn_is_routed_as_a_new_call`) |
 | RDR-1 | 8.1.3.4 | B-leg returns 3xx | Follow redirect or map; don't leak B Contacts to A | high | 🟡 | numbering_plan B2BUA-emitted 302 only; add `bleg_3xx_followed_not_leaked_to_aleg` |
 | RDR-2 | 8.1.3.4 | 3xx loop | Bounded redirect recursion | med | ❌ | add `redirect_recursion_bounded` |
 | OOD-2 | 8.2.1 | Unknown method on a leg | 405 + Allow | med | ✅ | rfc-audit `unsupported-method-405-allow` |
@@ -194,6 +198,7 @@ Severity = operational risk if the behaviour is wrong.
 | UPDATE-OA-1 | 3311/3264 §8 | UPDATE O/A on established dialog | Full §8 rules, re-anchor | high | 🟡 | fake_prack `update_happy` (early); add established-dialog UPDATE |
 | UPDATE-PENDING-1 | 3311/3264 §4 | UPDATE while O/A outstanding | 491 Request Pending | high | ❌ | add `update_491_when_oa_pending` |
 | GLARE-UPDATE-1 | 3311/3261 §14.2 | Both ends UPDATE/re-INVITE | Loser 491 + backoff, no deadlock | high | 🟡 | reinvite glare covers re-INVITE; add UPDATE-glare |
+| GLARE-UPDATE-2 | 3311 §5.2 | UPDATE while the sender's previous UPDATE awaits its final (any body), or an offer while the sender's INVITE offer (re-INVITE or initial) has no final and no reliable provisional carried its answer | 500 with a 0–10 s `Retry-After`, never relayed; an offer after the sender CANCELled that INVITE, its relayed copy still open: 491; an offerless INVITE: relayed | med | ✅ | update_offer_pending, update_matrix, promote_pem |
 
 ### SDP bridging (RFC 3264 §6/§8, RFC 4566)
 
@@ -260,7 +265,9 @@ Severity = operational risk if the behaviour is wrong.
 | REFER-TXN-4 | 5589 | A BYE during a-realign | Begin-termination BYEs orphaned B+C | high | ✅ | refer_full_transfer `a_bye_during_a_realign` |
 | REFER-TXN-5 | 3515 | C answers but realign fails/timeout | Rollback BYE all 3 + CDR rollback | high | ✅ | refer_c_realign / refer_full_transfer reject+timeout |
 | REFER-TXN-6 | 6665 §4.1 | Overall watchdog fires | Cancel all transfer timers, terminate | high | ✅ | refer_timers `refer_overall_safety_fires` |
-| REASON-1 | 3326 §2 | A/C BYE/CANCEL carries Reason | Propagate across legs | med | ❌ | add `bye_reason_propagated_across_legs` |
+| REASON-1 | 3326 §2 | A/C BYE/CANCEL carries Reason | Propagate across legs; a CANCEL restates a leading Q.850 value's cause alone where the deployment asks (`relayed_cancel_reason`); no Reason toward a media leg | med | ✅ | teardown_header_relay, early_dialog_bye, release_reason `a_relayed_cancel_*`, `a_relayed_cause_never_reaches_a_media_leg` |
+| REASON-3 | 3326 §2, 3261 §9.1 | A 2xx crosses the stack's CANCEL | The BYE ending the dialog is a release of the stack's own: `own_release_reason` | med | ✅ | release_reason `the_bye_replacing_a_crossed_cancel_*` |
+| REASON-4 | 3326 §2 | A release no peer's BYE or CANCEL asked for (timer, duration cap, decision, DestroyLeg) | The deployment's one `own_release_reason` on each BYE where no other Reason is stated; never toward a media leg | med | ✅ | release_reason `an_own_release_*`, `a_peer_asked_release_*` |
 | REASON-2 | 3326 §2 | B2BUA-initiated rollback/Replaces BYE | Include Reason header | med | ❌ | add `transfer_rollback_bye_reason` |
 | LOOP-1 | 5589 §6.1 | Refer-To target == self/A-leg | Detect & reject self-transfer | med | ❌ | add `refer_to_self_loop_rejected` |
 | LOOP-2 | 3261 §16.3 | Chained transfer | Bound via Max-Forwards | low | ❌ | add `refer_chain_max_forwards` |
@@ -269,23 +276,28 @@ Severity = operational risk if the behaviour is wrong.
 
 ## RFC 4028 / RTP / 3581 / 3263 / 3325 / 6442 / 4475 — Session timers, media, transport, identity, torture
 
-### RFC 4028 Session Timers — **whole area unimplemented (header parse only)**
+### RFC 4028 Session Timers — **transparent: negotiation and refreshes relayed end to end, no timer of our own**
 
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | SESSTIMER-1 | §7.2/9 | One leg supports ST, other doesn't | Bridge: originate refresh on supporting leg | high | ❌ | add `sesstimer_bridges_when_far_leg_unsupported` |
 | SESSTIMER-2 | §4/10 | Session-Expires below Min-SE | 422 + Min-SE | high | ❌ | add `sesstimer_422_below_min_se` |
-| SESSTIMER-3 | §6 | B-leg returns 422 | Retry same INVITE, CSeq++, SE≥Min-SE; don't leak to A | high | ❌ | add `sesstimer_retry_on_422_from_bleg` |
+| SESSTIMER-3 | §6 | B-leg returns 422 | Transparent: the 422 and its Min-SE reach A, which retries | high | ✅ | `session_timer_transparency::a_refused_interval_reaches_the_caller_with_the_callee_floor` |
 | SESSTIMER-4 | §7.4 | refresher=uac/uas assignment | Track refresher duty per leg | high | ❌ | add `sesstimer_refresher_param_assignment` |
 | SESSTIMER-5 | §10 | Missed refresh | Teardown timer → BYE both legs | high | ❌ | add `sesstimer_teardown_on_missed_refresh` |
 | SESSTIMER-7 | §8.1 | Refresh-only re-INVITE/UPDATE | Don't re-bridge media, just reset timer + 200 | high | ❌ | add `sesstimer_refresh_no_media_rebridge` |
 | SESSTIMER-10 | §10 | ST + OPTIONS keepalive both active | No double/conflicting teardown | high | ❌ | add `sesstimer_vs_options_keepalive_no_double_teardown` |
 | SESSTIMER-11 | §9 | B2BUA is refresher | Actually send refresh on schedule | high | ❌ | add `sesstimer_b2bua_sends_own_refresh` |
 
-> Note: **deliberate non-goal for now** (see Deliberate non-goals section). The
-> B2BUA relies entirely on its own OPTIONS keepalive (300 s) for liveness. A
-> strict ST peer would tear down long calls at Session-Expires while keepalive
-> thinks the call is healthy — accepted risk until an ST peer is required.
+> Note: the B2BUA relays `Session-Expires`, `Min-SE`, the `timer` tag of a
+> session request's `Require`, and the re-INVITE / UPDATE refreshes, so two
+> endpoints that both support the timer negotiate and refresh it end to end
+> (`session_timer_transparency`). Running a timer of its own stays a
+> **deliberate non-goal for now** (see Deliberate non-goals section): where one
+> endpoint does not support it, nobody refreshes. A leg whose answers never
+> reach the caller (a media leg, a leg dialled after the caller's INVITE
+> completed) neither offers nor negotiates the timer. Liveness is the B2BUA's
+> own OPTIONS keepalive (300 s).
 
 ### RTP / RTCP / mux / DTMF (B2BUA is signalling-only today; these are forward-looking for media-anchoring)
 
@@ -343,8 +355,8 @@ Severity = operational risk if the behaviour is wrong.
 
 ## Deliberate non-goals (documented, not scheduled)
 
-These areas are RFC-relevant but **intentionally out of scope for now** (per
-project decision, 2026-06-14). They are recorded here so the gap is explicit and
+These areas are RFC-relevant but **intentionally out of scope for now** (a
+project decision). They are recorded here so the gap is explicit and
 the decision is auditable — they are *not* bugs and not on the test backlog until
 reconsidered.
 
@@ -352,7 +364,7 @@ reconsidered.
 |------|-----|-------------------|----------|
 | **Attended transfer / Replaces** | 3515 + 3891 | REFER carrying `Replaces=` is rejected **501**; no dialog-replacement flow | Not supported on purpose. Blind transfer only. |
 | **Auth challenge / relay** | 3261 §22 | No 401/407 generation, no Digest challenge-response, no credentialed B-leg retry | Not supported on purpose for now. |
-| **Session timers (Session-Expires / Min-SE)** | 4028 | Headers parse only; no negotiation, no 422, no refresh. Liveness handled by the B2BUA's own OPTIONS keepalive | Out of scope for now; keepalive is the liveness mechanism. Revisit if a strict-ST peer is required. |
+| **Session timers (Session-Expires / Min-SE)** | 4028 | Transparent: the negotiation and the refreshes are relayed end to end; no timer of our own, no 422 of our own, no refresh of our own. Liveness handled by the B2BUA's own OPTIONS keepalive | Own timer out of scope for now; keepalive is the liveness mechanism. Revisit if a strict-ST peer facing a non-ST peer is required. |
 
 ## Verified bug status (code-traced, not just RFC-inferred)
 
@@ -383,11 +395,11 @@ latent defect; the rest are **correct-but-untested** (test debt, not bugs).
 
 **P2 — robustness / forward-looking**
 7. `torture_indialog_bad_msg_no_call_leak` (TORTURE-8)
-8. `b2bua_self_loop_detected` + `merged_invite_482_second_copy` (LOOP-1, MERGE-1)
+8. `b2bua_self_loop_detected` (LOOP-1)
 9. `bleg_3xx_followed_not_leaked_to_aleg` + redirect recursion bound (RDR-1/2)
 10. UPDATE guards (UPDATE-ALLOWED-1, UPDATE-PENDING-1)
 11. RTP anchoring corner cases if/when media is anchored (RTP-4/6/8)
-12. Reason-header propagation across legs (REASON-1/2)
+12. Reason on a transfer rollback BYE (REASON-2)
 
-> Items previously listed under "P1 — unimplemented" (Replaces, auth, session
-> timers) are now recorded under **Deliberate non-goals** above.
+> Replaces, auth and session timers are recorded under **Deliberate non-goals**
+> above, not as unimplemented gaps.

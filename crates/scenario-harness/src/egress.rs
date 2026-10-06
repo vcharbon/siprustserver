@@ -71,7 +71,7 @@ pub struct ApiCallRoute {
     /// dials for this route — the NO-ANSWER failover trigger:
     /// when the callee rings but never answers, the timer fires and the SUT
     /// walks to the next route exactly as it would on a reject final. `None`
-    /// (the default, and the historic wire shape byte-for-byte) arms nothing —
+    /// (the default, serialized as an absent field) arms nothing —
     /// only a reject can advance the plan.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_answer_timeout_sec: Option<i64>,
@@ -115,7 +115,7 @@ impl ApiCall {
         Self::routes_with_no_answer(candidates, None)
     }
 
-    /// [`ApiCall::routes`] with a per-route no-answer ring timer (047): every
+    /// [`ApiCall::routes`] with a per-route no-answer ring timer: every
     /// route arms `no_answer_timeout_sec` on its b-leg, so a ring-forever hop
     /// advances the plan exactly like a reject final. Uniform across routes —
     /// an answering hop cancels its timer at confirm, so the winner is
@@ -208,7 +208,7 @@ impl EgressPolicy {
         self.rewrite_with_no_answer(candidates, None)
     }
 
-    /// [`Self::rewrite_for`] with a per-route no-answer ring timer (047): on the
+    /// [`Self::rewrite_for`] with a per-route no-answer ring timer: on the
     /// pinned layout the `routes` failover plan arms `no_answer_timeout_sec` on
     /// every hop, so the SUT reroutes on ring-timeout as well as on reject. The
     /// other policies ignore the knob (a transparent layout's SUT owns its own
@@ -277,8 +277,8 @@ mod tests {
 
     #[test]
     fn pin_serializes_host_port_only() {
-        // Matches the hand-formatted payload the shapes used to emit verbatim,
-        // and what `route_dest_from_api_call` reads (host string, port number).
+        // Host and port only: what `route_dest_from_api_call` reads (host
+        // string, port number).
         assert_eq!(
             ApiCall::pin("10.0.0.9", 5070).to_header(),
             r#"{"destination":{"host":"10.0.0.9","port":5070}}"#
@@ -306,8 +306,8 @@ mod tests {
 
     #[test]
     fn one_pinned_candidate_is_a_single_destination() {
-        // The single-callee case stays byte-identical to the old hand-formatted
-        // pin — no `routes`, so the deployed worker's single-dest path is unchanged.
+        // The single-callee case is a plain pin — no `routes`, so the deployed
+        // worker takes its single-dest path.
         let rw = EgressPolicy::ApiCallPin.rewrite_for(&[target("bob1", "127.0.0.1:5070")]);
         assert_eq!(rw.ruri, None);
         assert_eq!(
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn routes_plan_arms_a_per_route_no_answer_timer_only_when_asked() {
-        // 047: the no-answer knob rides every route entry; the knob-less plan
+        // The no-answer knob rides every route entry; the knob-less plan
         // stays byte-identical (no `no_answer_timeout_sec` key at all).
         let candidates = [target("bob", "127.0.0.1:5070"), target("bob2", "127.0.0.1:5071")];
         let rw = EgressPolicy::ApiCallPin.rewrite_with_no_answer(&candidates, Some(2));

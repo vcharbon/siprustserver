@@ -54,7 +54,7 @@ describe("set deltas", () => {
 
 describe("name-addr equivalence", () => {
   it("layout differences that state the same address are equal", () => {
-    expect(valuesEqual("From", [`"A" <sip:+331@h.fr;user=phone>;tag=1`], [`"A" <sip:+331@H.FR; user=phone>;tag=1`])).toBe(
+    expect(valuesEqual("From", [`"A" <sip:+15551@h.example;user=phone>;tag=1`], [`"A" <sip:+15551@H.EXAMPLE; user=phone>;tag=1`])).toBe(
       true
     )
   })
@@ -64,15 +64,15 @@ describe("name-addr equivalence", () => {
   })
 
   it("parses bare addr-spec with header params", () => {
-    const parsed = parseNameAddr("sip:+331@h.fr;tag=x")
-    expect(parsed?.uri.user).toBe("+331")
+    const parsed = parseNameAddr("sip:+15551@h.example;tag=x")
+    expect(parsed?.uri.user).toBe("+15551")
     expect(parsed?.params.get("tag")).toBe("x")
   })
 })
 
 describe("URI reads", () => {
   it("tel and sip forms, hosts, ports, security", () => {
-    expect(parseUri("tel:+33123;phone-context=fr")?.user).toBe("+33123")
+    expect(parseUri("tel:+1555123;phone-context=example.com")?.user).toBe("+1555123")
     const sip = parseUri("sips:alice@Example.COM:5061;transport=tls")
     expect(sip?.host).toBe("example.com")
     expect(sip?.port).toBe(5061)

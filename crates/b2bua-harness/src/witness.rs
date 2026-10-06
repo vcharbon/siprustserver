@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{
@@ -106,6 +106,7 @@ impl WitnessRig {
         for id in WITNESS_IDS {
             let witness = store.admit(
                 &format!("witness-{id}"),
+                1,
                 &[AdmitEntry { id: id.into(), limit: 100 }],
                 false,
             );
@@ -160,7 +161,13 @@ impl WitnessRig {
     pub fn refresh_witnesses(&self) {
         for id in WITNESS_IDS {
             assert_eq!(
-                self.store.refresh(&format!("witness-{id}"), &[id.to_string()]),
+                self.store
+                    .refresh(
+                        &format!("witness-{id}"),
+                        1,
+                        &[AdmitEntry { id: id.into(), limit: 100 }]
+                    )
+                    .result,
                 call_limiter::RefreshResult::Extended,
                 "witness on {id} is known"
             );

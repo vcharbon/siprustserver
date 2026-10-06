@@ -11,16 +11,17 @@
 //!
 //! Every call holds three limiters.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter::RefreshOutcome;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::{LimiterOp, RefreshGiveUp};
 use b2bua::B2buaConfig;
 use b2bua_harness::{settle_until, B2buaSut};
@@ -157,7 +158,7 @@ impl Scene {
                     let mut r = route_to("127.0.0.1", 5070);
                     r.call_limiter = HOLDS
                         .iter()
-                        .map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit })
+                        .map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit })
                         .collect();
                     NewCallResponse::Route(r)
                 })
@@ -254,12 +255,11 @@ impl Scene {
         HOLDS.iter().map(|(id, _)| self.store.held(id)).collect()
     }
 
-    /// Advance until `at` from the scene's start, in the harness's settled
-    /// steps.
+    /// Advance until `at` from the scene's start.
     async fn advance_to(&self, at: Duration) {
         let now = self.start.elapsed();
         if at > now {
-            b2bua_harness::advance((at - now).as_millis() as u64).await;
+            self.h.advance(at - now).await;
         }
     }
 
@@ -270,7 +270,7 @@ impl Scene {
         let deadline = Instant::now() + bound;
         while self.sent_on("/v1/refresh") == before {
             assert!(Instant::now() < deadline, "no refresh request left within {bound:?}");
-            b2bua_harness::advance(10).await;
+            self.h.advance(Duration::from_millis(10)).await;
         }
     }
 
@@ -409,11 +409,11 @@ async fn a_dropped_answer_reaching_an_ended_call_is_harmless() {
 
     s.advance_to(REFRESH - Duration::from_millis(100)).await;
     let no_entries: &[AdmitEntry] = &[];
-    assert_eq!(s.store.admit(&key, no_entries, false), AdmitResult::Admitted);
+    assert_eq!(s.store.admit(&key, 1_000, no_entries, false), AdmitResult::Admitted);
     assert_eq!(s.holds(), [0, 0, 0], "the key's set is dropped and fenced");
     s.until_a_refresh_leaves(TICK + Duration::from_millis(500)).await;
     s.hang_up(&mut dialog).await;
-    b2bua_harness::advance(300).await;
+    s.h.advance(Duration::from_millis(300)).await;
 
     s.assert_drained().await;
     assert_eq!(s.released_keys(), [key]);
@@ -444,7 +444,7 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
 
     s.advance_to(REFRESH - Duration::from_millis(100)).await;
     let no_entries: &[AdmitEntry] = &[];
-    assert_eq!(s.store.admit(&key, no_entries, false), AdmitResult::Admitted);
+    assert_eq!(s.store.admit(&key, 1_000, no_entries, false), AdmitResult::Admitted);
     s.advance_to(REFRESH + TICK + Duration::from_secs(1)).await;
     let metrics = s.b2bua.metrics();
     assert_eq!(metrics.limiter().failures_of(LimiterOp::Refresh), 0, "the slow answer came back");

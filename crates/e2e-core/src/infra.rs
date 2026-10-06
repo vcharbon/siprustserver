@@ -81,7 +81,7 @@ impl InfraRuntime {
         self.agents.get(role).unwrap_or_else(|| panic!("infra has no agent for role {role:?}"))
     }
 
-    /// Label a message `role` just received with a canonical [`Anchor`]
+    /// Label a message `role` just received with a canonical [`Anchor`](crate::shape::Anchor)
     /// (ADR-0019) — e.g. `rt.anchor("bob1", Anchor::InitialInvite,
     /// uas.request())`. Surfaced on the [`RunReport`] for the check engine.
     pub fn anchor(
@@ -305,7 +305,7 @@ impl InfraShape for FakeLsbcB2bua {
             // REFER blind-transfer authorization (the `transfer-refer-media`
             // shape): the scripted `/call/refer` backend keyed on the REFER's
             // `X-Api-Call.refer_key` / `destination`, paired with the routes'
-            // `features.refer` arm above — without the arm this platform would
+            // `features.refer` arm above — without the arm the B2BUA would
             // relay the REFER on instead of consulting. Inert for the other
             // shapes (they never REFER); composes with the failover wiring.
             .on_refer(default_call_refer)
@@ -440,7 +440,7 @@ impl InfraShape for FakeRegisterProxy {
 }
 
 /// A **real**-transport infra: agents on `RealSignalingNetwork` under a wall
-/// clock, via the [`Harness::with_network_and_clock`] seam (ADR-0018, Phase A).
+/// clock, via the [`Harness::with_network_and_clock`] seam (ADR-0018).
 /// No SUT is spawned — `sut_ingress` points at bob1, so `basic-call` becomes a
 /// direct peer call. This is the in-CI proof that the *same* shape body runs over
 /// real sockets + real time; the external-kind-cluster infra is the same seam

@@ -4,14 +4,15 @@
 //! wrong and is alive: it hears the teardown on the wire — a BYE on a
 //! confirmed leg — and the call writes its CDR, even while the flood goes on.
 
+use call::LimiterEntry;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    NewCallRequest, NewCallResponse,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, NewCallRequest,
+    NewCallResponse,
 };
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, WitnessRig};
 use call::helpers::TERMINATING_TIMEOUT_MS;
@@ -224,7 +225,7 @@ impl CallDecisionEngine for HoldingXY {
         match self.0.new_call(req).await? {
             NewCallResponse::Route(mut r) => {
                 r.call_limiter =
-                    ["x", "y"].map(|id| CallLimiterEntry { id: id.into(), limit: 10 }).to_vec();
+                    ["x", "y"].map(|id| LimiterEntry { id: id.into(), limit: 10 }).to_vec();
                 Ok(NewCallResponse::Route(r))
             }
             other => Ok(other),

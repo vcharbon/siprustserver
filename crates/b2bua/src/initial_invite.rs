@@ -3,7 +3,8 @@
 //! route (b-leg creation) or reject. This is an **async** handler (it calls the
 //! decision backend), so it lives outside the synchronous rule chain; the router
 //! invokes it for out-of-dialog INVITEs and runs the result through the same
-//! invariant finalization as a rule result.
+//! invariant finalization as a rule result. A setup its caller CANCELed before
+//! its turn ran asks the decision engine nothing ([`cancelled_setup`]).
 
 use std::net::SocketAddr;
 
@@ -15,6 +16,7 @@ use call::{
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
+use sip_message::generators::CapabilitySet;
 use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
@@ -29,10 +31,10 @@ use crate::decision::{
     SipHeaderUpdates,
 };
 use crate::effects::{HandlerEffects, HandlerResult};
-use crate::event::CallEvent;
-use crate::limiter::CallLimiter;
+use crate::limiter::LimiterWorker;
 use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
 use crate::trace;
+use b2bua_sdk::event::CallEvent;
 
 /// Headers sent as top-level decision-request fields (excluded from
 /// `sip_headers`). Shared with the failure path: `route-failure` applies the
@@ -161,9 +163,12 @@ pub fn build_initial_call(
         invite.call_id().as_str(),
         invite.from().tag().unwrap_or(""),
     );
-    // The limiter key: the call_ref plus a nonce, unique over time where the
-    // call_ref is not (a retried INVITE reuses its Call-ID and From tag).
-    let limiter = CallLimiterState::uncounted(format!("{call_ref}#{}", id_gen.new_tag()));
+    // The limiter key is the call's incarnation: the call_ref plus a mark,
+    // unique over time where the call_ref is not (a retried INVITE reuses its
+    // Call-ID and From tag).
+    let limiter =
+        CallLimiterState::uncounted(call::derive_incarnation(&call_ref, &id_gen.new_tag()));
+    let (local_addr, remote_addr) = relay::uas_addresses(invite);
     let a_leg = Leg {
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
@@ -174,8 +179,8 @@ pub fn build_initial_call(
         dialogs: vec![],
         no_answer_timeout_sec: None,
         bye_disposition: None,
-        local_uri: Some(invite.to().uri().to_string()),
-        remote_uri: Some(invite.from().uri().to_string()),
+        local_uri: Some(local_addr),
+        remote_uri: Some(remote_addr),
         invite_request_uri: Some(invite.request_uri().to_string()),
         pending_invite_txn: None,
         ext: None,
@@ -183,6 +188,7 @@ pub fn build_initial_call(
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),
     };
@@ -195,6 +201,7 @@ pub fn build_initial_call(
             .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
             .collect(),
         body: invite.body().to_vec(),
+        cseq: invite.cseq().seq(),
     };
     Call {
         call_ref,
@@ -229,7 +236,7 @@ pub fn build_initial_call(
         // (see `call` codec_roundtrip emergency contract). The field carries the
         // call's emergency state to the `;emerg=1`/`;em=1` URI/Via markers in
         // `stack_identity`, so it is derived from the INVITE here, not
-        // hard-coded. The overload tiers classify the wire request directly and
+        // hard-coded. The admission ladder classifies the wire request directly and
         // never read this field.
         emergency: is_emergency_request(invite).then_some(true),
         features: None,
@@ -255,6 +262,16 @@ pub fn build_initial_call(
     }
 }
 
+/// The initial-INVITE turn of a setup its caller CANCELed before the turn ran:
+/// the call opens its trace (ADR-0026), and nothing else happens — no
+/// decision request, no limiter admit, no wire effect. The `Cancelled` turn
+/// queued behind it ends the call with its Cancel CDR.
+pub fn cancelled_setup(mut call: Call, invite_wire: &[u8], now_ms: i64) -> HandlerResult {
+    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    trace::intake::activate(&mut call, &a_invite, invite_wire, now_ms);
+    HandlerResult { call, effects: HandlerEffects::new() }
+}
+
 /// Run the initial-INVITE decision + route/reject. `call` must already carry the
 /// a-leg (from [`build_initial_call`]); `invite_wire` is the datagram it arrived
 /// as, which only the router holds (the call carries a header snapshot, not
@@ -265,7 +282,7 @@ pub fn build_initial_call(
 pub async fn handle_initial_invite(
     mut call: Call,
     decision: &dyn CallDecisionEngine,
-    limiter: &dyn CallLimiter,
+    limiter: &LimiterWorker,
     config: &B2buaConfig,
     id_gen: &IdGen,
     wire_faults: &crate::wire_faults::WireFaults,
@@ -329,6 +346,7 @@ pub async fn handle_initial_invite(
             DecisionKind::Reject,
             Some("a".into()),
             &a_invite,
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
         ),
@@ -338,6 +356,7 @@ pub async fn handle_initial_invite(
             DecisionKind::Redirect,
             Some("a".into()),
             &a_invite,
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
         ),
@@ -352,6 +371,7 @@ pub async fn handle_initial_invite(
                 Some("Temporarily Unavailable".into()),
                 None,
                 &[],
+                &config.minted_final_advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::DecisionReject,
@@ -366,6 +386,7 @@ pub async fn handle_initial_invite(
             reason,
             update_headers.as_ref(),
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -377,6 +398,7 @@ pub async fn handle_initial_invite(
             Some("Service Unavailable".into()),
             None,
             &[],
+            &config.minted_final_advertisement,
             id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -407,7 +429,9 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// skipped (the generator owns them, header-ownership matrix X2). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
 /// own is none. `cause` is the termination record's: the decision layer's
-/// refusal, or the stack's own admission.
+/// refusal, or the stack's own admission. A failure final carries the
+/// deployment's `advertisement` for a minted final under the decision's
+/// statements.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reject_call(
     mut call: Call,
@@ -416,6 +440,7 @@ pub(crate) fn reject_call(
     reason: Option<String>,
     update_headers: Option<&SipHeaderUpdates>,
     contacts: &[RedirectContact],
+    advertisement: &CapabilitySet,
     id_gen: &IdGen,
     now_ms: i64,
     cause: TerminationCause,
@@ -423,9 +448,9 @@ pub(crate) fn reject_call(
     let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
-    // decision never stated (055). Answer the plain server error instead — the
+    // decision never stated. Answer the plain server error instead — the
     // re-entry carries no contacts, so it always terminates.
-    let extra_headers = match build_reject_headers(update_headers, contacts) {
+    let mut extra_headers = match build_reject_headers(update_headers, contacts) {
         Ok(headers) => headers,
         Err(err) => {
             tracing::warn!(
@@ -440,12 +465,22 @@ pub(crate) fn reject_call(
                 Some(err.to_string()),
                 update_headers,
                 &[],
+                advertisement,
                 id_gen,
                 now_ms,
                 TerminationCause::Admission,
             );
         }
     };
+    // A failure final refused in this element's own name carries the
+    // deployment's advertisement, each half under the decision's statements.
+    if crate::rules::capabilities::is_minted_failure(status) {
+        crate::rules::capabilities::stamp_own_advertisement(
+            advertisement,
+            |name| update_headers.is_some_and(|u| u.keys().any(|n| name.matches(n))),
+            &mut extra_headers,
+        );
+    }
     let mut effects = HandlerEffects::new();
     // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
     if let Some(effect) = relay::response_to_a_leg(
@@ -463,6 +498,11 @@ pub(crate) fn reject_call(
         crate::effects::Provenance::Authored,
         crate::rules::relay::Author::Stack,
     ) {
+        let mut effect = effect;
+        let adds = update_headers.map(b2bua_sdk::header_update::header_adds).unwrap_or_default();
+        if let crate::effects::OutboundBody::Response(resp) = &mut effect.body {
+            *resp = crate::rules::stated_headers::response_with_adds(resp.clone(), &adds);
+        }
         effects.outbound.push(effect);
         call = add_cdr_event(
             call,
@@ -506,7 +546,8 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
 }
 
 /// Build the extra response headers for a reject/redirect: the non-structural
-/// `update_headers` *sets* (e.g. `Reason:`), one line per stated line, plus one
+/// `update_headers` *sets* (e.g. `Reason:`), one line per stated line — its
+/// adds yield to the final as built ([`reject_call`]) — plus one
 /// `Contact: <uri>;q=…` per redirect target. Removals and stack-owned keys are dropped — the response
 /// generator owns the structural set (ADR-0017 X2), including the Contact a
 /// redirect authors from its typed target list.
@@ -522,6 +563,9 @@ fn build_reject_headers(
         for (name, val) in map {
             let named = HeaderName::from(name.as_str());
             if named.class() != HeaderClass::EndToEnd {
+                continue;
+            }
+            if val.adds() {
                 continue;
             }
             for v in val.lines() {
@@ -824,7 +868,7 @@ mod multi_instance_header_tests {
 
         // Contact is populated via the plural getter, so any number of instances
         // survives (the parser caps an INVITE at one per RFC 3261 §8.1.1.8, but the
-        // schema no longer collapses — it carries whatever arrived).
+        // schema does not collapse — it carries whatever arrived).
         assert_eq!(req.contact, vec!["<sip:alice@10.0.0.9:5060>".to_string()]);
 
         // Every hop of a multi-line header survives, in wire order.

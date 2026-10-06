@@ -1,18 +1,19 @@
 //! The per-call handler body: runs on the per-call FIFO with the state lock
-//! held — reaper verdict gate, initial-INVITE admission, the in-dialog lookup
-//! (resident, or materialised as a takeover / on-demand reclaim), the re-offer
-//! of an unmatched datagram to the transactions the call seeded, the CANCEL
-//! the layer matched nothing for, the rule chain, and the message-cap defense.
+//! held — reaper verdict gate, the initial-INVITE turn, the incarnation gate,
+//! the in-dialog lookup (resident, or materialised as a takeover / on-demand
+//! reclaim), the re-offer of an unmatched datagram to the transactions the
+//! call seeded, the CANCEL the layer matched nothing for, the rule chain, and
+//! the message-cap defense.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
 use call::{Call, CallModelState, LegState, TerminationCause, TimerEntry, TimerType};
-use sip_message::emergency::is_emergency_request;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{Method, SipMessage};
 
+use super::admit::UnbornCall;
 use super::interpret::process_result;
 use sip_txn::Reoffer;
 
@@ -21,19 +22,28 @@ use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::{build_481, build_store_fault_500};
+use super::responses::{build_481, build_merged_482, build_retry_later_500, build_store_fault_500};
 use super::RouterCtx;
+use crate::admission::{class_of, Class};
+use crate::answer_deadline::Screened;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
-use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
-use crate::limiter_refresh_batch::RefreshAnswered;
+use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::new_calls::Refusal;
-use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
 use crate::store::StoreFaultPoint;
+use b2bua_sdk::event::CallEvent;
+use b2bua_sdk::model::RuleAction;
 
 /// The per-call handler body: check the call out, run the handler, interpret.
-pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolution) {
+/// `unborn` holds a new call admitted at ingress until its call is created;
+/// every other exit drops it.
+pub(super) async fn process(
+    ctx: &Arc<RouterCtx>,
+    event: CallEvent,
+    mut res: Resolution,
+    unborn: Option<UnbornCall>,
+) {
     let call_ref = res.call_ref.clone().expect("dispatched events carry a callRef");
     let _guard = ctx.state.lock(&call_ref).await;
     let now_ms = ctx.clock.now_ms();
@@ -56,9 +66,9 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             },
             _ => return,
         };
-        match initial_invite_turn(ctx, &call_ref, &req, src, now_ms).await {
+        match initial_invite_turn(ctx, &call_ref, &req, src, now_ms, unborn).await {
             Turn::Consumed => return,
-            // A stateless shed replied on the wire, but this dispatch created a
+            // A final went on the wire with no call here, but this dispatch created a
             // per-call queue (one `bump_creation`) + lock entry for a brand-new
             // call_ref and nothing will ever emit `RemoveCall`. Release through
             // the one teardown executor (`ReleaseKind::Orphan`: no store
@@ -69,7 +79,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
                 release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
                 return;
             }
-            Turn::Result(r) => r,
+            Turn::Result(r) => *r,
         }
     } else if let Some(answer) = RefreshAnswered::of(&event) {
         // A refresh answer applies to the resident call and never
@@ -82,7 +92,8 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             return;
         };
         let before = call.clone();
-        let Some(res) = super::limiter_refresh::apply_answer(ctx, call, &answer, now_ms) else {
+        let Some(res) = crate::limiter::call::apply_answer(&ctx.metrics, call, &answer, now_ms)
+        else {
             return;
         };
         crate::rules::invariants::enforce(
@@ -90,17 +101,26 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             &before,
             crate::rules::invariants::finalize(res),
             now_ms,
-            true,
+            crate::rules::invariants::UnansweredCaller::Answer(
+                &ctx.config.minted_final_advertisement,
+            ),
         )
     } else {
+        if of_another_incarnation(ctx, &event, &res, |stamp| {
+            ctx.state.is_incarnation(&call_ref, stamp) == Some(false)
+        }) {
+            maybe_reject_orphan(ctx, &event).await;
+            return;
+        }
         if in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await {
             return;
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
             maybe_reject_orphan(ctx, &event).await;
-            // A route fold for a vanished call: no call is left to own the
-            // set its dispatching task admitted.
-            super::callouts::release_route_fold_call(&ctx.limiter_releases, &event);
+            // An admit report for a vanished call (a route fold, a service's
+            // admit result): no call is left to own the set its admit may
+            // have counted.
+            super::callouts::release_admit_fold_call(&ctx.limiter, &event);
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
             // live call — nothing will ever emit `RemoveCall`, and a per-call
@@ -116,6 +136,12 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
+        res.bind_indexed_leg(&call, &event);
+        // A copy this event materialised is checked as a resident one was.
+        if of_another_incarnation(ctx, &event, &res, |stamp| call.incarnation() != stamp) {
+            maybe_reject_orphan(ctx, &event).await;
+            return;
+        }
         // Traced call: the message as it arrived, raw (ADR-0026), before any
         // answer to it — the re-offer's or the stray-CANCEL 481 — so the
         // datagram that triggered a takeover is in the trace. `image()` is the
@@ -146,7 +172,9 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         // Otherwise RFC 3261 §9.2: 481, and no effect on the call. The rules
         // never see a CANCEL request.
         let own_tag = call::helpers::b2bua_tag(&call, &res.source_leg_id);
-        if let Some(answer) = reject_stray_cancel(ctx, own_tag.as_deref(), &event).await {
+        if let Some(answer) =
+            reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
+        {
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
@@ -154,13 +182,15 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         // batch outside the rule chain; the call never waits on the limiter.
         if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
             let before = call.clone();
-            let res = super::limiter_refresh::on_refresh_due(ctx, call, &call_ref, now_ms);
+            let res = crate::limiter::call::on_refresh_due(&ctx.limiter, call, &call_ref, now_ms);
             crate::rules::invariants::enforce(
                 &ctx.obligations,
                 &before,
                 crate::rules::invariants::finalize(res),
                 now_ms,
-                true,
+                crate::rules::invariants::UnansweredCaller::Answer(
+                    &ctx.config.minted_final_advertisement,
+                ),
             )
         } else {
             rule_chain_turn(ctx, call, &event, &res, &call_ref, now_ms)
@@ -184,15 +214,15 @@ enum Gate {
     Shed,
 }
 
-/// Outcome of the initial-INVITE admission ladder.
+/// Outcome of the initial-INVITE turn.
 enum Turn {
-    /// Fully handled (a retransmit for an existing call) — return as-is.
+    /// Answered on a call still here, which keeps its per-call ephemera.
     Consumed,
-    /// A stateless reject replied on the wire; the caller tears down the
-    /// per-call ephemera this dispatch created (`ReleaseKind::Orphan`).
+    /// A final went on the wire and no call is here; the caller tears down
+    /// the per-call ephemera this dispatch created (`ReleaseKind::Orphan`).
     Shed,
     /// Admitted (or created-then-rejected): the handler result to interpret.
-    Result(HandlerResult),
+    Result(Box<HandlerResult>),
 }
 
 /// The call-reaper verdict gate (ADR-0020 X5/X6) — runs BEFORE any
@@ -254,109 +284,123 @@ async fn reaper_verdict_gate(
     Gate::Pass
 }
 
-/// The initial-INVITE admission ladder: store-fault probe → retransmit guard →
-/// capacity gate → Tier-3 admission gate → build + rule the new call. Each
-/// rung that ends the INVITE's admission counts its outcome once
-/// ([`crate::new_calls`]); a retransmission this far is a copy of a resident
-/// call and is not counted.
+/// The incarnation gate: an event stamped with another incarnation than the
+/// call live on its `call_ref` (`differs`) is a straggler of an earlier call
+/// there — a timer fire or transaction timeout queued before that call's
+/// release, a callout result, a late message on its Via or Contact — and is
+/// dropped before any rule reads it; the caller answers a request as one
+/// naming no call (481, RFC 3261 §12.2.2). An admit it carries releases its
+/// key when owed, as one reaching no call does. An unstamped event passes.
+fn of_another_incarnation(
+    ctx: &RouterCtx,
+    event: &CallEvent,
+    res: &Resolution,
+    differs: impl FnOnce(&str) -> bool,
+) -> bool {
+    let Some(stamp) = res.incarnation.as_deref() else { return false };
+    if !differs(stamp) {
+        return false;
+    }
+    ctx.metrics.bump_other_incarnation_dropped();
+    super::callouts::release_admit_fold_call(&ctx.limiter, event);
+    tracing::debug!(
+        call_ref = res.call_ref.as_deref().unwrap_or_default(),
+        incarnation = stamp,
+        kind = event.kind(),
+        "event of another call incarnation dropped"
+    );
+    true
+}
+
+/// The initial-INVITE turn: the admission ladder's router rungs admitted it
+/// at ingress (`super::admit`, ADR-0037); here the store-fault probe, the
+/// identity guard, then build + rule the new call. A setup its caller
+/// CANCELed before this turn ran is born and ruled by no one: no decision, no
+/// limiter admit. The probe's 500, the identity guard's 500, the cancelled
+/// setup or the accept counts the INVITE's outcome once
+/// ([`crate::new_calls`]); a copy is answered 482 and refused as a copy.
 async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     req: &sip_message::SipRequest,
     src: SocketAddr,
     now_ms: i64,
+    unborn: Option<UnbornCall>,
 ) -> Turn {
     // ── Live-path store-fault probe (ADR-0023): initial INVITE ──────────────
-    // The dialog-existence lookup (the `peek` retransmit guard below) is the
+    // The dialog-existence lookup (the `peek` identity guard below) is the
     // store read this INVITE depends on; a faulted store cannot answer "does
     // this dialog already exist", so the probe fires BEFORE the peek (its
     // answer is untrustworthy under a fault). Fail CLOSED: a final **500
     // Server Internal Error** through the INVITE server txn — superseding the
     // auto-100, composing with the ADR-0022 no-100-then-silence guarantee —
     // and NO call state is born.
-    let is_emergency = is_emergency_request(req);
+    let class = class_of(req);
+    let cseq = req.cseq().seq();
+    // A turn with no admission hold is a copy, offered unjudged: never a new
+    // call (`super::admit`).
+    let copy = unborn.is_none();
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
-        let resp = build_store_fault_500(&ctx.id_gen, req);
+        let resp = build_store_fault_500(&ctx.id_gen, req, &ctx.config.minted_final_advertisement);
         let _ = ctx.txn.send_response(resp, src).await;
         ctx.metrics.bump_store_fault_rejected();
-        ctx.metrics.new_calls().reject(Refusal::StoreFault, is_emergency);
-        return Turn::Shed;
+        if copy {
+            ctx.metrics.new_calls().refuse_copy();
+        } else {
+            ctx.metrics.new_calls().reject(Refusal::StoreFault, class);
+        }
+        // A call resident on the identity (this INVITE a copy of it, or a new
+        // request on it) owns the queue and keeps it.
+        if ctx.state.peek(call_ref).is_none() {
+            return Turn::Shed;
+        }
+        if !copy {
+            ctx.state.clear_setup_cancelled(call_ref, cseq);
+        }
+        return Turn::Consumed;
     }
 
-    if ctx.state.peek(call_ref).is_some() {
-        return Turn::Consumed; // retransmitted INVITE for an existing call — ignore
+    // A copy is a request merged with the INVITE it copies (RFC 3261
+    // §8.2.2.2): answered 482, it creates no call, as no call is born past
+    // the admission ladder.
+    let resident = ctx.state.peek(call_ref).is_some();
+    if copy {
+        let _ = ctx
+            .txn
+            .send_response(
+                build_merged_482(&ctx.id_gen, req, &ctx.config.minted_final_advertisement),
+                src,
+            )
+            .await;
+        ctx.metrics.new_calls().refuse_copy();
+        return if resident { Turn::Consumed } else { Turn::Shed };
     }
-
-    // ── Tier-3 admission gate. Only an *initial* INVITE reaches here;
-    // re-INVITEs (To-tag present) and non-INVITE in-dialog requests take the
-    // in-dialog branch and are never gated.
-    //
-    // sip-txn has already created the INVITE server txn and auto-sent
-    // 100 Trying before emitting this Message (the ADR-0007 layering
-    // deferral), so the reject is sent *through that server txn*
-    // (`send_response`, which supersedes the cached 100 and drives the txn →
-    // Completed with proper retransmission + ACK absorption) rather than as a
-    // wire-raw datagram. It is still **stateless at the call layer** — no
-    // `build_initial_call`/`create`, so no dialog, CDR, limiter hold, or
-    // replicated state is ever born.
-
-    // ── Capacity gate (ADR-0037), ahead of the CPS bucket so a memory reject
-    // spends no token. Behind the INVITE server transaction, so a retransmission
-    // of an admitted INVITE never reaches it. Exact live-call and transaction
-    // counts; this INVITE's own server transaction is not one the new call is
-    // judged against. INVITEs judged concurrently on a multi-thread runtime can
-    // each pass before either call is created: the overshoot is at most one
-    // call per runtime worker thread.
-    let occupancy = crate::capacity::Occupancy {
-        calls: ctx.state.active_count() as u64,
-        transactions: (ctx.txn.metrics().active_transactions() as u64).saturating_sub(1),
-    };
-    if let Some(bound) = ctx.capacity.refuses(is_emergency, occupancy) {
-        let to_tag = ctx.id_gen.new_tag();
-        let roll = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            to_tag.hash(&mut h);
-            h.finish()
-        };
-        let retry_after = crate::overload::jittered_retry_after(
-            ctx.config.retry_after_base_sec,
-            ctx.config.retry_after_jitter_sec,
-            || roll,
-        );
-        let resp = crate::capacity::build_capacity_reject_503(to_tag, req, retry_after);
+    // A new request on the identity of a call still here: one call per
+    // identity, so the caller is told to retry once it is gone (§14.2).
+    if resident {
+        let retry_after = super::owed::OwedAnswer::of(ctx).jittered_retry_after();
+        let resp = build_retry_later_500(req, Some(ctx.id_gen.new_tag()), retry_after);
         let _ = ctx.txn.send_response(resp, src).await;
-        ctx.capacity.record_reject(bound, is_emergency);
-        ctx.metrics.new_calls().reject(bound.into(), is_emergency);
-        return Turn::Shed;
+        ctx.metrics.new_calls().reject(Refusal::IdentityInUse, class);
+        // Its mark, unread, is its own: a copy's would be the live call's.
+        ctx.state.clear_setup_cancelled(call_ref, cseq);
+        return Turn::Consumed;
     }
 
-    // The reason is the verdict: a reject always names one, so it is counted.
-    let decision = ctx.overload.should_admit(is_emergency);
-    debug_assert_eq!(decision.admit, decision.reason.is_none());
-    if let Some(reason) = decision.reason {
-        let resp = crate::overload::build_reject_new_call_503(
-            ctx.id_gen.new_tag(),
-            req,
-            decision.retry_after_sec,
-        );
-        let _ = ctx.txn.send_response(resp, src).await;
-        // The reject is observable via `b2bua_overload_rejected_total`; the
-        // `reason`/`retry_after_sec` are carried on the 503 itself (Reason +
-        // Retry-After) for the caller and any wire trace.
-        ctx.metrics.bump_overload_rejected();
-        ctx.metrics.new_calls().reject(reason.into(), is_emergency);
-        return Turn::Shed;
-    }
-    ctx.metrics.new_calls().accept(is_emergency);
-    // Counter published on X-Overload (`adm`). Emergency admits are NOT counted
-    // on `adm` — the LB's AIMD caps non-emergency traffic only — but ARE
-    // tallied on their own `b2bua_emergency_admitted_total` counter so the
-    // emergency-admit branch is observable (it would otherwise be uncounted).
-    if is_emergency {
-        ctx.overload.increment_emergency_admitted();
+    // The caller CANCELed while this turn waited (marked at ingress): the
+    // transaction layer already answered 487. The call is born so the queued
+    // `Cancelled` turn ends it with its Cancel CDR; it is neither accepted nor
+    // treated (`adm`).
+    let cancelled = ctx.state.is_setup_cancelled(call_ref, cseq);
+    if cancelled {
+        ctx.metrics.new_calls().cancel(class);
     } else {
-        ctx.overload.increment_non_emergency_admitted();
+        ctx.metrics.new_calls().accept(class);
+        // The `adm` published on X-Overload counts non-emergency calls only:
+        // the LB's AIMD caps non-emergency traffic alone.
+        if class != Class::Emergency {
+            ctx.overload.increment_non_emergency_admitted();
+        }
     }
 
     let mut call = build_initial_call(req, src, &ctx.config, &ctx.id_gen, now_ms);
@@ -365,6 +409,8 @@ async fn initial_invite_turn(
         call = ring.invite_received(call, &a_leg, req, now_ms);
     }
     ctx.state.create(call.clone());
+    // Born: the call counts as live from here.
+    drop(unborn);
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
     // caller's From tag IS the a-leg dialog's remote tag, so admitting a
     // tag-less INVITE would seed an un-probeable a-leg dialog (its in-dialog
@@ -373,7 +419,9 @@ async fn initial_invite_turn(
     // round-trips through HA hydration. Reject malformed at ingest instead.
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
-    let mut handled = if call.a_leg.from_tag.is_empty() {
+    let mut handled = if cancelled {
+        crate::initial_invite::cancelled_setup(call.clone(), req.image(), now_ms)
+    } else if call.a_leg.from_tag.is_empty() {
         let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
         crate::initial_invite::reject_call(
             call.clone(),
@@ -382,6 +430,7 @@ async fn initial_invite_turn(
             Some("Bad Request - missing From tag".into()),
             None,
             &[],
+            &ctx.config.minted_final_advertisement,
             &ctx.id_gen,
             now_ms,
             TerminationCause::Admission,
@@ -393,7 +442,7 @@ async fn initial_invite_turn(
         handle_initial_invite(
             call.clone(),
             ctx.decision.as_ref(),
-            ctx.limiter.as_ref(),
+            &ctx.limiter,
             &ctx.config,
             &ctx.id_gen,
             &ctx.wire_faults,
@@ -404,8 +453,8 @@ async fn initial_invite_turn(
         )
         .await
     };
-    // ── Decision-application drop guard (069) ───────────────────────────────
-    // The caller CANCELed while this turn was queued or parked on its decision
+    // ── Decision-application drop guard ───────────────────────────────
+    // The caller CANCELed while this turn was parked on its decision
     // round trip: the txn layer already finalized the a-leg INVITE (200 + 487 —
     // the transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
     // is queued right behind this turn. Whatever this turn resolved — route,
@@ -418,7 +467,7 @@ async fn initial_invite_turn(
     // path for that scheduler sliver — the b-leg is launched then CANCELed
     // (§9.1-held until a provisional), indistinguishable from the unavoidable
     // wire race.
-    if ctx.state.is_setup_cancelled(call_ref) {
+    if !cancelled && ctx.state.is_setup_cancelled(call_ref, cseq) {
         ctx.metrics.bump_decision_dropped_cancelled();
         tracing::debug!(
             %call_ref,
@@ -426,16 +475,16 @@ async fn initial_invite_turn(
         );
         handled = dropped_on_setup_cancel(&call, handled);
     }
-    Turn::Result(crate::rules::invariants::enforce(
+    Turn::Result(Box::new(crate::rules::invariants::enforce(
         &ctx.obligations,
         &call,
         crate::rules::invariants::finalize(handled),
         now_ms,
-        true,
-    ))
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
+    )))
 }
 
-/// The 069 drop result: the pre-handler call — no b-leg, no wire effects —
+/// The drop-guard result: the pre-handler call — no b-leg, no wire effects —
 /// carrying ONLY what the discarded turn already committed *outside* the call.
 /// The limiter state `apply_route` admitted rides over so the queued
 /// termination's standard obligation discharge still releases the call
@@ -476,7 +525,8 @@ async fn in_dialog_store_fault_gate(
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if ctx.store_faults.check(StoreFaultPoint::LiveInDialog).is_err() {
-                refuse_on_store_fault(ctx, req, *src).await;
+                let resident = ctx.state.peek(call_ref);
+                refuse_on_store_fault(ctx, req, *src, resident.as_ref()).await;
                 return true;
             }
         }
@@ -497,7 +547,8 @@ async fn in_dialog_store_fault_gate(
                 fire_at: cap_keepalive_fire_at(now_ms + interval_ms, now_ms, interval_ms),
                 leg_id: None,
             };
-            ctx.timers.schedule(entry, call_ref.to_string()).await;
+            let incarnation = event.incarnation().map(str::to_string);
+            ctx.timers.schedule(entry, call_ref.to_string(), incarnation).await;
             return true;
         }
     }
@@ -506,15 +557,20 @@ async fn in_dialog_store_fault_gate(
 
 /// Fail an in-dialog request CLOSED on a store fault (ADR-0023): 500 through
 /// its server transaction, an ACK dropped unanswered (RFC 3261 §17). Never the
-/// 481 of a lookup miss: the dialog may exist, the store cannot say.
+/// 481 of a lookup miss: the dialog may exist, the store cannot say. A call
+/// still resident (`resident`) states its headers on the refusal.
 pub(super) async fn refuse_on_store_fault(
     ctx: &RouterCtx,
     req: &sip_message::SipRequest,
     src: SocketAddr,
+    resident: Option<&Call>,
 ) {
     if req.method() != Method::Ack {
-        let resp =
+        let mut resp =
             generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default());
+        if let Some(call) = resident {
+            crate::rules::stated_headers::stamp_answer(call, req, &mut resp);
+        }
         let _ = ctx.txn.send_response(resp, src).await;
     }
     ctx.metrics.bump_store_fault_rejected();
@@ -564,9 +620,10 @@ async fn refuse_foreign_dialog(
     if req.method() == Method::Ack {
         return Some(None);
     }
-    // FIXME(charging-vector): this in-call refusal carries none of the call's
-    // stated RFC 7315 §5.6 vector; stamp it from the call it resolved to.
-    let refusal = build_481(req, None);
+    // An in-call refusal is a message of the leg it resolved to: it takes the
+    // call's stated headers.
+    let mut refusal = build_481(req, None);
+    crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(Some(refusal))
 }
@@ -577,6 +634,8 @@ async fn refuse_foreign_dialog(
 /// call. The 481 sent when `event` was such a CANCEL.
 async fn reject_stray_cancel(
     ctx: &RouterCtx,
+    call: &Call,
+    leg_id: &str,
     to_tag: Option<&str>,
     event: &CallEvent,
 ) -> Option<sip_message::SipResponse> {
@@ -585,7 +644,10 @@ async fn reject_stray_cancel(
     if req.method() != Method::Cancel {
         return None;
     }
-    let refusal = build_481(req, to_tag);
+    // A message of the leg the CANCEL resolved to: it takes the call's stated
+    // headers.
+    let mut refusal = build_481(req, to_tag);
+    crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(refusal)
 }
@@ -625,7 +687,7 @@ fn record_refusal(
 /// capture `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
 /// in-flight event (e.g. relaying this re-INVITE's response) is still serviced
 /// before teardown; a turn that trips the cap is the teardown, never quiet.
-fn rule_chain_turn(
+pub(super) fn rule_chain_turn(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
     event: &CallEvent,
@@ -663,6 +725,20 @@ fn rule_chain_turn(
     // its verdict is settled after (`settle_give_up`: an un-ACKed 2xx ends the
     // session whatever the rules made of it).
     let mut ladder_fx = HandlerEffects::new();
+    // A service request's answer, or its deadline, is screened against the
+    // call's pending deadlines before anything reads it (ADR-0039): an expired
+    // deadline is read as the request's lost answer, and an answer or a
+    // deadline no longer awaited reaches no rule.
+    let lost_answer;
+    let (event, rules_read) = match crate::answer_deadline::screen(&mut call, &mut ladder_fx, event)
+    {
+        Screened::Expired(lost) => {
+            lost_answer = lost;
+            (&lost_answer, true)
+        }
+        Screened::Unawaited => (event, false),
+        Screened::Awaited | Screened::Other => (event, true),
+    };
     if let CallEvent::Timer { timer_type: TimerType::Rung { obligation }, .. } = event {
         let before = call.clone();
         exec.repeat(&mut call, &mut ladder_fx, obligation);
@@ -673,7 +749,9 @@ fn rule_chain_turn(
             &before,
             crate::rules::invariants::finalize(repeated),
             now_ms,
-            true,
+            crate::rules::invariants::UnansweredCaller::Answer(
+                &ctx.config.minted_final_advertisement,
+            ),
         );
     }
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
@@ -708,8 +786,9 @@ fn rule_chain_turn(
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), now_ms);
     }
-    // An offer the leg's peer sends opens an exchange on that leg, counted once
-    // as it is received, before the rules read it.
+    // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
+    // opens an exchange on that leg, counted once as it is received, before
+    // the rules read it.
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             crate::rules::relay::note_request(&mut call, &res.source_leg_id, req);
@@ -718,6 +797,15 @@ fn rule_chain_turn(
     // A decision folding back is marked before the rules apply it, whichever
     // rule claims the fold.
     call = crate::decision_log::fold_decided(call, event, now_ms);
+    // An admit sent off the call's turn is applied before the rules read its
+    // event, whichever rule claims it. A report naming another key (an
+    // earlier call under this call_ref) releases that key when owed.
+    if let Some(report) = crate::limiter::report::apply_to_call(&mut call, event, &mut ladder_fx) {
+        if crate::trace::sampled(&call) {
+            let what = format!("{:?} -> {:?}", report.entries, report.outcome);
+            crate::trace::emit::limiter(&call, now_ms, "admit", &what);
+        }
+    }
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref,
@@ -728,7 +816,11 @@ fn rule_chain_turn(
         config: &ctx.config,
         discharged: discharged.as_ref(),
     };
-    let mut result = execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations);
+    let mut result = if rules_read {
+        execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations)
+    } else {
+        HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
+    };
     // A re-ACK leaves the body as the rules read it; a rule that also wrote
     // into it (a CDR event, a disposition) made the turn a write.
     if result.effects.quiet == Some(QuietTurn::ReAck) && result.call != call {
@@ -745,7 +837,9 @@ fn rule_chain_turn(
             &before,
             crate::rules::invariants::finalize(settled),
             now_ms,
-            true,
+            crate::rules::invariants::UnansweredCaller::Answer(
+                &ctx.config.minted_final_advertisement,
+            ),
         );
     }
     if cap_exceeded
@@ -806,7 +900,9 @@ fn rule_chain_turn(
             &before,
             crate::rules::invariants::finalize(result),
             now_ms,
-            true,
+            crate::rules::invariants::UnansweredCaller::Answer(
+                &ctx.config.minted_final_advertisement,
+            ),
         );
     }
     result

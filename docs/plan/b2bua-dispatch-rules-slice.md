@@ -99,13 +99,13 @@ timers.rs              TimerService: one tokio_util DelayQueue driver, schedule/
                        fires a CallEvent::Timer back through the dispatcher
 decision/mod.rs        CallDecisionEngine trait + NewCall/CallFailure/CallRefer request/response types + errors
 decision/schemas.rs    serde structs: NewCallRequest, NewCallResponse {Route|Reject}, SipDestination,
-                       SipHeaderUpdates, FeatureActivations (reuse call::features), CallLimiterEntry
+                       SipHeaderUpdates, FeatureActivations (reuse call::features), call_limiter: Vec<call::LimiterEntry>
 decision/apply_route.rs    applyRoute: response → call state (features, ext seed, b-leg create, effects)
 decision/test_adapter.rs   ScriptedDecisionEngine: emulates jssip by reading request JSON (ruri/from/to/X-*/body)
 cdr/mod.rs             CdrWriter trait + CdrRecord/CdrEvent (reuse call::CdrEvent); build_record(call)
 cdr/buffered.rs        BufferedCdrWriter (bounded queue + drainer, drop-on-overload, passthrough when max=0)
 cdr/memory.rs          InMemoryCdrWriter (test buffer + read_all) — recording assertion target
-limiter.rs             CallLimiter trait + NoopLimiter (always admits; decrement no-op)
+limiter/port.rs        CallLimiter trait + NoopLimiter (always admits; decrement no-op)
 initial_invite.rs      handle_initial_invite: build NewCallRequest, call engine, reject/route → applyRoute
 rules/mod.rs           re-exports; CORE_LAYER/SERVICE_LAYER consts
 rules/definition.rs    RuleDefinition, Match (request|response|timer|timeout|cancelled|internal-event),
@@ -297,7 +297,7 @@ returns terminate by default; failover path compiles and is unit-tested).
 4. `decision/` (trait + schemas + scripted adapter + apply_route) + `initial_invite.rs` — unit tests.
 5. `rules/` framework (definition/matcher/executor/actions/relay/invariants) — unit tests.
 6. `rules/defaults/` the basic set — unit tests per rule.
-7. `cdr/` + `limiter.rs`.
+7. `cdr/` + `limiter/`.
 8. `router/` + `handlers.rs` + `b2bua_core.rs` wiring.
 9. `crates/b2bua-harness` SUT + e2e tests; harness getter if needed.
 10. ADR-0010 + MIGRATION_STATUS + plan copy.
@@ -325,7 +325,7 @@ returns terminate by default; failover path compiles and is unit-tested).
 - **Real HTTP decision adapter** — the production `CallDecisionEngine` over HTTP;
   the scripted test adapter stands in. Stubbed behind the trait.
 - **Draining / WorkerReadiness / OverloadController** — out-of-dialog OPTIONS
-  answers a plain 200; the serving/draining/ready matrix + Tier-3 admission are a
+  answers a plain 200; the serving/draining/ready matrix + new-call admission are a
   distinct deferred line.
 - **Real CallLimiter** (row 20) — no-op admit/decrement; the limiter is its own
   migration layer.

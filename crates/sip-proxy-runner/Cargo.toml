@@ -9,12 +9,19 @@ description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (n
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "sip-proxy-runner"
 path = "src/main.rs"
 
 [dependencies]
 sip-proxy = { path = "../sip-proxy" }
+metric-catalogue = { path = "../metric-catalogue" }
+# The allocator families of the /metrics catalogue (the reads are the
+# target-gated half below).
+jemalloc-stats = { path = "../jemalloc-stats" }
 # The shared HTTP probe/metrics server: /metrics, /healthz, /readyz, and the
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }

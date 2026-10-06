@@ -1,4 +1,4 @@
-//! `K8sMembership` — the real cluster-membership source (slice S11), backed by a
+//! `K8sMembership` — the real cluster-membership source, backed by a
 //! Kubernetes **EndpointSlice informer**. Behind the `kube` feature so the
 //! fake-clock test tiers and the proxy/b2bua *libraries* never compile the kube
 //! client stack; only the `b2bua-runner` (and a future proxy runner) opts in.

@@ -23,8 +23,8 @@ use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use super::process::refuse_on_store_fault;
 use super::responses::{build_405, build_481};
 use super::RouterCtx;
-use crate::event::CallEvent;
 use crate::store::StoreFaultPoint;
+use b2bua_sdk::event::CallEvent;
 
 /// How the dialog lookups that found no call ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
             SipMessage::Request(req) => {
                 let probe = ctx.store_faults.check(StoreFaultPoint::LiveInDialog);
                 if lookup == Lookup::Failed || probe.is_err() {
-                    refuse_on_store_fault(ctx, req, *src).await;
+                    refuse_on_store_fault(ctx, req, *src, None).await;
                 } else {
                     on_request(ctx, req, *src).await;
                 }
@@ -75,13 +75,14 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
         },
         CallEvent::Timeout { branch, method, destination, .. } => {
             let method = method.as_deref().map(Method::from_wire);
-            let method = method.as_ref().map_or("", method_label);
-            ctx.metrics.record_unroutable_internal("timeout", method);
+            let token = method.as_ref().map_or("", Method::as_str);
+            ctx.metrics.record_unroutable_internal("timeout", token);
             let dest = destination.map_or_else(|| "-".to_string(), |d| d.to_string());
+            let class = method.as_ref().map_or("", wave_label);
             ctx.unroutable_waves.record(
-                &format!("internal:timeout:{method}"),
+                &format!("internal:timeout:{class}"),
                 RELEASED_TXN_REASON,
-                format!("branch={branch} dest={dest}"),
+                format!("method={token} branch={branch} dest={dest}"),
             );
         }
         // `resolve` names a call for every other event kind; one reaching here
@@ -98,19 +99,30 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
 }
 
 async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
-    let method = method_label(req.method());
-    let sample = format!("call_id={} src={src}", req.call_id().as_str());
+    let method = req.method().as_str();
+    let class = wave_label(req.method());
+    let sample = format!("method={method} call_id={} src={src}", req.call_id().as_str());
     match refusal(ctx, req) {
         Some(answer) => {
             let code = answer.status();
             let _ = ctx.txn.send_response(answer, src).await;
             ctx.metrics.record_unroutable_refused(method, code);
-            ctx.unroutable_waves.record(&format!("wire:{method}:{code}"), REQUEST_REASON, sample);
+            ctx.unroutable_waves.record(&format!("wire:{class}:{code}"), REQUEST_REASON, sample);
         }
         None => {
             ctx.metrics.record_unroutable_dropped(method);
-            ctx.unroutable_waves.record(&format!("wire:{method}"), REQUEST_REASON, sample);
+            ctx.unroutable_waves.record(&format!("wire:{class}"), REQUEST_REASON, sample);
         }
+    }
+}
+
+/// A method's label in an unroutable wave's class: its canonical name, or
+/// `other` for an extension method, so a peer cannot mint wave classes; the
+/// token itself goes in the sample.
+fn wave_label(method: &Method) -> &str {
+    match method {
+        Method::Other(_) => "other",
+        known => known.as_str(),
     }
 }
 
@@ -143,16 +155,20 @@ pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> 
     })
 }
 
-/// A metric label for `method`: its canonical name, `other` for an extension
-/// method, so a peer cannot mint label values.
-fn method_label(method: &Method) -> &str {
-    match method {
-        Method::Other(_) => "other",
-        known => known.as_str(),
-    }
-}
-
 /// A response's status class (`1xx` … `6xx`).
 fn status_class(status: u16) -> String {
     format!("{}xx", status / 100)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every extension method shares one wave class label.
+    #[test]
+    fn an_extension_method_mints_no_wave_class() {
+        assert_eq!(wave_label(&Method::from_wire("X1")), "other");
+        assert_eq!(wave_label(&Method::from_wire("X2")), "other");
+        assert_eq!(wave_label(&Method::Bye), "BYE");
+    }
 }

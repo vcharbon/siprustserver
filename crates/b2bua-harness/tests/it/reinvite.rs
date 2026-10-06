@@ -146,8 +146,8 @@ async fn reinvite_18x_then_488_keeps_call() {
     bob_uas.respond(488, "Not Acceptable Here").await;
 
     // The 488 is relayed to the originator (alice) — the failure is reported.
-    // (Pre-fix this never arrives: the 183 dropped the pending snapshot, so the
-    // 488 fell through to `route-failure` → `TerminateCall` and alice times out.)
+    // (Were the 183 to drop the pending snapshot, the 488 would fall through to
+    // `route-failure` → `TerminateCall` and alice would time out.)
     reinv.expect(488).await;
 
     // ── the call MUST still be up: the provisional must not have dropped the

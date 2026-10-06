@@ -10,6 +10,7 @@ description = "Call limiter keyed by the call: the keyed store (per-call multise
 workspace = true
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 http-net = { path = "../http-net" }
 sip-clock = { path = "../sip-clock" }
 serde = { workspace = true }

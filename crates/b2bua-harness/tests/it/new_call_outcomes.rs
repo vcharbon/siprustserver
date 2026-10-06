@@ -1,22 +1,24 @@
 //! Every new INVITE is counted once on `b2bua_new_calls_total`, by the outcome
-//! its admission tier reached: accepted, or rejected with the tier's reason.
+//! its admission ladder reached: accepted, or rejected with the refusing rung's
+//! reason.
 //! Each INVITE here is retransmitted before its final arrives (RFC 3261
 //! §17.1.1.2), and the copy is never counted again. The counts add up to the
 //! INVITEs sent, and every call is set up and torn down properly.
 //!
-//! The deferred-backlog tier refuses in the transaction layer, behind a full
+//! The deferred-backlog rung refuses in the transaction layer, behind a full
 //! event queue; its once-per-INVITE count is pinned in `sip-txn`'s
 //! `bounded_queue` tests and its share of the composed count in
 //! `b2bua::new_calls`.
 
 use std::sync::Arc;
 
+use b2bua::admission::Class;
 use b2bua::capacity::{simulated, CapacityGate, Level};
 use b2bua::config::{CapacityConfig, Ceilings};
+use b2bua::ingress_brake::{IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::new_calls::{NewCallCounts, Refusal};
 use b2bua::overload::OverloadSignal;
 use b2bua::store::{StoreFaultPoint, StoreFaults};
-use b2bua::tier1_brake::Tier1BrakeConfig;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, OFFER_SDP};
 use scenario_harness::{callflow, Dialog};
 
@@ -58,18 +60,24 @@ async fn settled(s: &B2buaScene) {
     assert_eq!(m.removals_total(), m.creations_total(), "a per-call queue is still open");
 }
 
+/// Every refusal the brake answered: its first refusals and its copies.
+fn answered(brake: &IngressBrakeCounters) -> u64 {
+    brake.refused(Class::Normal) + brake.refused_copies()
+}
+
 /// Every series of `counts` other than the ones listed is 0.
 fn assert_counts(counts: &NewCallCounts, accepted: [u64; 2], rejected: &[(Refusal, bool, u64)]) {
-    assert_eq!(counts.accepted(false), accepted[0], "accepted normal");
-    assert_eq!(counts.accepted(true), accepted[1], "accepted emergency");
+    assert_eq!(counts.accepted(Class::Normal), accepted[0], "accepted normal");
+    assert_eq!(counts.accepted(Class::Emergency), accepted[1], "accepted emergency");
     for reason in Refusal::ALL {
         for emergency in [false, true] {
             let want = rejected
                 .iter()
                 .find(|(r, e, _)| *r == reason && *e == emergency)
                 .map_or(0, |(_, _, n)| *n);
+            let class = if emergency { Class::Emergency } else { Class::Normal };
             assert_eq!(
-                counts.rejected(reason, emergency),
+                counts.rejected(reason, class),
                 want,
                 "rejected {} emergency={emergency}",
                 reason.as_str()
@@ -82,15 +90,16 @@ fn assert_counts(counts: &NewCallCounts, accepted: [u64; 2], rejected: &[(Refusa
 /// (normal and emergency), each memory bound, the global queue cap, the
 /// store-fault 500, the panic-ELU backstop and the empty CPS bucket.
 ///
-/// The bucket holds three tokens and never refills. The two accepts and the
-/// panic-ELU reject (judged after its token) take one each; the memory
-/// bounds, the queue cap and the store fault are judged before the bucket and
-/// take none. The last INVITE finds the bucket empty.
-#[tokio::test]
+/// The bucket holds three tokens and never refills. A token is spent when an
+/// INVITE's turn is queued: the two accepts and the store fault, whose 500 is
+/// the turn's, take one each; the memory bounds, the queue cap and the
+/// panic-ELU backstop refuse at ingress and take none. The last INVITE finds
+/// the bucket empty.
+#[tokio::test(start_paused = true)]
 async fn every_new_invite_is_counted_once_by_its_outcome() {
     let faults = StoreFaults::default();
     let (probe, system) = simulated();
-    let (sampler, load) = b2bua::overload::simulated();
+    let (sampler, load) = load_shed::simulated();
     let s = B2buaScene::with_b2bua("b2bua-new-call-outcomes", {
         let faults = faults.clone();
         move |bob_port| {
@@ -190,15 +199,11 @@ async fn every_new_invite_is_counted_once_by_its_outcome() {
 /// The ingress brake sheds a new non-emergency INVITE statelessly, before any
 /// transaction exists, and answers its copy the same: two 503s on the wire,
 /// one rejected new call. An emergency INVITE passes it and is accepted.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_ingress_brake_counts_a_shed_invite_once() {
     let s = B2buaScene::with_b2bua("b2bua-new-call-brake", |bob_port| {
-        B2buaSut::route_all_to("127.0.0.1", bob_port).tier1_brake(Tier1BrakeConfig {
-            queue_max: 256,
-            tier1_threshold_pct: 0,
-            retry_after_base_sec: 5,
-            retry_after_jitter_sec: 0,
-        })
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .ingress_brake(IngressBrakeConfig { queue_max: 256, threshold_pct: 0 })
     })
     .await;
 
@@ -207,13 +212,15 @@ async fn the_ingress_brake_counts_a_shed_invite_once() {
     settled(&s).await;
 
     refused_retransmitted(&s, false, 503).await;
-    let brake = s.b2bua.tier1_brake().expect("the brake is installed");
-    settle_until(|| brake.drops_tier1_brake() == 2).await;
-    assert_eq!(brake.drops_tier1_brake(), 2, "both copies are answered");
+    let brake = s.b2bua.ingress_brake().expect("the brake is installed");
+    settle_until(|| answered(brake) == 2).await;
+    assert_eq!(answered(brake), 2, "both copies are answered");
+    assert_eq!(brake.refused_copies(), 1, "the retransmission is a copy");
 
     let counts = s.b2bua.new_calls();
-    assert_counts(&counts, [0, 1], &[(Refusal::Tier1Brake, false, 1)]);
+    assert_counts(&counts, [0, 1], &[(Refusal::IngressBrake, false, 1)]);
     assert_eq!(counts.total(), 2, "one count per INVITE sent");
+    assert_eq!(counts.refused_copies(), 1, "the copy is counted apart");
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
@@ -224,32 +231,24 @@ async fn the_ingress_brake_counts_a_shed_invite_once() {
 /// above, its copy below draws the same 503 and is never admitted behind the
 /// caller's back. One INVITE, one count; a later INVITE below the threshold is
 /// accepted.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_shed_invite_copy_below_the_brake_threshold_is_shed_again() {
     let s = B2buaScene::with_b2bua("b2bua-new-call-brake-threshold", |bob_port| {
-        B2buaSut::route_all_to("127.0.0.1", bob_port).tier1_brake(Tier1BrakeConfig {
-            queue_max: 256,
-            tier1_threshold_pct: 50,
-            retry_after_base_sec: 5,
-            retry_after_jitter_sec: 0,
-        })
+        B2buaSut::route_all_to("127.0.0.1", bob_port)
+            .ingress_brake(IngressBrakeConfig { queue_max: 256, threshold_pct: 50 })
     })
     .await;
-    let brake = s.b2bua.tier1_brake().expect("the brake is installed").clone();
+    let brake = s.b2bua.ingress_brake().expect("the brake is installed").clone();
 
     s.b2bua.force_brake_depth(Some(200));
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
-    settle_until(|| brake.drops_tier1_brake() == 1).await;
+    settle_until(|| answered(&brake) == 1).await;
     s.b2bua.force_brake_depth(Some(0));
     call.retransmit().await;
-    settle_until(|| brake.drops_tier1_brake() == 2).await;
+    settle_until(|| answered(&brake) == 2).await;
     call.expect(503).await;
-    assert_eq!(
-        brake.drops_tier1_brake(),
-        2,
-        "the copy below the threshold is answered by the brake"
-    );
-    assert_eq!(s.b2bua.new_calls().accepted(false), 0, "the shed call is never admitted");
+    assert_eq!(brake.refused_copies(), 1, "the copy below the threshold is answered by the brake");
+    assert_eq!(s.b2bua.new_calls().accepted(Class::Normal), 0, "the shed call is never admitted");
 
     s.b2bua.force_brake_depth(None);
     let mut next = establish_retransmitted(&s, false).await;
@@ -257,7 +256,7 @@ async fn a_shed_invite_copy_below_the_brake_threshold_is_shed_again() {
     settled(&s).await;
 
     let counts = s.b2bua.new_calls();
-    assert_counts(&counts, [1, 0], &[(Refusal::Tier1Brake, false, 1)]);
+    assert_counts(&counts, [1, 0], &[(Refusal::IngressBrake, false, 1)]);
     assert_eq!(counts.total(), 2, "one count per INVITE sent");
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
     b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;

@@ -33,7 +33,7 @@ pub struct LoadObserverConfig {
 
 impl LoadObserverConfig {
     /// Band-classifier ordering + hysteresis-bounds guard — the invariants
-    /// [`compute_band`](super::band::compute_band) relies on:
+    /// `compute_band` relies on:
     ///
     ///   - `elu_soft < elu_hard < elu_critical` — a reversed band threshold turns
     ///     the controller inside-out (a low ELU lands in `AboveCritical` and the

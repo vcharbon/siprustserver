@@ -7,7 +7,7 @@
 //! a [`CapturedFrame`] (a decoded *replication* `Frame` with `(from,to,dir)`
 //! endpoints) onto them would mean fabricating synthetic SIP entries — the model
 //! does not fit (there is no SIP method/CSeq/branch; the "message" is a
-//! `PullRequest`/`Data`/`Noop`). So per the slice brief we build a FOCUSED
+//! `PullRequest`/`Data`/`Noop`). So we build a FOCUSED
 //! replication renderer here: a text sequence diagram (the bar) plus a mermaid
 //! `sequenceDiagram` (the bonus), both projecting the captured frame exchange
 //! with lanes = node ordinals and timestamps, and crash/reboot/partition markers
@@ -140,8 +140,8 @@ impl ReplReport {
     /// rows; crash/reboot/partition/put/delete markers are `Lifecycle` bands.
     ///
     /// Only `Sent` frames become rows (a `Sent`/`Received` pair is the same
-    /// logical message; `Sent` carries the originating lane), matching the
-    /// historic timeline so the diagram reads as one arrow per message.
+    /// logical message; `Sent` carries the originating lane), so the
+    /// diagram reads as one arrow per message.
     pub fn to_seq_doc(&self) -> seq_report::SeqDoc {
         use seq_report::{Lane, LaneKind, RowKind, SeqRow};
 

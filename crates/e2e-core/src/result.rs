@@ -1,4 +1,4 @@
-//! The **result model + persistence** (ADR-0018 Phase F): one serde
+//! The **result model + persistence** (ADR-0018): one serde
 //! `RunResult` per cell — verdict, check verdicts, surfaced report findings,
 //! the neutral [`SeqDoc`] diagram, timings — written as
 //! `e2e/runs/<campaign>/<ts>/<case>__<shape>__<infra>/result.json`, with a

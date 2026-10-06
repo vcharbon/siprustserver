@@ -111,7 +111,7 @@ mod tests {
         // The core's own sweep stays out of the way: this test drives its own.
         let n = node_with("w1", |c| c.reaper_sweep_interval_sec = 3_600).await;
         let ctx = n.core.router_ctx().clone();
-        ctx.limiter_releases.hold();
+        ctx.limiter.hold_releases();
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
         let mut terminal = build_initial_call(
             &invite("w0", "w1", "sweep"),
@@ -121,7 +121,11 @@ mod tests {
             0,
         );
         terminal.state = CallModelState::Terminated;
-        terminal.limiter = CallLimiterState::admitted("sweep-key".into(), vec!["x".into()]);
+        terminal.limiter = CallLimiterState::admitted(
+            "sweep-key".into(),
+            1,
+            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
+        );
         let call_ref = terminal.call_ref.clone();
         n.store
             .put_call(
@@ -157,14 +161,14 @@ mod tests {
 
         tokio::time::advance(Duration::from_millis(1_100)).await;
         sip_clock::testkit::settle().await;
-        assert!(ctx.limiter_releases.waiting_keys().is_empty(), "the first pass panicked");
+        assert!(ctx.limiter.waiting_keys().is_empty(), "the first pass panicked");
 
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(1)).await;
             sip_clock::testkit::settle().await;
         }
         assert_eq!(
-            ctx.limiter_releases.waiting_keys(),
+            ctx.limiter.waiting_keys(),
             vec!["sweep-key".to_string()],
             "a later pass released the call"
         );
@@ -199,7 +203,7 @@ mod tests {
     async fn a_reaper_step_that_keeps_panicking_never_stops_the_replica_reap() {
         let n = node_with("w1", |c| c.reaper_sweep_interval_sec = 3_600).await;
         let ctx = n.core.router_ctx().clone();
-        ctx.limiter_releases.hold();
+        ctx.limiter.hold_releases();
         seed_expiring_terminal(&n, "early", "early-key", 500).await;
         seed_expiring_terminal(&n, "late", "late-key", 1_500).await;
 
@@ -215,11 +219,11 @@ mod tests {
 
         tokio::time::advance(Duration::from_millis(1_100)).await;
         sip_clock::testkit::settle().await;
-        assert_eq!(ctx.limiter_releases.waiting_keys(), vec!["early-key".to_string()]);
+        assert_eq!(ctx.limiter.waiting_keys(), vec!["early-key".to_string()]);
         tokio::time::advance(Duration::from_secs(1)).await;
         sip_clock::testkit::settle().await;
         assert_eq!(
-            ctx.limiter_releases.waiting_keys(),
+            ctx.limiter.waiting_keys(),
             vec!["early-key".to_string(), "late-key".to_string()],
             "the second pass released the later terminal"
         );
@@ -250,7 +254,11 @@ mod tests {
             0,
         );
         terminal.state = CallModelState::Terminated;
-        terminal.limiter = CallLimiterState::admitted(key.into(), vec!["x".into()]);
+        terminal.limiter = CallLimiterState::admitted(
+            key.into(),
+            1,
+            vec![call::LimiterEntry { id: "x".into(), limit: 10 }],
+        );
         n.store
             .put_call(
                 PartitionRole::Backup,

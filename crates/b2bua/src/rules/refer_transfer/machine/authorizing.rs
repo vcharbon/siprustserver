@@ -8,14 +8,14 @@ use sip_message::{Method, SipStr};
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
 use crate::rules::defaults::parse_header_updates;
-use crate::rules::model::{
-    Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
-};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
+use b2bua_sdk::model::{
+    Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
+};
 
 /// Reduce a Refer-To to the bare `sip:user@host:port;params` URI a
 /// Request-URI may carry: the display name and the `?headers` list drop
@@ -58,7 +58,7 @@ fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleH
 /// Read the `reject`/`error` reject code+reason from the internal-event payload.
 fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
     let (is_reject, payload) = match ctx.event {
-        crate::event::CallEvent::InternalEvent { outcome, payload, .. } => {
+        b2bua_sdk::event::CallEvent::InternalEvent { outcome, payload, .. } => {
             (outcome == "reject", payload)
         }
         _ => (false, &serde_json::Value::Null),
@@ -91,7 +91,7 @@ pub(super) fn http_reject() -> RuleDefinition {
             .filter(|ctx| {
                 matches!(
                     ctx.event,
-                    crate::event::CallEvent::InternalEvent { outcome, .. }
+                    b2bua_sdk::event::CallEvent::InternalEvent { outcome, .. }
                         if outcome == "reject" || outcome == "error"
                 )
             }),
@@ -136,7 +136,7 @@ pub(super) fn http_allow() -> RuleDefinition {
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let payload = match ctx.event {
-                crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
                 _ => return None,
             };
             let host = payload.get("destination").and_then(|d| d.get("host")).and_then(|v| v.as_str())?.to_string();
@@ -156,6 +156,7 @@ pub(super) fn http_allow() -> RuleDefinition {
             let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
             let new_refer_to = payload.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
             let header_updates = parse_header_updates(payload);
+            let header_adds = b2bua_sdk::header_update::payload_adds(payload.get("update_headers"));
 
             // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
             // a=inactive). No profile → drop the body.
@@ -198,6 +199,7 @@ pub(super) fn http_allow() -> RuleDefinition {
                     callback_context,
                     body_override,
                     header_updates,
+                    header_adds,
                     kind: None,
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },

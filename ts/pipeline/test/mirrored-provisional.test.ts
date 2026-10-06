@@ -2,7 +2,7 @@
  * A relayed provisional crosses the vantage twice, and the document says the
  * same thing about both halves: where the captured platform dropped one on its
  * own account, the emission still gets the arrival a relaying B2BUA gives it
- * (§6.9, issue 116).
+ * (§6.9).
  */
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
@@ -96,7 +96,7 @@ const FLAG = "relayed-provisional-expect-derived"
 const flagOf = (flow: ReturnType<typeof flowOf>) => flow.flags.find((f) => f.kind === FLAG)
 
 describe("an emission the capture holds no relay of (§6.9)", () => {
-  /** capture_102648: two callee rings 402 ms apart, one caller ring. */
+  /** A captured shape: two callee rings 402 ms apart, one caller ring. */
   const REFERENCE = ringingCall([callerRing(277)], [calleeRing(268), calleeRing(671)])
 
   it("gives it the arrival a relaying B2BUA sends, so both legs carry two", () => {
@@ -161,7 +161,7 @@ describe("an emission the capture holds no relay of (§6.9)", () => {
   })
 
   it("derives nothing when two emissions milliseconds apart were BOTH relayed", () => {
-    // capture_159374's shape. `relayOriginOf` takes the LATEST emission in its
+    // A captured shape. `relayOriginOf` takes the LATEST emission in its
     // window, so both arrivals name the second send — and reading that as "the
     // first was never relayed" invents a third ring the SUT never sends.
     const flow = flowOf(
@@ -260,7 +260,7 @@ describe("an emission the capture holds no relay of (§6.9)", () => {
   })
 
   it("derives nothing where the platform runs a rewrite mode", () => {
-    // capture_205924's shape. A platform rewriting its 18x emits one by design,
+    // A captured shape. A platform rewriting its 18x emits one by design,
     // the replaying SUT is driven the same way, and a derived second would gate
     // on a datagram nothing causes.
     const flow = rewritingFlowOf(REFERENCE)
@@ -288,7 +288,7 @@ describe("an emission the capture holds no relay of (§6.9)", () => {
   })
 
   it("derives nothing after the relaying leg has taken its own final", () => {
-    // capture_f84347f4's shape: the caller CANCELs, the a-side transaction ends
+    // A captured shape: the caller CANCELs, the a-side transaction ends
     // on a 487, and the callee emits one last ring. A client transaction leaves
     // Proceeding on a final (RFC 3261 §17.1.1.2), so nothing relays it.
     const flows = doc(

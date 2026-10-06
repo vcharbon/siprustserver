@@ -103,7 +103,7 @@ fn authored_constructs(index: &Index<'_>, report: &mut Report) {
             refuse(report, "subset/after", path, "an `after` ordering");
         }
     }
-    // The ONE tolerated absence a capture justifies (§6.9, issue 106): a
+    // The ONE tolerated absence a capture justifies (§6.9): a
     // caller-facing PROVISIONAL beyond the peer emissions that anchor it, on a
     // document that SAYS it derived one. The flag is what puts the inference in
     // front of a reviewer, which is the whole of what this gate asks (module

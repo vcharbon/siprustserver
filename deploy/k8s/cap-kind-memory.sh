@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cap the TOTAL memory the kind cluster may use, so it can never starve the WSL2
-# host (a parallel `cargo` build + a leaking worker once OOM'd the host and
-# killed an unrelated test; on a 16 GiB box the cluster + rust-analyzer + the
-# observability stack also page-cache-thrashed the VHDX — see 2026-06-13). kind
+# host (a parallel `cargo` build + a leaking worker can OOM the host and kill an
+# unrelated test; on a 16 GiB box the cluster + rust-analyzer + the observability
+# stack can page-cache-thrash the VHDX). kind
 # has no native per-node memory limit, so we `docker update` the node containers
 # after the cluster exists.
 #

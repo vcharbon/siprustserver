@@ -22,7 +22,7 @@ fn fallback_to_tag(call_id: &str) -> String {
 
 const FALLBACK_TAG_PREFIX: &str = "b2bua-fb-";
 
-/// Whether `tag` is one [`fallback_to_tag`] minted: the shape a caller that
+/// Whether `tag` is one `fallback_to_tag` minted: the shape a caller that
 /// knew the dialog's tag would never have produced, so a layer holding that
 /// tag may replace it.
 pub fn is_fallback_to_tag(tag: &str) -> bool {
@@ -132,11 +132,11 @@ pub fn generate_response(
         .push_raw(HeaderName::CallId, call_id)
         .push_raw(HeaderName::CSeq, line(HeaderName::CSeq));
 
-    // RFC 3261 §8.2.6.1 / §20.38: a request carrying a Timestamp is answered
-    // with that same Timestamp, so the requester can measure the round trip
-    // against the value it sent. The delay this stack adds is not measured, so
-    // no delay is appended. A caller stating its own Timestamp owns it.
-    if !emit::carries(&opts.extra_headers, &HeaderName::Timestamp) {
+    // RFC 3261 §8.2.6.1: the 100 Trying copies the request's Timestamp, with no
+    // delay value, since a 100 is rendered as the request is received. A caller
+    // sending its 100 later states the delay-adjusted Timestamp itself. No other
+    // response gets an echo from this generator (§20 Table 3, optional).
+    if status == 100 && !emit::carries(&opts.extra_headers, &HeaderName::Timestamp) {
         for timestamp in incoming_request.raw_text(HeaderName::Timestamp).take(1) {
             draft = draft.push_raw(HeaderName::Timestamp, timestamp);
         }

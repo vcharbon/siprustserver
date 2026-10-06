@@ -4,23 +4,22 @@
 #   sipp UAC (docker, sipext bridge) -> sip-front-proxy (tier=edge, dual-faced,
 #   LB+HMAC stickiness) -> b2bua-worker pool (tier=app) -> sipp UAS (docker,
 #   sipext bridge). All generators are plain docker containers on the no-NAT
-#   $SIPEXT_NET bridge (sipext dual-plane layout — tier=load kind nodes GONE);
+#   $SIPEXT_NET bridge (sipext dual-plane layout — no tier=load kind nodes);
 #   they dial the EXTERNAL VIP ${SIPEXT_TARGET}:${SIP_PORT}.
 #
 # Deliberately minimal: deploy-all, run SIPp at a list of CAPS, sample per-pod
-# CPU% + RSS from /proc, tear down. As of S11 the cluster topology
-# (./cluster.yaml), the SIPp build context (./sipp/Dockerfile) and the SIPp
-# scenarios (./sipp/scenarios/) are VENDORED COPIES (no longer symlinks into the
-# sibling sipjsserver checkout) so the Rust SUT runner stands alone and the two
-# can diverge — especially the endurance/chaos scenarios. Reuses the SAME kind
-# cluster name (`sip-e2e`).
+# CPU% + RSS from /proc, tear down. The cluster topology (./cluster.yaml), the
+# SIPp build context (./sipp/Dockerfile) and the SIPp scenarios
+# (./sipp/scenarios/) are VENDORED COPIES so the Rust SUT runner stands alone and
+# may diverge from sipjsserver's — especially the endurance/chaos scenarios.
+# Reuses the SAME kind cluster name (`sip-e2e`).
 #
 # >>> ONE-CLUSTER CONSTRAINT <<<
 # Only one kind cluster runs at a time on the host. `up` is NON-DESTRUCTIVE: if a
 # `sip-e2e` cluster already exists it REFUSES rather than wiping it, so a cluster
 # left behind by a failed run survives for analysis. Destruction is explicit —
 # `down` — and `up` never auto-tears-down on failure either. To reclaim the host
-# for the other SUT (the old one-shot "stop the other, run this" switch), run
+# for the other SUT (a one-shot "stop the other, run this" switch), run
 # `./run.sh down` first, or `FORCE_RECREATE=1 ./run.sh up` to delete+recreate.
 #
 # Usage:
@@ -35,7 +34,7 @@
 #   ./run.sh down                    # delete the cluster (the ONLY destroy)
 #   FORCE_RECREATE=1 ./run.sh up     # delete any existing cluster, then recreate
 #
-# >>> SOURCEABLE LIBRARY (issue 025) <<<
+# >>> SOURCEABLE LIBRARY <<<
 # This file doubles as a function library: all logic lives in functions and the
 # subcommand dispatch is run_main(), executed ONLY when the script is run
 # directly. A downstream overlay (living in a DIFFERENT directory) can
@@ -73,8 +72,8 @@
 #      SIP_TRACE_HEADER=1
 set -euo pipefail
 # Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
-# into any script sourcing this library — issue 025); every path below that used
-# to be cwd-relative is now anchored on $K8S_DIR instead.
+# into any script sourcing this library); every path below is anchored on
+# $K8S_DIR, never cwd-relative.
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$K8S_DIR/../.." && pwd)"
 
@@ -100,9 +99,9 @@ source "$K8S_DIR/lib/kube-env.sh"
 
 CLUSTER="${CLUSTER:-sip-e2e}"
 NS="${NS:-sip-test}"
-# Bring-up waits, env-overridable. Defaults bumped from the historical 120s: on a
-# loaded WSL2 host node-ready + image build/load + first rollout regularly need
-# more, and a too-short wait used to abort the whole run.
+# Bring-up waits, env-overridable. Defaults are 300s: on a loaded WSL2 host
+# node-ready + image build/load + first rollout regularly need more than 120s, and
+# a too-short wait aborts the whole run.
 KIND_WAIT="${KIND_WAIT:-300s}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 SUT_IMAGE="${SUT_IMAGE:-siprustserver:dev}"
@@ -236,7 +235,7 @@ up() {
   # NON-DESTRUCTIVE by default. A cluster left over from a failed/aborted run must
   # SURVIVE so it can be analysed — destruction is explicit (`./run.sh down`). If
   # one already exists, refuse rather than silently wipe it. FORCE_RECREATE=1 opts
-  # back into the old one-shot "stop the other, run this" switch.
+  # into a one-shot "stop the other, run this" switch.
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
     if [ "${FORCE_RECREATE:-0}" = "1" ]; then
       log "FORCE_RECREATE=1 — deleting existing '$CLUSTER' cluster"
@@ -677,7 +676,7 @@ caps() {
   local max_calls=$(( cps * (secs+20) ))
   local maxc="${MAX_CONCURRENT:-$(( cps * 600 ))}"
   log "cap=$cps: launching UAC stream $name (${secs}s), ramp ${ramp}s, sample ${sample}s"
-  # Docker caps from the legacy k8s knobs: the old LIMITS map to --cpus/--memory
+  # Docker caps from the k8s-style knobs: the LIMITS map to --cpus/--memory
   # (requests were a k8s scheduler reservation — no docker analog). The per-run
   # stats dir under $RESULTS keeps the stat CSV after the container is reaped.
   UAC_CPU_LIM="${UAC_CPU_LIM:-8}" UAC_MEM_LIM="${UAC_MEM_LIM:-1536Mi}" \
@@ -748,7 +747,7 @@ down() {
 }
 
 # Subcommand dispatch — the surface every existing caller (endurance.sh, docs,
-# direct CLI use) depends on: names and behaviour are FROZEN (issue 025).
+# direct CLI use) depends on: names and behaviour are FROZEN.
 run_main() {
   local cmd="${1:-}"; shift || true
   case "$cmd" in

@@ -1,4 +1,4 @@
-//! REFER reject-path scenarios (slice 5e). Port of
+//! REFER reject-path scenarios. Port of
 //! `tests/scenarios/refer-reject.ts`.
 //!
 //! Each scenario brings an A↔B call to confirmed state, then exercises one
@@ -10,7 +10,7 @@
 //!   5. referSecondDuringAuthorizing — second REFER while refer-authorizing → 491.
 //!   6. referUnreadableReferTo — Refer-To absent / unreadable → 400 (seed rule).
 //!
-//! Each routes with `features.refer` active, so this platform terminates the
+//! Each routes with `features.refer` active, so the B2BUA terminates the
 //! REFER; without that directive a REFER is relayed to the peer leg
 //! (`refer_transparent_relay.rs`).
 
@@ -313,7 +313,7 @@ async fn refer_second_during_authorizing() {
 
 // ── 6. Unreadable Refer-To on the LOCAL path → 400 Bad Request ────────────
 
-/// A REFER this platform processes itself (`features.refer`) whose Refer-To is
+/// A REFER the B2BUA processes itself (`features.refer`) whose Refer-To is
 /// an unclosed name-addr no reader accepts (RFC 3261 §20.30 / §25.1) is refused
 /// 400: the target is the request's whole point (RFC 3515 §2), so there is
 /// nothing to authorize and no transfer to start — never a 202 for a transfer

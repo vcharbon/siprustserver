@@ -4,7 +4,7 @@
 //! an attended-transfer REFER (`?Replaces=`, 501) and any a-leg REFER (501).
 //!
 //! Every one of them is gated on the decision layer's LOCAL-processing
-//! directive (`features.refer`): without it this platform terminates no REFER
+//! directive (`features.refer`): without it the B2BUA terminates no REFER
 //! at all and the CORE `relay-refer` forwards it to the peer leg like any other
 //! in-dialog method, Refer-To or not (RFC 3515 rides end to end).
 
@@ -13,13 +13,13 @@ use sip_message::header::{HeaderName, ReferTo};
 
 use super::notify::{notify, SUB_STATE_ACTIVE_60};
 use super::ok;
-use crate::rules::model::{Match, RuleAction, RuleContext, RuleDefinition, TimerDelay, CORE_LAYER};
+use b2bua_sdk::model::{Match, RuleAction, RuleContext, RuleDefinition, TimerDelay, CORE_LAYER};
 
 fn core_rule(
     id: &'static str,
     overrides: &'static [&'static str],
     matcher: Match,
-    handle: fn(&RuleContext) -> Option<crate::rules::model::RuleHandleResult>,
+    handle: fn(&RuleContext) -> Option<b2bua_sdk::model::RuleHandleResult>,
 ) -> RuleDefinition {
     RuleDefinition::core(id, CORE_LAYER, overrides, matcher, handle)
 }
@@ -124,7 +124,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
-        // ── transfer-refuse-unreadable-refer-to — a REFER this platform is to
+        // ── transfer-refuse-unreadable-refer-to — a REFER the B2BUA is to
         // process itself, whose Refer-To is absent or unreadable → 400. The
         // transfer target is the request's whole point (RFC 3515 §2), so there
         // is nothing to authorize and nothing to accept: refusing the request

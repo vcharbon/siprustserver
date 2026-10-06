@@ -11,3 +11,16 @@ pub const STACK_AUTHORED: &str = "stack_authored";
 pub fn stack_authored(payload: &serde_json::Value) -> bool {
     payload.get(STACK_AUTHORED).and_then(|v| v.as_bool()).unwrap_or(false)
 }
+
+/// The internal-event topic a service's `RuleAction::ReplaceAdmissionSet`
+/// result rides; its outcome is the admit's (`call::AdmitOutcome::label`).
+pub const LIMITER_ADMIT_RESULT: &str = "limiter-admit-result";
+
+/// The payload key every event carrying an admit report (a route fold, a
+/// service's admit result) states it under.
+pub const LIMITER_ADMIT_REPORT: &str = "limiter_admit";
+
+/// The admit report a fold's payload carries under [`LIMITER_ADMIT_REPORT`].
+pub fn admit_report(payload: &serde_json::Value) -> Option<call::AdmitReport> {
+    serde_json::from_value(payload.get(LIMITER_ADMIT_REPORT)?.clone()).ok()
+}

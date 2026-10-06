@@ -189,17 +189,17 @@ All deterministic tests use `#[tokio::test(start_paused = true)]` and advance vi
 Live tests use `RealSignalingNetwork` + real `tokio::time::sleep` with a small packet-loss
 tolerance.
 
-- **Slice 0** `media-harness/tests/audio_comparator.rs`: clips self-classify with margin;
+- **Slice 0** `media-harness/tests/it/audio_comparator.rs`: clips self-classify with margin;
   cross-separation; empty→`NoAudio`; dithered→`Silence`; G.711 round-trip still matches;
   ringback→voice sequence ordering.
-- **Slice 1** `media/tests/rtp_media.rs`: the 2×2 framing cross-check matrix
+- **Slice 1** `media/tests/it/rtp_media.rs`: the 2×2 framing cross-check matrix
   (`HandRolled↔HandRolled`, `HandRolled↔WebRtcRs`, `WebRtcRs↔HandRolled`, `WebRtcRs↔WebRtcRs`,
   the `expectHeaderRoundTrip` analog); play→record over the simulated fabric for **both** endpoint
   flavors (`classify(recorded)` is `Matched`+correct name; exact packet/byte stats:
   `frames * (12 + 160)`); RTCP SR/RR counts flow on a shortened interval.
 - **Slice 1-live** `media/tests/rtp_media_live.rs`: same play→record over `RealSignalingNetwork`,
   `>= ceil(len/160) - 2` packet tolerance.
-- **Slice 2** `media/tests/sdp_negotiation.rs`: offerer order honored; each negative path asserts
+- **Slice 2** `media/tests/it/sdp_negotiation.rs`: offerer order honored; each negative path asserts
   the exact `SdpRule`; port 0 / `a=inactive` kill send (and `state()==Held`);
   `is_early_media_authorized` truth table.
 - **Slice 3a** `media/tests/media_e2e.rs`: `negotiate_call` transparent relay → both hear each

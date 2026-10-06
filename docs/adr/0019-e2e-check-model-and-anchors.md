@@ -7,7 +7,7 @@ accepted
 ## Context
 
 A **Test case** must assert things like "Bob1's received INVITE From URI
-user-part matches `\+33…`", verify PAI / R-URI / Diversion, and reach into the SDP
+user-part matches `\+1555…`", verify PAI / R-URI / Diversion, and reach into the SDP
 body. Read naively, "Bob verifies the From" suggests Bob evaluating assertions
 *live* as it receives. We also want these identity checks authored **once** and
 reused across many shapes, and the same verdict whether the Infra shape is fake or

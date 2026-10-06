@@ -179,6 +179,7 @@ mod tests {
     /// The untuned default: stamp value == the bare token, extract == the whole
     /// (trimmed) header value, whatever its charset.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn plain_header_default_is_whole_value() {
         let c = Correlation::header("X-Loadgen-Id");
         let (name, value) = stamp_header(&c, "lgdeadbeef");
@@ -200,6 +201,7 @@ mod tests {
     /// UUI-shaped template (RFC 7433 User-to-User): the token rides
     /// `User-to-User: <token>;encoding=hex`; the derived regex recovers it.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn uui_shaped_template_renders_and_extracts() {
         let c =
             Correlation::header_templated("User-to-User", "${token};encoding=hex", None).unwrap();
@@ -217,6 +219,7 @@ mod tests {
     /// param list; the derived regex recovers the token even when the SUT
     /// appends further params after it.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn pcv_shaped_template_renders_and_extracts() {
         let c = Correlation::header_templated("P-Charging-Vector", "icid-value=${token}", None)
             .unwrap();
@@ -233,6 +236,7 @@ mod tests {
     /// The CLI extraction override: an explicit regex (first capture group =
     /// the token) beats the derived one; invalid overrides are rejected.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn explicit_extract_override() {
         let c = Correlation::header_templated(
             "User-to-User",
@@ -255,6 +259,7 @@ mod tests {
     /// recovers the token from the To user-part in both name-addr and bare-URI
     /// shapes — no loadgen header involved.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn to_user_strategy_extracts_from_to_header() {
         let c = Correlation::to_user();
         assert!(matches!(c.stamp("lg123"), CorrelationStamp::ToUser));
@@ -276,6 +281,7 @@ mod tests {
     /// host, display name and tag differ from the caller's, ignores the To and
     /// any relayed header, and yields nothing for a userless From.
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn from_user_strategy_extracts_from_the_from_header() {
         let c = Correlation::from_user();
         assert!(matches!(c.stamp("+1555010"), CorrelationStamp::FromUser));

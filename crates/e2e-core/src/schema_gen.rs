@@ -5,8 +5,8 @@
 //! offers exactly the `<agent>.<anchor>` selectors and field accessors a chosen
 //! shape supports.
 //!
-//! [`test_case_schema(None)`] is the base "lens" (universal `field` + op/value
-//! help, any `on`); [`test_case_schema(Some(shape))`] additionally pins `on` to
+//! [`test_case_schema(None)`](test_case_schema) is the base "lens" (universal `field` + op/value
+//! help, any `on`); [`test_case_schema(Some(shape))`](test_case_schema) additionally pins `on` to
 //! that shape's `agents() × anchors()` product. [`compatible_shapes`] derives the
 //! read-only "this case also fits…" list the editor shows — a case is compatible
 //! with every registered shape that publishes the anchors (and carries the

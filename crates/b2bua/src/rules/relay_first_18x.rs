@@ -7,7 +7,7 @@
 //!     any b-leg is rewritten into a bare 180 (no SDP, no `100rel`) toward A and
 //!     the call advances to `Suppressing`.
 //!   - **`Suppressing`** — the first 18x is out (as a bare 180). Later 18x
-//!     across every b-leg follow the `relay18x.messages` policy (default FIRST:
+//!     across every b-leg follow the `Relay18xMessages` policy (default FIRST:
 //!     all suppressed; ALL: each relayed downgraded; ONE_PER_VALUE: one per
 //!     distinct upstream status value) — every relayed one reuses the first
 //!     180's To-tag, so the caller holds one early dialog whichever fork rings.
@@ -49,11 +49,11 @@ use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
 use sip_message::{answer_reoffer_both_ways, Method};
 
-use super::model::{
+use super::relay;
+use b2bua_sdk::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
     TimerDelay,
 };
-use super::relay;
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
@@ -122,7 +122,7 @@ define_service! {
         // Wins over CORE `relay-provisional` by SERVICE_LAYER. On the first 18x:
         // relay a bare 180 (minting the a-facing tag + seeding the tag map, in the
         // `RelayFirstBare180` executor) and advance to `Suppressing`. Later 18x
-        // follow the `relay18x.messages` policy (Routing API `Relay18x.messages`):
+        // follow the `Relay18xMessages` policy:
         // FIRST (default) suppresses them all; ALL relays each one (downgraded to
         // a bare 180 under the SAME stored a-facing tag — the mask stays one
         // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
@@ -187,7 +187,7 @@ define_service! {
 
                 let caller_answered = originator_final_sent(&ctx.call);
                 if ctx.call.relay_first_18x_first_relayed() || caller_answered {
-                    // Subsequent 18x — the `relay18x.messages` policy decides
+                    // Subsequent 18x — the `Relay18xMessages` policy decides
                     // whether it is relayed again (downgraded, under the stored
                     // a-facing tag) or suppressed; an answered caller is shown
                     // none. Either way it is PRACKed + cached (per-fork dialog
@@ -447,12 +447,10 @@ define_service! {
         // ── fake-prack: locally answer a-leg early-dialog **bodyless** UPDATE ─
         // A no-body UPDATE (session-timer / dialog refresh, RFC 4028) carries no
         // offer to negotiate, so answer 200 OK locally — do NOT wake the b-leg.
-        // An UPDATE that carries an SDP *offer* is deliberately NOT matched here
-        // (`is_fake_prack_bodyless_update`): answering it with a bodyless 200
-        // would strand alice's offer (RFC 3264 §5). It falls through to CORE
-        // `relay-update`, which forwards the offer to the b-leg early dialog and
-        // relays the callee's real answer back — the RFC 3311 §5.1 normal case.
-        // (early state only; after merge, normal in-dialog UPDATE relay applies.)
+        // An UPDATE carrying an offer is not matched here: under the mask alice
+        // saw only an unreliable bare 180, so her INVITE offer is unanswered and
+        // CORE `update-glare` refuses her offer 500 (RFC 3311 §5.2). (Early state
+        // only; after merge, normal in-dialog UPDATE relay applies.)
         sm_rule! {
             id: "fake-prack-handle-update-from-a",
             machine: RELAY_FIRST_18X_MACHINE,

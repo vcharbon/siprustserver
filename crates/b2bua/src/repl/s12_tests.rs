@@ -10,8 +10,9 @@
 //!   branch of the call, and is refused; so is one whose `b'` is behind the
 //!   Element's `b`;
 //! - a `Delete` is refused for the one fact the guard protects — the ANSWER: an
-//!   `Active` Element whose caller was answered and for which the authority has
-//!   never itself flushed an answer. Everything else takes delete-wins.
+//!   `Active` Element whose caller was answered and to which the authority has
+//!   never published an answer, by a flush or by the `Delete` itself.
+//!   Everything else takes delete-wins.
 //!
 //! The Backup flow is Forward in BOTH phases: a bulk re-seed after a
 //! `ResetToBootstrap` is a forward flush in bulk, and the guard holds there too.
@@ -37,7 +38,8 @@ use super::test_support::{fast_config, fwd, one_peer, rev, supervisor_for, tick,
 use super::ReplicatingCallStore;
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
-use crate::store::{CallStore, PartitionRole, PutOpts};
+use crate::metrics::B2buaMetrics;
+use crate::store::{BufferedTerminateWriter, CallState, CallStore, PartitionRole, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
 const BAK: PartitionRole = PartitionRole::Backup;
@@ -269,7 +271,7 @@ async fn forward_put_whose_body_leaves_the_calls_chain_is_refused_at_a_level_cou
     assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 1, "counted, by op");
 
     // And the `Delete` that branch's discharge propagates is refused with it.
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_some(),
@@ -304,7 +306,7 @@ async fn forward_delete_of_an_answered_element_the_authority_never_answered_is_r
     let teardown = call_in("A", "B", "s12-del", LegState::Early, CallModelState::Terminating);
     forward(&a.store, &teardown, 2, 0).await;
     tick(150).await;
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
 
     assert!(
@@ -346,7 +348,7 @@ async fn forward_delete_applies_when_the_authority_is_only_behind_on_the_vector(
         .await
         .unwrap();
     tick(150).await;
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
 
     assert!(
@@ -379,7 +381,7 @@ async fn forward_delete_applies_to_a_terminal_element_and_to_one_without_backup_
     forward(&a.store, &ended, 1, 0).await;
     tick(150).await;
     element(&b.store, &ended, 1, 1).await;
-    a.store.delete_call(PRI, "A", &ended_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &ended_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &ended_ref).await.unwrap().is_none(),
@@ -393,7 +395,7 @@ async fn forward_delete_applies_to_a_terminal_element_and_to_one_without_backup_
     forward(&a.store, &live, 1, 0).await;
     tick(150).await;
     assert!(b.store.get_call(BAK, "A", &live_ref).await.unwrap().is_some(), "the Element landed");
-    a.store.delete_call(PRI, "A", &live_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &live_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &live_ref).await.unwrap().is_none(),
@@ -431,7 +433,7 @@ async fn a_refused_flush_that_carries_the_answer_still_frees_the_authoritys_dele
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((1, 3)), "the counters refused it");
     assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 1, "counted, by op");
 
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
@@ -462,7 +464,7 @@ async fn forward_delete_applies_to_a_terminating_element() {
         call_in("A", "B", "s12-del-ending", LegState::Confirmed, CallModelState::Terminating);
     element(&b.store, &ending, 1, 1).await;
 
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
@@ -495,7 +497,7 @@ async fn forward_delete_applies_to_an_expired_element() {
     tick(1_500).await;
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), None, "the Element lapsed");
 
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert_eq!(
         b_sup.metrics().repl_forward_flush_refused("delete"),
@@ -537,7 +539,7 @@ async fn the_backups_own_writes_do_not_hand_the_authority_the_delete() {
     // B serves the call on — an in-dialog turn of its own, at (1,2).
     element(&b.store, &answered, 1, 2).await;
 
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert_eq!(
         stored_state(&b.store, BAK, "A", &call_ref).await,
@@ -575,13 +577,118 @@ async fn forward_delete_applies_once_the_authority_has_taken_the_answer() {
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((2, 1)), "the fold's flush landed");
 
     // The call ends at A.
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &call_ref, &[], false, &fwd("B")).await.unwrap();
     tick(200).await;
     assert!(
         b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
         "an authority that has taken the answer ends the call",
     );
     assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 0);
+}
+
+/// A `CallState` for `ordinal` writing through `store` as its replicating
+/// store, the way a wired node builds it.
+fn call_state(ordinal: &str, store: &ReplicatingCallStore) -> CallState {
+    let repl = Arc::new(store.clone());
+    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 1024);
+    CallState::new(repl.clone() as Arc<dyn CallStore>, ordinal, B2buaMetrics::new())
+        .with_replication(repl, writer)
+}
+
+// ---------------------------------------------------------------------------
+// FORWARD `Delete`: the authority also publishes its answer by its `Delete`.
+// The changelog keeps one entry per ref, so a call that ends within one drain
+// interval of its last flush reaches the backup as a lone `Delete`: the
+// answered `Put` before it is compacted away. The answer the authority holds
+// when it deletes rides on that `Delete`.
+//
+// A rang (flushed at (1,0)); B took the call over and answered the caller
+// (1,1); A took the answer back through the reverse path. A now ends the call:
+// its last flush (`Terminating`) and its delete are written in one turn, before
+// any drain. A flushes no `Terminated` body: that state takes the delete path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn an_authority_that_answered_ends_the_call_within_one_drain() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (a, b, b_sup) = primary_and_backup(&net, &clock, 31).await;
+
+    let ringing = call_in("A", "B", "s12-del-compacted", LegState::Early, CallModelState::Active);
+    let call_ref = ringing.call_ref.clone();
+    forward(&a.store, &ringing, 1, 0).await;
+    tick(150).await;
+    let mut answered =
+        call_in("A", "B", "s12-del-compacted", LegState::Confirmed, CallModelState::Active);
+    element(&b.store, &answered, 1, 1).await;
+
+    // A holds the answered call it adopted from B, at B's (1,1).
+    if let Some(t) = answered.topology.as_mut() {
+        t.bak_gen = 1;
+    }
+    let state = call_state("A", &a.store);
+    state.create(answered.clone());
+    let mut ending = answered;
+    ending.state = CallModelState::Terminating;
+    state.update(ending.clone());
+    state.flush(&ending);
+    let mut ended = ending;
+    ended.state = CallModelState::Terminated;
+    state.update(ended);
+    state.remove(&call_ref);
+    tick(200).await;
+
+    assert_eq!(
+        b_sup.metrics().repl_forward_flush_refused("put"),
+        0,
+        "the last flush never reached B on its own: it was compacted into the delete",
+    );
+    assert!(
+        b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
+        "a delete from an authority that held the answer ends the backup's copy",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// FORWARD `Delete`: the same single-drain teardown from an authority that never
+// took the answer still leaves the Element the backup answered on — its delete
+// states no answer, and an unanswered delete clears nothing the guard reads.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn an_authority_that_never_answered_ends_the_call_within_one_drain() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (a, b, b_sup) = primary_and_backup(&net, &clock, 33).await;
+
+    let ringing = call_in("A", "B", "s12-del-unanswered", LegState::Early, CallModelState::Active);
+    let call_ref = ringing.call_ref.clone();
+    forward(&a.store, &ringing, 1, 0).await;
+    tick(150).await;
+    let answered =
+        call_in("A", "B", "s12-del-unanswered", LegState::Confirmed, CallModelState::Active);
+    element(&b.store, &answered, 1, 1).await;
+
+    // A, behind the cut, ends its own ringing copy in one turn.
+    let state = call_state("A", &a.store);
+    state.create(ringing.clone());
+    let ending =
+        call_in("A", "B", "s12-del-unanswered", LegState::Early, CallModelState::Terminating);
+    state.update(ending.clone());
+    state.flush(&ending);
+    let ended =
+        call_in("A", "B", "s12-del-unanswered", LegState::Early, CallModelState::Terminated);
+    state.update(ended);
+    state.remove(&call_ref);
+    tick(200).await;
+
+    assert_eq!(
+        stored_state(&b.store, BAK, "A", &call_ref).await,
+        (CallModelState::Active, LegState::Confirmed),
+        "an unanswered delete leaves the Element the backup answered on",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 1, "counted, by op");
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +764,8 @@ async fn a_bulk_re_seed_after_a_reset_still_refuses_a_regressing_put() {
                                 origin_now_ms: 0,
                                 indexes: Vec::new(),
                                 body: Some(regressing.into()),
+                                answered: false,
+                                incarnation: None,
                             })
                             .await;
                         let _ = conn.send(Frame::Noop { at: Watermark::new(2, 1) }).await;
@@ -763,7 +872,7 @@ async fn reverse_delete_still_wins_over_the_primarys_own_backup_progress() {
         .unwrap();
     // The backup holds the same call and deletes it toward its primary.
     element(&b.store, &answered, 1, 1).await;
-    b.store.delete_call(BAK, "A", &call_ref, &[], &rev("A")).await.unwrap();
+    b.store.delete_call(BAK, "A", &call_ref, &[], false, &rev("A")).await.unwrap();
     tick(300).await;
 
     assert!(

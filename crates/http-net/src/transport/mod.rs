@@ -71,7 +71,7 @@ impl HttpRequest {
 /// A one-shot HTTP response.
 ///
 /// [`headers`](Self::headers) let a served service emit response headers (e.g.
-/// the Routing API's `X-Example-Trace-Id`); empty by default so a status+body
+/// the decision API's `X-Example-Trace-Id`); empty by default so a status+body
 /// service is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {

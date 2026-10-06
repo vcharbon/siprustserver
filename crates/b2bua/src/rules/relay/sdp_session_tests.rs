@@ -290,6 +290,42 @@ fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     super::note_request(call, leg, &req);
 }
 
+/// The peer of `leg` sends a `method` request this stack relays: received as
+/// [`peer_sends`], then pending on the relay target's dialog until its final.
+fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
+    peer_sends(call, leg, method, with_sdp);
+    let target = call::helpers::resolve_relay_peer(call, leg, Some("b")).0.expect("a relay target");
+    let pending = call::PendingRequest {
+        method: method.into(),
+        outbound_cseq: 7,
+        inbound_cseq: 7,
+        source_vias: vec![format!("SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK-{method}")],
+        source_call_id: "c".into(),
+        source_from: "<sip:a@192.0.2.1>;tag=a".into(),
+        source_to: "<sip:b@192.0.2.100>;tag=b".into(),
+        direction: call::Direction::FromA,
+        cancelled: false,
+        offered_100rel: true,
+        offered: with_sdp,
+        source_timestamp: None,
+    };
+    let target = std::iter::once(&mut call.a_leg)
+        .chain(call.b_legs.iter_mut())
+        .find(|l| l.leg_id == target)
+        .unwrap();
+    if target.dialogs.is_empty() {
+        let ctx = call::helpers::MakeDialogLegCtx {
+            call_id: "c-b",
+            local_uri: "sip:b2bua@192.0.2.100",
+            remote_uri: "sip:bob@192.0.2.2",
+            local_tag: "as",
+            remote_tag: "bob",
+        };
+        target.dialogs.push(call::helpers::make_empty_dialog(&ctx, 1));
+    }
+    target.dialogs[0].ext.inbound_pending_requests.push(pending);
+}
+
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a
 /// description.
 fn peer_offers(call: &mut Call, leg: &str, method: Method) {
@@ -375,6 +411,23 @@ fn an_identical_answer_to_a_new_offer_is_a_new_version() {
     }
 }
 
+/// Each offerless re-INVITE of the peer opens a new exchange whose offer is
+/// the final (RFC 3264 §5): the author's unchanged description in it is a new
+/// version each time.
+#[test]
+fn an_unchanged_offer_in_the_final_to_an_offerless_invite_is_a_new_version() {
+    let mut c = spliced();
+    let offer = sdp("carol 303 4 IN IP4 192.0.2.3", 30002);
+    for version in 3..6 {
+        peer_sends(&mut c, "a", "INVITE", false);
+        let out =
+            send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+        assert_eq!(o_line(&out), format!("o=bob 202 {version} IN IP4 192.0.2.2"));
+        let answer = sdp("alice 101 2 IN IP4 192.0.2.1", 10002);
+        send(&mut c, "b-2", Author::Leg("a"), Carried::InDialog, &answer);
+    }
+}
+
 /// An offerless re-INVITE's reliable 183 carries the offer, and the PRACK
 /// carries the peer's answer to it — no offer of the peer's: the 200 repeating
 /// the 183's description is the 183's bytes (RFC 6337 §3.1.1).
@@ -389,6 +442,111 @@ fn a_prack_answer_opens_no_exchange() {
     let fin =
         send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
     assert_eq!(fin, early, "the 200 repeats the 183 byte for byte");
+}
+
+/// A second INVITE of the peer while its first is still pending is refused
+/// (RFC 3261 §14.1) and opens no exchange: the 200 repeating the reliable
+/// 183's offer is the 183's bytes (RFC 6337 §3.1.1).
+#[test]
+fn an_invite_refused_inside_the_peers_open_invite_opens_no_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "INVITE", false);
+    let offer = sdp("carol 303 5 IN IP4 192.0.2.3", 30002);
+    let early =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 183), &offer);
+    peer_sends(&mut c, "a", "INVITE", false);
+    peer_sends(&mut c, "a", "PRACK", true);
+    let fin =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+    assert_eq!(fin, early, "the 200 repeats the 183 byte for byte");
+}
+
+/// The compliant nested exchange (RFC 3311 §5.1): once the reliable 183's
+/// offer is answered in the PRACK, the peer's UPDATE offer inside its pending
+/// INVITE opens its own exchange, so the author's unchanged answer is a new
+/// version; the INVITE's 200 repeating that answer is the UPDATE 200's bytes.
+#[test]
+fn an_update_after_the_prack_inside_the_peers_open_invite_opens_an_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "INVITE", false);
+    let offer = sdp("carol 303 5 IN IP4 192.0.2.3", 30002);
+    let early =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 183), &offer);
+    assert_eq!(o_line(&early), "o=bob 202 3 IN IP4 192.0.2.2");
+    peer_sends(&mut c, "a", "PRACK", true);
+    peer_relays(&mut c, "a", "UPDATE", true);
+    let update =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Update, 200), &offer);
+    assert_eq!(o_line(&update), "o=bob 202 4 IN IP4 192.0.2.2", "a new exchange");
+    let fin =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+    assert_eq!(fin, update, "the 200 repeats the UPDATE's answer");
+}
+
+/// An UPDATE offer of the peer while the reliable 183's offer awaits its PRACK
+/// breaks RFC 3311 §5.1. The call does not record whether that 183's
+/// description is an offer, so the UPDATE opens an exchange: the 200
+/// repeating the 183's description is a new version, which RFC 3264 §8
+/// permits.
+#[test]
+fn an_update_before_the_prack_opens_an_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "INVITE", false);
+    let offer = sdp("carol 303 5 IN IP4 192.0.2.3", 30002);
+    send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 183), &offer);
+    peer_relays(&mut c, "a", "UPDATE", true);
+    peer_sends(&mut c, "a", "PRACK", true);
+    let fin =
+        send(&mut c, "a", Author::Leg("b-2"), Carried::answering(&Method::Invite, 200), &offer);
+    assert_eq!(o_line(&fin), "o=bob 202 4 IN IP4 192.0.2.2");
+}
+
+/// An UPDATE offer of the peer inside its own pending INVITE whose offer no
+/// reliable provisional answered overlaps that offer (RFC 3311 §5.2) and opens
+/// no exchange, whether or not the INVITE offered `100rel`.
+#[test]
+fn an_update_inside_the_peers_open_offer_invite_opens_no_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "INVITE", true);
+    let opened = c.a_leg.sdp_session.exchanges_opened;
+    peer_sends(&mut c, "a", "UPDATE", true);
+    assert_eq!(c.a_leg.sdp_session.exchanges_opened, opened);
+}
+
+/// Once a reliable provisional shown on the peer's face carried the answer to
+/// its INVITE's offer, its UPDATE offer is the legal nesting of RFC 3311 §5.1
+/// and opens an exchange.
+#[test]
+fn an_update_after_a_reliable_answer_to_the_peers_invite_opens_an_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "INVITE", true);
+    c.reliable_provisionals.push(call::ReliableProvisional {
+        a_tag: "b".into(),
+        a_rseq: 1,
+        b_leg_id: "b-2".into(),
+        b_tag: "carol".into(),
+        b_cseq: 7,
+        b_rseq: 1,
+        acknowledged: true,
+        emission: None,
+        a_cseq: 7,
+        carried_sdp: true,
+        responder_sdp: true,
+    });
+    let opened = c.a_leg.sdp_session.exchanges_opened;
+    peer_sends(&mut c, "a", "UPDATE", true);
+    assert_eq!(c.a_leg.sdp_session.exchanges_opened, opened + 1);
+}
+
+/// A second UPDATE offer of the peer while its first is pending (RFC 3311
+/// §5.2) opens no exchange.
+#[test]
+fn an_update_inside_the_peers_open_update_opens_no_exchange() {
+    let mut c = spliced();
+    peer_relays(&mut c, "a", "UPDATE", true);
+    let opened = c.a_leg.sdp_session.exchanges_opened;
+    peer_sends(&mut c, "a", "UPDATE", true);
+    assert_eq!(c.a_leg.sdp_session.exchanges_opened, opened);
 }
 
 /// The final to the peer's re-INVITE repeating the description the author

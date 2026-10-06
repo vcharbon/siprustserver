@@ -6,7 +6,7 @@
 //! decision replaced on the call. Append helper:
 //! [`crate::helpers::mark_decision`].
 //!
-//! A route the limiter, the hop budget or the target admission refused, an
+//! A route the limiter, the hop budget or the destination allow-list refused, an
 //! unanswered consult (engine error, deadline), a limiter-refused reroute and
 //! every final the stack authors on its own mark nothing.
 

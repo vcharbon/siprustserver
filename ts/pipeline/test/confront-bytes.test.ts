@@ -66,7 +66,7 @@ const expecting = (body: Body.Body): Pivot.PivotV3 => ({
 const head = (contentType: string, len: number): string =>
   crlf([
     "INFO sip:callee@127.0.0.1 SIP/2.0",
-    "To: <sip:+331@h.fr>;tag=b",
+    "To: <sip:+15551@h.example>;tag=b",
     "CSeq: 2 INFO",
     `Content-Type: ${contentType}`,
     `Content-Length: ${len}`

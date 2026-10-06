@@ -6,43 +6,35 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use metric_catalogue::OpenRows;
+
 use sip_message::Method;
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
 use crate::event::{EventQueueClass, TransactionEvent};
-use crate::layer::RefusedClass;
+use crate::layer::InviteClass;
 
 /// The transaction ladders this layer drives, in the order the family
 /// enumerates them. A dialog-level class is the TU's and never reaches here.
 const REQUEST_LADDERS: [Class; 4] =
     [Class::InviteClient, Class::NonInviteClient, Class::NonInviteProceeding, Class::CancelClient];
 
-/// The `method` label slots of a request ladder's rows: every method
-/// `sip_message` models natively, plus one bucket for an extension method, so
-/// the family stays a fixed set of atomics whatever the wire carries.
-const METHOD_LABELS: [&str; 15] = [
-    "INVITE",
-    "ACK",
-    "BYE",
-    "CANCEL",
-    "OPTIONS",
-    "REGISTER",
-    "INFO",
-    "UPDATE",
-    "PRACK",
-    "SUBSCRIBE",
-    "NOTIFY",
-    "PUBLISH",
-    "MESSAGE",
-    "REFER",
-    "OTHER",
-];
+/// The `method` label slots of the fixed rows: every method `sip_message`
+/// models natively. An extension method's rows are held apart, by token.
+const METHOD_LABELS: [&str; 14] = Method::NATIVE_TOKENS;
 
-/// The `method` label slot of `method` — the index a rung is counted at, so
-/// a fire path resolves it once, before the send, and allocates nothing.
-pub(crate) fn method_slot(method: &Method) -> usize {
-    match method {
+/// The `method` label of a rung, resolved before its send: the fixed slot of
+/// a native method (no allocation), or an extension method's token.
+#[derive(Debug, Clone)]
+pub(crate) enum MethodSlot {
+    Native(usize),
+    Extension(Box<str>),
+}
+
+/// The `method` label of `method`.
+pub(crate) fn method_slot(method: &Method) -> MethodSlot {
+    let slot = match method {
         Method::Invite => 0,
         Method::Ack => 1,
         Method::Bye => 2,
@@ -57,8 +49,9 @@ pub(crate) fn method_slot(method: &Method) -> usize {
         Method::Publish => 11,
         Method::Message => 12,
         Method::Refer => 13,
-        Method::Other(_) => 14,
-    }
+        Method::Other(token) => return MethodSlot::Extension(token.as_str().into()),
+    };
+    MethodSlot::Native(slot)
 }
 
 /// The lowest status Timer G ever paces: a non-2xx INVITE final (§17.2.1).
@@ -88,13 +81,18 @@ pub(crate) struct RetransmitFamily {
     finals: [AtomicU64; FINAL_CODES],
     /// `[method][status - 100]` for the cached-response replay.
     triggers: [[AtomicU64; TRIGGER_CODES]; METHOD_LABELS.len()],
+    /// The rows of extension methods, `[ladder, token]` or `[ladder, token,
+    /// code]`, under the family's cap ([`crate::catalogue::RETRANSMITS`]);
+    /// past it a rung lands on its ladder's and code's row whose method is
+    /// [`OVERFLOW`](metric_catalogue::OVERFLOW).
+    extensions: OpenRows,
 }
 
 /// One row of the retransmit family with a non-zero count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetransmitRow {
     pub ladder: &'static str,
-    pub method: &'static str,
+    pub method: String,
     /// The final's status, on the Timer G row; `None` on a request's.
     pub code: Option<u16>,
     pub count: u64,
@@ -106,14 +104,34 @@ impl RetransmitFamily {
             requests: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             finals: std::array::from_fn(|_| AtomicU64::new(0)),
             triggers: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            extensions: OpenRows::new(&crate::catalogue::RETRANSMITS),
         }
     }
 
-    /// Count one rung of `ladder` re-sending a request whose method sits at
+    /// Rungs of extension methods that landed on the overflow row.
+    fn overflowed(&self) -> u64 {
+        self.extensions.overflowed()
+    }
+
+    /// The extension-method rows' total over the rows of `ladder`.
+    fn extension_total(&self, ladder: &str) -> u64 {
+        self.extensions
+            .rows()
+            .iter()
+            .filter(|(labels, _)| labels[0] == ladder)
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    /// Count one rung of `ladder` re-sending a request whose method is
     /// `slot` ([`method_slot`]).
-    pub(crate) fn record_request(&self, ladder: Class, slot: usize) {
-        if let Some(row) = REQUEST_LADDERS.iter().position(|c| *c == ladder) {
-            self.requests[row][slot].fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_request(&self, ladder: Class, slot: MethodSlot) {
+        let Some(row) = REQUEST_LADDERS.iter().position(|c| *c == ladder) else { return };
+        match slot {
+            MethodSlot::Native(slot) => {
+                self.requests[row][slot].fetch_add(1, Ordering::Relaxed);
+            }
+            MethodSlot::Extension(token) => self.extensions.add(&[ladder.as_str(), &token], 1),
         }
     }
 
@@ -129,21 +147,33 @@ impl RetransmitFamily {
     /// Count one replay of the cached response of status `code` to a
     /// retransmitted request of `method`.
     pub(crate) fn record_trigger(&self, method: &Method, code: u16) {
-        if let Some(slot) =
+        let Some(slot) =
             code.checked_sub(FIRST_TRIGGER_CODE).map(usize::from).filter(|s| *s < TRIGGER_CODES)
-        {
-            self.triggers[method_slot(method)][slot].fetch_add(1, Ordering::Relaxed);
+        else {
+            return;
+        };
+        match method_slot(method) {
+            MethodSlot::Native(row) => {
+                self.triggers[row][slot].fetch_add(1, Ordering::Relaxed);
+            }
+            MethodSlot::Extension(token) => {
+                self.extensions.add(&[TRIGGER, &token, &code.to_string()], 1)
+            }
         }
     }
 
     /// Every cached-response replay, whatever it repeated.
     fn triggered(&self) -> u64 {
-        self.triggers.iter().flatten().map(|a| a.load(Ordering::Relaxed)).sum()
+        self.triggers.iter().flatten().map(|a| a.load(Ordering::Relaxed)).sum::<u64>()
+            + self.extension_total(TRIGGER)
     }
 
     fn total(&self, ladder: Class) -> u64 {
         match REQUEST_LADDERS.iter().position(|c| *c == ladder) {
-            Some(row) => self.requests[row].iter().map(|a| a.load(Ordering::Relaxed)).sum(),
+            Some(row) => {
+                self.requests[row].iter().map(|a| a.load(Ordering::Relaxed)).sum::<u64>()
+                    + self.extension_total(ladder.as_str())
+            }
             None if ladder == Class::InviteServerFinal => {
                 self.finals.iter().map(|a| a.load(Ordering::Relaxed)).sum()
             }
@@ -157,7 +187,12 @@ impl RetransmitFamily {
             for (slot, method) in METHOD_LABELS.iter().enumerate() {
                 let count = self.requests[row][slot].load(Ordering::Relaxed);
                 if count > 0 {
-                    out.push(RetransmitRow { ladder: ladder.as_str(), method, code: None, count });
+                    out.push(RetransmitRow {
+                        ladder: ladder.as_str(),
+                        method: method.to_string(),
+                        code: None,
+                        count,
+                    });
                 }
             }
         }
@@ -166,7 +201,7 @@ impl RetransmitFamily {
             if count > 0 {
                 out.push(RetransmitRow {
                     ladder: Class::InviteServerFinal.as_str(),
-                    method: "INVITE",
+                    method: "INVITE".to_string(),
                     code: Some(FIRST_FINAL_CODE + slot as u16),
                     count,
                 });
@@ -178,12 +213,25 @@ impl RetransmitFamily {
                 if count > 0 {
                     out.push(RetransmitRow {
                         ladder: TRIGGER,
-                        method,
+                        method: method.to_string(),
                         code: Some(FIRST_TRIGGER_CODE + slot as u16),
                         count,
                     });
                 }
             }
+        }
+        let ladders = REQUEST_LADDERS.map(Class::as_str);
+        for (labels, count) in self.extensions.rows() {
+            let Some(ladder) = ladders.into_iter().chain([TRIGGER]).find(|l| *l == labels[0])
+            else {
+                continue;
+            };
+            out.push(RetransmitRow {
+                ladder,
+                method: labels[1].clone(),
+                code: labels.get(2).and_then(|code| code.parse().ok()),
+                count,
+            });
         }
         out
     }
@@ -201,10 +249,6 @@ pub(crate) struct MetricsInner {
     /// retransmission). Sampled in the sweep; a climb vs flat txns = buffers
     /// retained past completion.
     pub retransmit_buf_bytes: AtomicU64,
-    pub messages_processed: AtomicU64,
-    pub inbound_message_bytes_total: AtomicU64,
-    pub outbound_message_bytes_total: AtomicU64,
-    pub outbound_messages_total: AtomicU64,
     /// Ordinary events the full output queue dropped, by
     /// [`EventQueueClass::index`].
     pub event_queue_drops: [AtomicU64; 6],
@@ -215,12 +259,20 @@ pub(crate) struct MetricsInner {
     /// Critical events waiting on the retry deque right now (gauge), sampled
     /// at the end of every owner turn.
     pub event_queue_deferred: AtomicUsize,
-    /// Deferred requests removed because the sweep deleted the server
-    /// transaction that admitted them (counter).
+    /// Deferred requests removed because the server transaction that
+    /// admitted them left the map unanswered — at its backstop, or reaped by
+    /// the sweep (counter).
     pub deferred_swept: AtomicU64,
+    /// Transactions the sweep found still resident more than one sweep
+    /// interval past their lifetime deadline, and removed: each one had no
+    /// cleanup timer left in the wheel (counter). Expected 0.
+    pub sweep_reaped: AtomicU64,
     /// INVITEs refused at a deferred-backlog ceiling, indexed by
-    /// [`RefusedClass::index`] (counter).
+    /// [`InviteClass::index`] (counter).
     pub deferred_refused: [AtomicU64; 3],
+    /// Copies of a refused INVITE answered that refusal again before any
+    /// transaction held them (counter).
+    pub refused_copies: AtomicU64,
     /// Client transactions still open when their call was released — orphaned
     /// (see `Transaction::orphaned`), never cut short (counter).
     pub txn_orphaned_on_call_evict: AtomicU64,
@@ -279,16 +331,15 @@ pub(crate) struct MetricsInner {
     /// Responses that left carrying the generator's fallback To-tag because
     /// nothing here had a tag bound for them.
     pub fallback_to_tag_used: AtomicU64,
-    /// Inbound packets the parser rejected (dropped). A persistent climb here vs a
-    /// flat `messages_processed` is the signature of a malformed-traffic flood or a
-    /// parser regression — distinguishable from "no traffic arrived".
+    /// Inbound datagrams the parser rejected and the layer dropped: a
+    /// malformed-traffic flood or a parser regression.
     pub parse_errors: AtomicU64,
     /// Non-INVITE server transactions forgotten unanswered at the consumer's
     /// request ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)):
     /// one per request copy the consumer discarded before answering it.
     pub unanswered_forgotten: AtomicU64,
     /// Forget requests a full command queue refused; the transaction they
-    /// named absorbs its retransmissions until the sweep.
+    /// named absorbs its retransmissions until its backstop.
     pub forget_refused: AtomicU64,
     /// Non-INVITE server transactions with no final forgotten at their call's
     /// release ([`TransactionLayer::forget_unanswered_of_call`](crate::TransactionLayer::forget_unanswered_of_call)).
@@ -296,9 +347,10 @@ pub(crate) struct MetricsInner {
     /// In-dialog INVITE server transactions left without a final at their
     /// call's release, answered there ([`TransactionLayer::answer_unanswered_invites_of_call`](crate::TransactionLayer::answer_unanswered_invites_of_call)).
     pub released_unanswered_invites_answered: AtomicU64,
-    /// Outbound `send_to` failures (logged-and-swallowed so a send error never
-    /// aborts the owner). A climb here means the socket is failing (ENOBUFS/EPERM
-    /// under netfilter churn) while everything else looks idle.
+    /// Outbound sends the socket refused for a reason other than a full send
+    /// buffer (counted by the endpoint as would-block): ENOBUFS, a filter's
+    /// EPERM, an unreachable peer. Swallowed so a send error never aborts the
+    /// owner.
     pub send_errors: AtomicU64,
 }
 
@@ -308,15 +360,13 @@ impl MetricsInner {
             active_transactions: AtomicUsize::new(0),
             timer_queue_len: AtomicUsize::new(0),
             retransmit_buf_bytes: AtomicU64::new(0),
-            messages_processed: AtomicU64::new(0),
-            inbound_message_bytes_total: AtomicU64::new(0),
-            outbound_message_bytes_total: AtomicU64::new(0),
-            outbound_messages_total: AtomicU64::new(0),
             event_queue_drops: Default::default(),
             event_queue_deferrals: Default::default(),
             event_queue_deferred: AtomicUsize::new(0),
             deferred_swept: AtomicU64::new(0),
+            sweep_reaped: AtomicU64::new(0),
             deferred_refused: Default::default(),
+            refused_copies: AtomicU64::new(0),
             txn_orphaned_on_call_evict: AtomicU64::new(0),
             orphaned_transactions: AtomicUsize::new(0),
             cancels_held: AtomicU64::new(0),
@@ -338,6 +388,14 @@ impl MetricsInner {
             released_unanswered_forgotten: AtomicU64::new(0),
             released_unanswered_invites_answered: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
+        }
+    }
+
+    /// Count `sent` when the socket refused it for a reason other than a full
+    /// send buffer.
+    pub(crate) fn count_send(&self, sent: Result<(), sip_net::SendError>) {
+        if sent.is_err_and(|e| e.kind != sip_net::SendErrorKind::WouldBlock) {
+            self.send_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -371,21 +429,6 @@ impl TransactionMetrics {
         self.inner.retransmit_buf_bytes.load(Ordering::Relaxed)
     }
 
-    /// Total inbound SIP messages parsed since start (counter).
-    pub fn messages_processed(&self) -> u64 {
-        self.inner.messages_processed.load(Ordering::Relaxed)
-    }
-
-    pub fn inbound_message_bytes_total(&self) -> u64 {
-        self.inner.inbound_message_bytes_total.load(Ordering::Relaxed)
-    }
-    pub fn outbound_message_bytes_total(&self) -> u64 {
-        self.inner.outbound_message_bytes_total.load(Ordering::Relaxed)
-    }
-    pub fn outbound_messages_total(&self) -> u64 {
-        self.inner.outbound_messages_total.load(Ordering::Relaxed)
-    }
-
     /// Static capacity of the bounded inbound→app event queue.
     pub fn event_queue_capacity(&self) -> usize {
         self.events_tx.max_capacity()
@@ -403,14 +446,10 @@ impl TransactionMetrics {
         self.inner.event_queue_drops[reason.index()].load(Ordering::Relaxed)
     }
 
-    /// Sum of all per-class drop counters.
-    pub fn event_queue_drops_total(&self) -> u64 {
-        EventQueueClass::ALL.iter().map(|r| self.event_queue_drops(*r)).sum()
-    }
-
     /// Critical events the full output queue deferred, by class: each is
-    /// delivered once the queue has room, unless the sweep removes it with
-    /// its transaction ([`deferred_swept`](Self::deferred_swept)).
+    /// delivered once the queue has room, unless it is a request whose
+    /// transaction leaves unanswered first
+    /// ([`deferred_swept`](Self::deferred_swept)).
     pub fn event_queue_deferrals(&self, reason: EventQueueClass) -> u64 {
         self.inner.event_queue_deferrals[reason.index()].load(Ordering::Relaxed)
     }
@@ -420,18 +459,33 @@ impl TransactionMetrics {
         self.inner.event_queue_deferred.load(Ordering::Relaxed)
     }
 
-    /// Deferred requests removed with the server transaction the sweep
-    /// deleted (counter).
+    /// Deferred requests removed with the server transaction that admitted
+    /// them, which left the map unanswered — at its backstop, or reaped by
+    /// the sweep (counter).
     pub fn deferred_swept(&self) -> u64 {
         self.inner.deferred_swept.load(Ordering::Relaxed)
+    }
+
+    /// Transactions the safety-net sweep found still resident more than one
+    /// sweep interval (`TXN_SWEEP_INTERVAL`) past their lifetime deadline, and
+    /// removed (counter). The owner fires every due timer before the sweep,
+    /// so one count is one transaction whose cleanup timer was missing.
+    pub fn sweep_reaped(&self) -> u64 {
+        self.inner.sweep_reaped.load(Ordering::Relaxed)
     }
 
     /// INVITEs refused at a deferred-backlog ceiling
     /// ([`DeferredBound`](crate::DeferredBound)), by class; a later copy of a
     /// refused INVITE, answered the same refusal, is not counted again
     /// (counter).
-    pub fn deferred_refused(&self, class: RefusedClass) -> u64 {
+    pub fn deferred_refused(&self, class: InviteClass) -> u64 {
         self.inner.deferred_refused[class.index()].load(Ordering::Relaxed)
+    }
+
+    /// Copies of a refused INVITE — at this layer or a stage ahead of it —
+    /// that reached this layer and drew that refusal again (counter).
+    pub fn refused_copies(&self) -> u64 {
+        self.inner.refused_copies.load(Ordering::Relaxed)
     }
 
     /// Client transactions orphaned — left to close their own obligations —
@@ -492,6 +546,13 @@ impl TransactionMetrics {
     /// The rows of `{ladder,method,code}` with a non-zero count, for a scrape.
     pub fn retransmit_rows(&self) -> Vec<RetransmitRow> {
         self.inner.retransmits.rows()
+    }
+
+    /// Retransmissions of extension methods that landed on the overflow row
+    /// of [`retransmit_rows`](Self::retransmit_rows), past its cap of
+    /// distinct rows.
+    pub fn retransmit_rows_overflowed(&self) -> u64 {
+        self.inner.retransmits.overflowed()
     }
 
     /// Timer-E re-sends of an on-wire CANCEL awaiting its response (RFC 3261
@@ -579,8 +640,70 @@ impl TransactionMetrics {
         self.inner.forget_refused.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Outbound `send_to` failures (counter).
+    /// Outbound sends the socket refused, a full send buffer aside (counter).
     pub fn send_errors(&self) -> u64 {
         self.inner.send_errors.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use metric_catalogue::{DEFAULT_CAP, OVERFLOW};
+
+    use super::*;
+    use crate::catalogue::RETRANSMITS;
+
+    fn extension(token: &str) -> MethodSlot {
+        method_slot(&Method::Other(token.to_owned()))
+    }
+
+    /// A send error is counted unless it is a full send buffer, which the
+    /// endpoint counts as would-block.
+    #[test]
+    fn a_send_error_is_counted_unless_it_would_block() {
+        let inner = MetricsInner::new();
+        let refused = |kind| Err(sip_net::SendError { message: String::new(), kind });
+        inner.count_send(Ok(()));
+        inner.count_send(refused(sip_net::SendErrorKind::WouldBlock));
+        assert_eq!(inner.send_errors.load(Ordering::Relaxed), 0);
+        inner.count_send(refused(sip_net::SendErrorKind::Other));
+        inner.count_send(refused(sip_net::SendErrorKind::Unreachable));
+        assert_eq!(inner.send_errors.load(Ordering::Relaxed), 2);
+    }
+
+    /// An extension method's rung is counted under its own token, never under
+    /// a shared bucket.
+    #[test]
+    fn an_extension_method_keeps_its_own_row() {
+        let family = RetransmitFamily::new();
+        family.record_request(Class::NonInviteClient, extension("FOO"));
+        family.record_request(Class::NonInviteClient, extension("FOO"));
+        family.record_trigger(&Method::Other("BAR".to_owned()), 200);
+        family.record_request(Class::NonInviteClient, method_slot(&Method::Bye));
+        let rows = family.rows();
+        let row = |method: &str, code| {
+            rows.iter().find(|r| r.method == method && r.code == code).map(|r| (r.ladder, r.count))
+        };
+        assert_eq!(row("FOO", None), Some(("non-invite-client", 2)));
+        assert_eq!(row("BAR", Some(200)), Some(("trigger", 1)));
+        assert_eq!(row("BYE", None), Some(("non-invite-client", 1)));
+        assert_eq!(family.total(Class::NonInviteClient), 3);
+        assert_eq!(family.triggered(), 1);
+    }
+
+    /// Past the cap an extension method's rung lands on the overflow row and
+    /// is counted there.
+    #[test]
+    fn past_the_cap_an_extension_rung_lands_on_the_overflow_row() {
+        let family = RetransmitFamily::new();
+        assert_eq!(RETRANSMITS.cap().map(|c| c.max), Some(DEFAULT_CAP));
+        for i in 0..DEFAULT_CAP + 3 {
+            family.record_request(Class::NonInviteClient, extension(&format!("X{i}")));
+        }
+        let rows = family.rows();
+        assert_eq!(rows.iter().filter(|r| r.method.starts_with('X')).count(), DEFAULT_CAP);
+        let overflow = rows.iter().find(|r| r.method == OVERFLOW).expect("overflow row");
+        assert_eq!((overflow.ladder, overflow.count), ("non-invite-client", 3));
+        assert_eq!(family.overflowed(), 3);
     }
 }

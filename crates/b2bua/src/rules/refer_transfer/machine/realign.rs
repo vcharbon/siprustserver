@@ -8,9 +8,9 @@ use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, Tra
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
+use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 
 /// transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
 /// Distinguished from `transfer-c-200-initial` by `legState: confirmed`
@@ -60,7 +60,10 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                 },
                 RuleAction::SendReinvite {
                     leg_id: "a".to_string(),
-                    body: Some(Body::from_leg(c_realign_sdp.to_vec(), c_leg_id.clone())),
+                    body: Some(
+                        Body::from_leg(c_realign_sdp.to_vec(), c_leg_id.clone())
+                            .described_by(resp.headers()),
+                    ),
                     add_headers: vec![],
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },
@@ -273,7 +276,7 @@ pub(super) fn a_realign_timeout() -> RuleDefinition {
             .timer_type(call::TimerType::ReferReinviteAnswer)
             .filter(|ctx| {
                 let timer_leg = match ctx.event {
-                    crate::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
+                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
                     _ => None,
                 };
                 timer_leg == Some("a")

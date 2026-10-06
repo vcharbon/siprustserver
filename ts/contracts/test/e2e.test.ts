@@ -211,7 +211,7 @@ describe("a load-run index", () => {
       startedMs: 1000,
       finishedMs: 61000,
       finished: true,
-      target: "172.20.255.250:5060",
+      target: "192.0.2.250:5060",
       cps: 20,
       durationSecs: 60,
       maxInFlight: 2000,

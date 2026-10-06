@@ -314,8 +314,8 @@ mod tests {
         ));
     }
 
-    /// A rule-only waiver covers by rule alone (byte-for-byte the old
-    /// `HashSet<String>` filter) regardless of attribution.
+    /// A rule-only waiver covers by rule alone (a plain rule-name filter)
+    /// regardless of attribution.
     #[test]
     fn rule_only_covers_by_rule_regardless_of_party() {
         let entries = vec![entry("10.0.0.9:5070#bob")];

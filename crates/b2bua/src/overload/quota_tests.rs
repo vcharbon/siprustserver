@@ -7,6 +7,7 @@
 use super::cpu_budget::CpuBudget;
 use super::sampler::LiveLoadSampler;
 use super::*;
+use crate::new_calls::Refusal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -86,20 +87,26 @@ fn one_core_quota() -> OverloadSignal {
 /// runtime may use: the busy ratio reads against the quota, not the four
 /// workers, and the panic backstop sheds a non-emergency call.
 #[test]
+#[ignore = "slow lane: real clock >= 1 s"]
 fn panic_elu_sheds_when_offered_work_nears_the_cpu_quota() {
     let sig = run_offered(0.9, one_core_quota);
     let elu = sig.metrics().elu_ewma;
     assert!(elu > 0.75, "elu {elu} must read against a one-core quota, not {WORKERS} workers");
-    assert_eq!(sig.should_admit(false).reason, Some(AdmitReason::PanicElu), "elu {elu}");
+    assert_eq!(
+        super::tests::admit(&sig, false).err().map(|r| r.reason),
+        Some(Refusal::PanicElu),
+        "elu {elu}"
+    );
 }
 
 /// A light load against the same quota reads light and admits.
 #[test]
+#[ignore = "slow lane: real clock >= 1 s"]
 fn light_load_on_the_cpu_quota_admits() {
     let sig = run_offered(0.2, one_core_quota);
     let elu = sig.metrics().elu_ewma;
     assert!(elu < 0.6, "elu {elu}");
-    assert!(sig.should_admit(false).admit, "elu {elu}");
+    assert!(super::tests::admit(&sig, false).is_ok(), "elu {elu}");
 }
 
 /// The production path end to end: the quota read from this process's own
@@ -111,5 +118,9 @@ fn live_signal_sheds_under_a_real_one_core_quota() {
     let sig = run_offered(0.9, OverloadSignal::live);
     let elu = sig.metrics().elu_ewma;
     assert!(elu > 0.75, "elu {elu}");
-    assert_eq!(sig.should_admit(false).reason, Some(AdmitReason::PanicElu), "elu {elu}");
+    assert_eq!(
+        super::tests::admit(&sig, false).err().map(|r| r.reason),
+        Some(Refusal::PanicElu),
+        "elu {elu}"
+    );
 }

@@ -3,7 +3,8 @@
  * applied to a message at one actor's vantage.
  *
  * Tier 1 is stack-owned and omitted, tier 2 is the dialog-opening INVITE's
- * identities turned into positional refs, and EVERYTHING else is tier 3 and
+ * identities turned into refs that keep the captured name-addr around each
+ * role number, and EVERYTHING else is tier 3 and
  * freezes verbatim in wire order. A `send` carries the body it emits; an
  * `expect` carries the shape it checks and the existence checks a session timer
  * needs.
@@ -15,7 +16,17 @@ import type { MsgSpecDraft } from "./draft.js"
 import type { PartsIndex } from "./parts.js"
 import { classKey, type Plan } from "./plan.js"
 import { peerSide, type ActorObs, type Layout } from "./topology.js"
-import { addrForm, hasHeader, headersInOrder, sameHeader, uriUser } from "./wire.js"
+import {
+  addrForm,
+  hasHeader,
+  headersInOrder,
+  identityNameAddr,
+  sameHeader,
+  uriRuns,
+  uriUser,
+  uriUserSpan,
+  type WireHeader
+} from "./wire.js"
 
 /**
  * Tier-1 headers (regenerated from dialog state) plus the ones represented
@@ -147,11 +158,21 @@ export const buildMsg = (
   if (msg.summary.kind === "request") {
     spec.method = msg.summary.method
     // Identity refs only on the dialog-OPENING INVITE: an in-dialog R-URI is
-    // the tier-1 learned remote target, regenerated at replay.
-    if (emits && Flows.isInvite(msg) && isInitialInvite(flows, actor, msg)) {
-      spec.ruri = refFlagged(layout, plan, msg.summary.uri, "R-URI", flags)
-      spec.from = refFlagged(layout, plan, msg.summary.from.uri, "From", flags)
-      spec.to = refFlagged(layout, plan, msg.summary.to.uri, "To", flags)
+    // the tier-1 learned remote target, regenerated at replay. A send states
+    // what the actor dials with; an expect records the identity the SUT
+    // launched, and its R-URI is the lane's claim.
+    if (Flows.isInvite(msg) && isOpeningInvite(flows, actor, msg)) {
+      const headers = headersInOrder(msg)
+      const identity = (uri: string, field: "From" | "To"): Msg.Ref =>
+        withAddr(
+          layout,
+          plan,
+          emits ? refFlagged(layout, plan, uri, field, flags) : resolveRef(layout, plan, uri),
+          headers.find((h) => sameHeader(field, h.name))
+        )
+      if (emits) spec.ruri = refFlagged(layout, plan, msg.summary.uri, "R-URI", flags)
+      spec.from = identity(msg.summary.from.uri, "From")
+      spec.to = identity(msg.summary.to.uri, "To")
     }
   } else {
     spec.status = msg.summary.status
@@ -231,8 +252,6 @@ const NUMBER_BEARING_HEADERS = [
   "Referred-By"
 ]
 
-const URI_RUN = /(?:sips?|tel):[^>\s,;]+/gi
-
 /** The identity-registry name of a tier-2 position (§8.5's one encoding). */
 const identityOf = (pos: string): string | undefined => {
   if (pos === "caller") return CALLER_IDENTITY
@@ -242,15 +261,19 @@ const identityOf = (pos: string): string | undefined => {
 
 /**
  * A number-bearing header value with every number the plan resolved to a
- * registered identity composed as a `${num:…}` accessor. A number the plan
- * does not classify, that maps to no topology position, or whose dial form
- * carries no label stays frozen: an accessor lint would refuse is worse than a
- * literal.
+ * registered identity composed as a `${num:…}` accessor: in the user part of
+ * the URI that writes it, and in the display name in front of that URI where
+ * the name is the number itself. A host, a parameter or any other text keeps
+ * its digits. A number the plan does not classify, that maps to no topology
+ * position, or whose dial form carries no label stays frozen: an accessor lint
+ * would refuse is worse than a literal.
  */
 const composeNumbers = (layout: Layout, plan: Plan, value: string): string => {
-  let out = value
-  for (const uri of value.match(URI_RUN) ?? []) {
-    const user = uriUser(uri)
+  const edits: Array<{ readonly at: number; readonly end: number; readonly text: string }> = []
+  for (const run of uriRuns(value)) {
+    const span = uriUserSpan(run.text)
+    if (span === undefined) continue
+    const user = run.text.slice(span[0], span[1])
     if (user === "" || user.startsWith("urn:")) continue
     const cls = plan.classify(user)
     if (!cls) continue
@@ -259,18 +282,58 @@ const composeNumbers = (layout: Layout, plan: Plan, value: string): string => {
     const name = identityOf(pos)
     const form = plan.formLabel(user)
     if (name === undefined || form === undefined) continue
-    out = out.split(user).join(`\${num:${name}:${form}}`)
+    const accessor = `\${num:${name}:${form}}`
+    const display = displayBefore(value, run.at)
+    if (display !== undefined) {
+      const written = value.slice(display[0], display[1])
+      if (written === user || written === `"${user}"`) {
+        edits.push({ at: display[0], end: display[1], text: written.replace(user, accessor) })
+      }
+    }
+    edits.push({ at: run.at + span[0], end: run.at + span[1], text: accessor })
+  }
+  let out = value
+  for (const edit of [...edits].sort((x, y) => y.at - x.at)) {
+    out = out.slice(0, edit.at) + edit.text + out.slice(edit.end)
   }
   return out
 }
 
-const isInitialInvite = (flows: Flows.FlowsDoc, actor: ActorObs, msg: Flows.Msg): boolean => {
-  if (actor.kind !== "uac") return false
+/**
+ * The display name in front of the `<` that opens a URI at `at`, as the
+ * trimmed `[start, end)` of `value` back to the previous entry's `,`.
+ */
+const displayBefore = (value: string, at: number): readonly [number, number] | undefined => {
+  if (value[at - 1] !== "<") return undefined
+  const start = value.lastIndexOf(",", at - 1) + 1
+  const text = value.slice(start, at - 1)
+  const lead = text.length - text.trimStart().length
+  const trimmed = text.trim()
+  return trimmed === "" ? undefined : [start + lead, start + lead + trimmed.length]
+}
+
+/**
+ * Whether `msg` opens this actor's dialog: the first INVITE the actor sent, as
+ * a UAC, or the first it received from the SUT, as a UAS.
+ */
+const isOpeningInvite = (flows: Flows.FlowsDoc, actor: ActorObs, msg: Flows.Msg): boolean => {
   const first = actor.msgIdxs
     .map((i) => flows.legs[actor.origLeg]!.msgs[i]!)
-    .filter((m) => peerSide(actor, m.src))
+    .filter((m) => peerSide(actor, m.src) === (actor.kind === "uac"))
     .find(Flows.isInvite)
   return first === msg
+}
+
+/**
+ * `ref` stating the captured name-addr (§8): the header's value as a dialog
+ * identity, its numbers composed as `${num:…}`. Stated only where it keeps the
+ * lane's number: a frozen ref, or a positional one whose number composed.
+ */
+const withAddr = (layout: Layout, plan: Plan, ref: Msg.Ref, header: WireHeader | undefined): Msg.Ref => {
+  if (header === undefined) return ref
+  const addr = composeNumbers(layout, plan, identityNameAddr(header.value))
+  if (Msg.isPositionalRef(ref) && !addr.includes("${num:")) return ref
+  return { ...ref, addr }
 }
 
 /**

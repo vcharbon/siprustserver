@@ -52,6 +52,13 @@ pub struct PutOpts {
     /// inter-node clock skew. `None` on a locally-originated write (no skew to
     /// correct — the deadlines were minted on THIS node's clock).
     pub origin_now_ms: Option<i64>,
+    /// The call incarnation ([`call::Call::incarnation`]) the write is of: the
+    /// body a `Put` stores, or the call a `Delete` removes. A replicating store
+    /// keeps it beside the `(p,b)` version, which orders versions of one
+    /// incarnation only, and a delete's resurrection tombstone names it.
+    /// `None` names no incarnation: the write is taken as one of the call the
+    /// store already holds for the ref.
+    pub incarnation: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,9 +70,9 @@ pub enum StoreError {
 /// The call body + index persistence seam.
 #[async_trait]
 pub trait CallStore: Send + Sync {
-    /// Read a call body as a shared, immutable `Arc<[u8]>` (Decision 9 / ADR-0011
-    /// X8). A rewrite REPLACES the slot's `Arc`, so a holder of a prior clone
-    /// keeps reading the body it observed — the immutable-shared-body invariant.
+    /// Read a call body as a shared, immutable `Arc<[u8]>` (ADR-0011 X8). A
+    /// rewrite REPLACES the slot's `Arc`, so a holder of a prior clone keeps
+    /// reading the body it observed — the immutable-shared-body invariant.
     async fn get_call(
         &self,
         role: PartitionRole,
@@ -87,16 +94,20 @@ pub trait CallStore: Send + Sync {
         opts: &PutOpts,
     ) -> Result<(), StoreError>;
 
+    /// Delete a call body and its indexes. `answered`: the deleting node's own
+    /// copy of the call had answered the caller — a replicating store states it
+    /// on the propagated delete (ADR-0031 D3); every other store ignores it.
     async fn delete_call(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
         indexes: &[String],
+        answered: bool,
         opts: &PutOpts,
     ) -> Result<(), StoreError>;
 
-    /// Resolve a SIP routing index key (`leg:callId|tag`) to a `callRef`.
+    /// Resolve a SIP routing index key (a [`call::index_key`] key) to a `callRef`.
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError>;
 
     /// All call bodies this worker owns in `(role, primary)` (crash recovery).

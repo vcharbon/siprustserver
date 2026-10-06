@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn an_identity_answers_for_the_forms_the_plan_resolved() {
         let identity: Identity = serde_json::from_str(
-            r#"{"name":"called-0-0","kind":"site","observed":"+33000900004","forms":["e164","trunk-composed"]}"#,
+            r#"{"name":"called-0-0","kind":"site","observed":"+15550900004","forms":["e164","trunk-composed"]}"#,
         )
         .unwrap();
         assert!(identity.has_form("e164"));
@@ -86,10 +86,10 @@ mod tests {
         assert!(!serde_json::to_string(&symbolic).unwrap().contains("observed"));
         // Carrying one is legal and unlinted: the discipline binds captures.
         let stated: Identity = serde_json::from_str(
-            r#"{"name":"transferee","kind":"site","observed":"+33000900006","forms":["e164"]}"#,
+            r#"{"name":"transferee","kind":"site","observed":"+15550900006","forms":["e164"]}"#,
         )
         .unwrap();
-        assert_eq!(stated.observed.as_deref(), Some("+33000900006"));
+        assert_eq!(stated.observed.as_deref(), Some("+15550900006"));
     }
 
     #[test]

@@ -17,9 +17,9 @@
 //!
 //! # Module map
 //!
-//! - [`correlation`] — how the per-call token travels through the SUT
+//! - `correlation` — how the per-call token travels through the SUT
 //!   (pluggable per run: relayed header, To-user, or the caller's From user).
-//! - [`demux`] — the inbound path. Precedence per datagram: (1) **known
+//! - `demux` — the inbound path. Precedence per datagram: (1) **known
 //!   Call-ID** (our UAC dialog, or a UAS dialog after its first request) — this
 //!   tier demuxes EVERY in-dialog datagram with no token and no R-URI
 //!   cooperation; (2) **correlation token** — an initial INVITE spawning a new
@@ -28,14 +28,14 @@
 //!   call by the scenario's [`LegPicker`] (compiled shapes) or consumable
 //!   [`ClaimRule`]s (data-driven scenarios); (3) orphan
 //!   (count + bounded-sample + drop — never queued, never silent).
-//! - [`endpoint`] — the per-call [`SignalingNetwork`] view ([`MuxNetwork`]) and
+//! - `endpoint` — the per-call [`SignalingNetwork`] view ([`MuxNetwork`]) and
 //!   each leg's endpoint. Every per-call endpoint deregisters its keys on
 //!   `Drop`; a reaper sweeps pending-UAS entries whose leg never arrived.
-//! - [`loss`] — per-call loss injection: the network layer's
+//! - `loss` — per-call loss injection: the network layer's
 //!   [`sip_net::RandomLoss`] + the deterministic, test-owned [`TargetedDrop`].
-//! - [`retransmit`] — opt-in per-call SIP transaction engine (Timer A/E/G)
+//! - `retransmit` — opt-in per-call SIP transaction engine (Timer A/E/G)
 //!   recovering modeled loss.
-//! - [`stats`] — process-wide counters + Prometheus rendering.
+//! - `stats` — process-wide counters + Prometheus rendering.
 //!
 //! # Key lifetime (shared sockets, reused keys)
 //!
@@ -72,6 +72,7 @@ pub use loss::{DropDir, TargetedDrop};
 pub use retransmit::RELEASE_HOLD;
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
+pub(crate) use stats::OrphanReason;
 
 use loss::DropModel;
 use retransmit::CallTxns;

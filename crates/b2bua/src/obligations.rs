@@ -1,5 +1,6 @@
-//! The open **obligation** vocabulary (ADR-0020 X7) — extracted verbatim from
-//! the hardcoded limiter/CDR blocks of `invariants::enforce`.
+//! The open **obligation** vocabulary (ADR-0020 X7): the kinds
+//! `invariants::enforce` settles at a call's terminal, the limiter release and
+//! the CDR among them.
 //!
 //! An obligation is a per-call consequence that must be discharged **exactly
 //! once** at release, **derivable from the persisted [`Call`] snapshot alone**
@@ -10,8 +11,8 @@
 //!   its `ext` slices). Closures and runtime registries are unrepresentable
 //!   here by design: the same derivation must produce the same obligations
 //!   from a snapshot rehydrated on another node after reclaim.
-//! - **total over history** — tolerate snapshots written before the kind
-//!   existed (serde defaults / `Option` fields).
+//! - **total over the call's life** — tolerate a snapshot taken before the
+//!   kind's state was ever written (`None` / empty fields).
 //! - **skip-aware** — entries carrying no real allocation are skipped at
 //!   derive time (the limiter precedent: a call that sent no admit).
 //! - **idempotent** — `settle` appends only what `effects` does not already
@@ -31,7 +32,8 @@
 
 use call::Call;
 
-use crate::effects::{BufferedObservabilityEffect, HandlerEffects, SoftBoundedEffect};
+use crate::effects::{BufferedObservabilityEffect, HandlerEffects};
+use crate::limiter::call::LimiterObligations;
 
 /// One owed release, as data — the pure audit view ([`ObligationSet::owed`])
 /// used for logging and tests; the discharging side effect is expressed through
@@ -70,7 +72,7 @@ pub struct ObligationSet {
 }
 
 impl ObligationSet {
-    /// The two core kinds, in this order: [`LimiterObligations`],
+    /// The two core kinds, in this order: `LimiterObligations`,
     /// [`CdrObligation`].
     pub fn core() -> Self {
         Self { kinds: vec![Box::new(LimiterObligations), Box::new(CdrObligation)] }
@@ -94,41 +96,6 @@ impl ObligationSet {
     /// Pure audit view across all kinds.
     pub fn owed(&self, call: &Call) -> Vec<Obligation> {
         self.kinds.iter().flat_map(|k| k.owed(call)).collect()
-    }
-}
-
-/// Kind `"limiter"` — a call that sent an admit request releases its key
-/// exactly once at termination (the strong admit↔release invariant), with one
-/// `release(key)` under the call's own key, which the server applies
-/// idempotently and as a no-op for a key it holds nothing for. A call that
-/// sent none (no limiter stated, none configured) owes nothing. A
-/// `ReleaseLimiter` of the call's key a rule already emitted discharges it;
-/// one of another key does not.
-pub struct LimiterObligations;
-
-impl ObligationKind for LimiterObligations {
-    fn id(&self) -> &'static str {
-        "limiter"
-    }
-
-    fn settle(&self, call: &Call, effects: &mut HandlerEffects) {
-        if !call.limiter.release_owed {
-            return;
-        }
-        let already = effects.soft.iter().any(
-            |e| matches!(e, SoftBoundedEffect::ReleaseLimiter { key } if *key == call.limiter.key),
-        );
-        if !already {
-            effects.soft.push(SoftBoundedEffect::ReleaseLimiter { key: call.limiter.key.clone() });
-        }
-    }
-
-    fn owed(&self, call: &Call) -> Vec<Obligation> {
-        if call.limiter.release_owed {
-            vec![Obligation { kind: "limiter", key: call.limiter.key.clone() }]
-        } else {
-            Vec::new()
-        }
     }
 }
 

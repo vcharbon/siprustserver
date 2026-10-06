@@ -26,7 +26,7 @@ use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, S
 use crate::ProxyMetrics;
 
 const UAC: &str = "10.244.7.13";
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 const W1: &str = "10.0.0.1";
 const W2: &str = "10.0.0.2";
 
@@ -65,6 +65,9 @@ impl RoutingStrategy for QueueStrategy {
     fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
         None
     }
+    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
+        None
+    }
 }
 
 /// Gate double: admits the first external INVITE, rejects everything after
@@ -79,14 +82,17 @@ impl ProxySelfGate for AdmitOnceGate {
     fn try_admit_external(&self) -> AdmitDecision {
         self.tries.fetch_add(1, Ordering::SeqCst);
         if self.used.swap(true, Ordering::SeqCst) {
-            AdmitDecision {
-                admit: false,
-                reason: Some("proxy_overload_cps".into()),
-                retry_after_sec: 3,
-            }
+            AdmitDecision::Reject { reason: crate::self_gate::ShedReason::Cps, retry_after_sec: 3 }
         } else {
-            AdmitDecision::admit()
+            AdmitDecision::Admit
         }
+    }
+}
+
+impl AdmitOnceGate {
+    /// Room for one more external INVITE: the next one is a call of its own.
+    fn admit_next(&self) {
+        self.used.store(false, Ordering::SeqCst);
     }
 }
 
@@ -120,9 +126,20 @@ fn parse_req(raw: &str) -> SipMessage {
 }
 
 fn invite(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
+    invite_from(UAC, call_id, from_tag, cseq, branch)
+}
+
+/// [`invite`] sent by `sent_by` (its top-Via host, port 5060).
+fn invite_from(
+    sent_by: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    branch: &str,
+) -> SipMessage {
     parse_req(&format!(
         "INVITE sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Via: SIP/2.0/UDP {sent_by}:5060;branch={branch};rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@{UAC}>;tag={from_tag}\r\n\
 To: <sip:bob@10.0.0.50>\r\n\
@@ -133,10 +150,22 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
+/// The UAC's CANCEL; §9.1: `branch` is its INVITE's.
 fn cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
+    cancel_from(UAC, call_id, from_tag, cseq, branch)
+}
+
+/// [`cancel`] sent by `sent_by`, as its INVITE was.
+fn cancel_from(
+    sent_by: &str,
+    call_id: &str,
+    from_tag: &str,
+    cseq: u32,
+    branch: &str,
+) -> SipMessage {
     parse_req(&format!(
         "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Via: SIP/2.0/UDP {sent_by}:5060;branch={branch};rport\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@{UAC}>;tag={from_tag}\r\n\
 To: <sip:bob@10.0.0.50>\r\n\
@@ -236,7 +265,7 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
 
     tokio::time::advance(Duration::from_secs(60)).await;
 
-    let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3c");
+    let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3");
     let outcome = f.core.route_request(&cxl, src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
     assert_eq!(
@@ -263,6 +292,26 @@ async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
         "the CANCEL follows the R-URI, where the worker's INVITE went"
     );
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 0, "a worker's CANCEL never selects");
+}
+
+// Every CANCEL counts how its lookup of the INVITE's remembered hop ended:
+// one series per outcome, each moved only by its own outcome.
+#[tokio::test(start_paused = true)]
+async fn each_cancel_lookup_counts_its_outcome() {
+    let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
+    f.core.route_request(&invite("lookup-1@test", "tag-a", 1, "z9hG4bKl1"), src()).await;
+    // The CANCEL and its retransmission each look the INVITE up.
+    let cxl = cancel("lookup-1@test", "tag-a", 1, "z9hG4bKl1");
+    for _ in 0..2 {
+        let out = f.core.route_request(&cxl, src()).await;
+        assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
+    }
+    let lost = worker_cancel("lookup-2@test", "tag-w", 1, "z9hG4bKl2c");
+    f.core.route_request(&lost, format!("{W1}:5060").parse().unwrap()).await;
+
+    let txt = f.metrics.prometheus_text();
+    assert!(txt.contains("\nsip_proxy_cancel_lookups_total{outcome=\"hit\"} 2\n"), "{txt}");
+    assert!(txt.contains("\nsip_proxy_cancel_lookups_total{outcome=\"miss\"} 1\n"), "{txt}");
 }
 
 // Same window for the response side: a late non-2xx final must still find
@@ -301,20 +350,22 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fresh selection for the ACK");
 }
 
-// Guards the From-tag in the entry key: without it the two directions of
-// one Call-ID (independent CSeq spaces, both remembered here) overwrite
-// each other when their CSeq numbers coincide, and a CANCEL is then
-// forwarded to the wrong party with the wrong branch.
+// The two directions of one Call-ID (independent CSeq spaces, both
+// remembered here) keep one entry each when their CSeq numbers coincide —
+// here on one branch token from one sent-by, so the From tag alone separates
+// them: each CANCEL is forwarded to the party its own INVITE went to.
 #[tokio::test(start_paused = true)]
 async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
-    let dir_a = invite("glare-1@test", "tag-a", 5, "z9hG4bKa");
-    let dir_b = invite("glare-1@test", "tag-b", 5, "z9hG4bKb");
+    let dir_a = invite("glare-1@test", "tag-a", 5, "z9hG4bKglare");
+    let dir_b = invite("glare-1@test", "tag-b", 5, "z9hG4bKglare");
     f.core.route_request(&dir_a, src()).await;
-    f.core.route_request(&dir_b, src()).await;
+    f.gate.admit_next();
+    let fwd_b = f.core.route_request(&dir_b, src()).await;
+    assert_eq!(fwd_b.target, Some(ProxyAddr::new(W2, 5060)), "B's INVITE is a forward of its own");
 
-    let cxl_a = cancel("glare-1@test", "tag-a", 5, "z9hG4bKac");
-    let cxl_b = cancel("glare-1@test", "tag-b", 5, "z9hG4bKbc");
+    let cxl_a = cancel("glare-1@test", "tag-a", 5, "z9hG4bKglare");
+    let cxl_b = cancel("glare-1@test", "tag-b", 5, "z9hG4bKglare");
     let out_a = f.core.route_request(&cxl_a, src()).await;
     let out_b = f.core.route_request(&cxl_b, src()).await;
 
@@ -328,4 +379,54 @@ async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
         Some(ProxyAddr::new(W2, 5060)),
         "direction B's CANCEL follows B's INVITE"
     );
+}
+
+// §17.2.3 matches a transaction on branch AND sent-by: one branch token from
+// two senders is two transactions, each with its own forward and its own
+// CANCEL route, even under one Call-ID, From tag and CSeq.
+#[tokio::test(start_paused = true)]
+async fn one_branch_token_from_two_sent_bys_is_two_transactions() {
+    let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+    let (a, b) = ("10.0.1.1", "10.0.1.2");
+    let from = |host: &str| format!("{host}:5060").parse().unwrap();
+
+    let out = f
+        .core
+        .route_request(&invite_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
+        .await;
+    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)));
+    f.gate.admit_next();
+    let out = f
+        .core
+        .route_request(&invite_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
+        .await;
+    assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "another sender: no retransmission");
+
+    let out = f
+        .core
+        .route_request(&cancel_from(a, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(a))
+        .await;
+    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "a's CANCEL follows a's INVITE");
+    let out = f
+        .core
+        .route_request(&cancel_from(b, "twin-1@test", "tag-a", 1, "z9hG4bKtwin"), from(b))
+        .await;
+    assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "b's CANCEL follows b's INVITE");
+}
+
+// §16.10: a CANCEL that matches no remembered INVITE transaction (here one
+// that breaks §9.1 with a branch of its own) is forwarded statelessly, an
+// external one through new-dialog selection. The worker it reaches matches
+// it by its transaction (§9.2) and answers 481 when it holds no such INVITE.
+#[tokio::test(start_paused = true)]
+async fn an_external_cancel_matching_no_invite_takes_new_dialog_selection() {
+    let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+    f.core.route_request(&invite("miss-1@test", "tag-a", 1, "z9hG4bKb1"), src()).await;
+
+    let out = f.core.route_request(&cancel("miss-1@test", "tag-a", 1, "z9hG4bKb1x"), src()).await;
+    assert_eq!(out.decision, RoutingDecisionKind::Cancel);
+    assert_eq!(out.target, Some(ProxyAddr::new(W2, 5060)), "the next selection, not the INVITE's");
+    assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 2, "the CANCEL ran the selection");
+    let txt = f.metrics.prometheus_text();
+    assert!(txt.contains("\nsip_proxy_cancel_lookups_total{outcome=\"miss\"} 1\n"), "{txt}");
 }

@@ -13,12 +13,11 @@ use b2bua::config::CdrConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, HeaderUpdate,
-    NewCallRequest, NewCallResponse, RejectDecision, SipHeaderUpdates,
+    CallReferRequest, CallReferResponse, CallTreatment, HeaderUpdate, NewCallRequest,
+    NewCallResponse, RejectDecision, SipHeaderUpdates,
 };
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::limiter::LimiterEntry;
+use b2bua_harness::limiter::doubles::{fail_open, refuse_on};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, DecisionKind, TerminationCause};
 use scenario_harness::Harness;
@@ -83,7 +82,7 @@ impl CallDecisionEngine for Engine {
                 r.callback_context = Some("ctx".into());
                 r.label = Some("first".into());
                 if self.capped {
-                    r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                    r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 }
                 Ok(NewCallResponse::Route(r))
             }
@@ -106,28 +105,8 @@ impl CallDecisionEngine for Engine {
     }
 }
 
-/// A limiter that refuses the `cap` admission.
-struct RefusingLimiter;
-
-#[async_trait]
-impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        match entries.iter().find(|e| e.id == "cap") {
-            Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
-            None => AdmitOutcome::Unavailable,
-        }
-    }
-    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        ReleaseAnswer::Released
-    }
-    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
-        RefreshAnswer::Unavailable
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// The SUT under `engine`, keeping every terminated `Call` whole; a capped
-/// engine runs behind the refusing limiter.
+/// engine runs behind a limiter refusing `cap`.
 struct Sut {
     addr: SocketAddr,
     b2bua: B2buaSut,
@@ -141,7 +120,7 @@ impl Sut {
             c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
         });
         if capped {
-            builder = builder.limiter(Arc::new(RefusingLimiter));
+            builder = builder.limiter(refuse_on("cap", fail_open()));
         }
         let b2bua = builder.start(h, "b2bua", B2BUA).await;
         Self { addr: b2bua.addr, b2bua }

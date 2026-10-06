@@ -13,19 +13,17 @@
 //! admitted under a call of its own, so a surplus release reads below the
 //! witness instead of vanishing under the store's floor at 0.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua::drain::{DrainBounds, DrainExit};
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::limiter::{CallLimiter, LimiterEntry};
 use b2bua::metrics::{LimiterTask, ReleaseGiveUp};
+use b2bua_harness::limiter::doubles::panic_on_first_release;
 use b2bua_harness::{settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -142,7 +140,7 @@ impl Scene {
                     let mut r = route_to("127.0.0.1", 5070);
                     r.call_limiter = HOLDS
                         .iter()
-                        .map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit })
+                        .map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit })
                         .collect();
                     NewCallResponse::Route(r)
                 })
@@ -180,7 +178,7 @@ impl Scene {
         let mut bye = dialog.bye().await;
         self.bob.receive("BYE").await.respond(200, "OK").await;
         bye.expect(200).await;
-        b2bua_harness::advance(SIMULATED_TRANSIT_DELAY_MS).await;
+        self.h.advance(Duration::from_millis(SIMULATED_TRANSIT_DELAY_MS)).await;
     }
 
     /// Advance `secs` seconds one at a time, keeping the witnesses alive.
@@ -398,40 +396,12 @@ async fn a_call_ending_during_a_limiter_outage_is_not_delayed_by_the_limiter() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter `inner`, except that the first release request panics the
-/// task sending it.
-struct FirstReleasePanics {
-    inner: Arc<dyn CallLimiter>,
-    released: AtomicBool,
-}
-
-#[async_trait]
-impl CallLimiter for FirstReleasePanics {
-    async fn admit(&self, key: &str, entries: &[LimiterEntry], drop: bool) -> AdmitOutcome {
-        self.inner.admit(key, entries, drop).await
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        assert!(self.released.swap(true, Ordering::SeqCst), "the first release panics");
-        self.inner.release(keys).await
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        self.inner.refresh(calls).await
-    }
-    fn report_to(&self, reports: b2bua::limiter::LimiterReports) {
-        self.inner.report_to(reports);
-    }
-}
-
 /// The release queue's sender panics on the call's release: it is restarted,
 /// counted, and sends the release the panic interrupted.
 #[tokio::test(start_paused = true)]
 async fn a_release_sender_that_panics_is_restarted_and_the_release_lands() {
-    let s = Scene::with_client(
-        "release-queue-drainer-restart",
-        |_| {},
-        |inner| Arc::new(FirstReleasePanics { inner, released: AtomicBool::new(false) }),
-    )
-    .await;
+    let s =
+        Scene::with_client("release-queue-drainer-restart", |_| {}, panic_on_first_release).await;
     let mut dialog = s.establish().await;
     s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
     s.hang_up(&mut dialog).await;
@@ -478,7 +448,9 @@ async fn a_draining_worker_flushes_its_release_queue_before_it_exits() {
     assert_eq!(out.elapsed, elapsed, "the drain's time includes its flush");
     let metrics = s.b2bua.metrics();
     assert_eq!(
-        metrics.limiter().release_flushes_total(b2bua::limiter_release::ReleaseFlushOutcome::Sent),
+        metrics
+            .limiter()
+            .release_flushes_total(b2bua::limiter::release_queue::ReleaseFlushOutcome::Sent),
         1
     );
     assert_eq!(
@@ -521,7 +493,7 @@ async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
     assert_eq!(
         metrics
             .limiter()
-            .release_flushes_total(b2bua::limiter_release::ReleaseFlushOutcome::GivenUp),
+            .release_flushes_total(b2bua::limiter::release_queue::ReleaseFlushOutcome::GivenUp),
         1
     );
     assert_eq!(

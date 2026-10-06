@@ -1,4 +1,4 @@
-//! The capture adapter (issue 29): one leg of an emitted flows document
+//! The capture adapter: one leg of an emitted flows document
 //! projected into the `rfc-rules` wire model, and the merged rules' findings
 //! folded back into the census [`Scan`].
 //!
@@ -27,7 +27,7 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
         closed: false,
     };
     let view = WireView { msgs: &msgs, obs: &obs };
-    // Report order matches the historical census order: CANCEL, PRACK, ACK,
+    // Report order is the census order: CANCEL, PRACK, ACK,
     // then whatever joined the WIRE subset after them.
     let rules: [&dyn Obligation; 5] = [
         &No200AfterCancel,

@@ -24,7 +24,7 @@
 //!     confirm, the requests it sends on it carry that dialog's remote tag.
 //!
 //! **The state is per `(endpoint, Call-ID)` and built from that endpoint's own
-//! stream** ([`PeerDialogs`]): the tags it minted, the requests it sent, the
+//! stream** (`PeerDialogs`): the tags it minted, the requests it sent, the
 //! INVITEs it took, the URI its dialog was created with. Every rule here reads
 //! that state as it stood BEFORE the message being judged — evidence the taker
 //! itself had at the moment it would have had to reject.
@@ -38,7 +38,7 @@
 //! [`DialogCallIdStable`] deliberately does NOT partition on Call-ID — a
 //! partition would make a Call-ID CHANGE invisible by opening a second one —
 //! [`TagConsistency`] keys on the server transaction rather than the dialog, and
-//! [`InDialogToTag`] needs a witness [`PeerDialogs`] does not carry (which
+//! [`InDialogToTag`] needs a witness `PeerDialogs` does not carry (which
 //! branch established the dialog, which drew a non-2xx), so each walks the view
 //! under its own key.
 

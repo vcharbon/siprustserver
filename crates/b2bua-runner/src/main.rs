@@ -3,7 +3,7 @@
 //! Wires the `b2bua` library over the **real, non-recording** UDP transport
 //! (`sip_net::RealSignalingNetwork` — no `Recorder` decorator, no simulated
 //! fabric) and a **system wall clock** (`Clock::system`, so transaction/dialog
-//! timers fire). The generic runner plumbing — env grammar, bind + Tier-1
+//! timers fire). The generic runner plumbing — env grammar, bind + ingress
 //! brake, advertise coercion, deps defaults, probe server, gauge sampler,
 //! SIGTERM/drain — lives in `b2bua-runner-kit` (shared with downstream runner
 //! binaries per ADR-0016); this binary keeps only its OWN composition choices:
@@ -16,7 +16,7 @@
 //!   - CDR  : RabbitMQ sink when `B2BUA_CDR_RABBITMQ_URL` is set, else the
 //!            kit's discarding `NullCdrWriter` — either way behind the bounded
 //!            `BufferedCdrWriter` (drop-on-overload).
-//!   - HA   : opt-in peer-to-peer replication (S11) with static or kube
+//!   - HA   : opt-in peer-to-peer replication with static or kube
 //!            EndpointSlice membership.
 //!   - alloc: jemalloc (+ heap-profiling `/debug/heap` route, jemalloc stats
 //!            appended to `/metrics`).
@@ -24,7 +24,7 @@
 //! Config via env (all optional; the generic `B2BUA_*`/`LIMITER_*`/`WORKER_*`
 //! knobs are parsed by `b2bua_runner_kit::RunnerEnv` — see its field docs):
 //!   B2BUA_LISTEN    SIP/signaling listen addr        (default 0.0.0.0:5060)
-//!   B2BUA_ADVERTISE SIP host[:port] stamped on Via/Contact/b-leg Call-ID
+//!   B2BUA_ADVERTISE SIP host\[:port\] stamped on Via/Contact/b-leg Call-ID
 //!                   (default: bound IP, or loopback if bind is 0.0.0.0).
 //!                   In k8s inject the pod IP via downward API `status.podIP`,
 //!                   else peers route responses to 0.0.0.0 (a storm).
@@ -47,6 +47,8 @@
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
+//!   B2BUA_NEW_CALL_PERMIT_SHARE_PCT share of B2BUA_CONCURRENCY normal initial-INVITE turns may hold (default 50; 1..=100; emergency INVITEs draw the whole pool)
+//!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
@@ -54,7 +56,8 @@
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC b-leg initial INVITE give-up when NOTHING answers, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32 — tightening is a deliberate §17.1.1.2 deviation, telephony policy: 2 s buys 2 re-sends, 5 s 3, 10 s 4, 32 s 6; a provisional swaps in B2BUA_INVITE_TXN_TIMEOUT_SEC; in-dialog INVITE and non-INVITE keep 64·T1)
 //!   B2BUA_CANCEL_STRICT_RFC_WAIT truthy (1/true/yes/on) = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
-//!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
+//!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg destination allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
+//!   B2BUA_PRIVACY_SERVICE on (default) = this worker is the RFC 3323 privacy service and withholds the asserted identity a concealing Privacy names; off = the next hop is the trust boundary and the identity rides
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)
 //!   B2BUA_CDR_MESSAGE_RING per-leg message-ring cap on the call record: the last N distinct SIP messages a leg received or sent (default 0 = off)
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
@@ -66,23 +69,23 @@
 //!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)
 //!   B2BUA_STRESS_LIMITER_LIMIT cap for that entry (never rejects in practice) (default 999999)
 //!
-//! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off: unwired node)
+//! ## HA replication — opt-in via `B2BUA_REPL=1` (default off: unwired node)
 //!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
 //!   B2BUA_NAMESPACE  the replication grammar (see `b2bua_runner_kit::ReplicationSettings`)
 //!
 //! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
-// Use jemalloc instead of the glibc system allocator. Under the many tokio
-// worker threads, glibc malloc spawns up to 8×ncpu arenas and retains freed
-// chunks (it caps arena *count*, not per-arena high-water mark), so a churning
-// SIP B2BUA's RSS ratchets monotonically up under sustained load and never
-// returns memory to the OS — a 2026-06-13/14 no-chaos soak measured ~209 MiB/h
-// growth with all logical state (active_calls/store/txn/repl) dead flat, leading
-// to a node-cgroup OOM. jemalloc's decay-based purging returns dirty/muzzy pages
-// to the OS (tuned aggressively via _RJEM_MALLOC_CONF on the worker container),
-// bounding steady-state RSS. No logical leak exists; this is purely allocator
-// retention. See deploy/k8s/manifests/20-worker.yaml.
+// Use jemalloc instead of the glibc system allocator. Under the many tokio worker
+// threads, glibc malloc spawns up to 8×ncpu arenas and retains freed chunks (it
+// caps arena *count*, not per-arena high-water mark), so a churning SIP B2BUA's
+// RSS ratchets monotonically up under sustained load and never returns memory to
+// the OS — a no-chaos soak measured ~209 MiB/h growth with all logical state
+// (active_calls/store/txn/repl) dead flat, leading to a node-cgroup OOM.
+// jemalloc's decay-based purging returns dirty/muzzy pages to the OS (tuned
+// aggressively via _RJEM_MALLOC_CONF on the worker container), bounding
+// steady-state RSS. No logical leak exists; this is purely allocator retention.
+// See deploy/k8s/manifests/20-worker.yaml.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -90,14 +93,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::env;
 use std::sync::Arc;
 
-use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
+use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, RunnerEnv};
+use call::LimiterEntry;
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
 /// admit/release/refresh chain is exercised on all traffic (the endurance suite
 /// drives this). `B2BUA_STRESS_LIMITER_ID` empty disables it; the default cap
 /// (`B2BUA_STRESS_LIMITER_LIMIT`, default 999999) is high enough to never reject.
-fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
+fn stress_limiter_from_env() -> Option<LimiterEntry> {
     let id = env_or("B2BUA_STRESS_LIMITER_ID", "global-stress");
     if id.trim().is_empty() {
         return None;
@@ -106,7 +110,7 @@ fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(999_999);
-    Some(CallLimiterEntry { id, limit })
+    Some(LimiterEntry { id, limit })
 }
 
 #[tokio::main]
@@ -124,7 +128,7 @@ async fn main() {
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
-    // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (Tier-1
+    // Generic runner plumbing (b2bua-runner-kit): env grammar → bind (ingress
     // brake installed) → advertise coercion → validated config + metrics/clock.
     let base = RunnerEnv::from_env().bind("b2bua-runner").await;
 
@@ -149,7 +153,7 @@ async fn main() {
         )
         .await;
 
-    // Replication (opt-in, S11): `None` leaves the node unwired.
+    // Replication (opt-in): `None` leaves the node unwired.
     deps.replication = base.replication_setup_from_env().await;
 
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)

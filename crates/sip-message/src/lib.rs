@@ -16,6 +16,7 @@ pub mod header;
 pub mod method;
 pub mod parser;
 pub mod sip_str;
+pub mod status;
 pub mod types;
 
 pub mod deviation;

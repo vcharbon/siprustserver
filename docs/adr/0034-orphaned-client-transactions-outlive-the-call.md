@@ -74,15 +74,16 @@ The metrics name the state: `txn_orphaned_on_call_evict` counts orphans made,
 ## Retention
 
 The earliest moment an orphan may be purged is its own RFC timer, measured
-from the event that arms it; the layer purges at exactly that moment and the
-safety-net sweep (35 s) sits just above each window:
+from the event that arms it; the layer purges at exactly that moment, the
+transaction's one lifetime deadline (`sip-txn` `layer::lifetime`), which the
+safety-net sweep only re-reads:
 
 | Orphan's fate | Held until | From |
 |---|---|---|
 | non-2xx final taken | Timer D = 64·T1 (≥ 32 s on UDP, §17.1.1.2) | the first final |
 | 2xx final taken | Timer M = 64·T1 (RFC 6026 §7.2, §8.4; matches the sender's §13.3.1.4 repeat bound) | the first 2xx |
 | no final, no provisional | Timer B = 64·T1 (§17.1.1.2), then 64·T1 (§9.1) | the INVITE |
-| no final, a provisional | the configured INVITE bound (`invite_initial_timeout_ms`; §17.1.1.2 has no client timer in Proceeding — the bound is deployment policy), then 64·T1 (§9.1) | the first provisional |
+| no final, a provisional | the configured INVITE bound (`invite_initial_timeout_ms`; §17.1.1.2 has no client timer in Proceeding — the bound is deployment policy; armed at the first provisional), then 64·T1 (§9.1) | the INVITE |
 | non-INVITE, no final | Timer F = 64·T1 (§17.1.2.2) | the request |
 | CANCEL that draws nothing | its INVITE transaction's bound above; the CANCEL's own Timer E ladder stops at 64·T1 (§17.1.2.2) | the CANCEL |
 
@@ -103,5 +104,5 @@ safety-net sweep (35 s) sits just above each window:
   crossing 2xx on a resident call (`resolve-cancelled-reinvite-response`) are
   unchanged.
 - The retention windows above are the invariant the paused-clock tests pin
-  (`crates/b2bua-harness/tests/reinvite_final_after_teardown_is_acked.rs`,
-  `crates/sip-txn/tests/cancel_on_evict.rs`).
+  (`crates/b2bua-harness/tests/it/reinvite_final_after_teardown_is_acked.rs`,
+  `crates/sip-txn/tests/it/cancel_on_evict.rs`).

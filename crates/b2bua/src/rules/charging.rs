@@ -1,197 +1,96 @@
-//! RFC 7315 §5.6 charging correlation on a call's messages. A call whose
-//! decision stated its charging vector
-//! ([`call::features::FeatureActivations::stated_charging_vector`]) has every
-//! message the stack sends on every leg — requests and responses but
-//! `100 Trying` — carry exactly the stated lines, none for a stated removal, in
-//! place of any relayed or minted copy. A call stating nothing keeps the
-//! originated-leg arm ([`minting_arm`]) and the relay of the originator's
-//! vector.
-//!
-//! The stamp is idempotent: a message already carrying exactly the stated
-//! lines is left as it is, so a message stamped before it is retained for
-//! repetition and stamped again on its way out stays the same bytes.
-//! FIXME(charging-vector): a retention stamps from the working call, the turn's
-//! outbound from the end-of-turn call; a statement changed later in the same
-//! turn would split them. Stamp retained emissions at end of turn.
+//! RFC 7315 §5.6 charging correlation on the legs a call originates: the
+//! originated-leg arm ([`call::features::ChargingVectorFeature`]) mints a
+//! vector on a leg's INVITE where none reached the stack. A call whose
+//! decision states the vector for that INVITE ([`call::features::StatedHeaders`])
+//! mints none: the decision outranks the arm, and the stated headers carry it
+//! (`rules::stated_headers`). A deployment that leaves media legs uncharged
+//! ([`call::features::FeatureActivations::uncharged_media_legs`]) has neither
+//! a mint nor a relayed vector on a media leg's INVITE ([`uncharge_media_leg`]).
+//! An arm with `in_dialog_invites` also puts the leg's own vector on the
+//! re-INVITEs the stack sends on its own behalf ([`in_dialog_invite_vector`]).
 
-use call::features::{ChargingVectorFeature, StatedChargingVector};
-use call::Call;
-use sip_message::header::{ChargingVector, HeaderName, HeaderValue};
-use sip_message::{SipRequest, SipResponse};
+use call::features::ChargingVectorFeature;
+use call::{Call, LegKind};
+use sip_message::header::{ChargingVector, HeaderValue};
 
-use crate::effects::{HandlerResult, OutboundBody, OutboundSipEffect};
-
-/// The `P-Charging-Vector` lines every message of `call` carries, where its
-/// decision stated them: the stated lines, or none for a stated removal.
-pub fn stated(call: &Call) -> Option<&[String]> {
-    match call.features.as_ref()?.stated_charging_vector.as_ref()? {
-        StatedChargingVector::Lines(lines) => Some(lines),
-        StatedChargingVector::Removed => Some(&[]),
-    }
-}
-
-/// The arm a leg this call originates mints its own vector under: none where
-/// the call's decision stated its vector, lines or a removal.
-pub fn minting_arm(call: &Call) -> Option<&ChargingVectorFeature> {
+/// The arm the leg `leg_id` of `kind` this call originates mints its own
+/// vector under: none where the set that leg takes (its own, else the call's)
+/// states the vector for its INVITE, or where the deployment leaves a media
+/// leg uncharged.
+pub fn minting_arm<'a>(
+    call: &'a Call,
+    leg_id: &str,
+    kind: Option<LegKind>,
+) -> Option<&'a ChargingVectorFeature> {
     let features = call.features.as_ref()?;
-    match features.stated_charging_vector {
-        Some(_) => None,
-        None => features.charging_vector.as_ref(),
-    }
-}
-
-/// Stamp every outbound message of `result` with its call's stated vector.
-pub fn stamp_outbound(mut result: HandlerResult) -> HandlerResult {
-    if let Some(lines) = stated(&result.call).map(<[String]>::to_vec) {
-        for effect in &mut result.effects.outbound {
-            stamp_with(&lines, effect);
-        }
-    }
-    result
-}
-
-/// Stamp `effect` with `call`'s stated vector, if it states one.
-pub fn stamp(call: &Call, effect: &mut OutboundSipEffect) {
-    if let Some(lines) = stated(call) {
-        stamp_with(lines, effect);
-    }
-}
-
-/// Stamp `resp` with `call`'s stated vector, if it states one.
-pub fn stamp_response(call: &Call, resp: &mut SipResponse) {
-    if let Some(stamped) = stated(call).and_then(|lines| stamped_response(lines, resp)) {
-        *resp = stamped;
-    }
-}
-
-/// Stamp a request or response body with `lines`. A retained datagram is left
-/// as it is: its bytes were stamped before they were retained.
-fn stamp_with(lines: &[String], effect: &mut OutboundSipEffect) {
-    match &mut effect.body {
-        OutboundBody::Request(req) => {
-            if let Some(stamped) = stamped_request(lines, req) {
-                *req = stamped;
-            }
-        }
-        OutboundBody::Response(resp) => {
-            if let Some(stamped) = stamped_response(lines, resp) {
-                *resp = stamped;
-            }
-        }
-        OutboundBody::Datagram(_) => {}
-    }
-}
-
-fn name() -> HeaderName {
-    ChargingVector::header_name()
-}
-
-/// Whether `carried` are exactly `lines`, in order.
-fn carries<'a>(carried: impl Iterator<Item = &'a str>, lines: &[String]) -> bool {
-    carried.eq(lines.iter().map(String::as_str))
-}
-
-/// `req` carrying exactly `lines` as its charging lines, or `None` where it
-/// already does. The lines replace every relayed or minted copy.
-fn stamped_request(lines: &[String], req: &SipRequest) -> Option<SipRequest> {
-    if carries(req.raw(name()), lines) {
+    if uncharged(call, kind) {
         return None;
     }
-    let draft = req.thaw().remove(&name());
-    lines.iter().fold(draft, |d, line| d.push_raw(name(), line.clone())).freeze().ok()
-}
-
-/// `resp` carrying exactly `lines`, or `None` where it already does or is a
-/// `100`, which is hop-by-hop (RFC 3261 §21.1.1) and is left as it is.
-fn stamped_response(lines: &[String], resp: &SipResponse) -> Option<SipResponse> {
-    if resp.status() == 100 || carries(resp.raw(name()), lines) {
+    let name = ChargingVector::header_name();
+    if features.stated_headers.as_ref().is_some_and(|s| s.of_leg(leg_id).states(name.as_wire_str()))
+    {
         return None;
     }
-    let draft = resp.thaw().remove(&name());
-    lines.iter().fold(draft, |d, line| d.push_raw(name(), line.clone())).freeze().ok()
+    features.charging_vector.as_ref()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{SipMessage, SipParser};
+/// True iff `call`'s deployment leaves a leg of `kind` uncharged.
+fn uncharged(call: &Call, kind: Option<LegKind>) -> bool {
+    kind == Some(LegKind::Media) && call.features.as_ref().is_some_and(|f| f.uncharged_media_legs)
+}
 
-    const VECTOR: &str = "icid-value=abc;orig-ioi=example.net";
-
-    fn one() -> Vec<String> {
-        vec![VECTOR.to_string()]
+/// The media leg's INVITE `effect` mints on `leg` with no `P-Charging-Vector`
+/// where the deployment leaves media legs uncharged and the decision's
+/// `header_updates` state none for it; the leg's handles hold the INVITE as it
+/// leaves.
+pub fn uncharge_media_leg(
+    call: &Call,
+    kind: Option<LegKind>,
+    header_updates: &[(String, Option<String>)],
+    leg: &mut call::Leg,
+    effect: &mut crate::effects::OutboundSipEffect,
+) {
+    let name = ChargingVector::header_name();
+    if !uncharged(call, kind) || header_updates.iter().any(|(n, _)| name.matches(n)) {
+        return;
     }
-
-    fn parse(raw: &str) -> SipMessage {
-        CustomParser::new().parse(raw.as_bytes()).unwrap()
-    }
-
-    fn request(extra: &str) -> SipRequest {
-        let raw = format!(
-            "BYE sip:bob@192.0.2.9 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.5;branch=z9hG4bK-1\r\n\
-Max-Forwards: 70\r\nFrom: <sip:alice@192.0.2.5>;tag=a\r\nTo: <sip:bob@192.0.2.9>;tag=b\r\n\
-Call-ID: c1\r\nCSeq: 2 BYE\r\n{extra}Content-Length: 0\r\n\r\n"
-        );
-        match parse(&raw) {
-            SipMessage::Request(r) => r,
-            _ => unreachable!(),
+    if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
+        if req.raw(name.clone()).next().is_none() {
+            return;
+        }
+        let was = req.image().to_vec();
+        if let Ok(stripped) = req.thaw().remove(&name).freeze() {
+            *req = stripped;
+            call::helpers::restate_leg_invite(leg, &was, req.image());
         }
     }
+}
 
-    fn response(status: &str) -> SipResponse {
-        let raw = format!(
-            "SIP/2.0 {status}\r\nVia: SIP/2.0/UDP 192.0.2.5;branch=z9hG4bK-1\r\n\
-From: <sip:alice@192.0.2.5>;tag=a\r\nTo: <sip:bob@192.0.2.9>;tag=b\r\n\
-Call-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n"
-        );
-        match parse(&raw) {
-            SipMessage::Response(r) => r,
-            _ => unreachable!(),
-        }
+/// The vector line a re-INVITE the stack sends on its own behalf on `leg_id`
+/// carries, where the call's arm carries `in_dialog_invites`: the vector that
+/// leg's dialog-creating INVITE carried (the originator's own on the
+/// originator's leg), none where it carried none or the leg is an uncharged
+/// media leg.
+pub fn in_dialog_invite_vector(call: &Call, leg_id: &str) -> Option<String> {
+    call.features
+        .as_ref()
+        .and_then(|f| f.charging_vector.as_ref())
+        .filter(|a| a.in_dialog_invites)?;
+    let leg = call::helpers::find_leg(call, leg_id)?;
+    let kind = call::helpers::leg_kind(leg);
+    if uncharged(call, Some(kind)) {
+        return None;
     }
-
-    fn lines(req: &SipRequest) -> Vec<String> {
-        req.raw(name()).map(str::to_string).collect()
+    let name = ChargingVector::header_name();
+    if kind == LegKind::A {
+        return call
+            .a_leg_invite
+            .headers
+            .iter()
+            .find(|h| name.matches(&h.name))
+            .map(|h| h.value.clone());
     }
-
-    /// Every relayed or minted copy gives way to the one stated line.
-    #[test]
-    fn the_stated_vector_replaces_every_copy() {
-        let relayed = request("P-Charging-Vector: icid-value=one\r\np-charging-vector: two\r\n");
-        let stamped = stamped_request(&one(), &relayed).expect("restated");
-        assert_eq!(lines(&stamped), [VECTOR]);
-        let bare = stamped_request(&one(), &request("")).expect("added");
-        assert_eq!(lines(&bare), [VECTOR]);
-    }
-
-    /// A message already stating exactly the vector is the same bytes after a
-    /// second stamp — what keeps a retained repeat equal to its original.
-    #[test]
-    fn a_second_stamp_changes_nothing() {
-        let once = stamped_request(&one(), &request("")).unwrap();
-        assert!(stamped_request(&one(), &once).is_none());
-        let answered = stamped_response(&one(), &response("200 OK")).unwrap();
-        assert!(stamped_response(&one(), &answered).is_none());
-    }
-
-    /// `100 Trying` is hop-by-hop and carries none; every other response does.
-    #[test]
-    fn a_trying_is_left_alone() {
-        assert!(stamped_response(&one(), &response("100 Trying")).is_none());
-        let ringing = stamped_response(&one(), &response("180 Ringing")).unwrap();
-        assert_eq!(ringing.raw(name()).collect::<Vec<_>>(), [VECTOR]);
-    }
-
-    /// Several stated lines ride in order; a stated removal takes every
-    /// relayed copy off, and a message carrying none is left as it is.
-    #[test]
-    fn several_lines_ride_in_order_and_a_removal_strips_every_copy() {
-        let two = vec!["icid-value=a".to_string(), "orig-ioi=b".to_string()];
-        let stamped = stamped_request(&two, &request("P-Charging-Vector: other\r\n")).unwrap();
-        assert_eq!(lines(&stamped), two);
-        let relayed = request("P-Charging-Vector: icid-value=one\r\n");
-        assert_eq!(lines(&stamped_request(&[], &relayed).unwrap()), Vec::<String>::new());
-        assert!(stamped_request(&[], &request("")).is_none());
-    }
+    let dialled = crate::rules::relay::dialling_invite(leg)?;
+    let line = dialled.raw(name).next().map(str::to_string);
+    line
 }

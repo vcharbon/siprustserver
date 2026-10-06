@@ -126,6 +126,9 @@ fn msg_strings(msg: &MsgSpec) -> Vec<Text<'_>> {
                 }
             }
         }
+        if let Some(addr) = reference.addr() {
+            out.push(one(format!("{field}.addr"), addr));
+        }
     }
     for header in &msg.headers {
         out.push(one("msg.headers[].name", header.name.as_str()));
@@ -204,8 +207,8 @@ mod tests {
               "msg": {
                 "method": "INVITE", "status": 200, "reason": "OK", "cseq-method": "INVITE",
                 "ruri": { "pos": "called[0][0]", "form": "trunk-composed" },
-                "from": { "frozen": "f", "kind": "anonymous" },
-                "to": { "pos": "caller" },
+                "from": { "frozen": "f", "kind": "anonymous", "addr": "<sip:f>" },
+                "to": { "pos": "caller", "addr": "<sip:${num:caller:e164}@h>" },
                 "headers": [{ "name": "Allow", "value": "INVITE" }],
                 "headers-present": ["session-expires"],
                 "body": { "multipart": { "content-type": "multipart/mixed", "parts": [
@@ -235,7 +238,9 @@ mod tests {
             "msg.ruri.form",
             "msg.from.frozen",
             "msg.from.kind",
+            "msg.from.addr",
             "msg.to.pos",
+            "msg.to.addr",
             "msg.headers[].name",
             "msg.headers[].value",
             "msg.headers-present[]",

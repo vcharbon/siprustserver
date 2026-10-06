@@ -1,34 +1,11 @@
-//! Current-load read seam: the [`LoadSampler`] trait, the production tokio
-//! busy-ratio sampler, and the injectable [`simulated`] pair for tests.
-//! The front proxy's self-gate sampler does NOT live here — see
-//! `sip_proxy::self_gate`.
+//! The worker's production [`LoadSampler`]: the tokio runtime busy ratio,
+//! bounded by the process's CPU budget.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+
+use load_shed::{clamp01, LoadSampler};
 
 use super::cpu_budget::CpuBudget;
-
-/// Clamp a reading to `0..=1`, mapping non-finite to `0`.
-fn clamp01(v: f64) -> f64 {
-    if !v.is_finite() {
-        return 0.0;
-    }
-    v.clamp(0.0, 1.0)
-}
-
-/// Current-load reader: two snapshot reads consumed by the per-worker overload
-/// signal pipeline. Both return a `0..=1` ratio of wall time since the previous
-/// call. Smoothing (EWMA) is the consumer's
-/// ([`OverloadSignal`](super::OverloadSignal)) responsibility, not the
-/// sampler's — a test fixture injects a raw value with no convergence wait.
-pub trait LoadSampler: Send + Sync {
-    /// Event-Loop Utilization since the previous `elu()` call (`0..=1`) — "the
-    /// loop is busy".
-    fn elu(&self) -> f64;
-    /// Fraction of wall time spent in GC pauses since the previous `gc_fraction()`
-    /// call (`0..=1`).
-    fn gc_fraction(&self) -> f64;
-}
 
 /// Production [`LoadSampler`] — a faithful tokio runtime busy-ratio.
 ///
@@ -45,7 +22,7 @@ pub trait LoadSampler: Send + Sync {
 ///
 /// i.e. the share of the CPU the runtime may use that it actually spent
 /// processing work between two reads, clamped to `0..=1` — the signal the
-/// proxy band classifier and the Tier-3 panic-ELU backstop both key on. The
+/// proxy band classifier and the panic-ELU rung both key on. The
 /// capacity is [`CpuBudget::capacity`]: the cgroup CPU quota when it is below
 /// the worker count and the affinity set gives every worker a CPU, else the
 /// worker count. The budget is re-read on every `elu()`, so a resized limit
@@ -157,64 +134,10 @@ impl LoadSampler for LiveLoadSampler {
     }
 }
 
-/// Test/simulated [`LoadSampler`] with a paired control surface.
-///
-/// A single shared cell backs both the read seam and the control surface, so a
-/// test that holds the [`SimulatedLoadControl`] and calls `set_elu(0.85)` sees
-/// `0.85` from `LoadSampler::elu()`. Build with [`simulated`].
-#[derive(Clone)]
-pub struct SimulatedLoadSampler {
-    inner: Arc<SimulatedInner>,
-}
-
-/// The control half of [`SimulatedLoadSampler`] — set the next reading.
-/// Clamped to `0..=1`.
-#[derive(Clone)]
-pub struct SimulatedLoadControl {
-    inner: Arc<SimulatedInner>,
-}
-
-struct SimulatedInner {
-    // Stored as the bit pattern of an f64 so the read seam is lock-free and the
-    // control writes are atomic — a test on another task observes the latest set.
-    elu_bits: AtomicU64,
-    gc_bits: AtomicU64,
-}
-
-/// Build a simulated sampler + its control, sharing one backing cell — a value
-/// set through the control is read back through the sampler.
-pub fn simulated() -> (SimulatedLoadSampler, SimulatedLoadControl) {
-    let inner = Arc::new(SimulatedInner {
-        elu_bits: AtomicU64::new(0.0f64.to_bits()),
-        gc_bits: AtomicU64::new(0.0f64.to_bits()),
-    });
-    (SimulatedLoadSampler { inner: inner.clone() }, SimulatedLoadControl { inner })
-}
-
-impl LoadSampler for SimulatedLoadSampler {
-    fn elu(&self) -> f64 {
-        f64::from_bits(self.inner.elu_bits.load(Ordering::Relaxed))
-    }
-    fn gc_fraction(&self) -> f64 {
-        f64::from_bits(self.inner.gc_bits.load(Ordering::Relaxed))
-    }
-}
-
-impl SimulatedLoadControl {
-    /// Set the next `elu()` reading (clamped to `0..=1`).
-    pub fn set_elu(&self, v: f64) {
-        self.inner.elu_bits.store(clamp01(v).to_bits(), Ordering::Relaxed);
-    }
-    /// Set the next `gc_fraction()` reading (clamped to `0..=1`).
-    pub fn set_gc_fraction(&self, v: f64) {
-        self.inner.gc_bits.store(clamp01(v).to_bits(), Ordering::Relaxed);
-    }
-}
-
 #[cfg(test)]
 mod sampler_tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A voided budget read keeps the last full one; the next full read replaces it.
     #[test]
@@ -230,25 +153,6 @@ mod sampler_tests {
         VOID.store(true, Ordering::Relaxed);
         assert_eq!(s.refresh_budget(&mut last).capacity(1), 0.5);
         assert_eq!(last.quota, Some(0.5));
-    }
-
-    /// The simulated control and sampler share one cell: a value set through
-    /// the control is read back through the sampler, and readings are clamped
-    /// to `0..=1`.
-    #[test]
-    fn simulated_control_and_sampler_share_one_cell_and_clamp() {
-        let (sampler, ctl) = simulated();
-        ctl.set_elu(0.85);
-        ctl.set_gc_fraction(0.1);
-        assert!((sampler.elu() - 0.85).abs() < 1e-9);
-        assert!((sampler.gc_fraction() - 0.1).abs() < 1e-9);
-        // Clamp: above 1 → 1, below 0 → 0, NaN → 0.
-        ctl.set_elu(5.0);
-        assert_eq!(sampler.elu(), 1.0);
-        ctl.set_elu(-1.0);
-        assert_eq!(sampler.elu(), 0.0);
-        ctl.set_elu(f64::NAN);
-        assert_eq!(sampler.elu(), 0.0);
     }
 
     /// The live sampler reports a `0..=1` ELU and a structurally-`0` GC fraction.

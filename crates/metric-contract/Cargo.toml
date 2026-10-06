@@ -1,0 +1,23 @@
+[package]
+name = "metric-contract"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The metric contract of every shipped binary: exports each binary's catalogue as JSON, and checks the metric names and selector labels that readers (dashboards, probes, scripts) spell against it."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "metric-contract"
+path = "src/main.rs"
+
+[dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
+b2bua-runner-kit = { path = "../b2bua-runner-kit" }
+sip-proxy-runner = { path = "../sip-proxy-runner" }
+call-limiter = { path = "../call-limiter" }
+loadgen = { path = "../loadgen" }
+cdr-consumer-runner = { path = "../cdr-consumer-runner" }
+serde_json = { workspace = true }

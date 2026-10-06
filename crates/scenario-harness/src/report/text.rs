@@ -6,7 +6,7 @@
 //! timeline format the failover harness uses for its three-plane view.
 //!
 //! The **per-endpoint** views (`<net>/<agent>.txt`, one per agent filtered to
-//! that agent's wire address) keep the historic per-message wire dump here —
+//! that agent's wire address) keep the per-message wire dump here —
 //! they are a SIP-specific, single-actor cut with no analogue in the neutral
 //! model, so they stay native to scenario-harness. Lane identity is `(ip,port)`;
 //! names are decorations resolved from the lane registry.

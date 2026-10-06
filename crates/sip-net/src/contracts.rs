@@ -264,8 +264,8 @@ use std::collections::HashSet;
 /// The source's `shouldAuditBind` escape valve.
 pub type ShouldAuditBind = Arc<dyn Fn(&LaneKey) -> bool + Send + Sync>;
 
-/// Options for the recording/audit decorator. (Port of `ScopedAuditOptions`;
-/// the per-test `exceptions` ledger is deferred — see MIGRATION_STATUS.)
+/// Options for the recording/audit decorator. (Port of `ScopedAuditOptions`,
+/// without its per-test `exceptions` ledger.)
 #[derive(Default, Clone)]
 pub struct ScopedAuditOptions {
     /// Per-bind rules, evaluated at bind drop. The default RFC suite fills none
@@ -472,7 +472,7 @@ impl RecordingSignalingNetwork {
 #[async_trait]
 impl SignalingNetwork for RecordingSignalingNetwork {
     async fn bind_udp(&self, opts: BindUdpOpts) -> Result<Box<dyn UdpEndpoint>, BindError> {
-        // Logical sub-lane (036 ask C): a labelled bind records under
+        // Logical sub-lane: a labelled bind records under
         // `ip:port#<label>` so several logical endpoints sharing one socket
         // stay distinct columns. `report::lane_addr` recovers the address.
         let bind_key = match &opts.lane_label {

@@ -35,11 +35,11 @@ use call::{
 };
 use tokio::sync::mpsc;
 
-use crate::dispatch::{HandlerFailure, PerCallDispatcher};
+use crate::dispatch::{HandlerFailure, InFlight};
 use crate::effects::HandlerResult;
-use crate::event::CallEvent;
 use crate::metrics::B2buaMetrics;
 use crate::store::CallState;
+use b2bua_sdk::event::CallEvent;
 
 /// The synthetic-event topic every reaper verdict carries.
 pub const REAPER_TOPIC: &str = "reaper";
@@ -169,30 +169,23 @@ impl Reaper {
         })
     }
 
-    /// The dispatcher-facing overflow hook: a call flooded past its overflow
-    /// ceiling is condemned — one `overflow` verdict now, then one per sweep
-    /// with the stale escalation (abort, discharge) until it is gone. Once
-    /// per call, so a flood sends one verdict, not one per refused job.
-    pub fn overflow_hook(&self) -> crate::dispatch::OverflowHook {
-        let this = self.clone();
-        Arc::new(move |call_ref: &str| {
-            if this.enabled && this.condemned.lock().unwrap().insert(call_ref.to_string()) {
-                this.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
-            }
-        })
+    /// Hears a call whose dispatch overflow reached its ceiling: it is
+    /// condemned — one `overflow` verdict now, then one per sweep with the
+    /// stale escalation (abort, discharge) until it is gone. Once per call,
+    /// so a flood sends one verdict, not one per refused event.
+    pub fn on_overflow_ceiling(&self, call_ref: &str) {
+        if self.enabled && self.condemned.lock().unwrap().insert(call_ref.to_string()) {
+            self.send_verdict(call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
+        }
     }
 
-    /// The dispatcher-facing lifetime hook: a call that crossed its lifetime
-    /// message cap gets one `message-cap` verdict. The dispatcher admits it
-    /// past every bound and refuses the call's requests from then on, so one
-    /// is enough.
-    pub fn lifetime_hook(&self) -> crate::dispatch::LifetimeHook {
-        let this = self.clone();
-        Arc::new(move |call_ref: &str| {
-            if this.enabled && this.capped.lock().unwrap().insert(call_ref.to_string()) {
-                this.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
-            }
-        })
+    /// Hears a call that crossed its lifetime message cap: one
+    /// `message-cap` verdict. The verdict is admitted past every bound and
+    /// the call's requests are refused from then on, so one is enough.
+    pub fn on_lifetime_cap(&self, call_ref: &str) {
+        if self.enabled && self.capped.lock().unwrap().insert(call_ref.to_string()) {
+            self.send_verdict(call_ref, OUTCOME_MESSAGE_CAP, serde_json::json!({}));
+        }
     }
 
     /// One paced sweep pass, gated on `enabled` (a no-op for a disabled reaper).
@@ -200,9 +193,9 @@ impl Reaper {
     /// drives the Model-Y backup-durable reap, so the two periodic concerns share
     /// one `tokio::time::interval` (deterministic under `start_paused` +
     /// `Harness::advance`) with an explicit ordering instead of two racing timers.
-    pub fn maybe_sweep(&self, state: &CallState, dispatcher: &PerCallDispatcher, now_ms: i64) {
+    pub fn maybe_sweep(&self, state: &CallState, in_flight: &InFlight, now_ms: i64) {
         if self.enabled {
-            self.sweep_once(state, dispatcher, now_ms);
+            self.sweep_once(state, in_flight, now_ms);
         }
     }
 
@@ -214,7 +207,7 @@ impl Reaper {
     /// One sweep pass: emit verdicts for stale candidates, then for condemned
     /// ones, at most [`MAX_VERDICTS_PER_SWEEP`] in all; escalate undelivered
     /// ones; prune dead escalation state. Sync + lock-light.
-    fn sweep_once(&self, state: &CallState, dispatcher: &PerCallDispatcher, now_ms: i64) {
+    fn sweep_once(&self, state: &CallState, in_flight: &InFlight, now_ms: i64) {
         self.metrics.bump_reaper_sweep();
         // A condemned call that left Active has its teardown under way, bounded
         // by `TerminatingTimeout`: it needs no further verdict. A takeover copy
@@ -235,16 +228,17 @@ impl Reaper {
             .take(MAX_VERDICTS_PER_SWEEP - reserved)
         {
             budget -= 1;
-            // Idempotent re-send: a queue-full drop is simply retried next
-            // sweep — the reaper never assumes delivery. The verdict carries
-            // the observed stamp; `process` discards it if the stamp moved
-            // (X5), so a call that revived in the meantime is untouched.
-            self.climb(&self.attempts, &call_ref, dispatcher, false, || {
+            // Idempotent re-send: each sweep sends the verdict again while
+            // the call stays stale — the reaper never assumes it took effect.
+            // The verdict carries the observed stamp; `process` discards it
+            // if the stamp moved (X5), so a call that revived in the meantime
+            // is untouched.
+            self.climb(&self.attempts, &call_ref, in_flight, false, || {
                 (OUTCOME_STALE, serde_json::json!({ "watermark": watermark }))
             });
         }
         for call_ref in condemned.into_iter().take(budget) {
-            self.climb(&self.condemned_attempts, &call_ref, dispatcher, true, || {
+            self.climb(&self.condemned_attempts, &call_ref, in_flight, true, || {
                 (OUTCOME_OVERFLOW, serde_json::json!({}))
             });
         }
@@ -268,7 +262,7 @@ impl Reaper {
         &self,
         ladder: &Mutex<HashMap<String, u32>>,
         call_ref: &str,
-        dispatcher: &PerCallDispatcher,
+        in_flight: &InFlight,
         overflow: bool,
         verdict: impl FnOnce() -> (&'static str, serde_json::Value),
     ) {
@@ -286,7 +280,7 @@ impl Reaper {
             if overflow {
                 self.overflow_aborts.lock().unwrap().insert(call_ref.to_string());
             }
-            if !dispatcher.abort_in_flight(call_ref) && overflow {
+            if !in_flight.abort(call_ref) && overflow {
                 self.overflow_aborts.lock().unwrap().remove(call_ref);
             }
         }
@@ -303,13 +297,11 @@ impl Reaper {
             outcome: outcome.to_string(),
             payload,
             body: Vec::new(),
+            // Confirmed by the call's liveness stamp, not by incarnation
+            // (ADR-0020 X5).
+            incarnation: None,
         });
     }
-}
-
-/// Is `event` a reaper verdict? (the router's guard/discharge gate)
-pub fn is_reaper_event(event: &CallEvent) -> bool {
-    matches!(event, CallEvent::InternalEvent { topic, .. } if topic == REAPER_TOPIC)
 }
 
 /// X5 confirm — check-then-act made safe, pure. `watermark` is the stamp the
@@ -402,15 +394,14 @@ mod tests {
             &sip_txn::IdGen::seeded(1),
             0,
         ));
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, metrics.clone());
+        let in_flight = InFlight::default();
 
-        let hook = reaper.overflow_hook();
-        hook(&call_ref);
-        hook(&call_ref);
+        reaper.on_overflow_ceiling(&call_ref);
+        reaper.on_overflow_ceiling(&call_ref);
         assert_eq!(outcomes(&mut rx), vec![OUTCOME_OVERFLOW], "one verdict per condemned call");
 
         for _ in 0..5 {
-            reaper.maybe_sweep(&state, &dispatcher, 0);
+            reaper.maybe_sweep(&state, &in_flight, 0);
         }
         assert_eq!(
             outcomes(&mut rx),
@@ -424,9 +415,9 @@ mod tests {
         );
 
         state.remove(&call_ref);
-        reaper.maybe_sweep(&state, &dispatcher, 0);
+        reaper.maybe_sweep(&state, &in_flight, 0);
         assert!(outcomes(&mut rx).is_empty(), "a gone call is no longer swept");
-        hook(&call_ref);
+        reaper.on_overflow_ceiling(&call_ref);
         assert_eq!(outcomes(&mut rx), vec![OUTCOME_OVERFLOW], "its condemnation was pruned");
     }
 
@@ -472,13 +463,12 @@ mod tests {
     #[tokio::test]
     async fn the_condemned_loop_shares_the_sweep_budget() {
         let (reaper, mut rx, state, refs) = condemned_rig(MAX_VERDICTS_PER_SWEEP + 6);
-        let hook = reaper.overflow_hook();
         for r in &refs {
-            hook(r);
+            reaper.on_overflow_ceiling(r);
         }
         let _ = outcomes(&mut rx);
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
-        reaper.maybe_sweep(&state, &dispatcher, 0);
+        let in_flight = InFlight::default();
+        reaper.maybe_sweep(&state, &in_flight, 0);
         assert_eq!(outcomes(&mut rx).len(), MAX_VERDICTS_PER_SWEEP);
     }
 
@@ -487,12 +477,12 @@ mod tests {
     #[tokio::test]
     async fn stale_and_overflow_verdicts_keep_their_own_ladders() {
         let (reaper, mut rx, state, refs) = condemned_rig(1);
-        reaper.overflow_hook()(&refs[0]);
+        reaper.on_overflow_ceiling(&refs[0]);
         let _ = outcomes(&mut rx);
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
+        let in_flight = InFlight::default();
         let far = i64::MAX / 2;
         for _ in 0..3 {
-            reaper.maybe_sweep(&state, &dispatcher, far);
+            reaper.maybe_sweep(&state, &in_flight, far);
         }
         let sent = outcomes(&mut rx);
         assert_eq!(sent.len(), 6, "{sent:?}");
@@ -503,13 +493,13 @@ mod tests {
     #[tokio::test]
     async fn a_condemned_call_that_left_active_is_not_swept() {
         let (reaper, mut rx, state, refs) = condemned_rig(1);
-        reaper.overflow_hook()(&refs[0]);
+        reaper.on_overflow_ceiling(&refs[0]);
         let _ = outcomes(&mut rx);
         let mut call = state.peek(&refs[0]).unwrap();
         call.state = CallModelState::Terminating;
         state.update(call);
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
-        reaper.maybe_sweep(&state, &dispatcher, 0);
+        let in_flight = InFlight::default();
+        reaper.maybe_sweep(&state, &in_flight, 0);
         assert!(outcomes(&mut rx).is_empty());
     }
 
@@ -520,15 +510,15 @@ mod tests {
     async fn the_overflow_ladders_abort_strikes_nothing() {
         let (reaper, mut rx, state, refs) = condemned_rig(1);
         let call_ref = refs[0].clone();
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new())
+        let dispatcher = crate::dispatch::PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new())
             .with_failure_hook(reaper.failure_hook());
-        dispatcher
-            .dispatch(&call_ref, crate::dispatch::Job::new(Box::pin(std::future::pending())))
-            .await;
+        let hung: crate::dispatch::DispatchBody = Box::pin(std::future::pending());
+        let _ = dispatcher.offer(&call_ref, hung, crate::dispatch::DispatchClass::Internal);
+        let in_flight = dispatcher.in_flight();
         tokio::task::yield_now().await;
-        reaper.overflow_hook()(&call_ref);
+        reaper.on_overflow_ceiling(&call_ref);
         for _ in 0..ESCALATE_ABORT_AFTER + 1 {
-            reaper.maybe_sweep(&state, &dispatcher, 0);
+            reaper.maybe_sweep(&state, &in_flight, 0);
         }
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -546,11 +536,11 @@ mod tests {
     #[tokio::test]
     async fn a_condemned_takeover_copy_is_not_swept() {
         let (reaper, mut rx, state, refs) = condemned_rig(1);
-        reaper.overflow_hook()(&refs[0]);
+        reaper.on_overflow_ceiling(&refs[0]);
         let _ = outcomes(&mut rx);
         state.mark_takeover(&refs[0]);
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
-        reaper.maybe_sweep(&state, &dispatcher, 0);
+        let in_flight = InFlight::default();
+        reaper.maybe_sweep(&state, &in_flight, 0);
         assert!(outcomes(&mut rx).is_empty());
     }
 
@@ -559,10 +549,10 @@ mod tests {
     #[tokio::test]
     async fn stale_calls_leave_condemned_calls_their_share_of_the_sweep() {
         let (reaper, mut rx, state, refs) = condemned_rig(MAX_VERDICTS_PER_SWEEP + 6);
-        reaper.overflow_hook()(&refs[0]);
+        reaper.on_overflow_ceiling(&refs[0]);
         let _ = outcomes(&mut rx);
-        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
-        reaper.maybe_sweep(&state, &dispatcher, i64::MAX / 2);
+        let in_flight = InFlight::default();
+        reaper.maybe_sweep(&state, &in_flight, i64::MAX / 2);
         let sent = outcomes(&mut rx);
         assert_eq!(sent.len(), MAX_VERDICTS_PER_SWEEP);
         assert!(sent.iter().any(|o| o == OUTCOME_OVERFLOW), "the condemned call is swept");

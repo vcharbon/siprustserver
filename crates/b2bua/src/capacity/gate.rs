@@ -1,41 +1,17 @@
 //! [`CapacityGate`]: the configured ceilings, the last sampled RSS and level,
-//! and the reject tallies.
+//! and the backup sheds. A new call is judged on the gate's
+//! [`reading`](CapacityGate::reading) by the admission ladder
+//! ([`crate::admission`]).
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use sip_txn::InviteClass;
+
 use crate::config::CapacityConfig;
+use crate::new_calls::Refusal;
 
 use super::probe::{ProcSelfProbe, SystemProbe};
-
-/// The quantity whose ceiling refused a new call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bound {
-    /// Live calls, takeover copies included.
-    Calls,
-    /// Live SIP transactions.
-    Transactions,
-    /// Process resident set size.
-    Rss,
-}
-
-impl Bound {
-    /// Every bound, in the order the gate checks them.
-    pub const ALL: [Bound; 3] = [Bound::Calls, Bound::Transactions, Bound::Rss];
-
-    /// Short stable tag, keyed by logs and the `bound` metric label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Bound::Calls => "calls",
-            Bound::Transactions => "transactions",
-            Bound::Rss => "rss",
-        }
-    }
-
-    fn index(self) -> usize {
-        self as usize
-    }
-}
 
 /// The quantity whose ceiling kept a backup replica out of the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +27,7 @@ impl BackupBound {
     pub const ALL: [BackupBound; 2] = [BackupBound::Calls, BackupBound::Rss];
 
     /// Short stable tag, keyed by the `bound` metric label.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             BackupBound::Calls => "calls",
             BackupBound::Rss => "rss",
@@ -78,21 +54,49 @@ pub struct Occupancy {
     pub transactions: u64,
 }
 
+/// What the capacity rung of the admission ladder judges a new call on: the
+/// ceilings, the exactly counted quantities, and the RSS of the last sample
+/// (`None` without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityReading {
+    pub limits: CapacityConfig,
+    pub occupancy: Occupancy,
+    pub rss: Option<u64>,
+}
+
+impl CapacityReading {
+    /// The first bound — calls, transactions, RSS — whose ceiling for a new
+    /// call of `class` ([`crate::admission::Class`]) the reading reaches: the
+    /// normal ceilings for a normal call, the emergency ones for an emergency
+    /// call; an in-dialog INVITE meets none. No RSS reading reaches no
+    /// ceiling.
+    pub fn refusal(&self, class: InviteClass) -> Option<Refusal> {
+        let emergency = match class {
+            InviteClass::Normal => false,
+            InviteClass::Emergency => true,
+            InviteClass::InDialog => return None,
+        };
+        let limits = &self.limits;
+        [
+            (Refusal::CapacityCalls, limits.calls, Some(self.occupancy.calls)),
+            (Refusal::CapacityTransactions, limits.transactions, Some(self.occupancy.transactions)),
+            (Refusal::CapacityRss, limits.rss_bytes, self.rss),
+        ]
+        .into_iter()
+        .find(|(_, ceilings, value)| reached(ceilings.for_class(emergency), *value))
+        .map(|(refusal, _, _)| refusal)
+    }
+}
+
 /// `u64::MAX` in the RSS slot stands for "no reading yet".
 const NO_READING: u64 = u64::MAX;
-/// `0` in a level slot stands for "no bound reached".
-const NONE_REACHED: u8 = 0;
 
 struct Inner {
     probe: Arc<dyn SystemProbe>,
     limits: Mutex<CapacityConfig>,
     rss: AtomicU64,
-    /// The bound a non-emergency call met at the last sample (index + 1).
-    shed_normal: AtomicU8,
-    /// The bound an emergency call met at the last sample (index + 1).
-    shed_all: AtomicU8,
-    /// Rejects by `[bound][class]`, class 0 = normal, 1 = emergency.
-    rejected: [[AtomicU64; 2]; 3],
+    /// The [`Level`] of the last sample.
+    level: AtomicU8,
     backup_shed: [AtomicU64; 2],
 }
 
@@ -115,9 +119,7 @@ impl CapacityGate {
                 probe,
                 limits: Mutex::new(CapacityConfig::default()),
                 rss: AtomicU64::new(NO_READING),
-                shed_normal: AtomicU8::new(NONE_REACHED),
-                shed_all: AtomicU8::new(NONE_REACHED),
-                rejected: Default::default(),
+                level: AtomicU8::new(Level::Open as u8),
                 backup_shed: Default::default(),
             }),
         }
@@ -143,12 +145,21 @@ impl CapacityGate {
     pub fn sample(&self, occupancy: Occupancy) {
         let rss = self.inner.probe.rss_bytes();
         self.inner.rss.store(rss.unwrap_or(NO_READING), Ordering::Relaxed);
-        let limits = self.limits();
-        let slot = |b: Option<Bound>| b.map_or(NONE_REACHED, |b| b.index() as u8 + 1);
-        let normal = first_reached(&limits, false, occupancy, rss);
-        let all = first_reached(&limits, true, occupancy, rss);
-        self.inner.shed_normal.store(slot(normal), Ordering::Relaxed);
-        self.inner.shed_all.store(slot(all), Ordering::Relaxed);
+        let reading = self.reading(occupancy);
+        let level = if reading.refusal(InviteClass::Emergency).is_some() {
+            Level::ShedAll
+        } else if reading.refusal(InviteClass::Normal).is_some() {
+            Level::ShedNormal
+        } else {
+            Level::Open
+        };
+        self.inner.level.store(level as u8, Ordering::Relaxed);
+    }
+
+    /// What a new call is judged on now: the ceilings, `occupancy`, and the
+    /// RSS of the last sample.
+    pub fn reading(&self, occupancy: Occupancy) -> CapacityReading {
+        CapacityReading { limits: self.limits(), occupancy, rss: self.rss_bytes() }
     }
 
     /// The RSS of the last sample; `None` before the first or when the probe
@@ -162,44 +173,11 @@ impl CapacityGate {
 
     /// The level of the last sample.
     pub fn level(&self) -> Level {
-        if self.inner.shed_all.load(Ordering::Relaxed) != NONE_REACHED {
-            Level::ShedAll
-        } else if self.inner.shed_normal.load(Ordering::Relaxed) != NONE_REACHED {
-            Level::ShedNormal
-        } else {
-            Level::Open
+        match self.inner.level.load(Ordering::Relaxed) {
+            l if l == Level::ShedAll as u8 => Level::ShedAll,
+            l if l == Level::ShedNormal as u8 => Level::ShedNormal,
+            _ => Level::Open,
         }
-    }
-
-    /// The bound a new call of this class met at the last sample.
-    pub fn refused_at_sample(&self, is_emergency: bool) -> Option<Bound> {
-        let slot = if is_emergency { &self.inner.shed_all } else { &self.inner.shed_normal };
-        match slot.load(Ordering::Relaxed) {
-            NONE_REACHED => None,
-            n => Some(Bound::ALL[usize::from(n) - 1]),
-        }
-    }
-
-    /// The bound a new call of this class meets now, from exact counts and
-    /// the last sampled RSS.
-    pub fn refuses(&self, is_emergency: bool, occupancy: Occupancy) -> Option<Bound> {
-        first_reached(&self.limits(), is_emergency, occupancy, self.rss_bytes())
-    }
-
-    /// Count one reject sent for `bound`.
-    pub fn record_reject(&self, bound: Bound, is_emergency: bool) {
-        self.inner.rejected[bound.index()][usize::from(is_emergency)]
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Rejects sent for `bound` to calls of this class.
-    pub fn rejected_total(&self, bound: Bound, is_emergency: bool) -> u64 {
-        self.inner.rejected[bound.index()][usize::from(is_emergency)].load(Ordering::Relaxed)
-    }
-
-    /// Every capacity reject sent, all bounds and classes.
-    pub fn rejected_sum(&self) -> u64 {
-        self.inner.rejected.iter().flatten().map(|c| c.load(Ordering::Relaxed)).sum()
     }
 
     /// Whether a backup replica of a call this node does not hold yet may be
@@ -230,20 +208,4 @@ impl CapacityGate {
 /// `value` at or above `ceiling`, both present.
 fn reached(ceiling: Option<u64>, value: Option<u64>) -> bool {
     matches!((ceiling, value), (Some(c), Some(v)) if v >= c)
-}
-
-/// The first bound, in [`Bound::ALL`] order, a new call of this class meets.
-fn first_reached(
-    limits: &CapacityConfig,
-    is_emergency: bool,
-    occupancy: Occupancy,
-    rss: Option<u64>,
-) -> Option<Bound> {
-    Bound::ALL.into_iter().find(|b| match b {
-        Bound::Calls => reached(limits.calls.for_class(is_emergency), Some(occupancy.calls)),
-        Bound::Transactions => {
-            reached(limits.transactions.for_class(is_emergency), Some(occupancy.transactions))
-        }
-        Bound::Rss => reached(limits.rss_bytes.for_class(is_emergency), rss),
-    })
 }

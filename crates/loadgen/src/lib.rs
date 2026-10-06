@@ -15,21 +15,21 @@
 //! the `Send` [`scenario_harness::AgentBinder`] — NOT the `!Send` `Harness`. So
 //! every call is an ordinary `tokio` task on a shared multi-threaded runtime
 //! (thousands concurrent, flat memory), and *recording* is a per-call opt-in
-//! decided by the [`report::SamplingGate`](report)-backed
-//! [`Reporter::should_record`](report::Reporter::should_record) — no OS thread
-//! per call, recorded or not.
+//! decided by the sampling gate
+//! ([`Reporter::should_record`](report::Reporter::should_record)) — no OS
+//! thread per call, recorded or not.
 //!
 //! # Pieces
 //!
-//! - [`scenarios`] — re-exports the shared [`LoadScenario`](scenarios::LoadScenario)
+//! - [`scenarios`] — re-exports the shared [`LoadScenario`]
 //!   trait, the scenario bodies (`scenario_harness::realcall`), and the unified
-//!   open shape registry ([`ShapeRegistry`](e2e_model::ShapeRegistry)) whose
-//!   per-shape [`ShapeDescriptor`](e2e_model::ShapeDescriptor)s the driver's
-//!   [`MixEntry`](driver::MixEntry) is built from.
+//!   open shape registry ([`ShapeRegistry`]) whose
+//!   per-shape [`ShapeDescriptor`]s the driver's
+//!   [`MixEntry`] is built from.
 //! - [`driver`] — the CPS governor + max-in-flight semaphore + per-call
 //!   `catch_unwind` boundary + [`scope`]-based teardown.
 //! - [`app`] — the whole CLI application ([`app::Args`] + [`app::run`]) behind
-//!   an injectable [`ShapeRegistry`](e2e_model::ShapeRegistry), so a
+//!   an injectable [`ShapeRegistry`], so a
 //!   third-party load bin is a one-liner passing its own composed registry
 //!   (the shipped bin passes `with_defaults()`).
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
@@ -40,6 +40,7 @@
 
 pub mod app;
 pub mod case;
+pub mod catalogue;
 pub mod chaos;
 pub mod class;
 pub mod ctx;
@@ -52,6 +53,7 @@ pub mod scope;
 pub mod waiver;
 
 pub use case::{DwellOverrides, LoadCase, ResolvedCall};
+pub use catalogue::CATALOGUE;
 pub use chaos::{ChaosLog, ChaosTag};
 pub use class::{CallOutcome, ResultClass};
 pub use ctx::{CallCtx, CallEnv, CoreIdentity, CorrelationStamp};

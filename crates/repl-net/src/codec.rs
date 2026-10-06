@@ -93,8 +93,10 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             origin_now_ms,
             indexes,
             body,
+            answered,
+            incarnation,
         } => {
-            encode::write_array_len(buf, 12).unwrap();
+            encode::write_array_len(buf, 14).unwrap();
             encode::write_uint(buf, tag::DATA).unwrap();
             encode::write_uint(buf, at.gen).unwrap();
             encode::write_uint(buf, at.counter).unwrap();
@@ -116,6 +118,11 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
                 None => {
                     encode::write_nil(buf).unwrap();
                 }
+            }
+            encode::write_bool(buf, *answered).unwrap();
+            match incarnation {
+                Some(id) => encode::write_str(buf, id).unwrap(),
+                None => encode::write_nil(buf).unwrap(),
             }
         }
         Frame::Noop { at } => {
@@ -188,7 +195,7 @@ fn decode_pull_request(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError
 }
 
 fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
-    expect_len(len, 12, "Data")?;
+    expect_len(len, 14, "Data")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     let op = Op::from_u8(read_u8(rd, "op")?)?;
@@ -208,6 +215,8 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
         indexes.push(read_str(rd, "indexes[]")?);
     }
     let body = read_opt_bin(rd, "body")?;
+    let answered = read_bool(rd, "answered")?;
+    let incarnation = read_opt_str(rd, "incarnation")?;
     Ok(Frame::Data {
         at: Watermark::new(gen, counter),
         op,
@@ -219,6 +228,8 @@ fn decode_data(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
         origin_now_ms,
         indexes,
         body,
+        answered,
+        incarnation,
     })
 }
 
@@ -293,12 +304,25 @@ fn read_i64(rd: &mut &[u8], at: &'static str) -> Result<i64, ReplCodecError> {
     decode::read_int(rd).map_err(|e| map_nvre(e, at))
 }
 
+fn read_bool(rd: &mut &[u8], at: &'static str) -> Result<bool, ReplCodecError> {
+    decode::read_bool(rd).map_err(|e| map_vre(e, at))
+}
+
 /// Read a msgpack `str`: read its length marker, then split that many bytes off
 /// the cursor and validate UTF-8.
 fn read_str(rd: &mut &[u8], at: &'static str) -> Result<String, ReplCodecError> {
     let n = decode::read_str_len(rd).map_err(|e| map_vre(e, at))? as usize;
     let raw = take(rd, n, at)?;
     String::from_utf8(raw.to_vec()).map_err(|_| ReplCodecError::Utf8 { at })
+}
+
+/// Read a msgpack `str` (→ `Some`) or `nil` (→ `None`).
+fn read_opt_str(rd: &mut &[u8], at: &'static str) -> Result<Option<String>, ReplCodecError> {
+    if rd.first() == Some(&Marker::Null.to_u8()) {
+        take(rd, 1, at)?;
+        return Ok(None);
+    }
+    read_str(rd, at).map(Some)
 }
 
 /// Read a msgpack `bin` (→ `Some`) or `nil` (→ `None`). Peeks the marker so a

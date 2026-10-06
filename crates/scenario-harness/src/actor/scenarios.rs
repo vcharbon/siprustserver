@@ -207,8 +207,8 @@ impl ActorScenario for Refer {
 /// Confirmed so the *driver's* teardown BYEs A↔B; the actor runner OWNS teardown
 /// (its own per-actor scopes), so here **alice BYEs A↔B herself** once the
 /// decline is observed — the call reaches a clean torn-down + settled
-/// [`CallVerdict::Ok`], which [`Expect::TransferDeclined`] then maps onto the
-/// EXACT contract Err (`UnexpectedKind { who: "refer_charlie_reject", detail:
+/// [`CallVerdict::Ok`](super::CallVerdict::Ok), which [`Expect::TransferDeclined`]
+/// then maps onto the EXACT contract Err (`UnexpectedKind { who: "refer_charlie_reject", detail:
 /// "transfer declined by charlie (603)" }`). Same net SUT effect (A↔B BYE'd,
 /// fully reaped), same downstream `Result`.
 ///

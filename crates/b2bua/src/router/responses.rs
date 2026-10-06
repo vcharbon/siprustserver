@@ -1,7 +1,8 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
-//! no call draws, and the retry-later 500. The overload reject lives with the policy that owns it —
-//! [`crate::overload::build_reject_new_call_503`].
+//! no call draws, the retry-later 500 and the merged-request 482. The 503
+//! refusing a new INVITE is the admission ladder's
+//! ([`crate::admission::Refusals`]).
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
@@ -33,16 +34,44 @@ pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
 
 /// `500 Server Internal Error` to `req` with `Retry-After: retry_after_sec`,
 /// floored at 1 s: a request this node took but could not process now, which
-/// the UAC may retry (RFC 3261 §14.2 for a re-INVITE, §21.5.1).
-pub(super) fn build_retry_later_500(req: &SipRequest, retry_after_sec: u32) -> SipResponse {
+/// the UAC may retry (RFC 3261 §14.2 for a re-INVITE, §21.5.1). `to_tag` is
+/// the tag minted for a request whose To has none (§8.2.6.2).
+pub(super) fn build_retry_later_500(
+    req: &SipRequest,
+    to_tag: Option<String>,
+    retry_after_sec: u32,
+) -> SipResponse {
     let opts = GenerateResponseOpts {
+        to_tag,
         extra_headers: vec![hdr(
             "Retry-After",
-            retry_after_sec.max(crate::overload::MIN_REJECT_RETRY_AFTER_SEC).to_string(),
+            load_shed::retry_after::floored(retry_after_sec).to_string(),
         )],
         ..Default::default()
     };
     generate_response(req, 500, "Server Internal Error", &opts)
+}
+
+/// `482 Loop Detected` to `req`, an initial INVITE merged with one already
+/// here: same Call-ID, From-tag and CSeq on another branch (RFC 3261
+/// §8.2.2.2), under a fresh To-tag (§8.2.6.2), carrying the deployment's
+/// `advertisement` for a minted final.
+pub(super) fn build_merged_482(
+    id_gen: &IdGen,
+    req: &SipRequest,
+    advertisement: &CapabilitySet,
+) -> SipResponse {
+    let opts = GenerateResponseOpts {
+        to_tag: Some(id_gen.new_tag()),
+        extra_headers: minted_final_lines(advertisement),
+        ..Default::default()
+    };
+    generate_response(req, 482, "Loop Detected", &opts)
+}
+
+/// The deployment's minted-final advertisement as header lines.
+pub(crate) fn minted_final_lines(advertisement: &CapabilitySet) -> Vec<SipHeader> {
+    advertisement.lines().into_iter().map(|(name, value)| hdr(name.as_wire_str(), value)).collect()
 }
 
 /// `405 Method Not Allowed` to `req`, a request of a method the node does not
@@ -58,7 +87,7 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 }
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
-/// keepalive (S7). Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
+/// keepalive. Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
 /// a To-tag on any response > 100 to an out-of-dialog request (the 2xx path
 /// always did; the 503 path needs it too). The status + `Reason` header text is the
 /// contract `sip-proxy::health::probe::classify_503` keys on:
@@ -77,8 +106,7 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 /// (`sip_proxy::load_observer::parse_x_overload_header`) consumes to steer (and,
 /// at `AboveCritical`, exclude) a *serving* worker. A 503 already removes the
 /// node from new-dialog selection, so the band signal is not stamped there
-/// (tracked divergence — pinned by `options_200_stamps_x_overload_503_does_not`;
-/// revisit with the AIMD rate-cap consumer, see `MIGRATION_STATUS.md`).
+/// (pinned by `options_200_stamps_x_overload_503_does_not`).
 pub(crate) fn build_options_health_response(
     readiness: &Readiness,
     overload: &OverloadSignal,
@@ -123,22 +151,66 @@ pub(crate) fn build_options_health_response(
 }
 
 /// Build the fail-closed **500 Server Internal Error** for an initial INVITE
-/// whose dialog-existence store lookup failed (ADR-0023). Same call-layer-
-/// stateless shape as [`crate::overload::build_reject_new_call_503`]: sent
-/// through the INVITE
-/// server txn (`send_response` supersedes the cached 100, retransmits the final
+/// whose dialog-existence store lookup failed (ADR-0023). Call-layer
+/// stateless like an admission refusal: sent through the INVITE server txn (`send_response` supersedes the cached 100, retransmits the final
 /// and absorbs the ACK) with **no** call/dialog/CDR/limiter state born. Fresh
 /// To-tag — this codebase enforces a tag on every non-100 final (RFC 3261
 /// §8.2.6.2). No Reason header: the bare canonical reject (ADR-0022 X3 shape);
-/// the fault is observable via `b2bua_store_fault_rejected_total`.
+/// the fault is observable via `b2bua_store_fault_rejected_total`. The
+/// deployment's `advertisement` for a minted final rides.
 pub(super) fn build_store_fault_500(
     id_gen: &IdGen,
     req: &sip_message::SipRequest,
+    advertisement: &CapabilitySet,
 ) -> sip_message::SipResponse {
     generate_response(
         req,
         500,
         "Server Internal Error",
-        &GenerateResponseOpts { to_tag: Some(id_gen.new_tag()), ..Default::default() },
+        &GenerateResponseOpts {
+            to_tag: Some(id_gen.new_tag()),
+            extra_headers: minted_final_lines(advertisement),
+            ..Default::default()
+        },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sip_message::header::{AcceptRange, HeaderName};
+    use sip_message::{CustomParser, SipMessage, SipParser};
+
+    fn invite() -> SipRequest {
+        let raw = "INVITE sip:bob@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5555;branch=z9hG4bK-r\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@caller.test>;tag=a\r\n\
+To: <sip:bob@b2bua.test>\r\n\
+Call-ID: r@10.0.0.1\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    fn policy() -> CapabilitySet {
+        CapabilitySet::stating(None, None, Some(vec![AcceptRange::new("application/sdp")]))
+    }
+
+    /// The merged-request 482 and the store-fault 500 are finals minted in the
+    /// worker's own name: each carries the deployment's advertisement.
+    #[test]
+    fn the_stateless_minted_finals_carry_the_advertisement() {
+        let id_gen = IdGen::seeded(1);
+        for resp in [
+            build_merged_482(&id_gen, &invite(), &policy()),
+            build_store_fault_500(&id_gen, &invite(), &policy()),
+        ] {
+            let accept: Vec<&str> = resp.raw(HeaderName::Accept).collect();
+            assert_eq!(accept, ["application/sdp"], "{}", resp.status());
+        }
+    }
 }

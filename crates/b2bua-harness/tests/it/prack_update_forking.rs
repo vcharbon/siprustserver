@@ -230,17 +230,16 @@ async fn prack_update_forking_answer_on_second_fork() {
     finish_with_report(h).await;
 }
 
-// ── fake-prack forking (GAP-P7-1): per-To-tag PRACK targeting + SDP cache ────
+// ── fake-prack forking: per-To-tag PRACK targeting + SDP cache ──────────────
 //
 // Under `relayFirst18xTo180` strategy `fake-prack` the B2BUA itself PRACKs each
 // reliable 1xx and caches each fork's SDP answer, keyed strictly on the
-// `(leg, callee To-tag)` early dialog. The regression these two tests pin:
-// pre-fix the machine registered only the RELAYED fork's early dialog, so a
-// second fork's suppressed 183 fell back to the FIRST dialog — its PRACK went
-// out carrying fork 1's To-tag (mis-targeted RAck) and its cache OVERWROTE
-// fork 1's answer. Now each distinct callee To-tag gets its own early dialog,
-// PRACK, and SDP cache; whichever fork wins the 200, alice's answer is THAT
-// fork's cached SDP.
+// `(leg, callee To-tag)` early dialog. Each distinct callee To-tag gets its own
+// early dialog, PRACK, and SDP cache; whichever fork wins the 200, alice's
+// answer is THAT fork's cached SDP. These two tests pin it: a machine that
+// registered only the RELAYED fork's early dialog would let a second fork's
+// suppressed 183 fall back to the FIRST dialog — its PRACK carrying fork 1's
+// To-tag (mis-targeted RAck) and its cache OVERWRITING fork 1's answer.
 
 /// The RAck a request acknowledges — `<rseq> <invite-cseq> INVITE`
 /// (RFC 3262 §7.2).
@@ -281,7 +280,7 @@ async fn fake_prack_fork_prelude(
 
     // Fork 2: reliable 183 (tag `bobfork2`) with answer 2 — suppressed for
     // alice (FIRST policy), but the B2BUA must still PRACK **fork 2's** dialog
-    // (pre-fix this PRACK fell back to fork 1's To-tag).
+    // (not fork 1's To-tag).
     uas.respond(183, "Session Progress")
         .with_to_tag("bobfork2")
         .with_header("Require", "100rel")
@@ -305,8 +304,8 @@ async fn fake_prack_fork_prelude(
 }
 
 /// Fake-prack forked b-leg answered on **fork 1**: its cached SDP must survive
-/// fork 2's later 183 (pre-fix, fork 2's answer overwrote fork 1's cache and
-/// alice's 200 carried the WRONG fork's SDP).
+/// fork 2's later 183 (were fork 2's answer to overwrite fork 1's cache, alice's
+/// 200 would carry the WRONG fork's SDP).
 #[tokio::test]
 async fn fake_prack_forking_answer_on_first_fork_keeps_its_own_cache() {
     let h = Harness::with_transit_delay("fake-prack-forking-first-fork", 1);

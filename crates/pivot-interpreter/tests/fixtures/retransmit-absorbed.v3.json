@@ -34,7 +34,7 @@
   "case": {
     "annotations": {
       "notes": [
-        "The simulated callee withholds its own 100 Trying for 700 ms so the system's INVITE client transaction reaches Timer A and retransmits. That is a departure from RFC 3261 §17.2.1's SHOULD (a UAS SHOULD answer 100 within 200 ms) by the PEER, deliberate and local to this fixture: the retransmission is the subject of the case. It is stated here rather than as a `deviations` entry because §11's vocabulary has no kind for a withheld provisional and an interpreter must refuse a kind it cannot emit (friction K16)."
+        "The simulated callee withholds its own 100 Trying for 700 ms so the system's INVITE client transaction reaches Timer A and retransmits. That is a departure from RFC 3261 §17.2.1's SHOULD (a UAS SHOULD answer 100 within 200 ms) by the PEER, deliberate and local to this fixture: the retransmission is the subject of the case. It is stated here rather than as a `deviations` entry because §11's vocabulary has no kind for a withheld provisional and an interpreter must refuse a kind it cannot emit."
       ]
     },
     "family": "transparent",

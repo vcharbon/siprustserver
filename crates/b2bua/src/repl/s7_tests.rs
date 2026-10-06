@@ -205,13 +205,13 @@ fn emitted_reason_aligns_with_proxy_classify_503() {
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::Draining);
 }
 
-/// migration/08: the OPTIONS-200 self-report carries the worker load signal as
-/// `X-Overload: v=1; elu=…; gc=…; adm=…` (the schema
+/// The OPTIONS-200 self-report carries the worker load signal as `X-Overload:
+/// v=1; elu=…; gc=…; adm=…` (the schema
 /// `sip_proxy::load_observer::parse_x_overload_header` consumes — that real
 /// cross-crate parse is exercised end-to-end in `b2bua-harness`), and the `adm`
 /// counter the responder publishes tracks
-/// `OverloadSignal::increment_non_emergency_admitted`. The 503 paths do NOT
-/// carry it (a 503 already removes the node from new-dialog selection).
+/// `OverloadSignal::increment_non_emergency_admitted`. The 503 paths do NOT carry
+/// it (a 503 already removes the node from new-dialog selection).
 #[test]
 fn options_200_stamps_x_overload_503_does_not() {
     let id_gen = IdGen::seeded(0x08);
@@ -449,16 +449,15 @@ async fn static_membership_never_withdraws_the_worker() {
     }
 }
 
-/// Cold double-restart readiness deadlock regression (handoff
-/// `repl-coldstart-readiness-deadlock`): a peer that is seen **once** at a stale
-/// address, never connects, then **leaves** the desired membership (both pods
-/// NotReady → `publishNotReadyAddresses:false` empties the EndpointSlice) is
+/// Cold double-restart readiness deadlock: a peer that is seen **once** at a
+/// stale address, never connects, then **leaves** the desired membership (both
+/// pods NotReady → `publishNotReadyAddresses:false` empties the EndpointSlice) is
 /// parked with `{current:false, bootstrap_complete:false, ever_connected:false}`
-/// and retained in the `peers` map. Before the fix `all_current`/
-/// `all_bootstrapped` iterated **every** retained entry, so that parked-departed
-/// peer pinned the node NotReady forever — no puller was left to fire the
-/// bootstrap hard timer. The node must still reach Ready (the peer is no longer
-/// desired; readiness filters to the desired membership, like the backup gate).
+/// and retained in the `peers` map. Were `all_current`/`all_bootstrapped` to
+/// iterate **every** retained entry, that parked-departed peer would pin the node
+/// NotReady forever — no puller is left to fire the bootstrap hard timer. The
+/// node must still reach Ready (the peer is no longer desired; readiness filters
+/// to the desired membership, like the backup gate).
 #[tokio::test(start_paused = true)]
 async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     let clock = Clock::test_at(0);
@@ -488,7 +487,7 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
 
     // Let the Reclaim puller spawn + fail its first connect. Stay well under the
     // 2 s bootstrap hard timer so it is genuinely still pending (not yet
-    // best-effort complete) — the exact pre-condition the bug needs.
+    // best-effort complete) — the exact pre-condition of the deadlock.
     tick(100).await;
     assert!(!a_sup.all_current(), "peer B still pending → NotReady (sanity)");
     assert!(a_sup.is_running("B"), "B's Reclaim puller is running while desired");

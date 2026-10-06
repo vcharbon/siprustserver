@@ -62,7 +62,7 @@ const DISPUTE_FILL: &str = "#fef3c7"; // amber tint — observers disagree here
 /// distinct connection (ephemeral socket) gets a stable hue so two flows to the
 /// same node — and a node's pre-crash vs post-reboot sockets — read as visibly
 /// different arrows even though they collapse onto one node lane. Index 0 is the
-/// historic repl purple so single-socket diagrams look unchanged. Hues are
+/// repl purple, so single-socket diagrams use one colour. Hues are
 /// chosen legible against white and distinct from the SIP blue.
 const CONN_PALETTE: &[&str] = &[
     "#9333ea", // purple
@@ -198,7 +198,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|d| format!("<p class=\"desc\">{}</p>", escape(d)))
         .unwrap_or_default();
 
-    // Per-flow color legend (036 ask C): SIP rows carrying a `conn` (the
+    // Per-flow color legend: SIP rows carrying a `conn` (the
     // Call-ID) are colored per flow — name each color so a reader can map
     // arrow hue → dialog without opening payloads. First-seen order.
     let mut flow_chips = String::new();
@@ -393,7 +393,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
 
 /// Render ONLY the SVG sequence diagram — the exact markup [`render_html`]
 /// embeds in its diagram panel. For callers that persist/serve the diagram
-/// standalone (the E2E `result.json` sibling artifacts, ADR-0018 Phase F).
+/// standalone (the E2E `result.json` sibling artifacts, ADR-0018).
 pub fn render_svg(doc: &SeqDoc) -> String {
     let items = doc.sorted_items();
     let base = doc.base_ms();
@@ -529,7 +529,7 @@ fn svg_markup(
     s.push_str("</defs>\n");
 
     // Lifelines + column heads. Consecutive lanes sharing a `group` (logical
-    // sub-lanes of one socket — 036 ask C) get one bracketing header with the
+    // sub-lanes of one socket) get one bracketing header with the
     // shared resource (the ip:port) centered above their individual captions.
     let life_bottom = height - BOTTOM_PAD / 2;
     {
@@ -607,8 +607,8 @@ fn svg_markup(
                 let is_http = matches!(row.kind, RowKind::Http { .. });
                 // Per-key color for arrows carrying a `conn`: repl rows key on
                 // the socket (two flows to the same node, pre-crash vs
-                // post-reboot sockets); SIP rows key on the Call-ID (036 ask C
-                // — a b2bua's a-leg vs b-leg read as distinct flows). A row
+                // post-reboot sockets); SIP rows key on the Call-ID
+                // (a b2bua's a-leg vs b-leg read as distinct flows). A row
                 // with no `conn` falls back to its plane's default color.
                 // An HTTP row keeps its plane's color whatever its `conn`.
                 let color = match (&row.conn, is_repl) {

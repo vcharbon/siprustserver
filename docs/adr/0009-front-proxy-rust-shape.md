@@ -24,9 +24,25 @@ classification only** of the worker-overload machinery (defer the AIMD bucket).
 Route directly and forwards, never instantiating a transaction state machine.
 So `sip-proxy` does **not** depend on `sip-txn`'s FSMs; it reuses only
 `sip-txn::IdGen` (the RNG seam) for Via branch generation, and `sip-clock::Clock`
-for timestamps. CANCEL/ACK correlation is a proxy-local `(Call-ID|CSeq#)` LRU
-(`cancel_lru`), keyed per RFC 3261 §9.1 so it works at any hop and survives the
-load balancer re-sharding a fallback selection.
+for timestamps. CANCEL/ACK correlation is a proxy-local LRU (`cancel_lru`) keyed
+on the INVITE transaction as received, its top-Via branch and sent-by (RFC 3261
+§9.1, §17.2.3), so it works at any hop, keeps a spiral's two passes apart, and
+survives the load balancer re-sharding a fallback selection. A CANCEL matching no
+remembered INVITE transaction is forwarded statelessly (§16.10): a worker's to its
+Request-URI, any other through new-dialog selection, where a worker holding no such
+INVITE answers it 481 (§9.2).
+Reverse-path failover of an INVITE response to a dead worker reads the backup
+from the bottommost of this proxy's own Record-Route entries whose cookie names
+that worker as primary: a spiral puts one pair per pass on the response, and the
+pair recorded relaying the worker's request out lies below every later pass (a
+later pass reaching the same worker may name another backup, the alive set having
+changed).
+An in-dialog request whose Route set holds several of this proxy's pairs back to
+back (a spiral with no Record-Routing hop between passes) takes its direction
+from the first entry of the last pair: it leaves this proxy on the last pass, and
+its worker Via does not make it worker-outbound when that pair decodes. An odd run
+of own entries is no run of pairs this proxy recorded: its first entry decides,
+and a worker Via still makes the request worker-outbound.
 
 ## Decision X2 — the scenario harness gains a System-Under-Test seam
 

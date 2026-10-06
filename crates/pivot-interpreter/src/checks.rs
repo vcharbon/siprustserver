@@ -292,7 +292,7 @@ mod tests {
         );
     }
 
-    /// **Issue 68**: `eq` on a header is a comparison of wire FORMS. Whitespace
+    /// `eq` on a header is a comparison of wire FORMS. Whitespace
     /// around a list separator is layout (RFC 3261 §7.3.1 / §25.1); a value
     /// difference is still a difference, and a non-header selector is untouched.
     #[test]

@@ -1,9 +1,9 @@
 //! The `no-answer` timer on an ALREADY-ANSWERED call.
 //!
-//! A `kill_worker` reclaim can restore a stale per-b-leg `NoAnswer` ledger
-//! entry whose cancel died with the crashed node; pre-fix its fire tore a
-//! CONFIRMED call down with a 480 (~107 established-call drops per endurance
-//! kill event). The rule must absorb the fire when the call is answered —
+//! A reclaim after a worker crash can restore a stale per-b-leg `NoAnswer`
+//! ledger entry whose cancel died with the crashed node; unabsorbed, its fire
+//! would tear a CONFIRMED call down with a 480. The rule must absorb the fire
+//! when the call is answered —
 //! only the spent ledger entry is scrubbed; no 480, no leg teardown, no
 //! `/call/failure` consult.
 //!
@@ -132,8 +132,8 @@ async fn stale_no_answer_fire_on_a_confirmed_call_is_absorbed() {
     // 15 s was cancelled by the answer): the stale entry is re-armed for +5 s.
     h.advance(Duration::from_secs(stalerestore::INJECT_AT_SEC as u64 + 1)).await;
 
-    // Cross ONLY the stale NoAnswer deadline. Pre-fix this 480'd the answered
-    // INVITE and tore the call down; the guard must absorb it.
+    // Cross ONLY the stale NoAnswer deadline. The guard must absorb it: no 480
+    // on the answered INVITE, no teardown.
     h.advance(Duration::from_secs(stalerestore::STALE_FIRE_SEC as u64 + 1)).await;
 
     assert_eq!(

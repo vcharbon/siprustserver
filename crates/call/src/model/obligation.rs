@@ -23,12 +23,37 @@ pub enum Obligation {
     PrackOf { a_tag: String, a_rseq: i64 },
 }
 
+/// The kind of an [`Obligation`], whatever its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObligationKind {
+    AckOf2xx,
+    PrackOf,
+}
+
+impl ObligationKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [ObligationKind; 2] = [ObligationKind::AckOf2xx, ObligationKind::PrackOf];
+
+    /// The kind as a counter labels it (`obligation="…"`).
+    pub const fn label(self) -> &'static str {
+        match self {
+            ObligationKind::AckOf2xx => "ack-of-2xx",
+            ObligationKind::PrackOf => "prack-of",
+        }
+    }
+}
+
 impl Obligation {
     /// The kind of obligation, as a counter labels it (`obligation="…"`).
     pub fn kind(&self) -> &'static str {
+        self.kind_of().label()
+    }
+
+    /// The kind of obligation.
+    pub fn kind_of(&self) -> ObligationKind {
         match self {
-            Obligation::AckOf2xx { .. } => "ack-of-2xx",
-            Obligation::PrackOf { .. } => "prack-of",
+            Obligation::AckOf2xx { .. } => ObligationKind::AckOf2xx,
+            Obligation::PrackOf { .. } => ObligationKind::PrackOf,
         }
     }
 

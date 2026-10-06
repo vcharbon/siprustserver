@@ -3,7 +3,7 @@
 //! Several pivot fields are closed vocabularies whose members carry a
 //! parameter (`redirect:302`, `step:14`, `blocked:<reason>`). They are enums in
 //! Rust — a lane must not re-parse a string — and single JSON strings on the
-//! wire. [`string_token!`] wires `Display` + `FromStr` to `Serialize`,
+//! wire. [`string_token!`](crate::string_token!) wires `Display` + `FromStr` to `Serialize`,
 //! `Deserialize` and `JsonSchema` so the two forms cannot drift.
 
 /// Implement `Serialize` / `Deserialize` / `JsonSchema` for a type whose wire

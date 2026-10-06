@@ -6,8 +6,8 @@
 
 use call::StackDialog;
 use sip_message::generators;
-use sip_message::header::{HostPort, NameAddr};
-use sip_message::SipStr;
+use sip_message::header::{HeaderValue, HostPort, NameAddr};
+use sip_message::{SipRequest, SipStr};
 
 /// Convert a `call` dialog to the generators' `StackDialog` input shape.
 pub fn to_gen_dialog(d: &StackDialog) -> generators::StackDialog {
@@ -21,6 +21,13 @@ pub fn to_gen_dialog(d: &StackDialog) -> generators::StackDialog {
         local_cseq: d.local_cseq.max(0) as u32,
         route_set: d.route_set.clone(),
     }
+}
+
+/// The local and remote address of the UAS dialog `invite` creates: its To and
+/// its From (RFC 3261 §12.1.1), each written whole but for the tag, so the
+/// requests the dialog later carries keep the display names the INVITE stated.
+pub fn uas_addresses(invite: &SipRequest) -> (String, String) {
+    (invite.to().clone().without_tag().to_wire(), invite.from().clone().without_tag().to_wire())
 }
 
 /// The transport destination the address `target` names. The `call` crate keeps

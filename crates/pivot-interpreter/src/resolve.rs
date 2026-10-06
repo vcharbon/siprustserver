@@ -289,7 +289,7 @@ mod tests {
         IdentityBindings::new().bind("caller", "private", "0009001").bind(
             "transferee",
             "e164",
-            "+33000900006",
+            "+15550900006",
         )
     }
 
@@ -312,7 +312,7 @@ mod tests {
         }
     }
 
-    /// K7's answer: a leg ringing two forks has two To-tags and two RSeq
+    /// A leg ringing two forks has two To-tags and two RSeq
     /// spaces, and `${leg:B.rseq}` publishes ONE of each. The early namespace
     /// reads the fork.
     #[test]
@@ -394,7 +394,7 @@ mod tests {
         let r = Resolver::new(&state, &bindings);
         assert_eq!(
             r.text("<sip:${num:transferee:e164}@example.invalid>").unwrap(),
-            "<sip:+33000900006@example.invalid>"
+            "<sip:+15550900006@example.invalid>"
         );
         let err = r.text("${num:transferee:private}").unwrap_err();
         assert!(matches!(err, ResolveError::Binding { .. }), "{err}");
@@ -426,7 +426,7 @@ mod tests {
                  %3Bto-tag%3D${leg:B.remote-tag}%3Bfrom-tag%3D${leg:B.local-tag}>"
             )
             .unwrap(),
-            "<sip:+33000900006@example.invalid?Replaces=call-b@host\
+            "<sip:+15550900006@example.invalid?Replaces=call-b@host\
              %3Bto-tag%3Db2bua-tag-7%3Bfrom-tag%3Duas1-tag-3>"
         );
     }

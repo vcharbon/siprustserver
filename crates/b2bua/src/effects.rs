@@ -7,7 +7,7 @@ use call::{Call, RetainedEmission, TimerEntry};
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::TxnKind;
 
-use crate::event::CallEvent;
+use b2bua_sdk::event::CallEvent;
 
 /// How an outbound message reaches the wire.
 #[derive(Debug, Clone)]
@@ -99,10 +99,6 @@ pub enum SoftBoundedEffect {
 #[derive(Debug, Clone)]
 pub enum BufferedObservabilityEffect {
     WriteCdr,
-    /// The initial route's admit was refused because the limiter had released
-    /// the call's key: the call runs uncounted. The router counts it as
-    /// `b2bua_limiter_admit_released_total{site="initial"}`.
-    LimiterAdmitReleased,
     /// A final of `status` toward the a-leg's initial INVITE was refused: that
     /// transaction already carries `carried` (RFC 3261 §17.2.1). The router
     /// counts it as `second_final_refused`.
@@ -158,10 +154,16 @@ pub enum FireAndForgetEffect {
     },
     /// Kick the async `/call/failure` decision (b-leg failover). Carries the
     /// request JSON the seed rule built; the router calls `decision.call_failure`
-    /// then re-enters via a `call-failure-result` internal event.
+    /// then re-enters via a `call-failure-result` internal event. The admits
+    /// of the failover chain are numbered from `limiter_change` on, in the
+    /// block the dispatching turn reserved. `deadline` names the answer
+    /// deadline the sending turn armed (ADR-0039), which the fold states;
+    /// `None` until armed, and for a consult with no deadline.
     FailureAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
+        limiter_change: u64,
+        deadline: Option<u64>,
     },
     /// Kick the async `call_release` consult for a subscribed internal release
     /// event. Carries the event-scoped request JSON the
@@ -171,6 +173,20 @@ pub enum FireAndForgetEffect {
     ReleaseAsyncHttp {
         call_ref: String,
         request: serde_json::Value,
+        /// The change number a reroute's admit carries.
+        limiter_change: u64,
+    },
+    /// Replace the call's admission set on the call limiter with `entries`
+    /// under `change`, carrying the call's `held` set of the sending turn (a
+    /// service's `ReplaceAdmissionSet`), then re-enter via a
+    /// `limiter-admit-result` internal event echoing `correlation_id`.
+    LimiterAdmit {
+        call_ref: String,
+        correlation_id: String,
+        key: String,
+        change: u64,
+        held: call::LimiterHeld,
+        entries: Vec<call::LimiterEntry>,
     },
     /// Re-enter the handler chain with an internally-generated event.
     Reenter(Box<CallEvent>),
@@ -198,8 +214,11 @@ pub enum QuietTurn {
 }
 
 impl QuietTurn {
+    /// Every kind, in declaration order.
+    pub const ALL: [QuietTurn; 2] = [QuietTurn::OwnRung, QuietTurn::ReAck];
+
     /// The `kind` label of `b2bua_repl_quiet_turns_total`.
-    pub fn kind(self) -> &'static str {
+    pub const fn kind(self) -> &'static str {
         match self {
             QuietTurn::OwnRung => "own-rung",
             QuietTurn::ReAck => "re-ack",

@@ -1,5 +1,5 @@
 //! RFC 3261 §17.2 absorption — THE one classification in this tree — and the
-//! two views of the datagram stream it separates (issue 22).
+//! two views of the datagram stream it separates.
 //!
 //! A receiving stack sees one stream of datagrams and owes two answers about
 //! each: "did it arrive?" and "did the logic see it?". They differ, and the

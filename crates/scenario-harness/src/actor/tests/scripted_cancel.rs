@@ -68,7 +68,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
     h.finish().await;
 }
 
-/// The scripted 487 response template for the CANC01-style abort — a
+/// The scripted 487 response template for the caller-abort shape — a
 /// frozen `X-Cap-487` pins verbatim-template fidelity end to end (bob
 /// emits it, alice's matcher verifies it).
 fn cap487_template() -> MessageTemplate {
@@ -80,7 +80,7 @@ fn cap487_template() -> MessageTemplate {
     )
 }
 
-/// Scripted CANCEL reception (053, CANC01 shape): bob claims the INVITE,
+/// Scripted CANCEL reception (the caller-abort shape): bob claims the INVITE,
 /// rings 180 on the bound transaction, `ExpectRequest{Cancel}` parks the
 /// caller's CANCEL (its 200 stays automatic), and the scripted
 /// `RespondTemplate 487` — frozen headers verbatim — rides the BOUND
@@ -90,7 +90,7 @@ fn cap487_template() -> MessageTemplate {
 #[tokio::test(start_paused = true)]
 async fn scripted_cancel_reception_487_rides_bound_invite() {
     let h = Harness::new("actor-scripted-cancel-reception").describe(
-        "CANC01: INVITE→180 on bound txn→ExpectRequest{Cancel} parks the \
+        "caller abort: INVITE→180 on bound txn→ExpectRequest{Cancel} parks the \
          CANCEL (auto-200)→RespondTemplate 487 verbatim on the BOUND INVITE",
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -176,7 +176,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
     h.finish().await;
 }
 
-/// Gap 2 (053): a CANCEL hits a script-BOUND INVITE (claimed by
+/// Gap 2: a CANCEL hits a script-BOUND INVITE (claimed by
 /// `ExpectRequest{Initial}`, 180 already sent on the bound transaction)
 /// with NO remaining `ExpectRequest{Cancel}` — the automatic mirrors the
 /// parked path: 200 the CANCEL, 487 the BOUND INVITE, terminate the leg
@@ -257,7 +257,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
     h.finish().await;
 }
 
-/// Precedence (053): the CANCEL lands while the script's
+/// Precedence: the CANCEL lands while the script's
 /// `ExpectRequest{Cancel}` is still DWELLING — the expectation wins: the
 /// CANCEL parks (auto-200 only, no automatic 487), waits out the dwell,
 /// and the scripted policy `Respond 487` rides the bound INVITE. The

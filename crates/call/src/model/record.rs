@@ -1,10 +1,12 @@
 //! The master [`Call`] record and its call-level satellites: lifecycle state,
-//! HA topology hint, active peering, limiter entries, the a-leg INVITE
+//! HA topology hint, active peering, the a-leg INVITE
 //! snapshot, tag mappings, policy overrides, active rules.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use super::limiter::CallLimiterState;
 
 use super::cdr::CdrEvent;
 use super::decision_log::DecisionMark;
@@ -67,25 +69,24 @@ pub struct ReliableProvisional {
     /// is absorbed rather than relayed. The entry itself stays for the life of
     /// the call: it still translates a re-PRACK's `RAck` and anchors the
     /// ladder.
-    #[serde(default)]
     pub acknowledged: bool,
     /// The provisional as it left on the face the number was shown, on the
     /// RFC 3262 §3 ladder this stack's retransmissions repeat
     /// ([`RetainedEmission`], paced). `Some` while the ladder is live; `None`
     /// before the provisional leaves, once the PRACK retires it, and once the
     /// ladder ceases — retained bytes are never sent again after any of those.
-    #[serde(default)]
     pub emission: Option<RetainedEmission>,
     /// The `CSeq` number of the INVITE the provisional answers on the face it
     /// was shown — the second `RAck` token a PRACK names beside `a_rseq`
     /// (RFC 3262 §7.2).
-    /// `None` on an entry hydrated from a peer that recorded none: absent
-    /// books disprove no PRACK, so such an entry admits any CSeq token. The
-    /// replication body is positional, so this stays the LAST field and the
-    /// fields before it are never skipped: `#[serde(default)]` hydrates only a
-    /// missing trailing element.
+    pub a_cseq: i64,
+    /// The provisional carried a description toward the face it was shown
+    /// (RFC 3311 §5.1).
     #[serde(default)]
-    pub a_cseq: Option<i64>,
+    pub carried_sdp: bool,
+    /// The responder's provisional carried a description.
+    #[serde(default)]
+    pub responder_sdp: bool,
 }
 
 /// A reliable provisional this stack acknowledged ITSELF, on the responder's
@@ -107,105 +108,9 @@ pub struct PrackedProvisional {
     pub invite_cseq: i64,
     /// The `RSeq` the responder stated.
     pub rseq: i64,
-}
-
-/// The call's admission state on the call limiter: the key every hold of the
-/// call is kept under, whether the limiter counts the call, whether the call
-/// owes a release of its key, and the ids of the set it last admitted
-/// (observability: the CDR and the decision snapshot name them). The key is
-/// minted once at the call's creation and is unique over time (`call_ref`
-/// alone is not: a retried INVITE reuses it), so a release names this call and
-/// no later one; it is replicated with the call, so a takeover, a reclaim and
-/// the lossy reap release with the same key.
-///
-/// `counted` (the limiter confirmed a non-empty set) is what makes the call
-/// refresh its lease. `release_owed` is set once an admit request left for the
-/// key, whatever its answer, and is never cleared: the request may have landed,
-/// so the call releases its key once at its end. `counted` implies it.
-/// `fail_open` marks a call that runs uncounted although its route names
-/// limiter ids: its admit got no usable answer or was not sent while the call
-/// was uncounted, the limiter refused it on a release fence, or a refresh
-/// learnt that an admit of the key dropped its set. Any other answered admit
-/// that restates the set, a cap refusal included, clears it; it implies
-/// `!counted`.
-/// `generation` counts the restatements of the set after the call's first
-/// admit ([`set`](Self::set)): a refresh answer applies to the call only under
-/// the generation its refresh was sent for.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CallLimiterState {
-    pub key: String,
-    pub counted: bool,
-    pub release_owed: bool,
-    pub fail_open: bool,
-    pub ids: Vec<String>,
-    pub generation: u32,
-}
-
-impl CallLimiterState {
-    /// The state of a call under `key` that sent no admit request.
-    pub fn uncounted(key: String) -> Self {
-        Self {
-            key,
-            counted: false,
-            release_owed: false,
-            fail_open: false,
-            ids: Vec::new(),
-            generation: 0,
-        }
-    }
-
-    /// The state under `key` after an admitted set: counted iff the set is
-    /// not empty; the release is owed either way.
-    pub fn admitted(key: String, ids: Vec<String>) -> Self {
-        Self {
-            key,
-            counted: !ids.is_empty(),
-            release_owed: true,
-            fail_open: false,
-            ids,
-            generation: 0,
-        }
-    }
-
-    /// The state under `key` after an admit request the limiter answered
-    /// with no set for the call (a cap refusal that dropped or never had
-    /// one, a release fence): uncounted, the release owed.
-    pub fn unconfirmed(key: String) -> Self {
-        Self {
-            key,
-            counted: false,
-            release_owed: true,
-            fail_open: false,
-            ids: Vec::new(),
-            generation: 0,
-        }
-    }
-
-    /// This state after an admit of a set the limiter did not confirm (no
-    /// usable answer, no request sent, a release fence): a counted call stays
-    /// as it is; an uncounted one runs `fail_open` when the set it asked for
-    /// names ids (`wanted`).
-    pub fn failed_open(&self, wanted: bool) -> Self {
-        Self { fail_open: !self.counted && wanted, ..self.clone() }
-    }
-
-    /// This state after an admit request whose answer is lost: the set it
-    /// counted stays counted, and the release is owed.
-    pub fn with_release_owed(&self) -> Self {
-        Self { release_owed: true, ..self.clone() }
-    }
-
-    /// State the outcome of a replaced set, the key kept: `counted`,
-    /// `fail_open` (only on an uncounted call) and `ids` are replaced, the
-    /// release obligation only grows (a counted call owes it), and the
-    /// generation moves on.
-    pub fn set(&mut self, counted: bool, release_owed: bool, fail_open: bool, ids: Vec<String>) {
-        self.counted = counted;
-        self.release_owed |= release_owed || counted;
-        self.fail_open = fail_open && !counted;
-        self.ids = ids;
-        self.generation = self.generation.wrapping_add(1);
-    }
+    /// The responder's provisional carried a description.
+    #[serde(default)]
+    pub responder_sdp: bool,
 }
 
 /// A single `name: value` header line.
@@ -223,6 +128,9 @@ pub struct ALegInviteSnapshot {
     pub headers: Vec<SipHeader>,
     #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
+    /// The INVITE's CSeq number: what a copy of it carries (RFC 3261
+    /// §8.2.2.2), and a new request on its Call-ID and From-tag does not.
+    pub cseq: u32,
 }
 
 /// A rule activated on this call by the HTTP API response.
@@ -260,9 +168,7 @@ pub struct CallTopology {
     pub bak: String,
     /// Primary counter `p` of the `(p,b)` version vector.
     pub gen: i64,
-    /// Backup counter `b` of the `(p,b)` version vector. `#[serde(default)]` so
-    /// a body serialised without it still deserialises (`b = 0`).
-    #[serde(default)]
+    /// Backup counter `b` of the `(p,b)` version vector.
     pub bak_gen: i64,
 }
 
@@ -357,47 +263,38 @@ pub struct Call {
     /// speculative — revisit when a genuinely per-leg event (BYE/INFO
     /// reporting) lands. Replicated like `features` (an ordinary `Call` field
     /// on the msgpack body), so a takeover node keeps honoring the
-    /// subscription. `#[serde(default)]` so a body encoded before this field
-    /// decodes as "no subscriptions".
-    #[serde(default)]
+    /// subscription.
     pub subscriptions: Vec<ReleaseEventKind>,
     /// Per-call runtime state for an in-flight **established-call reroute**
     /// (a `Route`-shaped `call_release` decision): replacement b-leg dialing →
     /// a-leg re-INVITE realign → old-leg BYE. Mirrors `transfer` (typed slice;
     /// presence is the activation guard for the `release-reroute` rules).
     /// `None` when no reroute is in flight.
-    #[serde(default)]
     pub reroute: Option<RerouteState>,
     /// The reliable provisionals relayed toward the caller, in mint order
     /// (RFC 3262 §7.1) — one entry per provisional this stack renumbered, for
     /// the life of the call. It survives here because a PRACK arriving after a
     /// takeover still translates onto the b-leg number it acknowledges.
-    #[serde(default)]
     pub reliable_provisionals: Vec<ReliableProvisional>,
     /// The reliable provisionals this stack PRACKed on the responder's behalf
     /// (no shown number, so no `reliable_provisionals` entry), one per
     /// provisional for the life of the call — the books that make a
     /// responder's retransmission of one recognisable as such.
-    #[serde(default)]
     pub pracked_provisionals: Vec<PrackedProvisional>,
     /// The `seq` of the last message recorded on any leg's ring — the
     /// call-wide sequence [`crate::helpers::record_message`] draws from; `0`
     /// while nothing is recorded.
-    #[serde(default)]
     pub message_seq: u32,
     /// The decisions applied to the call, in order
     /// ([`crate::helpers::mark_decision`] is the one writer); empty until the
     /// first decision.
-    #[serde(default)]
     pub decision_log: Vec<DecisionMark>,
     /// The count of applied decisions — `decision_log.len()`, kept as a field
     /// so a stamp reads it without a length; `0` before the first decision.
-    #[serde(default)]
     pub decision_ordinal: u32,
     /// Who ended the call and why ([`crate::helpers::record_termination`] is
     /// the one writer, the first termination's record stands); `None` while
     /// the call is live.
-    #[serde(default)]
     pub termination: Option<Termination>,
     /// The turn being handled (one event under the call's lock), whose number
     /// every ring entry it appends carries; `1` for the initial INVITE's turn,
@@ -408,7 +305,24 @@ pub struct Call {
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate
-    /// machine-bound rules. An empty map drops off the wire.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// machine-bound rules.
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
+}
+
+impl Call {
+    /// The call's **incarnation**: which of the successive calls a `call_ref`
+    /// can carry this record is. A retried INVITE reuses its Call-ID and From
+    /// tag, so it is born on the `call_ref` of the call it retries; the
+    /// incarnation tells the two apart. It is the limiter key, minted once at
+    /// creation and replicated with the body, so every copy of one call agrees.
+    pub fn incarnation(&self) -> &str {
+        self.limiter.key()
+    }
+
+    /// The incarnation's mark ([`crate::incarnation_mark`]): what tells this
+    /// call apart from the other calls of its `call_ref`, stamped on every Via
+    /// and Contact the stack emits for it.
+    pub fn incarnation_mark(&self) -> &str {
+        crate::incarnation_mark(self.incarnation())
+    }
 }

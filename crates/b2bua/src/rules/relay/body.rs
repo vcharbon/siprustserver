@@ -3,9 +3,9 @@
 //! are the readers every emission site shares.
 
 use sip_message::header::{HeaderName, HeaderValue, MediaType};
-use sip_message::{SipRequest, SipStr};
+use sip_message::{SipHeader, SipRequest, SipStr};
 
-use crate::rules::model::Body;
+use b2bua_sdk::model::Body;
 
 /// The media type a policy- or peer-supplied value names. The B2BUA emits its
 /// own body, so the header describing it is the stack's to state (§16.6). Text
@@ -37,6 +37,21 @@ pub fn source_content_type(a_invite: &SipRequest, body: &Body) -> Option<String>
     body.content_type
         .clone()
         .or_else(|| a_invite.raw(HeaderName::ContentType).next().map(str::to_string))
+}
+
+/// `headers` with the lines describing a sent body ([`Body::descriptors`])
+/// beside them, each whose name `headers` does not state already: a body sent
+/// whole reads on the new message as it read on the one it was taken from
+/// (RFC 3261 §20.11). A message sending no body states none.
+pub fn describe_body(headers: &mut Vec<SipHeader>, sent: &[u8], descriptors: &[SipHeader]) {
+    if sent.is_empty() {
+        return;
+    }
+    let stated: Vec<HeaderName> =
+        headers.iter().map(|h| HeaderName::from(h.name.as_str())).collect();
+    headers.extend(
+        descriptors.iter().filter(|d| !stated.iter().any(|name| name.matches(&d.name))).cloned(),
+    );
 }
 
 /// Whether the INVITE minted from `a_invite` under `body_override` makes an

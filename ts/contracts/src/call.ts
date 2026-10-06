@@ -65,7 +65,7 @@ export const noAnswerMsIsDeclarable = (attempt: Attempt): boolean => {
 }
 
 /**
- * The provisional-handling profile the CAPTURED system ran, in the routing API's
+ * The provisional-handling profile the CAPTURED system ran, in the decision API's
  * own vocabulary so a lane applies it without re-deciding. Every token is open.
  */
 export const Relay18x = Schema.Struct({

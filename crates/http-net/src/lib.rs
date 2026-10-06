@@ -21,7 +21,7 @@
 //!   real sockets do not obey `tokio::time::pause`, so deterministic scenarios
 //!   cannot use real HTTP. This is the workhorse.
 //! - `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
-//!   `real`**, filled in by the runner slice. Its tests run on a real
+//!   `real`**. Its tests run on a real
 //!   (non-paused) runtime.
 //! - [`RecordingHttpNetwork`] — a test decorator that records both sides of
 //!   every exchange onto the `layer-harness` `Recorder` ([`HTTP_TAG`]), so HTTP
@@ -44,7 +44,7 @@
 //! [`HttpError`]). The *timeout budget* and the fail-open policy are the
 //! caller's job (it wraps `request` in `tokio::time::timeout`): under a paused
 //! clock a [`Fault::Stall`]ed request simply never completes until the caller's
-//! timeout fires when the harness advances. See `b2bua::limiter_http`.
+//! timeout fires when the harness advances. See `b2bua::limiter::http`.
 
 pub mod failures;
 pub mod scripted;

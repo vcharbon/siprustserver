@@ -176,9 +176,10 @@ pub enum RuleId {
     /// no route set. Charges the REGISTER's sender.
     #[serde(rename = "register-no-route-set")]
     RegisterNoRouteSet,
-    /// RFC 3261 §14.2: a UAS that takes a re-INVITE while another INVITE
-    /// transaction of the same dialog is still in progress answers 491, or 500
-    /// with `Retry-After`. Charges that UAS.
+    /// RFC 3261 §14.2: a UAS that takes a re-INVITE while its sender's earlier
+    /// INVITE of the same dialog is still in progress answers 500 with
+    /// `Retry-After`; one crossing the other party's INVITE answers 491.
+    /// Charges that UAS.
     #[serde(rename = "concurrent-re-invite-500-or-491")]
     ConcurrentReInvite500Or491,
     /// RFC 3261 §15: a BYE names a dialog that exists, and a callee does not
@@ -1156,7 +1157,8 @@ pub enum Evidence {
         target_uri: String,
         target_host: String,
         target_port: u16,
-        /// The target came from the topmost Route (§12.2.1.1); false means the
+        /// The target came from the route set's first hop (§12.2.1.1): the
+        /// topmost Route, or the dialog's strict first route; false means the
         /// route set was empty and the Request-URI named it (§8.1.2).
         from_route: bool,
     },
@@ -1371,10 +1373,11 @@ pub enum Evidence {
         /// The request-line method, as the wire spelled it.
         method: String,
         /// The top-Via branch the incoming request named (RFC 3261 §17), which
-        /// is what pairs it with the copy the proxy forwarded.
+        /// the copy the proxy forwarded carries in its Via stack.
         branch: String,
-        /// The topmost Route URI — what §16.4 has the forward carry as its
-        /// Request-URI.
+        /// The Route URI §16.4 / §16.6 step 6 has the forward carry as its
+        /// Request-URI: the strict first Route, or for a request addressed to
+        /// the proxy, the next strict Route, else the last one.
         first_route: String,
         /// The Request-URI the forward carried, empty where the proxy forwarded
         /// nothing on that transaction.
@@ -1436,7 +1439,8 @@ pub enum Evidence {
         /// Index into the view's `msgs` of that pending INVITE.
         pending_invite_msg: usize,
         /// The FINAL the taker answered the racing re-INVITE with, or 0 where
-        /// it answered none — §14.2 owes 491, or 500 with `Retry-After`.
+        /// it answered none — §14.2 owes 500 with `Retry-After` to a same-sender
+        /// race and 491 to a crossing.
         answered_status: u16,
         /// That answer carried a `Retry-After`, which §14.2 requires of a 500.
         retry_after: bool,
@@ -1889,7 +1893,7 @@ pub enum Evidence {
         same_session: bool,
         /// Everything BUT the `o=` line changed, which is what §8 has the
         /// version count: a changed description owes `prior + 1`, an unchanged
-        /// one owes `prior`.
+        /// one `prior` or `prior + 1`.
         body_changed: bool,
         session_version: u64,
         prior_session_version: u64,

@@ -1711,7 +1711,7 @@
       "id": 40,
       "type": "timeseries",
       "title": "Reboot verdict \u2014 long-call survival (the HA signal)",
-      "description": "Per kill_worker event: long_loss_pct = long BYE-481 failures / long calls created in-window. The fix target: transparent failover \u21d2 ~0%. long_failed/long_created shown for context. A spike here is the long-call-on-reboot regression (sipp unexpected_msg = 481 on the end-of-hold BYE).",
+      "description": "Per kill_worker event: long_loss_pct = long BYE-481 failures / long calls created in-window. The target: transparent failover \u21d2 ~0%. long_failed/long_created shown for context. A spike here is the long-call-on-reboot regression (sipp unexpected_msg = 481 on the end-of-hold BYE).",
       "gridPos": {
         "h": 8,
         "w": 24,

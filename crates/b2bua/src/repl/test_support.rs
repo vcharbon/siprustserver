@@ -30,8 +30,7 @@ pub fn fast_config() -> PullerConfig {
     PullerConfig::fast_test()
 }
 
-/// Advance ~`ms` in 100 ms chunks under the settle/advance/settle discipline
-/// (the CLAUDE.md fake-clock hazard). Thin `ms`-typed shim over
+/// Advance ~`ms` in settled 100 ms chunks. Thin `ms`-typed shim over
 /// [`sip_clock::testkit::pump`].
 pub async fn tick(ms: u64) {
     sip_clock::testkit::pump(Duration::from_millis(ms)).await;

@@ -1,18 +1,17 @@
 //! Keepalive-driven reaping of a dead peer, asserted VIA CDR GENERATION, for
 //! BOTH directions — and at scale across multiple concurrent calls.
 //!
-//! Regression for the production "no-BYE orphan" leak: an ESTABLISHED dialog
-//! whose peer vanished with no BYE was never reaped, so `b2bua_active_calls`
-//! grew without bound. The intended cleanup is the in-dialog OPTIONS keepalive
+//! Guards the "no-BYE orphan" leak: an ESTABLISHED dialog whose peer vanished
+//! with no BYE must still be reaped, or `b2bua_active_calls` grows without
+//! bound. The cleanup is the in-dialog OPTIONS keepalive
 //! (`keepalive` rule) → unanswered OPTIONS → `KeepaliveTimeout` →
 //! `keepalive-timeout` rule → `BeginTermination` → reap.
 //!
-//! Root cause it guards: the single shared `TimerService` keyed its live-epoch
-//! map by the bare timer **id** (`"Keepalive"`, `"KeepaliveTimeout:a"`, …) which
-//! is identical across calls. Scheduling a later call's keepalive overwrote an
-//! earlier call's epoch, tombstoning the earlier keepalive so it never fired —
-//! at scale, keepalives stopped and dead peers were never probed. The fix keys
-//! the map by `(call_ref, id)`. `colliding_timer_ids_across_calls_both_fire`
+//! The single shared `TimerService` keys its live-epoch map by
+//! `(call_ref, id)`: the bare timer **id** (`"Keepalive"`, `"KeepaliveTimeout:a"`,
+//! …) is identical across calls, so keyed by id alone a later call's keepalive
+//! would overwrite an earlier call's epoch and tombstone it — at scale,
+//! keepalives would stop and dead peers go unprobed. `colliding_timer_ids_across_calls_both_fire`
 //! covers the driver; these tests cover the end-to-end reap + CDR.
 //!
 //! Mirrors `keepalive_timeout.rs`: a 30 s keepalive interval + a hard 5 s

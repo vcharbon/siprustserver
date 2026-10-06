@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs jemalloc as the global allocator and re-runs itself per configuration.
 //! The allocator's footprint under a transaction-table allocation pattern on a
 //! multi-thread runtime, per resolved jemalloc configuration, and the defaults
 //! a binary linking this crate resolves with no operator setting.
@@ -130,10 +131,12 @@ fn child_pattern() {
 }
 
 /// The output of this binary re-run as the child for `test` under `conf`
-/// (`None`: no `_RJEM_MALLOC_CONF` at all).
+/// (`None`: no `_RJEM_MALLOC_CONF` at all). The child includes ignored tests, so
+/// it runs in whichever lane the parent did.
 fn child(test: &str, conf: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(CHILD, "1");
+    cmd.args(["--exact", test, "--include-ignored", "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1");
     match conf {
         Some(conf) => cmd.env("_RJEM_MALLOC_CONF", conf),
         None => cmd.env_remove("_RJEM_MALLOC_CONF"),
@@ -172,6 +175,7 @@ fn ratio(test: &str, conf: &str, held: f64) -> (f64, String) {
 }
 
 #[test]
+#[ignore = "slow lane: real clock >= 1 s"]
 fn profiling_off_keeps_active_within_1_3_of_allocated() {
     if std::env::var_os(CHILD).is_some() {
         return child_pattern();
@@ -185,6 +189,7 @@ fn profiling_off_keeps_active_within_1_3_of_allocated() {
 }
 
 #[test]
+#[ignore = "slow lane: real clock >= 1 s"]
 fn the_recommended_profiling_interval_keeps_active_within_1_3_of_allocated() {
     if std::env::var_os(CHILD).is_some() {
         return child_pattern();
@@ -202,6 +207,7 @@ fn the_recommended_profiling_interval_keeps_active_within_1_3_of_allocated() {
 /// backtrace and an extent, so under a fractional CPU quota the churn holds
 /// less of the heap; the ratio, not the held count, is the claim here.
 #[test]
+#[ignore = "slow lane: real clock >= 1 s"]
 fn a_fine_profiling_interval_doubles_the_small_heap_and_the_startup_line_says_so() {
     if std::env::var_os(CHILD).is_some() {
         jemalloc_stats::log_config();

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub type ExtMap = BTreeMap<String, serde_json::Value>;
 
 /// REFER blind-transfer phase — the authoritative state of the `transfer`
-/// callflow machine (ADR-0016 slice 7). It is projected into the per-call
+/// callflow machine (ADR-0016). It is projected into the per-call
 /// `transfer` machine cursor (`refer_transfer::project_cursor`), and each
 /// transfer rule is gated by that cursor via its `active_states`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +58,6 @@ pub struct TransferState {
     /// The referrer answered a refer NOTIFY 481: the implicit subscription is
     /// over (RFC 6665 §4.4.1) and no further NOTIFY leaves on it; the transfer
     /// itself runs on to its own outcome.
-    #[serde(default)]
     pub subscription_terminated: bool,
 }
 
@@ -66,7 +65,7 @@ pub struct TransferState {
 /// `Route` decision. When a subscribed event fires, the core consults the
 /// engine's `call_release` (release vs reroute) instead of tearing the call
 /// down locally. Wire form is `snake_case` (`"max_call_duration"`), matching
-/// the Routing API's `subscribe[]` names. Deliberately a closed enum, not free
+/// the names a route subscribes with. Deliberately a closed enum, not free
 /// strings: the core must know each event's firing site to honor it, so an
 /// unknown name is a design change, not data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,9 +117,6 @@ pub struct RelayFirst18xState {
     /// Distinct *upstream* 18x status values already relayed (dedupe key for the
     /// `ONE_PER_VALUE` messages policy — the caller-facing wire form is always
     /// the downgraded bare 180, so dedupe must key on what the callee sent).
-    /// `#[serde(default)]` keeps old replicated bodies (two-element positional
-    /// encoding) decoding unchanged.
-    #[serde(default)]
     pub relayed_values: Vec<u16>,
 }
 

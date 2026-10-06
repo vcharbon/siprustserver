@@ -4,10 +4,10 @@
  * fields — an emitter that grows a field must not break a reader that has not
  * caught up.
  *
- * `anon-capture.flows.json` is the smallest anonymized real capture the corpus
- * holds, committed here so the sweep runs with no corpus checkout. It covers the
- * `text` payload arm and two evidence kinds; the other arms and kinds are pinned
- * by the inline fixtures below, since no small real capture carries them.
+ * `anon-capture.flows.json` is a small synthetic capture in the extractor's own
+ * output shape (example hosts, documentation addresses, minted Call-IDs and
+ * tags). It covers the `text` payload arm and two evidence kinds; the other
+ * arms and kinds are pinned by the inline fixtures below.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -27,7 +27,7 @@ import { LOCAL_FIXTURES, read } from "./fixtures.js"
 
 const doc = decodeFlowsSync(JSON.parse(read(LOCAL_FIXTURES, "anon-capture.flows.json")) as unknown)
 
-describe("a real anonymized capture", () => {
+describe("a whole capture document", () => {
   it("decodes at the schema version this contract models", () => {
     expect(doc.schema).toBe(EMIT_SCHEMA_VERSION)
     expect(doc.legs.length).toBe(4)
@@ -48,7 +48,7 @@ describe("a real anonymized capture", () => {
 
   it("reads the subscriber a URI names, digits first", () => {
     const first = doc.legs[0].msgs[0]
-    expect(userOf(first.identities.from)).toBe("33000900001")
+    expect(userOf(first.identities.from)).toBe("15550900001")
     expect(userOf(undefined)).toBeUndefined()
   })
 

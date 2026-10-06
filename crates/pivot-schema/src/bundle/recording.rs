@@ -52,7 +52,7 @@ pub struct RecordedMessage {
     /// one bound every comparison of the body uses.
     pub body: Option<BodyLayout>,
     /// The `seq` of the earliest datagram on this leg, in this direction, that
-    /// this one repeats byte for byte (friction H8). Set by the caller that
+    /// this one repeats byte for byte. Set by the caller that
     /// KNOWS it is a repeat — the §17.2 seam for an arrival, the emitting step
     /// for a ladder it sent — never derived here.
     pub repeat_of: Option<u64>,

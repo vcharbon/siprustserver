@@ -1,4 +1,4 @@
-//! The authored JSON surface (ADR-0018 Phase D) — MOVED to the dependency-light
+//! The authored JSON surface (ADR-0018) — MOVED to the dependency-light
 //! `e2e-model` crate (the axis data model shared with the load generator) and
 //! re-exported here verbatim so every consumer path (`e2e_core::model::…`,
 //! including the `xtask e2e-schema` emission via [`schemas`]) is unchanged.

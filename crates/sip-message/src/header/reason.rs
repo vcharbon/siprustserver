@@ -42,6 +42,16 @@ pub fn reason_for<'a>(reasons: &'a [Reason], protocol: &str) -> Option<&'a Reaso
     reasons.iter().find(|r| r.is(protocol))
 }
 
+/// The first value of `reasons` restated alone where it is a Q.850 value,
+/// `Q.850;cause=N` with its cause digits as written: every parameter and every
+/// other value dropped. `None` where the first value is of another protocol or
+/// states no decimal cause.
+pub fn q850_cause_alone(reasons: &[Reason]) -> Option<String> {
+    let first = reasons.first().filter(|r| r.is(Q850))?;
+    let digits = first.cause_digits()?;
+    Some(format!("{Q850};cause={digits}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +97,27 @@ mod tests {
         assert_eq!(reason_for(&both, Q850).and_then(Reason::cause), Some(17));
         assert_eq!(reason_for(&both, "SIP").and_then(Reason::cause), Some(600));
         assert!(reason_for(&both[..1], Q850).is_none(), "no Q.850 value");
+    }
+
+    /// A leading Q.850 value is restated alone, digits as written; a list led
+    /// by another protocol, or by a Q.850 value stating no cause, restates
+    /// nothing. One value per protocol, as RFC 3326 §2 allows.
+    #[test]
+    fn a_leading_q850_cause_is_restated_alone() {
+        let led = readable_reasons(
+            ["Q.850 ;cause=031 ;text=\"x\";Location=A", "SIP;cause=487;text=\"ORIGINATOR_CANCEL\""]
+                .map(SipStr::owned),
+        );
+        assert_eq!(q850_cause_alone(&led).as_deref(), Some("Q.850;cause=031"));
+        let folded = readable_reasons([SipStr::owned("Q.850;cause=17, SIP;cause=486")]);
+        assert_eq!(q850_cause_alone(&folded).as_deref(), Some("Q.850;cause=17"));
+        let sip_first = readable_reasons(["SIP;cause=487", "Q.850;cause=16"].map(SipStr::owned));
+        assert_eq!(q850_cause_alone(&sip_first), None, "a SIP value leads");
+        let sip_only = readable_reasons([SipStr::owned("SIP;cause=480;text=\"NO_ANSWER\"")]);
+        assert_eq!(q850_cause_alone(&sip_only), None);
+        let causeless = readable_reasons([SipStr::owned("Q.850;text=\"x\"")]);
+        assert_eq!(q850_cause_alone(&causeless), None, "the leading Q.850 value states none");
+        assert_eq!(q850_cause_alone(&[]), None);
     }
 
     /// A line that does not parse is skipped; the other lines, and every value

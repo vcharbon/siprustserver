@@ -1,98 +1,63 @@
 //! Prometheus text exposition of the capacity gate: its ceilings, its last
-//! RSS sample and level, and what it refused.
+//! RSS sample and level, and the backup replicas it kept out.
 
-use std::fmt::Write;
+use std::fmt;
 
-use super::gate::{BackupBound, Bound, CapacityGate};
+use super::gate::{BackupBound, CapacityGate};
+use crate::metrics::catalogue::capacity as c;
 
 impl CapacityGate {
-    /// The gate's series, appended to the worker's `/metrics` body:
-    ///   - `b2bua_capacity_rejected_total{bound,class}` (counter): new calls
-    ///     refused, by the bound met and the call's class
-    ///     (`normal`/`emergency`).
+    /// The gate's series, appended to the worker's `/metrics` body (a new
+    /// call it refused is counted on `b2bua_new_calls_total`):
     ///   - `b2bua_capacity_level` (gauge): 0 open, 1 non-emergency calls
     ///     refused, 2 every new call refused, as of the last sample.
     ///   - `b2bua_capacity_rss_bytes` (gauge): the RSS the gate last read;
-    ///     absent without a reading.
-    ///   - `b2bua_capacity_ceiling{bound,class}` (gauge): each configured
-    ///     ceiling, the backup ones under `class="backup"` with the `bound`
-    ///     values of `b2bua_repl_backup_shed_total`; an unset one is absent.
+    ///     NaN before the first reading.
+    ///   - `b2bua_capacity_ceiling{bound,class}` (gauge): each ceiling, the
+    ///     backup ones under `class="backup"` with the `bound` values of
+    ///     `b2bua_repl_backup_shed_total`; `+Inf` where none is configured.
     ///   - `b2bua_repl_backup_shed_total{bound}` (counter): backup replicas
     ///     not stored.
     pub fn prometheus_text(&self) -> String {
         let mut s = String::with_capacity(2048);
-        s.push_str(
-            "# HELP b2bua_capacity_rejected_total New calls refused with a 503 by a memory bound.\n\
-             # TYPE b2bua_capacity_rejected_total counter\n",
-        );
-        for bound in Bound::ALL {
-            for (class, emergency) in [("normal", false), ("emergency", true)] {
-                let _ = writeln!(
-                    s,
-                    "b2bua_capacity_rejected_total{{bound=\"{}\",class=\"{class}\"}} {}",
-                    bound.as_str(),
-                    self.rejected_total(bound, emergency)
-                );
-            }
-        }
-        let _ = write!(
-            s,
-            "# HELP b2bua_capacity_level 0 open, 1 non-emergency calls refused, 2 every new call refused.\n\
-             # TYPE b2bua_capacity_level gauge\nb2bua_capacity_level {}\n",
-            self.level() as u8
-        );
-        if let Some(rss) = self.rss_bytes() {
-            let _ = write!(
-                s,
-                "# HELP b2bua_capacity_rss_bytes Process RSS the capacity gate last sampled.\n\
-                 # TYPE b2bua_capacity_rss_bytes gauge\nb2bua_capacity_rss_bytes {rss}\n"
-            );
-        }
-        s.push_str(
-            "# HELP b2bua_capacity_ceiling Configured capacity ceilings.\n\
-             # TYPE b2bua_capacity_ceiling gauge\n",
-        );
+        c::CAPACITY_LEVEL.render_value(&mut s, self.level() as u8);
+        c::CAPACITY_RSS_BYTES.render_value(&mut s, Reading(self.rss_bytes(), "NaN"));
         let limits = self.limits();
-        let ceilings = [
-            ("calls", limits.calls),
-            ("transactions", limits.transactions),
-            ("rss", limits.rss_bytes),
-        ];
-        for (bound, c) in ceilings {
-            for (class, v) in [("normal", c.normal), ("emergency", c.emergency)] {
-                if let Some(v) = v {
-                    let _ = writeln!(
-                        s,
-                        "b2bua_capacity_ceiling{{bound=\"{bound}\",class=\"{class}\"}} {v}"
-                    );
+        c::CAPACITY_CEILING.render(&mut s, |series| {
+            let ceiling = if series.block() == 0 {
+                let bound = match series.index(&c::CEILING_BOUND) {
+                    0 => limits.calls,
+                    1 => limits.transactions,
+                    _ => limits.rss_bytes,
+                };
+                match series.index(&c::CEILING_CLASS) {
+                    0 => bound.normal,
+                    _ => bound.emergency,
                 }
-            }
-        }
-        let backup = [
-            (BackupBound::Calls, limits.backup_calls),
-            (BackupBound::Rss, limits.backup_rss_bytes),
-        ];
-        for (bound, v) in backup {
-            if let Some(v) = v {
-                let _ = writeln!(
-                    s,
-                    "b2bua_capacity_ceiling{{bound=\"{}\",class=\"backup\"}} {v}",
-                    bound.as_str()
-                );
-            }
-        }
-        s.push_str(
-            "# HELP b2bua_repl_backup_shed_total Backup replicas not stored because a backup ceiling was reached.\n\
-             # TYPE b2bua_repl_backup_shed_total counter\n",
-        );
-        for bound in BackupBound::ALL {
-            let _ = writeln!(
-                s,
-                "b2bua_repl_backup_shed_total{{bound=\"{}\"}} {}",
-                bound.as_str(),
-                self.backup_shed_total(bound)
-            );
-        }
+            } else {
+                match BackupBound::ALL[series.index(&c::BACKUP_BOUND)] {
+                    BackupBound::Calls => limits.backup_calls,
+                    BackupBound::Rss => limits.backup_rss_bytes,
+                }
+            };
+            Reading(ceiling, "+Inf")
+        });
+        c::REPL_BACKUP_SHED.render(&mut s, |series| {
+            self.backup_shed_total(BackupBound::ALL[series.index(&c::BACKUP_BOUND)])
+        });
         s
+    }
+}
+
+/// A sample that may hold no reading: its value, or the text standing for
+/// none (`+Inf` for a ceiling not configured, `NaN` before a first sample).
+struct Reading(Option<u64>, &'static str);
+
+impl fmt::Display for Reading {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(v) => write!(f, "{v}"),
+            None => f.write_str(self.1),
+        }
     }
 }

@@ -21,9 +21,9 @@ use sip_retransmit::{Class, Schedule};
 use crate::effects::{
     HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
-use crate::event::CallEvent;
 use crate::rules::defaults::unacked_2xx_give_up_actions;
-use crate::rules::model::{RuleCall, RuleContext};
+use b2bua_sdk::event::CallEvent;
+use b2bua_sdk::model::{RuleCall, RuleContext};
 
 use super::ActionExecutor;
 
@@ -31,8 +31,8 @@ impl ActionExecutor<'_> {
     // ── arming ─────────────────────────────────────────────────────────────
 
     /// Retain the a-leg's INITIAL answer as the datagram it leaves as — its
-    /// `image()` once stamped with the call's charging vector
-    /// ([`crate::rules::charging`]), which the transaction layer sends verbatim
+    /// `image()`, which the end-of-turn stamp rebinds to the stamped bytes
+    /// ([`crate::rules::stated_headers`]) and the transaction layer sends verbatim
     /// — and arm its §13.3.1.4 ladder under `AckOf2xx`, keyed by the To-tag and
     /// CSeq the 2xx itself carries — the two facts the caller's ACK echoes. The
     /// a-leg INVITE server transaction goes `Completed` on this final, so the
@@ -44,7 +44,6 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
         effect: &mut OutboundSipEffect,
     ) {
-        crate::rules::charging::stamp(call, effect);
         let OutboundBody::Response(resp) = &effect.body else {
             return;
         };
@@ -57,7 +56,7 @@ impl ActionExecutor<'_> {
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face), stamped as it leaves, and arm its §13.3.1.4 ladder. The
+    /// either face) and arm its §13.3.1.4 ladder. The
     /// marker also holds the dialog's INVITE server transaction in RFC 6026
     /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
     /// give-up stands.
@@ -69,7 +68,6 @@ impl ActionExecutor<'_> {
         dest: (String, u16),
         target_leg: &str,
     ) {
-        crate::rules::charging::stamp_response(call, resp);
         let (unacked, obligation, first) = unacked_2xx_of(resp, dest, target_leg);
         let target_dialog = if target_leg == call.a_leg.leg_id {
             call.a_leg.dialogs.first_mut()
@@ -113,8 +111,8 @@ impl ActionExecutor<'_> {
         );
     }
 
-    /// Retain the reliable provisional as its `image()`, stamped as it leaves —
-    /// the datagram the transaction layer sends verbatim — and arm its first §3
+    /// Retain the reliable provisional as its `image()` — the datagram the
+    /// transaction layer sends verbatim — and arm its first §3
     /// rung under `PrackOf`. The obligation is this stack's: the `RSeq` the
     /// peer must PRACK is our own mint (`assign_a_rseq`), so the ladder under
     /// its copies is ours — per `(a_tag, a_rseq)`, one per shown dialog (§4,
@@ -129,7 +127,6 @@ impl ActionExecutor<'_> {
         a_tag: &str,
         a_rseq: i64,
     ) {
-        crate::rules::charging::stamp(call, effect);
         let OutboundBody::Response(resp) = &effect.body else {
             return;
         };
@@ -177,8 +174,9 @@ impl ActionExecutor<'_> {
     /// died with the crashed node) — sends nothing and retires the obligation
     /// so a later reclaim cannot re-fire it. A rung that arms the next one
     /// leaves the repeat and its re-arm as the turn's whole effect set
-    /// ([`QuietTurn::OwnRung`]); a cease or a spent fire cancels a ledger
-    /// entry, and the router reads that as the write it is.
+    /// ([`QuietTurn::OwnRung`](crate::effects::QuietTurn::OwnRung)); a cease or
+    /// a spent fire cancels a ledger entry, and the router reads that as the
+    /// write it is.
     pub fn repeat(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         let rung = TimerType::Rung { obligation: obligation.clone() };
         let effect = (call.state == CallModelState::Active)

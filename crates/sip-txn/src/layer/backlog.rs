@@ -2,63 +2,67 @@
 //! arriving while the backlog holds its class's ceiling is refused
 //! statelessly, before the 100 Trying and before any transaction exists, so
 //! the retry deque stays bounded while the consumer is not draining the
-//! output queue. The refused identities are remembered for 64·T1, so every
-//! later copy of one INVITE draws the same refusal and its ACK ends here.
+//! output queue. The refusal and its memo are the node's shared
+//! [`InviteRefusals`]: every later copy of one INVITE draws the same refusal,
+//! whichever stage refused it first, and its ACK ends here.
 
-use std::collections::hash_map::RandomState;
-use std::collections::{HashSet, VecDeque};
-use std::hash::BuildHasher;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Arc;
 
-use sip_message::emergency::is_emergency_request;
-use sip_message::{SipRequest, SipResponse};
+use sip_message::SipRequest;
 use sip_net::UdpEndpoint;
-use tokio::time::Instant;
-
-use crate::timers::{ms, TIMER_B};
 
 use super::owner::Owner;
-
-/// Builds the response that refuses an INVITE at a ceiling. The consumer
-/// phrases it (status, To-tag, `Retry-After`); the layer only sends it, and
-/// sends it again for every later copy of that INVITE, so it must answer one
-/// request identically each time (RFC 3261 §8.2.7).
-pub type NewCallRefusal = Arc<dyn Fn(&SipRequest) -> SipResponse + Send + Sync>;
+use super::refusals::Admission;
 
 /// Ceilings on the deferred backlog (the critical events a full output queue
-/// holds for later), in events. A CANCEL, an ACK, a response and every event
-/// the layer emits for a transaction it already holds are never refused; a
-/// retransmission of an admitted INVITE matches its transaction first and is
-/// never judged.
-#[derive(Clone)]
+/// holds for later), in events, and the classifier a new INVITE is judged
+/// with. A CANCEL, an ACK, a response and every event the layer emits for a
+/// transaction it already holds are never refused; a retransmission of an
+/// admitted INVITE matches its transaction first and is never judged.
+#[derive(Debug, Clone, Copy)]
 pub struct DeferredBound {
-    /// The ceiling for a new non-emergency initial INVITE.
+    /// The ceiling for [`InviteClass::Normal`].
     pub normal: usize,
-    /// The ceiling for an emergency initial INVITE (RFC 4412
-    /// `Resource-Priority`) and for an INVITE carrying a To-tag: this layer
-    /// cannot tell a dialog the consumer holds from one it never had, and a
-    /// 503 leaves an existing dialog in place (RFC 3261 §12.2.1.2, §14.1).
-    /// Read as at least `normal`.
+    /// The ceiling for [`InviteClass::Emergency`] and
+    /// [`InviteClass::InDialog`]: this layer cannot tell a dialog the
+    /// consumer holds from one it never had, and a 503 leaves an existing
+    /// dialog in place (RFC 3261 §12.2.1.2, §14.1). Read as at least
+    /// `normal`.
     pub emergency: usize,
-    /// The response a refused INVITE draws.
-    pub refusal: NewCallRefusal,
+    /// The class of an INVITE no transaction holds.
+    pub class_of: fn(&SipRequest) -> InviteClass,
 }
 
-/// Why an INVITE was refused at a ceiling: the `class` of the refusal counter.
+impl DeferredBound {
+    /// The ceiling an INVITE of `class` is refused at.
+    fn ceiling(&self, class: InviteClass) -> usize {
+        match class {
+            InviteClass::Normal => self.normal,
+            InviteClass::Emergency | InviteClass::InDialog => self.emergency.max(self.normal),
+        }
+    }
+
+    /// Whether an INVITE of `class` is refused while `deferred` events wait.
+    pub fn refuses(&self, class: InviteClass, deferred: usize) -> bool {
+        deferred >= self.ceiling(class)
+    }
+}
+
+/// The class an INVITE is judged in: the `class` of the refusal counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RefusedClass {
-    /// A new initial INVITE, at the normal ceiling.
+pub enum InviteClass {
+    /// A new initial INVITE.
     Normal,
-    /// A new emergency initial INVITE, at the emergency ceiling.
+    /// A new initial INVITE carrying an emergency priority (RFC 4412).
     Emergency,
-    /// An INVITE carrying a To-tag, at the emergency ceiling.
+    /// An INVITE carrying a To-tag.
     InDialog,
 }
 
-impl RefusedClass {
-    pub const ALL: [RefusedClass; 3] = [Self::Normal, Self::Emergency, Self::InDialog];
+impl InviteClass {
+    /// Every class, in exposition order.
+    pub const ALL: [InviteClass; 3] = [Self::Normal, Self::Emergency, Self::InDialog];
 
     /// Stable metric label (`class="..."`).
     pub const fn label(self) -> &'static str {
@@ -69,153 +73,81 @@ impl RefusedClass {
         }
     }
 
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Normal => 0,
-            Self::Emergency => 1,
-            Self::InDialog => 2,
-        }
+    /// The class's position in [`ALL`](Self::ALL).
+    pub const fn index(self) -> usize {
+        self as usize
     }
 }
 
-/// The most refused identities the layer's memo holds at once; past it the
-/// oldest is forgotten first, and a later copy of that INVITE is judged afresh.
-/// At 64·T1 it covers refusals up to 2 048 a second.
-const REFUSED_MEMO_MAX: usize = 65_536;
-
-/// The identities (top-`Via` branch, Call-ID, From-tag) of the INVITEs
-/// refused in the last 64·T1 (Timer B, the longest a UAC retransmits an
-/// INVITE), as keyed hashes with their refusal instant, oldest first. Past its
-/// capacity the oldest identity is forgotten first.
-pub struct RefusedMemo {
-    keys: HashSet<u64>,
-    order: VecDeque<(Instant, u64)>,
-    hasher: RandomState,
-    max: usize,
-}
-
-impl Default for RefusedMemo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RefusedMemo {
-    /// An empty memo holding at most 65 536 identities.
-    pub fn new() -> Self {
-        Self::with_capacity(REFUSED_MEMO_MAX)
-    }
-
-    /// An empty memo holding at most `max` identities.
-    pub fn with_capacity(max: usize) -> Self {
-        Self { keys: HashSet::new(), order: VecDeque::new(), hasher: RandomState::new(), max }
-    }
-
-    /// Whether no identity refused in the last 64·T1 is held, as of the last
-    /// call that expired the old ones.
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-
-    /// The key of `req`'s transaction identity. An ACK to a non-2xx final
-    /// shares its INVITE's branch, Call-ID and From-tag (RFC 3261 §17.1.1.3).
-    fn key(&self, req: &SipRequest) -> u64 {
-        self.hasher.hash_one((
-            req.top_via().branch().unwrap_or_default(),
-            req.call_id().as_str(),
-            req.from().tag().unwrap_or_default(),
-        ))
-    }
-
-    fn expire(&mut self, now: Instant) {
-        while let Some(&(at, key)) = self.order.front() {
-            if now.duration_since(at) < ms(TIMER_B) && self.order.len() <= self.max {
-                break;
-            }
-            self.order.pop_front();
-            self.keys.remove(&key);
-        }
-    }
-
-    /// Remember `req`'s identity as refused now. `true` when the memo did not
-    /// hold it: `req` is the first copy of its INVITE refused in 64·T1.
-    pub fn remember(&mut self, req: &SipRequest) -> bool {
-        let now = Instant::now();
-        let key = self.key(req);
-        let first = self.keys.insert(key);
-        if first {
-            self.order.push_back((now, key));
-        }
-        self.expire(now);
-        first
-    }
-
-    /// Whether `req` shares the identity of an INVITE refused in the last
-    /// 64·T1 (a copy of it, or the ACK to its refusal).
-    pub fn holds(&mut self, req: &SipRequest) -> bool {
-        self.expire(Instant::now());
-        !self.keys.is_empty() && self.keys.contains(&self.key(req))
-    }
+/// Whether the new INVITE judged now is admitted: no transaction is opened
+/// for one that is not.
+pub(super) enum NewInvite {
+    /// Answered with the node's refusal.
+    Refused,
+    /// Admitted; `held` when the shared refusals hold its identity for the
+    /// transaction about to open.
+    Admitted { held: bool },
 }
 
 impl Owner {
-    /// Refuse the INVITE `req`, which no transaction holds, when the backlog
-    /// already holds its class's ceiling: the refusal goes to `src`, the
-    /// identity is remembered and the refusal counted. `true` when refused —
-    /// the caller creates no transaction and sends no 100 Trying.
-    pub(super) async fn refuse_on_backlog(
+    /// Judge the INVITE `req`, which no transaction holds, against the node's
+    /// refusals: a copy of a refused INVITE draws that refusal again, whatever
+    /// the backlog holds now — the caller has its final, or will have it from
+    /// this copy, and a call admitted behind it would ring for no one; past its
+    /// class's ceiling it is refused now, counted once. A refusal goes to
+    /// `src`, before any 100 Trying.
+    pub(super) async fn judge_new_invite(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         req: &SipRequest,
         src: SocketAddr,
-    ) -> bool {
-        let Some(bound) = &self.deferred_bound else { return false };
-        let backlog = self.deferred_events.len();
-        // Below the normal ceiling no class is refused, so every ceiling reads
-        // as at least `normal`.
-        if backlog < bound.normal {
-            return false;
-        }
-        let class = if req.to().tag().is_some() {
-            RefusedClass::InDialog
-        } else if is_emergency_request(req) {
-            RefusedClass::Emergency
-        } else {
-            RefusedClass::Normal
+    ) -> NewInvite {
+        let Some(refusals) = self.refusals.clone() else {
+            return NewInvite::Admitted { held: false };
         };
-        if class != RefusedClass::Normal && backlog < bound.emergency {
-            return false;
+        let class = self.backlog_refuses(req);
+        match refusals.admit(req, class.is_some()) {
+            Admission::Admit { held } => return NewInvite::Admitted { held },
+            Admission::Repeat => {
+                self.metrics.refused_copies.fetch_add(1, Relaxed);
+            }
+            Admission::Refuse => {
+                if let Some(class) = class {
+                    self.metrics.deferred_refused[class.index()].fetch_add(1, Relaxed);
+                }
+            }
         }
-        let refusal = (bound.refusal)(req);
+        let refusal = refusals.answer(req);
         self.send_buffer(endpoint, refusal.image(), src).await;
-        self.refused.remember(req);
-        self.metrics.deferred_refused[class.index()].fetch_add(1, Relaxed);
-        true
+        NewInvite::Refused
     }
 
-    /// A copy of an INVITE refused in the last 64·T1 draws that refusal again,
-    /// whatever the backlog holds now: the caller has its final, or will have
-    /// it from this copy, and a call admitted behind it would ring for no one.
-    /// `true` when `req` was such a copy.
-    pub(super) async fn repeat_refusal(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        req: &SipRequest,
-        src: SocketAddr,
-    ) -> bool {
-        let Some(bound) = &self.deferred_bound else { return false };
-        if !self.refused.holds(req) {
-            return false;
+    /// The class `req` is refused under when the backlog holds that class's
+    /// ceiling now; `None` while it has room.
+    fn backlog_refuses(&self, req: &SipRequest) -> Option<InviteClass> {
+        let bound = self.deferred_bound.as_ref()?;
+        let backlog = self.deferred_events.len();
+        // Below the normal ceiling no class is refused: no INVITE is
+        // classified on the uncongested path.
+        if backlog < bound.normal {
+            return None;
         }
-        let refusal = (bound.refusal)(req);
-        self.send_buffer(endpoint, refusal.image(), src).await;
-        true
+        let class = (bound.class_of)(req);
+        bound.refuses(class, backlog).then_some(class)
     }
 
     /// Whether `ack`, matching no transaction, acknowledges a refusal of the
     /// last 64·T1: it ends here, as a transaction's ACK to its non-2xx final
     /// would (RFC 3261 §17.2.1).
-    pub(super) fn acknowledges_refusal(&mut self, ack: &SipRequest) -> bool {
-        self.deferred_bound.is_some() && self.refused.holds(ack)
+    pub(super) fn acknowledges_refusal(&self, ack: &SipRequest) -> bool {
+        self.refusals.as_ref().is_some_and(|r| r.remembers() && r.refused(ack))
+    }
+
+    /// Release the shared refusals' hold on the identity of a leaving
+    /// transaction that [`judge_new_invite`](Self::judge_new_invite) admitted.
+    pub(super) fn release_hold(&self, branch: &str, call_id: &str, from_tag: &str) {
+        if let Some(refusals) = &self.refusals {
+            refusals.release(branch, call_id, from_tag);
+        }
     }
 }

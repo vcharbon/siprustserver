@@ -70,7 +70,7 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     // retransmit → SUT → re-ACK → bob, draining bob's raw inbox each step (the
     // inbox dedups the re-ACK for `receive` — same Call-ID/branch/method as the
     // first ACK — but the datagram is delivered and recorded). This is the primary
-    // gate: WITHOUT the fix no re-ACK is emitted and this stays 0.
+    // gate: a stack that does not re-ACK leaves this at 0.
     let mut re_acks = 0;
     for _ in 0..10 {
         h.advance(Duration::from_millis(100)).await;

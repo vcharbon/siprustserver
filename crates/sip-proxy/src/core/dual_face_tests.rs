@@ -8,9 +8,9 @@
 //! capturing endpoints (one per face) and asserts WHICH socket egressed, WHAT
 //! advertise was stamped (Via / Record-Route per face), and that in-dialog
 //! requests pop BOTH self-Route halves. The end-to-end flows (real workers,
-//! recorded-trace RFC audit) live in `failover-harness/tests/dual_face.rs`;
-//! the single-face regression guard is the entire pre-existing sip-proxy
-//! suite plus `single_face_rr_format_is_unchanged` below.
+//! recorded-trace RFC audit) live in `failover-harness/tests/it/dual_face.rs`;
+//! the single-face guard is the rest of the sip-proxy suite plus
+//! `single_face_rr_format_is_unchanged` below.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -484,9 +484,9 @@ Content-Length: 0\r\n\r\n"
 
 #[tokio::test]
 async fn single_face_rr_format_is_unchanged() {
-    // The SAME flow with NO external face: the historical double-RR — both
+    // The SAME flow with NO external face: the single-face double-RR — both
     // entries at the one advertise, the outbound half param-less. Dual-face
-    // plumbing must be inert here (the entire pre-existing suite is the wider
+    // plumbing must be inert here (the rest of the suite is the wider
     // guard; this pins the exact wire shape).
     let sent: Arc<Mutex<Vec<Sent>>> = Arc::new(Mutex::new(Vec::new()));
     let int_ep = TapEndpoint {

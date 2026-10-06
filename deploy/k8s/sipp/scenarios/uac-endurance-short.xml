@@ -9,9 +9,10 @@
   a 30s call can receive a probe mid-hold.
 
   This half carries `Resource-Priority: esnet.0` (below), the canonical
-  emergency token `sip_message::is_emergency_request` recognises. The B2BUA
-  Tier-3 admission gate (overload.should_admit) therefore ALWAYS admits these,
-  even under cpu_starve overload — so they are NEVER shed. The non-emergency
+  emergency token `sip_message::is_emergency_request` recognises. The B2BUA's
+  panic-ELU and CPS bucket rungs admit these, so cpu_starve overload does not
+  shed them; only the capacity, backlog and shed rungs refuse an emergency
+  call, at their emergency ceilings. The non-emergency
   half (uac-endurance-short-noemerg.xml, role=short_ne) has no such header and
   IS sheddable. Run both at SHORT_CPS/2 each so the overload experiment can
   prove emergency new calls survive while non-emergency new calls get 503'd.

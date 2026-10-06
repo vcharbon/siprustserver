@@ -4,7 +4,7 @@
 //! A message is frozen. Its fields are private, so the typed core and the
 //! header list cannot desync — the only way to a modified message is
 //! [`thaw`](SipRequest::thaw) → edit → `freeze`. The read surface lives in
-//! [`crate::access`]; this module holds the shapes.
+//! `crate::access`; this module holds the shapes.
 //!
 //! What requests and responses share is written once in [`MessageCore`]:
 //! the ordered header list, the typed [`CoreHeaders`] the parser validated, the

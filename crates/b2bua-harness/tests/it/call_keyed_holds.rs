@@ -22,14 +22,12 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, CallTreatment,
+    NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, RefreshOutcome,
-    ReleaseAnswer,
-};
+use b2bua::limiter::{LimiterEntry, RefreshOutcome};
 use b2bua::metrics::AdmitSite;
+use b2bua_harness::limiter::doubles::{answers_released, spy};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
@@ -44,10 +42,8 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// A fail-open budget above the paused-clock HTTP round trip: a detached
-/// admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
-/// production-sized budget could expire between.
-const WIDE_BUDGET: Duration = Duration::from_secs(2);
+/// The limiter client's fail-open budget.
+const BUDGET: Duration = Duration::from_millis(150);
 /// A short lease, so the paused clock crosses it cheaply.
 const LEASE_SEC: i64 = 20;
 
@@ -58,8 +54,8 @@ async fn limiter_rig(budget: Duration) -> WitnessRig {
 
 /// Limiter entries `(id, cap)`. A cap of 2 on an id the call already holds
 /// once is exactly the witness plus the call: room for nothing new.
-fn limiters(entries: &[(&str, i64)]) -> Vec<CallLimiterEntry> {
-    entries.iter().map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit }).collect()
+fn limiters(entries: &[(&str, i64)]) -> Vec<LimiterEntry> {
+    entries.iter().map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit }).collect()
 }
 
 /// A route toward `host:port` with `entries` as its call limiters and a
@@ -101,7 +97,7 @@ async fn busy_then_failover_answered(
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let b2bua = B2buaSut::builder(one_failover(initial, failover))
         .limiter(rig.client.clone())
         .limiter_store(rig.store.clone())
@@ -182,7 +178,7 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let media = h.agent("media", "127.0.0.1:5090").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
@@ -305,7 +301,7 @@ async fn refused_replacement_releases_the_call_holds() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let origins = Arc::new(Mutex::new(Vec::new()));
     let seen = origins.clone();
     let decision = Arc::new(DelayNthFailure {
@@ -431,7 +427,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let decision = Arc::new(DelayedFailure {
         delay: Duration::from_millis(900),
         inner: Arc::new(
@@ -515,7 +511,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     // x at cap 2: the witness and one call.
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 2)]))
         .limiter(rig.client.clone())
@@ -580,7 +576,7 @@ async fn a_limiter_restart_is_healed_by_the_next_refresh() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let mut rig = limiter_rig(WIDE_BUDGET).await;
+    let mut rig = limiter_rig(BUDGET).await;
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 10), ("y", 10)]))
         .limiter(rig.client.clone())
         .limiter_store(rig.store.clone())
@@ -658,7 +654,7 @@ async fn a_refresh_landing_after_a_refused_reroute_dropped_the_set_re_creates_no
     let h = Harness::new("keyed-holds-late-refresh-after-drop");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let rig = WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, WIDE_BUDGET, |s| {
+    let rig = WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, BUDGET, |s| {
         Arc::new(LateRefresh { inner: s, after: Duration::from_secs(5) })
     })
     .await;
@@ -731,7 +727,7 @@ async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
     let h = Harness::new("keyed-holds-dropped-refresh-fire");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
         .limiter(rig.client.clone())
         .limiter_store(rig.store.clone())
@@ -799,7 +795,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
     let h = Harness::new("keyed-holds-refresh-released");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let rig = limiter_rig(WIDE_BUDGET).await;
+    let rig = limiter_rig(BUDGET).await;
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
         .limiter(rig.client.clone())
         .limiter_store(rig.store.clone())
@@ -826,7 +822,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
 
     // ── the key is released behind the call's back ─────────────────────────
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
-    let key = b2bua.live_call(&call_ref).expect("the call is live").limiter.key;
+    let key = b2bua.live_call(&call_ref).expect("the call is live").limiter.key().to_string();
     rig.store.release(&[&key]);
     assert_eq!(rig.all_holds(), [0, 0, 0]);
     // The refresh falls due at 5 s and leaves within one tick.
@@ -872,11 +868,10 @@ impl HttpService for RequestLog {
 async fn logged_rig() -> (WitnessRig, Arc<Mutex<Vec<String>>>) {
     let paths = Arc::new(Mutex::new(Vec::new()));
     let log = paths.clone();
-    let rig =
-        WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, WIDE_BUDGET, move |s| {
-            Arc::new(RequestLog { inner: s, paths: log.clone() })
-        })
-        .await;
+    let rig = WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, BUDGET, move |s| {
+        Arc::new(RequestLog { inner: s, paths: log.clone() })
+    })
+    .await;
     (rig, paths)
 }
 
@@ -1007,29 +1002,6 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
 }
 
-/// A limiter that answers every admit `Released` and counts the releases it
-/// receives: the release-fence refusal on an initial route leaves the call
-/// uncounted and is counted on the b2bua.
-#[derive(Default)]
-struct AnswersReleased {
-    releases: AtomicUsize,
-}
-
-#[async_trait]
-impl CallLimiter for AnswersReleased {
-    async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        AdmitOutcome::Released
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        self.releases.fetch_add(keys.len(), Ordering::SeqCst);
-        ReleaseAnswer::Released
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        RefreshAnswer::Answered(vec![RefreshOutcome::Released; calls.len()])
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// An initial admit refused by a release fence runs the call uncounted, counts
 /// it as `b2bua_limiter_admit_released_total{site="initial"}`, and releases the call's key once at
 /// its end: the admit was answered, so it was sent.
@@ -1038,7 +1010,8 @@ async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     let h = Harness::new("keyed-holds-initial-admit-released");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let limiter = Arc::new(AnswersReleased::default());
+    // Every admit answered `Released` (a release fence); the releases counted.
+    let limiter = spy(answers_released());
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
         .limiter(limiter.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
@@ -1057,7 +1030,7 @@ async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     settle_until(|| b2bua.is_reaped()).await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released, count.failed_open), (0, 0, 0), "uncounted");
-    assert_eq!(limiter.releases.load(Ordering::SeqCst), 1, "one release of the call's key");
+    assert_eq!(limiter.released_keys().len(), 1, "one release of the call's key");
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

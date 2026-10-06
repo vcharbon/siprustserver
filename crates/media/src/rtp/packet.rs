@@ -3,10 +3,10 @@
 //!
 //! Port of `../sipjsserver/src/media/rtp/packet.ts`. The seam lets the transport
 //! engine swap wire codecs so an independent implementation
-//! ([`WebRtcRs`](super::webrtc_framing::WebRtcRs)) can cross-check this one —
-//! the rtp.js-witness pattern from the TS port. The encoder always emits the
-//! 12-byte fixed header (CSRC count 0); the parser is full-form so it can read
-//! any peer's packets (CSRC list, extension header, padding trim).
+//! ([`WebRtcRs`](super::webrtc_framing::WebRtcRs)) can cross-check this one.
+//! The encoder always emits the 12-byte fixed header (CSRC count 0); the parser
+//! is full-form so it can read any peer's packets (CSRC list, extension header,
+//! padding trim).
 
 pub const RTP_HEADER_BYTES: usize = 12;
 

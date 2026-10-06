@@ -117,7 +117,7 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
     let alice = h.agent("alice", "127.0.0.1:5795").await;
     let bob = h.agent("bob", "127.0.0.1:5796").await;
     // Default composition — the `refer_transfer` seed IS present. What is absent
-    // is the route's `features.refer` arm, so this platform processes no
+    // is the route's `features.refer` arm, so the B2BUA processes no
     // transfer and the REFER is an ordinary in-dialog request.
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5796).start(&h, "b2bua", "127.0.0.1:5797").await;
@@ -175,8 +175,8 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
 
 // ── 3. Transparent path reads no Refer-To syntax. ────────────────────────────
 
-/// A relayed REFER is not a transfer this platform runs, so its Refer-To is not
-/// this platform's to read: an unclosed name-addr no reader accepts (RFC 3261
+/// A relayed REFER is not a transfer the B2BUA runs, so its Refer-To is not
+/// the B2BUA's to read: an unclosed name-addr no reader accepts (RFC 3261
 /// §20.30 / §25.1) crosses to the peer verbatim and the answer is the far end's
 /// — here Alice's own 400, relayed back to the transferor.
 ///

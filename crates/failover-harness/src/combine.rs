@@ -130,7 +130,7 @@ pub fn combine_doc(
     // alone (NOT `at_ms`), giving true append/causal order: a reboot marker
     // appended just before the bootstrap pull it triggers sorts first even when
     // both share the same paused-clock millisecond. `at_ms` is carried only for
-    // the displayed `T+…` time label. (Issue 1.)
+    // the displayed `T+…` time label.
     let mut rows: Vec<SeqRow> = Vec::new();
     let base = sip_entries.iter().map(|e| e.sent_ms as i64).min().unwrap_or(0);
 

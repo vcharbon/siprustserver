@@ -1,4 +1,4 @@
-//! The planned exit's env grammar (ADR-0031 D2, ADR-0038 decision 9).
+//! The planned exit's env grammar (ADR-0031 D2, ADR-0040 decision 9).
 //!
 //! | variable | meaning | default |
 //! |---|---|---|

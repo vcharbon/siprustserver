@@ -10,8 +10,7 @@
 //! State transitions and rare events do NOT belong here — they are individual
 //! `info!` lines at their own site.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use observe::{WaveReport, WaveSet};
 
@@ -70,12 +69,12 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
 /// Messages and events that resolved to no call (`router::unroutable`), keyed
 /// by class (`wire:ACK`, `wire:BYE:481`, `internal:timeout:OPTIONS`, …). Each
 /// line names the class, why it resolved to nothing, and the most recent
-/// example (`sample`: its Call-ID or transaction branch), so an episode of
-/// thousands prints a handful of lines that still point at one real message.
+/// example of its own episode (`sample`: its Call-ID or transaction branch),
+/// so an episode of thousands prints a handful of lines that still point at
+/// one real message.
 pub struct UnroutableWaves {
-    waves: Arc<WaveSet>,
-    /// Class → (reason, sample) of the latest event; bounded by the classes.
-    samples: Arc<Mutex<HashMap<String, (&'static str, String)>>>,
+    /// Each episode's payload is the (reason, sample) of its latest event.
+    waves: Arc<WaveSet<(&'static str, String)>>,
 }
 
 impl Default for UnroutableWaves {
@@ -86,35 +85,51 @@ impl Default for UnroutableWaves {
 
 impl UnroutableWaves {
     pub fn new() -> Self {
-        let samples: Arc<Mutex<HashMap<String, (&'static str, String)>>> = Arc::default();
-        let read = samples.clone();
-        let waves = WaveSet::new(move |class: &str, r: &WaveReport| {
-            let (reason, sample) = read.lock().unwrap().get(class).cloned().unwrap_or_default();
-            tracing::info!(
-                node = observe::node(),
-                class,
-                reason,
-                sample = %sample,
-                edge = %r.edge,
-                elapsed_ms = r.elapsed_ms,
-                totals = %r.tally,
-                "unroutable"
-            );
-        });
-        Self { waves, samples }
+        let waves = WaveSet::with_payload(
+            |class: &str, r: &WaveReport, (reason, sample): &(&'static str, String)| {
+                tracing::info!(
+                    node = observe::node(),
+                    class,
+                    reason,
+                    sample = %sample,
+                    edge = %r.edge,
+                    elapsed_ms = r.elapsed_ms,
+                    totals = %r.tally,
+                    "unroutable"
+                );
+            },
+        );
+        Self { waves }
     }
 
     /// Record one event of `class`; `reason` says why it resolved to no call
-    /// and `sample` identifies it.
+    /// and `sample` identifies it. The sample lives with its episode, at most
+    /// [`observe::MAX_KEYS`] of them.
     pub fn record(&self, class: &str, reason: &'static str, sample: String) {
-        self.samples.lock().unwrap().insert(class.to_string(), (reason, sample));
-        self.waves.record(class, "events", 1);
+        self.waves.record_with(class, "events", 1, (reason, sample));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Classes a peer can mint (one per method token) open at most
+    /// [`observe::MAX_KEYS`] episodes, each line naming its own class's sample.
+    #[tokio::test(start_paused = true)]
+    async fn the_samples_stay_bounded_whatever_the_classes() {
+        let (_guard, log) = observe::test_buffer();
+        let waves = UnroutableWaves::new();
+        for i in 0..(observe::MAX_KEYS * 4) {
+            waves.record(&format!("wire:X{i}:405"), "r", format!("call_id=c{i}"));
+        }
+        let lines = log.matching("unroutable");
+        assert_eq!(lines.len(), observe::MAX_KEYS);
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains(&format!("class=wire:X{i}:405")), "{}", line.line());
+            assert!(line.contains(&format!("sample=call_id=c{i} ")), "{}", line.line());
+        }
+    }
 
     /// A storm of one class prints a handful of lines, each naming the class,
     /// its reason and a real example.
@@ -136,6 +151,45 @@ mod tests {
         let last = lines.last().expect("the episode closes");
         assert!(last.contains("edge=falling") && last.contains("events=5000"), "{}", last.line());
         assert!(last.contains("sample=call_id=c4999"), "{}", last.line());
+    }
+
+    /// Two successive episodes of one class: each episode's lines name its
+    /// own reason and sample.
+    #[tokio::test(start_paused = true)]
+    async fn each_successive_episode_names_its_own_sample() {
+        let (_guard, log) = observe::test_buffer();
+        let waves = UnroutableWaves::new();
+        waves.record("wire:ACK", "no-dialog", "call_id=old".into());
+        tokio::task::yield_now().await;
+        tokio::time::advance(observe::DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+        waves.record("wire:ACK", "no-transaction", "call_id=new".into());
+        tokio::task::yield_now().await;
+        tokio::time::advance(observe::DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = log.matching("unroutable");
+        let shape: Vec<_> = lines
+            .iter()
+            .map(|l| {
+                let edge =
+                    ["rising", "falling"].into_iter().find(|e| l.contains(&format!("edge={e}")));
+                let sample =
+                    ["old", "new"].into_iter().find(|s| l.contains(&format!("sample=call_id={s}")));
+                (edge, sample)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Some("rising"), Some("old")),
+                (Some("falling"), Some("old")),
+                (Some("rising"), Some("new")),
+                (Some("falling"), Some("new")),
+            ],
+            "{lines:?}",
+        );
+        assert!(lines[3].contains("reason=no-transaction"), "{}", lines[3].line());
     }
 
     /// The traffic-independence guarantee at the site that would break it

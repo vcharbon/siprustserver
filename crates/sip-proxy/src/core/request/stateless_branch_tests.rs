@@ -16,7 +16,7 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
 
 use crate::addr::ProxyAddr;
-use crate::cancel_lru::{call_id_cseq_key, INVITE_ENTRY_TTL_MS};
+use crate::cancel_lru::{invite_txn_key, INVITE_ENTRY_TTL_MS};
 use crate::core::ProxyCore;
 use crate::core::ProxyCoreBuilder;
 use crate::observability::metrics::RoutingDecisionKind;
@@ -32,7 +32,7 @@ const DOWNSTREAM: &str = "10.0.0.50";
 /// The address BOTH instances advertise — a VIP pair is one sent-by to the
 /// downstream, whose server transaction matches on branch + sent-by + method
 /// (§17.2.3). Each instance still owns its own socket.
-const PROXY_VIP: &str = "172.20.255.250";
+const PROXY_VIP: &str = "192.0.2.250";
 const NODE_A: &str = "10.244.1.11";
 const NODE_B: &str = "10.244.1.12";
 
@@ -189,12 +189,15 @@ async fn cancel_after_the_invite_memo_expired_carries_the_same_branch() {
     let f = fabric().await;
     let core = f.proxy(NODE_A).await;
 
-    core.route_request(&invite("expired-memo@test", "tag-a", 4, "z9hG4bKup2"), worker_src()).await;
+    let inv = invite("expired-memo@test", "tag-a", 4, "z9hG4bKup2");
+    core.route_request(&inv, worker_src()).await;
     let invite_via = f.pushed_via().await;
 
+    let key = invite_txn_key(inv.top_via(), "expired-memo@test", Some("tag-a"), 4);
+    assert!(core.cancel_lru.lookup(&key).is_some(), "the INVITE entry is written under this key");
     tokio::time::advance(Duration::from_millis(INVITE_ENTRY_TTL_MS + 1_000)).await;
     assert!(
-        core.cancel_lru.lookup(&call_id_cseq_key("expired-memo@test", Some("tag-a"), 4)).is_none(),
+        core.cancel_lru.lookup(&key).is_none(),
         "the INVITE entry must be gone, or this proves nothing"
     );
 
@@ -287,4 +290,60 @@ async fn a_branchless_received_via_maps_by_the_alternate_input_set() {
 
     assert_eq!(repeat, original, "§16.11: a retransmission maps to the first copy's branch");
     assert_ne!(other_cseq, original, "a different CSeq number is a different transaction");
+}
+
+/// A request from an outside sender at `host:5060`, which the proxy forwards
+/// to the worker through its strategy.
+fn external(method: &str, host: &str, branch: &str) -> SipMessage {
+    let contact = if method == "INVITE" {
+        format!("Contact: <sip:alice@{host}:5060>\r\n")
+    } else {
+        String::new()
+    };
+    parse_req(&format!(
+        "{method} sip:bob@{PROXY_VIP}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {host}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@example.com>;tag=tag-a\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: twin-branch@test\r\n\
+CSeq: 1 {method}\r\n\
+{contact}Content-Length: 0\r\n\r\n"
+    ))
+}
+
+// §17.2.3 matches a server transaction on branch AND sent-by, so one branch
+// token from two senders is two transactions. Forwarded to the same worker,
+// they must leave on two branches, or the worker absorbs the second INVITE as
+// a retransmission of the first and the second sender's CANCEL cancels the
+// first sender's call. Each CANCEL repeats its own INVITE's branch.
+#[tokio::test(start_paused = true)]
+async fn one_branch_token_from_two_senders_leaves_on_two_branches() {
+    let f = fabric().await;
+    let worker = f
+        .net
+        .bind_udp(BindUdpOpts::new(format!("{WORKER}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let pushed = || async {
+        let pkt = worker.recv().await.expect("the proxy forwards to the worker");
+        let SipMessage::Request(req) = CustomParser::default().parse(&pkt.raw).unwrap() else {
+            panic!("a forwarded request")
+        };
+        req.top_via().to_wire()
+    };
+    let core = f.proxy(NODE_A).await;
+    let (a, b) = ("10.0.1.1", "10.0.1.2");
+    let from = |host: &str| format!("{host}:5060").parse().unwrap();
+
+    core.route_request(&external("INVITE", a, "z9hG4bKtwin"), from(a)).await;
+    let invite_a = pushed().await;
+    core.route_request(&external("INVITE", b, "z9hG4bKtwin"), from(b)).await;
+    let invite_b = pushed().await;
+    assert_ne!(invite_a, invite_b, "two senders' transactions leave on two branches");
+
+    core.route_request(&external("CANCEL", b, "z9hG4bKtwin"), from(b)).await;
+    assert_eq!(pushed().await, invite_b, "b's CANCEL rides b's INVITE's branch");
+    core.route_request(&external("CANCEL", a, "z9hG4bKtwin"), from(a)).await;
+    assert_eq!(pushed().await, invite_a, "a's CANCEL rides a's INVITE's branch");
 }

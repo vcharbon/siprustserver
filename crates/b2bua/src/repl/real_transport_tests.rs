@@ -1,6 +1,6 @@
-//! Real-TCP replication integration tests (goal-3 — the kind/k8s transport).
+//! Real-TCP replication integration tests (the kind/k8s transport).
 //!
-//! The sim suite (S5–S10) drives the changelog → `ReplServer` → `Puller`
+//! The sim suite drives the changelog → `ReplServer` → `Puller`
 //! protocol over the in-memory `SimulatedReplicationNetwork`, which moves whole
 //! `Vec<u8>` frames and pumps a fake clock. That fabric **cannot** exercise the
 //! real `RealReplicationNetwork` (tokio `TcpStream` readiness ignores
@@ -189,7 +189,8 @@ async fn spawn_reclaimer_core(
         wire_faults: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
-        refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
+        refusals: None,
+        deferred_ceilings: None,
         replication: Some(setup),
         metrics: crate::metrics::B2buaMetrics::new(),
         adaptation_http: None,
@@ -262,10 +263,10 @@ fn spawn_puller(
 }
 
 // ---------------------------------------------------------------------------
-// THE goal-3 regression: an in-dialog mutation made on the primary AFTER the
-// puller has connected + bootstrapped (cold, empty store) must stream over real
-// TCP and land on the backup. This is the path the cluster proved broken
-// (`repl_pull_applied = 0`); the sim suite cannot reach it (no real socket).
+// An in-dialog mutation made on the primary AFTER the puller has connected +
+// bootstrapped (cold, empty store) must stream over real TCP and land on the
+// backup (a broken tail shows as `repl_pull_applied = 0`); the sim suite cannot
+// reach it (no real socket).
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn tail_delivers_post_connect_mutation_over_real_tcp() {
@@ -644,10 +645,11 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
 // real repl TCP, reclaiming VALID `Call` bodies, and finishes only when the node
 // `serves()` every one — measuring the stage the stream gates skip. It runs on
 // `multi_thread` with a live-write storm contending the reclaimer's store Mutex
-// (finding #6 applied to the reclaim side) so the materialise pipeline is timed
-// under the load a real reboot reclaims under.
+// so the materialise pipeline is timed under the load a real reboot reclaims
+// under.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "slow lane: real clock >= 1 s"]
 async fn reclaim_materialises_into_live_map_under_serving_load() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -684,9 +686,9 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     let started = tokio::time::Instant::now();
     let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
 
-    // Concurrent serving load: hammer w1's store with backup forward-flushes while
-    // it reclaims. These hit the SAME inner Mutex as `reclaim_scan` + the bootstrap
-    // applies (finding #6) but land in `bak:w9` — NOT scanned by reclaim (which
+    // Concurrent serving load: hammer w1's store with backup forward-flushes
+    // while it reclaims. These hit the SAME inner Mutex as `reclaim_scan` + the
+    // bootstrap applies but land in `bak:w9` — NOT scanned by reclaim (which
     // scans `pri:w1`), so they pressure the lock without polluting the count.
     let stop = Arc::new(AtomicBool::new(false));
     let mut writers = Vec::new();
@@ -815,15 +817,15 @@ async fn mismatched_ordinal_silently_delivers_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// THROUGHPUT BENCH (manual; `--ignored`). Measures bootstrap re-hydration
-// ctx/s over real TCP, on a MULTI-THREAD runtime, with and without a concurrent
+// THROUGHPUT BENCH (manual; `--ignored`). Measures bootstrap re-hydration ctx/s
+// over real TCP, on a MULTI-THREAD runtime, with and without a concurrent
 // live-write storm on the SERVER — the only setup that exercises the real
-// bottleneck (finding #6: the single `meta` Mutex shared by serve_bootstrap's
-// per-body reads and live put_call/delete_call). On a current-thread runtime a
-// std Mutex is never contended (one task at a time, no lock held across await),
-// so the plain CI test cannot represent #6 — this bench is the representative
-// measurement that justifies (or refutes) a perf fix. Writers forward to a
-// dummy "w2" so they load w0's locks WITHOUT polluting w1's pri: count.
+// bottleneck (the single `meta` Mutex shared by serve_bootstrap's per-body reads
+// and live put_call/delete_call). On a current-thread runtime a std Mutex is
+// never contended (one task at a time, no lock held across await), so the plain
+// CI test cannot represent that contention — this bench is the representative
+// measurement that justifies (or refutes) a perf fix. Writers forward to a dummy
+// "w2" so they load w0's locks WITHOUT polluting w1's pri: count.
 //
 // Run: `cargo test -p b2bua --release repl::real_transport_tests::bench -- --ignored --nocapture`
 // ---------------------------------------------------------------------------
@@ -898,11 +900,11 @@ async fn measure_bootstrap(
 // `bootstrap_synchronises_above_5k_…` measures a cold node in ISOLATION. A real
 // rebooted worker re-hydrates WHILE serving ~100 cps of new traffic, and
 // `serve_bootstrap`'s per-body reads share the server's single `meta` Mutex with
-// live `put_call`/`delete_call` (finding #6). On a current-thread runtime a std
-// Mutex is never contended (one task at a time), so a plain CI test cannot
-// represent #6 — this rides `multi_thread` + a live-write storm, and GATES that
-// the contended bootstrap still lands every context AND clears the same 5 000
-// ctx/s floor (measured #6 cost is ~4x, leaving ~14x of headroom). Writers
+// live `put_call`/`delete_call`. On a current-thread runtime a std Mutex is never
+// contended (one task at a time), so a plain CI test cannot represent that
+// contention — this rides `multi_thread` + a live-write storm, and GATES that the
+// contended bootstrap still lands every context AND clears the same 5 000 ctx/s
+// floor (measured contention cost is ~4x, leaving ~14x of headroom). Writers
 // forward to a dummy "w2" so they load w0's locks WITHOUT polluting w1's pri:.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -943,10 +945,10 @@ async fn bootstrap_throughput_survives_live_write_contention() {
 }
 
 // ---------------------------------------------------------------------------
-// LATENCY-INJECTING wrapper: adds a fixed per-`send` cost to model a real
-// network / a CPU-loaded send path (loopback's per-send cost is ~0, which hides
-// finding #4 — sequential one-await-send-per-body with no pipelining). Wraps
-// BOTH ends so serve_bootstrap's server-side sends pay the cost.
+// LATENCY-INJECTING wrapper: adds a fixed per-`send` cost to model a real network
+// / a CPU-loaded send path (loopback's per-send cost is ~0, which hides
+// sequential one-await-send-per-body with no pipelining). Wraps BOTH ends so
+// serve_bootstrap's server-side sends pay the cost.
 // ---------------------------------------------------------------------------
 struct LatentNet {
     inner: Arc<dyn ReplicationNetwork>,
@@ -1155,14 +1157,14 @@ impl ReplicationConnection for CountingConn {
     }
 }
 
-// Representative CI gate for finding #4 (deterministic, no wall-clock). The
-// latency bench proves a per-frame flush collapses bootstrap to ~1/send_cost on
-// any real link; batching is what keeps it above the 5k ctx/s floor. This pins
-// the structural property that guarantees it: a cold bootstrap of N bodies must
-// coalesce into O(N/chunk) network rounds, NOT O(N). Pre-fix (one send+flush
-// per body) the server alone emitted N rounds; with batching it emits
-// ~ceil(N/chunk) + the handful of control frames. Asserting a tight round
-// budget fails loudly if anyone reverts to per-frame sends.
+// Representative CI gate (deterministic, no wall-clock). The latency bench proves
+// a per-frame flush collapses bootstrap to ~1/send_cost on any real link;
+// batching is what keeps it above the 5k ctx/s floor. This pins the structural
+// property that guarantees it: a cold bootstrap of N bodies must coalesce into
+// O(N/chunk) network rounds, NOT O(N). One send+flush per body would emit N
+// rounds from the server alone; batching emits ~ceil(N/chunk) + the handful of
+// control frames. Asserting a tight round budget fails loudly if anyone reverts
+// to per-frame sends.
 #[tokio::test]
 async fn bootstrap_coalesces_into_few_network_rounds() {
     use std::sync::atomic::{AtomicU64, Ordering};

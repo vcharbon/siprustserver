@@ -9,11 +9,15 @@ description = "Dedicated CDR consumer: drains the RabbitMQ CDR queue and exposes
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "cdr-consumer-runner"
 path = "src/main.rs"
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 # Same AMQP client + tokio-runtime shims the b2bua-runner sink publishes with.
 lapin = { workspace = true }
 tokio-executor-trait = { workspace = true }

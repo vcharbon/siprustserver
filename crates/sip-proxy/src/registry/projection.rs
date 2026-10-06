@@ -1,5 +1,5 @@
 //! The shared worker-registry core: a [`topology::Membership`] identity/address
-//! set + a proxy-only [`WorkerAnnotations`] overlay, composed into the
+//! set + a proxy-only `WorkerAnnotations` overlay, composed into the
 //! [`WorkerEntry`] set the LB reads.
 //!
 //! This is "the rest" that every registry impl now shares. Before, each of the
@@ -16,12 +16,12 @@
 //! - **Identity + host** live in `topology::Membership` — one container, one diff
 //!   (`reconcile_to_desired`), one self-heal loop (`spawn_membership_reconcile`),
 //!   shared with the b2bua replication supervisor.
-//! - **Port + health + LB-timing** live in [`WorkerAnnotations`], keyed by ordinal.
+//! - **Port + health + LB-timing** live in `WorkerAnnotations`, keyed by ordinal.
 //!   Port is here (not in membership) because topology is deliberately
 //!   port-agnostic — the port is a consumer concern. In production every worker
 //!   uses the cluster-wide `default_port`; `static`/`simulated` may set a
 //!   per-worker `port_override`.
-//! - **Departed addresses** live in [`Tombstones`], keyed by address: an address
+//! - **Departed addresses** live in `Tombstones`, keyed by address: an address
 //!   the set stopped serving still resolves as `Dead` for Timer H, so a response
 //!   from a node that left the pool is recognised as such.
 //! - **Only a `ready` member is routable** (ADR-0031 D1). The filter is applied

@@ -66,7 +66,7 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
     let _report = s.finish().await;
 }
 
-/// The dual-part case the note calls out for INFO_UUI priority: a
+/// The dual-part case the note calls out for User-to-User priority: a
 /// `multipart/mixed` body bearing a `User-To-User` part and an example-binary part
 /// relays through verbatim (both the multipart Content-Type and the exact CRLF-
 /// delimited bytes survive).

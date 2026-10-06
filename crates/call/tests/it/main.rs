@@ -1,0 +1,14 @@
+//! Every `call` integration test, in one binary (ADR-0030): a test file
+//! is a module here, and a file left directly in `tests/` is a second copy of
+//! the dependency graph. Only an ADR-0030 X2 exception stays there.
+//!
+//! Select one (the workspace build `just test` made, no rebuild):
+//! `cargo nextest run --workspace -E 'package(=call) & binary(it)' <module>::`.
+
+// Shared fixtures, reached from a test module as `crate::common::…`.
+mod common;
+
+mod callref;
+mod codec_roundtrip;
+mod index_key;
+mod model_helpers;

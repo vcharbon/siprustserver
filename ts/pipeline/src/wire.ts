@@ -228,3 +228,81 @@ export const addrForm = (uri: string): string => {
   const authority = (at < 0 ? rest : rest.slice(at + 1)).split(/[;>?]/)[0] ?? ""
   return user === undefined ? authority : `${user}@${authority}`
 }
+
+/**
+ * Every sip/sips/tel URI a header value writes, scheme to the end of its
+ * parameters, with its offset in the value. A sip userinfo's own `;`-parameters
+ * (RFC 3261 §19.1.1, 3GPP TS 24.229 `verstat`) stay inside the run, so
+ * {@link uriUser} reads the number before them; a `,` or a `>` ends the run.
+ */
+export const uriRuns = (value: string): Array<{ readonly text: string; readonly at: number }> =>
+  [...value.matchAll(/(?:sips?|tel):[^>\s,]+/gi)].map((m) => ({ text: m[0], at: m.index }))
+
+/**
+ * Where in `uri` the user {@link uriUser} reads sits, as `[start, end)`: a sip
+ * userinfo up to its first `;`, a tel number up to its parameters. `undefined`
+ * for a user-less or another scheme's URI.
+ */
+export const uriUserSpan = (uri: string): readonly [number, number] | undefined => {
+  const colon = uri.indexOf(":")
+  if (colon < 0) return undefined
+  const scheme = uri.slice(0, colon).toLowerCase()
+  const start = colon + 1
+  if (scheme === "tel") {
+    const end = uri.slice(start).search(/[;>?]/)
+    return [start, end < 0 ? uri.length : start + end]
+  }
+  if (scheme !== "sip" && scheme !== "sips") return undefined
+  const at = uri.indexOf("@", start)
+  if (at < 0) return undefined
+  const semi = uri.indexOf(";", start)
+  return [start, semi >= 0 && semi < at ? semi : at]
+}
+
+/**
+ * A From/To value as a dialog identity, its tag dropped (the stack's own,
+ * RFC 3261 §19.3). A bare addr-spec is bracketed so the parameters after it
+ * stay the header's own (§20.10); the rest is kept as written, a quoted
+ * display name or parameter value whole.
+ */
+export const identityNameAddr = (value: string): string => {
+  const text = value.trim()
+  const open = indexOutsideQuotes(text, "<")
+  const close = open < 0 ? -1 : text.indexOf(">", open)
+  const semi = indexOutsideQuotes(text, ";")
+  const [addr, params] =
+    close >= 0
+      ? [text.slice(0, close + 1), text.slice(close + 1)]
+      : semi < 0
+      ? [`<${text}>`, ""]
+      : [`<${text.slice(0, semi)}>`, text.slice(semi)]
+  const kept = splitOutsideQuotes(params, ";")
+    .slice(1)
+    .filter((p) => (p.split("=")[0] ?? "").trim().toLowerCase() !== "tag")
+  return [addr, ...kept].join(";")
+}
+
+const indexOutsideQuotes = (text: string, needle: string): number => {
+  let quoted = false
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]
+    if (quoted) {
+      if (c === "\\") i += 1
+      else if (c === '"') quoted = false
+    } else if (c === '"') quoted = true
+    else if (c === needle) return i
+  }
+  return -1
+}
+
+/** `text` split on every `separator` that sits outside a quoted string. */
+const splitOutsideQuotes = (text: string, separator: string): Array<string> => {
+  const out: Array<string> = []
+  let rest = text
+  for (let i = indexOutsideQuotes(rest, separator); i >= 0; i = indexOutsideQuotes(rest, separator)) {
+    out.push(rest.slice(0, i))
+    rest = rest.slice(i + 1)
+  }
+  out.push(rest)
+  return out
+}

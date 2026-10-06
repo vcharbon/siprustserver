@@ -15,14 +15,13 @@ use b2bua::config::CdrConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision,
-    RejectDecision, ReleaseOutcome, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, CallTreatment,
+    NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision, RejectDecision,
+    ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::limiter::{CallLimiter, LimiterEntry};
 use b2bua::rules::ServiceDef;
+use b2bua_harness::limiter::doubles::{fail_open, refuse_on};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry};
 use scenario_harness::Harness;
@@ -256,7 +255,7 @@ fn svc(call: &Call) -> Option<&serde_json::Value> {
 }
 
 /// A core-reserved `Call.ext` key (ADR-0016): no decision's service slice.
-const RESERVED: &str = "relayed-failure-headers";
+const RESERVED: &str = b2bua::rules::relay::RELAYED_FAILURE_HEADERS_EXT;
 
 /// The value the terminated call holds under [`RESERVED`].
 fn reserved(call: &Call) -> Option<&serde_json::Value> {
@@ -366,7 +365,7 @@ async fn a_limiter_failover_redirect_seeds_its_service_ext() {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx".into());
-                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 r.service_ext = svc_slice("t-route");
                 NewCallResponse::Route(r)
             })
@@ -380,8 +379,7 @@ async fn a_limiter_failover_redirect_seeds_its_service_ext() {
             })
             .build(),
     );
-    let sut =
-        Sut::spawn_with(&h, decision, Some(Arc::new(RefusingLimiter("cap"))), Vec::new()).await;
+    let sut = Sut::spawn_with(&h, decision, Some(refuse_on("cap", fail_open())), Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     call.expect(302).await;
@@ -470,15 +468,14 @@ async fn a_limiter_refused_release_reroute_keeps_the_answers_service_ext() {
             .fallback(|_| capped_route())
             .on_release(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 r.service_ext = svc_slice("t-reroute");
                 r.label = Some("reroute".into());
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
             .build(),
     );
-    let sut =
-        Sut::spawn_with(&h, decision, Some(Arc::new(RefusingLimiter("cap"))), Vec::new()).await;
+    let sut = Sut::spawn_with(&h, decision, Some(refuse_on("cap", fail_open())), Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -609,27 +606,6 @@ async fn a_call_with_no_labels_marks_with_none() {
     let _report = h.finish().await;
 }
 
-/// A limiter that refuses every admission naming `refused` and admits the
-/// rest without holds.
-struct RefusingLimiter(&'static str);
-
-#[async_trait]
-impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        match entries.iter().find(|e| e.id == self.0) {
-            Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
-            None => AdmitOutcome::Unavailable,
-        }
-    }
-    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        ReleaseAnswer::Released
-    }
-    async fn refresh(&self, _: &[RefreshCall]) -> RefreshAnswer {
-        RefreshAnswer::Unavailable
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// A route the limiter refused was never applied: the log holds only the
 /// failover route the refusal raised, which answers no failed leg, and the
 /// leg it dials is stamped under it.
@@ -643,7 +619,7 @@ async fn a_limiter_refused_route_marks_nothing_and_the_reroute_marks_once() {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx".into());
-                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.call_limiter = vec![LimiterEntry { id: "cap".into(), limit: 1 }];
                 r.label = Some("capped".into());
                 NewCallResponse::Route(r)
             })
@@ -655,8 +631,7 @@ async fn a_limiter_refused_route_marks_nothing_and_the_reroute_marks_once() {
             })
             .build(),
     );
-    let sut =
-        Sut::spawn_with(&h, decision, Some(Arc::new(RefusingLimiter("cap"))), Vec::new()).await;
+    let sut = Sut::spawn_with(&h, decision, Some(refuse_on("cap", fail_open())), Vec::new()).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -790,6 +765,7 @@ mod claimer {
                         callback_context: None,
                         body_override: None,
                         header_updates: Vec::new(),
+                        header_adds: vec![],
                         kind: None,
                     },
                 ]))

@@ -14,16 +14,15 @@
 //! against the leak class: the hold taken at route time MUST be released by the
 //! crossing teardown — `current_total` back to 0.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -56,7 +55,7 @@ fn route_limited(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn CallDec
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 NewCallResponse::Route(r)
             })
             .build(),

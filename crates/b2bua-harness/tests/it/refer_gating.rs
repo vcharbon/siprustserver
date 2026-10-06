@@ -1,4 +1,4 @@
-//! REFER gating scenarios (slice 5d). Port of `tests/scenarios/refer-gating.ts`.
+//! REFER gating scenarios. Port of `tests/scenarios/refer-gating.ts`.
 //!
 //! Verification slice for the two gating regimes (slice5-refer-design.md §5):
 //!

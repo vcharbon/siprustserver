@@ -1,6 +1,6 @@
 /**
  * A caller-facing provisional the SUT is not CAUSED to emit is a tolerated
- * absence, not an obligation (§6.9, issue 106).
+ * absence, not an obligation (§6.9).
  *
  * A captured platform can put more provisionals toward the caller than it took
  * from the callee — it emits one ring twice sub-millisecond apart with a header

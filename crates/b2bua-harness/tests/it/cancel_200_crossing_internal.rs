@@ -5,10 +5,10 @@
 //! no-answer timer, or a pending-INVITE transaction timeout), the callee's 200
 //! OK can cross the CANCEL on the wire. On the explicit-CANCEL path the b-leg is
 //! marked `Cancelling` and the `cancel-200-crossing` rule ACK+BYEs the crossing
-//! 200; the internal paths (`DestroyLeg`) previously set only `bye_disposition`,
-//! so a crossing 200 matched no rule and the late-answering callee was orphaned
-//! in a one-sided established dialog. The fix marks the leg `Cancelling` on the
-//! internal paths too, so the reap is uniform regardless of who CANCELed.
+//! 200. The internal paths (`DestroyLeg`) mark the leg `Cancelling` too, so the
+//! reap is uniform regardless of who CANCELed; a leg carrying only a
+//! `bye_disposition` would match no rule on the crossing 200 and orphan the
+//! late-answering callee in a one-sided established dialog.
 //!
 //! Both scenarios need the call to OUTLIVE the CANCEL so a live call exists to
 //! reap the crossing 200 — i.e. a **failover-capable** call: `DestroyLeg` +
@@ -93,9 +93,8 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     cancel.respond(200, "OK").await;
 
     // ── CROSSING: carol answers 200 OK, crossing the CANCEL on the wire ───────
-    // Pre-fix: no rule matched this 200 (the leg was Terminated, not
-    // `Cancelling`) → carol orphaned in a one-sided established dialog.
-    // Now `cancel-200-crossing` reaps it: ACK then immediate BYE.
+    // The leg is `Cancelling` (not Terminated), so `cancel-200-crossing` reaps
+    // it: ACK then immediate BYE — carol is not left in a one-sided dialog.
     carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
     carol.receive("ACK").await;
     let mut bye = carol.receive("BYE").await;
@@ -125,11 +124,11 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
 /// `no-answer` rule takes its `None` branch (`DestroyLeg` + the caller's 480 +
 /// `BeginTermination`).
 ///
-/// Pre-fix, that teardown promoted `Terminating → Terminated → RemoveCall` in the
-/// SAME turn as the CANCEL (the CANCELled b-leg's interim `Cancelled` bye
-/// disposition read terminal), so a `200 OK` crossing the CANCEL landed on a
+/// Were that teardown to promote `Terminating → Terminated → RemoveCall` in the
+/// SAME turn as the CANCEL (reading the CANCELled b-leg's interim `Cancelled` bye
+/// disposition as terminal), a `200 OK` crossing the CANCEL would land on a
 /// REMOVED call: no ACK, no BYE — the answering callee orphaned in a one-sided
-/// established dialog. The fix keeps a `Cancelling` leg UNRESOLVED
+/// established dialog. A `Cancelling` leg stays UNRESOLVED
 /// (`leg_is_resolved`), so finalization HOLDS while the internal CANCEL is in
 /// flight and the crossing 200 still has a live call to be reaped against —
 /// `cancel-200-crossing` ACK+BYEs the abandoned callee — and the caller's reject
@@ -183,7 +182,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
 
     // The B2BUA CANCELs the ringing b-leg. The call MUST outlive the CANCEL —
-    // pre-fix it was already gone in this same turn.
+    // it is not removed in this same turn.
     let mut cancel = carol.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
 

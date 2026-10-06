@@ -106,7 +106,7 @@ pub struct CallEnv<'a> {
     /// [`Self::stamp`]) and carried by the SUT onto every downstream leg.
     pub token: String,
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
-    /// SUT force-admits it (never shed by the Tier-3 / panic-ELU overload gate).
+    /// SUT's panic-ELU and CPS bucket rungs admit it.
     pub emergency: bool,
     /// The per-call **core identity** (the resolved binding's From/To/R-URI
     /// overrides — the e2e Test case's `core` on the load surface). Defaults
@@ -178,7 +178,7 @@ impl<'a> CallEnv<'a> {
             charlie,
             callees: Vec::new(),
             via,
-            // The functional gate keeps the historic plain relayed-header stamp
+            // The functional gate uses the plain relayed-header stamp
             // (value = the bare token).
             stamp: CorrelationStamp::Header {
                 name: correlation_header.into(),
@@ -216,7 +216,7 @@ impl<'a> CallEnv<'a> {
 
     /// The bound agent behind a logical callee **role** — the receiver a load
     /// body drives for that leg. Resolves the open [`Self::callees`] list
-    /// first (a named-`LegSpec` role such as `"mrf"`), then the historic
+    /// first (a named-`LegSpec` role such as `"mrf"`), then the fixed
     /// bob/bob2/charlie fields. Panics on an unbound role — a scenario wiring
     /// bug, caught loudly.
     pub fn callee_agent(&self, role: &str) -> &'a Agent {
@@ -284,7 +284,7 @@ impl<'a> CallEnv<'a> {
         self.invite_plan_with(callees, None)
     }
 
-    /// [`Self::invite_plan`] with a per-route NO-ANSWER ring timer (047): on a
+    /// [`Self::invite_plan`] with a per-route NO-ANSWER ring timer: on a
     /// pinned layout the `routes` failover plan arms `no_answer_timeout_sec` on
     /// every hop, so the SUT reroutes on ring-timeout as well as on reject
     /// (`EgressPolicy::rewrite_with_no_answer`). Other layouts ignore the knob.
@@ -402,8 +402,8 @@ impl InvitePlan {
         self.with_header("Supported", "100rel")
     }
 
-    /// Replay the plan onto an INVITE builder — the same op order
-    /// [`CallEnv::outgoing_invite`] historically applied: `through(via)` → core
+    /// Replay the plan onto an INVITE builder (what
+    /// [`CallEnv::outgoing_invite`] applies), in op order: `through(via)` → core
     /// From/To/R-URI → identity headers → the egress rewrite last.
     pub fn apply<'b>(&self, inv: Invite<'b>) -> Invite<'b> {
         let mut inv = inv.through(self.via);

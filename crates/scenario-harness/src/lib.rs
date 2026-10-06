@@ -39,9 +39,9 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 // The fluent, dialog-aware DSL (auto-generates correct-by-default B2B messages).
 // This is the primary surface — scenarios should not hand-author headers.
 pub use agent::{
-    Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest,
-    InDialogTxn, Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError,
-    WaiverScope,
+    forwarded_request, forwarded_response, request_next_hop, response_next_hop, Agent,
+    CancelHandle, ClientInvite, ClientReinvite, Dialog, Harness, InDialogRequest, InDialogTxn,
+    Inbound, Invite, OutOfDialogRequest, Proxy, Respond, ServerTxn, StepError, WaiverScope,
 };
 // Captured-message replay vocabulary (`sip_message::template` + matching),
 // re-exported so a `send_template`/`expect_template` caller reaches the harness

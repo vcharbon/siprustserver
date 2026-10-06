@@ -53,24 +53,14 @@ pub(super) fn address(field: &'static str, text: &str) -> Result<Uri, Unreadable
 }
 
 /// The identity `text` names on a From or To a decision states, read by
-/// [`NameAddr::parse_identity`], or a refusal. The core owns the dialog tags
-/// (ADR-0017 X2): a `tag` header or URI parameter is dropped; a `tag=` inside the
-/// userinfo or a `?`-header value is refused, the freeze counting it as a second tag.
+/// [`NameAddr::parse_untagged_identity`], or a refusal. The core owns the
+/// dialog tags (ADR-0017 X2).
 pub(super) fn identity(field: &'static str, text: &str) -> Result<NameAddr, UnreadableAddress> {
-    let refuse = |reason: String| UnreadableAddress { field, value: text.to_string(), reason };
-    let addr = NameAddr::parse_identity(&SipStr::owned(text)).map_err(|err| refuse(err.reason))?;
-    let uri = addr.uri();
-    if uri.user().is_some_and(|u| u.to_ascii_lowercase().contains("tag=")) {
-        return Err(refuse("a tag in the userinfo".to_string()));
-    }
-    if uri
-        .escaped_headers()
-        .any(|(_, v)| v.is_some_and(|v| v.to_ascii_lowercase().contains("tag=")))
-    {
-        return Err(refuse("a tag in a URI header".to_string()));
-    }
-    let uri = addr.uri().clone().without_param("tag");
-    Ok(addr.without_param("tag").with_uri(uri))
+    NameAddr::parse_untagged_identity(&SipStr::owned(text)).map_err(|err| UnreadableAddress {
+        field,
+        value: text.to_string(),
+        reason: err.reason,
+    })
 }
 
 /// One `Contact: <uri>;q=…` redirect target (RFC 3261 §20.10) for a 3xx the
@@ -97,7 +87,7 @@ mod unreadable_address_tests {
     use super::{redirect_contact, UnreadableAddress};
     use crate::config::B2buaConfig;
     use crate::effects::{OutboundBody, OutboundSipEffect};
-    use crate::rules::relay::build_b_leg;
+    use crate::rules::relay::{build_b_leg, CallMarks};
     use call::Leg;
     use sip_message::generators::CapabilitySet;
     use sip_message::parser::custom::CustomParser;
@@ -126,9 +116,8 @@ Content-Length: 0\r\n\r\n";
         new_to: Option<&str>,
     ) -> Result<(Leg, OutboundSipEffect), UnreadableAddress> {
         build_b_leg(
-            "w0|call-ref|xyz",
+            CallMarks { call_ref: "w0|call-ref|xyz", incarnation_mark: "k", is_emergency: false },
             "b-1",
-            false,
             &a_leg_invite(),
             ("10.244.2.7".to_string(), 5060),
             new_ruri,
@@ -144,6 +133,8 @@ Content-Length: 0\r\n\r\n";
             &[],
             &[], // no withheld option tags
             None,
+            true,
+            0,
         )
     }
 

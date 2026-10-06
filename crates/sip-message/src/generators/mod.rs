@@ -38,7 +38,9 @@ pub mod in_dialog;
 pub mod methods;
 pub mod out_of_dialog;
 pub mod relay;
+pub mod relay_policy;
 pub mod response;
+pub mod session_timer;
 pub mod spec;
 
 pub use ack::{
@@ -46,14 +48,23 @@ pub use ack::{
     GenerateAckFor2xxOpts,
 };
 pub use cancel::generate_cancel;
-pub use capabilities::{CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
-pub use contact_policy::{request_states_contact, response_states_contact};
+pub use capabilities::{admitted_on, CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
+pub use contact_policy::{
+    request_states_contact, response_names_retry_targets, response_states_contact,
+    response_states_own_contact, retain_retry_targets_for, retry_targets,
+};
 pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InDialogResult};
 pub use methods::{InDialogMethod, OutOfDialogMethod};
 pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
 pub use relay::{
-    generate_relayed_response, relayable, relayable_headers, states_send_time,
-    GenerateRelayedResponseOpts, RelayScope, RelayTarget, SourceBody,
+    body_descriptors, body_media_type, describes_body, generate_relayed_response, relayable,
+    relayable_from, relayable_headers, relayable_request_headers, stated_timestamp,
+    states_send_time, timestamp_value, GenerateRelayedResponseOpts, IdentityPrivacy, RelayScope,
+    RelayTarget, SourceBody, SourceMoment,
+};
+pub use relay_policy::{
+    MessageClass, RelayDirection, RelayDrop, RelayPolicy, RelaySituation, RelayedMessage,
 };
 pub use response::{generate_response, GenerateResponseOpts};
+pub use session_timer::{offers_session_timer, withdraw_session_timer};
 pub use spec::{InviteClientTransactionHandle, StackDialog};

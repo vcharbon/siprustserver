@@ -8,8 +8,8 @@ use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog, 
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
-use crate::rules::model::RuleContext;
 use crate::rules::relay;
+use b2bua_sdk::model::RuleContext;
 
 use super::ActionExecutor;
 
@@ -265,7 +265,7 @@ impl ActionExecutor<'_> {
     }
 
     /// Map a callee early dialog no provisional showed the caller to a fresh
-    /// a-facing To-tag ([`crate::rules::model::RuleAction::MapUnshownDialog`]):
+    /// a-facing To-tag ([`b2bua_sdk::model::RuleAction::MapUnshownDialog`]):
     /// its 2xx then opens a caller dialog of its own (RFC 3261 §12.1.2) — the
     /// relay reads the tag off the map, `confirm_dialog` adopts it. A dialog
     /// already mapped keeps the tag it was shown under; a tagless one names no
@@ -316,13 +316,14 @@ impl ActionExecutor<'_> {
         // two), same as the b-leg path above.
         let route_set = self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
         let cseq = a_invite.cseq().seq() as i64;
+        let (local_uri, remote_uri) = relay::uas_addresses(&a_invite);
         let dialog = Dialog {
             sip: StackDialog {
                 call_id: call.a_leg.call_id.clone(),
                 local_tag: tag.clone(),
                 remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: a_invite.to().uri().to_string(),
-                remote_uri: from.uri().to_string(),
+                local_uri,
+                remote_uri,
                 remote_target,
                 local_cseq: cseq,
                 route_set,

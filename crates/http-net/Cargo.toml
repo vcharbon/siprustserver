@@ -21,6 +21,7 @@ real = [
 ]
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

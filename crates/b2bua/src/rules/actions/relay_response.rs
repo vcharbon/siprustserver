@@ -9,7 +9,9 @@ use call::helpers::{
 };
 use call::{Call, LegState, PendingRequest, TagMapping};
 use sip_message::draft::Entry;
-use sip_message::generators::{self, GenerateRelayedResponseOpts, SourceBody};
+use sip_message::generators::{
+    self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
+};
 use sip_message::header::{From, HeaderName, HeaderValue, MediaType, To, Via};
 use sip_message::{Method, SipHeader, SipStr};
 
@@ -17,8 +19,9 @@ use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities::{self, Face};
-use crate::rules::model::{MessageTransform, RuleContext};
 use crate::rules::relay;
+use b2bua_sdk::model::{MessageTransform, RuleContext};
+use b2bua_sdk::relayed_final::invite_timestamp;
 
 use super::select::{dialog_identity_tag, resolve_peer};
 use super::ActionExecutor;
@@ -32,8 +35,10 @@ impl ActionExecutor<'_> {
     /// on that face — the two the PRACK's `RAck` names beside the number
     /// (§7.2). A retransmitted provisional recalls the number already shown; a
     /// provisional relayed without an `RSeq` (a masking policy stripped it) is
-    /// not a reliable one and takes no number. Returns the number taken, so the
-    /// emission arms its §3 ladder.
+    /// not a reliable one and takes no number. `carried_sdp`: the provisional
+    /// carries a description toward that face. Returns the number taken, so
+    /// the emission arms its §3 ladder.
+    #[allow(clippy::too_many_arguments)]
     fn own_relayed_rseq(
         &self,
         call: &mut Call,
@@ -42,6 +47,7 @@ impl ActionExecutor<'_> {
         source_leg_id: &str,
         resp: &sip_message::SipResponse,
         headers: &mut [SipHeader],
+        carried_sdp: bool,
     ) -> Option<i64> {
         if !headers.iter().any(|h| HeaderName::RSeq.matches(&h.name)) {
             return None;
@@ -63,6 +69,8 @@ impl ActionExecutor<'_> {
             b_cseq,
             b_rseq,
             initial,
+            carried_sdp,
+            resp.sdp().is_some(),
         );
         *call = updated;
         relay::own_the_rseq(headers, a_rseq);
@@ -116,6 +124,11 @@ impl ActionExecutor<'_> {
                 SourceBody::Verbatim,
             )
         };
+        // Whether the relayed message carries a description: on a reliable
+        // provisional, the description its INVITE's sender holds (RFC 3311 §5.1).
+        let carried_sdp = relay_content_type
+            .as_ref()
+            .is_some_and(|ct| sip_message::multipart::sdp_range(ct, &relay_body).is_some());
         // Passthrough headers minus any the transform suppresses (e.g.
         // Require/RSeq on a bare-180 downgrade), plus any the transform stamps
         // with replace semantics (Allow/Supported on the synthetic 200 / resync
@@ -181,8 +194,8 @@ impl ActionExecutor<'_> {
                 // reader accepts names no address — drop the relay and say so
                 // (the originator retransmits, then times out its own request).
                 // Answering it toward a fabricated destination would post the
-                // caller's response to whatever that address happens to be; the
-                // loopback this used to fall back to swallowed it silently (055).
+                // caller's response to whatever that address happens to be; a
+                // loopback fallback would swallow it silently.
                 let Some(dest) = pending.source_vias.first().and_then(|v| via_sent_by(v)) else {
                     tracing::warn!(
                         call_ref = %call.call_ref,
@@ -194,21 +207,28 @@ impl ActionExecutor<'_> {
                     return;
                 };
                 // The B2BUA's Contact rides only where it establishes a dialog
-                // or answers a target refresh (`response_states_contact`) — a
-                // relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none.
-                let contact =
-                    generators::response_states_contact(&Method::from_wire(&cseq_method), status)
-                        .then(|| {
-                            relay::leg_contact(
-                                self.config,
-                                &call.call_ref,
-                                target_leg,
-                                call.emergency == Some(true),
+                // or answers a target refresh (`response_states_own_contact`) —
+                // a relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none, and a
+                // relayed 3xx / 485 carries the peer's targets in passthrough.
+                let contact = generators::response_states_own_contact(
+                    &Method::from_wire(&cseq_method),
+                    status,
+                )
+                .then(|| relay::leg_contact(self.config, relay::CallMarks::of(call), target_leg));
+                let mut transparent_headers =
+                    filter_passthrough(relay::relay_response_passthrough_headers(
+                        resp,
+                        self.config
+                            .relay_scope(
+                                RelayScope::response_carrying(relay_source_body),
+                                RelaySituation::response(
+                                    status,
+                                    cseq.method(),
+                                    relay::toward_leg(target_leg),
+                                ),
                             )
-                        });
-                let mut transparent_headers = filter_passthrough(
-                    relay::relay_response_passthrough_headers(resp, relay_source_body),
-                );
+                            .stamped(pending.source_timestamp.as_deref()),
+                    ));
                 // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
                 // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
                 // response's own, carried through, unless the call declares one.
@@ -251,6 +271,7 @@ impl ActionExecutor<'_> {
                                     &source_leg_id,
                                     resp,
                                     &mut transparent_headers,
+                                    carried_sdp,
                                 )
                                 .map(|a_rseq| (shown_tag, a_rseq));
                         }
@@ -264,6 +285,7 @@ impl ActionExecutor<'_> {
                                     b_rseq,
                                     cseq_num,
                                     &to_tag,
+                                    resp.sdp().is_some(),
                                 );
                             }
                         }
@@ -376,7 +398,16 @@ impl ActionExecutor<'_> {
                 self.ensure_b_early_dialog(call, ctx, &source_leg_id, &to_tag);
                 if let Some(rseq) = relay::reliable_rseq(resp) {
                     let invite_cseq = i64::from(resp.cseq().seq());
-                    self.send_prack_to_leg(call, fx, &source_leg_id, rseq, invite_cseq, &to_tag);
+                    let responder_sdp = resp.sdp().is_some();
+                    self.send_prack_to_leg(
+                        call,
+                        fx,
+                        &source_leg_id,
+                        rseq,
+                        invite_cseq,
+                        &to_tag,
+                        responder_sdp,
+                    );
                 }
             }
             return;
@@ -403,8 +434,8 @@ impl ActionExecutor<'_> {
                 Some(m) => m.a_tag.clone(),
                 None => {
                     // Which caller-facing dialog a new callee early dialog lands
-                    // in is the 18x policy's to decide (`sipProfile.relay18x` /
-                    // `.prack`), and the two policies answer it oppositely.
+                    // in is the 18x policy's to decide (the route's 18x relay
+                    // and 100rel features), and the two policies answer it oppositely.
                     //
                     // TRANSPARENT (no `relayFirst18xTo180` arm): the caller's
                     // dialog set mirrors the callee's, so every early dialog
@@ -455,16 +486,22 @@ impl ActionExecutor<'_> {
                 }
             };
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-            let contact = relay::leg_contact(
-                self.config,
-                &call.call_ref,
-                &call.a_leg.leg_id,
-                call.emergency == Some(true),
-            );
+            let contact =
+                relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
             let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(
                 resp,
-                relay_source_body,
+                self.config
+                    .relay_scope(
+                        RelayScope::response_carrying(relay_source_body),
+                        RelaySituation::response(
+                            status,
+                            cseq.method(),
+                            RelayDirection::TowardCaller,
+                        ),
+                    )
+                    .stamped(invite_timestamp(&call.a_leg_invite)),
             ));
+            relay::withhold_from_relayed_provisional(call, status, &mut passthrough);
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
             // capability set of the originator face (RFC 3261 §13.2.1/§20.37):
             // the callee's own, carried through, unless the call declares one.
@@ -485,6 +522,7 @@ impl ActionExecutor<'_> {
                 &source_leg_id,
                 resp,
                 &mut passthrough,
+                carried_sdp,
             );
             let Some(mut effect) = relay::response_to_a_leg(
                 call,
@@ -534,17 +572,23 @@ impl ActionExecutor<'_> {
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(
-            self.config,
-            &call.call_ref,
-            &call.a_leg.leg_id,
-            call.emergency == Some(true),
-        );
+        let contact =
+            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
-        let mut passthrough =
-            filter_passthrough(relay::relay_response_passthrough_headers(resp, relay_source_body));
+        let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(
+            resp,
+            self.config
+                .relay_scope(
+                    RelayScope::response_carrying(relay_source_body),
+                    RelaySituation::response(status, cseq.method(), RelayDirection::TowardCaller),
+                )
+                .stamped(invite_timestamp(&call.a_leg_invite)),
+        ));
+        // A compliant callee's provisional carries a To tag (RFC 3261 §8.2.6.2)
+        // and takes the tag-map seam above, where the call's provisional
+        // withhold applies; this seam relays finals and a tagless 1xx.
         // A 2xx INVITE answer carries the originator face's Allow/Supported —
         // the callee's own, carried through, unless the call declares a set
         // (RFC 3261 §13.2.1/§20.37); provisionals keep passthrough.
@@ -559,6 +603,7 @@ impl ActionExecutor<'_> {
             &source_leg_id,
             resp,
             &mut passthrough,
+            carried_sdp,
         );
         let Some(mut effect) = relay::response_to_a_leg(
             call,
@@ -598,12 +643,12 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// Bare-180 downgrade relay ([`crate::rules::model::RuleAction::RelayFirstBare180`]).
+    /// Bare-180 downgrade relay ([`b2bua_sdk::model::RuleAction::RelayFirstBare180`]).
     /// The bare 180 ESTABLISHES the a-leg dialog it shows the caller, so that
     /// dialog's local tag is the owned a-facing To-tag: every later relayed 18x,
     /// every non-2xx final and the transaction layer's own 487 answer under it
     /// (RFC 3261 §8.2.6.2, §17.2.1), and so does the 2xx of a callee dialog it
-    /// mapped. A LATER 18x the `relay18x.messages` policy relays again (ALL /
+    /// mapped. A LATER 18x the `Relay18xMessages` policy relays again (ALL /
     /// ONE_PER_VALUE) reads back the same tag, so the caller holds ONE early
     /// dialog regardless of which fork rings; the 2xx of a dialog it never
     /// showed her opens a second (`answering-dialog-identity`). Seed the tag map
@@ -677,8 +722,7 @@ fn shown_tag_of(call: &Call, target_leg: &str, pending: &PendingRequest) -> Opti
 /// its originator (RFC 3261 §8.2.6.2): Via / From / To / Call-ID / CSeq equal
 /// the originator's own, and the snapshot holds the originator's own bytes
 /// (the `call` crate stores text, ADR-0008) — so each rides as a raw entry and
-/// reaches the wire unaltered; the requester's `Timestamp`, held on the
-/// snapshot, comes back on the response it answers (§8.2.6.1).
+/// reaches the wire unaltered.
 pub(super) fn snapshot_response_opts(
     pending: &PendingRequest,
     cseq_method: &str,
@@ -696,7 +740,6 @@ pub(super) fn snapshot_response_opts(
         call_id: Some(echo(HeaderName::CallId, &pending.source_call_id)),
         cseq: Some(echo(HeaderName::CSeq, &format!("{} {}", pending.inbound_cseq, cseq_method))),
         body,
-        timestamp: pending.source_timestamp.as_ref().map(|t| echo(HeaderName::Timestamp, t)),
         transparent_headers,
         content_type,
         contact,

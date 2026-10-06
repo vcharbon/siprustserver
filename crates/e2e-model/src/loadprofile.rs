@@ -73,8 +73,8 @@ pub struct LoadProfile {
 }
 
 /// The GLOBAL loss/retransmit defaults (a mix entry inherits these unless it
-/// overrides them). Both default off, so an un-tuned profile is byte-for-byte the
-/// historic behaviour.
+/// overrides them). Both default off: an un-tuned profile drops and
+/// retransmits nothing extra.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Robustness {

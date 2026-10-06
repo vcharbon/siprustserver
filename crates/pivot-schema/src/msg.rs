@@ -91,6 +91,16 @@ pub enum Ref {
     Frozen(FrozenRef),
 }
 
+impl Ref {
+    /// The captured name-addr the ref states, where it states one.
+    pub fn addr(&self) -> Option<&str> {
+        match self {
+            Ref::Positional(p) => p.addr.as_deref(),
+            Ref::Frozen(f) => f.addr.as_deref(),
+        }
+    }
+}
+
 /// A tier-2 reference the numbering plan resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +112,11 @@ pub struct PositionalRef {
     /// Open dial-form token: which form of the number this field carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<String>,
+    /// On a From or To: the captured name-addr, tag dropped, its role numbers
+    /// composed as `${num:…}`. Present, it is the field's whole value and the
+    /// lane composes no URI around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
 }
 
 /// A tier-2 reference the numbering plan did not resolve.
@@ -115,6 +130,11 @@ pub struct FrozenRef {
     /// number to map, but the class still drives emission).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// On a From or To: the captured name-addr, tag dropped, its role numbers
+    /// composed as `${num:…}`. Present, it is the field's whole value and the
+    /// lane composes no URI around it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
 }
 
 #[cfg(test)]
@@ -133,6 +153,23 @@ mod tests {
             parse(r#"{"frozen":"anonymous@anonymous.invalid","kind":"anonymous"}"#),
             Ref::Frozen(_)
         ));
+    }
+
+    #[test]
+    fn a_ref_may_state_the_name_addr_its_number_rides_in() {
+        let positional = parse(
+            r#"{"pos":"caller","form":"e164","addr":"\"A\" <sip:${num:caller:e164};verstat=x@h;user=phone>;x-param=1"}"#,
+        );
+        let Ref::Positional(p) = positional else { panic!("positional") };
+        assert_eq!(
+            p.addr.as_deref(),
+            Some("\"A\" <sip:${num:caller:e164};verstat=x@h;user=phone>;x-param=1")
+        );
+        let Ref::Frozen(f) = parse(r#"{"frozen":"0099","addr":"<sip:0099@h;x-uri=2>"}"#) else {
+            panic!("frozen")
+        };
+        assert_eq!(f.addr.as_deref(), Some("<sip:0099@h;x-uri=2>"));
+        assert!(!serde_json::to_string(&parse(r#"{"pos":"caller"}"#)).unwrap().contains("addr"));
     }
 
     #[test]

@@ -1,11 +1,9 @@
 //! Recording helpers (port of `recordingHelpers.ts`, ADR-0013 D4).
 //!
 //! Boilerplate-elimination for the call shapes a wrappable layer surface
-//! actually has. The TS source had four (`recordSync`, `recordEffectCall`,
-//! `recordScopedAcquire`, `recordStreamLifecycle`); the Rust network surface
-//! collapses to two, because we dropped `Stream` (receiver-style `recv` is
-//! recorded inline by the decorator) and there are no sync pure methods on the
-//! network trait:
+//! actually has. The network surface has two (receiver-style `recv` is
+//! recorded inline by the decorator, and the network trait has no sync pure
+//! methods):
 //!
 //!   - [`record_call`]     — an `async` method returning `Result`: record a
 //!     `before` event on entry, an `after` event on exit (built from the

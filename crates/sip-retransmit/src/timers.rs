@@ -1,6 +1,6 @@
 //! RFC 3261 §17 transaction timer constants — the one home for them, paced
 //! against by transaction and dialog-level ladders alike (ADR-0032).
-//! Behaviour rides `tokio::time` (via the [`tokio_util::time::DelayQueue`]
+//! Behaviour rides `tokio::time` (via the `tokio_util::time::DelayQueue`
 //! driver in `sip-txn`), so a single `tokio::time::advance` moves all of these
 //! together in tests.
 
@@ -84,11 +84,15 @@ pub const TIMER_M: u64 = 64 * T1;
 /// the `cancel-after-1xx` rule) sits just below this value — keep them in step.
 pub const CANCEL_HOLD_GRACE: u64 = 2 * T1;
 
-/// Safety-net sweep cadence (ms).
+/// Safety-net sweep cadence (ms): how often `sip-txn` checks for a
+/// transaction past its lifetime deadline.
 pub const TXN_SWEEP_INTERVAL: u64 = 10_000;
 
-/// Safety-net max txn age — just above Timer H/J (32 s) so the sweep only ever
-/// catches transactions a missing-cleanup bug would otherwise leak.
+/// The backstop margin of an active `sip-txn` transaction (ms): one that no
+/// final, give-up or forget has ended leaves the map `TXN_MAX_AGE` after it
+/// entered it (a non-INVITE: past Timer F), or the INVITE bound plus
+/// `TXN_MAX_AGE` after it (an INVITE: past the bound, where a client INVITE
+/// gives up and its 64·T1 hold replaces the backstop).
 pub const TXN_MAX_AGE: u64 = 35_000;
 
 /// The constants above are milliseconds; this is the one place they become a

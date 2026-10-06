@@ -237,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn dwell_extras_override_and_unknown_extras_are_ignored() {
         let mut input = Input::default();
         input.extras.insert("ring_delay_ms".into(), serde_json::json!(25));
@@ -250,22 +251,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn resolve_yields_expanding_identities_and_a_banner() {
         let entry = Input {
-            core: CoreInput { from: Some("sip:+331${seq:4}@pool".into()), ..Default::default() },
+            core: CoreInput { from: Some("sip:+1555${seq:4}@pool".into()), ..Default::default() },
             extras: Default::default(),
         };
         let pool = BindingPool { mode: BindingMode::Seq, entries: vec![entry] };
         let lc = LoadCase::new(case_with(Input::default(), Some(pool)), &no_sets(), 1).unwrap();
         let a = lc.resolve();
         let b = lc.resolve();
-        assert_eq!(a.core.from.as_deref(), Some("sip:+3310000@pool"));
-        assert_eq!(b.core.from.as_deref(), Some("sip:+3310001@pool"));
+        assert_eq!(a.core.from.as_deref(), Some("sip:+15550000@pool"));
+        assert_eq!(b.core.from.as_deref(), Some("sip:+15550001@pool"));
         assert!(a.banner.contains("case=t"), "{}", a.banner);
-        assert!(a.banner.contains("from=sip:+3310000@pool"), "{}", a.banner);
+        assert!(a.banner.contains("from=sip:+15550000@pool"), "{}", a.banner);
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     fn bad_tokens_and_empty_pool_fail_construction() {
         let bad = Input {
             core: CoreInput { from: Some("sip:${bogus}@x".into()), ..Default::default() },
@@ -277,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow lane: loadgen"]
     #[should_panic(expected = "ring_delay_ms")]
     fn a_malformed_dwell_value_panics_instead_of_silently_defaulting() {
         let mut input = Input::default();

@@ -168,7 +168,7 @@ pub enum PreIngressAction {
     /// Silently drop (counted as `pre_ingress_dropped`).
     Drop,
     /// Don't enqueue; send these bytes back to the source (counted as
-    /// `pre_ingress_replies`). The Tier-1 overload brake's stateless-503 path.
+    /// `pre_ingress_replies`). The ingress brake's stateless 503 path.
     Reply(Vec<u8>),
 }
 

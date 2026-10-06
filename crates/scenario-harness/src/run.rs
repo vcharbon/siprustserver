@@ -3,7 +3,8 @@
 //!
 //! Unlike the source interpreter, this driver maintains **no trace and no
 //! dialog state**. Its only job is to bind each agent on the
-//! recording-wrapped simulated [`SignalingNetwork`] and replay the step list.
+//! recording-wrapped simulated [`SignalingNetwork`](sip_net::SignalingNetwork)
+//! and replay the step list.
 //! Every `send_to` / `recv` flows through the recording decorator, so the
 //! `layer-harness` `Recorder` *is* the trace — the reports are projected from
 //! its channel snapshot afterwards (`sip_net::to_sip_entries`), exactly the
@@ -168,8 +169,8 @@ pub async fn run(scenario: &Scenario) -> RunReport {
     // Timestamps ride a monotonic-anchored `Clock` constructed *inside* the
     // runtime, so under `#[tokio::test(start_paused = true)]` the recorded
     // `at_ms` (and thus the report's relative-time labels) advance in lockstep
-    // with `tokio::time::advance` / the `Advance` step's 100 ms chunks. Anchor
-    // at 0 → the first event sits at `T+0.000s`. See sip-clock crate docs.
+    // with every `Advance` step. Anchor at 0 → the first event sits at
+    // `T+0.000s`. See sip-clock crate docs.
     let recorder = Recorder::with_clock(TransportKind::Fake, Clock::test_at(0));
     let sim = Arc::new(SimulatedSignalingNetwork::new(crate::SIMULATED_TRANSIT_DELAY_MS));
     let wrapped = with_all_contracts(
@@ -216,9 +217,9 @@ pub async fn run(scenario: &Scenario) -> RunReport {
                 expects.push(outcome);
             }
             Step::Advance { ms } => {
-                // Requires a paused runtime; the 100 ms chunking mirrors the
-                // source so in-flight delivery tasks observe intermediate time.
-                sip_clock::testkit::advance_in_100ms_chunks(Duration::from_millis(*ms)).await;
+                // Requires a paused runtime; in-flight deliveries land at
+                // their own instants inside the span.
+                sip_clock::testkit::advance_settled(Duration::from_millis(*ms)).await;
             }
         }
     }

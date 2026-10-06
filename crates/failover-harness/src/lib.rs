@@ -4,10 +4,10 @@
 //! simulated replication fabric, and a combined SIP + replication report.
 //!
 //! Layers:
-//! - [`harness`] — the [`FailoverHarness`] engine + [`ReplicatedB2buaSut`] +
+//! - `harness` — the [`FailoverHarness`] engine + [`ReplicatedB2buaSut`] +
 //!   [`ProxySut`] (moved here from `b2bua-harness`; the canonical 5-step failover
-//!   scenario and the fault matrix live in `tests/failover.rs`).
-//! - [`scenario`] — the [`CallScenario`] step-list + [`SafePoint`] DSL: a callflow
+//!   scenario and the fault matrix live in `tests/it/failover.rs`).
+//! - [`scenario`] — the `CallScenario` step-list + `SafePoint` DSL: a callflow
 //!   declares its steps and the quiescent points where an injected crash/recovery
 //!   is expected to be *transparent*.
 //! - [`oracle`] — the transparency oracle: differential (clean baseline vs
@@ -18,9 +18,9 @@
 //!   gate the run and which a scenario declared accepted for a bounded window.
 //! - [`views`] — the views ledger: what the orchestrator, the proxy and each
 //!   worker incarnation believed about every worker, and where they disagreed.
-//! - the `transparent_failover!` matrix macro ([`matrix`]) — expands a
-//!   `(scenario × safe-point × fault × recovery)` table into one named
-//!   `#[tokio::test]` per legal cell (`tests/transparent_v1.rs`).
+//! - the [`transparent_matrix!`] matrix macro — expands a table of
+//!   `(state, event, fault, recovery, seed)` rows into one named
+//!   `#[tokio::test]` per legal cell (`tests/it/transparent_v1.rs`).
 
 pub mod combine;
 pub mod cookie;
@@ -90,7 +90,7 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
 /// set a crashed primary never releases is freed by the backup's reap or the
 /// reborn primary's reclaim, never by the lease, so a cell proves the release
 /// it names. Production runs the opposite relation (lease 120 s, refresh 40 s,
-/// see ADR-0038): there the lease frees such a set first and the reap's
+/// see ADR-0040): there the lease frees such a set first and the reap's
 /// release is a no-op.
 pub const LEASE_OUTLIVING_THE_REPLICA_TTL: call_limiter::LimiterConfig =
     call_limiter::LimiterConfig { lease_sec: 3600 };

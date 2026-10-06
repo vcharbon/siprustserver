@@ -1,68 +1,16 @@
-//! What a decision states for one header name on a message the stack
-//! authors: the removal of every relayed line, or the ordered lines that
-//! replace them.
-//!
-//! A header may legitimately occupy several lines (RFC 3261 §7.3.1), and for
-//! some of them the line order is the meaning — each `Diversion` or
-//! `History-Info` entry is one hop, most recent first. A decision therefore
-//! states LINES, never a single value the generator would have to fold, and
-//! the mint writes one wire line per entry in the order given.
+//! The decision's header statements ([`call::header_update`]) as the
+//! `(name, line-or-removal)` pairs a message generator consumes.
 
-use std::collections::BTreeMap;
+pub use call::header_update::{HeaderUpdate, SipHeaderUpdates};
 
-use serde::de::{self, Deserializer, SeqAccess, Visitor};
-use serde::{Deserialize, Serialize, Serializer};
-
-/// Header name → what the decision states for it. The name is the decision's
-/// whatever the variant: no relayed or configured copy of it rides beside.
-pub type SipHeaderUpdates = BTreeMap<String, HeaderUpdate>;
-
-/// The decision's statement for one header name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeaderUpdate {
-    /// Delete every relayed line of the name; the message carries none.
-    Remove,
-    /// Replace every relayed line with these, one wire line per entry, in
-    /// this order. Empty states the name with no line, which the mint treats
-    /// as [`HeaderUpdate::Remove`].
-    Set(Vec<String>),
-}
-
-impl HeaderUpdate {
-    /// A single-line statement.
-    pub fn line(value: impl Into<String>) -> Self {
-        HeaderUpdate::Set(vec![value.into()])
-    }
-
-    /// The lines this statement puts on the wire — none for a removal.
-    pub fn lines(&self) -> &[String] {
-        match self {
-            HeaderUpdate::Remove => &[],
-            HeaderUpdate::Set(lines) => lines,
-        }
-    }
-
-    /// True iff the statement leaves the message with no line of the name.
-    pub fn removes(&self) -> bool {
-        self.lines().is_empty()
-    }
-
-    /// The single line of a one-line statement; `None` for a removal or a
-    /// multi-line set.
-    pub fn single(&self) -> Option<&str> {
-        match self.lines() {
-            [one] => Some(one),
-            _ => None,
-        }
-    }
-}
-
-/// The map as the `(name, line-or-removal)` pairs a message generator
-/// consumes: one pair per line of a set, in the set's order, and one
-/// `(name, None)` per removal. Names keep the map's order.
+/// The sets and removals of the map as the `(name, line-or-removal)` pairs a
+/// message generator consumes: one pair per line of a set, in the set's order,
+/// and one `(name, None)` per removal. Names keep the map's order. An add is
+/// not among them: it yields to the message as built ([`header_adds`]).
 pub fn header_lines(updates: &SipHeaderUpdates) -> Vec<(String, Option<String>)> {
     updates
         .iter()
+        .filter(|(_, update)| !update.adds())
         .flat_map(|(name, update)| -> Vec<(String, Option<String>)> {
             if update.removes() {
                 vec![(name.clone(), None)]
@@ -71,6 +19,28 @@ pub fn header_lines(updates: &SipHeaderUpdates) -> Vec<(String, Option<String>)>
             }
         })
         .collect()
+}
+
+/// The adds of the map, `(name, lines)` in the map's order: what a builder
+/// states on the message it built only where that message carries none of
+/// the name. An add with no line is none.
+pub fn header_adds(updates: &SipHeaderUpdates) -> Vec<(String, Vec<String>)> {
+    updates
+        .iter()
+        .filter_map(|(name, update)| match update {
+            HeaderUpdate::Add(lines) if !lines.is_empty() => Some((name.clone(), lines.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The adds of a payload's `update_headers` object ([`header_adds`] of it).
+pub fn payload_adds(update_headers: Option<&serde_json::Value>) -> Vec<(String, Vec<String>)> {
+    update_headers
+        .filter(|v| v.is_object())
+        .and_then(|v| serde_json::from_value::<SipHeaderUpdates>(v.clone()).ok())
+        .map(|m| header_adds(&m))
+        .unwrap_or_default()
 }
 
 /// The `(name, line-or-removal)` pairs of a payload's `update_headers` object
@@ -84,56 +54,26 @@ pub fn payload_lines(update_headers: Option<&serde_json::Value>) -> Vec<(String,
         .unwrap_or_default()
 }
 
-/// `Remove` is `null`; `Set` is the array of lines.
-impl Serialize for HeaderUpdate {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            HeaderUpdate::Remove => s.serialize_none(),
-            HeaderUpdate::Set(lines) => lines.serialize(s),
-        }
-    }
-}
-
-/// `null` is a removal, an array is the lines, and a bare string is the
-/// one-line set — the form a decision adapter states a single-line header in.
-impl<'de> Deserialize<'de> for HeaderUpdate {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = HeaderUpdate;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("null, a string, or an array of strings")
-            }
-            fn visit_none<E: de::Error>(self) -> Result<HeaderUpdate, E> {
-                Ok(HeaderUpdate::Remove)
-            }
-            fn visit_unit<E: de::Error>(self) -> Result<HeaderUpdate, E> {
-                Ok(HeaderUpdate::Remove)
-            }
-            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<HeaderUpdate, D2::Error> {
-                d.deserialize_any(V)
-            }
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<HeaderUpdate, E> {
-                Ok(HeaderUpdate::line(v))
-            }
-            fn visit_string<E: de::Error>(self, v: String) -> Result<HeaderUpdate, E> {
-                Ok(HeaderUpdate::Set(vec![v]))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<HeaderUpdate, A::Error> {
-                let mut lines = Vec::new();
-                while let Some(l) = seq.next_element::<String>()? {
-                    lines.push(l);
-                }
-                Ok(HeaderUpdate::Set(lines))
-            }
-        }
-        d.deserialize_any(V)
-    }
+/// The stated headers of a final a decision authors (a reject, a redirect)
+/// from its payload's `update_headers`: the adds, on that final, yielding to
+/// the lines it carries as built; `None` where it adds nothing.
+pub fn final_adds(
+    update_headers: Option<&serde_json::Value>,
+) -> Option<call::features::StatedHeaders> {
+    let adds = payload_adds(update_headers);
+    (!adds.is_empty()).then(|| call::features::StatedHeaders {
+        originator_finals: adds
+            .into_iter()
+            .map(|(name, lines)| (name, HeaderUpdate::Add(lines)))
+            .collect(),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn a_set_keeps_its_lines_in_order_and_a_removal_has_none() {
@@ -161,29 +101,14 @@ mod tests {
     }
 
     #[test]
-    fn json_reads_null_string_and_array() {
-        let m: SipHeaderUpdates =
-            serde_json::from_str(r#"{"A": null, "B": "one", "C": ["x", "y"]}"#).unwrap();
-        assert_eq!(m["A"], HeaderUpdate::Remove);
-        assert_eq!(m["B"], HeaderUpdate::line("one"));
-        assert_eq!(m["C"], HeaderUpdate::Set(vec!["x".into(), "y".into()]));
-    }
-
-    #[test]
-    fn json_writes_null_and_arrays() {
+    fn an_add_is_no_generator_pair_and_an_empty_add_is_no_add() {
         let mut m: SipHeaderUpdates = BTreeMap::new();
-        m.insert("A".into(), HeaderUpdate::Remove);
-        m.insert("B".into(), HeaderUpdate::line("one"));
-        let json = serde_json::to_value(&m).unwrap();
-        assert_eq!(json, serde_json::json!({"A": null, "B": ["one"]}));
-        let back: SipHeaderUpdates = serde_json::from_value(json).unwrap();
-        assert_eq!(back, m);
-    }
-
-    #[test]
-    fn single_reads_only_a_one_line_set() {
-        assert_eq!(HeaderUpdate::line("v").single(), Some("v"));
-        assert_eq!(HeaderUpdate::Remove.single(), None);
-        assert_eq!(HeaderUpdate::Set(vec!["a".into(), "b".into()]).single(), None);
+        m.insert("A".into(), HeaderUpdate::Add(vec!["x".into()]));
+        m.insert("B".into(), HeaderUpdate::Add(vec![]));
+        m.insert("C".into(), HeaderUpdate::line("c"));
+        assert_eq!(header_lines(&m), vec![("C".to_string(), Some("c".to_string()))]);
+        assert_eq!(header_adds(&m), vec![("A".to_string(), vec!["x".to_string()])]);
+        let payload = serde_json::json!({"A": {"add": ["x"]}, "C": "c"});
+        assert_eq!(payload_adds(Some(&payload)), vec![("A".to_string(), vec!["x".to_string()])]);
     }
 }

@@ -125,7 +125,7 @@
       ]
     },
     "Robustness": {
-      "description": "The GLOBAL loss/retransmit defaults (a mix entry inherits these unless it\noverrides them). Both default off, so an un-tuned profile is byte-for-byte the\nhistoric behaviour.",
+      "description": "The GLOBAL loss/retransmit defaults (a mix entry inherits these unless it\noverrides them). Both default off: an un-tuned profile drops and\nretransmits nothing extra.",
       "type": "object",
       "properties": {
         "dropRate": {

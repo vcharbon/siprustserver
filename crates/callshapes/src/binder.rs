@@ -7,8 +7,8 @@
 //! `EgressPolicy::Transparent` route-by-config or the `X-Api-Call`
 //! pin/failover plan). A downstream platform binds the same intents its own
 //! way — e.g. a dial-plan platform maps a `FailoverOnReject` intent to a dialed
-//! whose BL scenario is a reroute, by building an
-//! [`InvitePlan`](scenario_harness::realcall::InvitePlan) with its own R-URI
+//! whose service logic is a reroute, by building an
+//! [`InvitePlan`] with its own R-URI
 //! user (and any extra headers) instead.
 
 use scenario_harness::realcall::{CallEnv, InvitePlan};
@@ -43,7 +43,7 @@ impl RouteIntent<'_> {
 /// establishment stage).
 pub trait RouteBinder: Send + Sync {
     /// The initial-INVITE plan realizing `intent` (R-URI, headers, X-Api-Call,
-    /// egress rewrite — whatever this platform's SUT routes on).
+    /// egress rewrite — whatever the SUT routes on).
     fn invite_plan(&self, env: &CallEnv<'_>, intent: RouteIntent<'_>) -> InvitePlan;
 
     /// The initial-INVITE plan for a **no-answer-triggered** failover
@@ -64,7 +64,7 @@ pub trait RouteBinder: Send + Sync {
         self.invite_plan(env, intent)
     }
 
-    /// The authorization payload a REFER carries so this platform's SUT
+    /// The authorization payload a REFER carries so the SUT
     /// accepts the transfer (`None` = the SUT needs none). `refer_key` is the
     /// per-run auth input (`ScenarioInputs::refer_key` upstream).
     fn refer_authorization(&self, env: &CallEnv<'_>, refer_key: &str) -> Option<String> {

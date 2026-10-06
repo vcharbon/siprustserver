@@ -1,7 +1,7 @@
 //! [`ProxyMetrics`] — atomics-backed counters/gauges for the proxy data path
 //! (port of `observability/Metrics.ts`). The source uses Effect `Metric`s; here
 //! we keep live atomics + small labeled maps and render Prometheus text
-//! ([`ProxyMetrics::prometheus_text`]) for the [`super::metrics_server`] endpoint.
+//! ([`ProxyMetrics::prometheus_text`]) for the `/metrics` endpoint.
 //!
 //! Mirrors the source metric names so dashboards transfer: `sip_messages_total`,
 //! `sip_routing_decision_total`, `sip_routing_duration_seconds` (histogram),
@@ -11,9 +11,16 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use metric_catalogue::{FixedCounts, HistogramValue, OpenRows};
+use sip_message::method::Method;
 use sip_net::UdpEndpoint;
 
-/// Inbound vs outbound, for `sip_messages_total{direction}`.
+use super::catalogue;
+use crate::resolver::{outcome, refresh_outcome};
+use crate::strategy::DecodeResult;
+
+/// Inbound vs outbound: the first half of `sip_messages_total`'s
+/// `label="direction:result"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Inbound,
@@ -21,18 +28,12 @@ pub enum Direction {
 }
 
 impl Direction {
-    const ALL: [Direction; 2] = [Direction::Inbound, Direction::Outbound];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Direction::Inbound => "inbound",
-            Direction::Outbound => "outbound",
-        }
-    }
+    /// Every direction, in declaration order.
+    pub const ALL: [Direction; 2] = [Direction::Inbound, Direction::Outbound];
 }
 
 /// Which proxy face a datagram crossed, for
-/// `sip_proxy_face_messages_total{face,direction}` (dual-face mode). A
+/// `sip_proxy_face_messages_total{label="face:direction"}` (dual-face mode). A
 /// single-face proxy records everything as `int`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Face {
@@ -41,8 +42,11 @@ pub enum Face {
 }
 
 impl Face {
+    /// Every face, in declaration order.
+    pub const ALL: [Face; 2] = [Face::Internal, Face::External];
+
     /// The face's metrics label, and the value a trace event names it by.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Face::Internal => "int",
             Face::External => "ext",
@@ -50,7 +54,8 @@ impl Face {
     }
 }
 
-/// How a message was handled, for `sip_messages_total{result}`.
+/// How a message was handled: the second half of `sip_messages_total`'s
+/// `label="direction:result"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageResult {
     Forwarded,
@@ -59,16 +64,9 @@ pub enum MessageResult {
 }
 
 impl MessageResult {
-    const ALL: [MessageResult; 3] =
+    /// Every result, in declaration order.
+    pub const ALL: [MessageResult; 3] =
         [MessageResult::Forwarded, MessageResult::Responded, MessageResult::Dropped];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            MessageResult::Forwarded => "forwarded",
-            MessageResult::Responded => "responded",
-            MessageResult::Dropped => "dropped",
-        }
-    }
 }
 
 /// The routing decision taken, for `sip_routing_decision_total{kind}`.
@@ -85,7 +83,8 @@ pub enum RoutingDecisionKind {
 }
 
 impl RoutingDecisionKind {
-    const ALL: [RoutingDecisionKind; 8] = [
+    /// Every kind, in declaration order.
+    pub const ALL: [RoutingDecisionKind; 8] = [
         RoutingDecisionKind::SelectNew,
         RoutingDecisionKind::DecodeForward,
         RoutingDecisionKind::DecodeForwardBackup,
@@ -97,7 +96,7 @@ impl RoutingDecisionKind {
     ];
 
     /// The decision's metrics label, and the value a trace event names it by.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             RoutingDecisionKind::SelectNew => "select_new",
             RoutingDecisionKind::DecodeForward => "decode_forward",
@@ -120,7 +119,12 @@ pub enum HmacFailureReason {
 }
 
 impl HmacFailureReason {
-    fn as_str(self) -> &'static str {
+    /// Every reason, in declaration order.
+    pub const ALL: [HmacFailureReason; 3] =
+        [HmacFailureReason::Missing, HmacFailureReason::Decode, HmacFailureReason::Mismatch];
+
+    /// The `reason` label.
+    pub const fn as_str(self) -> &'static str {
         match self {
             HmacFailureReason::Missing => "missing",
             HmacFailureReason::Decode => "decode",
@@ -129,56 +133,49 @@ impl HmacFailureReason {
     }
 }
 
-/// Known request methods get fixed counter slots; anything else lands in
-/// `other`. The method token is wire-controlled and the lenient parser accepts
-/// any token, so an open label set was a remote memory-exhaustion vector: a
-/// flood of invented methods (`FOO1`, `FOO2`, …) grew one permanent map entry
-/// + one `/metrics` line per distinct token, ballooning RSS and Prometheus
-/// cardinality without bound.
-const METHOD_SLOTS: [&str; 14] = [
-    "INVITE",
-    "ACK",
-    "BYE",
-    "CANCEL",
-    "OPTIONS",
-    "REGISTER",
-    "SUBSCRIBE",
-    "NOTIFY",
-    "PRACK",
-    "UPDATE",
-    "INFO",
-    "MESSAGE",
-    "REFER",
-    "PUBLISH",
-];
-
-/// Slot index for an (uppercased) method token; unknown → the `other` slot.
-fn method_slot(method: &str) -> usize {
-    METHOD_SLOTS.iter().position(|m| *m == method).unwrap_or(METHOD_SLOTS.len())
+/// How a CANCEL's lookup of its INVITE's remembered hop ended, for
+/// `sip_proxy_cancel_lookups_total{outcome}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelLookup {
+    /// The INVITE's hop was remembered: the CANCEL follows it.
+    Hit,
+    /// No hop remembered: the CANCEL is routed on its own.
+    Miss,
 }
 
-fn method_label(slot: usize) -> &'static str {
-    METHOD_SLOTS.get(slot).copied().unwrap_or("other")
-}
+impl CancelLookup {
+    /// Every outcome, in declaration order.
+    pub const ALL: [CancelLookup; 2] = [CancelLookup::Hit, CancelLookup::Miss];
 
-#[derive(Default)]
-struct LabeledCounter(Mutex<BTreeMap<String, u64>>);
-
-impl LabeledCounter {
-    fn inc(&self, label: &str) {
-        *self.0.lock().unwrap().entry(label.to_string()).or_insert(0) += 1;
-    }
-    fn sum(&self) -> u64 {
-        self.0.lock().unwrap().values().sum()
-    }
-    fn snapshot(&self) -> BTreeMap<String, u64> {
-        self.0.lock().unwrap().clone()
+    /// The `outcome` label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CancelLookup::Hit => "hit",
+            CancelLookup::Miss => "miss",
+        }
     }
 }
 
-/// The five worker-health gauges (one set per registry — the source keys per
-/// worker; the slice's tests assert the aggregate, so we count workers in each
-/// health state).
+/// The fixed counter slot of a native method (uppercased by the caller);
+/// `None` for an extension method, counted under its own label in
+/// [`ProxyMetrics`]'s open rows, under the family's cap.
+fn method_slot(method: &str) -> Option<usize> {
+    Method::NATIVE_TOKENS.iter().position(|m| *m == method)
+}
+
+/// Count one `label` of the closed list `labels` on its slot of `counters`;
+/// a label outside the list is a caller's bug.
+fn count_outcome(counters: &[AtomicU64], labels: &[&str], label: &str) {
+    match labels.iter().position(|l| *l == label) {
+        Some(i) => {
+            counters[i].fetch_add(1, Ordering::Relaxed);
+        }
+        None => debug_assert!(false, "{label} is no outcome of {labels:?}"),
+    }
+}
+
+/// The five worker-health gauges (one set per registry: the count of workers in
+/// each health state).
 #[derive(Default)]
 struct HealthGauges {
     alive: AtomicU64,
@@ -241,37 +238,41 @@ impl std::ops::AddAssign for UdpShardStats {
 }
 
 /// Live proxy metrics. Cheap to share behind an `Arc`.
-#[derive(Default)]
 pub struct ProxyMetrics {
     /// `[direction][result]` — fixed slots, lock-free (multiple increments per
     /// packet on the hot path).
     messages: [[AtomicU64; 3]; 2],
-    /// One slot per known method + `other` — bounded and lock-free.
-    requests: [AtomicU64; METHOD_SLOTS.len() + 1],
-    /// Keyed "method|code" with the method slotted and the code validated to
-    /// 100..699 (else `other`) — both wire-controlled inputs bounded.
-    responses: LabeledCounter,
+    /// One slot per native method — lock-free; an extension method's count
+    /// sits in `request_extensions`.
+    requests: [AtomicU64; Method::NATIVE_TOKENS.len()],
+    /// Extension methods, each under its own label, under the family's cap
+    /// (the method token is wire-controlled).
+    request_extensions: OpenRows,
+    /// By CSeq method and status, under the family's cap (both are
+    /// wire-controlled; the parser bounds the status to 100..=699).
+    responses: OpenRows,
     calls: AtomicU64, // initial (dialog-creating, no To-tag) INVITEs
     routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()], // indexed by RoutingDecisionKind
-    hmac_failures: LabeledCounter,                                  // keyed reason
+    hmac_failures: [AtomicU64; HmacFailureReason::ALL.len()],
     /// Locally decided rejections (`RouteOutcome` kind `reject`), keyed by a
     /// bounded static reason — where the reject also answers on the wire, the
     /// same string the SIP `Reason` header states. The per-cause split of the
     /// aggregate `sip_routing_decision_total{kind="reject"}`, so a
     /// proxy-generated 503 is attributable from metrics alone.
-    rejects: LabeledCounter,
-    cancel_lookups: LabeledCounter,          // keyed outcome
-    decode_forward_promoted: LabeledCounter, // keyed from-reason
-    fresh_pod_forward: LabeledCounter,       // keyed age-bucket
-    overload_rejections: LabeledCounter,     // keyed reason
+    rejects: FixedCounts,
+    cancel_lookups: FixedCounts,
+    decode_forward_promotions: FixedCounts,
+    /// Cookie-routed requests forwarded to a primary inside its fresh-pod
+    /// guard window because the cookie names no usable backup.
+    fresh_pod_forwards: AtomicU64,
+    overload_rejections: FixedCounts,
     /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
     /// floor events — an Alive worker whose OPTIONS replies stopped carrying a
     /// fresh `X-Overload` payload within `payload_stale_ms`, so AIMD halved its
     /// cap. Non-zero while ELU is healthy means the HealthProbe cycle exceeds the
-    /// stale threshold (config invariant). The TS source pushes this per-`worker_id`
-    /// (`staleDecreaseCounter`); the per-worker-labelled surface is a deferred slice
-    /// (ProxyMetrics is registry-aggregate today), so this is the coarse stand-in
-    /// that keeps a silently-floored cap diagnosable.
+    /// stale threshold (config invariant). ProxyMetrics is registry-aggregate, so
+    /// this is the coarse stand-in for a per-`worker_id` counter that keeps a
+    /// silently-floored cap diagnosable.
     overload_stale_decrease: AtomicU64,
     /// New-dialog INVITEs that BYPASSED the LB's overload gates because they are
     /// emergency: they skip the `above_critical` critical-filter (kept as
@@ -285,14 +286,15 @@ pub struct ProxyMetrics {
     routing_duration_sum_us: AtomicU64,
     record_route_inserted: AtomicU64,
     pending_invite_lru_size: AtomicU64,
-    named_sends: LabeledCounter, // keyed outcome (crate::resolver::outcome — closed set)
+    /// By outcome, indexed like `crate::resolver::outcome::ALL`.
+    named_sends: [AtomicU64; outcome::ALL.len()],
     /// Proactive resolver refresh + startup prewarm events, keyed outcome
     /// (crate::resolver::refresh_outcome — closed set:
     /// refreshed|failed|idle_stopped|prewarmed|prewarm_failed). The
     /// cold-cache-kill visibility: `refreshed` moving means
     /// active names never expire cold; `prewarm_failed`/`failed` climbing
     /// means DNS is unhealthy while the old entries keep serving.
-    resolver_refresh: LabeledCounter,
+    resolver_refresh: [AtomicU64; refresh_outcome::ALL.len()],
     resolver_cache_size: AtomicU64,
     /// Outbound datagrams the endpoint failed to send (EPERM/ENOBUFS/...).
     /// `sip_messages_total{outbound,forwarded}` counts hand-off to the send
@@ -318,12 +320,46 @@ pub struct ProxyMetrics {
     /// A single-face proxy only ever touches the `int` slots — cheap fixed
     /// atomics, no restructuring of the existing counters.
     face_messages: [[AtomicU64; 2]; 2],
-    /// Cardinality-bounded per-peer failure/timeout counters
+    /// Per-peer failure/timeout counters
     /// (`sip_proxy_peer_failures_total{peer,scope,kind}`). Internal = resolves to
-    /// a known worker (registry); external = LRU-bounded
-    /// (`PEER_METRICS_EXTERNAL_CAP`, default 100). See
-    /// [`crate::observability::peer_failures::PeerFailures`].
+    /// a known worker (registry), always its own series; external = under the
+    /// family's cap. See [`crate::observability::peer_failures::PeerFailures`].
     per_peer: crate::observability::peer_failures::PeerFailures,
+}
+
+impl Default for ProxyMetrics {
+    fn default() -> Self {
+        Self {
+            messages: Default::default(),
+            requests: Default::default(),
+            request_extensions: OpenRows::new(&catalogue::REQUESTS),
+            responses: OpenRows::new(&catalogue::RESPONSES),
+            calls: Default::default(),
+            routing_decisions: Default::default(),
+            hmac_failures: Default::default(),
+            rejects: FixedCounts::new(&catalogue::REJECTS),
+            cancel_lookups: FixedCounts::new(&catalogue::CANCEL_LOOKUPS),
+            decode_forward_promotions: FixedCounts::new(&catalogue::DECODE_FORWARD_PROMOTIONS),
+            fresh_pod_forwards: Default::default(),
+            overload_rejections: FixedCounts::new(&catalogue::OVERLOAD_REJECTIONS),
+            overload_stale_decrease: Default::default(),
+            lb_emergency_bypassed: Default::default(),
+            routing_duration_count: Default::default(),
+            routing_duration_sum_us: Default::default(),
+            record_route_inserted: Default::default(),
+            pending_invite_lru_size: Default::default(),
+            named_sends: Default::default(),
+            resolver_refresh: Default::default(),
+            resolver_cache_size: Default::default(),
+            send_failures: Default::default(),
+            udp_shards: Default::default(),
+            health: Default::default(),
+            worker_pool_empty: Default::default(),
+            recv_shards_stalled: Default::default(),
+            face_messages: Default::default(),
+            per_peer: Default::default(),
+        }
+    }
 }
 
 impl ProxyMetrics {
@@ -336,22 +372,21 @@ impl ProxyMetrics {
     }
 
     /// Count one inbound request by SIP method (uppercased by the caller), for
-    /// `sip_proxy_requests_total{method}`. Unknown methods share one `other`
-    /// slot — see [`METHOD_SLOTS`].
+    /// `sip_proxy_requests_total{method}`: a native method on its lock-free
+    /// slot, an extension method under its own label, under the cap.
     pub fn record_request(&self, method: &str) {
-        self.requests[method_slot(method)].fetch_add(1, Ordering::Relaxed);
+        match method_slot(method) {
+            Some(slot) => {
+                self.requests[slot].fetch_add(1, Ordering::Relaxed);
+            }
+            None => self.request_extensions.add(&[method], 1),
+        }
     }
 
     /// Count one inbound response by its CSeq method + status code, for
-    /// `sip_proxy_responses_total{method,code}`. Both labels are bounded:
-    /// unknown methods → `other`, out-of-range codes → `other`.
+    /// `sip_proxy_responses_total{method,code}`, under the cap.
     pub fn record_response(&self, method: &str, code: u16) {
-        let method = method_label(method_slot(method));
-        if (100..700).contains(&code) {
-            self.responses.inc(&format!("{method}|{code}"));
-        } else {
-            self.responses.inc(&format!("{method}|other"));
-        }
+        self.responses.add(&[method, &code.to_string()], 1);
     }
 
     /// Count one new call: a dialog-creating INVITE with no To-tag (an initial
@@ -387,7 +422,7 @@ impl ProxyMetrics {
     }
 
     pub fn record_hmac_failure(&self, reason: HmacFailureReason) {
-        self.hmac_failures.inc(reason.as_str());
+        self.hmac_failures[reason as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one locally decided reject by reason, for
@@ -395,23 +430,35 @@ impl ProxyMetrics {
     /// static set (the emit sites' `&'static str` reasons plus the self-gate's
     /// two reason constants), keeping label cardinality bounded.
     pub fn record_reject(&self, reason: &str) {
-        self.rejects.inc(reason);
+        self.rejects.add(&[reason], 1);
     }
 
-    pub fn record_cancel_lookup(&self, outcome: &str) {
-        self.cancel_lookups.inc(outcome);
+    /// Count one CANCEL's lookup of its INVITE's remembered hop, for
+    /// `sip_proxy_cancel_lookups_total{outcome}`.
+    pub fn record_cancel_lookup(&self, outcome: CancelLookup) {
+        self.cancel_lookups.add(&[outcome.as_str()], 1);
     }
 
-    pub fn record_decode_forward_promoted(&self, from: &str) {
-        self.decode_forward_promoted.inc(from);
-    }
-
-    pub fn record_fresh_pod_forward(&self, bucket: &str) {
-        self.fresh_pod_forward.inc(bucket);
+    /// Count what one request's cookie decode says about its primary (an
+    /// in-dialog request, or a CANCEL following its INVITE's cookie; each
+    /// retransmission counts): a backup promotion past a primary that is up
+    /// (`sip_proxy_decode_forward_promotions_total{reason}`), or a forward to a
+    /// fresh primary for want of a usable backup
+    /// (`sip_proxy_fresh_pod_forwards_total`). Only the request path calls it.
+    pub fn record_request_decode(&self, decoded: &DecodeResult) {
+        match decoded {
+            DecodeResult::ForwardBackup { promotion: Some(reason), .. } => {
+                self.decode_forward_promotions.add(&[reason.as_str()], 1);
+            }
+            DecodeResult::Forward { fresh_primary: true, .. } => {
+                self.fresh_pod_forwards.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
     }
 
     pub fn record_overload_rejection(&self, reason: &str) {
-        self.overload_rejections.inc(reason);
+        self.overload_rejections.add(&[reason], 1);
     }
 
     /// Add `n` `sweep_stale` floor events (one per worker the sweep just
@@ -439,14 +486,14 @@ impl ProxyMetrics {
     /// Count a named-target send by outcome (cached/resolved/dropped_*…), for
     /// `sip_proxy_named_sends_total{outcome}`. See [`crate::resolver`].
     pub fn record_named_send(&self, outcome: &str) {
-        self.named_sends.inc(outcome);
+        count_outcome(&self.named_sends, &outcome::ALL, outcome);
     }
 
     /// Count a proactive resolver refresh / startup prewarm event by outcome
     /// (refreshed/failed/idle_stopped/prewarmed/prewarm_failed), for
     /// `sip_proxy_resolver_refresh_total{outcome}`. See [`crate::resolver`].
     pub fn record_resolver_refresh(&self, outcome: &str) {
-        self.resolver_refresh.inc(outcome);
+        count_outcome(&self.resolver_refresh, &refresh_outcome::ALL, outcome);
     }
 
     pub fn set_resolver_cache_size(&self, n: u64) {
@@ -519,9 +566,6 @@ impl ProxyMetrics {
     pub fn routing_duration_count(&self) -> u64 {
         self.routing_duration_count.load(Ordering::Relaxed)
     }
-    pub fn hmac_failures_total(&self) -> u64 {
-        self.hmac_failures.sum()
-    }
     pub fn record_route_inserted_total(&self) -> u64 {
         self.record_route_inserted.load(Ordering::Relaxed)
     }
@@ -532,19 +576,19 @@ impl ProxyMetrics {
         self.calls.load(Ordering::Relaxed)
     }
     pub fn named_send_count(&self, outcome: &str) -> u64 {
-        self.named_sends.snapshot().get(outcome).copied().unwrap_or(0)
+        outcome::ALL
+            .iter()
+            .position(|o| *o == outcome)
+            .map_or(0, |i| self.named_sends[i].load(Ordering::Relaxed))
     }
     pub fn resolver_refresh_count(&self, outcome: &str) -> u64 {
-        self.resolver_refresh.snapshot().get(outcome).copied().unwrap_or(0)
+        refresh_outcome::ALL
+            .iter()
+            .position(|o| *o == outcome)
+            .map_or(0, |i| self.resolver_refresh[i].load(Ordering::Relaxed))
     }
     pub fn resolver_cache_size(&self) -> u64 {
         self.resolver_cache_size.load(Ordering::Relaxed)
-    }
-    pub fn send_failures_total(&self) -> u64 {
-        self.send_failures.load(Ordering::Relaxed)
-    }
-    pub fn udp_tail_dropped_total(&self) -> u64 {
-        self.udp_totals().tail_dropped
     }
     pub fn overload_stale_decrease_total(&self) -> u64 {
         self.overload_stale_decrease.load(Ordering::Relaxed)
@@ -553,280 +597,111 @@ impl ProxyMetrics {
         self.lb_emergency_bypassed.load(Ordering::Relaxed)
     }
     pub fn overload_rejection_count(&self, reason: &str) -> u64 {
-        self.overload_rejections.snapshot().get(reason).copied().unwrap_or(0)
+        self.overload_rejections.get(&[reason])
     }
     pub fn reject_count(&self, reason: &str) -> u64 {
-        self.rejects.snapshot().get(reason).copied().unwrap_or(0)
+        self.rejects.get(&[reason])
     }
 
-    /// Render Prometheus text exposition (the `/metrics` body).
+    /// Render Prometheus text exposition (the `/metrics` body): every
+    /// family of [`catalogue::PROXY`], in order.
     pub fn prometheus_text(&self) -> String {
+        use catalogue as c;
         let mut s = String::new();
-        let g = |s: &mut String, name: &str, help: &str, ty: &str, val: u64| {
-            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {ty}\n{name} {val}\n"));
-        };
-        let labeled = |s: &mut String,
-                       name: &str,
-                       help: &str,
-                       ty: &str,
-                       label: &str,
-                       m: &BTreeMap<String, u64>| {
-            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {ty}\n"));
-            if m.is_empty() {
-                s.push_str(&format!("{name}{{{label}=\"none\"}} 0\n"));
-            }
-            for (k, v) in m {
-                s.push_str(&format!("{name}{{{label}=\"{k}\"}} {v}\n"));
-            }
-        };
-
-        // Two-label render: key is "method|code" -> {method="..",code=".."}.
-        let labeled2 = |s: &mut String,
-                        name: &str,
-                        help: &str,
-                        (l1, l2): (&str, &str),
-                        m: &BTreeMap<String, u64>| {
-            s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
-            if m.is_empty() {
-                s.push_str(&format!("{name}{{{l1}=\"none\",{l2}=\"none\"}} 0\n"));
-            }
-            for (k, v) in m {
-                let (a, b) = k.split_once('|').unwrap_or((k.as_str(), ""));
-                s.push_str(&format!("{name}{{{l1}=\"{a}\",{l2}=\"{b}\"}} {v}\n"));
-            }
-        };
-
-        // Slot-backed counters render only their non-zero entries, matching the
-        // sparse output the map-backed counters produced.
-        let mut messages_map = BTreeMap::new();
-        for d in Direction::ALL {
-            for r in MessageResult::ALL {
-                let v = self.messages[d as usize][r as usize].load(Ordering::Relaxed);
-                if v > 0 {
-                    messages_map.insert(format!("{}:{}", d.as_str(), r.as_str()), v);
-                }
-            }
-        }
-        let mut requests_map = BTreeMap::new();
-        for (slot, c) in self.requests.iter().enumerate() {
-            let v = c.load(Ordering::Relaxed);
-            if v > 0 {
-                requests_map.insert(method_label(slot).to_string(), v);
-            }
-        }
-        let mut decisions_map = BTreeMap::new();
-        for k in RoutingDecisionKind::ALL {
-            let v = self.routing_decisions[k as usize].load(Ordering::Relaxed);
-            if v > 0 {
-                decisions_map.insert(k.as_str().to_string(), v);
-            }
-        }
-
-        let mut faces_map = BTreeMap::new();
-        for f in [Face::Internal, Face::External] {
-            for d in Direction::ALL {
-                let v = self.face_messages[f as usize][d as usize].load(Ordering::Relaxed);
-                if v > 0 {
-                    faces_map.insert(format!("{}:{}", f.as_str(), d.as_str()), v);
-                }
-            }
-        }
-
-        labeled(
-            &mut s,
-            "sip_messages_total",
-            "SIP messages by direction+result.",
-            "counter",
-            "label",
-            &messages_map,
-        );
-        labeled(
-            &mut s,
-            "sip_proxy_face_messages_total",
-            "Datagrams by proxy face + direction (dual-face mode; single-face records int only).",
-            "counter",
-            "label",
-            &faces_map,
-        );
-        labeled(
-            &mut s,
-            "sip_proxy_requests_total",
-            "Inbound SIP requests by method.",
-            "counter",
-            "method",
-            &requests_map,
-        );
-        labeled2(
-            &mut s,
-            "sip_proxy_responses_total",
-            "Inbound SIP responses by CSeq method + status code.",
-            ("method", "code"),
-            &self.responses.snapshot(),
-        );
-        g(
-            &mut s,
-            "sip_proxy_calls_total",
-            "New calls: initial dialog-creating INVITEs (no To-tag).",
-            "counter",
-            self.calls.load(Ordering::Relaxed),
-        );
-        labeled(
-            &mut s,
-            "sip_routing_decision_total",
-            "Routing decisions by kind.",
-            "counter",
-            "kind",
-            &decisions_map,
-        );
-        labeled(&mut s, "sip_proxy_rejects_total", "Locally decided rejects by reason (the per-cause split of sip_routing_decision_total kind=reject).", "counter", "reason", &self.rejects.snapshot());
-        labeled(
-            &mut s,
-            "sip_proxy_hmac_failures_total",
-            "HMAC verify failures by reason.",
-            "counter",
-            "reason",
-            &self.hmac_failures.snapshot(),
-        );
-
-        // Histogram (count + sum only — the slice does not bucket).
-        let cnt = self.routing_duration_count.load(Ordering::Relaxed);
-        let sum_s = self.routing_duration_sum_us.load(Ordering::Relaxed) as f64 / 1_000_000.0;
-        s.push_str("# HELP sip_routing_duration_seconds Routing decision duration.\n");
-        s.push_str("# TYPE sip_routing_duration_seconds histogram\n");
-        s.push_str(&format!("sip_routing_duration_seconds_bucket{{le=\"+Inf\"}} {cnt}\n"));
-        s.push_str(&format!("sip_routing_duration_seconds_sum {sum_s}\n"));
-        s.push_str(&format!("sip_routing_duration_seconds_count {cnt}\n"));
-
-        g(
-            &mut s,
-            "sip_proxy_record_route_inserted_total",
-            "Record-Route headers inserted.",
-            "counter",
-            self.record_route_inserted.load(Ordering::Relaxed),
-        );
-        g(
-            &mut s,
-            "sip_proxy_pending_invite_lru_size",
-            "Pending-INVITE LRU size.",
-            "gauge",
-            self.pending_invite_lru_size.load(Ordering::Relaxed),
-        );
-        labeled(
-            &mut s,
-            "sip_proxy_named_sends_total",
-            "Named-target (DNS) sends by outcome.",
-            "counter",
-            "outcome",
-            &self.named_sends.snapshot(),
-        );
-        labeled(
-            &mut s,
-            "sip_proxy_resolver_refresh_total",
-            "Proactive resolver refresh + startup prewarm events by outcome.",
-            "counter",
-            "outcome",
-            &self.resolver_refresh.snapshot(),
-        );
-        g(
-            &mut s,
-            "sip_proxy_resolver_cache_size",
-            "Resolver name-cache size.",
-            "gauge",
-            self.resolver_cache_size.load(Ordering::Relaxed),
-        );
-        g(
-            &mut s,
-            "sip_proxy_send_failures_total",
-            "Outbound datagrams the endpoint failed to send.",
-            "counter",
-            self.send_failures.load(Ordering::Relaxed),
-        );
-        let UdpShardStats {
-            queue_depth: udp_depth,
-            queue_max: udp_max,
-            enqueued: udp_enq,
-            tail_dropped: udp_drop,
-            intake_shed: udp_shed,
-            send_would_block: udp_would_block,
-            kernel_rx_dropped: udp_kernel_drop,
-        } = self.udp_totals();
-        g(
-            &mut s,
-            "sip_proxy_udp_queue_depth",
-            "Inbound UDP queue depth (sampled, summed over recv shards and both faces).",
-            "gauge",
-            udp_depth,
-        );
-        g(
-            &mut s,
-            "sip_proxy_udp_queue_max",
-            "Inbound UDP queue capacity (summed over recv shards and both faces).",
-            "gauge",
-            udp_max,
-        );
-        g(
-            &mut s,
-            "sip_proxy_udp_enqueued_total",
-            "Datagrams accepted into the inbound queue(s), summed over recv shards and both faces.",
-            "counter",
-            udp_enq,
-        );
-        g(
-            &mut s,
-            "sip_proxy_udp_tail_dropped_total",
-            "Datagrams tail-dropped by the full inbound queue(s), summed over recv shards and both faces.",
-            "counter",
-            udp_drop,
-        );
-        g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
-        g(&mut s, "sip_proxy_udp_send_would_block_total", "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the recv shard; ADR-0033). Summed over recv shards and both faces.", "counter", udp_would_block);
-        g(&mut s, "sip_proxy_udp_kernel_rx_dropped_total", "Inbound datagrams the kernel dropped on the signalling sockets before the proxy read them, mostly on a full receive buffer (SO_RCVBUF, PROXY_UDP_RCVBUF). Summed over recv shards and both faces.", "counter", udp_kernel_drop);
-        g(&mut s, "sip_proxy_recv_shards_stalled", "Recv shards that dequeued a packet more than PROXY_SHARD_STALL_MS ago and have not returned to waiting: parked, not idle. Non-zero flips /readyz.", "gauge", self.recv_shards_stalled.load(Ordering::Relaxed));
-        g(
-            &mut s,
-            "sip_proxy_worker_pool_empty",
-            "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.",
-            "gauge",
-            self.worker_pool_empty.load(Ordering::Relaxed),
-        );
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        c::MESSAGES.render(&mut s, |series| {
+            let (d, r) =
+                (series.at(0) / MessageResult::ALL.len(), series.at(0) % MessageResult::ALL.len());
+            load(&self.messages[d][r])
+        });
+        c::FACE_MESSAGES.render(&mut s, |series| {
+            let (f, d) = (series.at(0) / Direction::ALL.len(), series.at(0) % Direction::ALL.len());
+            load(&self.face_messages[f][d])
+        });
+        let native = Method::NATIVE_TOKENS
+            .iter()
+            .zip(&self.requests)
+            .map(|(m, n)| (vec![m.to_string()], load(n)));
+        c::REQUESTS.render_rows(&mut s, native.chain(self.request_extensions.rows()));
+        c::REQUESTS_OVERFLOW.render_value(&mut s, self.request_extensions.overflowed());
+        self.responses.render(&mut s);
+        c::CALLS.render_value(&mut s, load(&self.calls));
+        c::ROUTING_DECISION.render(&mut s, |series| load(&self.routing_decisions[series.at(0)]));
+        self.rejects.render(&mut s);
+        c::HMAC_FAILURES.render(&mut s, |series| load(&self.hmac_failures[series.at(0)]));
+        self.cancel_lookups.render(&mut s);
+        self.decode_forward_promotions.render(&mut s);
+        c::FRESH_POD_FORWARDS.render_value(&mut s, load(&self.fresh_pod_forwards));
+        // A histogram without finite buckets: the count and the sum.
+        let count = load(&self.routing_duration_count);
+        let sum = load(&self.routing_duration_sum_us) as f64 / 1_000_000.0;
+        c::ROUTING_DURATION_SECONDS.render_histogram(&mut s, |_| HistogramValue {
+            buckets: Vec::new(),
+            sum,
+            count,
+        });
+        c::RECORD_ROUTE_INSERTED.render_value(&mut s, load(&self.record_route_inserted));
+        c::PENDING_INVITE_LRU_SIZE.render_value(&mut s, load(&self.pending_invite_lru_size));
+        c::NAMED_SENDS.render(&mut s, |series| load(&self.named_sends[series.at(0)]));
+        c::RESOLVER_REFRESH.render(&mut s, |series| load(&self.resolver_refresh[series.at(0)]));
+        c::RESOLVER_CACHE_SIZE.render_value(&mut s, load(&self.resolver_cache_size));
+        c::SEND_FAILURES.render_value(&mut s, load(&self.send_failures));
+        let udp = self.udp_totals();
+        c::UDP_QUEUE_DEPTH.render_value(&mut s, udp.queue_depth);
+        c::UDP_QUEUE_MAX.render_value(&mut s, udp.queue_max);
+        c::UDP_ENQUEUED.render_value(&mut s, udp.enqueued);
+        c::UDP_TAIL_DROPPED.render_value(&mut s, udp.tail_dropped);
+        c::INTAKE_SHED.render_value(&mut s, udp.intake_shed);
+        c::UDP_SEND_WOULD_BLOCK.render_value(&mut s, udp.send_would_block);
+        c::UDP_KERNEL_RX_DROPPED.render_value(&mut s, udp.kernel_rx_dropped);
+        c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
+        c::WORKER_POOL_EMPTY.render_value(&mut s, load(&self.worker_pool_empty));
 
         // Overload-shed visibility (port of the TS AIMD counters). Without these a
         // worker that gets silently rate-capped (`bucket_empty`), filtered out
         // (`no_target_critical_filtered`), or floored on stale telemetry
-        // (`stale_decrease`) leaves no Prometheus trail — the 2026-05-25 root cause.
-        // `overload_rejections` is keyed by reason; `stale_decrease` is the coarse
-        // (registry-aggregate) stand-in for the TS per-`worker_id` push.
-        labeled(
-            &mut s,
-            "sip_proxy_overload_rejections_total",
-            "New-dialog admissions rejected by the AIMD/band overload path, by reason.",
-            "counter",
-            "reason",
-            &self.overload_rejections.snapshot(),
-        );
-        g(&mut s, "sip_proxy_worker_stale_decrease_total", "WorkerLoadObserver sweep_stale floor events (AIMD cap halved — no fresh X-Overload within payload_stale_ms).", "counter", self.overload_stale_decrease.load(Ordering::Relaxed));
-        g(&mut s, "sip_proxy_lb_emergency_bypassed_total", "Emergency new-dialog INVITEs that bypassed the LB overload gates (above_critical critical-filter + per-worker AIMD bucket). Emergency traffic skipping the load-balancer's overload path under flood.", "counter", self.lb_emergency_bypassed.load(Ordering::Relaxed));
+        // (`stale_decrease`) leaves no Prometheus trail. `overload_rejections` is
+        // keyed by reason; `stale_decrease` is the coarse (registry-aggregate)
+        // stand-in for a per-`worker_id` counter.
+        self.overload_rejections.render(&mut s);
+        c::WORKER_STALE_DECREASE.render_value(&mut s, load(&self.overload_stale_decrease));
+        c::LB_EMERGENCY_BYPASSED.render_value(&mut s, load(&self.lb_emergency_bypassed));
 
-        s.push_str("# HELP sip_worker_health Worker count by health state.\n# TYPE sip_worker_health gauge\n");
-        for (label, val) in [
-            ("alive", &self.health.alive),
-            ("draining", &self.health.draining),
-            ("not-ready", &self.health.not_ready),
-            ("unknown", &self.health.unknown),
-            ("dead", &self.health.dead),
-        ] {
-            s.push_str(&format!(
-                "sip_worker_health{{health=\"{label}\"}} {}\n",
-                val.load(Ordering::Relaxed)
-            ));
-        }
+        let health = [
+            &self.health.alive,
+            &self.health.draining,
+            &self.health.not_ready,
+            &self.health.unknown,
+            &self.health.dead,
+        ];
+        c::WORKER_HEALTH.render(&mut s, |series| load(health[series.at(0)]));
 
-        // Per-peer failure/timeout family (cardinality-bounded; see
-        // crate::observability::peer_failures). Internal = known worker
-        // (registry), external = LRU-bounded.
-        s.push_str(&self.per_peer.prometheus_text("sip_proxy_peer_failures_total"));
+        // Per-peer failure/timeout family: internal = known worker
+        // (registry), external = under the cap.
+        self.per_peer.render(&mut s);
         s
     }
+}
+
+/// The proxy-self gate's families: its gauges and its admission counts;
+/// without a gate (the always-admit one) the gauges read `NaN` and the
+/// counters 0.
+pub fn self_gate_text(gate: Option<&crate::self_gate::ProxySelfGateMetrics>) -> String {
+    use catalogue as c;
+    let mut s = String::new();
+    let gauge = |v: fn(&crate::self_gate::ProxySelfGateMetrics) -> f64| gate.map_or(f64::NAN, v);
+    let count = |v: fn(&crate::self_gate::ProxySelfGateMetrics) -> u64| gate.map_or(0, v);
+    c::SELF_GATE_ELU_EWMA.render_value(&mut s, gauge(|m| m.elu_ewma));
+    c::SELF_GATE_GC_FRACTION.render_value(&mut s, gauge(|m| m.gc_fraction));
+    c::SELF_GATE_CPS_BUCKET_LEVEL.render_value(&mut s, gauge(|m| m.cps_bucket_level));
+    c::SELF_GATE_CPS_BUCKET_MAX.render_value(&mut s, gauge(|m| m.cps_bucket_max));
+    c::SELF_GATE_EXTERNAL_INVITES_ADMITTED
+        .render_value(&mut s, count(|m| m.external_admitted_total));
+    let rejected = [count(|m| m.rejected_elu_total), count(|m| m.rejected_cps_total)];
+    c::SELF_GATE_EXTERNAL_INVITES_REJECTED.render(&mut s, |series| rejected[series.at(0)]);
+    c::SELF_GATE_EMERGENCY_BYPASSED.render_value(&mut s, count(|m| m.emergency_bypassed_total));
+    c::SELF_GATE_INTERNAL_BYPASSED.render_value(&mut s, count(|m| m.internal_bypassed_total));
+    s
 }
 
 #[cfg(test)]
@@ -1009,18 +884,26 @@ mod tests {
 
     #[test]
     fn wire_controlled_labels_are_bounded() {
-        // A flood of invented methods/codes must not grow label cardinality —
-        // unknown tokens share the `other` slot (remote memory-exhaustion fix).
+        // A flood of invented methods must not grow label cardinality without
+        // bound: each gets its own series up to the cap, the rest land on the
+        // overflow series and are counted (remote memory-exhaustion guard).
+        use metric_catalogue::{DEFAULT_CAP, OVERFLOW};
         let m = ProxyMetrics::new();
         for i in 0..1_000 {
             m.record_request(&format!("FOO{i}"));
-            m.record_response(&format!("BAR{i}"), 9_999);
+            m.record_response(&format!("BAR{i}"), 299);
         }
         let txt = m.prometheus_text();
-        assert!(txt.contains("sip_proxy_requests_total{method=\"other\"} 1000"));
-        assert!(txt.contains("sip_proxy_responses_total{method=\"other\",code=\"other\"} 1000"));
-        assert!(!txt.contains("FOO"), "no per-token label may leak into the exposition");
-        // The whole body stays small — one line per slot, not per token.
-        assert!(txt.len() < 8_192, "exposition must stay bounded, got {} bytes", txt.len());
+        let series = |prefix: &str| txt.lines().filter(|l| l.starts_with(prefix)).count();
+        assert_eq!(series("sip_proxy_requests_total{method=\"FOO"), DEFAULT_CAP);
+        let past = 1_000 - DEFAULT_CAP;
+        assert!(
+            txt.contains(&format!("sip_proxy_requests_total{{method=\"{OVERFLOW}\"}} {past}\n"))
+        );
+        assert!(txt.contains(&format!("\nsip_proxy_requests_overflow_total {past}\n")));
+        assert_eq!(series("sip_proxy_responses_total{method=\"BAR"), DEFAULT_CAP);
+        assert!(txt.contains(&format!("\nsip_proxy_responses_overflow_total {past}\n")));
+        assert!(txt.contains("sip_proxy_requests_total{method=\"FOO0\"} 1\n"), "{txt}");
+        assert!(!txt.contains("FOO999"), "a token past the cap gets no series of its own");
     }
 }

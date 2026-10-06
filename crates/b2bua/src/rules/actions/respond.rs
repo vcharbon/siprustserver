@@ -8,28 +8,40 @@
 use call::helpers::{set_leg_state, Scope};
 use call::{Call, LegState, TimerType};
 use sip_message::draft::Entry;
-use sip_message::generators::{self, GenerateResponseOpts};
+use sip_message::generators::{self, GenerateResponseOpts, RelayDirection, RelaySituation};
 use sip_message::header::{HeaderClass, HeaderName};
-use sip_message::{SipHeader, SipStr};
+use sip_message::{Method, SipHeader, SipStr};
 
+use crate::config::{B2buaConfig, RetryAfterRange};
 use crate::effects::{
     HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::rules::capabilities::{self, Face};
-use crate::rules::model::RuleContext;
 use crate::rules::relay;
 use crate::rules::RelayedFinal;
+use b2bua_sdk::model::{GlareRefusal, RuleContext};
 
 use super::select::dialog_identity_tag;
 use super::ActionExecutor;
 
+/// The `Retry-After` range RFC 3261 §14.2 and RFC 3311 §5.2 set on the 500
+/// refusing a request whose sender's earlier INVITE or UPDATE is unanswered:
+/// 0 to 10 s.
+const GLARE_500_RETRY_AFTER: RetryAfterRange = RetryAfterRange { min_sec: 0, max_sec: 10 };
+
 impl ActionExecutor<'_> {
     /// Answer the current request event in place with `status` (no relay) —
     /// the response goes back to the request's top-Via sent-by on the source
-    /// leg's server transaction. A locally answered **in-dialog** request still
+    /// leg's server transaction, under the source face's Contact where
+    /// [`generators::response_states_own_contact`] states one (the 2xx to
+    /// UPDATE, the 202 to REFER). A locally answered **in-dialog** request still
     /// advances the source dialog's highest-seen CSeq (RFC 3261 §12.2.2), so
     /// the next relayed request's `relay_cseq_delta` does not reproduce the
     /// gap on the peer dialog (§12.2.1.1 — its CSeq increments by exactly one).
+    /// `extra_headers` ride the response as given; on a failure final to the
+    /// initial INVITE the deployment's minted-final advertisement fills a half
+    /// they leave unnamed.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn respond(
         &self,
         call: &mut Call,
@@ -39,8 +51,19 @@ impl ActionExecutor<'_> {
         reason: &str,
         body: &[u8],
         content_type: Option<&str>,
+        mut extra_headers: Vec<SipHeader>,
     ) {
         if let Some(req) = ctx.request() {
+            if req.method() == Method::Invite
+                && req.to().tag().is_none()
+                && capabilities::is_minted_failure(status)
+            {
+                capabilities::stamp_own_advertisement(
+                    &self.config.minted_final_advertisement,
+                    |_| false,
+                    &mut extra_headers,
+                );
+            }
             if req.to().tag().is_some() {
                 if let Some(sd) = ctx.source_dialog() {
                     let inbound_cseq = req.cseq().seq() as i64;
@@ -74,7 +97,25 @@ impl ActionExecutor<'_> {
                 content_type.as_ref(),
                 self.config.sdp_form.as_ref(),
             );
-            let opts = GenerateResponseOpts { to_tag, body, content_type, ..Default::default() };
+            // A 2xx or 1xx to a target refresh or a subscription-creating
+            // request names this face as the dialog's remote target
+            // (`response_states_own_contact`); anything else states none. The
+            // response echoes the request's To tag, else carries the leg's own
+            // (`b2bua_tag`; none on the a-leg before its dialog exists). No
+            // rule answers locally with a 1xx, so the policy's tagged-1xx
+            // clause needs no check here.
+            let contact =
+                generators::response_states_own_contact(req.method(), status).then(|| {
+                    relay::leg_contact(self.config, relay::CallMarks::of(call), ctx.source_leg_id)
+                });
+            let opts = GenerateResponseOpts {
+                to_tag,
+                contact,
+                body,
+                content_type,
+                extra_headers,
+                ..Default::default()
+            };
             let resp = generators::generate_response(req, status, reason, &opts);
             // RFC 3261 §18.2.2 — a response goes back to the request's top-Via
             // sent-by.
@@ -92,15 +133,44 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// Refuse the current INVITE that meets glare, or UPDATE over an open
+    /// offer, in place (RFC 3261 §14.2, RFC 3311 §5.2): 500 with a
+    /// `Retry-After` drawn from [`GLARE_500_RETRY_AFTER`] when the sender's
+    /// own INVITE or UPDATE is unanswered; 491 otherwise, with one from
+    /// [`glare_retry_after`](crate::config::B2buaConfig::glare_retry_after)
+    /// only when that INVITE's 2xx awaits its ACK.
+    pub(super) fn refuse_glare(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        refusal: GlareRefusal,
+    ) {
+        let (status, reason, range) = match refusal {
+            GlareRefusal::Unanswered => (500, "Server Internal Error", Some(GLARE_500_RETRY_AFTER)),
+            GlareRefusal::Unacknowledged => (491, "Request Pending", self.config.glare_retry_after),
+            GlareRefusal::Crossing => (491, "Request Pending", None),
+        };
+        let extra = range
+            .map(|range| SipHeader {
+                name: SipStr::owned(HeaderName::RetryAfter.as_wire_str()),
+                value: SipStr::owned(&range.pick(self.id_gen.draw()).to_string()),
+            })
+            .into_iter()
+            .collect();
+        self.respond(call, fx, ctx, status, reason, &[], None, extra);
+    }
+
     /// Answer the a-leg INVITE with a failure final under the B2BUA's own
-    /// a-dialog tag ([`crate::rules::model::RuleAction::RelayFailureToALeg`]);
-    /// the Contact rides only where
-    /// [`sip_message::generators::response_states_contact`] states it.
+    /// a-dialog tag ([`b2bua_sdk::model::RuleAction::RelayFailureToALeg`]);
+    /// the B2BUA's Contact rides only where
+    /// [`sip_message::generators::response_states_own_contact`] states it, and
+    /// a 3xx / 485 carries the failing peer's retry targets instead.
     /// A final that answers the `/call/failure` consult restates the failing
     /// b-leg final's relayable headers (RFC 3261 §16.6), so what the refusing
     /// peer stated — its `Warning`, charging correlation, vendor annotations —
     /// reaches the caller; a final answering anything else speaks only for
-    /// itself.
+    /// itself, under the deployment's advertisement for a minted final.
     pub(super) fn relay_failure_to_a_leg(
         &self,
         call: &mut Call,
@@ -114,13 +184,22 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(
-            self.config,
-            &call.call_ref,
-            &call.a_leg.leg_id,
-            call.emergency == Some(true),
-        );
-        let extra = failure_headers_answering(ctx, call);
+        let contact =
+            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
+        // Guard: the status relayed here is the failing peer's own, so the
+        // image already holds retry targets only on a 3xx / 485. Any other
+        // status keeps no Contact line, whatever the image holds.
+        let image = failure_headers_answering(ctx, call, self.config, status);
+        let restates = image.is_some();
+        let mut extra = image.unwrap_or_default();
+        generators::retain_retry_targets_for(status, &mut extra);
+        if !restates && capabilities::is_minted_failure(status) {
+            capabilities::stamp_own_advertisement(
+                &self.config.minted_final_advertisement,
+                |_| false,
+                &mut extra,
+            );
+        }
         if let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
@@ -141,15 +220,19 @@ impl ActionExecutor<'_> {
     }
 
     /// Answer the a-leg INVITE with a decision-authored Reject/Redirect final
-    /// ([`crate::rules::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
+    /// ([`b2bua_sdk::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
     /// redirect carries its own Contact list (via the built headers), a reject
     /// carries none (ADR-0017 header-ownership X2,
-    /// [`sip_message::generators::response_states_contact`]).
+    /// [`sip_message::generators::response_states_own_contact`]).
     /// When this final answers the `/call/failure` consult, the failing b-leg
     /// final's relayable headers ride UNDER the decision's own statements: a
     /// `header_updates` entry naming a header — set or removal — owns that name
-    /// (X2 precedence). A redirect (3xx) and a refused redirect are new
-    /// instructions, not relayed refusals, so they carry none of them.
+    /// (X2 precedence). The peer's Contact lines never ride: the decision
+    /// authors this final and names its own targets, if any. A redirect (3xx)
+    /// and a refused redirect are new instructions, not relayed refusals, so
+    /// they carry none of the peer's headers. A failure final that restates
+    /// no peer's carries the deployment's advertisement for a minted final,
+    /// under the decision's statements.
     pub(super) fn respond_to_a_leg(
         &self,
         call: &mut Call,
@@ -164,7 +247,7 @@ impl ActionExecutor<'_> {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         // A redirect target that does not read is refused, not invented: the
-        // caller dials what a 3xx Contact names (055). The caller still gets a
+        // caller dials what a 3xx Contact names. The caller still gets a
         // final — the plain server error, with no Contact list.
         let (status, reason, mut extra, refused) =
             match build_a_leg_response_headers(header_updates, contacts) {
@@ -183,10 +266,27 @@ impl ActionExecutor<'_> {
         // redirect Contact's validity, not when the refusing callee frees up),
         // so a plan-authored redirect carries none of the peer's image — like
         // the refused-redirect 500, it speaks only for itself.
-        if !refused && !(300..400).contains(&status) {
-            for h in failure_headers_answering(ctx, call) {
+        // The peer's Contact lines never ride: the decision authors this final
+        // and states its own targets, if any (RFC 3261 §21.4.22 on a 485). Nor
+        // do the refusal's clock stamps: the final is the stack's own message,
+        // sent after the consult (RFC 3261 §20.17 / §8.2.6.1).
+        let image = (!refused && !(300..400).contains(&status))
+            .then(|| failure_headers_answering(ctx, call, self.config, status))
+            .flatten();
+        if image.is_none() && capabilities::is_minted_failure(status) {
+            capabilities::stamp_own_advertisement(
+                &self.config.minted_final_advertisement,
+                |name| header_updates.iter().any(|(n, _)| name.matches(n)),
+                &mut extra,
+            );
+        }
+        if let Some(image) = image {
+            for h in image {
                 let name = HeaderName::from(h.name.as_str());
-                if !header_updates.iter().any(|(n, _)| name.matches(n)) {
+                if !HeaderName::Contact.matches(&h.name)
+                    && !header_updates.iter().any(|(n, _)| name.matches(n))
+                    && !generators::states_send_time(&h.name)
+                {
                     extra.push(h);
                 }
             }
@@ -251,6 +351,7 @@ impl ActionExecutor<'_> {
         reason: &str,
         body: &[u8],
         content_type: Option<&str>,
+        descriptors: &[SipHeader],
         to_tag: Option<&str>,
         p_early_media: Option<&str>,
         author: relay::Author<'_>,
@@ -282,12 +383,8 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(
-            self.config,
-            &call.call_ref,
-            &call.a_leg.leg_id,
-            call.emergency == Some(true),
-        );
+        let contact =
+            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(SipHeader {
@@ -295,6 +392,7 @@ impl ActionExecutor<'_> {
                 value: SipStr::owned(pem),
             });
         }
+        relay::describe_body(&mut extra_headers, body, descriptors);
         if let Some(effect) = relay::response_to_a_leg(
             call,
             fx,
@@ -314,7 +412,7 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// A-side fork-confirm ([`crate::rules::model::RuleAction::AnswerALegNewDialog`]):
+    /// A-side fork-confirm ([`b2bua_sdk::model::RuleAction::AnswerALegNewDialog`]):
     /// answer the a-leg INVITE with a final **2xx** under a fresh (or supplied)
     /// To-tag A2 that becomes the confirmed a-dialog, **superseding** an
     /// early-media dialog A1 the caller saw on a prior `18x` (RFC 3261 §12.1
@@ -352,6 +450,7 @@ impl ActionExecutor<'_> {
         reason: &str,
         body: &[u8],
         content_type: Option<&str>,
+        descriptors: &[SipHeader],
         to_tag: Option<&str>,
         header_updates: &[(String, Option<String>)],
         relayed: &RelayedFinal,
@@ -371,12 +470,8 @@ impl ActionExecutor<'_> {
             .and_then(relay::media_type)
             .or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(
-            self.config,
-            &call.call_ref,
-            &call.a_leg.leg_id,
-            call.emergency == Some(true),
-        );
+        let contact =
+            relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
@@ -394,6 +489,14 @@ impl ActionExecutor<'_> {
         // naming a half owns it: a set value is kept verbatim, a removal keeps
         // it absent (`header_update_lines` already dropped it).
         let advert = capabilities::relaying(call, Face::Originator, &extra_headers);
+        let undecided: Vec<SipHeader> = descriptors
+            .iter()
+            .filter(|d| {
+                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&d.name))
+            })
+            .cloned()
+            .collect();
+        relay::describe_body(&mut extra_headers, body, &undecided);
         extra_headers.extend(header_update_lines(header_updates));
         let service_owned: Vec<Entry> =
             [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
@@ -461,7 +564,7 @@ impl ActionExecutor<'_> {
 }
 
 /// Build the extra a-leg response headers for a decision-authored Reject/Redirect
-/// ([`crate::rules::model::RuleAction::RespondToALeg`]): non-structural
+/// ([`b2bua_sdk::model::RuleAction::RespondToALeg`]): non-structural
 /// `header_updates` *sets* plus one `Contact: <uri>;q=…` per redirect target.
 /// Removals and structural keys drop — the response generator owns the
 /// stack-owned set (ADR-0017 X2), including the Contact a redirect authors from
@@ -484,7 +587,7 @@ fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHe
 }
 
 /// What the decision authored for the caller's final, as
-/// [`crate::rules::model::RuleAction::RespondToALeg`] states it: the status line
+/// [`b2bua_sdk::model::RuleAction::RespondToALeg`] states it: the status line
 /// plus the two lists that own their own names.
 pub(super) struct AuthoredFinal<'a> {
     pub status: u16,
@@ -495,20 +598,31 @@ pub(super) struct AuthoredFinal<'a> {
 
 /// The failing peer's relayable headers, but ONLY on a final that answers the
 /// `/call/failure` consult the image belongs to — the `call-failure-result`
-/// event. A setup deadline, a capacity refusal or a media-service failure mints
+/// event — and only when that failure had a peer final: `None` when the final
+/// restates no peer's. A setup deadline, a capacity refusal or a media-service failure mints
 /// its own diagnosis about a peer that is not the one being answered, so it
 /// carries none of them: a fold whose `origin` is `call_limiter` resolved a
 /// limiter refusal (the router's re-consult / terminal 486), not the peer's
-/// final, and folds nothing.
-fn failure_headers_answering(ctx: &RuleContext, call: &Call) -> Vec<SipHeader> {
+/// final, and folds nothing. The deployment's relay policy is read for the
+/// final being minted: a `status` to the INVITE, toward the caller.
+fn failure_headers_answering(
+    ctx: &RuleContext,
+    call: &Call,
+    config: &B2buaConfig,
+    status: u16,
+) -> Option<Vec<SipHeader>> {
     match ctx.event {
-        crate::event::CallEvent::InternalEvent { topic, payload, .. }
+        b2bua_sdk::event::CallEvent::InternalEvent { topic, payload, .. }
             if topic == "call-failure-result"
                 && payload.get("origin").and_then(|v| v.as_str()) != Some("call_limiter") =>
         {
-            relay::relayed_failure_headers(call.ext.as_ref())
+            let minted =
+                RelaySituation::response(status, &Method::Invite, RelayDirection::TowardCaller);
+            let mut image = relay::relayed_failure_headers(call.ext.as_ref())?;
+            image.retain(|h| !config.relay_policy.drops(&h.name, minted));
+            Some(image)
         }
-        _ => Vec::new(),
+        _ => None,
     }
 }
 

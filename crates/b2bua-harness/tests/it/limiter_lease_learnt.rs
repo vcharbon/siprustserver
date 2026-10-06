@@ -8,15 +8,17 @@
 //!
 //! Every call holds three limiters, each id with one witness hold.
 
+use call::LimiterEntry;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua::metrics::{RefreshGiveUp, ReleaseGiveUp};
 use b2bua_harness::{B2buaSut, WitnessRig};
+use call::TimerType;
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
 use scenario_harness::{Agent, Dialog, Harness, SIMULATED_TRANSIT_DELAY_MS};
@@ -101,7 +103,7 @@ impl Scene {
                     let mut r = route_to("127.0.0.1", 5070);
                     r.call_limiter = HOLDS
                         .iter()
-                        .map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit })
+                        .map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit })
                         .collect();
                     NewCallResponse::Route(r)
                 })
@@ -137,7 +139,7 @@ impl Scene {
         let mut bye = dialog.bye().await;
         self.bob.receive("BYE").await.respond(200, "OK").await;
         bye.expect(200).await;
-        b2bua_harness::advance(SIMULATED_TRANSIT_DELAY_MS).await;
+        self.h.advance(Duration::from_millis(SIMULATED_TRANSIT_DELAY_MS)).await;
     }
 
     /// Advance `secs` seconds one at a time, keeping the witnesses alive.
@@ -353,6 +355,74 @@ async fn a_short_lease_shortens_the_refresh_period_to_a_third_of_it() {
     s.hang_up(&mut dialog).await;
     s.hold_for(2).await;
     s.rig.expect_drained("the release freed the call").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// A limiter whose lease (6 s) sets the refresh period to a third of it
+/// (2 s), below the configured one (40 s): a call admitted once the worker
+/// learnt the lease has its first refresh due one learnt period after its
+/// admit, and the refresh leaves then.
+#[tokio::test(start_paused = true)]
+async fn a_call_s_first_refresh_falls_due_one_learnt_period_after_its_admit() {
+    const LEASE_SEC: i64 = 6;
+    const LEARNT_PERIOD_MS: i64 = 2_000;
+    const CALL_ID: &str = "first-refresh@127.0.0.1";
+    const FROM_TAG: &str = "first-refresh-tag";
+    let s =
+        Scene::new("lease-learnt-first-refresh", LEASE_SEC, |c| c.limiter_refresh_sec = 40).await;
+
+    // The first call's admit answer teaches the worker the lease.
+    let mut first = s.establish().await;
+    s.rig.expect_holds([1, 1, 1], "the first call holds its three limiters").await;
+    assert_eq!(s.exposed("b2bua_limiter_refresh_period_seconds").as_deref(), Some("2"));
+    s.hang_up(&mut first).await;
+    s.hold_for(2).await;
+    s.rig.expect_holds([0, 0, 0], "the release freed the first call").await;
+    let refreshes = s.received("/v1/refresh");
+
+    // The admit runs on the turn of the INVITE, one transit after it leaves.
+    let admitted_at = s.b2bua.clock().now_ms() + SIMULATED_TRANSIT_DELAY_MS as i64;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    s.rig.expect_holds([1, 1, 1], "the second call holds its three limiters").await;
+
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let live = s.b2bua.live_call(&call_ref).expect("the call is live");
+    let refresh = live
+        .timers
+        .iter()
+        .find(|t| t.timer_type == TimerType::LimiterRefresh)
+        .expect("the counted call has its refresh armed");
+    assert_eq!(
+        refresh.fire_at - admitted_at,
+        LEARNT_PERIOD_MS,
+        "the first refresh is due one learnt period after the admit"
+    );
+
+    s.hold_for(1).await;
+    assert_eq!(s.received("/v1/refresh"), refreshes, "not due before one learnt period");
+    s.hold_for(2).await;
+    assert_eq!(
+        s.received("/v1/refresh"),
+        refreshes + 1,
+        "the first refresh left one learnt period after the admit"
+    );
+
+    s.hang_up(&mut dialog).await;
+    s.hold_for(2).await;
+    s.rig.expect_drained("the release freed the second call").await;
     s.b2bua.assert_fully_reaped();
     let _ = s.h.finish().await;
 }

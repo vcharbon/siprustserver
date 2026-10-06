@@ -16,7 +16,7 @@ compiler, dumb interpreter.** A corner case is compiled into explicit fields by
 the generator, never inferred at replay time. The named anti-example is the
 v0.1 interpreter's keepalive elision: callflow knowledge inside an interpreter
 is a design failure of the format, and `background` (§5.1) is where that
-particular knowledge now lives — as document data.
+particular knowledge lives — as document data.
 
 Rationale and the design record live with the consumer that authored the
 format. This file states the contract and nothing else.
@@ -44,7 +44,7 @@ A v2 reader looking for a field that moved:
 | `routing.attempts` | `calls[].attempts`. `relay18x` moved onto the call with it, and the `routing` container is gone. v2's `setup_deadline_ms` has no v3 counterpart (§0.1) |
 | — | `calls[]`: a document may play several calls at once |
 | cross-leg order derived from `routing.attempts` | `after: ["<step-id>"]`, stated |
-| resource name `resources/s07_uac1_0.sdp` | `resources/uac1_3_0.sdp` — actor, ordinal within the case, part index. Step-index-free (friction H1) |
+| resource name `resources/s07_uac1_0.sdp` | `resources/uac1_3_0.sdp` — actor, ordinal within the case, part index. Step-index-free |
 | — | `case.origin`: `capture` or `authored`, the subset gate's discriminator |
 | `case.source` required | required for `origin: capture`, absent otherwise |
 | — | `case.requires`: informative capability tokens |
@@ -69,6 +69,20 @@ A format change is user-authorized, and lands in one batch across this
 document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
+
+**2026-10-05 — a From or To ref states the name-addr its number rode in.** A
+tier-2 ref on a From or To may carry `addr`: the captured value with its tag
+dropped (display name, URI and user parameters, header parameters), each role
+number composed as `${num:…}`. Present, it is the field's whole value and the
+lane composes no URI around it. The generator states it on a UAC's
+dialog-opening INVITE send, and records the identity on the dialog-opening
+INVITE a UAS expects, where no `ruri` is stated (§8). Lint refuses an `addr`
+on a `ruri` (`ref/addr-on-ruri`), one carrying a tag (`ref/addr-tagged`) and one
+that does not read as a name-addr (`ref/addr-unreadable`); the interpreter
+refuses them at render. A number is composed in a URI's user part, and in a
+display name that is the number itself, never in a host or a parameter; one a
+URI writes with user parameters (3GPP TS 24.229 `verstat`) is composed like any
+other.
 
 **2026-09-22 — a tolerated absence is released only in front of the leg's
 first pending required step.** An expect armed beside a pending required expect
@@ -144,7 +158,7 @@ after the run.
 | the confrontation gains `body` records: `body:<type/subtype>:<scope>`, the expected and received texts one a side, both verbatim; a reception carrying no body confronts as the empty text; the driver supplies every expect-side resource from the case directory and a ref it did not supply is a driver error | `ConfrontationRecord.kind`, the pipeline's `confront`, the driver |
 
 **2026-08-30 — an expect-side ladder states its FACTS and the interpreter
-excuses nothing.** Ticket 211. §6.9 splits a ladder — the count is the
+excuses nothing.** §6.9 splits a ladder — the count is the
 document's, the pacing is RFC 3261's per message class — and on a `send` step
 that split closes, because the scripted peer paces itself by the document's own
 gaps. On an `expect` step it cannot: the emitter is the SUT on its own T1 while
@@ -152,21 +166,20 @@ the count was read off a platform on another one, so the two counts are one
 dwell measured against two ladders and the cut is faithful either way. The
 interpreter had answered that with a 30 ms wall-clock margin
 (`ladder-overtaken-by-answer`), which derived from nothing and missed by 25 ms
-on `capture_181953` s45. The margin is gone; the note carries the facts instead
+on a captured step. The margin is gone; the note carries the facts instead
 and a post-run tolerance re-counts them.
 
 | change | where |
 |---|---|
 | `RetransmitNote` gains `side` (`send` / `expect`), `intervals_ms` (the document's own gaps for the step), `dwell_us` (the claimed datagram to the closer that ended the ladder) and `rfc_rungs` (the rungs an RFC-paced ladder of the message's class puts inside that dwell); `blessed` is removed | §6.9, `pivot-schema`, `@sip/contracts` |
 | `retransmit-count-mismatch` gates unconditionally: the interpreter counts the ladder and excuses no count, on any lane | §6.9, `pivot-interpreter` |
-| the tolerance is `ladder-recounted-under-rfc-pacing`, a second bless premise on the post-run reclassifier: expect-side, one stated gap per declared rung, the captured pacing putting the DECLARED rungs in the dwell and the RFC ladder the OBSERVED ones — all four or the failure stands | the downstream rules package (`ladder-recount.ts`), audited by issue 163 |
+| the tolerance is `ladder-recounted-under-rfc-pacing`, a second bless premise on the post-run reclassifier: expect-side, one stated gap per declared rung, the captured pacing putting the DECLARED rungs in the dwell and the RFC ladder the OBSERVED ones — all four or the failure stands | the downstream rules package (`ladder-recount.ts`) |
 
-**2026-08-26 — `auto` is a composition marker, not a storage policy.** Ruling
-of the design record. The
+**2026-08-26 — `auto` is a composition marker, not a storage policy.** The
 closed field list on an auto step was the ONE departure from the three-tier
 model in the pipeline, and it left an ACK's frozen headers and the delayed
-offer's ANSWER with no home: measured over 400 captures / 8910 steps, scripted
-steps dropped 0 headers and 0 bodies while auto steps dropped 993 and 99. The
+offer's ANSWER with no home: scripted steps dropped no header and no body
+while auto steps dropped both. The
 justification written for the list — "a scripted copy emits a second automatic"
 — was false in this interpreter, which emits only from `emit(&step)`. Every
 delayed-offer ACK in the corpus therefore asserted a preservation the document
@@ -180,7 +193,7 @@ did not perform.
 | a `verbatim-emission` naming an auto step COMPILES: there is a stored block to preserve. `PlanError::PreservesAutomaticStep` is deleted | §11, interpreter |
 
 Consequence, stated because it must be measured and not absorbed: once the
-harness DRIVES those headers, every relay claim issue 65 declined on
+harness DRIVES those headers, every relay claim left undecided on
 `request:ACK:in-dialog`, `request:PRACK:in-dialog` and `response:200:PRACK`
 becomes decidable again. The capability set on an ACK or a PRACK is inert
 (RFC 3261 §20.5, §12.2 — an ACK is no target-refresh request, and it draws no
@@ -225,7 +238,7 @@ that predicts the replay's divergence and writes the case as a NEGATIVE one,
 proving both that failure detection works and that the bad behavior is gone.
 No auto-repair is attempted: there is no way to guess how such a call would
 have ended. The ONLY ground for not generating a case from a capture is an
-INCOMPLETE source call (`source-call-incomplete`, Q51 (b)); the census refusal
+INCOMPLETE source call (`source-call-incomplete`); the census refusal
 survives solely as a DEFERRED guard on the residue no declaration can anchor.
 
 | change | where |
@@ -234,7 +247,7 @@ survives solely as a DEFERRED guard on the residue no declaration can anchor.
 | `pivot-schema lint` holds the new shape: `must-fail/anchor-not-a-reliable-provisional-send`, `must-fail/anchor-already-pracked` | §11.2, §13 |
 | both SUT-invalid census refusals (`sut-violates:<rule>`) are DEFERRED: withdrawn where the case declares every charged coordinate, standing only on the undeclarable residue. A charged coordinate carries its RULE, so one rule's anchor never withdraws another's refusal | generator |
 | census-sync settles a hit on a REFUSED case in its own `CASE REFUSED` block instead of writing an entry no case will ever carry; decisions are recomputed each run, so a later re-cut re-surfaces the hit | census-sync |
-| every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter (Q53) |
+| every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter |
 
 **2026-08-23 — `must_fail`: a document declares the failure its run MUST
 produce.** Ruling of the third evidence round. A source whose
@@ -248,7 +261,7 @@ change, so it lands here.
 | `must_fail[]`: `failure` (CLOSED, one member `unexpected-ack`), `step` (the anchor) and `derived_from` (the §11.1 rule the source broke). Declaring any makes the document a NEGATIVE case, which passes only by failing exactly as declared | §2, §11.2 |
 | `pivot-schema lint` holds the placement: `ref/must-fail-step-unknown`, `must-fail/duplicate`, `must-fail/anchor-not-a-2xx-send`, `must-fail/anchor-already-acked` | §11.2, §13 |
 | the subset gate lets a captured document carry it: a declaration pairs a detector's hit with the lane knowledge §13.2 already applies, and it is the one construct by which a captured document may state something the capture does not hold | §13.1 |
-| the generator DERIVES it from the census hit, at the seam that stamps `rfc_violations`, and never from the shape of the flow: only where the scripted peer SENDS the unACKed 2xx does this platform's own local ACK arrive where nothing expects it | generator |
+| the generator DERIVES it from the census hit, at the seam that stamps `rfc_violations`, and never from the shape of the flow: only where the scripted peer SENDS the unACKed 2xx does the platform's own local ACK arrive where nothing expects it | generator |
 
 The verdict inversion is NOT in this batch: a run does not yet read the
 declaration, so a negative case's run reports the plain failure. §15 marked it,
@@ -269,7 +282,7 @@ read by the run that carries it. No field changes; the run bundle gains a
 | the run keeps replaying past a declared datagram, so a negative case still tears its call down, settles and evaluates its postconditions. The gate, the lint rules and the recording are untouched | §10, §11.2 |
 
 **2026-08-23 — `must_fail`: the declaration INCLUDES, and the derivation goes
-first.** Ruling Q47 (b) of the collision round. The two entries
+first.** The two entries
 above read "the declared failure and nothing else", which no corpus negative can
 meet: replaying a capture the replay is known to diverge from makes the tail
 diverge too. No field changes; the run bundle gains a `tolerated` list, and the
@@ -282,7 +295,7 @@ generator stops refusing a case it can declare.
 | where the census charges the capture's own SUT with the withheld ACK, the DERIVATION decides first: the case is generated as a negative one wherever it anchors a declaration for every charged hit, and refused by category only where it cannot. The unPRACKed-provisional rule still refuses outright | §11.2, §0.1 (2026-08-23) |
 
 **2026-08-24 — what ends a script is being unable to GO ON, on every
-document.** Ruling Q52, correcting the
+document.** This corrects the
 trigger the entry below states. Ending early has nothing to do with whether a
 document is positive or negative: it is about whether the run can compose its
 next message. No field changes; what moves is where the rule is written, since it
@@ -295,7 +308,7 @@ is run semantics and not a property of a declaration.
 | the rule and the generic close are POLARITY-FREE and move to §14, where run semantics live. A positive run that cannot go on is abandoned, closed and settled exactly like a negative one — and still fails. §11.2 keeps only what a declaration adds | §10, §11.2, §14 |
 
 **2026-08-23 — `must_fail`: the first delta ends the SCRIPT, and the call is
-closed generically.** Ruling Q50. The two entries
+closed generically.** The two entries
 above have a negative run keep replaying past its divergence, which scripts a
 conversation neither party is having; and the tail's own aborting deltas were
 piling a settle failure on top of the declaration anyway. No field changes; the
@@ -344,7 +357,7 @@ batch also introduced is RETIRED by the 2026-08-25 entry above.)
 |---|---|
 | `rfc_violations[].rule` gains `no-ack-to-dialog-creating-2xx` (RFC 3261 §13.2.2.4), with its detector in `crates/sip-pcap/src/rfc/ack.rs` and the report field it carries | §11.1 |
 
-**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31. No field shape
+**2026-08-23 — `flow[].in_dialog` is TOTAL.** No field shape
 changes; the CONTRACT does, which is what this index is for — a document that
 marked only the finals §4.1 reads is now a lint error, so the batch lands across
 this document, `pivot-schema`'s lint and the generator exactly as an amendment
@@ -378,7 +391,7 @@ Rulings of the design record.
 |---|---|
 | `calls[].setup_deadline_ms` is REMOVED — one concept, one spelling, and the wire only ever shows the cancel timing, which `attempts[].no_answer_ms` already states. §4.3 (the PROVISIONAL section) and the §15 row are gone with it, and the per-lane compilation contract renumbers §4.4 → §4.3 | §0, §4, §4.3, §15 |
 | REFER with `Replaces` is OUT OF SCOPE. The `has-replaces` claim discriminator is REMOVED from `actors[].claim.by`, leaving `ruri-pos` and `arrival-order`; the §15 `replaces`-correlated row is gone, and the authored attended-transfer fixture is replaced by `authored-consultation-refer.v3.json`, which carries the same authored-only constructs with a plain `Refer-To` | §5, §15, fixture set |
-| the generator EXCLUDES a call group carrying that mechanism instead of cutting a case from it, loudly: reason token `refer-replaces-out-of-scope` on stdout, the evidence datagram on stderr, and both in `<out>/<capture>/excluded.json` (`testkit/ts/rules/src/exclusions.ts`). Zero groups in the 10 182-document corpus match | generator |
+| the generator EXCLUDES a call group carrying that mechanism instead of cutting a case from it, loudly: reason token `refer-replaces-out-of-scope` on stdout, the evidence datagram on stderr, and both in `<out>/<capture>/excluded.json`. A deployment's rule set names the exclusion | generator |
 
 `setup_deadline_ms` may return by amendment the day a per-call setup budget
 becomes observable as a distinct fact rather than a second spelling of the
@@ -391,10 +404,10 @@ vocabulary —
 by string equality, so one lane spelled two ways would downgrade classified
 checks on the origin's own lane. Renamed in the generator, this document's
 examples, drafts and staged fixtures now; the bulk corpus picks it up at
-regeneration (issue 07).
+regeneration.
 
 **2026-08-22 — forked early dialogs: an accessor namespace, and UPDATE inside
-one.** Rulings Q29 and Q38.
+one.**
 
 | change | where |
 |---|---|
@@ -405,7 +418,7 @@ The authored `forked-100rel-prack-per-early-dialog` draft is the exercise: its
 "each PRACK rides its own fork" assertion was an `RAck` regex proxy and now
 reads the two forks' own tags and RSeqs.
 
-**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35.
+**2026-08-22 — verbatim body fidelity: a part's own entity block.**
 
 | change | where |
 |---|---|
@@ -417,21 +430,21 @@ The flows schema is NOT bumped: `msgs[].body.parts[].headers` is additive and
 omitted when empty, and schema 5's rule is a bump on a BREAKING change to the
 emitted shape. A flows document produced before this batch states no part
 headers because its producer read none — the corpus picks them up at
-regeneration (issue 07).
+regeneration.
 
-**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34.
+**2026-08-22 — the ACK ladder: drawn, and collapsed once.**
 
 | change | where |
 |---|---|
 | `retransmits` on an auto ACK step means ONE ACK per repeat of the final its `cseq` names (RFC 3261 §13.2.2.4), drawn by the wire and never paced — an ACK rides no retransmission timer. Copies of the final that arrive while the ACK is held are each still owed one. A count on a scripted ACK, or on one naming no `cseq`, is refused by the interpreter and by lint (`retransmits/scripted-ack`) | §6.3, §6.9, §14 |
-| the generator collapses a repeat onto the step it repeats using the flows document's `repeat_of`, not `retx`. **Amended 2026-08-26 (issue 81/82): the fresh-branch re-ACK no longer collapses** — a repeat is the same datagram byte for byte, and those ACKs are not, so H8's ladder is encoded once because it is one step per emission, not because a count absorbs it. `retx` is the same-branch half of that one relation, not a second criterion, and both are bounded by the transaction envelope and by byte identity (§6.9) — which makes the two halves coincide. A document whose producer computed no `repeat_of` keeps the `retx` collapse and carries a `retransmit-collapse-legacy` flag | generator, §6.9 |
+| the generator collapses a repeat onto the step it repeats using the flows document's `repeat_of`, not `retx`. **Amended 2026-08-26: the fresh-branch re-ACK does not collapse** — a repeat is the same datagram byte for byte, and those ACKs are not, so such a ladder is encoded once because it is one step per emission, not because a count absorbs it. `retx` is the same-branch half of that one relation, not a second criterion, and both are bounded by the transaction envelope and by byte identity (§6.9) — which makes the two halves coincide. A document whose producer computed no `repeat_of` keeps the `retx` collapse and carries a `retransmit-collapse-legacy` flag | generator, §6.9 |
 
 The drawn shape is exercised end to end by the authored
 `bc-rc-drawn-ack-per-2xx` draft and its run bundle. The `samples/` documents and
 the bulk corpus still show the pre-collapse encoding; they pick it up at
-regeneration (issue 07).
+regeneration.
 
-**2026-08-22 — ratified working readings.** Ruling Q38 accepted these as
+**2026-08-22 — ratified working readings.** These were accepted as
 readings of the format, amendable like anything else here. Each is now stated
 where its section already discusses the matter.
 
@@ -450,17 +463,14 @@ enforced by the interpreter's plan, is now mirrored in lint as
 `deviation/verbatim-emission-auto`, so a generator learns it at lint time.
 
 **2026-08-23 — the `rfc_violations` rule vocabulary grows a second member.**
-Ruling Q30.
 
 | change | where |
 |---|---|
 | `unacked-reliable-provisional` joins the closed `rule` enum, with its detector: RFC 3262 §4, a UAC that took a reliable provisional and never PRACKed it | §11.1 |
 
 A member and its detector land together, which is what "closed" is for. The
-corpus census run that justifies it is `corpus-work/violation-census/`
-(33 hits in 8 of 10 182 documents), and the registry that remembers the accepted
-ones is populated mechanically for source-side emitters by
-`testkit/ts/scripts`'s `census-sync` — never for the platform's own.
+registry that remembers the accepted hits is populated mechanically for
+source-side emitters by the census sync — never for the platform's own.
 
 ## 1. Case directory layout
 
@@ -473,8 +483,7 @@ tests/pcap2test/<case-id>/
   source.html            # selection/review view (generated)
 ```
 
-Illustrations quote the sample documents in `testkit/scenarios/samples/`
-(`simple-attempt.v3.json`, `reroute-chain.v3.json`, `noanswer-failover.v3.json`,
+Illustrations quote sample documents (`simple-attempt.v3.json`, `reroute-chain.v3.json`, `noanswer-failover.v3.json`,
 `retransmit-delayed-ack.v3.json`) and the fixture set in
 `crates/pivot-schema/tests/fixtures/`, where `authored-cancel-race.v3.json`,
 `authored-consultation-refer.v3.json` and `authored-blind-transfer.v3.json` are
@@ -643,8 +652,8 @@ and `after`.
         "final": { "status": 200, "at_ms": 25404 },
         "join_evidence": "the attempts' Call-IDs are application-server derivations of one base call" }
     ],
-    "relay18x": { "mode": "18X_TO_180_SDP_REMOVE", "messages": "FIRST",
-                  "prack": "PRACK_MANAGED_BY_AS", "evidence": [ "…" ] } }
+    "relay18x": { "mode": "DOWNGRADE_NO_SDP", "messages": "FIRST",
+                  "prack": "PRACK_ANSWERED_LOCALLY", "evidence": [ "…" ] } }
 ]
 ```
 
@@ -683,7 +692,7 @@ caller-leg final (`call/refused-step-not-a-final`); a call that states neither a
 chain nor a refusal stays `call/no-attempts`.
 
 A refused call arms no ring, runs under no provisional profile and reaches no
-`/calls/failure`: the refusal is its whole lowered program (§4.3), and the lane
+`/call/failure`: the refusal is its whole lowered program (§4.3), and the lane
 names no egress for a leg that never happens.
 
 A third outcome sits beside those two: the CALLER abandoned the call. It
@@ -786,20 +795,20 @@ the value.
 
 ### 4.2 relay18x
 
-The provisional-handling profile the CAPTURED SUT ran, in the Routing API's own
+The provisional-handling profile the CAPTURED SUT ran, in the decision API's own
 vocabulary so a lane applies it without re-deciding.
 
 | field | required | meaning |
 |---|---|---|
-| `mode` | yes | open profile token (e.g. `18X_TO_180_SDP_REMOVE`, `18X_TO_180_SDP_TRANSPARENT`) |
-| `messages` | yes | open token: how many upstream `18x` reach the caller (this deployment emits `FIRST`, `ONE_PER_VALUE`, `ALL`) |
-| `prack` | no | open prack-mode token (`PRACK_MANAGED_BY_AS`), present only where the SUT answered 100rel itself |
+| `mode` | yes | open profile token (e.g. `DOWNGRADE_NO_SDP`, `DOWNGRADE_KEEP_SDP`) |
+| `messages` | yes | open token: how many upstream `18x` reach the caller (the `Relay18xMessages` feature's own values are `FIRST`, `ONE_PER_VALUE`, `ALL`) |
+| `prack` | no | open prack-mode token (`PRACK_ANSWERED_LOCALLY`), present only where the SUT answered 100rel itself |
 | `evidence` | yes | the detection signals that fired |
 
 Every token here names a platform's configuration, not a SIP constant. The
 structs model all three as open strings and lint checks none of them against a
-list; the values above are what this deployment's detector emits, and a
-different platform's vocabulary is as valid.
+list; the values above are examples, and a different platform's vocabulary is
+as valid.
 
 ### 4.3 Per-lane compilation contract
 
@@ -1202,7 +1211,7 @@ recorded. It is a fresh transaction on the dialog, not a `repeat_of` — the
 branches differ — so the ACK ladder above never sees it, and the interpreter's
 own discharge bookkeeping must not deny it its final.
 
-*Amended 2026-08-27 (issue 103), narrowed 2026-08-28 (issues 149, 150).* The count is
+*Amended 2026-08-27, narrowed 2026-08-28.* The count is
 the final's own ladder, and the ladder is the only thing that puts an ACK on the
 leg: a B2BUA owes one ACK per final it RECEIVES here, so N ACKs arriving from
 the far leg draw none of their own.
@@ -1232,7 +1241,7 @@ own (§17.1.1.3): composed from the final itself, hop by hop on every platform,
 so every copy of that final draws one back. The FINAL's status decides which of
 the two paragraphs applies — never the body the ACK carries, and never whether
 it CONFIRMS the dialog. Both shapes are pinned in
-`crates/b2bua-harness/tests/repeated_2xx_before_caller_ack.rs` and
+`crates/b2bua-harness/tests/it/repeated_2xx_before_caller_ack.rs` and
 `crates/b2bua-harness/tests/it/ack_body_relayed.rs`.
 
 An auto PRACK acknowledges the reliable provisionals outstanding on its leg
@@ -1343,7 +1352,7 @@ no internal order to be earlier in.
 
 An external event, anchored by step refs like everything else. `action` is an
 open token from a deployment-owned injector registry (`store-fault:LiveAudit`,
-`http:bl-cut`, `node-kill`); `target` is in the injector's own vocabulary.
+`http:decision-cut`, `node-kill`); `target` is in the injector's own vocabulary.
 
 **The interpreter never executes an action.** It calls an injector interface the
 lane provides. That one mechanism spans store faults, HTTP-fabric faults and HA
@@ -1572,15 +1581,14 @@ seen by every consumer that skips a retransmission. The anchor is the earliest
 match either way, so a re-emission never becomes the head of a fresh ladder on
 the strength of a near neighbour.
 
-*Amended 2026-08-27 (issue 116), withdrawing "the caller's Timer B bounds it at
+*Amended 2026-08-27, withdrawing "the caller's Timer B bounds it at
 the same 32 s".* An **unreliable provisional** — a 1xx above 100 carrying no
 `RSeq` — states no repeat relation AT ALL. It rides no timer: the transaction
 user re-sends it when it chooses, and RFC 3262 §3 paces only the reliable one.
 §17.2.1 names a CAUSE for one re-send, the INVITE going out again, and a cause
 is not a pacing, so borrowing the caller's Timer B as this class's envelope
-stated a ladder that does not exist. Measured across the corpus, every class
-that DOES retransmit sits on T1 — a median gap of 500 ms, the first rung and
-nothing else — while this one sits at 3.9 s with a tail past two minutes. So a
+stated a ladder that does not exist. Every class that DOES retransmit opens on
+T1, the first rung and nothing else, while this one follows no timer at all. So a
 platform that rings twice has SENT TWICE, and both copies are events, however
 alike the bytes. A callee refreshing its ring every minute (RFC 3261 §13.3.1.1
 obliges a non-100 provisional at that cadence) is emitting, not repeating — and
@@ -1610,7 +1618,7 @@ Trying an INVITE ladder draws.
 The SUT's own retransmit behaviour is a different subject and is not bounded
 here: what this section keys is the CAPTURE's repeat relation.
 
-*Amended 2026-08-27 (issue 120).* That holds for a `send` step, whose emitter is
+*Amended 2026-08-27.* That holds for a `send` step, whose emitter is
 the scripted peer. On an `expect` step the emitter is the SUT, so the count
 states what OUR answerer will put on the wire and is DERIVED, never collapsed:
 an INVITE final whose ACK the document holds past T1 obliges the rungs
@@ -1619,10 +1627,10 @@ the 32 s envelope above. The reasoning is §6.3's, one section over: the two
 platforms are different UASs, a captured platform that sat on an un-ACKed final
 states its own non-compliance, and replaying that number leaves the repeat a
 compliant answerer sends unclaimed — an unannounced repeat the gate then refuses.
-Measured over the corpus the derivation and the collapse agree wherever both
-speak (53 of 53, no case where the capture held more than the dwell justifies).
+Where both speak, the derivation and the collapse agree: a capture holding more
+rungs than the dwell justifies is the non-compliance this rule exists to drop.
 
-*Amended 2026-09-04 (issue 143).* **A count states how long a ladder is; WHO
+*Amended 2026-09-04.* **A count states how long a ladder is; WHO
 paced it states whether that count is an assertion.** Four regimes, and the
 interpreter asserts each against its own pacer:
 
@@ -1662,7 +1670,7 @@ rule paces. There the repeat stays one step per emission, carrying its own dwell
 and its own `observed` coordinate — which a count, having none, could never
 hold. §13.2 names the class this covers and the flag it rides.
 
-*Narrowed 2026-08-27 (issue 116).* Two classes ride no ladder, and the relation
+*Narrowed 2026-08-27.* Two classes ride no ladder, and the relation
 above now answers them differently. The unreliable provisional states no repeat
 at all, so the extractor produces none for the generator to decline. The **100
 Trying** still does — its copies are DRAWN, one per copy of the INVITE — and a
@@ -1672,9 +1680,9 @@ repeat: a legacy flows document, or another generator.
 
 A peer that re-ACKs each retransmitted final with a FRESH branch mints a
 different datagram each time, so those ACKs do NOT collapse: each is its own
-step. Ruling Q34 collapsed them, to stop one ladder being encoded twice; the
+step. A former reading collapsed them, to stop one ladder being encoded twice; the
 byte bound withdraws that, because the count §6.3 defines replays copies of ONE
-stored ACK and these differ on the wire. The double encoding Q34 guarded against
+stored ACK and these differ on the wire. The double encoding that reading guarded against
 cannot arise from a step the generator never emits a count on. The generator
 identifies repeats by the flows document's `repeat_of`; a flows document that
 does not carry the field collapses on `retx` alone and says so. Both fields are
@@ -1690,14 +1698,14 @@ generated one whose producer measured nothing — the interval is the one the
 message's class prescribes: T1-doubling for an INVITE (§17.1.1.2), the T1/T2-capped
 ladder otherwise (§17.1.2.2).
 
-*Amended 2026-08-27 (issue 90), reversing "never a stored interval".* The
-premise that a rung's interval is derivable does not survive measurement: across
-the captures that declare a 2xx-INVITE ladder the real gap runs from 409 ms to
-17 480 ms where T1 says 500. The error is not always cosmetic. 92 ms of it puts a
+*Amended 2026-08-27, reversing "never a stored interval".* The
+premise that a rung's interval is derivable does not hold: an implementation
+may configure any T1 (RFC 3261 §17.1.1.1), so a captured gap need not be 500 ms.
+The error is not always cosmetic. A fraction of T1 of it puts a
 reliable provisional's rung on the far side of the PRACK that ends it — a
 callee retransmitting a provisional after it has answered, which the capture
-never held and the protocol does not allow. Ticket 70 rejected storing the
-interval for putting "a second, differently-paced meaning on one field"; the
+never held and the protocol does not allow. Storing the interval was once
+rejected for putting "a second, differently-paced meaning on one field"; the
 objection is answered by a SEPARATE field, and by the fact that every other
 emission in the document already carries its measured `delay`. A rung was the
 one emission whose timing was invented.
@@ -1900,7 +1908,10 @@ The tier model is UNCHANGED:
   or, where the plan does not recognize the value, `{ "frozen": "…" }`. A frozen
   ref adds `kind` where the plan classified the ADDRESS without resolving a
   number. The two shapes are exclusive. The party a positional ref names is
-  declared once, in the identity registry (§8.5).
+  declared once, in the identity registry (§8.5). A From or To ref of either
+  shape may add `addr`, the captured name-addr (tag dropped) with its role
+  numbers composed as `${num:…}`; it is then the field's whole value. A
+  positional ref states it only where its number composed.
 - **Tier 3, frozen**, stored verbatim: everything else, in wire order.
 
 `RSeq` splits by direction: a **send** freezes the captured value (the scripted
@@ -1933,6 +1944,7 @@ there.
 | `status`, `reason`, `cseq-method` | responses | discriminator |
 | `cseq` | auto steps only | the CSeq number (§6.3) |
 | `ruri`, `from`, `to` | dialog-opening INVITE sends | tier-2 refs |
+| `from`, `to` | the dialog-opening INVITE a UAS expects | tier-2 refs, recorded: the identity the system launched |
 | `headers` | any | tier-3 frozen list, wire order |
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
@@ -2241,8 +2253,8 @@ its ordinal over the messages it emits, and the part index within that message
 — and `resources/<actor>_r<n>_<part>.<ext>` on an expect, the ordinal counted
 over the messages the actor expects. Every message takes an ordinal whether or
 not it carries a body, and the two counters are separate, so a send and an
-expect of one actor never name one file. The name is **step-index-free** (v2
-friction H1) — renumbering the flow, inserting a step, splitting a deviation,
+expect of one actor never name one file. The name is **step-index-free** —
+renumbering the flow, inserting a step, splitting a deviation,
 none of it renames a file on disk.
 
 ### 8.5 The identity registry
@@ -2253,7 +2265,7 @@ Every number and domain the document names is declared ONCE, at the top level:
 "identities": [
   { "name": "caller", "kind": "external-caller", "observed": "0009001",
     "forms": ["private"] },
-  { "name": "called-0-0", "kind": "site", "observed": "+33000900004",
+  { "name": "called-0-0", "kind": "site", "observed": "+15550900004",
     "forms": ["e164"], "catalog": { "class": "site" } },
   { "name": "transferee", "kind": "site", "forms": ["e164"] }
 ]
@@ -2349,7 +2361,7 @@ would have to drop the fact. So the fact stays, NAMED.
 
 | class | what it reads |
 |---|---|
-| `origin-platform-header` | a header value only the origin platform emits: a family of its own (`P-Charging-Vector`, `P-Identifier`, `P-Orig`), or a value the capture never shows reaching it |
+| `origin-platform-header` | a header value only the origin platform emits: a family of its own (`P-Charging-Vector`, `X-Vendor-Id`, `X-Vendor-Orig`), or a value the capture never shows reaching it |
 | `cdr-vocabulary` | the origin platform's CDR record vocabulary: event names, disposition words, field spellings |
 
 Two sites carry one:
@@ -2400,7 +2412,7 @@ computed from gating checks alone; there is no third status value.
 ### 9.2 Timing tolerance — the run's window, not the document's
 
 **A `timer_linked` dwell (§6.8) is a fact about a SYSTEM timer, and a system's
-timers are its own.** One platform arms a whole second where the capture measured
+timers are its own.** One platform arms a whole second where the capture states
 15 139 ms; a platform under real load fires a few hundred milliseconds off. The
 document keeps what it measured — that is the fact — and the RUN states the
 window it accepts around it:
@@ -2769,7 +2781,7 @@ or on another leg satisfies nothing, however loudly it failed.
 ## 12. media — RESERVED
 
 An open object, deployment-extensible. Nothing reads it. It exists so the media
-vocabulary (issue 19: loadgen adoption) lands additively rather than as a
+vocabulary (loadgen adoption) lands additively rather than as a
 version bump. Distinct from `legs[].media`, which is the per-leg RTP source
 token and is not reserved.
 
@@ -2878,7 +2890,7 @@ datagrams are compared against, and the second relay keeps its header
 comparison. §6.9 states the three bounds and the mode that puts a case outside
 them.
 
-*Joined 2026-08-27 (issue 116) by the deficit above.* This slot held the
+*Joined 2026-08-27 by the deficit above.* This slot held the
 unreliable-provisional EXPANSION alone: a carve-out keeping a repeat of a class
 that rides no ladder as steps rather than a count. It still holds — such a count
 names a ladder no lane can run whoever wrote the document. What changed is the
@@ -2909,12 +2921,12 @@ restores the captured ladder exactly.
 `relay18x` is indistinguishable between "transparent, decided" and "announcement
 mode, never looked for", and a `family` whose rule has no arm for the shape in
 front of it asserts a wrong answer where it owes an unknown. So a captured
-document names the detectors this deployment runs and accounts for every one of
+document names the detectors its deployment runs and accounts for every one of
 them, on the same `case.annotations.flags`:
 
 | flag | what it says |
 |---|---|
-| `detector-roster` | the roster this document accounts for, comma-separated. This deployment's is `relay18x, prack, refer, reroute, fork, mrf` |
+| `detector-roster` | the roster this document accounts for, comma-separated, e.g. `relay18x, prack, refer, reroute, fork, mrf` |
 | `detected:<detector>` | the detector fired. `detail` quotes the signals verbatim, the way §4.2 `evidence` does |
 | `detected-none:<detector>` | the detector ran over this capture and asserts the shape is absent |
 | `detection-unavailable:<detector>` | the vantage lacks the messages the detector reads, so it decided nothing |
@@ -3097,6 +3109,6 @@ Everything in this document is frozen except the following.
 | `rfc_violations` vocabulary | **MINIMAL** | §11.1. One member, `no-200-after-cancel`, and no `allowed` flag. The vocabulary and its mechanics grow from the per-endpoint violation census, not before it |
 | `must_fail` vocabulary | **MINIMAL** | §11.2. Two members, `unexpected-ack` and `unexpected-prack`. It grows with the prediction that decides it, as `rfc_violations` grows with the detector |
 | `inject` execution semantics | **DESIGN ONLY** | §6.6 freezes the shape and the injector-interface split. No interpreter executes an action in this program |
-| `media` | **RESERVED** | §12. Open object, deployment-extensible; the vocabulary lands in issue 19 |
-| match-less retry chains | **UNEXERCISED** (F3) | a retry chain ordered by a match-less rule is absent from the corpus. `calls[].attempts` expresses it; nothing has produced one |
-| body-registry deployment overlay | **NOT MODELLED** (G6) | §8.2. A deployment handler that REWRITES a body has no field on a `body`/`part` to name itself with. No corpus case exercises it |
+| `media` | **RESERVED** | §12. Open object, deployment-extensible; the vocabulary lands with loadgen adoption |
+| match-less retry chains | **UNEXERCISED** | a retry chain ordered by a match-less rule is absent from the corpus. `calls[].attempts` expresses it; nothing has produced one |
+| body-registry deployment overlay | **NOT MODELLED** | §8.2. A deployment handler that REWRITES a body has no field on a `body`/`part` to name itself with. No corpus case exercises it |

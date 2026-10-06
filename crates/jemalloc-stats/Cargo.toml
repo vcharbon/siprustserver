@@ -16,6 +16,9 @@ unsafe_code = "deny"
 
 # jemalloc has no MSVC target; on msvc this crate compiles to no-op stubs so the
 # `#[cfg(not(target_env = \"msvc\"))]` callers do not need a second cfg arm.
+[dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
+
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 # mallctl read interface into the SAME jemalloc the binary links via
 # tikv-jemallocator. Version-locked to tikv-jemalloc-sys 0.7 (one jemalloc in

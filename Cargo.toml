@@ -6,6 +6,9 @@ members = [
     "crates/alloc-counter",
     "crates/sip-clock",
     "crates/sip-retransmit",
+    "crates/load-shed",
+    "crates/metric-catalogue",
+    "crates/metric-contract",
     "crates/layer-harness",
     "crates/sip-net",
     "crates/sip-txn",
@@ -46,9 +49,9 @@ members = [
     "xtask",
 ]
 
-# One crate per migration layer (see MIGRATION_STATUS.md). Slice 1 is the
-# pure SIP message layer (`sip-message`); slice 2 adds the network layer
-# (`sip-net`). `layer-harness` is the test-only contract+recording foundation
+# One crate per migration layer (see MIGRATION_STATUS.md): `sip-message` is the
+# pure SIP message layer, `sip-net` the network layer. `layer-harness` is the
+# test-only contract+recording foundation
 # (Recorder / RunContext / severity / recording helpers) shared by sip-net and
 # every later layer's `contracts` module — it carries no production code and no
 # domain types, so it does not contradict ADR-0002's "no premature shared
@@ -108,7 +111,7 @@ serde_json = "1"
 # `regex` backs the check engine's `regex` op (ADR-0019 field grammar).
 schemars = "1"
 regex = "1"
-# E2E test-management website (`e2e-web`, ADR-0018 Phase I): axum serves the
+# E2E test-management website (`e2e-web`, ADR-0018): axum serves the
 # content-negotiated route set (HTML + JSON on ONE handler per resource), maud
 # renders the HTML server-side (htmx does fragment polling client-side, loaded
 # from CDN — no JS build step). TEST-TOOLING ONLY, never in a runner.
@@ -116,14 +119,14 @@ axum = "0.8"
 maud = "0.27"
 serde_bytes = "0.11"
 rmp-serde = "1"
-# HA replication wire codec (`crates/repl-net`, slice S2). The five replication
+# HA replication wire codec (`crates/repl-net`). The five replication
 # frames are positional-msgpack arrays (tag = element 0) hand-encoded with the
 # low-level `rmp` crate for exact positional control — serde-derived enums do
 # not emit clean `[tag, ...]` arrays. `rmp` is already in the tree transitively
 # via `rmp-serde`; declared here directly so repl-net can drive it. See ADR-0011
 # X9 / ADR-0008 (positional msgpack ethos).
 rmp = "0.8"
-# Front proxy (`crates/sip-proxy`, slice 9). The routing cookie stamped on the
+# Front proxy (`crates/sip-proxy`). The routing cookie stamped on the
 # Record-Route is HMAC-SHA256 truncated to 128 bits (`hmac` + `sha2`),
 # base64url-encoded (`base64`); `subtle` is the constant-time compare
 # (`timingSafeEqual` analogue) used to verify it. `sha1` is NOT a crypto
@@ -151,7 +154,7 @@ socket2 = "0.6"
 # path-MTU-discovery mode UDP-only signalling pins (ADR-0027). Linux-only, and
 # only where a raw `setsockopt`/`getsockopt` is the sole route.
 libc = "0.2"
-# Media layer (`crates/media`, slice S-media). `rtp`/`rtcp` are the webrtc-rs
+# Media layer (`crates/media`). `rtp`/`rtcp` are the webrtc-rs
 # wire-codec crates used as the independent framing *witness* against our
 # hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs
 # the audio comparator's MFCC signature in the test-only `media-harness`. See

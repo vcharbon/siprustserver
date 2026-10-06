@@ -1,4 +1,4 @@
-//! [`HaNode`] — one goal-1 replication-subsystem node (plan Decision 7).
+//! [`HaNode`] — one replication-subsystem node.
 //!
 //! A node bundles exactly the engine pieces (and nothing SIP):
 //! `{ ReplicatingCallStore + per-peer Changelog + ReplServer on a listener +
@@ -11,14 +11,14 @@
 //! AND drops the store/changelog so the node's memory is wiped — a true crash.
 //! `reboot()` rebuilds it: same ordinal, EMPTY store, a NEW higher incarnation
 //! gen, fresh server + supervisor → it re-bootstraps + resubscribes from its
-//! peers (the S6 reboot-recovery path).
+//! peers (the reboot-recovery path).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use b2bua::repl::{
-    flush_replicated, Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore,
+    Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationPlan,
     ReplicationSupervisor,
 };
 use b2bua::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
@@ -143,9 +143,10 @@ impl HaNode {
     }
 
     /// Put `body` for `call_ref` at content version `call_gen`, routing it
-    /// through the write-side policy ([`flush_replicated`]): the injected
+    /// through the write-side policy ([`ReplicationPlan`]): the injected
     /// `backup_resolver` names this node's backup peer (2/3-node tests resolve it
     /// trivially), the policy picks the partition + Forward/Reverse direction.
+    /// The write names the ref's one call (`incarnation_of`).
     pub async fn put(
         &self,
         call_ref: &str,
@@ -154,28 +155,22 @@ impl HaNode {
         call_bgen: i64,
         backup_resolver: &dyn Fn(&str) -> Option<String>,
     ) {
-        flush_replicated(
-            &self.store,
-            &self.ordinal,
-            call_ref,
-            body,
-            &[],
-            0,
-            call_gen,
-            call_bgen,
-            backup_resolver,
-        )
-        .await
-        .expect("put");
+        let plan = ReplicationPlan::resolve(&self.ordinal, call_ref, backup_resolver);
+        let opts = PutOpts { incarnation: Some(incarnation_of(call_ref)), ..plan.put_opts() };
+        self.store
+            .put_call(plan.role, &plan.primary, call_ref, body, &[], 0, call_gen, call_bgen, &opts)
+            .await
+            .expect("put");
     }
 
     /// Delete `call_ref`, propagating the tombstone the same way `put` routes a
-    /// body (resolve partition + direction, bump the changelog).
+    /// body (resolve partition + direction, bump the changelog), naming the
+    /// ref's one call.
     pub async fn delete(&self, call_ref: &str, backup_resolver: &dyn Fn(&str) -> Option<String>) {
-        let plan = b2bua::repl::ReplicationPlan::resolve(&self.ordinal, call_ref, backup_resolver);
-        let opts = plan.put_opts();
+        let plan = ReplicationPlan::resolve(&self.ordinal, call_ref, backup_resolver);
+        let opts = PutOpts { incarnation: Some(incarnation_of(call_ref)), ..plan.put_opts() };
         self.store
-            .delete_call(plan.role, &plan.primary, call_ref, &[], &opts)
+            .delete_call(plan.role, &plan.primary, call_ref, &[], false, &opts)
             .await
             .expect("delete");
     }
@@ -186,7 +181,8 @@ impl HaNode {
     }
 
     /// The primary version counter (`p`) currently stored for a ref, or `None`
-    /// — projected from the `(p,b)` version vector ([`current_cv`]).
+    /// — projected from the `(p,b)` version vector
+    /// ([`ReplicatingCallStore::current_cv`]).
     pub fn call_gen(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<i64> {
         self.store.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
@@ -207,7 +203,7 @@ impl HaNode {
         self.supervisor.bootstrap_complete(peer)
     }
 
-    /// Ready = every known peer bootstrapped AND current (the S7 readiness gate,
+    /// Ready = every known peer bootstrapped AND current (the readiness gate,
     /// read straight off the supervisor — no SIP/OPTIONS).
     pub fn is_ready(&self) -> bool {
         self.supervisor.all_bootstrapped() && self.supervisor.all_current()
@@ -258,7 +254,7 @@ impl HaNode {
     }
 
     /// REBOOT: same ordinal, EMPTY store, a NEW higher incarnation gen, fresh
-    /// server + supervisor → re-bootstrap + resubscribe from peers (S6 path).
+    /// server + supervisor → re-bootstrap + resubscribe from peers.
     /// Driven via [`HaCluster::reboot`](crate::HaCluster::reboot).
     pub(crate) async fn reboot(&mut self, wiring: &NodeWiring) {
         // Make sure any prior server task is gone (idempotent if already crashed).
@@ -283,6 +279,12 @@ impl HaNode {
     pub fn remove_peer(&self, ordinal: &str) {
         self.membership.remove(ordinal);
     }
+}
+
+/// The call incarnation the harness's writes of `call_ref` name: the harness
+/// models one call per ref.
+pub fn incarnation_of(call_ref: &str) -> String {
+    format!("{call_ref}#1")
 }
 
 /// Forward (primary→backup) put options targeting `peer` — used by tests that

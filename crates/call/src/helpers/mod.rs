@@ -43,9 +43,10 @@ pub mod timer;
 pub use decision_log::mark_decision;
 pub use dialog::{
     add_pending_request, bump_local_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    cancel_pending_request, close_rejected_invite_round, find_pending_request,
-    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, relay_cseq_delta,
-    remove_pending_request, retain_ack_branch, retain_emitted_ack, set_awaited_ack_cseq,
+    cancel_pending_request, close_rejected_invite_round, find_pending_request, invite_glare,
+    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, peer_update_pending,
+    relay_cseq_delta, remove_pending_request, retain_ack_branch, retain_emitted_ack,
+    sender_invite_unacknowledged, sender_invite_unanswered, set_awaited_ack_cseq,
     update_remote_cseq, MakeDialogLegCtx,
 };
 pub use leg::{
@@ -59,7 +60,7 @@ pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses}
 pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,
-    retained_for, Scope,
+    restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
     add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer, merge_leg,

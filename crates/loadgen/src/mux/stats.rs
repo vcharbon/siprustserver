@@ -1,14 +1,23 @@
 //! Process-wide mux counters + their Prometheus rendering.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use sip_message::sniff::{cseq_method_label, cseq_value, first_line};
+use metric_catalogue::OpenRows;
+use sip_message::sniff::{cseq_method_token, cseq_value, first_line};
 
 use super::MuxCore;
 
 /// Process-wide mux counters (Prometheus + report).
+/// The orphan rows of `loadgen_mux_orphan_total`.
+struct OrphanRows(OpenRows);
+
+impl Default for OrphanRows {
+    fn default() -> Self {
+        Self(OpenRows::new(&crate::catalogue::MUX_ORPHAN))
+    }
+}
+
 #[derive(Default)]
 pub struct MuxStats {
     pub orphan_no_header: AtomicU64,
@@ -56,7 +65,9 @@ pub struct MuxStats {
     /// triageable from `/metrics` alone ("stray BYE: N, stray OPTIONS: M")
     /// without a packet capture. Off the hot path (orphans only), so a
     /// `Mutex<map>` is fine.
-    orphan_by_method: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
+    /// Orphans by reason and CSeq method, under the family's cap (the method
+    /// token is wire-controlled).
+    orphan_by_method: OrphanRows,
 }
 
 impl MuxStats {
@@ -75,8 +86,8 @@ impl MuxStats {
             OrphanReason::Early => self.orphan_early.fetch_add(1, Ordering::Relaxed),
             OrphanReason::CallIdReuse => self.orphan_call_id_reuse.fetch_add(1, Ordering::Relaxed),
         };
-        let method = cseq_method_label(raw);
-        *self.orphan_by_method.lock().unwrap().entry((reason.label(), method)).or_default() += 1;
+        let method = cseq_method_token(raw).unwrap_or_else(|| "none".to_string());
+        self.orphan_by_method.0.add(&[reason.label(), &method], 1);
         let mut g = self.samples.lock().unwrap();
         if g.len() < self.sample_cap {
             // Lead the sample with the CSeq (method + number) so a sampled orphan is
@@ -117,7 +128,7 @@ impl MuxStats {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum OrphanReason {
+pub(crate) enum OrphanReason {
     /// An initial INVITE we cannot correlate (no token) — the concerning case.
     NoHeader,
     /// A token present but matching no pending call.
@@ -136,7 +147,18 @@ pub(super) enum OrphanReason {
 }
 
 impl OrphanReason {
-    fn label(self) -> &'static str {
+    /// Every reason, in declaration order.
+    pub(crate) const ALL: [OrphanReason; 7] = [
+        OrphanReason::NoHeader,
+        OrphanReason::UnknownToken,
+        OrphanReason::NoRoute,
+        OrphanReason::Stray,
+        OrphanReason::Released,
+        OrphanReason::Early,
+        OrphanReason::CallIdReuse,
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             OrphanReason::NoHeader => "no_header",
             OrphanReason::UnknownToken => "unknown_token",
@@ -152,91 +174,24 @@ impl OrphanReason {
 impl MuxCore {
     /// Render the mux Prometheus series.
     pub fn render_prometheus(&self) -> String {
+        use crate::catalogue as c;
         let s = self.stats();
         let mut out = String::new();
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
         // Orphans are labelled by reason AND CSeq method (`sum by(reason)` still
-        // aggregates to the per-reason total for existing queries). Always emit the
-        // three reason×none zero-series so a fresh run has the series present.
-        out.push_str("# HELP loadgen_mux_orphan_total Inbound datagrams that matched no call, by reason and CSeq method.\n");
-        out.push_str("# TYPE loadgen_mux_orphan_total counter\n");
-        let by = s.orphan_by_method.lock().unwrap();
-        if by.is_empty() {
-            for r in ["no_header", "unknown_token", "stray"] {
-                out.push_str(&format!(
-                    "loadgen_mux_orphan_total{{reason=\"{r}\",method=\"none\"}} 0\n"
-                ));
-            }
-        } else {
-            for ((reason, method), n) in by.iter() {
-                out.push_str(&format!(
-                    "loadgen_mux_orphan_total{{reason=\"{reason}\",method=\"{method}\"}} {n}\n"
-                ));
-            }
-        }
-        drop(by);
-        out.push_str("# HELP loadgen_mux_registry_size Live demux entries (leak canary).\n");
-        out.push_str("# TYPE loadgen_mux_registry_size gauge\n");
-        out.push_str(&format!("loadgen_mux_registry_size {}\n", self.registry_size()));
-        out.push_str("# HELP loadgen_mux_pending_expired_total Pending callee legs reaped (never arrived).\n");
-        out.push_str("# TYPE loadgen_mux_pending_expired_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_pending_expired_total {}\n",
-            s.pending_expired.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_unclaimed_total Initial INVITEs on a known call that no pending claim accepted.\n");
-        out.push_str("# TYPE loadgen_mux_unclaimed_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_unclaimed_total {}\n",
-            s.unclaimed.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_token_collision_total Token-slot registration draws refused: token already owned by a concurrent call (up to KEY_DRAWS per call).\n");
-        out.push_str("# TYPE loadgen_mux_token_collision_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_token_collision_total {}\n",
-            s.token_collision.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_caller_key_mismatch_total Caller INVITEs refused before the wire: From user is not the call key (from-user correlation).\n");
-        out.push_str("# TYPE loadgen_mux_caller_key_mismatch_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_caller_key_mismatch_total {}\n",
-            s.caller_key_mismatch.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_key_cooling_total From-user draws refused: the key's previous call ended not ok within 64*T1 (up to KEY_DRAWS per call).\n");
-        out.push_str("# TYPE loadgen_mux_key_cooling_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_key_cooling_total {}\n",
-            s.key_cooling.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_claim_unfired_total Claims released without firing (expected inbound leg never came).\n");
-        out.push_str("# TYPE loadgen_mux_claim_unfired_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_claim_unfired_total {}\n",
-            s.claim_unfired.load(Ordering::Relaxed)
-        ));
-        out.push_str(
-            "# HELP loadgen_mux_inbox_drop_total Datagrams dropped on a full call inbox.\n",
-        );
-        out.push_str("# TYPE loadgen_mux_inbox_drop_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_inbox_drop_total {}\n",
-            s.inbox_drop.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_mux_delivered_total Datagrams demuxed to a call.\n");
-        out.push_str("# TYPE loadgen_mux_delivered_total counter\n");
-        out.push_str(&format!(
-            "loadgen_mux_delivered_total {}\n",
-            s.delivered.load(Ordering::Relaxed)
-        ));
-        out.push_str("# HELP loadgen_drop_total Datagrams dropped by the simulated packet-loss model, by direction.\n");
-        out.push_str("# TYPE loadgen_drop_total counter\n");
-        out.push_str(&format!(
-            "loadgen_drop_total{{dir=\"out\"}} {}\n",
-            s.dropped_out.load(Ordering::Relaxed)
-        ));
-        out.push_str(&format!(
-            "loadgen_drop_total{{dir=\"in\"}} {}\n",
-            s.dropped_in.load(Ordering::Relaxed)
-        ));
+        // aggregates to the per-reason total for existing queries).
+        s.orphan_by_method.0.render(&mut out);
+        c::MUX_REGISTRY_SIZE.render_value(&mut out, self.registry_size());
+        c::MUX_PENDING_EXPIRED.render_value(&mut out, load(&s.pending_expired));
+        c::MUX_UNCLAIMED.render_value(&mut out, load(&s.unclaimed));
+        c::MUX_TOKEN_COLLISION.render_value(&mut out, load(&s.token_collision));
+        c::MUX_CALLER_KEY_MISMATCH.render_value(&mut out, load(&s.caller_key_mismatch));
+        c::MUX_KEY_COOLING.render_value(&mut out, load(&s.key_cooling));
+        c::MUX_CLAIM_UNFIRED.render_value(&mut out, load(&s.claim_unfired));
+        c::MUX_INBOX_DROP.render_value(&mut out, load(&s.inbox_drop));
+        c::MUX_DELIVERED.render_value(&mut out, load(&s.delivered));
+        let drops = [load(&s.dropped_out), load(&s.dropped_in)];
+        c::DROP.render(&mut out, |series| drops[series.at(0)]);
         out
     }
 }

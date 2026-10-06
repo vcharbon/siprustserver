@@ -4,16 +4,16 @@
 //! helpers; outbound messages use the [`crate::rules::relay`] primitives. One
 //! module per action family:
 //!
-//! - [`dispatch`] — the `RuleAction` → handler table (+ inline state mutations)
-//! - [`relay_request`] / [`relay_response`] — relaying the current event to a peer
-//! - [`dialog_track`] — early-dialog tracking, 2xx confirmation, the a-dialog
-//! - [`originate`] — requests the B2BUA sends itself (CreateLeg, re-INVITE,
+//! - `dispatch` — the `RuleAction` → handler table (+ inline state mutations)
+//! - `relay_request` / `relay_response` — relaying the current event to a peer
+//! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
+//! - `originate` — requests the B2BUA sends itself (CreateLeg, re-INVITE,
 //!   NOTIFY, PRACK, in-dialog probes)
-//! - [`respond`] — response synthesis toward a leg (finals, provisionals)
-//! - [`ladder`] — the dialog-level retransmission ladders the framework owns
+//! - `respond` — response synthesis toward a leg (finals, provisionals)
+//! - `ladder` — the dialog-level retransmission ladders the framework owns
 //!   (ADR-0032 X4): arm / repeat / discharge / retire, keyed by obligation
-//! - [`teardown`] — termination policy + BYE/CANCEL builders
-//! - [`select`] — shared leg/dialog selection views
+//! - `teardown` — termination policy + BYE/CANCEL builders
+//! - `select` — shared leg/dialog selection views
 
 mod dialog_track;
 mod dispatch;
@@ -32,7 +32,7 @@ use sip_txn::IdGen;
 use crate::config::B2buaConfig;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 
-use super::model::{RuleAction, RuleContext};
+use b2bua_sdk::model::{RuleAction, RuleContext};
 
 /// Executes rule actions against a working copy of the call.
 pub struct ActionExecutor<'a> {

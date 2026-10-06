@@ -3,7 +3,7 @@
 //!   1. `/call/failure` carries the framework-attached [`CallSnapshot`]
 //!      (observed CDR trail, legs, features, limiter holds) plus the failed
 //!      final response's non-structural headers — the generic carrier a real
-//!      decision backend derives `prov18x` / Q.850 causes / anything else from.
+//!      decision backend derives an "18x seen" flag / Q.850 causes / anything else from.
 //!   2. A **pending b-leg INVITE transaction timeout** (the dead-gateway case)
 //!      consults `/call/failure` (origin `transaction_timeout`) instead of
 //!      unconditionally terminating, so the backend can reroute — and the
@@ -15,16 +15,15 @@
 //!      holds are released at termination; a limiter reject on the failover
 //!      route re-consults `/call/failure` (origin `call_limiter`), bounded.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallFailureRequest, CallLimiterEntry, CallTreatment, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallFailureRequest, CallTreatment, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{hangup, settle_until, B2buaSut};
 use call::CdrEventType;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
@@ -132,7 +131,7 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
     assert_eq!(snap.legs[0].leg_id, "a");
     assert_eq!(snap.legs[1].leg_id, "b-1");
     assert!(snap.features.is_some(), "route features visible to the failure decision");
-    // The observed trail: the backend derives `prov18x` (a Provisional ≥ 180
+    // The observed trail: the backend derives an "18x seen" flag (a Provisional ≥ 180
     // on the failed leg) instead of the platform exporting a bespoke flag.
     assert!(
         snap.cdr_events.iter().any(|e| e.event_type == CdrEventType::Provisional
@@ -196,8 +195,8 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     call.expect(180).await;
 
     // Dead gateway: carol never sends a final. At the sip-txn INVITE backstop
-    // (158 s) the b-leg transaction times out — pre-fix this tore the call
-    // down without ever consulting the decision backend. Advance just past the
+    // (158 s) the b-leg transaction times out — and the decision backend is
+    // consulted before any teardown. Advance just past the
     // deadline (not beyond it) so the reroute INVITE is answered inside its
     // Timer A window instead of retransmitting mid-advance.
     h.advance(Duration::from_secs(158) + Duration::from_millis(300)).await;
@@ -444,7 +443,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
                 // The reroute carries its own per-target limit + service ext —
                 // dropped silently before failover/initial parity landed.
                 let mut r = route_to("127.0.0.1", 5071);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-B".into(), limit: 5 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-B".into(), limit: 5 }];
                 r.service_ext =
                     [("svc-x".to_string(), serde_json::json!({"k": "v"}))].into_iter().collect();
                 CallTreatment::Route(r)
@@ -500,12 +499,12 @@ async fn failover_route_limiter_replaces_the_initial_route_holds() {
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.callback_context = Some("ctx-replace".into());
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 5 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 5 }];
                 NewCallResponse::Route(r)
             })
             .on_failure(|_| {
                 let mut r = route_to("127.0.0.1", 5071);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-B".into(), limit: 5 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-B".into(), limit: 5 }];
                 CallTreatment::Route(r)
             })
             .build(),
@@ -573,7 +572,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
                 // First hop: a full trunk (limit 0 rejects immediately). The
                 // callback context is what allows the chained re-consult.
                 let mut r = route_to("127.0.0.1", 5099);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-full".into(), limit: 0 }];
+                r.call_limiter = vec![LimiterEntry { id: "trunk-full".into(), limit: 0 }];
                 r.callback_context = Some("ctx-chain-2".into());
                 CallTreatment::Route(r)
             })

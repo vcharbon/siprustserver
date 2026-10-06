@@ -95,9 +95,9 @@ mod tests {
     /// consumed slot (`None`) no longer competes.
     #[test]
     fn ruri_user_longest_prefix_wins_and_consumed_slots_are_skipped() {
-        let short = ClaimRule::RuriUser("0650033033".into());
-        let long = ClaimRule::RuriUser("0650033033231".into());
-        let raw = invite("sip:0650033033231089@10.0.0.1:5070", "");
+        let short = ClaimRule::RuriUser("9001100100".into());
+        let long = ClaimRule::RuriUser("9001100100555".into());
+        let raw = invite("sip:9001100100555000@10.0.0.1:5070", "");
 
         assert_eq!(resolve(&[Some(&short), Some(&long)], &raw, 0), Some(1));
         // The long claim consumed → the sibling prefix now owns the leg.
@@ -113,9 +113,9 @@ mod tests {
     /// and competes by R-URI like any other leg.
     #[test]
     fn has_replaces_takes_precedence_then_falls_through() {
-        let by_number = ClaimRule::RuriUser("0650".into());
+        let by_number = ClaimRule::RuriUser("9001".into());
         let xfer = ClaimRule::HasReplaces;
-        let raw = invite("sip:065012@10.0.0.1:5070", "Replaces: abc@h;to-tag=1;from-tag=2\r\n");
+        let raw = invite("sip:900112@10.0.0.1:5070", "Replaces: abc@h;to-tag=1;from-tag=2\r\n");
 
         assert_eq!(resolve(&[Some(&by_number), Some(&xfer)], &raw, 0), Some(1));
         assert_eq!(resolve(&[Some(&by_number), None], &raw, 0), Some(0));
@@ -131,7 +131,7 @@ mod tests {
     fn arrival_order_claims_kth_leg_and_userless_legs() {
         let first = ClaimRule::ArrivalOrder(0);
         let second = ClaimRule::ArrivalOrder(1);
-        let raw = invite("sip:0590777@10.0.0.1:5070", "");
+        let raw = invite("sip:9005777@10.0.0.1:5070", "");
 
         assert_eq!(resolve(&[Some(&first), Some(&second)], &raw, 0), Some(0));
         assert_eq!(resolve(&[None, Some(&second)], &raw, 1), Some(1));
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(resolve(&[None, Some(&second)], &raw, 0), None);
 
         let userless = invite("sip:192.168.60.20:6001", "");
-        let by_number = ClaimRule::RuriUser("0590".into());
+        let by_number = ClaimRule::RuriUser("9005".into());
         assert_eq!(resolve(&[Some(&by_number), Some(&first)], &userless, 0), Some(1));
     }
 
@@ -148,8 +148,8 @@ mod tests {
     #[test]
     fn specific_rules_beat_arrival_order() {
         let order0 = ClaimRule::ArrivalOrder(0);
-        let by_number = ClaimRule::RuriUser("0491".into());
-        let mrf = invite("sip:049112@10.0.0.1:5070", "");
+        let by_number = ClaimRule::RuriUser("9007".into());
+        let mrf = invite("sip:900712@10.0.0.1:5070", "");
         assert_eq!(resolve(&[Some(&order0), Some(&by_number)], &mrf, 0), Some(1));
     }
 }

@@ -279,7 +279,11 @@ flowchart LR
    <code>(sp, sb)</code>:</p>
 <dl class="legend">
   <dt>Delete</dt>
-  <dd>Apply unconditionally — <strong>delete-wins</strong>, both directions.</dd>
+  <dd><strong>Delete-wins</strong>, with one exception on the Forward flow (ADR-0031 D3):
+      a <code>Delete</code> is refused when the local copy is <code>Active</code>, its
+      caller was answered, and the authority has published no answer of its own — by
+      a flush, or by the <code>Delete</code>'s <code>answered</code> statement. Reverse
+      and Bootstrap apply it unconditionally.</dd>
   <dt>Forward / Bootstrap <code>Put</code> (the Backup flow, and any flow's pre-Noop scan)</dt>
   <dd>Apply <strong>unless dominated</strong>: skip iff <code>sp ≥ p &amp;&amp; sb ≥ b</code>
       (an idempotent re-delivery). The follower defers to the authority but never
@@ -339,10 +343,11 @@ flowchart LR
     </tr>
     <tr>
       <td><code>Data</code></td><td>S→C</td>
-      <td><code>at, op, partition, call_ref, p, b, body_ttl_ms, indexes, body?</code></td>
+      <td><code>at, op, partition, call_ref, p, b, body_ttl_ms, origin_now_ms, indexes, body?, answered</code></td>
       <td>One mutation. <code>op ∈ {Put, Delete}</code> — <strong>Create and Update
           are merged into one idempotent <code>Put</code></strong> (carries a body);
-          <code>Delete</code> carries none.</td>
+          <code>Delete</code> carries none, and states in <code>answered</code> whether
+          the deleting node had answered the call.</td>
     </tr>
     <tr>
       <td><code>Noop</code></td><td>S→C</td>

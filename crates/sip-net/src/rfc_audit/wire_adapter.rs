@@ -1,17 +1,16 @@
-//! The live adapter (issue 29): the recorded event channel projected into the
+//! The live adapter: the recorded event channel projected into the
 //! `rfc-rules` wire model, per bind, and the merged rules surfaced as
 //! cross-message audit findings.
 //!
 //! Observation policy lives here, not in the rules: the harness controls
 //! shutdown and drains transit before close, so every view is CLOSED — an
 //! absence at end-of-stream decides immediately, and the rules' capture-side
-//! observability windows collapse. Consumer policy per issue 29: a finding is
+//! observability windows collapse. Consumer policy: a finding is
 //! surfaced only when it is `Violated`, charged to the VANTAGE bind itself,
-//! and not relay-attributed — a hop-vantage or undecidable occasion is the
-//! old engine's silence, kept deliberately (R3; revisit per rule as later
-//! rungs port).
+//! and not relay-attributed — a hop-vantage or undecidable occasion stays
+//! silent, deliberately.
 //!
-//! Projection reads each arrival's production-time [`WireStamp`]
+//! Projection reads each arrival's production-time [`WireStamp`](crate::WireStamp)
 //! (parse-once + the §17.2 repeat mark) and dedups SENDS by transaction key
 //! here, at projection — the send-side twin of that stamp.
 
@@ -1063,7 +1062,7 @@ impl CrossMessageAuditRule for MidDialogWireDestinationRule {
                 return String::new();
             };
             let lead = if *from_route {
-                "topmost Route URI resolves to "
+                "first route URI resolves to "
             } else {
                 "Request-URI resolves to "
             };
@@ -1839,8 +1838,8 @@ impl CrossMessageAuditRule for ConcurrentReInvite500Or491Rule {
             format!(
                 "Took a concurrent re-INVITE (callId {cid}, branch {branch}) while a prior \
                  INVITE (branch {pending_invite_branch}) was still in progress — {{Uas}} must \
-                 respond 491 or 500+Retry-After; got {answered_status}/RetryAfter={retry_after} \
-                 (RFC 3261 §14.2)"
+                 respond 500+Retry-After when the same sender sent both, 491 when they cross; \
+                 got {answered_status}/RetryAfter={retry_after} (RFC 3261 §14.2)"
             )
         })
     }
@@ -2868,7 +2867,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
             } else {
                 format!(
                     "the description is byte-identical but sess-version went \
-                     {prior_session_version} → {session_version} (expected it unchanged)"
+                     {prior_session_version} → {session_version} (expected it unchanged or +1)"
                 )
             };
             format!(
@@ -2905,7 +2904,7 @@ fn stream_rows(
 ///
 /// The live policy this bind adds to the rule body: surfaced at EITHER END,
 /// since the glare is one negotiation and both lanes are places the recording
-/// checks it (the taker-side reading of the same act is the old MUST-001, the
+/// checks it (the taker-side reading of the same act is MUST-001, the
 /// sender-side one MUST-002 — one obligation, charged to the sender); the
 /// finding is **advisory**, because a B2BUA legitimately re-offers on one leg
 /// before the prior answer arrives on the other; plus the relay-lane skip.
@@ -5736,7 +5735,8 @@ mod tests {
     }
 
     /// §14.2 at the UAS lane: the racing re-INVITE surfaces on the lane that
-    /// TOOK it, pointed at that message, and a compliant 491 surfaces nothing.
+    /// TOOK it, pointed at that message. Its sender's earlier INVITE is the
+    /// pending one, so 500 with Retry-After surfaces nothing and 491 surfaces.
     #[test]
     fn a_racing_re_invite_surfaces_at_the_lane_that_took_it() {
         let evs = vec![
@@ -5746,17 +5746,25 @@ mod tests {
         ];
         let out = ConcurrentReInvite500Or491Rule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
-        assert_eq!(out[0].0, BOB, "charged to the UAS that owed the 491");
-        assert!(out[0].1.contains("491 or 500"), "{}", out[0].1);
+        assert_eq!(out[0].0, BOB, "charged to the UAS that owed the 500");
+        assert!(out[0].1.contains("500+Retry-After"), "{}", out[0].1);
         assert_eq!(out[0].2, Some(2), "offending points at the racing re-INVITE");
 
-        let compliant = vec![
-            recv(BOB, req("INVITE", "z9hG4bK-1", 2, Some("bt")), ALICE, 0),
-            recv(BOB, req("INVITE", "z9hG4bK-2", 3, Some("bt")), ALICE, 1),
-            sent(BOB, resp(491, 3, "INVITE", "bt", "z9hG4bK-2"), ALICE, 2),
-            sent(BOB, resp(200, 2, "INVITE", "bt", "z9hG4bK-1"), ALICE, 3),
-        ];
+        let answered = |status: u16, retry_after: &str| {
+            let refusal = String::from_utf8(resp(status, 3, "INVITE", "bt", "z9hG4bK-2"))
+                .expect("utf-8")
+                .replace("Content-Length:", &format!("{retry_after}Content-Length:"));
+            vec![
+                recv(BOB, req("INVITE", "z9hG4bK-1", 2, Some("bt")), ALICE, 0),
+                recv(BOB, req("INVITE", "z9hG4bK-2", 3, Some("bt")), ALICE, 1),
+                sent(BOB, refusal.into_bytes(), ALICE, 2),
+                sent(BOB, resp(200, 2, "INVITE", "bt", "z9hG4bK-1"), ALICE, 3),
+            ]
+        };
+        let compliant = answered(500, "Retry-After: 4\r\n");
         assert!(ConcurrentReInvite500Or491Rule.check_positioned(&compliant).is_empty());
+        let pending_491 = answered(491, "");
+        assert_eq!(ConcurrentReInvite500Or491Rule.check_positioned(&pending_491).len(), 1);
     }
 
     /// §15 at the sending lane: a BYE with no peer tag is off-dialog, and a
@@ -6040,7 +6048,7 @@ mod tests {
         resp(status, 2, "PRACK", "bt", branch)
     }
 
-    // ── the obligation half, ported in rung 2 ───────────────────────────────
+    // ── the obligation half ─────────────────────────────────────────────────
 
     #[test]
     fn a_second_reliable_provisional_waits_for_the_prack_of_the_last() {

@@ -120,7 +120,7 @@ The matrix framework is already here:
 - `assert_call_fully_released` + `assert_single_owner`
   ([lib.rs](crates/failover-harness/src/lib.rs)) — invariant #2 already covered.
 - Limiter wiring + `store.stats().current_total`
-  ([limiter_ha.rs](crates/failover-harness/tests/limiter_ha.rs)).
+  ([limiter_ha.rs](crates/failover-harness/tests/it/limiter_ha.rs)).
 
 **What is missing** (this is the infra work in §5): a no-kill misroute fault, a
 peer-silent axis, and the CDR-count + limiter gates folded into the universal

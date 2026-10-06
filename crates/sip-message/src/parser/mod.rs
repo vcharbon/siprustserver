@@ -4,9 +4,9 @@
 //! `SipParser` is the **layer interface** (the DI seam that mimics Effect
 //! Layer): consumers depend on the trait, not a concrete parser, and any
 //! impl — `CustomParser` (production) or `RvoipParser` (dev-only oracle) —
-//! is swappable behind it. Future contract wrappers (the effect-layer-test
-//! 4-wrapper model: property/paranoid/parity/scopedAudit, deferred to the
-//! SignalingNetwork slice) will also implement this same trait as decorators.
+//! is swappable behind it. Contract wrappers (the effect-layer-test 4-wrapper
+//! model: property/paranoid/parity/scopedAudit) implement this same trait as
+//! decorators.
 //!
 //! Pure + synchronous + never-panics across the boundary: parse failures are
 //! `Err(SipParseError)`, never panics. There is no async / Effect runtime at
@@ -34,7 +34,7 @@ pub trait SipParser {
 
     /// Parse a datagram the caller already owns as [`Bytes`]. The message's
     /// `raw` and `body` then SHARE that buffer instead of copying it — the
-    /// receive path should prefer this. Defaults to a copy via [`parse`].
+    /// receive path should prefer this. Defaults to a copy via [`parse`](Self::parse).
     fn parse_shared(&self, raw: Bytes) -> Result<SipMessage, SipParseError> {
         self.parse(&raw)
     }

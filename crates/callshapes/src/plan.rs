@@ -454,7 +454,7 @@ impl ShapePlan {
                     ),
                     Establishment::RerouteOnNoAnswer { no_answer_sec, winner_reliable } => (
                         winner_reliable,
-                        // 047: the primary rings then stays silent; the SUT's
+                        // The primary rings then stays silent; the SUT's
                         // no-answer timer CANCELs it (→ 487, a clean settle) and
                         // walks the plan to bob2.
                         Disposition::RingThenSilent,
@@ -688,8 +688,8 @@ impl ShapePlan {
                 // `reneg_count` is the cardinality of the caller's grow-only
                 // completed-reneg set (state.rs `RenegCompleted`) — a real
                 // per-cycle counter, unlike the monotone SUBFLOW_RENEG latch.
-                // For n=1 this is byte-for-byte the old `reneg_done` gate (the
-                // count hits 1 the same instant the latch confirms).
+                // For n=1 this equals a single `reneg_done` gate (the count hits
+                // 1 the same instant the latch confirms).
                 for i in 0..n {
                     let guard = if i == 0 {
                         b.gate.clone()

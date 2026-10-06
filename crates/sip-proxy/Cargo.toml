@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
 # Ingress hands the receive buffer to the parser as a refcounted `Bytes`, so
 # the parsed message shares it rather than copying the datagram.
 bytes.workspace = true
@@ -16,6 +17,9 @@ sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-clock = { path = "../sip-clock" }
 sip-txn = { path = "../sip-txn" } # IdGen (To-tags), timer constants, and the health prober's client transactions
+# The token bucket, EWMA, load-sampler seam and Retry-After policy the self-gate
+# and the per-worker caps shed with, shared with the worker.
+load-shed = { path = "../load-shed" }
 topology = { path = "../topology" } # cluster-membership identity substrate (ADR-0002: proxy → topology)
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -1,8 +1,8 @@
 //! Media transport engine — one local RTP port over the shared
-//! [`SignalingNetwork`](sip_net::SignalingNetwork), paced on `tokio::time`.
+//! [`SignalingNetwork`], paced on `tokio::time`.
 //!
 //! Port of `../sipjsserver/src/media/transport.ts`. Parameterized by an
-//! [`RtpFraming`](crate::rtp::RtpFraming) so the hand-rolled and webrtc-rs
+//! [`RtpFraming`] so the hand-rolled and webrtc-rs
 //! implementations share this whole engine and differ only in the wire codec
 //! (each an independent witness of the other).
 //!
@@ -17,7 +17,7 @@
 //!
 //! **Timing discipline (per CLAUDE.md):** behavioural pacing uses
 //! `tokio::time::sleep` directly so it rides the paused test clock; the
-//! [`Clock`](sip_clock::Clock) is consulted only for RTCP NTP timestamps. The
+//! [`Clock`] is consulted only for RTCP NTP timestamps. The
 //! shared state lock is never held across an `.await`.
 
 use std::collections::HashMap;

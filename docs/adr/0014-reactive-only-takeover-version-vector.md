@@ -155,7 +155,7 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     | Frame | Dir | Fields | Role |
     |---|---|---|---|
     | **PullRequest** | C→S | `proto_ver, caller, partition, since` | Open one flow. Bootstrap is **implicit** when `since==(0,0)`; else tail. |
-    | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, indexes, body?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins). |
+    | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, origin_now_ms, indexes, body?, answered, incarnation?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins), and states in `answered` whether the deleting node had answered the call (ADR-0031 D3). A `Put` names the call incarnation its body is of, a `Delete` the one it removed (§"Amendment — `(p,b)` orders one call incarnation"). |
     | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
     | **Position** | C→S | `at` | "I have applied everything up to `at`" — the drain's exit signal only (ADR-0031 D2), never a retention or readiness input. |
@@ -321,7 +321,8 @@ three rules (the primary is the sole discharge authority; see ADR-0020 X3):
    discharged state apply to a primary that has bumped `p`, a deleted `call_ref` is
    **tombstoned** (`ReplicatingCallStore`): `put_call` rejects a re-creating `Put`
    within the window (apply-side delete-wins), so a late reverse-flush cannot
-   resurrect a just-discharged call.
+   resurrect a just-discharged call. The tombstone buries the call incarnation
+   the delete removed, not the `call_ref` (amendment below).
 
 ## Amendment — skew re-anchoring at the replication boundary (accuracy only)
 
@@ -405,8 +406,8 @@ The front proxy's CANCEL memo (Decision 5's ACK/CANCEL exemption) re-resolves a
 dead pinned worker through the stickiness cookie's own health ladder, so the
 caller's give-up reaches the survivor that holds the seeded INVITE.
 
-Pinned by `failover-harness/tests/{prack_takeover,inflight_resend,released_copy}.rs`,
-`sip-txn/tests/seed.rs` and `b2bua/src/router/materialise/tests.rs`.
+Pinned by `failover-harness/tests/it/{prack_takeover,inflight_resend,released_copy}.rs`,
+`sip-txn/tests/it/seed.rs` and `b2bua/src/router/materialise/tests.rs`.
 
 ## Amendment — lifecycle progress folds over a refused reverse flush
 
@@ -438,7 +439,7 @@ Not closed here: an answer version that died with the primary before any copy
 held it. No record can carry that fact; closing it needs the answer durable at
 the backup before the 2xx leaves (an accepted trade-off above rejects it) or a wire check at
 the ring deadline. Pinned ignored in
-`failover-harness/tests/answer_lost_with_primary_no_answer.rs`; the folds are
+`failover-harness/tests/it/answer_lost_with_primary_no_answer.rs`; the folds are
 pinned live in the same file.
 
 ## Amendment — a counter counts writes that change the call, not progress
@@ -502,12 +503,86 @@ cell that pins the rule:
 
 | Rule | Ordinary path | Pinned by |
 | --- | --- | --- |
-| Own 2xx rung is quiet, does not count toward the cap | `b2bua-harness/tests/unacked_2xx_reap.rs`, `unacked_reinvite_2xx_reap.rs`, `failover-harness/tests/inflight_resend.rs` | `b2bua-harness/tests/retransmission_turn_and_message_cap.rs` (`a_2xx_ladder_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/retransmission_turn_is_quiet.rs` (`a_reclaim_after_one_rung_…`, `…three_rungs_…`) |
-| Own §3 rung is quiet, does not count toward the cap | `b2bua-harness/tests/prack_reliable_ladder.rs` | `retransmission_turn_and_message_cap.rs` (`a_reliable_provisional_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/prack_takeover.rs` |
+| Own 2xx rung is quiet, does not count toward the cap | `b2bua-harness/tests/unacked_2xx_reap.rs`, `unacked_reinvite_2xx_reap.rs`, `failover-harness/tests/it/inflight_resend.rs` | `b2bua-harness/tests/it/retransmission_turn_and_message_cap.rs` (`a_2xx_ladder_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/it/retransmission_turn_is_quiet.rs` (`a_reclaim_after_one_rung_…`, `…three_rungs_…`) |
+| Own §3 rung is quiet, does not count toward the cap | `b2bua-harness/tests/it/prack_reliable_ladder.rs` | `retransmission_turn_and_message_cap.rs` (`a_reliable_provisional_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/it/prack_takeover.rs` |
 | Re-ACK is quiet, the repeated 2xx counts | `b2bua-harness/tests/it/reack_retransmitted_2xx.rs` | `retransmission_turn_is_quiet.rs` (`a_re_ack_of_a_repeated_2xx_replicates_nothing`), `retransmission_turn_and_message_cap.rs` (`a_repeated_inbound_2xx_counts_toward_the_message_cap`) |
-| The vector answers equality and strict-greater only | `failover-harness/tests/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
+| The vector answers equality and strict-greater only | `failover-harness/tests/it/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
 | A restored ladder restarts from the last write, bounded by the deadline | — (a residual, not a rule) | `retransmission_turn_is_quiet.rs` (`a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer`) |
 
 `b2bua_repl_quiet_turns_total{kind}` counts the turns persisted this way, so
 N rungs in `b2bua_retransmits_total` against 0 in `b2bua_repl_flush_propagated_total`
 is the rule holding. ADR-0032 X2 states the ladder side.
+
+## Amendment — `(p,b)` orders one call incarnation
+
+A `call_ref` carries successive calls: a caller retrying after a 401/407/422 or
+a 3xx re-sends the INVITE with the same Call-ID and From tag (RFC 3261 §8.1.3.5,
+§22.2), and the retry is born on the `call_ref` of the call it retries, its
+vector restarted at `(1,0)`. The vector orders versions of **one call
+incarnation** (`call::Call::incarnation`, the limiter key, unique over time),
+so every write names its incarnation beside `(p,b)`: the store keeps it with
+the body, a `Put` frame carries it, a `Delete` frame names the call it removed,
+and a tombstone names the call it buries.
+
+- **A tombstone buries a call, not a ref.** Every call a ref carried inside the
+  window stays buried, each for its own window: a `Put` of a buried incarnation
+  is ignored, as is a `Put` naming none while nothing is held; a `Put` of
+  another incarnation is stored and replicated at once. A tombstone naming none
+  (the deleting node held no body and the delete named none) buries only
+  unnamed writes. A `Delete` of another call than the held one buries that
+  call alone and propagates nothing.
+- **A write of another incarnation is a new record.** The call it replaces is
+  buried as replaced, its body and index keys go, and none of the per-ref facts
+  the store kept about it (the authority's answer, the backup ordinal, the skew
+  offset) carry over.
+- **Another incarnation is not a version.** A Bootstrap or Forward `Put` of
+  another incarnation than the Element's replaces it whatever the vectors say:
+  the authority serves a new call on the ref, and a backup that missed the old
+  call's delete (the changelog keeps one entry per ref, so a delete and the
+  retry's first `Put` inside one poll drain as that `Put`) would otherwise keep
+  the old call at a version the retry's first writes do not dominate. An acting
+  backup's own write (`Reverse`) never replaces another incarnation, and a
+  Reverse `Put` of one is refused: either is a takeover copy's view of a call
+  the authority has since replaced. A fold (the reverse reconcile, a refused
+  flush) reads a body of the live call's own incarnation only.
+- **A replaced deferred terminal is settled like an expired one.** Nobody
+  settles a call a write of another replaced: its primary moved on with no
+  delete. The backup that held it hands its last body to the replica reap
+  (`take_displaced`) when that body is a version a backup authored (`b > 0`;
+  the authority settles its own), and the reap releases its own limiter key
+  and counts its CDR lost when it is a terminal, as for an expired deferred
+  terminal (ADR-0020 X3). A takeover copy's writes after the replacement go
+  the same way, each re-stamping the burial so the call stays buried while a
+  copy still writes it. A release with no resident copy deletes nothing.
+- **An event names its incarnation.** A timer fire, a transaction timeout and
+  a callout result carry the incarnation that armed, sent or awaited them, and
+  every Via and Contact the stack emits carries its mark (`ci`); the router
+  drops an event of another incarnation than the live call's before any rule
+  reads it (`b2bua_other_incarnation_dropped_total`). One stating none belongs
+  to the live call. Pinned by `b2bua-harness` `reoffer_late_events_of_the_first_call`.
+
+Writes that name no incarnation (unit fixtures, harness surgery) compare by
+`(p,b)` alone; the `ha-harness` writes name one call per ref. Pinned by
+`failover-harness` `retry_on_a_challenged_identity` (both timings), the
+`b2bua` `repl` S13 cells (a late reverse flush of the first of two challenged
+calls, in the Reclaim bootstrap and in its tail; a takeover write of a
+replaced call before and after the retry lands; a replaced deferred terminal
+settled once; a delete of a replaced call leaves the retry), the `router`
+reclaim cells `a_refused_flush_of_another_call_never_ends_the_live_one`,
+`a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one`,
+`a_deferred_terminal_another_call_replaced_is_released_by_its_own_key`, and the
+`repl` unit cells `a_delete_buries_its_call_and_not_the_next_one_on_its_ref`,
+`a_new_call_on_the_ref_replaces_an_element_its_version_does_not_dominate`,
+`a_reverse_flush_of_a_replaced_call_folds_into_nothing`. The resurrection the
+tombstone exists for stays pinned by `resurrection_tombstone_pruned_by_reap`,
+`answer_lost_with_primary_no_answer` and the two forward-`Delete` cells of
+`forward_flush_never_regresses_backup_progress`, which fail with the guard off.
+
+Residuals. A replaced deferred terminal's CDR is lost, not written: the
+discharge funnel serves one call per ref, and the ref now carries the new
+call. When the primary reclaimed and discharged a backup's deferred terminal
+(`b > 0`) and its delete compacted into the retry's `Put`, the backup counts
+that CDR lost although it was written (the limiter release is a no-op). A new call replaces an Element a
+takeover answered and the authority never saw (ADR-0031 D3's protected case):
+the authority starts a new call on a ref only after ending the old one, so the
+answered call's record is lost with it.

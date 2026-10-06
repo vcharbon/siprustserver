@@ -8,8 +8,8 @@ use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition};
 use crate::rules::refer_transfer::ok;
+use b2bua_sdk::model::{Effect, Match, RuleAction, RuleDefinition};
 
 /// transfer-reject-second-refer — a second REFER while active → 491.
 pub(super) fn reject_second_refer() -> RuleDefinition {

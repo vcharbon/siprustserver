@@ -74,7 +74,7 @@
       ]
     },
     "family": "reroute",
-    "id": "capture_c08080b0-c9a3-41a0-80da-b3a90c4e98f0.pcap.gz-tschain",
+    "id": "capture_reroute-chain.pcap.gz-tschain",
     "lanes": {
       "hosted": "blocked:number-unclassified",
       "kind": "blocked:number-unclassified",
@@ -87,9 +87,9 @@
         0,
         1
       ],
-      "capture": "capture_c08080b0-c9a3-41a0-80da-b3a90c4e98f0.pcap.gz"
+      "capture": "capture_reroute-chain.pcap.gz"
     },
-    "title": "capture_c08080b0-c9a3-41a0-80da-b3a90c4e98f0.pcap.gz basic call (groups 0+1)",
+    "title": "capture_reroute-chain.pcap.gz basic call (groups 0+1)",
     "variant": "repro"
   },
   "endpoints": [
@@ -134,11 +134,11 @@
             "value": "INVITE, BYE, CANCEL, ACK, INFO, OPTIONS, NOTIFY, UPDATE"
           },
           {
-            "name": "P-Identifier",
-            "value": "112233335"
+            "name": "X-Vendor-Id",
+            "value": "119900007"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
@@ -146,8 +146,8 @@
             "value": "<tel:0009002>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           }
         ],
         "method": "INVITE",
@@ -209,20 +209,20 @@
             "value": "INVITE, BYE, CANCEL, ACK, INFO, OPTIONS, NOTIFY, UPDATE"
           },
           {
-            "name": "P-Identifier",
-            "value": "112233335"
+            "name": "X-Vendor-Id",
+            "value": "119900007"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900001@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900001@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           },
           {
             "name": "P-Charging-Vector",
@@ -279,7 +279,7 @@
           },
           {
             "name": "Warning",
-            "value": "399 vendorb.example.net \" Release from ISUP  (UTRYING) \""
+            "value": "399 vendorb.example.net \"Released by peer\""
           },
           {
             "name": "P-Charging-Vector",
@@ -344,7 +344,7 @@
           },
           {
             "name": "Warning",
-            "value": "399 vendorb.example.net \" Release from ISUP  (UTRYING) \""
+            "value": "399 vendorb.example.net \"Released by peer\""
           },
           {
             "name": "P-Charging-Vector",
@@ -406,20 +406,20 @@
             "value": "INVITE, BYE, CANCEL, ACK, INFO, OPTIONS, NOTIFY, UPDATE"
           },
           {
-            "name": "P-Identifier",
-            "value": "112233335"
+            "name": "X-Vendor-Id",
+            "value": "119900007"
           },
           {
-            "name": "P-Options",
+            "name": "X-Vendor-Options",
             "value": ""
           },
           {
             "name": "P-Asserted-Identity",
-            "value": "<sip:+33000900001@carrier.example.net;user=phone>"
+            "value": "<sip:+15550900001@carrier.example.net;user=phone>"
           },
           {
-            "name": "P-Orig",
-            "value": "sbc.site.111"
+            "name": "X-Vendor-Orig",
+            "value": "edge.example.e111"
           },
           {
             "name": "P-Charging-Vector",
@@ -476,7 +476,7 @@
           },
           {
             "name": "Warning",
-            "value": "399 vendorb.example.net \" Release from ISUP  (UTRYING) \""
+            "value": "399 vendorb.example.net \"Released by peer\""
           },
           {
             "name": "P-Charging-Vector",

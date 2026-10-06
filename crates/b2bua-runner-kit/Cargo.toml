@@ -10,6 +10,8 @@ description = "Reusable B2BUA runner composition: the env -> config -> bind -> d
 workspace = true
 
 [dependencies]
+metric-catalogue = { path = "../metric-catalogue" }
+jemalloc-stats = { path = "../jemalloc-stats" }
 b2bua = { path = "../b2bua" }
 call = { path = "../call" }
 # Real HTTP transport for the default call-limiter client (LIMITER_URL).
@@ -44,6 +46,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 sip-message = { path = "../sip-message" }
+# The simulated load sampler the /metrics body test builds the overload signal with.
+load-shed = { path = "../load-shed" }
 # The limiter client's boot and re-resolve tests run a real limiter server on
 # the simulated HTTP network under the paused clock.
 call-limiter = { path = "../call-limiter" }

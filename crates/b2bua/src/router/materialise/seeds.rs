@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use call::{Call, Dialog, InviteTxnHandle, Leg, LegState, PendingRequest};
-use sip_message::header::{self, HeaderValue, Via};
+use sip_message::header::{self, HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest, SipStr};
 use sip_txn::TxnSeed;
@@ -36,13 +36,15 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
     let mut seeds = Vec::new();
     let mut branches = HashSet::new();
     let mut push = |seed: TxnSeed| {
-        let branch = match &seed {
+        // A client and a server transaction are told apart (RFC 3261 §17.1.3,
+        // §17.2.3): one of each may share a branch.
+        let (server, branch) = match &seed {
             TxnSeed::ClientInvite { invite, .. } => {
-                invite.top_via().branch().unwrap_or_default().to_string()
+                (false, invite.top_via().branch().unwrap_or_default().to_string())
             }
-            TxnSeed::ServerInvite { branch, .. } => branch.clone(),
+            TxnSeed::ServerInvite { branch, .. } => (true, branch.clone()),
         };
-        if !branch.is_empty() && branches.insert(branch) {
+        if !branch.is_empty() && branches.insert((server, branch)) {
             seeds.push(seed);
         }
     };
@@ -51,6 +53,7 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
         let invite = rebuild_a_leg_invite(&call.a_leg_invite);
         push(TxnSeed::ServerInvite {
             branch: invite.top_via().branch().unwrap_or_default().to_string(),
+            sent_by: SentBy::of(invite.top_via()),
             call_id: invite.call_id().as_str().to_string(),
             from_tag: invite.from().tag().unwrap_or_default().to_string(),
             // The tag every provisional to the caller carried (`ensure_a_dialog`);
@@ -106,7 +109,9 @@ pub(super) fn names_server_branch(call: &Call, branch: &str) -> bool {
         .flat_map(|leg| leg.dialogs.iter())
         .flat_map(|d| d.ext.inbound_pending_requests.iter())
         .filter(|p| pending_invite(p))
-        .any(|p| pending_branch(p).as_deref() == Some(branch))
+        .any(|p| {
+            pending_via(p).and_then(|v| v.branch().map(str::to_string)).as_deref() == Some(branch)
+        })
 }
 
 /// A re-INVITE round on a confirmed dialog still open for `handle`'s INVITE:
@@ -127,10 +132,10 @@ fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
         .all(|p| !p.cancelled)
 }
 
-/// The originator's top-Via branch a pending relayed request was received on.
-fn pending_branch(p: &PendingRequest) -> Option<String> {
+/// The originator's top Via a pending relayed request was received with.
+fn pending_via(p: &PendingRequest) -> Option<Via> {
     let top_via = p.source_vias.first()?;
-    Via::parse(&SipStr::owned(top_via)).ok()?.branch().map(str::to_string)
+    Via::parse(&SipStr::owned(top_via)).ok()
 }
 
 fn pending_invite(p: &PendingRequest) -> bool {
@@ -148,12 +153,13 @@ fn client_seed(handle: &InviteTxnHandle) -> Option<TxnSeed> {
 }
 
 /// The server seed for a relayed INVITE pending on one of `leg`'s dialogs:
-/// keyed by the originator's top-Via branch, matched on the originator's own
+/// keyed by the originator's top-Via branch and sent-by, matched on the originator's own
 /// Call-ID and From-tag, answered under the To-tag its To already carries,
 /// attributed to the originator's leg. The snapshot holds no request, so only
 /// the INVITE's retransmissions are absorbed.
 fn relayed_server_seed(call: &Call, leg: &Leg, pending: &PendingRequest) -> Option<TxnSeed> {
-    let branch = pending_branch(pending)?;
+    let via = pending_via(pending)?;
+    let branch = via.branch().filter(|b| !b.is_empty())?.to_string();
     let from_tag = header::From::parse(&SipStr::owned(&pending.source_from))
         .ok()?
         .tag()
@@ -167,6 +173,7 @@ fn relayed_server_seed(call: &Call, leg: &Leg, pending: &PendingRequest) -> Opti
         .unwrap_or_else(|| call.a_leg.leg_id.clone());
     Some(TxnSeed::ServerInvite {
         branch,
+        sent_by: SentBy::of(&via),
         call_id: pending.source_call_id.clone(),
         from_tag,
         to_tag,
@@ -319,6 +326,7 @@ mod tests {
             kind: Some(LegKind::Destination),
             adopted: None,
             invite_final_sent: None,
+            in_session_timer: None,
             messages: Default::default(),
             sdp_session: Default::default(),
         }
@@ -338,10 +346,11 @@ mod tests {
             source_call_id: "acid@alice".into(),
             source_from: "<sip:alice@10.0.0.1>;tag=atag".into(),
             source_to: "<sip:bob@10.0.0.9>;tag=svca".into(),
-            source_timestamp: None,
             direction: Direction::FromA,
             cancelled,
             offered_100rel: false,
+            offered: false,
+            source_timestamp: None,
         }
     }
 

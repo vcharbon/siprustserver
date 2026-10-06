@@ -103,3 +103,25 @@ describe("the two models state one claim", () => {
     }
   )
 })
+
+describe("the Via facts", () => {
+  const via = (sent_by: string, branch: string | null = "z9hG4bK1"): Flows.Via => ({ sent_by, transport: "UDP", branch })
+
+  it("reads the host of a sent-by or a socket, port dropped and IPv6 brackets kept", () => {
+    expect(Flows.hostOf("10.0.0.1:5060")).toBe("10.0.0.1")
+    expect(Flows.hostOf("10.0.0.1")).toBe("10.0.0.1")
+    expect(Flows.hostOf("[2001:db8::1]:5060")).toBe("[2001:db8::1]")
+    expect(Flows.hostOf("2001:db8::1")).toBe("2001:db8::1")
+  })
+
+  it("names one host whatever its port and its case", () => {
+    expect(Flows.sameViaHost(via("UA.example:49152"), via("ua.EXAMPLE:49170"))).toBe(true)
+    expect(Flows.sameViaHost(via("ua.example:49152"), via("ub.example:49152"))).toBe(false)
+  })
+
+  it("takes the bottom Via as the originator's", () => {
+    const msg = { via: [via("proxy:5060", "z9hG4bKp"), via("ua:5060", "z9hG4bKu")] } as unknown as Flows.Msg
+    expect(Flows.originVia(msg)?.branch).toBe("z9hG4bKu")
+    expect(Flows.originVia({} as unknown as Flows.Msg)).toBeUndefined()
+  })
+})

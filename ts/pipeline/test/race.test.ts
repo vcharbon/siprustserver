@@ -21,7 +21,7 @@ const step = (
   }) as StepDraft
 
 /**
- * The BYE glare of `capture_165814`: the callee's BYE (s11, leg B) is relayed
+ * A captured BYE glare: the callee's BYE (s11, leg B) is relayed
  * onto leg A while the caller's own BYE is 22 ms into its dwell off the same
  * anchor. Which lands first is (22 ms) against the SUT's relay latency.
  */
@@ -100,7 +100,7 @@ describe("declared races (§6.1)", () => {
 })
 
 /**
- * The teardown frontier of `capture_199978` case2 (leg A): a NOTIFY still
+ * A captured teardown frontier (leg A): a NOTIFY still
  * pending when the caller's BYE lands, and the two finals 1.5 ms apart against
  * a capture that never moved a message in under 6.7 ms. `s19` is the leg-B
  * relay of the NOTIFY, and the only thing that states the floor.

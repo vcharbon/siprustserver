@@ -14,8 +14,8 @@
 use call::helpers::mark_decision;
 use call::{Call, CallModelState, DecisionKind};
 
-use crate::event::CallEvent;
 use crate::rules::defaults::parse_label;
+use b2bua_sdk::event::CallEvent;
 
 pub(crate) use b2bua_sdk::fold_payload::{stack_authored, STACK_AUTHORED};
 

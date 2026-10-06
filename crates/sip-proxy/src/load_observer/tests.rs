@@ -235,7 +235,7 @@ fn above_critical_pins_cap_at_floor_immediately() {
 
 #[test]
 fn unknown_worker_is_admitted_bootstrap_friendly() {
-    assert!(obs().try_consume_for("unknown-worker", 1000));
+    assert!(obs().try_consume_for("unknown-worker", 1000).is_ok());
 }
 
 #[test]
@@ -248,9 +248,9 @@ fn bucket_starts_full_at_cap_initial_cps_tokens() {
     });
     o.apply_payload(W, &payload(0.7), 1000);
     for _ in 0..10 {
-        assert!(o.try_consume_for(W, 1000));
+        assert!(o.try_consume_for(W, 1000).is_ok());
     }
-    assert!(!o.try_consume_for(W, 1000));
+    assert!(o.try_consume_for(W, 1000).is_err());
 }
 
 #[test]
@@ -262,15 +262,76 @@ fn bucket_refills_at_cap_tokens_per_sec_over_elapsed_time() {
     o.apply_payload(W, &payload(0.7), 0);
     // Drain the bucket.
     for _ in 0..10 {
-        o.try_consume_for(W, 0);
+        let _ = o.try_consume_for(W, 0);
     }
-    assert!(!o.try_consume_for(W, 0));
+    assert!(o.try_consume_for(W, 0).is_err());
     // 500ms later → bucket gains 10 × 0.5 = 5 tokens.
-    assert!(o.try_consume_for(W, 500));
+    assert!(o.try_consume_for(W, 500).is_ok());
     for _ in 0..4 {
-        assert!(o.try_consume_for(W, 500));
+        assert!(o.try_consume_for(W, 500).is_ok());
     }
-    assert!(!o.try_consume_for(W, 500));
+    assert!(o.try_consume_for(W, 500).is_err());
+}
+
+// ── AIMD cap ↔ bucket coupling ────────────────────────────────────────────
+
+/// Every snapshot's bucket level is within the cap the AIMD ladder set.
+fn snap_within_cap(o: &WorkerLoadObserver, now_ms: i64) -> AimdSnapshot {
+    let snap = snap1(o, now_ms);
+    assert!(snap.tokens <= snap.cap_cps, "tokens {} above cap {}", snap.tokens, snap.cap_cps);
+    snap
+}
+
+/// A slam to the floor binds the bucket at once: a full bucket of the old cap
+/// admits one call, not a hundred.
+#[test]
+fn a_slam_to_the_floor_binds_the_bucket_at_once() {
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_initial_cps = 100.0;
+        c.cap_floor_cps = 1.0;
+    });
+    o.apply_payload(W, &payload(0.99), 1000);
+    assert_eq!(snap_within_cap(&o, 1000).cap_cps, 1.0);
+    assert!(o.try_consume_for(W, 1000).is_ok());
+    assert!(o.try_consume_for(W, 1000).is_err(), "the floor holds one token");
+    snap_within_cap(&o, 1000);
+}
+
+/// A stale sweep's decrease caps the bucket: six seconds refill a drained
+/// bucket to the old cap, the decrease then cuts it to the new one.
+#[test]
+fn a_stale_decrease_caps_the_bucket() {
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_initial_cps = 100.0;
+        c.aimd_decrease_factor = 0.75;
+        c.payload_stale_ms = 5000;
+    });
+    o.apply_payload(W, &payload(0.7), 0);
+    while o.try_consume_for(W, 0).is_ok() {}
+    assert_eq!(o.sweep_stale(6000), 1);
+    let snap = snap_within_cap(&o, 6000);
+    assert_eq!(snap.cap_cps, 75.0);
+    assert_eq!(snap.tokens, 75.0);
+}
+
+/// An increase credits the time before it at the old cap: one second after a
+/// drain at cap 105 holds 105 tokens, though the cap is now 110.
+#[test]
+fn an_increase_credits_the_time_before_it_at_the_old_cap() {
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_initial_cps = 100.0;
+        c.aimd_increase_step_cps = 5.0;
+    });
+    o.apply_payload(W, &payload(0.1), 0);
+    assert_eq!(snap_within_cap(&o, 0).cap_cps, 105.0);
+    while o.try_consume_for(W, 0).is_ok() {}
+    o.apply_payload(W, &payload(0.1), 1000);
+    let snap = snap_within_cap(&o, 1000);
+    assert_eq!(snap.cap_cps, 110.0);
+    assert_eq!(snap.tokens, 105.0);
 }
 
 // ── counter math ──────────────────────────────────────────────────────────
@@ -381,23 +442,22 @@ fn snapshot_returns_one_entry_per_known_worker() {
 
 // ── retry-after (powers SelectError::RateCapExhausted) ────────────────────
 
-/// An empty bucket reports a finite, ceil'd Retry-After; an unknown worker
-/// reports 0 (bootstrap admits, no rate-cap). Pins the value the strategy
-/// feeds into `SelectError::RateCapExhausted`.
+/// An empty bucket's refusal carries a finite, ceil'd Retry-After; an
+/// unknown worker is admitted. Pins the value the strategy feeds into
+/// `SelectError::RateCapExhausted`.
 #[test]
-fn retry_after_is_finite_when_capped_and_zero_when_unknown() {
+fn an_empty_bucket_refuses_with_its_time_to_a_token() {
     let o = obs_with(|c| {
         bands_cfg(c);
         c.cap_initial_cps = 10.0;
     });
-    assert_eq!(o.retry_after_sec_for("unknown", 1000), 0);
+    assert_eq!(o.try_consume_for("unknown", 1000), Ok(()));
     o.apply_payload(W, &payload(0.7), 1000);
     for _ in 0..10 {
-        o.try_consume_for(W, 1000);
+        assert_eq!(o.try_consume_for(W, 1000), Ok(()));
     }
-    assert!(!o.try_consume_for(W, 1000)); // drained
-                                          // empty bucket, cap=10/s → (1-0)/10 = 0.1 → ceil = 1s.
-    assert_eq!(o.retry_after_sec_for(W, 1000), 1);
+    // Empty bucket, cap 10/s: (1 - 0) / 10 = 0.1 s, ceil'd to 1 s.
+    assert_eq!(o.try_consume_for(W, 1000), Err(1));
 }
 
 // ── the band-change line ──────────────────────────────────────────────────

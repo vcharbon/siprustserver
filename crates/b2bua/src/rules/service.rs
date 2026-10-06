@@ -2,20 +2,20 @@
 //! helpers that wire a service's declared rules and `init` seeds through the
 //! executor.
 //!
-//! The *authoring* surface — the [`define_service!`] / [`sm_rule!`] macros and
-//! the registry types [`ServiceSeed`] / [`ServiceDef`] — moved to the public
-//! Rule SDK (`b2bua-sdk`, ADR-0016 slice 6) so an out-of-tree service crate has
-//! no dependency on `b2bua`. The glue below stays here because it needs the
-//! engine ([`ActionExecutor`], [`HandlerResult`]); it is re-exported through
-//! `crate::rules` so in-tree call sites are unchanged.
+//! The *authoring* surface — the [`define_service!`](b2bua_sdk::define_service) /
+//! [`sm_rule!`](b2bua_sdk::sm_rule) macros and the registry types [`ServiceSeed`] /
+//! [`ServiceDef`] — lives in the public Rule SDK (`b2bua-sdk`), so an out-of-tree
+//! service crate has no dependency on `b2bua`. The glue below needs the engine
+//! ([`ActionExecutor`], [`HandlerResult`]) and is re-exported through
+//! `crate::rules`.
 
 use call::MachineId;
 
 use crate::effects::HandlerResult;
-use crate::event::CallEvent;
+use b2bua_sdk::event::CallEvent;
 
 use super::actions::ActionExecutor;
-use super::model::{RuleCall, RuleContext};
+use b2bua_sdk::model::{RuleCall, RuleContext};
 
 // Re-export the authoring registry types so `crate::rules::{ServiceDef,
 // ServiceSeed}` and the macros' `$crate::rules::…` references resolve identically

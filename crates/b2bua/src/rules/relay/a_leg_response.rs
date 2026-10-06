@@ -4,7 +4,7 @@
 //! transaction is refused.
 
 use call::Call;
-use sip_message::generators::{self, response_states_contact, GenerateResponseOpts};
+use sip_message::generators::{self, response_states_own_contact, GenerateResponseOpts};
 use sip_message::header::{self, MediaType};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
@@ -15,7 +15,8 @@ use crate::effects::{
 
 /// Build a UAS response on the a-leg's inbound INVITE (toward alice). `to_tag`
 /// pins the stable a-facing dialog tag; `contact` is stamped only where
-/// [`response_states_contact`] states it for an INVITE response; `provenance`
+/// [`response_states_own_contact`] states it for an INVITE response (a 3xx /
+/// 485's retry targets ride in `extra_headers`); `provenance`
 /// says whose response it is — a callee's forwarded, or this stack's own.
 ///
 /// A final (≥ 200) is admitted once per transaction (RFC 3261 §17.2.1): the
@@ -68,7 +69,7 @@ pub fn response_to_a_leg(
     );
     let opts = GenerateResponseOpts {
         to_tag,
-        contact: contact.filter(|_| response_states_contact(&Method::Invite, status)),
+        contact: contact.filter(|_| response_states_own_contact(&Method::Invite, status)),
         body,
         content_type,
         extra_headers,

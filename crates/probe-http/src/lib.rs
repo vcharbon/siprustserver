@@ -17,14 +17,11 @@
 //! - everything else — `404`.
 //!
 //! ## Why one module
-//! This was two near-identical hand-rolled copies (one inline in `b2bua-runner`,
-//! one as `sip-proxy`'s `MetricsServer`). Only two things ever differed across
-//! them — the `/metrics` body and the readiness predicate — and they are exactly
-//! the two closures of [`ProbeRoutes`]. Everything else (the accept loop, the
-//! exact-path match, the response framing, the **fully-idle connection cut**,
-//! the flamegraph route) is shared transport that previously lived hardened in
-//! one copy and un-hardened in the other. Folding it here makes the hardening
-//! apply to both by construction.
+//! The two servers differ only in the `/metrics` body and the readiness
+//! predicate — exactly the two closures of [`ProbeRoutes`]. Everything else (the
+//! accept loop, the exact-path match, the response framing, the **fully-idle
+//! connection cut**, the flamegraph route) is shared transport, so the hardening
+//! applies to both by construction.
 //!
 //! ## Fully-idle connection cut (auto resource exclusion, not DDoS)
 //! The observability port is internal to the cluster, so this is not DDoS

@@ -80,7 +80,7 @@ pub struct Census {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sut: Option<SutSet>,
     /// Rules run beside the WIRE vocabulary to take their baseline (see
-    /// [`scan_with`]). Sweep configuration, not a result: it is not reported.
+    /// [`scan_with`](super::scan_with)). Sweep configuration, not a result: it is not reported.
     #[serde(skip)]
     pub candidates: Vec<RfcRule>,
 }

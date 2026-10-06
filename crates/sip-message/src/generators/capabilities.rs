@@ -208,6 +208,28 @@ impl Default for CapabilitySet {
     }
 }
 
+/// Whether RFC 3261 §20 Tables 2 and 3 admit header `name` on a request of
+/// `method`. A "-" cell is "not applicable": the sender MUST NOT place the
+/// header there. Only the advertisement family is read (`Allow`, `Supported`,
+/// `Accept`, `Accept-Encoding`, `Accept-Language`): an ACK admits none of it,
+/// a CANCEL only `Supported`; every other name and method is admitted.
+pub fn admitted_on(name: &str, method: &crate::method::Method) -> bool {
+    use crate::method::Method;
+    let named = |h: HeaderName| h.matches(name);
+    let accept_family = named(HeaderName::Accept)
+        || named(HeaderName::AcceptEncoding)
+        || named(HeaderName::AcceptLanguage);
+    let supported = named(HeaderName::Supported);
+    if !(accept_family || supported || named(HeaderName::Allow)) {
+        return true;
+    }
+    match method {
+        Method::Ack => false,
+        Method::Cancel => supported,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +366,21 @@ mod tests {
         assert_eq!(entries[0].text().as_str(), B2BUA_ALLOW);
         assert_eq!(entries[1].text().as_str(), B2BUA_SUPPORTED);
         assert_eq!(entries[2].text().as_str(), B2BUA_ACCEPT);
+    }
+
+    /// RFC 3261 §20 Tables 2 and 3: an ACK admits no Allow, Supported or
+    /// Accept family header; a CANCEL admits Supported alone; an INVITE all.
+    #[test]
+    fn the_rfc_tables_bound_the_advertisement_family_on_requests() {
+        use crate::method::Method;
+        for name in ["Allow", "Supported", "Accept", "Accept-Encoding", "accept-language"] {
+            assert!(!admitted_on(name, &Method::Ack), "{name} on ACK");
+            assert!(admitted_on(name, &Method::Invite), "{name} on INVITE");
+        }
+        assert!(admitted_on("Supported", &Method::Cancel));
+        assert!(!admitted_on("Allow", &Method::Cancel));
+        assert!(!admitted_on("Accept", &Method::Cancel));
+        assert!(admitted_on("Allow-Events", &Method::Ack), "not in the RFC 3261 tables");
+        assert!(admitted_on("User-Agent", &Method::Ack));
     }
 }

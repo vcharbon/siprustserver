@@ -51,6 +51,9 @@ pub enum TransactionEvent {
         branch: String,
         call_ref: Option<String>,
         leg_id: Option<String>,
+        /// The `ci` mark of the call incarnation that sent the request, from
+        /// its Via beside `cr` / `lg`.
+        incarnation_mark: Option<String>,
         /// SIP method of the timed-out transaction (INVITE / BYE / …).
         method: Option<String>,
         /// The destination the timed-out request was sent to, forwarded from the

@@ -29,8 +29,3 @@ layer-harness = { path = "../layer-harness" }
 sip-clock = { path = "../sip-clock" }
 sip-message = { path = "../sip-message" }
 rfc-rules = { path = "../rfc-rules" }
-
-[dev-dependencies]
-# `test-util` adds the paused-clock lever (`tokio::time::pause`/`advance`) the
-# BufferedUdpEndpoint sweep/idle-TTL tests drive (`#[tokio::test(start_paused)]`).
-tokio = { workspace = true, features = ["test-util"] }

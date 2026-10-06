@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+use sip_message::header::SentBy;
 use sip_message::SipRequest;
 
 /// One INVITE transaction to rebuild, typed on the record's terms
@@ -17,8 +18,9 @@ pub enum TxnSeed {
     /// keyed by the INVITE's top-Via branch and attributed from its Via `cr` /
     /// `lg` params. The INVITE bound is armed; no retransmit ladder runs.
     ClientInvite { invite: SipRequest, dest: SocketAddr },
-    /// A server INVITE this side admitted and has not answered: keyed by
-    /// `branch`, matched by a CANCEL on `call_id` + `from_tag`. `to_tag` is the
+    /// A server INVITE this side admitted and has not answered: keyed by the
+    /// top-Via `branch` and `sent_by` of the INVITE (RFC 3261 §17.2.3),
+    /// matched by a CANCEL on them and `call_id` + `from_tag`. `to_tag` is the
     /// To-tag the node that held it already put on a provisional, so every
     /// response this layer sends on the transaction carries the tag the peer's
     /// early dialog holds (RFC 3261 §17.2.1); `None` when none went out yet.
@@ -29,6 +31,7 @@ pub enum TxnSeed {
     /// answer 481 (§9.2).
     ServerInvite {
         branch: String,
+        sent_by: SentBy,
         call_id: String,
         from_tag: String,
         to_tag: Option<String>,

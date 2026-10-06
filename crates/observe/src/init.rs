@@ -156,10 +156,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::admission::activation_bucket;
     use crate::admission::SampleAdmission;
     use crate::call_span::{CallIdentity, CallSpan, TraceEvent};
     use crate::rate_draw::RateDraw;
-    use crate::token_bucket::TokenBucket;
 
     /// A `MakeWriter` collecting what the fmt layer renders.
     #[derive(Clone, Default)]
@@ -202,10 +202,9 @@ mod tests {
 
         tracing::info!(node = "w-0", peer = "w-1", "takeover complete");
 
-        let lease =
-            SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0))
-                .admit(None, 0)
-                .expect("the gate is wide open in this fixture");
+        let lease = SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), activation_bucket(0))
+            .admit(None, 0)
+            .expect("the gate is wide open in this fixture");
         let span =
             CallSpan::open(lease, CallIdentity { call_id: "c1@host", from_tag: "ft", to_tag: "" });
         span.record(TraceEvent::new("sip.in", 0, "alice").with_body(b"INVITE sip:bob SIP/2.0"));

@@ -1,17 +1,17 @@
 //! Workspace automation. Run via `cargo run -p xtask -- <task>`.
 //!
 //! Tasks:
-//!   abnf-regen [N]      Regenerate the frozen ABNF corpus from the vendored
+//!   abnf-regen \[N\]    Regenerate the frozen ABNF corpus from the vendored
 //!                       grammars using `abnfgen` (external binary; install per
 //!                       crates/sip-message/tests/abnf/README.md). N samples per
-//!                       target, default 1000. Writes tests/abnf/corpus/<t>.txt.
+//!                       target, default 1000. Writes `tests/abnf/corpus/<t>.txt`.
 //!   state-machine-docs  Regenerate the committed callflow state-machine diagrams
-//!                       (ADR-0016) under docs/sm/<machine>.md from the composed
+//!                       (ADR-0016) under `docs/sm/<machine>.md` from the composed
 //!                       service registry. A CI test asserts the committed files
 //!                       match this output (drift fails CI).
 //!   e2e-schema          Regenerate the committed JSON Schemas for the authored
-//!                       E2E test-management docs (ADR-0018 Phase D) under
-//!                       e2e/schemas/<doc>.schema.json from the e2e-core model.
+//!                       E2E test-management docs (ADR-0018) under
+//!                       `e2e/schemas/<doc>.schema.json` from the e2e-core model.
 //!                       Authored files reference them via `$schema`.
 //!
 //! The corpus is committed so CI is deterministic and needs no external

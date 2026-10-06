@@ -1,4 +1,4 @@
-//! Media folding (ADR-0018 Phase J): a media-exchanging Callflow shape
+//! Media folding (ADR-0018): a media-exchanging Callflow shape
 //! deposits per-agent [`MediaCapture`]s on the [`InfraRuntime`](crate::infra::InfraRuntime);
 //! this module classifies each recording (the `media-harness` spectral MFCC
 //! classifier), writes it as a sibling `<agent>.received.wav` (PCM16 mono

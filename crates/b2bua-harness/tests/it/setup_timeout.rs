@@ -1,32 +1,30 @@
 //! Setup-timeout (a-leg initial-INVITE transaction deadline).
 //!
-//! Endurance 2026-06-12: a `kill_worker` crash caught ~169 calls **mid-setup**
-//! (b-leg INVITE sent, no final response yet). Their only timers were the
-//! route-time `GlobalDuration` (1 h) + `LimiterRefresh`, so the reclaimed
-//! copies sat `Active` for a full hour — holding their **limiter slots** (the
-//! cap20 SIPp stream pinned at 15/20 for ~50 min) and refreshing them every
-//! 300 s, invisible to the reaper. The per-b-leg `NoAnswer` timer is NOT the
-//! fix: it is route-supplied (the endurance adapter supplies `None`) and
-//! reroute/failover creates fresh b-legs, each needing its own.
+//! A worker crash can catch calls **mid-setup** (b-leg INVITE sent, no final
+//! response yet). With only the route-time `GlobalDuration` (1 h) +
+//! `LimiterRefresh` armed, the reclaimed copies would sit `Active` for a full
+//! hour — holding their **limiter slots** and refreshing them every 300 s,
+//! invisible to the reaper. The per-b-leg `NoAnswer` timer does not cover it:
+//! it is route-supplied (a route may supply `None`) and reroute/failover
+//! creates fresh b-legs, each needing its own.
 //!
-//! The fix is a single **call-level `SetupTimeout`** anchored on the calling
+//! The guard is a single **call-level `SetupTimeout`** anchored on the calling
 //! leg: armed at route time (so it rides the replicated `call.timers` ledger
 //! and survives crash → reclaim), untouched by reroutes, cancelled at answer.
 //! On fire for a still-unanswered call: 408 to the a-leg, CANCEL the pending
 //! b-leg(s), terminate — which settles the obligations (the limiter release +
 //! CDR) through the ordinary enforce path.
 
+use call::LimiterEntry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
-};
+use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -43,8 +41,7 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 /// (`invite_txn_timeout_sec`, default 158 s) so the rules path owns the
 /// teardown (clean 408 + CANCEL + obligations) while the txn timer stays the
 /// lower-layer backstop. The torn-down test rides the *default* deliberately:
-/// the regression is that a default-configured worker leaks setup-stalled
-/// calls.
+/// a default-configured worker must not leak setup-stalled calls.
 const DEFAULT_SETUP_TIMEOUT: Duration = Duration::from_secs(150);
 
 fn laddr() -> SocketAddr {
@@ -69,7 +66,7 @@ fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn Ca
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -83,7 +80,7 @@ fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
 /// A call that rings forever (b-leg never sends a final response) must be torn
 /// down at the **setup timeout** — 408 to the caller, CANCEL to the ringing
 /// b-leg — and must release its limiter hold then, NOT an hour later at the
-/// GlobalDuration cap. Pre-fix this wedges `Active` holding the limiter slot.
+/// GlobalDuration cap. Unguarded, it would wedge `Active` holding the limiter slot.
 #[tokio::test(start_paused = true)]
 async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter() {
     let h = Harness::new("b2bua-setup-timeout");
@@ -97,8 +94,8 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
         .limiter(limiter_client(&http))
         .limiter_store(store.clone())
         // Isolate the timer mechanism: the reaper's liveness policy has its own
-        // suite (`reaper_liveness.rs`); in production the reaper was masked by
-        // the LimiterRefresh self-touch, so it must not save this test either.
+        // suite (`reaper_liveness.rs`); the setup timeout must reap on its own,
+        // without the reaper's help.
         .tune(|c| c.reaper_enabled = false)
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
@@ -124,7 +121,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
 
     // The caller gets its final 408 IMMEDIATELY (setup-timeout answers the a-leg
     // explicitly), and the ringing b-leg gets a CANCEL. Call teardown, however,
-    // now HOLDS until that CANCEL resolves — the call-liveness ordering fix: a
+    // HOLDS until that CANCEL resolves — the call-liveness ordering: a
     // ringing b-leg's internal CANCEL must quiesce (its 487, or a crossing 200
     // reaped by ACK+BYE) before RemoveCall, so a 200 crossing the CANCEL is never
     // stranded on a removed call. So the reap completes when bob answers 487, NOT
@@ -143,7 +140,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
         "setup-stalled call torn down once the ringing b-leg's CANCEL resolves (not the 1h GlobalDuration)",
     );
 
-    // The limiter hold is released once teardown completes (the leak fixed by this test).
+    // The limiter hold is released once teardown completes (the leak this test guards).
     settle_until(|| store.stats().current_total == 0).await;
 
     // CDR records the setup timeout; per-call state fully reclaimed.

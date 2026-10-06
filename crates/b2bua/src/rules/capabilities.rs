@@ -41,7 +41,7 @@ use call::features::{AdvertisedCapabilities, FeatureActivations, RelayFirst18xSt
 use call::{Call, LegKind};
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{Allow, HeaderName, Supported};
-use sip_message::{SipHeader, SipRequest};
+use sip_message::{SipHeader, SipRequest, SipStr};
 
 /// The face of the back-to-back UA an advertisement is emitted on. The two are
 /// declared independently, so a bridge between asymmetric domains can narrow
@@ -88,17 +88,7 @@ pub fn declared_advert_headers(
     features: Option<&FeatureActivations>,
     face: Face,
 ) -> Vec<HeaderName> {
-    let Some(declared) = declared_face(features, face) else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    if declared.allow.is_some() {
-        names.push(HeaderName::Allow);
-    }
-    if declared.supported.is_some() {
-        names.push(HeaderName::Supported);
-    }
-    names
+    b2bua_sdk::in_dialog_relay::declared_halves(features, face == Face::Originator)
 }
 
 /// The face's declaration inside `features`, if any.
@@ -106,11 +96,7 @@ fn declared_face(
     features: Option<&FeatureActivations>,
     face: Face,
 ) -> Option<&AdvertisedCapabilities> {
-    let arm = features?.advertise_capabilities.as_ref()?;
-    match face {
-        Face::Originator => arm.toward_originator.as_ref(),
-        Face::Originated => arm.toward_originated.as_ref(),
-    }
+    b2bua_sdk::in_dialog_relay::declared_face(features, face == Face::Originator)
 }
 
 /// The set the call DECLARED for `face`, or `None` when it declared none.
@@ -130,24 +116,23 @@ pub fn for_leg(call: &Call, leg_id: &str) -> CapabilitySet {
     advertised(call, Face::of_leg(leg_id))
 }
 
-/// The set a re-INVITE the B2BUA originates on `leg_id` states: `Allow` and
-/// `Supported` as [`for_leg`]; `Accept` (RFC 3261 §20.1) is the one the INVITE
-/// that dialled the leg stated (`dialling_invite`), so a peer the stack dialled
-/// reads one statement of acceptable bodies over the dialog's life. Toward the
-/// originator, and on a dialled leg whose INVITE stated none, no `Accept`.
-pub fn for_reinvite(
-    call: &Call,
-    leg_id: &str,
-    dialling_invite: Option<&SipRequest>,
-) -> CapabilitySet {
+/// The set a re-INVITE the B2BUA originates on `leg_id` states, `creating`
+/// being the INVITE that created the leg's dialog (the one the stack sent on a
+/// leg it dialled, the originator's own on hers). `Allow` is the declared half,
+/// else the one `creating` carried: a UA's method set holds for the dialog and
+/// §13.2.1 asks an INVITE to state it. `Supported` is the declared half alone.
+/// `Accept` (RFC 3261 §20.1) is the one the dialling INVITE stated on a leg the
+/// stack dialled, so that peer reads one statement of acceptable bodies over
+/// the dialog's life; toward the originator, none.
+pub fn for_reinvite(call: &Call, leg_id: &str, creating: Option<&SipRequest>) -> CapabilitySet {
     let own = for_leg(call, leg_id);
+    let carried = creating.map(|invite| CapabilitySet::relayed(invite.headers()));
+    let allow = own.allow().cloned().or_else(|| carried.as_ref()?.allow().cloned());
     let accept = match Face::of_leg(leg_id) {
         Face::Originator => None,
-        Face::Originated => dialling_invite.and_then(|invite| {
-            CapabilitySet::relayed(invite.headers()).accept().map(<[_]>::to_vec)
-        }),
+        Face::Originated => carried.as_ref().and_then(|c| c.accept().map(<[_]>::to_vec)),
     };
-    CapabilitySet::stating(own.allow().cloned(), own.supported().cloned(), accept)
+    CapabilitySet::stating(allow, own.supported().cloned(), accept)
 }
 
 /// The set advertised on `face` for a message that carries the peer's own
@@ -195,28 +180,33 @@ pub fn relaying_for_leg(call: &Call, leg_id: &str, received: &[SipHeader]) -> Ca
 /// reliable provisionals itself, so that INVITE offers `100rel` (RFC 3262 §3)
 /// whatever the originator advertised — an offer the originator never made is
 /// not relayed back to it, and the strategy's own relay keeps its provisionals
-/// unreliable. A media leg's provisionals belong to the service that dialled
-/// it and take no offer; every other strategy offers nothing. The mint states
-/// these after every advertisement and before the call-scoped withhold, so a
-/// withheld tag still never rides.
+/// unreliable. The strategy masks the provisionals of the originator's INVITE,
+/// so only a leg dialled while that INVITE `awaits_final` takes the offer; a
+/// leg dialled after it (a transfer target) has none to mask. A media leg's
+/// provisionals belong to the service that dialled it and take no offer; every
+/// other strategy offers nothing. The mint states these after every
+/// advertisement and before the call-scoped withhold, so a withheld tag still
+/// never rides.
 pub fn offered_option_tags_in(
     features: Option<&FeatureActivations>,
     kind: Option<LegKind>,
+    awaits_final: bool,
 ) -> Vec<String> {
     let destination = kind.unwrap_or(LegKind::Destination) == LegKind::Destination;
     let acknowledges_itself = features
         .and_then(|f| f.relay_first_18x_to_180.as_ref())
         .is_some_and(|f| f.strategy == RelayFirst18xStrategy::FakePrack);
-    if destination && acknowledges_itself {
+    if destination && acknowledges_itself && awaits_final {
         vec!["100rel".to_string()]
     } else {
         Vec::new()
     }
 }
 
-/// [`offered_option_tags_in`] for the strategy `call` arms.
+/// [`offered_option_tags_in`] for the strategy `call` arms, as `call`'s
+/// originator INVITE stands now.
 pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
-    offered_option_tags_in(call.features.as_ref(), kind)
+    offered_option_tags_in(call.features.as_ref(), kind, call.a_leg.invite_final_sent.is_none())
 }
 
 /// The option tags the armed strategy WITHHOLDS from an INVITE the stack
@@ -228,8 +218,11 @@ pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
 /// originator's relayed line or a declared set — and `fake-prack` withholds
 /// it where the INVITE carries no offer, since the answer a reliable
 /// provisional would then carry is one this stack cannot acknowledge. The
-/// twin of [`offered_option_tags_in`]: the withhold outranks the offer, and
-/// it applies on EVERY mint of the call — the initial route and each leg a
+/// twin of [`offered_option_tags_in`]. `promote-pem-to-200` answers the
+/// originator with a 200 of its own and absorbs the destination's, so the
+/// destination's session interval reaches nobody who would refresh it: that
+/// strategy withholds `timer` (RFC 4028 §7.1). The withhold outranks the
+/// offer, and it applies on EVERY mint of the call — the initial route and each leg a
 /// rule creates — so the call solicits the same reliability from each callee.
 /// A media leg's provisionals belong to the service that dialled it: nothing
 /// is withheld there.
@@ -239,34 +232,72 @@ pub fn withheld_by_strategy_in(
     offers_sdp: bool,
 ) -> Vec<String> {
     let destination = kind.unwrap_or(LegKind::Destination) == LegKind::Destination;
-    let keeps_unreliable = match features.and_then(|f| f.relay_first_18x_to_180.as_ref()) {
+    let withheld: &[&str] = match features.and_then(|f| f.relay_first_18x_to_180.as_ref()) {
         Some(f) => match f.strategy {
-            RelayFirst18xStrategy::DropSdp | RelayFirst18xStrategy::KeepSdp => true,
-            RelayFirst18xStrategy::FakePrack => !offers_sdp,
-            RelayFirst18xStrategy::PromotePemTo200 => false,
+            RelayFirst18xStrategy::DropSdp | RelayFirst18xStrategy::KeepSdp => &["100rel"],
+            RelayFirst18xStrategy::FakePrack if !offers_sdp => &["100rel"],
+            RelayFirst18xStrategy::FakePrack => &[],
+            RelayFirst18xStrategy::PromotePemTo200 => &["timer"],
         },
-        None => false,
+        None => &[],
     };
-    if destination && keeps_unreliable {
-        vec!["100rel".to_string()]
+    if destination {
+        withheld.iter().map(|tag| tag.to_string()).collect()
     } else {
         Vec::new()
     }
 }
 
 /// Every option tag withheld from an INVITE `call` originates toward a leg of
-/// `kind`: the call-scoped declaration (`features.withhold_option_tags`) and
-/// the armed strategy's own ([`withheld_by_strategy_in`]), as one set — what
-/// `build_b_leg` narrows the assembled `Supported`/`Require` lines by.
+/// `kind`: the call-scoped declaration (`features.withhold_option_tags`), the
+/// armed strategy's own ([`withheld_by_strategy_in`]) and, toward a media leg,
+/// `100rel` — no service acknowledges a media leg's reliable provisionals
+/// (RFC 3262 §4) — as one set: what `build_b_leg` narrows the assembled
+/// `Supported`/`Require` lines by.
 pub fn withheld_option_tags(call: &Call, kind: Option<LegKind>, offers_sdp: bool) -> Vec<String> {
+    withheld_option_tags_in(call.features.as_ref(), kind, offers_sdp)
+}
+
+/// [`withheld_option_tags`] for the call-scoped `features`.
+pub fn withheld_option_tags_in(
+    features: Option<&FeatureActivations>,
+    kind: Option<LegKind>,
+    offers_sdp: bool,
+) -> Vec<String> {
     let mut withheld: Vec<String> =
-        call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
-    for tag in withheld_by_strategy_in(call.features.as_ref(), kind, offers_sdp) {
+        features.and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
+    let media = (kind == Some(LegKind::Media)).then(|| "100rel".to_string());
+    for tag in withheld_by_strategy_in(features, kind, offers_sdp).into_iter().chain(media) {
         if !withheld.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
             withheld.push(tag);
         }
     }
     withheld
+}
+
+/// A final to the originator's INVITE refused in the element's own name:
+/// 4xx–6xx, less the 487 that reports the request's own termination (RFC 3261
+/// §9.2, §15).
+pub(crate) fn is_minted_failure(status: u16) -> bool {
+    (400..700).contains(&status) && status != 487
+}
+
+/// Append `set`, the deployment's advertisement for a minted final, to
+/// `extra`, each half only where neither `extra` nor the decision (`stated`)
+/// names it.
+pub(crate) fn stamp_own_advertisement(
+    set: &CapabilitySet,
+    stated: impl Fn(&HeaderName) -> bool,
+    extra: &mut Vec<SipHeader>,
+) {
+    for (name, value) in set.lines() {
+        if !stated(&name) && !extra.iter().any(|h| name.matches(&h.name)) {
+            extra.push(SipHeader {
+                name: SipStr::owned(name.as_wire_str()),
+                value: SipStr::owned(&value),
+            });
+        }
+    }
 }
 
 /// Read the replicated token lists into the typed value the SIP layer stamps.
@@ -302,10 +333,11 @@ mod tests {
             refer: None,
             relay_first_18x_to_180: None,
             no_answer_timeout_sec: None,
-            call_limiters: None,
             charging_vector: None,
             withhold_option_tags: None,
-            stated_charging_vector: None,
+            stated_headers: None,
+            uncharged_media_legs: false,
+            withhold_on_relayed_provisionals: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(caps),
@@ -430,9 +462,46 @@ mod tests {
     #[test]
     fn fake_prack_offers_100rel_to_a_destination_leg_and_nothing_to_a_media_leg() {
         let features = arming(RelayFirst18xStrategy::FakePrack);
-        assert_eq!(offered_option_tags_in(Some(&features), None), ["100rel"]);
-        assert_eq!(offered_option_tags_in(Some(&features), Some(LegKind::Destination)), ["100rel"]);
-        assert!(offered_option_tags_in(Some(&features), Some(LegKind::Media)).is_empty());
+        assert_eq!(offered_option_tags_in(Some(&features), None, true), ["100rel"]);
+        assert_eq!(
+            offered_option_tags_in(Some(&features), Some(LegKind::Destination), true),
+            ["100rel"]
+        );
+        assert!(offered_option_tags_in(Some(&features), Some(LegKind::Media), true).is_empty());
+    }
+
+    /// No service acknowledges a media leg's reliable provisionals, so `100rel`
+    /// is withheld from every INVITE toward one (RFC 3262 §4: a reliable 18x
+    /// unacknowledged goes unanswered), whatever the strategy, the transparent
+    /// one included; a destination leg keeps the strategy's own withhold.
+    #[test]
+    fn a_media_leg_is_never_offered_100rel() {
+        for features in [
+            None,
+            Some(arming(RelayFirst18xStrategy::FakePrack)),
+            Some(arming(RelayFirst18xStrategy::DropSdp)),
+            Some(arming(RelayFirst18xStrategy::PromotePemTo200)),
+        ] {
+            let withheld = withheld_option_tags_in(features.as_ref(), Some(LegKind::Media), true);
+            assert!(
+                withheld.iter().any(|t| t == "100rel"),
+                "100rel withheld from a media leg under {features:?}"
+            );
+            assert!(!withheld.iter().any(|t| t == "timer"), "only 100rel: {withheld:?}");
+        }
+        assert!(withheld_option_tags_in(None, Some(LegKind::Destination), true).is_empty());
+        assert!(withheld_option_tags_in(None, None, true).is_empty());
+    }
+
+    /// A destination leg dialled after the originator's INVITE took its final
+    /// has no provisional for the strategy to mask: it is offered nothing.
+    #[test]
+    fn fake_prack_offers_nothing_once_the_originator_invite_has_its_final() {
+        let features = arming(RelayFirst18xStrategy::FakePrack);
+        assert!(offered_option_tags_in(Some(&features), None, false).is_empty());
+        assert!(
+            offered_option_tags_in(Some(&features), Some(LegKind::Destination), false).is_empty()
+        );
     }
 
     /// Any other strategy, and no strategy, offer nothing: the stack
@@ -445,7 +514,7 @@ mod tests {
             Some(arming(RelayFirst18xStrategy::KeepSdp)),
             Some(arming(RelayFirst18xStrategy::PromotePemTo200)),
         ] {
-            assert!(offered_option_tags_in(features.as_ref(), None).is_empty());
+            assert!(offered_option_tags_in(features.as_ref(), None, true).is_empty());
         }
     }
 
@@ -481,13 +550,24 @@ mod tests {
         assert_eq!(withheld_by_strategy_in(Some(&features), None, false), ["100rel"]);
     }
 
-    /// The PEM promotion and no strategy at all withhold nothing.
+    /// No strategy at all withholds nothing.
     #[test]
-    fn other_strategies_withhold_nothing() {
-        for features in [None, Some(arming(RelayFirst18xStrategy::PromotePemTo200))] {
-            for offers_sdp in [true, false] {
-                assert!(withheld_by_strategy_in(features.as_ref(), None, offers_sdp).is_empty());
-            }
+    fn no_strategy_withholds_nothing() {
+        for offers_sdp in [true, false] {
+            assert!(withheld_by_strategy_in(None, None, offers_sdp).is_empty());
+        }
+    }
+
+    /// The PEM promotion absorbs the destination's 2xx, so it withholds the
+    /// session timer from a destination leg (nobody would refresh it) and
+    /// nothing from a media leg.
+    #[test]
+    fn the_pem_promotion_withholds_the_session_timer() {
+        let features = arming(RelayFirst18xStrategy::PromotePemTo200);
+        for offers_sdp in [true, false] {
+            assert_eq!(withheld_by_strategy_in(Some(&features), None, offers_sdp), ["timer"]);
+            assert!(withheld_by_strategy_in(Some(&features), Some(LegKind::Media), offers_sdp)
+                .is_empty());
         }
     }
 }

@@ -29,7 +29,7 @@ const lineFields = {
   body: Schema.optionalKey(MsgBody),
   /**
    * The `seq` of the earliest datagram on this leg, in this direction, that this
-   * one repeats byte for byte (friction H8). Set by the caller that KNOWS it is
+   * one repeats byte for byte. Set by the caller that KNOWS it is
    * a repeat, never derived here.
    */
   repeat_of: Schema.optionalKey(Schema.Int),

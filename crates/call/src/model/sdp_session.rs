@@ -20,18 +20,19 @@ pub struct LegSdpSession {
     /// The leg whose peer wrote the description `sent_slots` restated: only a
     /// description going back to that leg is put in its stream order.
     pub sent_slots_author: Option<String>,
-    /// For that restatement: the count of the peer's offers at the time and
-    /// the `o=` value of the description it was made from. The same author's
-    /// same version with no newer peer offer is a repeat, restated at the same
-    /// version; only a response by that author can repeat the recorded key.
+    /// For that restatement: [`exchanges_opened`](Self::exchanges_opened) at
+    /// the time and the `o=` value of the description it was made from. The
+    /// same author's same version in no newer exchange of the peer is a
+    /// repeat, restated at the same version; only a response by that author
+    /// can repeat the recorded key.
     pub restated_from: Option<String>,
-    /// How many in-dialog offers the leg's peer has sent (an INVITE or UPDATE
-    /// carrying a description), counted as each is received once the call
-    /// exists — the a-leg's initial INVITE is never counted. An offer the rules
-    /// then refuse (491, 500) counts too: its only effect is that the next
-    /// unchanged description is a new version, which RFC 3264 §8 permits.
-    #[serde(default)]
-    pub offers_received: u32,
+    /// Offer/answer exchanges the leg's peer opened, counted on receipt: each
+    /// INVITE, offerless included, not meeting glare, and each UPDATE with a
+    /// description meeting no UPDATE of that peer awaiting its final and no
+    /// open INVITE offer (`b2bua_sdk::open_offer`). An
+    /// increment means only that the next restatement on the leg is a new
+    /// version; it does not mean an offer arrived or was accepted.
+    pub exchanges_opened: u32,
     /// The leg whose peer's own session the dialog carries; `None` when it is
     /// a session this stack opened (or none yet).
     pub session_author: Option<String>,
@@ -43,6 +44,5 @@ pub struct LegSdpSession {
     pub restated: bool,
     /// This stack has restated a description on this leg at least once.
     /// Never cleared: a call with any such leg has had a restatement.
-    #[serde(default)]
     pub has_restated: bool,
 }

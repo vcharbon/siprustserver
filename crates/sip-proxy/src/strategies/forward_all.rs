@@ -44,7 +44,9 @@ impl RoutingStrategy for ForwardAllStrategy {
         _msg: &SipMessage,
     ) -> DecodeResult {
         match route_param.get(TARGET_PARAM).and_then(|raw| ProxyAddr::parse(raw)) {
-            Some(target) => DecodeResult::Forward { target, is_emergency: false },
+            Some(target) => {
+                DecodeResult::Forward { target, is_emergency: false, fresh_primary: false }
+            }
             None => DecodeResult::Unknown { is_emergency: false },
         }
     }
@@ -53,6 +55,10 @@ impl RoutingStrategy for ForwardAllStrategy {
         let mut params = RouteParams::new();
         params.insert(TARGET_PARAM.to_string(), target.to_string());
         Some(params)
+    }
+    /// The cookie names an address, never a worker id.
+    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
+        None
     }
 }
 

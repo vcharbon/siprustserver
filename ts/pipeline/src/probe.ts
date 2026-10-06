@@ -10,6 +10,7 @@
 import type { Body } from "@sip/contracts"
 import { Confrontation } from "@sip/contracts"
 import { setDelta } from "./fold.js"
+import type { LegPlace } from "./leg-role.js"
 import { canonicalName } from "./wire.js"
 
 /** Where in the call a confronted message sits. */
@@ -89,6 +90,12 @@ export const shapeSides = (
  */
 export interface ProbeSite {
   readonly step: string
+  /**
+   * The role of the leg the step sits on and the way the message travelled;
+   * absent where the probe was attributed to no step. Outside
+   * {@link signature}, like the step.
+   */
+  readonly leg?: LegPlace
 }
 
 export interface HeaderProbe extends ProbeSite {
@@ -117,6 +124,21 @@ export interface HeaderProbe extends ProbeSite {
    * (RFC 3261 §20.11–§20.13, §20.24) describes nothing on either side.
    */
   readonly bodiless: boolean
+  /**
+   * Every value of this header an entity part of the REPLAYED message's
+   * multipart body states (RFC 2046 §5.1), in body order; empty where that
+   * body is no multipart. A body descriptor the replay moved off the message
+   * onto the part it describes is read here.
+   */
+  readonly inReplayedParts: ReadonlyArray<string>
+  /**
+   * On a response, every value of this header the request it answers carried
+   * as the run sent it (the leg's own request with the response's CSeq);
+   * empty on a request, or where the run sent no such request.
+   */
+  readonly inAnsweredRequest: ReadonlyArray<string>
+  /** Whether the REPLAYED message carries a body. */
+  readonly replayedCarriesBody: boolean
 }
 
 export interface ShapeProbe extends ProbeSite {

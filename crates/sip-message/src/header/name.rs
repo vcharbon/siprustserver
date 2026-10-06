@@ -52,6 +52,7 @@ known_header_names! {
     ContentEncoding => "Content-Encoding",
     ContentLanguage => "Content-Language",
     ContentLength => "Content-Length",
+    ContentTransferEncoding => "Content-Transfer-Encoding",
     ContentType => "Content-Type",
     CSeq => "CSeq",
     Date => "Date",

@@ -130,25 +130,25 @@ The floor and the grace default must move together.
 ### X4 — An on-wire CANCEL retransmits on a Timer-E ladder
 
 A CANCEL is a non-INVITE request (RFC 3261 §9.1) and owes §17.1.2.2
-retransmission over UDP, but it reuses its INVITE's branch and the txns map is
-branch-keyed, so it deliberately builds no client transaction of its own (a map
-entry would displace the live INVITE client txn). Instead the ladder rides the
-INVITE client txn as a sub-state of the parked datagram: every send that leaves
-a live txn behind it — the direct pass-through, the grace expiry, the
-first-provisional flush — arms a `CancelRetransmit` timer paced T1 → doubling →
-capped at T2. The ladder stops on the first response whose CSeq method is
-CANCEL, on the INVITE txn taking a final, on txn death (the given-up hold's
-end / displacement), and at its own 64·T1 ceiling — and the ceiling gives up on the
-CANCEL only: the INVITE client txn continues under its own bound and still owes
-a final. A superseding CANCEL replaces the parked datagram, so the ladder
-always replays the newest copy; a CANCEL matching no txn stays a raw single
-send (nothing to hang a ladder on without re-keying the map). ACK is exempt —
-a 2xx ACK is TU-owned and rides no timer (§13.2.2.4). Counter:
+retransmission over UDP, but it reuses its INVITE's branch and the client
+transaction map is keyed by branch, so it deliberately builds no client
+transaction of its own (a map entry would displace the live INVITE client txn).
+Instead the ladder rides the INVITE client txn as a sub-state of the parked
+datagram: every send that leaves a live txn behind it — the direct pass-through,
+the grace expiry, the first-provisional flush — arms a `CancelRetransmit` timer
+paced T1 → doubling → capped at T2. The ladder stops on the first response whose
+CSeq method is CANCEL, on the INVITE txn taking a final, on txn death (the
+given-up hold's end / displacement), and at its own 64·T1 ceiling — and the
+ceiling gives up on the CANCEL only: the INVITE client txn continues under its
+own bound and still owes a final. A superseding CANCEL replaces the parked
+datagram, so the ladder always replays the newest copy; a CANCEL matching no txn
+stays a raw single send (nothing to hang a ladder on without re-keying the map).
+ACK is exempt — a 2xx ACK is TU-owned and rides no timer (§13.2.2.4). Counter:
 `cancel_retransmits`.
 
 ## Pinned by
 
-`sip-txn/tests/cancel_hold.rs`, `sip-txn/tests/cancel_retransmit.rs` (X4),
+`sip-txn/tests/it/cancel_hold.rs`, `sip-txn/tests/it/cancel_retransmit.rs` (X4),
 `b2bua-harness/tests/cancel_before_provisional.rs`,
 `b2bua-harness/tests/no_answer_cancelled_call.rs`,
-`failover-harness/tests/silent_callee_no_answer_via_lb.rs` (via-LB shape, X2).
+`failover-harness/tests/it/silent_callee_no_answer_via_lb.rs` (via-LB shape, X2).

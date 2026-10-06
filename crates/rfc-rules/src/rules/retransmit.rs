@@ -15,7 +15,7 @@
 //! paced.
 //!
 //! **The occasion is one message an endpoint emitted MORE THAN ONCE**, and what
-//! makes two datagrams one message is [`Identity`]: the emitter and its
+//! makes two datagrams one message is `Identity`: the emitter and its
 //! destination, the hop, the call, the §17 transaction (top-Via branch, CSeq
 //! number and method) and, for a response, the status, the To tag and the
 //! `RSeq`. The tag is what keeps a fork's two 2xx apart — each fork answers the

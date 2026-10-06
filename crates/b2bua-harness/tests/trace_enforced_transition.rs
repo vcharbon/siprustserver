@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! End-to-end: a transition the invariant layer synthesizes reaches the trace
 //! (ADR-0026).
 //!
@@ -23,7 +24,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaSut};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -37,7 +38,7 @@ const MAX_DURATION: Duration = Duration::from_secs(MAX_DURATION_SEC as u64);
 /// A gate that samples every call.
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(2), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(2), activation_bucket(0)),
         false,
     )));
 }

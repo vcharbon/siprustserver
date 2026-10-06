@@ -248,3 +248,79 @@ async fn with_the_reaper_off_a_call_past_the_lifetime_cap_hangs_up_as_usual() {
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
+
+/// alice floods her confirmed call with INFOs while a parked call holds the
+/// only handler permit, crossing its lifetime cap of 20; she then sends a
+/// re-INVITE. A capped call runs no more requests and is ending its dialog,
+/// so the re-INVITE is answered 481 where it is refused (RFC 3261 §12.2.2),
+/// not left on its 100 Trying, and her ACK ends it at the B2BUA's
+/// transaction layer. The cap's teardown then ends the call.
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_to_a_capped_call_is_answered_481_where_it_is_refused() {
+    let s = B2buaScene::with_b2bua("b2bua-lifetime-cap-reinvite-481", |bob_port| {
+        B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
+            c.event_dispatch_concurrency = 1;
+            c.per_call_queue_depth = 1;
+            c.max_messages_per_call_lifetime = 20;
+            c.reaper_sweep_interval_sec = 3600;
+        })
+    })
+    .await;
+    let carol = s.h.agent("carol", "127.0.0.1:5062").await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
+    let answer = call.expect(200).await;
+    let dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let ids = DialogIds::of(&answer);
+
+    let mut parked = carol.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    s.h.advance(Duration::from_millis(300)).await;
+    let base = dialog.local_cseq();
+    for cseq in base + 1..=base + 30 {
+        let info = ids.info(&s.alice, cseq, &format!("flood-{cseq}"));
+        s.alice.try_send_datagram(&info, s.b2bua.addr).await.expect("the INFO leaves");
+    }
+    s.h.advance(Duration::from_millis(300)).await;
+    assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 1, "the cap is crossed");
+    while s.alice.take_queued().await.is_some() {}
+
+    let cseq = base + 31;
+    let reinvite = ids.reinvite(&s.alice, cseq, "capped-reinvite");
+    s.alice.try_send_datagram(&reinvite, s.b2bua.addr).await.expect("the re-INVITE leaves");
+    s.h.advance(Duration::from_millis(300)).await;
+    let mut finals = Vec::new();
+    while let Some(msg) = s.alice.take_queued().await {
+        if let SipMessage::Response(r) = msg {
+            if r.cseq().seq() == cseq && r.status() >= 200 {
+                finals.push(r.status());
+            }
+        }
+    }
+    assert_eq!(finals, vec![481], "the re-INVITE to a capped call is answered 481");
+    assert_eq!(s.b2bua.metrics().invite_discard_answered_total(), 1, "it is counted answered");
+    let ack = ids.ack_non_2xx(&s.alice, cseq, "capped-reinvite");
+    s.alice.try_send_datagram(&ack, s.b2bua.addr).await.expect("the ACK leaves");
+
+    // The permit frees: the INFO queued before the cap reaches bob, then the
+    // cap's teardown BYEs both parties.
+    parked.expect(503).await;
+    s.bob.receive("INFO").await.respond(200, "OK").await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    s.alice.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let cdrs = s.b2bua.cdr_records();
+    assert_eq!(
+        cdrs.iter()
+            .filter(|c| c
+                .events
+                .iter()
+                .any(|e| e.reason.as_deref() == Some("message-cap-lifetime")))
+            .count(),
+        1,
+        "the capped call writes one CDR naming the cap: {cdrs:?}"
+    );
+    s.b2bua.assert_fully_reaped();
+    let _ = s.finish().await;
+}

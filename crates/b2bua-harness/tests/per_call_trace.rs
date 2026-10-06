@@ -1,3 +1,4 @@
+// Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
 //! End-to-end: a SAMPLED call records its whole story on one root span
 //! (ADR-0026).
 //!
@@ -15,18 +16,18 @@ use std::sync::Arc;
 
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaScene};
-use observe::{RateDraw, SampleAdmission, TokenBucket};
+use observe::{activation_bucket, RateDraw, SampleAdmission};
 
 /// A gate that samples every call: an exporter is "configured", the draw always
 /// wins, and the header is not honored (this process did not opt in).
 fn sample_everything() {
     install_process_traces(Arc::new(CallTraces::new(
-        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), activation_bucket(0)),
         false,
     )));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_sampled_call_records_its_messages_decision_and_rules_on_one_span() {
     sample_everything();
     let (_log_guard, log) = observe::test_buffer();

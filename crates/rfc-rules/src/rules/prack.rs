@@ -67,7 +67,7 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 /// dialog must stay observably alive for [`PRACK_WINDOW_US`] after the
 /// provisional.
 ///
-/// **A CLOSED observation DECIDES** (issue 29 D2): end-of-stream is
+/// **A CLOSED observation DECIDES**: end-of-stream is
 /// end-of-world, so an unPRACKed reliable provisional is Violated even where a
 /// final response followed it milliseconds later — nothing was in flight when
 /// the observation stopped. The released-inside-the-window gate below is an
@@ -968,7 +968,7 @@ impl Obligation for NoPrackOf100Trying {
 /// and either party's copy is the same fact. Charges the PRACK's sender.
 ///
 /// **This reads BODY PRESENCE, never the offer/answer state machine** — it
-/// walks the view directly rather than through the family's [`Reading`],
+/// walks the view directly rather than through the family's `Reading`,
 /// because the offer is a fact about the CALL and not about either endpoint's
 /// own server transactions.
 pub struct PrackAnswers1xxOffer;

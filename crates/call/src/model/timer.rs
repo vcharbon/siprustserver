@@ -68,9 +68,32 @@ pub enum TimerType {
     ReferReinviteAnswer,
     /// Overall REFER safety timer covering the full transfer state machine.
     ReferOverallSafety,
+    /// The deadline of the answer to the adaptation HTTP request a service
+    /// sent off the call's turn, named by its `correlation_id`: the request's
+    /// budget plus a margin. In the ledger while the answer is awaited; its
+    /// expiry is the answer read as lost (ADR-0039).
+    ServiceHttpAnswer {
+        correlation_id: String,
+    },
+    /// The deadline of the answer to a service's replacement of the call's
+    /// admission set, named by its `correlation_id` and numbered `change`:
+    /// the limiter's admit budget plus a margin (ADR-0039).
+    ServiceAdmitAnswer {
+        correlation_id: String,
+        change: u64,
+    },
+    /// The deadline of the answer to a `/call/failure` consult the core sent
+    /// off the call's turn, named by the first change number the consult
+    /// reserved: the failover chain's budget plus a margin. In the ledger
+    /// while the answer is awaited; its expiry is the consult's fold read
+    /// unanswered, the `terminate` payload `unanswered` (ADR-0039).
+    FailureAnswer {
+        change: u64,
+        unanswered: serde_json::Value,
+    },
     /// A **service-owned** per-call timer (ADR-0016): `service_id` is the owning
     /// callflow service's [`MachineId`], `key` a service-chosen discriminator
-    /// (e.g. `"timer18x"`). Core schedules / cancels / replicates / restores it
+    /// (e.g. `"deadline18x"`). Core schedules / cancels / replicates / restores it
     /// like any other timer but attaches NO semantics — only the owning
     /// service's rules match its firing (exact `(service_id, key)` via a
     /// `timer_type` match column, or per-service via the `service_timers`
@@ -128,6 +151,13 @@ impl std::fmt::Debug for TimerType {
             TimerType::ReferSubscriptionExpiry => f.write_str("ReferSubscriptionExpiry"),
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),
             TimerType::ReferOverallSafety => f.write_str("ReferOverallSafety"),
+            TimerType::ServiceHttpAnswer { correlation_id } => {
+                write!(f, "ServiceHttpAnswer:{correlation_id}")
+            }
+            TimerType::ServiceAdmitAnswer { correlation_id, .. } => {
+                write!(f, "ServiceAdmitAnswer:{correlation_id}")
+            }
+            TimerType::FailureAnswer { change, .. } => write!(f, "FailureAnswer:{change}"),
             TimerType::Service { service_id, key } => {
                 write!(f, "Service:{}:{}", service_id.as_str(), key)
             }

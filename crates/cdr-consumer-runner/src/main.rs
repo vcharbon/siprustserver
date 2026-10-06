@@ -1,11 +1,12 @@
 //! `cdr-consumer-runner` — the dedicated CDR metrics consumer.
 //!
 //! Drains the RabbitMQ CDR queue the b2bua workers publish to (one record per
-//! terminated call) and turns it into Prometheus counters ([`counting`]):
+//! terminated call) and turns it into Prometheus counters
+//! ([`counting`](cdr_consumer_runner::counting)):
 //!
 //! - `cdr_consumed_total` — total number of CDRs consumed
-//! - in `json` mode, `cdr_call_duration_ms_total` — summed call duration across
-//!   all CDRs, i.e. Σ (terminated_at − created_at) — and
+//! - `cdr_call_duration_ms_total` — summed call duration across all CDRs,
+//!   i.e. Σ (terminated_at − created_at), 0 in `opaque` mode — and
 //!   `cdr_parse_errors_total` for payloads that do not decode.
 //!
 //! `opaque` mode counts deliveries whatever their format. It does NOT persist
@@ -21,9 +22,7 @@
 //! - `CDR_QUEUE`          queue name to consume    (default `cdr`)
 //! - `CDR_QUEUE_MAX_LEN`  broker `x-max-length`    (default `100000`; MUST match the producer)
 //! - `CDR_METRICS_LISTEN` Prometheus listen addr   (default `0.0.0.0:9093`)
-//! - `CDR_PAYLOAD`        `json` or `opaque`       (default `json`; see [`counting::Payload`])
-
-mod counting;
+//! - `CDR_PAYLOAD`        `json` or `opaque`       (default `json`; see `counting::Payload`)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,18 +36,14 @@ use lapin::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use counting::{Metrics, Payload};
+use cdr_consumer_runner::counting::{Metrics, Payload};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 /// Hand-rolled Prometheus exposition + liveness server (mirrors b2bua-runner).
-async fn serve_metrics(
-    addr: std::net::SocketAddr,
-    metrics: Arc<Metrics>,
-    payload: Payload,
-) -> std::io::Result<()> {
+async fn serve_metrics(addr: std::net::SocketAddr, metrics: Arc<Metrics>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "metrics server listening (/metrics)");
     loop {
@@ -59,10 +54,7 @@ async fn serve_metrics(
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let (status, body) = if req.starts_with("GET /metrics") {
-                let mut text = metrics.prometheus_text(payload);
-                // Dropped log lines + trace-admission denials (ADR-0026).
-                text.push_str(&observe::counters::prometheus_text());
-                ("200 OK", text)
+                ("200 OK", cdr_consumer_runner::metrics_body(&metrics))
             } else if req.starts_with("GET /healthz") {
                 ("200 OK", "ok\n".to_string())
             } else {
@@ -152,7 +144,7 @@ async fn main() {
 
     let m = metrics.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_metrics(addr, m, payload).await {
+        if let Err(e) = serve_metrics(addr, m).await {
             tracing::error!(error = %e, "metrics server error");
         }
     });

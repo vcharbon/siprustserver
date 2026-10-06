@@ -1,10 +1,11 @@
-//! REFER allow-path scenarios (slice 5a). Port of `tests/scenarios/refer-allow.ts`.
+//! REFER allow-path scenarios. Port of `tests/scenarios/refer-allow.ts`.
 //!
 //! Each scenario establishes an A↔B call and issues a REFER from B that the
 //! scripted `/call/refer` authorizes (`X-Api-Call` `refer-allow-c`). The B2BUA
 //! builds a C leg with held SDP and drives it through the initial
-//! INVITE/200/ACK — stopping **before** the c-realign re-INVITE (slice 5b),
-//! which the scenarios tolerate as an extra INVITE toward C.
+//! INVITE/200/ACK — stopping **before** the c-realign re-INVITE (covered by
+//! `refer_c_realign.rs`), which the scenarios tolerate as an extra INVITE
+//! toward C.
 
 use std::time::Duration;
 
@@ -102,7 +103,7 @@ async fn refer_allow_happy() {
     assert_notify(&nterm, "terminated", "SIP/2.0 200");
     nterm.respond(200, "OK").await;
 
-    // Slice 5b: c-realign re-INVITE toward C — receive it (don't reply) so the
+    // The c-realign re-INVITE toward C — receive it (don't reply) so the
     // dialog tracker stays in sync for the BYE.
     let mut charlie_dialog = charlie_uas.dialog();
     charlie.receive("INVITE").await;
@@ -263,7 +264,7 @@ async fn refer_allow_c_multiple_18x() {
     assert_notify(&nterm, "terminated", "SIP/2.0 200");
     nterm.respond(200, "OK").await;
 
-    // Slice 5b: c-realign re-INVITE toward C — receive (don't reply).
+    // The c-realign re-INVITE toward C — receive (don't reply).
     let mut charlie_dialog = charlie_uas.dialog();
     charlie.receive("INVITE").await;
 

@@ -197,6 +197,21 @@ impl Dialog {
     /// ACK carries that is not a session description — an ISUP payload
     /// (RFC 3372/3204) or a `multipart/mixed` of both. `None` sends a bare ACK.
     pub async fn ack_for_with_body(&mut self, invite_cseq: u32, body: Option<(&str, Vec<u8>)>) {
+        self.ack_carrying(invite_cseq, body, &[]).await;
+    }
+
+    /// [`ack`](Dialog::ack) of a bodiless round with the acknowledging party's
+    /// own header lines on the ACK.
+    pub async fn ack_stating(&mut self, stated: &[(&str, &str)]) {
+        self.ack_carrying(self.dialog.local_cseq, None, stated).await;
+    }
+
+    async fn ack_carrying(
+        &mut self,
+        invite_cseq: u32,
+        body: Option<(&str, Vec<u8>)>,
+        stated: &[(&str, &str)],
+    ) {
         let (content_type, bytes) = match body {
             Some((ct, bytes)) => (Some(media_type(ct)), bytes),
             None => (None, Vec::new()),
@@ -206,6 +221,7 @@ impl Dialog {
             cseq: Some(invite_cseq),
             body: bytes,
             content_type,
+            extra_headers: super::client_txn::stated_lines(stated),
             ..Default::default()
         };
         let ack = generate_ack_for_2xx(None, &self.dialog, &opts);

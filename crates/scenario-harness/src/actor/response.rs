@@ -310,8 +310,8 @@ pub(super) async fn react_response(
         // A 2xx to an in-dialog INVITE with NO pending initial INVITE: this
         // caller's own re-INVITE. ACK it IDEMPOTENTLY, re-derived from the
         // confirmed dialog + `resp.cseq`, NEVER gated on a one-shot a
-        // lost-datagram interleaving could strand (that stranding is the bug this
-        // fixes — mirrors the mux's `(Call-ID, CSeq)` re-ACK). The body follows
+        // lost-datagram interleaving could strand (mirrors the mux's
+        // `(Call-ID, CSeq)` re-ACK). The body follows
         // the round's offer/answer state ([`delayed_offer_answer`]).
         // Every such 2xx the reactor is handed is ACKed (or scheduled, under a
         // declared hold); the completion bookkeeping happens ONCE, keyed on the

@@ -11,8 +11,10 @@
 
 use std::sync::Arc;
 
-use b2bua::capacity::{simulated, Bound, CapacityGate, Level, SimulatedSystemControl};
+use b2bua::admission::Class;
+use b2bua::capacity::{simulated, CapacityGate, Level, SimulatedSystemControl};
 use b2bua::config::{CapacityConfig, Ceilings};
+use b2bua::new_calls::Refusal;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::callflow;
 use scenario_harness::{Agent, Dialog};
@@ -56,8 +58,7 @@ async fn expect_refused(alice: &Agent, bob: &Agent, b2bua: &B2buaSut, emergency:
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
 }
 
-/// Every call ended and every per-call resource released, the refused
-/// INVITEs' orphan queues included.
+/// Every call ended and every per-call resource released.
 async fn assert_all_released(b2bua: &B2buaSut, cdrs: usize) {
     settle_until(|| b2bua.cdr_records().len() == cdrs).await;
     settle_until(|| b2bua.is_reaped()).await;
@@ -72,7 +73,7 @@ fn simulated_gate() -> (CapacityGate, SimulatedSystemControl) {
 /// At the normal call ceiling a non-emergency call is refused while an
 /// emergency one is admitted; at the emergency ceiling every call is refused;
 /// once calls end, admission reopens.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_call_ceilings_refuse_then_reopen() {
     let s = B2buaScene::with_b2bua("b2bua-capacity-calls", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
@@ -86,9 +87,8 @@ async fn the_call_ceilings_refuse_then_reopen() {
     let mut urgent = establish(&s, true).await;
     expect_refused(&s.alice, &s.bob, &s.b2bua, true).await;
 
-    let gate = s.b2bua.capacity();
-    assert_eq!(gate.rejected_total(Bound::Calls, false), 1);
-    assert_eq!(gate.rejected_total(Bound::Calls, true), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityCalls, Class::Normal), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityCalls, Class::Emergency), 1);
     assert_eq!(s.b2bua.active_calls(), 2, "a refused INVITE creates no live call");
 
     s.hangup(&mut first).await;
@@ -98,14 +98,14 @@ async fn the_call_ceilings_refuse_then_reopen() {
     let mut again = establish(&s, false).await;
     s.hangup(&mut again).await;
     assert_all_released(&s.b2bua, 3).await;
-    assert_eq!(s.b2bua.metrics().overload_rejected_total(), 0, "no CPS or ELU shed");
+    assert_eq!(s.b2bua.new_calls().rejected_sum(), 2, "no CPS or ELU shed");
     s.finish().await;
 }
 
 /// While the first call's transactions are live, a transaction ceiling of 1
 /// refuses the next new call; the refused INVITE's own server transaction is
 /// not counted against it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_transaction_ceiling_refuses_a_new_call() {
     let s = B2buaScene::with_b2bua("b2bua-capacity-transactions", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
@@ -117,7 +117,7 @@ async fn the_transaction_ceiling_refuses_a_new_call() {
     let mut first = establish(&s, false).await;
     assert!(s.b2bua.txn_metrics().active_transactions() >= 1);
     expect_refused(&s.alice, &s.bob, &s.b2bua, false).await;
-    assert_eq!(s.b2bua.capacity().rejected_total(Bound::Transactions, false), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityTransactions, Class::Normal), 1);
 
     s.hangup(&mut first).await;
     assert_all_released(&s.b2bua, 1).await;
@@ -127,7 +127,7 @@ async fn the_transaction_ceiling_refuses_a_new_call() {
 /// The RSS ceilings read the injected probe: between them a non-emergency call
 /// is refused and an emergency one admitted, above the emergency one every
 /// call is refused, and below both admission reopens.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_rss_ceilings_follow_the_sampled_reading() {
     let (gate, system) = simulated_gate();
     let s = B2buaScene::with_b2bua("b2bua-capacity-rss", |bob_port| {
@@ -153,8 +153,8 @@ async fn the_rss_ceilings_follow_the_sampled_reading() {
     let mut normal = establish(&s, false).await;
     s.hangup(&mut normal).await;
 
-    assert_eq!(gate.rejected_total(Bound::Rss, false), 1);
-    assert_eq!(gate.rejected_total(Bound::Rss, true), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityRss, Class::Normal), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityRss, Class::Emergency), 1);
     assert_all_released(&s.b2bua, 2).await;
     s.finish().await;
 }
@@ -162,7 +162,7 @@ async fn the_rss_ceilings_follow_the_sampled_reading() {
 /// A capacity reject spends no CPS token: with a two-token bucket that never
 /// refills and one call slot, A takes a token, B is refused by the call
 /// ceiling, and C still finds the second token once A has ended.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_capacity_reject_spends_no_cps_token() {
     let s = B2buaScene::with_b2bua("b2bua-capacity-before-cps", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
@@ -180,8 +180,8 @@ async fn a_capacity_reject_spends_no_cps_token() {
     let mut c = establish(&s, false).await;
     s.hangup(&mut c).await;
 
-    assert_eq!(s.b2bua.capacity().rejected_total(Bound::Calls, false), 1);
-    assert_eq!(s.b2bua.metrics().overload_rejected_total(), 0, "the bucket never ran dry");
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityCalls, Class::Normal), 1);
+    assert_eq!(s.b2bua.new_calls().rejected_sum(), 1, "the bucket never ran dry");
     assert_all_released(&s.b2bua, 2).await;
     s.finish().await;
 }
@@ -190,7 +190,7 @@ async fn a_capacity_reject_spends_no_cps_token() {
 /// owed (ADR-0037 item 7): while their in-dialog traffic holds the table
 /// above it, a new call is refused 503, and the admitted calls' INFOs,
 /// re-INVITEs and BYEs still complete, each call ending with its CDR.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn past_the_new_call_ceiling_only_new_calls_are_refused() {
     let s = B2buaScene::with_b2bua("b2bua-capacity-margin", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| c.keepalive_interval_sec = 300)
@@ -227,7 +227,32 @@ async fn past_the_new_call_ceiling_only_new_calls_are_refused() {
     for dialog in &mut dialogs {
         s.hangup(dialog).await;
     }
-    assert_eq!(s.b2bua.capacity().rejected_total(Bound::Transactions, false), 1);
+    assert_eq!(s.b2bua.new_calls().rejected(Refusal::CapacityTransactions, Class::Normal), 1);
     assert_all_released(&s.b2bua, 2).await;
+    s.finish().await;
+}
+
+/// A capacity refusal is made before the dispatch offer: the refused INVITE
+/// opens no per-call queue (ADR-0037, admission bounded by memory).
+#[tokio::test(start_paused = true)]
+async fn a_capacity_refusal_opens_no_per_call_queue() {
+    let s = B2buaScene::with_b2bua("b2bua-capacity-no-queue", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
+            c.capacity.calls = Ceilings { normal: Some(1), emergency: None };
+        })
+    })
+    .await;
+
+    let mut first = establish(&s, false).await;
+    let opened = s.b2bua.metrics().creations_total();
+    expect_refused(&s.alice, &s.bob, &s.b2bua, false).await;
+    assert_eq!(
+        s.b2bua.metrics().creations_total(),
+        opened,
+        "a capacity refusal opens no per-call queue"
+    );
+
+    s.hangup(&mut first).await;
+    assert_all_released(&s.b2bua, 1).await;
     s.finish().await;
 }

@@ -1,6 +1,6 @@
 //! Emergency-call classification via Resource-Priority (RFC 4412) over a
-//! parsed request — the signal both overload tiers consult to NEVER reject an
-//! emergency call.
+//! parsed request — the signal the overload gates read to exempt an emergency
+//! call from their rate and load refusals.
 
 use crate::header::HeaderName;
 use crate::types::SipRequest;

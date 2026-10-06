@@ -121,6 +121,17 @@ impl RetainedEmission {
         (&self.datagram, (self.dest_host.as_str(), self.dest_port))
     }
 
+    /// Rebind the bytes to `now` iff they are `was`: the sender restated the
+    /// message on its way out after it was retained, and a repeat is the
+    /// message as it left. Returns whether it rebound.
+    pub fn restate(&mut self, was: &[u8], now: &[u8]) -> bool {
+        if self.datagram != was {
+            return false;
+        }
+        self.datagram = now.to_vec();
+        true
+    }
+
     /// How this emission is repeated.
     pub fn repeat(&self) -> Repeat {
         self.repeat

@@ -307,9 +307,8 @@ impl ReplServer {
                 // Send-time origin stamp for skew re-anchoring on the receiver
                 // (mirrors `drain_since`); one clock reading per bootstrap frame.
                 let origin_now_ms = self.changelog.now_ms();
-                let body = self.source.read_body(role, primary, key).await;
-                match (body, self.source.read_meta(key)) {
-                    (Some(body), Some(meta)) => frames.push(Frame::Data {
+                match self.source.read_entry(role, primary, key).await {
+                    Some((body, meta)) => frames.push(Frame::Data {
                         at: w,
                         op: repl_net::frame::Op::Put,
                         partition,
@@ -320,6 +319,8 @@ impl ReplServer {
                         origin_now_ms,
                         indexes: meta.indexes,
                         body: Some(body),
+                        answered: false,
+                        incarnation: meta.incarnation,
                     }),
                     _ => continue,
                 }

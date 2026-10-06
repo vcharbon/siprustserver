@@ -19,8 +19,8 @@
 //! stay distinguishable when the author wants them to be.
 //!
 //! Absent `bindings` = single-Input behaviour: the resolver expands the case's
-//! base input alone, so a case without a pool is byte-for-byte the historic
-//! one-identity case (tokens still expand, if authored).
+//! base input alone, so a case without a pool is a one-identity case (tokens
+//! still expand, if authored).
 //!
 //! Malformed tokens (`${seq:}`, `${bogus}`, an unclosed `${…`) are a LOUD
 //! failure: [`validate_bindings`] reports them at load time and the expander
@@ -337,8 +337,8 @@ mod tests {
         assert_eq!(last_n_digits(123456, 4), "3456");
         assert_eq!(last_n_digits(0, 1), "0");
         // End-to-end through the expander.
-        let out = expand_str("+331${seq:4}", 42, &mut |_| unreachable!()).unwrap();
-        assert_eq!(out, "+3310042");
+        let out = expand_str("+1555${seq:4}", 42, &mut |_| unreachable!()).unwrap();
+        assert_eq!(out, "+15550042");
     }
 
     #[test]

@@ -13,16 +13,14 @@
 //! hold admitted under a call of its own, so a surplus release reads below
 //! the witness instead of vanishing under the store's floor at 0.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, NoopLimiter, RefreshAnswer, RefreshCall, ReleaseAnswer,
-};
+use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::{CallLimiter, LimiterEntry, NoopLimiter};
+use b2bua_harness::limiter::doubles::spy;
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -107,8 +105,8 @@ async fn rig_with(fault: AdmitFault) -> (WitnessRig, Arc<Mutex<Vec<String>>>) {
     (rig, paths)
 }
 
-fn limiters(entries: &[(&str, i64)]) -> Vec<CallLimiterEntry> {
-    entries.iter().map(|(id, limit)| CallLimiterEntry { id: (*id).into(), limit: *limit }).collect()
+fn limiters(entries: &[(&str, i64)]) -> Vec<LimiterEntry> {
+    entries.iter().map(|(id, limit)| LimiterEntry { id: (*id).into(), limit: *limit }).collect()
 }
 
 /// A route toward bob (5070) holding `entries`.
@@ -304,35 +302,6 @@ async fn an_initial_admit_refused_at_its_cap_owes_one_release() {
     assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
 }
 
-/// Counts the requests a limiter received.
-#[derive(Default)]
-struct Requests {
-    admits: AtomicUsize,
-    releases: AtomicUsize,
-    refreshes: AtomicUsize,
-}
-
-/// A limiter that sends no request (none configured) behind a count of what
-/// the SUT asked of it.
-struct CountedNoop(Arc<Requests>);
-
-#[async_trait]
-impl CallLimiter for CountedNoop {
-    async fn admit(&self, key: &str, entries: &[LimiterEntry], release: bool) -> AdmitOutcome {
-        self.0.admits.fetch_add(1, Ordering::SeqCst);
-        NoopLimiter.admit(key, entries, release).await
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        self.0.releases.fetch_add(keys.len(), Ordering::SeqCst);
-        NoopLimiter.release(keys).await
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        self.0.refreshes.fetch_add(1, Ordering::SeqCst);
-        NoopLimiter.refresh(calls).await
-    }
-    fn report_to(&self, _: b2bua::limiter::LimiterReports) {}
-}
-
 /// An admit that sent no request (no limiter is configured) owes nothing:
 /// the call neither refreshes nor releases.
 #[tokio::test(start_paused = true)]
@@ -341,9 +310,8 @@ async fn an_admit_that_sent_no_request_owes_no_release() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let (rig, _paths) = rig_with(AdmitFault::None).await;
-    let requests = Arc::new(Requests::default());
-    let limiter = Arc::new(CountedNoop(requests.clone()));
-    let b2bua = sut(&h, routes_holding(&[("x", 10), ("y", 10)]), limiter, &rig).await;
+    let requests = spy(Arc::new(NoopLimiter));
+    let b2bua = sut(&h, routes_holding(&[("x", 10), ("y", 10)]), requests.clone(), &rig).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -357,9 +325,9 @@ async fn an_admit_that_sent_no_request_owes_no_release() {
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
 
-    assert_eq!(requests.admits.load(Ordering::SeqCst), 1);
-    assert_eq!(requests.refreshes.load(Ordering::SeqCst), 0, "no refresh");
-    assert_eq!(requests.releases.load(Ordering::SeqCst), 0, "no release owed");
+    assert_eq!(requests.admits().len(), 1);
+    assert_eq!(requests.refresh_requests(), 0, "no refresh");
+    assert_eq!(requests.released_keys().len(), 0, "no release owed");
     rig.expect_drained("nothing reached the limiter").await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;

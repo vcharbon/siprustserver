@@ -1,4 +1,4 @@
-//! The authored JSON surface (ADR-0018 Phase D): Test cases, Check sets and
+//! The authored JSON surface (ADR-0018): Test cases, Check sets and
 //! Campaigns as `serde` + `schemars::JsonSchema` documents, plus the loader and
 //! the **load-time compatibility validation** (ADR-0019): a Test case is
 //! compatible with a Callflow shape iff (i) its input satisfies the shape's

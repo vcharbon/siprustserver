@@ -1,10 +1,8 @@
 //! Byte-level cursor scanner. Port of `src/sip/parsers/custom/scanner.ts`.
 //! All character classification is direct byte comparison — zero regex.
 //!
-//! TS used `throw` as unwinding control flow, caught at the parser entry
-//! point. The Rust port surfaces those as `Result<_, SipParseError>` on the
-//! methods that threw (`read_digits`, `expect`, `expect_crlf`); the rest are
-//! infallible, matching the TS signatures.
+//! The fallible methods (`read_digits`, `expect`, `expect_crlf`) return
+//! `Result<_, SipParseError>`; the rest are infallible.
 
 use crate::error::SipParseError;
 

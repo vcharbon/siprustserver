@@ -127,7 +127,7 @@ pub struct Outcome {
     pub recording: Recording,
     pub timing: RunTiming,
     /// Every datagram the run sighted, in arrival order, each tagged with the
-    /// view it belongs to — the WIRE view of issue 22's pair. The recording is
+    /// view it belongs to — the WIRE view of the wire/TU pair. The recording is
     /// this same stream rendered per leg.
     pub wire_view: Vec<WireEntry>,
 }
@@ -2067,7 +2067,7 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     /// Record one ARRIVING datagram, with the §17.2 seam deciding whether it is
     /// a repeat: a repeat carries its `repeat_of` back-reference to the datagram
-    /// it repeats (friction H8), everything else does not. The classification is
+    /// it repeats, everything else does not. The classification is
     /// the seam's alone — this only chooses which recording door to use.
     fn record_arrival(
         &self,

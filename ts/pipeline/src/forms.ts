@@ -4,7 +4,7 @@
  */
 import type { Flows } from "@sip/contracts"
 import { classKey, type Plan } from "./plan.js"
-import { headText, uriUser } from "./wire.js"
+import { headText, uriRuns, uriUser } from "./wire.js"
 
 /**
  * Keyed by the number's class key. Built ONCE per capture: every message of the
@@ -50,7 +50,5 @@ const harvestNumbers = (m: Flows.Msg): Array<string> => {
 const IDENTITY_HEADERS =
   /^(from|f|to|t|contact|m|p-asserted-identity|p-preferred-identity|diversion|remote-party-id|history-info|refer-to|r|referred-by|b)\s*:/i
 
-const identityUris = (line: string): Array<string> => {
-  if (!IDENTITY_HEADERS.test(line)) return []
-  return [...line.matchAll(/(?:sips?|tel):[^>\s,;]+/gi)].map((m) => m[0]!)
-}
+const identityUris = (line: string): Array<string> =>
+  IDENTITY_HEADERS.test(line) ? uriRuns(line).map((r) => r.text) : []

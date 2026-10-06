@@ -25,16 +25,18 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
+    CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse, CallTreatment,
+    NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua::limiter::RefreshOutcome;
-use b2bua::limiter::{
-    AdmitOutcome, CallLimiter, LimiterEntry, RefreshAnswer, RefreshCall, ReleaseAnswer,
+use b2bua::limiter::{CallLimiter, LimiterEntry};
+use b2bua_harness::limiter::doubles::{spy, unavailable_on_nth, Spy};
+use b2bua_harness::{
+    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
-use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, WitnessRig, WITNESS_IDS};
 use call::ReleaseEventKind;
-use call_limiter::LimiterConfig;
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, LimiterConfig};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -42,62 +44,23 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// The witness rig under `cfg`, with a fail-open budget above the paused-clock
-/// HTTP round trip: a detached admit is woken inside a coarse `h.advance`,
-/// whose 100 ms chunks a production-sized budget could expire between.
+/// The witness rig under `cfg`, with a 150 ms fail-open budget.
 async fn limiter_rig_with(cfg: LimiterConfig) -> WitnessRig {
-    WitnessRig::serve(cfg, Duration::from_secs(2), None).await
+    WitnessRig::serve(cfg, Duration::from_millis(150), None).await
 }
 
 async fn limiter_rig() -> WitnessRig {
     limiter_rig_with(LimiterConfig::default()).await
 }
 
-/// A limiter whose `n`-th admit (1-based) is unavailable — the fail-open
-/// outcome of a stalled or unreachable limiter — and which otherwise delegates.
-/// With `lands`, that admit still reaches `inner` (its answer is what is lost).
-struct UnavailableOnAdmit {
-    n: usize,
-    lands: bool,
-    admits: AtomicUsize,
-    inner: Arc<dyn CallLimiter>,
+/// The admits `spy` saw that replace a call's set (`release_on_refusal`: a
+/// route fold's).
+fn replacing(spy: &Spy) -> usize {
+    spy.admits().iter().filter(|a| a.release_on_refusal).count()
 }
 
-impl UnavailableOnAdmit {
-    fn new(n: usize, lands: bool, inner: Arc<dyn CallLimiter>) -> Self {
-        Self { n, lands, admits: AtomicUsize::new(0), inner }
-    }
-}
-
-#[async_trait]
-impl CallLimiter for UnavailableOnAdmit {
-    async fn admit(
-        &self,
-        key: &str,
-        entries: &[LimiterEntry],
-        release_on_refusal: bool,
-    ) -> AdmitOutcome {
-        if self.admits.fetch_add(1, Ordering::SeqCst) + 1 == self.n {
-            if self.lands {
-                self.inner.admit(key, entries, release_on_refusal).await;
-            }
-            return AdmitOutcome::Unavailable;
-        }
-        self.inner.admit(key, entries, release_on_refusal).await
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        self.inner.release(keys).await
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        self.inner.refresh(calls).await
-    }
-    fn report_to(&self, reports: b2bua::limiter::LimiterReports) {
-        self.inner.report_to(reports);
-    }
-}
-
-fn limiters(ids: &[&str]) -> Vec<CallLimiterEntry> {
-    ids.iter().map(|id| CallLimiterEntry { id: (*id).into(), limit: 10 }).collect()
+fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
+    ids.iter().map(|id| LimiterEntry { id: (*id).into(), limit: 10 }).collect()
 }
 
 /// Delays the `n`-th `call_failure` (1-based) by `delay` before delegating.
@@ -288,8 +251,7 @@ async fn failover_admit_fails_and_the_call_outlives_the_lease(
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
     let rig = limiter_rig_with(LimiterConfig { lease_sec: SHORT_LEASE_SEC }).await;
-    let limiter: Arc<dyn CallLimiter> =
-        Arc::new(UnavailableOnAdmit::new(2, lands, rig.client.clone()));
+    let limiter = unavailable_on_nth(2, lands, rig.client.clone());
     let b2bua = B2buaSut::builder(one_failover(&["x"], &["y", "z"]))
         .limiter(limiter)
         .limiter_store(rig.store.clone())
@@ -312,7 +274,8 @@ async fn failover_admit_fails_and_the_call_outlives_the_lease(
     let mut dialog = call.ack().await;
     carol.receive("ACK").await;
     rig.expect_holds(held, "the set the limiter holds for the call").await;
-    assert_eq!(b2bua.metrics().limiter().uncounted_calls(), 0, "the call stays counted");
+    let gauge = || b2bua.metrics().limiter().uncounted_calls();
+    assert_eq!(gauge(), 1, "counted on [x], the call runs open on the route's [y, z]");
 
     // ── the call outlives two leases: its refresh keeps the set alive ─────
     for _ in 0..2 * SHORT_LEASE_SEC + 5 {
@@ -322,6 +285,11 @@ async fn failover_admit_fails_and_the_call_outlives_the_lease(
     rig.store.sweep_now();
     assert_eq!(rig.all_holds(), held, "the refreshed set outlives its lease");
     assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
+    assert_eq!(
+        gauge(),
+        if lands { 0 } else { 1 },
+        "a refresh answer stating the landed set repairs the lost answer; nothing else does"
+    );
 
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
@@ -379,8 +347,7 @@ async fn a_call_failing_open_then_failing_over(
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
     let rig = limiter_rig().await;
-    let limiter: Arc<dyn CallLimiter> =
-        Arc::new(UnavailableOnAdmit::new(1, false, rig.client.clone()));
+    let limiter = unavailable_on_nth(1, false, rig.client.clone());
     let b2bua = B2buaSut::builder(one_failover(&["x"], failover))
         .limiter(limiter)
         .limiter_store(rig.store.clone())
@@ -522,8 +489,8 @@ async fn refused_failover_route_releases_the_call_holds_before_the_re_consult() 
                     // `z` at cap 1 is refused (its witness already holds one).
                     let mut r = limited_route("127.0.0.1", 5099, &[]);
                     r.call_limiter = vec![
-                        CallLimiterEntry { id: "y".into(), limit: 10 },
-                        CallLimiterEntry { id: "z".into(), limit: 1 },
+                        LimiterEntry { id: "y".into(), limit: 10 },
+                        LimiterEntry { id: "z".into(), limit: 1 },
                     ];
                     CallTreatment::Route(r)
                 })
@@ -586,8 +553,219 @@ async fn refused_failover_route_releases_the_call_holds_before_the_re_consult() 
     );
 }
 
+/// The limiter restarts empty while bob is dialed, and calls admitted since
+/// take `x` to its cap of 10 beside the witness. Bob busies out; the failover
+/// route `[x, y]` is admitted before any refresh of the call (a ringing call
+/// does not refresh): its admit carries the call's held `[x]`, which the
+/// restarted limiter re-registers, so `x` is kept, not added, and only `y`
+/// is checked. The hangup's release frees the failover route's set.
+#[tokio::test(start_paused = true)]
+async fn failover_admit_reaching_a_restarted_limiter_keeps_the_call_s_own_ids() {
+    let h = Harness::new("reroute-holds-failover-restarted-limiter");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let mut rig = limiter_rig().await;
+    let b2bua = B2buaSut::builder(one_failover(&["x"], &["x", "y"]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
+
+    // ── the limiter restarts empty; x reaches its cap without the call ─────
+    let dead = rig.restart().await;
+    let since = vec![AdmitEntry { id: "x".into(), limit: 100 }; 9];
+    assert_eq!(rig.store.admit("since", 1, &since, false), AdmitResult::Admitted);
+    assert_eq!(rig.store.held("x"), 10, "x at its cap of 10: the witness and the calls since");
+
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    rig.expect_holds([10, 1, 0], "the failover kept the call's x and added y").await;
+    assert_eq!(rig.store.stats().admit_reregistered_calls, 1);
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    rig.expect_holds([9, 0, 0], "the hangup released the call's set").await;
+    rig.store.release(&["since"]);
+    rig.expect_drained("the calls since released theirs").await;
+    // The SUT's ledger reads the dead store, frozen with the initial route's
+    // set and the witnesses.
+    assert_eq!(dead.stats().current_total, 4);
+    b2bua.assert_fully_reaped_leaving(LimiterLeak {
+        unreleased: 0,
+        stored: dead.stats().current_total,
+        queued: Vec::new(),
+    });
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let _ = h.finish().await;
+}
+
+/// A call holding `[x]` whose failover route `[x, y]` is refused on `y` (its
+/// witness fills its cap of 1), the refusal dropping the call's set.
+/// `second` is the limiters of the re-consult's route toward carol, `third`
+/// those of the route after a second refusal. Returns the decision and the
+/// failure origins it saw.
+fn refused_then(
+    second: Vec<LimiterEntry>,
+    third: Option<Vec<LimiterEntry>>,
+) -> (Arc<ScriptedDecisionEngine>, Arc<Mutex<Vec<String>>>) {
+    let origins = Arc::new(Mutex::new(Vec::new()));
+    let seen = origins.clone();
+    let decision = ScriptedDecisionEngine::builder()
+        .fallback(|_| NewCallResponse::Route(limited_route("127.0.0.1", 5070, &["x"])))
+        .on_failure(move |req| {
+            let mut seen = seen.lock().unwrap();
+            seen.push(req.failure.origin.clone());
+            let mut r = limited_route("127.0.0.1", 5071, &[]);
+            r.call_limiter = match seen.len() {
+                1 => {
+                    r.destination.port = Some(5099);
+                    vec![
+                        LimiterEntry { id: "x".into(), limit: 10 },
+                        LimiterEntry { id: "y".into(), limit: 1 },
+                    ]
+                }
+                2 => second.clone(),
+                _ => third.clone().unwrap_or_default(),
+            };
+            CallTreatment::Route(r)
+        })
+        .build();
+    (Arc::new(decision), origins)
+}
+
+/// A refused failover route dropped the call's set: the re-consult's route
+/// states no limiter, and the call, holding nothing, sends no admit for it
+/// (the re-consult carries the empty set the refusal stated, not the `[x]`
+/// the consult was dispatched with).
+#[tokio::test(start_paused = true)]
+async fn a_re_consult_after_a_refusal_carries_the_set_the_refusal_stated() {
+    let h = Harness::new("reroute-holds-re-consult-carries-the-refusal");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig().await;
+    let limiter = spy(rig.client.clone());
+    let (decision, origins) = refused_then(Vec::new(), None);
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    assert_eq!(*origins.lock().unwrap(), ["external", "call_limiter"]);
+    assert_eq!(
+        replacing(&limiter),
+        1,
+        "the refused failover route's admit alone: a call holding nothing sends none for a \
+         route naming no limiter"
+    );
+    rig.expect_holds([0, 0, 0], "the refusal dropped the call's set").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    rig.expect_drained("nothing is held for the call").await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The limiter restarts between a refused failover route and the
+/// re-consult's admit, losing the drop fence: the re-consult's route `[x]`
+/// (its witness fills its cap of 1) carries the empty set the refusal
+/// stated, so the restarted limiter re-creates nothing and checks `x` as
+/// added, refusing it. The next re-consult's route states no limiter.
+#[tokio::test(start_paused = true)]
+async fn a_re_consult_reaching_a_restarted_limiter_re_creates_nothing_the_refusal_dropped() {
+    let h = Harness::new("reroute-holds-re-consult-restarted-limiter");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let mut rig = limiter_rig().await;
+    let limiter = spy(rig.client.clone());
+    let (scripted, origins) =
+        refused_then(vec![LimiterEntry { id: "x".into(), limit: 1 }], Some(Vec::new()));
+    let decision = Arc::new(DelayNthFailure {
+        n: 2,
+        delay: Duration::from_secs(1),
+        failures: AtomicUsize::new(0),
+        inner: scripted,
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    // ── the failover route is refused; the limiter restarts while the
+    //    re-consult is in flight ─────────────────────────────────────────────
+    h.advance(Duration::from_millis(500)).await;
+    assert_eq!(*origins.lock().unwrap(), ["external"], "the re-consult is still delayed");
+    assert_eq!(replacing(&limiter), 1, "the refused failover route's admit");
+    let dead = rig.restart().await;
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    assert_eq!(
+        *origins.lock().unwrap(),
+        ["external", "call_limiter", "call_limiter"],
+        "x, dropped by the refusal, was checked as added and refused"
+    );
+    assert_eq!(replacing(&limiter), 2, "the re-consult's [x] admit, refused");
+    assert_eq!(rig.store.stats().admit_reregistered_calls, 0);
+    rig.expect_holds([0, 0, 0], "nothing is held for the call").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    rig.expect_drained("nothing is held for the call").await;
+    // The SUT's ledger reads the dead store: the witnesses alone.
+    assert_eq!(dead.stats().current_total, 3);
+    b2bua.assert_fully_reaped_leaving(LimiterLeak {
+        unreleased: 0,
+        stored: dead.stats().current_total,
+        queued: Vec::new(),
+    });
+    let _ = h.finish().await;
+}
+
 /// The fold that replaces the set also ends the call. Initial `[x, x]`, the
-/// failover route `[x]` points at a host the target admission gate refuses:
+/// failover route `[x]` points at a host the destination allow-list refuses:
 /// the fold's dispatching task replaced the set with `[x]`, the fold's turn
 /// states it and terminates the call, whose settle releases the call once.
 /// The store drains to the witnesses.
@@ -727,8 +905,7 @@ async fn release_reroute_admit_answer_lost(
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let media = h.agent("media", "127.0.0.1:5090").await;
     let rig = limiter_rig_with(LimiterConfig { lease_sec: SHORT_LEASE_SEC }).await;
-    let limiter: Arc<dyn CallLimiter> =
-        Arc::new(UnavailableOnAdmit::new(2, true, rig.client.clone()));
+    let limiter = unavailable_on_nth(2, true, rig.client.clone());
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
@@ -878,37 +1055,6 @@ impl CallDecisionEngine for SlowRelease {
     }
 }
 
-/// Counts the admits that replace a call's set (`release_on_refusal`: a
-/// route fold's) and delegates.
-struct CountReplacingAdmits {
-    replacing: Arc<AtomicUsize>,
-    inner: Arc<dyn CallLimiter>,
-}
-
-#[async_trait]
-impl CallLimiter for CountReplacingAdmits {
-    async fn admit(
-        &self,
-        key: &str,
-        entries: &[LimiterEntry],
-        release_on_refusal: bool,
-    ) -> AdmitOutcome {
-        if release_on_refusal {
-            self.replacing.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.admit(key, entries, release_on_refusal).await
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        self.inner.release(keys).await
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        self.inner.refresh(calls).await
-    }
-    fn report_to(&self, reports: b2bua::limiter::LimiterReports) {
-        self.inner.report_to(reports);
-    }
-}
-
 /// A release consult in flight is the call's only one: the cap that raised it
 /// is spent, and nothing the established call does while the consult is
 /// pending raises another. The consult of `[x, y]`'s call answers 150 s late
@@ -925,9 +1071,7 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let media = h.agent("media", "127.0.0.1:5090").await;
     let rig = limiter_rig().await;
-    let replacing = Arc::new(AtomicUsize::new(0));
-    let limiter: Arc<dyn CallLimiter> =
-        Arc::new(CountReplacingAdmits { replacing: replacing.clone(), inner: rig.client.clone() });
+    let limiter = spy(rig.client.clone());
     let releases = Arc::new(AtomicUsize::new(0));
     let decision = Arc::new(SlowRelease {
         delay: Duration::from_secs(CONSULT_SEC),
@@ -951,7 +1095,7 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
         ),
     });
     let b2bua = B2buaSut::builder(decision)
-        .limiter(limiter)
+        .limiter(limiter.clone())
         .limiter_store(rig.store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
@@ -992,11 +1136,7 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
         rig.refresh_witnesses();
     }
     assert_eq!(releases.load(Ordering::SeqCst), 1, "one release consult while it is pending");
-    assert_eq!(
-        replacing.load(Ordering::SeqCst),
-        0,
-        "no replacing admit before the consult answers"
-    );
+    assert_eq!(replacing(&limiter), 0, "no replacing admit before the consult answers");
     rig.expect_holds([1, 1, 0], "the call still holds x and y").await;
 
     // ── the consult answers; the reroute is applied ─────────────────────────
@@ -1017,7 +1157,7 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
     bob.receive("BYE").await.respond(200, "OK").await;
     rig.expect_holds([0, 1, 1], "the applied reroute is the set the limiter holds").await;
     assert_eq!(releases.load(Ordering::SeqCst), 1, "one release consult for the call");
-    assert_eq!(replacing.load(Ordering::SeqCst), 1, "one replacing admit for the call");
+    assert_eq!(replacing(&limiter), 1, "one replacing admit for the call");
 
     // ── the rerouted call ends normally ─────────────────────────────────────
     let mut bye = dialog.bye().await;

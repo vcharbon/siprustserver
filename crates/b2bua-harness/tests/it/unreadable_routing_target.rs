@@ -1,11 +1,11 @@
 //! A routing decision naming an address no reader accepts is
 //! answered as a call outcome, never by inventing a destination.
 //!
-//! The failure mode these pin out: the B2BUA used to answer a malformed decision
-//! field by building an *opaque* URI whose host was the whole raw text, and then
-//! originating a b-leg toward it. The call died later as an unattributable
-//! resolution/transport error — or, if the fabricated host happened to resolve,
-//! reached a destination nobody named. Every scenario here asserts BOTH halves:
+//! The failure mode these pin out: a B2BUA answering a malformed decision field
+//! by building an *opaque* URI whose host is the whole raw text, then
+//! originating a b-leg toward it. The call dies later as an unattributable
+//! resolution/transport error — or, if the fabricated host happens to resolve,
+//! reaches a destination nobody named. Every scenario here asserts BOTH halves:
 //! the caller gets a final (ADR-0022's guarantee), and the callee is never dialled.
 
 use std::sync::Arc;
@@ -38,9 +38,9 @@ async fn assert_bob_was_never_dialled(bob: &scenario_harness::Agent) {
 
 // An unreadable `new_ruri` refuses the route: alice gets a 500 naming the
 // offending field, and no b-leg INVITE is ever originated.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unreadable_new_ruri_answers_500_and_dials_nobody() {
-    let h = Harness::with_transit_delay("055-ruri", 1);
+    let h = Harness::with_transit_delay("unreadable-ruri", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
@@ -78,10 +78,10 @@ async fn unreadable_new_ruri_answers_500_and_dials_nobody() {
 
 // Same refusal for the identity rewrites: a From/To URI the B2BUA cannot read is
 // not silently projected onto a host with an empty user.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unreadable_identity_rewrites_answer_500_and_dial_nobody() {
     for (field, key) in [("new_from", "new_from"), ("new_to", "new_to")] {
-        let h = Harness::with_transit_delay(format!("055-{field}"), 1);
+        let h = Harness::with_transit_delay(format!("unreadable-{field}"), 1);
         let alice = h.agent("alice", "127.0.0.1:5060").await;
         let bob = h.agent("bob", "127.0.0.1:5070").await;
         let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
@@ -117,9 +117,9 @@ async fn unreadable_identity_rewrites_answer_500_and_dial_nobody() {
 // the DEFAULT port of the same host — here `127.0.0.1:5060`, which in this
 // scenario is alice's own socket. A stated-but-unreadable port must never become
 // "whatever is listening on 5060".
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn out_of_range_destination_port_refuses_the_route() {
-    let h = Harness::with_transit_delay("055-port", 1);
+    let h = Harness::with_transit_delay("unreadable-port", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
@@ -152,9 +152,9 @@ async fn out_of_range_destination_port_refuses_the_route() {
 // A 3xx is a routing instruction the CALLER executes, so an unreadable redirect
 // target is refused whole rather than emitted as an opaque Contact. The caller
 // must not be handed an address to dial that the decision never stated.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unreadable_redirect_target_answers_500_without_a_contact() {
-    let h = Harness::with_transit_delay("055-redirect", 1);
+    let h = Harness::with_transit_delay("unreadable-redirect", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;
@@ -199,7 +199,7 @@ async fn unreadable_redirect_target_answers_500_without_a_contact() {
 // everything" would pass every assertion above.
 #[tokio::test]
 async fn readable_addresses_still_route_and_answer() {
-    let h = Harness::with_transit_delay("055-control", 1);
+    let h = Harness::with_transit_delay("unreadable-control", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let b2bua = B2buaSut::builder(plan_engine()).start(&h, "b2bua", "127.0.0.1:5080").await;

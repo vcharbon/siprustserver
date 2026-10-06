@@ -65,8 +65,8 @@ pub struct Msg {
     pub cseq_method: String,
     /// The top-Via branch, when the vantage carried it (RFC 3261 §17 names a
     /// transaction by it). `None` where the message had none or the vantage
-    /// does not record one: a rule that needs it returns `Undecidable` for that
-    /// occasion, never a guess.
+    /// does not record one: a rule that needs it states nothing it cannot pair
+    /// — an `Undecidable` occasion or none at all — never a guess.
     pub via_branch: Option<String>,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
