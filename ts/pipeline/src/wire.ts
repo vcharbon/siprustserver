@@ -42,13 +42,11 @@ const canon = (name: string): string => {
 
 /**
  * The datagram's head as text and its body as bytes, through the one decoder
- * (`Contracts.Wire`). An opaque datagram states no head at all: there is
- * nothing to read there, and pretending otherwise would invent headers the
- * capture never carried.
+ * (`Contracts.Wire`); an opaque datagram's head reads one character per byte.
  */
 const headBody = (m: Wire.Msg): readonly [string, Uint8Array] => {
   const split = Wire.headBodyOf(m)
-  return split === undefined ? ["", new Uint8Array(0)] : [split.head, split.body]
+  return [split.head, split.body]
 }
 
 const splitHead = (raw: string): string => {

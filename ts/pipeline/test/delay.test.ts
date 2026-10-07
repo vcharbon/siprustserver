@@ -216,10 +216,10 @@ describe("a minted arrival is measured inside its own transaction (§6.8)", () =
     expect(d[3]).toMatchObject({ derived: "sut-originated", from: "step:2", ms: 5 })
   })
 
-  it("leaves the 481 on its leg's previous step, as every send is", () => {
-    // A send's dwell is the actor's own decision and it decides from whatever
-    // last happened on its leg, transaction or not.
-    expect(classify(glare())[2]).toMatchObject({ derived: "measured", from: "step:2", ms: 3 })
+  it("anchors the 481 on the BYE it answers, as every owed send is", () => {
+    // A response is owed on its own transaction: the callee's own BYE sent in
+    // between is no milestone to time it from.
+    expect(classify(glare())[2]).toMatchObject({ derived: "measured", from: "step:1", ms: 8 })
   })
 
   it("falls back to the leg where the transaction has no earlier step", () => {

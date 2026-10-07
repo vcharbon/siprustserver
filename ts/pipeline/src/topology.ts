@@ -408,6 +408,20 @@ export const failureFinalTs = (flows: Flows.FlowsDoc, a: ActorObs): number | und
   return failed
 }
 
+/**
+ * When the platform gave a failed attempt up: its CANCEL of the attempt's
+ * INVITE where it sent one (RFC 3261 §9.1), else the failure final. The 487 a
+ * CANCEL draws only confirms the give-up and may cross the next attempt's
+ * INVITE on the wire. Undefined where the attempt did not fail.
+ */
+const gaveUpTs = (flows: Flows.FlowsDoc, a: ActorObs): number | undefined => {
+  const failed = failureFinalTs(flows, a)
+  if (failed === undefined) return undefined
+  const leg = flows.legs[a.origLeg]!
+  const cancel = a.msgIdxs.map((i) => leg.msgs[i]!).find((m) => Flows.isMethod(m, "CANCEL"))
+  return cancel === undefined ? failed : Math.min(failed, cancel.ts_us)
+}
+
 interface Branches {
   branches: Array<Array<number>>
   evidence: Map<number, string>
@@ -415,8 +429,8 @@ interface Branches {
 
 /**
  * Group UAS actors into called branches: same captured leg is one sequential
- * chain; across legs a chain needs POSITIVE identity evidence plus a failure
- * that preceded the next attempt and no intervening caller answer.
+ * chain; across legs a chain needs POSITIVE identity evidence plus a give-up
+ * (`gaveUpTs`) that preceded the next attempt and no intervening caller answer.
  */
 const calledBranches = (
   flows: Flows.FlowsDoc,
@@ -437,7 +451,7 @@ const calledBranches = (
     let best: { failedAt: number; b: number; ev: string } | undefined
     out.branches.forEach((br, b) => {
       const prev = raw[br[br.length - 1]!]!
-      const failedAt = failureFinalTs(flows, prev)
+      const failedAt = gaveUpTs(flows, prev)
       if (failedAt === undefined) return
       const prevStart = firstInviteTs(flows, prev)
       const answerIntervened =

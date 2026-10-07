@@ -2228,6 +2228,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let early_tag = self.fork_tag_of(step).map(str::to_string);
         let stack =
             self.stacks.get_mut(&step.leg).ok_or_else(|| fail("the leg has no stack".into()))?;
+        if let Some(n) = step.msg.target_refresh {
+            stack.refresh_target(n);
+        }
 
         // Where the CSeq is NOT the stack's to choose, an override cannot be
         // honoured, and a message that quietly kept the compliant number would
@@ -2300,7 +2303,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             Method::Update => stack
                 .update(early_tag.as_deref(), &headers, body, content_type, cseq_override)
                 .map_err(|e| fail(e.to_string()))?,
-            _ if !stack.has_dialog() && stack.sent_invite().is_none() => {
+            _ if !stack.has_dialog() && stack.sent_invite().is_none() && !stack.rings_early() => {
                 // A dialog-opening request is addressed at a party. Emitting one
                 // with an empty Request-URI, From or To puts a malformed message
                 // on the wire and calls it a replay.
@@ -2329,8 +2332,18 @@ impl<'a, 'p> Runner<'a, 'p> {
                     .out_of_dialog(method, &addresses, &headers, body, content_type, cseq_override)
                     .map_err(|e| fail(e.to_string()))?
             }
+            // A request on a leg still ringing rides the early dialog the step
+            // names, or the leg's only one (RFC 3261 §12.1.1): a callee's BYE
+            // on the dialog its provisional opened is one (§15).
             _ => stack
-                .in_dialog(method, &headers, body, content_type, cseq_override)
+                .in_dialog_on(
+                    early_tag.as_deref(),
+                    method,
+                    &headers,
+                    body,
+                    content_type,
+                    cseq_override,
+                )
                 .map_err(|e| fail(e.to_string()))?,
         };
         let message = SipMessage::Request(request);

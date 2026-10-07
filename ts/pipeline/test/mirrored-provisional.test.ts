@@ -369,4 +369,13 @@ describe("an emission on a second early dialog (§6.9, RFC 3261 §13.2.2.4)", ()
     expect(ringsOn(flow, "B", "send", 183).length).toBe(4)
     expect(ringsOn(flow, "A", "expect", 183).length).toBe(4)
   })
+
+  it("states the derived relay on the second dialog, with that dialog's own header value", () => {
+    const flow = flowOf(flows)
+    const arrivals = ringsOn(flow, "A", "expect", 183)
+    const served = (s: (typeof arrivals)[number]) => s.msg.headers?.find((h) => h.name === "P-Served-By")?.value
+    expect(arrivals.map(served)).toEqual(["node-a", "node-a", "node-b", "node-b"])
+    expect(arrivals[3]!.early).toBe(arrivals[2]!.early)
+    expect(arrivals[3]!.early).not.toBe(arrivals[1]!.early)
+  })
 })

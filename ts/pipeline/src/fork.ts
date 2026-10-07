@@ -137,7 +137,7 @@ export const stampEarlyDialogs = (
   const rang = new Map<string, Map<string, Transaction>>()
   steps.forEach((step, i) => {
     const msg = msgOf(flows, sources[i])
-    const tag = toTag(msg)
+    const tag = sources[i]?.toTag ?? toTag(msg)
     if (msg === undefined || tag === undefined || !answersInvite(msg)) return
     const perTransaction = rang.get(step.leg) ?? new Map<string, Transaction>()
     const seq = msg.summary.cseq.seq
@@ -174,7 +174,7 @@ export const stampEarlyDialogs = (
   const answered = new Map<string, string>()
   for (const [i, step] of steps.entries()) {
     const msg = msgOf(flows, sources[i])
-    const tag = toTag(msg)
+    const tag = sources[i]?.toTag ?? toTag(msg)
     if (msg === undefined || tag === undefined) continue
     if (createsDialog(msg) && !answered.has(step.leg)) answered.set(step.leg, tag)
     const early = named.get(`${step.leg} ${tag}`)

@@ -49,9 +49,9 @@ describe("the head's end", () => {
       const head = `INFO sip:b@h SIP/2.0\r\nContent-Length: 7${terminator}`
       const bytes = concat(utf8.encode(head), BLOB)
       expect(Wire.payloadOfBytes(bytes), JSON.stringify(terminator)).toEqual({ _tag: "head-body", head, body_b64: BLOB_B64 })
-      expect(Wire.headBodyOf({ raw: `${head}hello` })?.body, JSON.stringify(terminator)).toEqual(utf8.encode("hello"))
+      expect(Wire.headBodyOf({ raw: `${head}hello` }).body, JSON.stringify(terminator)).toEqual(utf8.encode("hello"))
     }
-    expect(Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\rContent-Length: 0\r" })?.body).toEqual(new Uint8Array(0))
+    expect(Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\rContent-Length: 0\r" }).body).toEqual(new Uint8Array(0))
   })
 })
 
@@ -77,13 +77,15 @@ describe("headBodyOf", () => {
   it("hands back the head as text and the body as bytes, on the text and the split arm alike", () => {
     expect(Wire.headBodyOf({ head: HEAD, body_b64: BLOB_B64 })).toEqual({ head: HEAD, body: BLOB })
     const text = Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\r\nContent-Length: 5\r\n\r\nhello" })
-    expect(text?.head).toBe("INFO sip:b@h SIP/2.0\r\nContent-Length: 5\r\n\r\n")
-    expect(text?.body).toEqual(utf8.encode("hello"))
-    expect(Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\r\n\r\n" })?.body).toEqual(new Uint8Array(0))
+    expect(text.head).toBe("INFO sip:b@h SIP/2.0\r\nContent-Length: 5\r\n\r\n")
+    expect(text.body).toEqual(utf8.encode("hello"))
+    expect(Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\r\n\r\n" }).body).toEqual(new Uint8Array(0))
   })
 
-  it("is undefined on an opaque datagram: it states no head to read", () => {
-    expect(Wire.headBodyOf({ raw_b64: "//5JTkZPIHNpcDpiQGggU0lQLzIuMA0KDQo=" })).toBeUndefined()
+  it("splits an opaque datagram bytewise, the head one character per byte", () => {
+    const split = Wire.headBodyOf({ raw_b64: "//5JTkZPIHNpcDpiQGggU0lQLzIuMA0KDQo=" })
+    expect(split.head).toBe("\xff\xfeINFO sip:b@h SIP/2.0\r\n\r\n")
+    expect(split.body).toEqual(new Uint8Array(0))
   })
 })
 

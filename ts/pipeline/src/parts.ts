@@ -40,7 +40,7 @@ export type PartsIndex = ReadonlyMap<Msg, Decomposed>
  * part's emitted byte offsets index them directly whatever arm the datagram
  * was written in.
  */
-const bodyBytes = (m: Wire.Msg): Uint8Array => Wire.headBodyOf(m)?.body ?? new Uint8Array(0)
+const bodyBytes = (m: Wire.Msg): Uint8Array => Wire.headBodyOf(m).body
 
 /** What a layout claims that its bytes cannot honour, each side in words. */
 export interface LayoutFault {

@@ -161,12 +161,13 @@ export const datagramOf = (msg: Msg): Uint8Array => {
 }
 
 /**
- * The head as text and the body as bytes. On the text arm the head runs
- * through the empty line that closes the header block (the whole datagram
- * where none does) and the body is what follows; undefined on an opaque
- * datagram, which states no head to read.
+ * The head as text and the body as bytes. The head runs through the empty
+ * line that closes the header block (the whole datagram where none does) and
+ * the body is what follows. On an opaque datagram the split is bytewise and
+ * the head reads one character per byte, as {@link textOf} renders it: a
+ * header block is ASCII structure whatever bytes a value carries.
  */
-export const headBodyOf = (msg: Msg): { readonly head: string; readonly body: Uint8Array } | undefined => {
+export const headBodyOf = (msg: Msg): { readonly head: string; readonly body: Uint8Array } => {
   const payload = payloadOf(msg)
   switch (payload._tag) {
     case "text": {
@@ -176,8 +177,11 @@ export const headBodyOf = (msg: Msg): { readonly head: string; readonly body: Ui
     }
     case "head-body":
       return { head: payload.head, body: bytesOfBase64(payload.body_b64) }
-    case "opaque":
-      return undefined
+    case "opaque": {
+      const bytes = bytesOfBase64(payload.raw_b64)
+      const headEnd = headEndOf(bytes) ?? bytes.length
+      return { head: latin1Of(bytes.subarray(0, headEnd)), body: bytes.slice(headEnd) }
+    }
   }
 }
 

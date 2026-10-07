@@ -3,7 +3,10 @@
  * classification. Every pivot delay is relative to an explicit anchor, and a
  * delay is trustworthy only at the leg that CAUSED it:
  *
- * - a `send` is origin-side, measured from the actor's previous step on the
+ * - a `send` the actor OWES on a transaction (a response, the ACK of a
+ *   non-2xx final) is measured inside that transaction (`owedCauseOf`), never
+ *   from a message of another transaction the system under test sent between;
+ * - any other `send` is origin-side, measured from the actor's previous step on the
  *   same leg (or `trigger` for the first) — unless an actor emit on ANOTHER leg
  *   is the nearer preceding instant and sits within the proximity window, in
  *   which case the send anchors THERE: two near-simultaneous originations have
@@ -55,12 +58,20 @@ export interface StepTiming {
   /** The captured CSeq number: with `typeKey`, the transaction the message rides. */
   readonly cseq: number
   readonly timerLinked: boolean
+  /**
+   * What of the message survives a relay (`relayImageOf`): equal images on two
+   * legs are the same content. Absent where the step states none.
+   */
+  readonly image?: string
 }
 
 /**
- * The index of the cross-leg emit that relayed into this arrival — the latest of
- * the same message type inside the proximity window — or -1 where the SUT minted
- * the message itself.
+ * The index of the cross-leg emit listed before this arrival that relayed into
+ * it, or -1 where the SUT minted the message itself. Among the emits of the
+ * same message type inside the proximity window, the one carrying the
+ * arrival's content (`image`) wins; among equals, the latest. Content decides
+ * before time because a relay may leave in another order than its sources
+ * arrived, and the latest emit would then collect the wrong arrival.
  *
  * ONE definition of "which emission this arrival is the relay of", shared by the
  * delay classification and by the pass that gives an unrelayed emission its
@@ -70,11 +81,20 @@ export interface StepTiming {
 export const relayOriginOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
   const s = steps[i]!
   let originIdx = -1
+  let originCarries = false
   for (let p = 0; p < i; p++) {
     const c = steps[p]!
     if (!c.emits || c.leg === s.leg || c.typeKey !== s.typeKey) continue
     if (s.ts_us - c.ts_us >= PROXIMITY_US) continue
-    if (originIdx < 0 || c.ts_us > steps[originIdx]!.ts_us) originIdx = p
+    const carries = s.image !== undefined && c.image === s.image
+    const better =
+      originIdx < 0 ||
+      (carries && !originCarries) ||
+      (carries === originCarries && c.ts_us > steps[originIdx]!.ts_us)
+    if (better) {
+      originIdx = p
+      originCarries = carries
+    }
   }
   return originIdx
 }
@@ -93,6 +113,34 @@ const transactionPredecessorOf = (steps: ReadonlyArray<StepTiming>, i: number): 
   for (let p = i - 1; p >= 0; p--) {
     const c = steps[p]!
     if (c.leg === steps[i]!.leg && transaction(c) === key) return p
+  }
+  return -1
+}
+
+/**
+ * The arrival or answer a send the scripted party OWES is timed from, or -1
+ * where the send is the party's own decision. A response is owed on its own
+ * transaction: it is measured from that transaction's latest earlier step on
+ * the leg, and an INVITE's non-2xx final also from the CANCEL that drew it
+ * (RFC 3261 §9.2). The ACK of a non-2xx final is owed to that final (§17.1.1.3).
+ * A message the system under test sent on another transaction in between never
+ * gates the owed send: a system that does not send it must still be answered.
+ */
+const owedCauseOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
+  const s = steps[i]!
+  const response = /^resp:(\d+):(.+)$/.exec(s.typeKey)
+  const answersInvite = response !== null && response[2] === "INVITE" && Number(response[1]) >= 300
+  for (let p = i - 1; p >= 0; p--) {
+    const c = steps[p]!
+    if (c.leg !== s.leg || c.cseq !== s.cseq) continue
+    if (response !== null) {
+      if (transaction(c) === transaction(s)) return p
+      if (answersInvite && !c.emits && c.typeKey === "req:CANCEL") return p
+      continue
+    }
+    if (s.typeKey !== "req:ACK") return -1
+    const acked = /^resp:(\d+):INVITE$/.exec(c.typeKey)
+    if (acked !== null && !c.emits) return Number(acked[1]) >= 300 ? p : -1
   }
   return -1
 }
@@ -117,7 +165,17 @@ export const classify = (steps: ReadonlyArray<StepTiming>): Array<ClassifiedDela
       return { ms, from: head < 0 ? "trigger" : `step:${head + 1}`, timer_linked: false, derived }
     }
     if (s.emits) {
-      out.push(coincident(steps, i) ?? anchored("measured"))
+      const owed = owedCauseOf(steps, i)
+      out.push(
+        owed >= 0
+          ? {
+              ms: Math.floor((s.ts_us - steps[owed]!.ts_us) / 1000),
+              from: `step:${owed + 1}`,
+              timer_linked: s.timerLinked,
+              derived: "measured"
+            }
+          : coincident(steps, i) ?? anchored("measured")
+      )
       return
     }
     const originIdx = relayOriginOf(steps, i)

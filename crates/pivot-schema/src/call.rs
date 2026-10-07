@@ -188,6 +188,9 @@ pub enum Cause {
     /// The attempt rang and the platform's own timer gave up: a CANCEL closed
     /// it.
     NoAnswer,
+    /// No provisional above 100 came back and the platform's own timer gave
+    /// up: a CANCEL closed an attempt that never rang.
+    NoProvisional,
     /// The callee answered busy.
     Busy,
     /// No final arrived before the transaction timed out.
@@ -207,6 +210,7 @@ impl fmt::Display for Cause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Cause::NoAnswer => f.write_str("no-answer"),
+            Cause::NoProvisional => f.write_str("no-provisional"),
             Cause::Busy => f.write_str("busy"),
             Cause::TransactionTimeout => f.write_str("transaction-timeout"),
             Cause::ClosedBye => f.write_str("closed:bye"),
@@ -222,6 +226,7 @@ impl FromStr for Cause {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "no-answer" => return Ok(Cause::NoAnswer),
+            "no-provisional" => return Ok(Cause::NoProvisional),
             "busy" => return Ok(Cause::Busy),
             "transaction-timeout" => return Ok(Cause::TransactionTimeout),
             "closed:bye" => return Ok(Cause::ClosedBye),
@@ -248,8 +253,8 @@ fn status_in(text: &str, band: std::ops::RangeInclusive<u16>) -> Result<u16, Str
 
 crate::string_token!(
     Cause,
-    "Why the platform left an attempt: `no-answer`, `busy`, `transaction-timeout`, `closed:bye`, `redirect:<3xx>` or `external:<4xx-6xx>`.",
-    "^(no-answer|busy|transaction-timeout|closed:bye|redirect:3[0-9]{2}|external:[4-6][0-9]{2})$"
+    "Why the platform left an attempt: `no-answer`, `no-provisional`, `busy`, `transaction-timeout`, `closed:bye`, `redirect:<3xx>` or `external:<4xx-6xx>`.",
+    "^(no-answer|no-provisional|busy|transaction-timeout|closed:bye|redirect:3[0-9]{2}|external:[4-6][0-9]{2})$"
 );
 
 /// The provisional-handling profile the CAPTURED system ran, in the routing

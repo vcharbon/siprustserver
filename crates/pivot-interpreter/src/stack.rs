@@ -198,6 +198,9 @@ pub struct LegStack {
     nonce: String,
     /// Branch and tag counter — one id source per leg, so a trace reads.
     ids: u64,
+    /// How many times this leg's party refreshed its remote target
+    /// ([`LegStack::refresh_target`]); its Contact user part names the count.
+    target_refreshes: u32,
 }
 
 /// The dialog identity a leg's out-of-dialog requests carry: its Call-ID and
@@ -256,7 +259,15 @@ impl LegStack {
             last_rseq: None,
             early: Vec::new(),
             ids: 0,
+            target_refreshes: 0,
         }
+    }
+
+    /// Refresh this leg's remote target for the `n`-th time (RFC 3261
+    /// §12.1.2, §12.2.1.2): from the next message on, its Contact names a user
+    /// part of its own. The host and port stay the bound socket's.
+    pub fn refresh_target(&mut self, n: u32) {
+        self.target_refreshes = n;
     }
 
     pub fn has_dialog(&self) -> bool {
@@ -306,8 +317,12 @@ impl LegStack {
     }
 
     fn contact(&self) -> header::Contact {
+        let user = match self.target_refreshes {
+            0 => self.leg.clone(),
+            n => format!("{}-{n}", self.leg),
+        };
         header::Contact::from_uri(
-            Uri::sip_user(SipStr::owned(&self.leg), SipStr::owned(&self.addr.ip().to_string()))
+            Uri::sip_user(SipStr::owned(&user), SipStr::owned(&self.addr.ip().to_string()))
                 .with_port(self.addr.port()),
         )
     }
@@ -385,7 +400,8 @@ impl LegStack {
 
     /// Compose an in-dialog request. `cseq` is a `cseq-override` (§11) and
     /// becomes the dialog's sequence number, as it does on a dialog-opening
-    /// request.
+    /// request. Before any final it rides the leg's only early dialog
+    /// ([`in_dialog_on`](Self::in_dialog_on)).
     pub fn in_dialog(
         &mut self,
         method: Method,
@@ -394,13 +410,44 @@ impl LegStack {
         content_type: Option<String>,
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
-        if !self.has_dialog {
-            return Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() });
-        }
+        self.in_dialog_on(None, method, headers, body, content_type, cseq)
+    }
+
+    /// Whether the leg rings an early dialog it can address a request on: no
+    /// final has opened a dialog yet, and a provisional under a To-tag opened
+    /// one on either side (RFC 3261 §12.1).
+    pub fn rings_early(&self) -> bool {
+        !self.has_dialog && !self.early.is_empty()
+    }
+
+    /// Compose an in-dialog request on the dialog the leg has: the one a final
+    /// opened, else the early dialog `early` names — the leg's only one where
+    /// it names none (RFC 3261 §12.1.1: a UAS's provisional under a To-tag
+    /// opens an early dialog on its side too, and a BYE may ride it, §15).
+    pub fn in_dialog_on(
+        &mut self,
+        early: Option<&str>,
+        method: Method,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+        cseq: Option<u32>,
+    ) -> Result<SipRequest, StackError> {
         let verb = in_dialog_method(&method).ok_or_else(|| StackError::UnsupportedMethod {
             leg: self.leg.clone(),
             method: method.to_string(),
         })?;
+        let fork = if self.has_dialog { None } else { Some(self.early_tag_for(early, &method)?) };
+        let dialog = match &fork {
+            None => self.dialog.clone(),
+            Some(tag) => self.early_dialog(tag).map(|e| e.dialog.clone()).ok_or_else(|| {
+                StackError::EarlyDialogUnknown {
+                    leg: self.leg.clone(),
+                    method: method.to_string(),
+                    early: tag.clone(),
+                }
+            })?,
+        };
         let via = self.via();
         let opts = GenerateInDialogRequestOpts {
             via: Some(via),
@@ -411,12 +458,38 @@ impl LegStack {
             cseq,
             ..Default::default()
         };
-        let result = generate_in_dialog_request(verb, &self.dialog, &opts);
-        self.dialog = result.dialog;
+        let result = generate_in_dialog_request(verb, &dialog, &opts);
+        match fork {
+            None => self.dialog = result.dialog,
+            Some(tag) => {
+                if let Some((_, early)) = self.early.iter_mut().find(|(known, _)| *known == tag) {
+                    early.dialog = result.dialog;
+                }
+            }
+        }
         if method == Method::Invite {
             self.sent_invites.push(result.request.clone());
         }
         Ok(result.request)
+    }
+
+    /// The early dialog a request rides: the one `early` names, else the
+    /// leg's only one. None and several are refusals: which dialog a request
+    /// rides decides which endpoint it reaches, and §14 has the tool infer
+    /// nothing.
+    fn early_tag_for(&self, early: Option<&str>, method: &Method) -> Result<String, StackError> {
+        if let Some(named) = early {
+            return Ok(named.to_string());
+        }
+        match self.early.len() {
+            0 => Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() }),
+            1 => Ok(self.early[0].0.clone()),
+            dialogs => Err(StackError::EarlyDialogAmbiguous {
+                leg: self.leg.clone(),
+                method: method.to_string(),
+                dialogs,
+            }),
+        }
     }
 
     /// Compose a response to the newest received request whose CSeq method is
@@ -612,51 +685,7 @@ impl LegStack {
         content_type: Option<String>,
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
-        if self.has_dialog {
-            return self.in_dialog(Method::Update, headers, body, content_type, cseq);
-        }
-        let tag = match early {
-            Some(named) => named.to_string(),
-            None => match self.early.len() {
-                0 => {
-                    return Err(StackError::NoDialog {
-                        leg: self.leg.clone(),
-                        method: Method::Update.to_string(),
-                    })
-                }
-                1 => self.early[0].0.clone(),
-                dialogs => {
-                    return Err(StackError::EarlyDialogAmbiguous {
-                        leg: self.leg.clone(),
-                        method: Method::Update.to_string(),
-                        dialogs,
-                    })
-                }
-            },
-        };
-        let dialog =
-            self.early_dialog(&tag).map(|early| early.dialog.clone()).ok_or_else(|| {
-                StackError::EarlyDialogUnknown {
-                    leg: self.leg.clone(),
-                    method: Method::Update.to_string(),
-                    early: tag.clone(),
-                }
-            })?;
-        let via = self.via();
-        let opts = GenerateInDialogRequestOpts {
-            via: Some(via),
-            contact: Some(self.contact()),
-            body,
-            content_type: content_type.as_deref().map(media_type),
-            extra_headers: frozen(headers),
-            cseq,
-            ..Default::default()
-        };
-        let result = generate_in_dialog_request(InDialogMethod::Update, &dialog, &opts);
-        if let Some((_, early)) = self.early.iter_mut().find(|(known, _)| *known == tag) {
-            early.dialog = result.dialog;
-        }
-        Ok(result.request)
+        self.in_dialog_on(early, Method::Update, headers, body, content_type, cseq)
     }
 
     /// The PRACK this leg owes a reliable provisional it received (RFC 3262
@@ -2123,6 +2152,30 @@ mod tests {
         assert_eq!(bye.call_id().to_string(), uas.call_id(), "one leg, one Call-ID");
     }
 
+    /// RFC 3261 §12.1.2: a provisional carrying a new Contact refreshes the
+    /// early dialog's remote target. After `refresh_target` the leg's Contact
+    /// names a user part of its own, on that message and every later one.
+    #[test]
+    fn a_target_refresh_changes_the_contact_the_leg_states() {
+        let (mut uas, _) = ringing("B");
+        let ring = |uas: &mut LegStack| {
+            let answer = Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: None,
+            };
+            let r = uas.respond(&answer, &[], Vec::new(), None).expect("a ring");
+            r.contacts().as_slice().first().expect("a 180 states a Contact").uri().to_string()
+        };
+        let first = ring(&mut uas);
+        uas.refresh_target(1);
+        let second = ring(&mut uas);
+        assert_ne!(first, second, "the refreshed target is another URI");
+        assert!(second.contains("B-1@"), "{second}");
+        assert_eq!(ring(&mut uas), second, "the refresh holds for later messages");
+    }
+
     // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
     /// A UAS ringing two forks, each under its own tag and RSeq.
@@ -2390,15 +2443,38 @@ mod tests {
         assert_eq!(re_invite.cseq().seq(), 2, "the confirmed dialog held only the INVITE's CSeq 1");
     }
 
-    /// Every other in-dialog request still waits for a confirmed dialog: PRACK
-    /// and UPDATE are the two that run inside an early one.
+    /// Before confirmation every in-dialog request rides an early dialog, so a
+    /// leg ringing several forks names which: unnamed, the request is refused,
+    /// never put on a fork the document did not choose.
     #[test]
-    fn an_in_dialog_request_that_is_no_update_still_waits_for_confirmation() {
+    fn an_early_dialog_request_names_its_fork_where_the_leg_rings_several() {
         let (mut uas, _) = forking("B");
         assert_eq!(
             uas.in_dialog(Method::Info, &[], Vec::new(), None, None),
-            Err(StackError::NoDialog { leg: "B".into(), method: "INFO".into() })
+            Err(StackError::EarlyDialogAmbiguous {
+                leg: "B".into(),
+                method: "INFO".into(),
+                dialogs: 2
+            })
         );
+        assert_eq!(
+            uas.in_dialog(Method::Bye, &[], Vec::new(), None, None),
+            Err(StackError::EarlyDialogAmbiguous {
+                leg: "B".into(),
+                method: "BYE".into(),
+                dialogs: 2
+            })
+        );
+        let bye = uas
+            .in_dialog_on(Some("B-early-f2"), Method::Bye, &[], Vec::new(), None, None)
+            .expect("the named fork");
+        assert_eq!(bye.from().tag(), Some("B-early-f2"));
+    }
+
+    /// A leg that rang nothing has no dialog to address an in-dialog request on.
+    #[test]
+    fn an_in_dialog_request_on_a_leg_that_rang_nothing_is_refused() {
+        let (mut uas, _) = ringing("B");
         assert_eq!(
             uas.in_dialog(Method::Bye, &[], Vec::new(), None, None),
             Err(StackError::NoDialog { leg: "B".into(), method: "BYE".into() })

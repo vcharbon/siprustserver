@@ -736,8 +736,10 @@ the attempt that failed; `join_evidence` explains a correlation and belongs to
 the attempt that joined.
 
 `cause` vocabulary, every member read off a captured datagram: `no-answer`,
-`busy`, `transaction-timeout`, `closed:bye`, `redirect:<3xx>`,
-`external:<4xx-6xx>`.
+`no-provisional`, `busy`, `transaction-timeout`, `closed:bye`, `redirect:<3xx>`,
+`external:<4xx-6xx>`. `no-answer` and `no-provisional` are both the platform's
+own give-up, a CANCEL closing the attempt: after a provisional above 100
+arrived, and before any did.
 
 **A `cause` may cite only two things: the attempt's own DIALOG-CREATING final,
 or an actual closer — a BYE or a CANCEL.** An in-dialog final answers a
@@ -1383,7 +1385,7 @@ A captured document carries no `after`: the chain barrier is derivable from
 "overlap": "s13"
 ```
 
-Same-leg order is list order and it BINDS (§6.7b and §6.7c are its exceptions), so a
+Same-leg order is list order and it BINDS (§6.7b, §6.7c and §6.7e are its exceptions), so a
 document that lists two steps in the order the capture happened to see them has
 decided that order. `overlap`
 is how it declines to: the two steps arm TOGETHER on their leg's frontier, and
@@ -1522,6 +1524,25 @@ under its own `check` mode as the named status's would be, and its recording
 line noted `tolerated: …` with both statuses. Nothing is failed and nothing
 retired.
 
+### 6.7e The answers a received CANCEL draws
+
+A leg that has RECEIVED a CANCEL owes two answers at once: `200` to the CANCEL,
+and a non-2xx final to the INVITE it cancels (RFC 3261 §9.2). The transaction
+layer owes both, whatever else the leg is waiting for, so a capture that shows
+the callee sending them after some other arrival — a BYE the captured platform
+sent the early dialog right after its CANCEL — shows an order one
+implementation happened to keep, not one a document can oblige.
+
+So a `send` naming `200` to a CANCEL, or a final of 300 or above to an INVITE,
+goes out past whatever stands in front of it on the leg once the leg's last
+CANCEL `expect` standing before it has COMPLETED. The bounds:
+
+- a message step only, walked to across message steps only, as §6.7c;
+- the send still fires at its own dwell, measured from its anchor (§6.8): the
+  generator anchors an owed answer inside its transaction, the CANCEL for both;
+- nothing else is reordered: the steps it walks past keep their place, and an
+  answer to the arrival it walked past (the BYE's own `200`) waits for it.
+
 ### 6.8 delay and dwell
 
 ```json
@@ -1538,6 +1559,11 @@ retired.
 Every message step carries a `delay`, auto steps included; an `inject` may carry
 one. All delays are relative to an explicit anchor; there are no absolute times
 in a pivot, and an anchor always points backwards.
+
+A generated document marks `timer_linked` on a session refresh alone — a
+re-INVITE or UPDATE inside a dialog stating `Session-Expires` (RFC 4028 §10),
+the one message a capture shows a timer sending. A response carrying the header
+answered a request and is not one.
 
 `compressible` and `timer_linked` are STATED, not derived. A lane that
 compresses reads `compressible` and nothing else. A timer-linked dwell is never
@@ -1768,21 +1794,36 @@ comparison instead of going unreferenced. It rides
 derivation the arithmetic would otherwise state:
 
 - **One arrival per emission.** Which emission an arrival relays is the delay
-  classification's own reading, and that reading is many-to-one — it takes the
-  latest emission inside its window, so two emissions milliseconds apart collect
-  BOTH their arrivals on the second. A relay emits one datagram per datagram, so
+  classification's own reading: inside its window the emission carrying the
+  arrival's content (a session description's `o=` line, or none) wins, the
+  latest among equals. That reading is many-to-one — two bare emissions
+  milliseconds apart collect BOTH their arrivals on the second. A relay emits one datagram per datagram, so
   a second arrival naming a claimed emission belongs to the nearest earlier
   unclaimed one of that status. What is left unclaimed is the deficit.
 - **Only a form the SUT was seen relaying.** The derived step copies an arrival
   the capture holds, so the emission it answers must be the SAME MESSAGE as one
   already relayed. A bare ring followed by one authorising early media is two
   different relays and neither is derived: nothing here predicts what a platform
-  makes of a message it has not been seen handling.
+  makes of a message it has not been seen handling. Across two early dialogs
+  (RFC 3261 §13.2.2.4) a header each dialog carries at one value on every
+  emission is the dialog's identity, like its To-tag, and is left out of the
+  comparison; the derived arrival rides its own dialog and takes that header's
+  value from a relay of its own dialog the capture holds, or is not derived.
 - **Never past the relaying leg's own final.** A client transaction leaves
   Proceeding when a final arrives (RFC 3261 §17.1.1.2), so a provisional the
   peer emits after that leg has taken its final reaches no transaction user and
   is relayed by nobody. A callee still ringing while its INVITE is cancelled is
   the case the corpus holds.
+
+**And a relayed arrival is listed after the emission it relays.** Capture order
+is not always causal order: a platform may relay two provisionals in another
+order than they reached it, and a vantage capturing the two directions on
+different interfaces can stamp a relay before the datagram it relays. The
+generator moves such an arrival behind its source, keyed on content: a relay
+stamped before its source only where it carries the source's session
+description (a bare message names nothing a minted one could not carry), and two
+relays of one type on one leg into the order of their sources. It rides
+`relay-placed-after-source` (§13.2).
 
 **And the far side of a relayed in-dialog INVITE the capture holds on one leg
 only is DERIVED, where the policy states the replaying platform relays it.** A
@@ -1948,6 +1989,7 @@ there.
 | `headers` | any | tier-3 frozen list, wire order |
 | `headers-present` | expects | existence checks |
 | `body` | any | §8.3 |
+| `target-refresh` | sends | the `n`-th time the leg's party refreshes its remote target (RFC 3261 §12.1.2, §12.2.1.2): the stack writes a Contact user part of its own per refresh, kept on every later message of the leg; host and port stay tier 1 |
 
 `headers` and `headers-present` are stated on an `expect` regardless of `check`.
 Under `assert` they are matched; under `record` they are the recorded value.
@@ -2903,6 +2945,7 @@ flag rides a repeated **100 Trying**, or a document some other producer marked.
 | `ack-count-drawn-from-final` | these ACK expectations carry the count they draw, naming each with the final it read, the number it composed against that final, and what the capture held (§6.3) |
 | `provisional-expect-surplus-tolerated` | these caller-facing provisional expectations were stamped `optional`: the leg holds more relayed provisionals than peer emissions anchoring them, naming each with its leg, status and run (§6.9). The subset gate accepts no `optional` in a captured document without it |
 | `relayed-provisional-expect-derived` | these caller-facing provisional expectations were derived from the emission that causes them: the leg holds fewer relayed provisionals than peer emissions, and each derived step copies a captured arrival, coordinate included, naming its leg, status, the emission it relays and the arrival it copies (§6.9) |
+| `relay-placed-after-source` | these relayed arrivals were listed after the emission carrying their content rather than at their capture instant — a relay stamped before its source, or relays out of their sources' order — naming each with the emission it relays and which of the two it was (§6.9) |
 | `far-side-reinvite-derived` | these in-dialog INVITE exchanges the capture holds on one leg only were transcribed onto the far leg, whose record ends at the 2xx its peer sent: the relaying platform has the far leg on the other end, and each derived step — the INVITE, the 2xx, the ACK, each in the op that mirrors the near leg's — copies the near-leg message it mirrors, coordinate included, naming the leg, the step its record ends at, and every pair with its op (§6.9). The subset gate accepts no second step on one coordinate of those three shapes without it |
 | `far-side-reinvite-not-derived` | these in-dialog INVITE exchanges onto a leg whose record ends at its 2xx were NOT transcribed — the platform answered the near peer's with a refusal other than 491 glare, which is its own; the near peer refused the far party's, a refusal relayed like a 2xx whose hop-by-hop ACK (§17.1.1.3) has no captured coordinate, or answered it 491, the near half of a crossing pair (§14.1) stated whole or not at all; or the far party's offer or answer is held by shape only — and the far leg scripts nothing for the relayed INVITE (§6.9) |
 
@@ -2959,7 +3002,8 @@ Its whole job:
 1. **Bind** each endpoint per its `side` and `binding`.
 2. **Sequence** the flow. Same-leg order is list order — save for a relay
    standing behind a send (§6.7b) and an answer to a transaction the leg has
-   already opened (§6.7c), which arm beside what stands in front of them —
+   already opened (§6.7c), which arm beside what stands in front of them, and
+   the answers a received CANCEL draws (§6.7e), which go out past it —
    cross-leg and cross-call order is `after`; a captured chain barrier comes
    from `attempts[].leg` plus `position`.
 3. **`send`**: emit exactly what `msg` states, plus tier-1 regeneration, plus

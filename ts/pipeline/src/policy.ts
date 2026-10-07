@@ -42,7 +42,7 @@ export interface CauseReading {
   readonly from: string
   readonly cause: Tokens.Cause
   readonly evidence: ReadonlyArray<string>
-  /** The dwell the platform's own no-answer timer ran, where it ran one. */
+  /** The dwell the platform's own give-up timer ran, where it ran one. */
   readonly after_ms?: number
 }
 

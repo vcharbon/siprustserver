@@ -60,6 +60,13 @@ pub struct MsgSpec {
     /// The body, by resource reference, multipart structure or asserted shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Body>,
+    /// On a send: the leg's party refreshes its remote target here, for the
+    /// `n`-th time (RFC 3261 §12.1.2, §12.2.1.2). The Contact host:port stays
+    /// tier 1; the stack writes a user part of its own per refresh, kept on
+    /// every later message of the leg, so two messages the capture tells apart
+    /// by their Contact alone stay two messages on the wire.
+    #[serde(rename = "target-refresh", default, skip_serializing_if = "Option::is_none")]
+    pub target_refresh: Option<u32>,
 }
 
 /// One frozen header, exactly as the capture carried it.

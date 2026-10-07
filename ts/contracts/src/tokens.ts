@@ -38,7 +38,7 @@ export const laneVerdictIsOk = (token: LaneVerdict | string): boolean => token =
 
 // --- Attempt cause (`pivot_schema::call::Cause`) -----------------------------
 
-const CAUSE = /^(no-answer|busy|transaction-timeout|closed:bye|redirect:3[0-9]{2}|external:[4-6][0-9]{2})$/
+const CAUSE = /^(no-answer|no-provisional|busy|transaction-timeout|closed:bye|redirect:3[0-9]{2}|external:[4-6][0-9]{2})$/
 
 /**
  * Why the platform left an attempt. Closed: every member is read off a captured
@@ -53,6 +53,7 @@ export type Cause = typeof Cause.Type
 
 export type CauseValue =
   | { readonly _tag: "no-answer" }
+  | { readonly _tag: "no-provisional" }
   | { readonly _tag: "busy" }
   | { readonly _tag: "transaction-timeout" }
   | { readonly _tag: "closed-bye" }
@@ -63,6 +64,8 @@ export const parseCause = (token: Cause | string): CauseValue => {
   switch (token) {
     case "no-answer":
       return { _tag: "no-answer" }
+    case "no-provisional":
+      return { _tag: "no-provisional" }
     case "busy":
       return { _tag: "busy" }
     case "transaction-timeout":
@@ -82,6 +85,7 @@ export const parseCause = (token: Cause | string): CauseValue => {
 export const causeToken = (value: CauseValue): Cause => {
   switch (value._tag) {
     case "no-answer":
+    case "no-provisional":
     case "busy":
     case "transaction-timeout":
       return value._tag as Cause
