@@ -36,12 +36,22 @@ import { identifiesSession } from "./relay-image.js"
 /**
  * Whether a step of `leg` between positions `a` and `b` stops an early-stamped
  * relay's move: any but another relayed provisional no listed emission
- * explains, itself stamped before whatever it relays.
+ * explains whose own source — a same-type emission with its content, bare
+ * included, on another leg — stands between it and the mover's source. A
+ * provisional the system under test made, or one relaying a later source,
+ * keeps the mover in front of it.
  */
 const blocksMove = (timings: ReadonlyArray<StepTiming>, leg: string, a: number, b: number): boolean =>
-  timings
-    .slice(a + 1, b)
-    .some((t, k) => t.leg === leg && !(relayedProvisional(t) && !t.emits && relayOriginOf(timings, a + 1 + k) < 0))
+  timings.slice(a + 1, b).some((t, k) => {
+    if (t.leg !== leg) return false
+    const at = a + 1 + k
+    const earlyRelay =
+      relayedProvisional(t) &&
+      !t.emits &&
+      relayOriginOf(timings, at) < 0 &&
+      timings.slice(at + 1, b).some((c) => c.emits && c.leg !== leg && c.typeKey === t.typeKey && c.image === t.image)
+    return !earlyRelay
+  })
 
 /**
  * How much earlier than its source a vantage capturing the two directions on
@@ -73,7 +83,9 @@ export const placeRelaysAfterSources = (input: PlacementInput): Array<Placed> =>
     }
   }
 
-  for (let i = 0; i < steps.length; i++) {
+  // Last to first: a later early relay is placed before an earlier one tries
+  // to pass it, so two early answers both land behind their own sources.
+  for (let i = steps.length - 1; i >= 0; i--) {
     const s = timings[i]!
     if (s.emits || !relayedProvisional(s) || !identifiesSession(s.image) || relayOriginOf(timings, i) >= 0) {
       continue
@@ -90,9 +102,8 @@ export const placeRelaysAfterSources = (input: PlacementInput): Array<Placed> =>
     if (source < 0 || blocksMove(timings, s.leg, i, source)) continue
     placed.push({ step: steps[i]!, source: steps[source]!, why: "stamped-before-source" })
     // Removing `i` shifts the source down by one: inserting at `source` lands
-    // the arrival just after it. The step now at `i` is examined next.
+    // the arrival just after it. Every step below `i` keeps its place.
     move(i, source)
-    i--
   }
 
   const origins = timings.map((t, i) => (t.emits || !relayedProvisional(t) ? -1 : relayOriginOf(timings, i)))

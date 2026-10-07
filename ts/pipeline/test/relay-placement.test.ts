@@ -68,3 +68,50 @@ describe("two relays stamped before their sources", () => {
     expect(placed(timings)).toEqual([2, 3, 4, 1])
   })
 })
+
+describe("an early answering relay and the steps it must not pass", () => {
+  const x = "sdp:o=x 1 1 IN IP4 h"
+  const y = "sdp:o=y 1 1 IN IP4 h"
+
+  it("keeps two early answers in their order when their sources run the same way", () => {
+    const timings = [
+      timing("A", false, "resp:183:INVITE", 100, 1, x),
+      timing("A", false, "resp:183:INVITE", 101, 1, y),
+      timing("B", true, "resp:183:INVITE", 220, 1, x),
+      timing("B", true, "resp:183:INVITE", 221, 1, y)
+    ]
+    expect(placed(timings)).toEqual([3, 1, 4, 2])
+  })
+
+  it("places three early answers each behind its own source, in order", () => {
+    const z = "sdp:o=z 1 1 IN IP4 h"
+    const timings = [
+      timing("A", false, "resp:183:INVITE", 100, 1, x),
+      timing("A", false, "resp:183:INVITE", 101, 1, y),
+      timing("A", false, "resp:183:INVITE", 102, 1, z),
+      timing("B", true, "resp:183:INVITE", 220, 1, x),
+      timing("B", true, "resp:183:INVITE", 221, 1, y),
+      timing("B", true, "resp:183:INVITE", 222, 1, z)
+    ]
+    expect(placed(timings)).toEqual([4, 1, 5, 2, 6, 3])
+  })
+
+  it("keeps an early 180 with an answer and an early 183 with another apart", () => {
+    const timings = [
+      timing("A", false, "resp:180:INVITE", 100, 1, x),
+      timing("A", false, "resp:183:INVITE", 101, 1, y),
+      timing("B", true, "resp:180:INVITE", 220, 1, x),
+      timing("B", true, "resp:183:INVITE", 221, 1, y)
+    ]
+    expect(placed(timings)).toEqual([3, 1, 4, 2])
+  })
+
+  it("never passes a provisional the system under test made itself", () => {
+    const timings = [
+      timing("A", false, "resp:183:INVITE", 100, 1, x),
+      timing("A", false, "resp:180:INVITE", 101, 1, "bare"),
+      timing("B", true, "resp:183:INVITE", 220, 1, x)
+    ]
+    expect(placed(timings)).toEqual([1, 2, 3])
+  })
+})
