@@ -2093,6 +2093,36 @@ mod tests {
         );
     }
 
+    /// RFC 3261 §12.1.1: a provisional the UAS sends under a To-tag opens an
+    /// early dialog on its side too. A BYE the callee puts on it (§15 forbids
+    /// it to the callee, and peers still send one) rides that dialog: the
+    /// leg's Call-ID, its own tag on the From, the caller's on the To. It is
+    /// never a dialog-opening request, which this leg cannot address.
+    #[test]
+    fn a_callee_bye_on_its_early_dialog_rides_that_dialog() {
+        let (mut uas, invite) = ringing("B");
+        let caller_tag = invite.from().tag().expect("the INVITE carried a From-tag").to_string();
+        uas.respond(
+            &Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee rings under a tag");
+        let bye = uas
+            .in_dialog(Method::Bye, &[], Vec::new(), None, None)
+            .expect("the callee BYEs its early dialog");
+        assert_eq!(bye.method(), Method::Bye);
+        assert_eq!(bye.from().tag(), Some("B-early-f1"), "the BYE rides the early dialog");
+        assert_eq!(bye.to().tag(), Some(caller_tag.as_str()), "the peer's tag is the caller's");
+        assert_eq!(bye.call_id().to_string(), uas.call_id(), "one leg, one Call-ID");
+    }
+
     // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
     /// A UAS ringing two forks, each under its own tag and RSeq.

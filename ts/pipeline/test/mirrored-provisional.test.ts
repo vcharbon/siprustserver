@@ -10,6 +10,7 @@ import { synthesize } from "../src/flowsteps.js"
 import { build } from "../src/topology.js"
 import type { Vantage } from "../src/selection.js"
 import {
+  ANSWER_SDP,
   CALLEE_CALL_ID,
   CALLER_CALL_ID,
   derivesOnePrefix,
@@ -319,5 +320,53 @@ describe("an emission the capture holds no relay of (§6.9)", () => {
     expect(ringsOn(flow, "B", "send").length).toBe(2)
     expect(ringsOn(flow, "A", "expect").length).toBe(1)
     expect(flagOf(flow)).toBeUndefined()
+  })
+})
+
+describe("an emission on a second early dialog (§6.9, RFC 3261 §13.2.2.4)", () => {
+  /**
+   * The callee opens two early dialogs (two To-tags), each with a 183
+   * carrying an answer then a bare 183; a header the callee writes per dialog
+   * (`P-Served-By`) differs between them. The platform relays both of the
+   * first dialog and only the answering one of the second. A relaying B2BUA
+   * relays the second dialog's bare 183 too, and the bare 183 of the first
+   * dialog is the same message, its early-dialog tag and per-dialog header
+   * aside: it gets the derived arrival.
+   */
+  const progress = (
+    ts_ms: number,
+    side: "caller" | "callee",
+    toTag: string,
+    served: string,
+    sdp: boolean
+  ): Flows.Msg =>
+    response({
+      callId: side === "caller" ? CALLER_CALL_ID : CALLEE_CALL_ID,
+      seq: 1, status: 183, reason: "Session Progress", cseqMethod: "INVITE",
+      src: side === "caller" ? sut : callee,
+      dst: side === "caller" ? caller : sut,
+      ts_ms, toTag,
+      headers: [`P-Served-By: ${served}`, ...(sdp ? [] : ["P-Early-Media: sendonly"])],
+      ...(sdp ? { sdp: ANSWER_SDP } : {})
+    })
+  const flows = ringingCall(
+    [
+      progress(1_188, "caller", "dialog-1", "node-a", true),
+      progress(1_189, "caller", "dialog-1", "node-a", false),
+      progress(7_490, "caller", "dialog-2", "node-b", true)
+    ],
+    [
+      progress(1_186, "callee", "dialog-1", "node-a", true),
+      progress(1_187, "callee", "dialog-1", "node-a", false),
+      progress(7_488, "callee", "dialog-2", "node-b", true),
+      progress(7_489, "callee", "dialog-2", "node-b", false)
+    ],
+    7_697
+  )
+
+  it("derives the relay of the second dialog's bare provisional", () => {
+    const flow = flowOf(flows)
+    expect(ringsOn(flow, "B", "send", 183).length).toBe(4)
+    expect(ringsOn(flow, "A", "expect", 183).length).toBe(4)
   })
 })
