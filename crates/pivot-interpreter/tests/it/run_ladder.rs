@@ -1254,6 +1254,72 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
     scene.finish().await;
 }
 
+/// The linear call with its teardown CROSSING: the captured trace shows the
+/// callee's own BYE 400 ms behind the caller's, and no BYE reaching the
+/// callee. Leg B scripts its BYE (s11) and that BYE's 200 (s12), nothing for a
+/// BYE it takes. 400 ms outlasts this lane's 200 ms relay of the caller's BYE,
+/// so the relay reaches leg B first.
+fn crossing_bye_case() -> Case {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = std::fs::read_to_string(base_dir.join("linear-attempt.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["case"]["id"] = "linear-attempt-crossing-bye".into();
+    let delay = |from: &str, ms: u64| serde_json::json!({ "compressible": true, "from": from, "ms": ms, "timer_linked": false });
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(10);
+    flow.push(serde_json::json!({
+        "id": "s11", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "method": "BYE" }, "delay": delay("step:s10", 400)
+    }));
+    flow.push(serde_json::json!({
+        "id": "s12", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": delay("step:s11", 0)
+    }));
+    flow.push(serde_json::json!({
+        "id": "s13", "leg": "A", "op": "expect", "check": "record", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": delay("step:s10", 0)
+    }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the crossing case parses");
+    Case { document, base_dir }
+}
+
+/// RFC 3261 §15.1.1 / §15.1.2: once a UA has answered the peer's BYE 200 the
+/// dialog is gone, so a BYE it would send on it names no dialog and draws a
+/// 481. Where the system's relay of the caller's BYE reaches the callee
+/// before the callee's own crossing BYE goes out, the callee answers the
+/// relay (an unscripted arrival) and its scripted BYE is moot: it is never
+/// put on the wire.
+#[tokio::test(start_paused = true)]
+async fn a_scripted_bye_on_a_dialog_the_leg_already_ended_is_not_sent() {
+    let scene = api_scene("pivot-crossing-bye").await;
+    let (outcome, _dir) = replay_case(&scene, crossing_bye_case(), BTreeMap::new()).await;
+
+    let legs = outcome.recording.legs();
+    let answered = legs["B"]
+        .iter()
+        .position(|m| {
+            m.dir == Dir::Out && text(m).starts_with("SIP/2.0 200") && text(m).contains(" BYE\r\n")
+        })
+        .unwrap_or_else(|| panic!("leg B answered the relayed BYE: {:#?}", legs["B"]));
+    assert!(
+        legs["B"][answered + 1..]
+            .iter()
+            .all(|m| !(m.dir == Dir::Out && text(m).starts_with("BYE "))),
+        "leg B sent its BYE on the dialog its own 200 had ended: {:#?}",
+        legs["B"]
+    );
+    assert!(
+        legs["B"].iter().all(|m| !(m.dir == Dir::In && text(m).starts_with("SIP/2.0 481"))),
+        "a 481 answered a BYE leg B should never have sent: {:#?}",
+        legs["B"]
+    );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// RFC 3261 §15.1.2, last paragraph: a UAS that answered a BYE still responds
 /// to every request pending on that dialog, 487 recommended.
 ///

@@ -1075,6 +1075,33 @@ mod tests {
         }
     }
 
+    /// RFC 6665 §4.1.3 (RFC 3515 §2.4.4 for the subscription a REFER creates):
+    /// a subscriber answers every NOTIFY of its subscription, so a NOTIFY on
+    /// the dialog this leg holds, for the REFER it sent, draws `200` where no
+    /// step scripts it — the notifier is otherwise left retransmitting to its
+    /// Timer F, which ends the dialog under it.
+    #[test]
+    fn an_unscripted_notify_of_the_leg_s_own_refer_draws_200() {
+        let invite = (Dir::In, INVITE.to_string());
+        let ok = (Dir::Out, response(200, "1 INVITE"));
+        let ack = (Dir::In, taken("ACK", "1 ACK", Some("b1"), ""));
+        let refer = (Dir::Out, request("REFER", "2 REFER"));
+        let accepted = (Dir::In, reply(202, "2 REFER"));
+        let notify_raw = taken(
+            "NOTIFY",
+            "2 NOTIFY",
+            Some("b1"),
+            "Event: refer\r\nSubscription-State: active\r\n",
+        );
+        let notify = (Dir::In, notify_raw.clone());
+        let held = ladder(&[invite, ok, ack, refer, accepted, notify]);
+        assert_eq!(
+            unscripted(&held, &message(&notify_raw)),
+            Some(answer("NOTIFY", 2, Some("b1"), 200)),
+            "the subscriber owes the NOTIFY its final"
+        );
+    }
+
     /// RFC 3261 §15.1.2: a BYE on the dialog this leg holds is answered `200`,
     /// once, from whichever side of the dialog this leg is on — and while this
     /// leg's own BYE still awaits its final (§15.1.1). A BYE matching no

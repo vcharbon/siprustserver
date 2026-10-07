@@ -1077,6 +1077,19 @@ mod tests {
         assert_eq!((*status, branch.as_str(), *invite_msg), (486, "z9hG4bK-i", 0));
     }
 
+    /// The offence is the ACK that never came, so [`Finding::emitter`] is the
+    /// party that OWED it: the UAC whose INVITE client transaction took the
+    /// reject (§17.1.1.3). The UAS that sent the reject and waited is the one
+    /// owed, the `taker`.
+    #[test]
+    fn a_never_acked_reject_is_charged_to_the_uac_that_owed_the_ack() {
+        let f = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 487, "z9hG4bK-i")]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].violated(), "{:?}", f[0].decision);
+        assert_eq!(f[0].emitter, UAC, "the UAC that withheld the ACK is charged");
+        assert_eq!(f[0].taker, UAS, "the UAS that sent the reject is the one owed");
+    }
+
     /// The obligation is the SENDER's: a UAC that merely TOOK a reject owes
     /// nothing here, and a 2xx is the dialog rules' business.
     #[test]

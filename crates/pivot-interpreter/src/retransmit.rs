@@ -1191,4 +1191,52 @@ mod tests {
             "a coincidental CSeq is not an answer, so nothing closed this ladder"
         );
     }
+
+    /// A CANCEL's ladder ends with the INVITE it names: once that INVITE has
+    /// its final the CANCEL is moot (RFC 3261 §9.1) and the system stops
+    /// retransmitting it (ADR-0028 X4). The final our side sends to that
+    /// INVITE closes the CANCEL's window, so no Timer E rung is owed past it.
+    #[test]
+    fn the_final_to_the_invite_a_cancel_names_closes_the_cancels_ladder() {
+        let cancel = b"CANCEL sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>\r\nCSeq: 1 CANCEL\r\n\r\n";
+        let answer = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let mut repeats = Repeats::new();
+        // The system's CANCEL, never answered; our 200 to its INVITE 319 ms on.
+        repeats.claim("s10", "B", LadderSide::Expect, None, &[], cancel, 8_036_000);
+        repeats.answered("B", answer, 8_355_000);
+        assert!(
+            repeats.mismatches(8_600_000).is_empty(),
+            "the INVITE's final at 319 ms ended the ladder before its 500 ms rung: {:#?}",
+            repeats.mismatches(8_600_000)
+        );
+    }
+
+    /// A 2xx's ladder ends with the dialog it would confirm: a UAS that sends
+    /// its BYE on that dialog has ended it (RFC 3261 §15), and the system
+    /// stops retransmitting the 2xx there. The emitter's BYE, claimed as an
+    /// exec claims a matched arrival, closes the 2xx's window.
+    #[test]
+    fn the_emitters_bye_on_the_dialog_closes_its_2xx_ladder() {
+        let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 2 BYE\r\n\r\n";
+        let mut repeats = Repeats::new();
+        // The system's 2xx to our re-INVITE, never ACKed; its BYE 415 ms on.
+        repeats.note("B", ok, 917_000);
+        repeats.claim("s14", "B", LadderSide::Expect, None, &[], ok, 917_000);
+        repeats.note("B", bye, 1_332_000);
+        repeats.claim("s17", "B", LadderSide::Expect, None, &[], bye, 1_332_000);
+        let charged: Vec<Failure> = repeats
+            .mismatches(5_272_000)
+            .into_iter()
+            .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s14"))
+            .collect();
+        assert!(
+            charged.is_empty(),
+            "the BYE at 415 ms ended the dialog before the 2xx's 500 ms rung: {charged:#?}"
+        );
+    }
 }
