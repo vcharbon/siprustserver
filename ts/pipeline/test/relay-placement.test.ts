@@ -49,3 +49,22 @@ describe("two relayed provisionals with a step of their leg between them", () =>
     expect(placed(timings)).toEqual([1, 2, 3, 4, 5])
   })
 })
+
+describe("two relays stamped before their sources", () => {
+  /**
+   * The vantage stamps the caller-side 183 with an answer, then a bare one,
+   * before the callee sent either. The answering relay moves behind its
+   * source, past the bare one, itself a provisional no listed emission
+   * explains; the bare one, naming nothing, stays where it was stamped.
+   */
+  it("moves the answering relay behind its source", () => {
+    const sdp = "sdp:o=x 1 1 IN IP4 h"
+    const timings = [
+      timing("A", false, "resp:183:INVITE", 100, 1, sdp),
+      timing("A", false, "resp:183:INVITE", 101, 1, "bare"),
+      timing("B", true, "resp:183:INVITE", 220, 1, "bare"),
+      timing("B", true, "resp:183:INVITE", 221, 1, sdp)
+    ]
+    expect(placed(timings)).toEqual([2, 3, 4, 1])
+  })
+})

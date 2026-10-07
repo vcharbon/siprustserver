@@ -1795,9 +1795,12 @@ derivation the arithmetic would otherwise state:
 
 - **One arrival per emission.** Which emission an arrival relays is the delay
   classification's own reading: inside its window the emission carrying the
-  arrival's session description (its `o=` line) wins, the latest among equals;
-  a bare arrival pairs by time alone. That reading is many-to-one — two bare emissions
-  milliseconds apart collect BOTH their arrivals on the second. A relay emits one datagram per datagram, so
+  arrival's content wins, the latest among equals. A relayed provisional's
+  content is its session description (its `o=` line) or its bareness, so a bare
+  arrival pairs with a bare emission and one with an answer with the emission
+  carrying that answer; any other message pairs on a session description alone.
+  That reading is many-to-one — two bare emissions milliseconds apart collect
+  BOTH their arrivals on the second. A relay emits one datagram per datagram, so
   a second arrival naming a claimed emission belongs to the nearest earlier
   unclaimed one of that status. What is left unclaimed is the deficit.
 - **Only a form the SUT was seen relaying.** The derived step copies an arrival
@@ -1824,7 +1827,10 @@ a relayed provisional (a 101–199 to an INVITE; an ACK to a non-2xx is hop-by-h
 and relays nothing): a relay stamped before its source only where it carries the
 source's session description (a bare message names nothing a minted one could
 not carry), and two relays of one type adjacent on one leg into the order of
-their sources. Neither move passes another step of the arrival's own leg. It rides
+their sources. Neither move passes another step of the arrival's own leg. A
+bare relay stamped before its source does not move, so a bare provisional the
+capture shows reaching the caller before the callee sent anything stays where
+the capture put it. It rides
 `relay-placed-after-source` (§13.2).
 
 **And the far side of a relayed in-dialog INVITE the capture holds on one leg

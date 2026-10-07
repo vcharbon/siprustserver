@@ -13,7 +13,8 @@
  * relaying platform passes on out of order; an ACK to a non-2xx is hop-by-hop
  * (RFC 3261 §17.1.1.3) and relays nothing. Two moves, both keyed on content
  * (`relayImageOf`), never on time alone, and neither past another step of the
- * arrival's own leg:
+ * arrival's own leg — save, for the first, another provisional stamped before
+ * whatever it relays:
  *
  * - **A relay stamped before its source** — an arrival no listed emission
  *   explains, carrying the session description of an emission of the same
@@ -27,22 +28,26 @@
  * Runs right after the steps are built, before any pass that reads positions.
  * Mutates `steps`, `timings` and `sources` together and renumbers the ids.
  */
-import { relayOriginOf, type StepTiming } from "./delay.js"
+import { relayedProvisional, relayOriginOf, type StepTiming } from "./delay.js"
 import type { StepDraft } from "./draft.js"
 import { stepId, type StepSource } from "./flowsteps.js"
 import { identifiesSession } from "./relay-image.js"
 
-/** Whether a step's type is a provisional to an INVITE above 100: what a relay moves. */
-const relayedProvisional = (s: StepTiming): boolean => {
-  const m = /^resp:(\d+):INVITE$/.exec(s.typeKey)
-  return m !== null && Number(m[1]) > 100 && Number(m[1]) < 200
-}
+/**
+ * Whether a step of `leg` between positions `a` and `b` stops an early-stamped
+ * relay's move: any but another relayed provisional no listed emission
+ * explains, itself stamped before whatever it relays.
+ */
+const blocksMove = (timings: ReadonlyArray<StepTiming>, leg: string, a: number, b: number): boolean =>
+  timings
+    .slice(a + 1, b)
+    .some((t, k) => t.leg === leg && !(relayedProvisional(t) && !t.emits && relayOriginOf(timings, a + 1 + k) < 0))
 
-/** Whether a step of `leg` stands strictly between positions `a` and `b`. */
-const legBetween = (timings: ReadonlyArray<StepTiming>, leg: string, a: number, b: number): boolean =>
-  timings.slice(Math.min(a, b) + 1, Math.max(a, b)).some((t) => t.leg === leg)
-
-/** How much earlier than its source a vantage may stamp a relay (µs). */
+/**
+ * How much earlier than its source a vantage capturing the two directions on
+ * different interfaces may stamp a relay (µs). A voluntary bound, not a
+ * measured one: a pair stamped further apart is left where the capture put it.
+ */
 export const RELAY_SKEW_US = 500_000
 
 /** One arrival this pass moved, for the flag. */
@@ -82,7 +87,7 @@ export const placeRelaysAfterSources = (input: PlacementInput): Array<Placed> =>
         break
       }
     }
-    if (source < 0 || legBetween(timings, s.leg, i, source + 1)) continue
+    if (source < 0 || blocksMove(timings, s.leg, i, source)) continue
     placed.push({ step: steps[i]!, source: steps[source]!, why: "stamped-before-source" })
     // Removing `i` shifts the source down by one: inserting at `source` lands
     // the arrival just after it. The step now at `i` is examined next.

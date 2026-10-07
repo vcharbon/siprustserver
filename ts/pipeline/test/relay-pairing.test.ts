@@ -129,3 +129,30 @@ describe("a relay stamped before the datagram it relays", () => {
     expect(flow.steps.indexOf(arrivals[0]!)).toBeGreaterThan(flow.steps.indexOf(send!))
   })
 })
+
+describe("a bare provisional and one with an answer, relayed in the other order", () => {
+  /**
+   * The callee sends a bare 183 then one with an answer; the platform relays
+   * the answering one first. A bare arrival pairs with a bare emission, not
+   * with the latest one: each relay is anchored on its own source and the
+   * arrivals are expected in their sources' order.
+   */
+  const flows = call(
+    [callerProgress(374.7, true), callerProgress(375.6, false)],
+    [calleeProgress(373.4, false), calleeProgress(373.45, true)]
+  )
+
+  it("anchors the bare arrival on the bare emission and the answering one on its own", () => {
+    const flow = flowOf(flows)
+    const sends = progress(flow, "B", "send")
+    const arrivals = progress(flow, "A", "expect")
+    expect(sends.map(hasBody)).toEqual([false, true])
+    const anchorOf = (withBody: boolean) => arrivals.find((s) => hasBody(s) === withBody)!.delay.from
+    expect(anchorOf(false)).toBe(`step:${sends[0]!.id}`)
+    expect(anchorOf(true)).toBe(`step:${sends[1]!.id}`)
+  })
+
+  it("expects the relays in their sources' order", () => {
+    expect(progress(flowOf(flows), "A", "expect").map(hasBody)).toEqual([false, true])
+  })
+})

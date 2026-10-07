@@ -72,9 +72,11 @@ export interface StepTiming {
  * The index of the cross-leg emit listed before this arrival that relayed into
  * it, or -1 where the SUT minted the message itself. Among the emits of the
  * same message type inside the proximity window, the one carrying the
- * arrival's session description (`image`, an `o=` line) wins; among equals,
- * the latest. A bare message names nothing a minted one could not carry, so
- * it pairs by time alone. Content decides
+ * arrival's content (`image`) wins; among equals, the latest. A relayed
+ * provisional's content is its session description or its bareness — a
+ * platform may relay a bare one and one with an answer in either order, and
+ * bare pairs with bare. Any other message pairs on a session description
+ * alone; bare, it pairs by time. Content decides
  * before time because a relay may leave in another order than its sources
  * arrived, and the latest emit would then collect the wrong arrival.
  *
@@ -91,7 +93,8 @@ export const relayOriginOf = (steps: ReadonlyArray<StepTiming>, i: number): numb
     const c = steps[p]!
     if (!c.emits || c.leg === s.leg || c.typeKey !== s.typeKey) continue
     if (s.ts_us - c.ts_us >= PROXIMITY_US) continue
-    const carries = identifiesSession(s.image) && c.image === s.image
+    const carries =
+      (relayedProvisional(s) ? s.image !== undefined : identifiesSession(s.image)) && c.image === s.image
     const better =
       originIdx < 0 ||
       (carries && !originCarries) ||
@@ -102,6 +105,12 @@ export const relayOriginOf = (steps: ReadonlyArray<StepTiming>, i: number): numb
     }
   }
   return originIdx
+}
+
+/** Whether a step's type is a provisional to an INVITE above 100: what a platform relays. */
+export const relayedProvisional = (s: StepTiming): boolean => {
+  const m = /^resp:(\d+):INVITE$/.exec(s.typeKey)
+  return m !== null && Number(m[1]) > 100 && Number(m[1]) < 200
 }
 
 /** The transaction a step rides on its leg: the CSeq, method and number. */

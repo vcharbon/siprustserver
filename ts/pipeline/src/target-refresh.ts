@@ -43,7 +43,9 @@ const refreshesTarget = (msg: Flows.Msg): boolean => {
  * Stamp `target-refresh` on every send that may refresh a target and names
  * another one than its dialog last did, counting per leg. The dialog side is
  * the sending party's own tag: its From-tag on a request, its To-tag on a
- * response. Mutates `steps`; `sources` is parallel to it. A step transcribed
+ * response. The count is per leg, as the stack keeps one Contact per leg: on a
+ * forked leg a refresh on one early dialog moves the Contact the others state
+ * from then on too. Mutates `steps`; `sources` is parallel to it. A step transcribed
  * from another leg's message speaks for no party of this one and is skipped.
  */
 export const stampTargetRefreshes = (
