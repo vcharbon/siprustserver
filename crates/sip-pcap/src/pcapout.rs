@@ -11,10 +11,15 @@
 //! message's own `src`/`dst` sockets. Repeats stay repeats and the capture
 //! duplicates the reader already collapsed do not come back: the document is
 //! the model, and the model is what is written.
+//!
+//! The datagrams the reader set aside (the SIP-looking ones the parser
+//! rejected) are written the same way, as captured
+//! ([`datagrams_to_pcap`]): a capture of what the model could not hold.
 
 use std::net::{IpAddr, SocketAddr};
 
 use crate::doc::FlowsDoc;
+use crate::Datagram;
 
 /// Ethernet II link type, the one every record is written under.
 const LINKTYPE_ETHERNET: u32 = 1;
@@ -35,8 +40,21 @@ pub fn doc_to_pcap(doc: &FlowsDoc) -> Result<Vec<u8>, String> {
             records.push((m.ts_us, src, dst, payload));
         }
     }
-    // Stable on ties, so two messages the capture stamped alike keep their
-    // document order.
+    encode(records)
+}
+
+/// Encode captured datagrams as they are, their own sockets, timestamps and
+/// payload bytes, as a little-endian, microsecond classic pcap: the
+/// datagrams a reader set aside, as a capture of their own.
+pub fn datagrams_to_pcap<'a>(
+    datagrams: impl IntoIterator<Item = &'a Datagram>,
+) -> Result<Vec<u8>, String> {
+    encode(datagrams.into_iter().map(|d| (d.ts_us, d.src, d.dst, d.payload.clone())).collect())
+}
+
+/// One record per `(ts_us, src, dst, payload)`, in timestamp order; stable on
+/// ties, so two records stamped alike keep their given order.
+fn encode(mut records: Vec<(u64, SocketAddr, SocketAddr, Vec<u8>)>) -> Result<Vec<u8>, String> {
     records.sort_by_key(|r| r.0);
 
     let mut out = Vec::new();
@@ -177,6 +195,23 @@ mod tests {
         );
         assert!(back.iter().all(|d| d.payload == RAW.as_bytes()));
         assert_eq!(build_flows(&back, &FlowConfig::default()).stats.sip_messages, 2);
+    }
+
+    /// The datagrams the parser rejected come back as they were captured.
+    #[test]
+    fn rejected_datagrams_are_written_as_captured() {
+        let garbage = b"INVITE sip:x SIP/2.0\r\nGarbage\r\n\r\n".to_vec();
+        let mut rejected = dg(2_000, "10.0.0.1:5060", "10.0.0.2:5060");
+        rejected.payload = garbage.clone();
+        let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060"), rejected];
+        let flows = build_flows(&datagrams, &FlowConfig::default());
+        let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
+        let (back, stats) = read_back(&datagrams_to_pcap(failed).expect("encodes"));
+        assert_eq!(stats.datagrams, 1);
+        assert_eq!(
+            (back[0].ts_us, back[0].src.to_string(), back[0].payload.clone()),
+            (2_000, "10.0.0.1:5060".to_string(), garbage)
+        );
     }
 
     #[test]

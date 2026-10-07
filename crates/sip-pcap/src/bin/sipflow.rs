@@ -207,6 +207,11 @@ struct Args {
     #[arg(long)]
     out: Option<PathBuf>,
 
+    /// Also write every SIP-looking datagram the parser rejected (the
+    /// `parse-failed` count), exactly as captured, to this classic pcap.
+    #[arg(long = "parse-failed-pcap")]
+    parse_failed_pcap: Option<PathBuf>,
+
     /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
     /// flows documents — files, or directories walked recursively for
     /// `*.flows.json` — and print the report as JSON on stdout with its
@@ -393,6 +398,16 @@ fn main() {
 
     let flows = build_flows(&datagrams, &cfg);
     let sut = sut_of(&args, &flows);
+
+    if let Some(path) = &args.parse_failed_pcap {
+        let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
+        if let Err(e) = sip_pcap::pcapout::datagrams_to_pcap(failed)
+            .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
+        {
+            eprintln!("cannot write the rejected datagrams to {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
 
     if args.json {
         // Pretty + deterministic field order: the emit is committed as
