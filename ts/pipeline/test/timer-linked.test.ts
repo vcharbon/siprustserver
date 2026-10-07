@@ -65,3 +65,35 @@ describe("a 2xx that carries Session-Expires", () => {
     ])
   })
 })
+
+describe("an in-dialog re-INVITE that refreshes the session", () => {
+  /** The callee refreshes the session 900 s after the answer (RFC 4028 §10). */
+  const refreshed = doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(caller, sut), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: caller, dst: sut, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 2_421, toTag: "callee-tag", headers: TIMER, sdp: ANSWER_SDP }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 2_435, toTag: "callee-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: caller, dst: sut, ts_ms: 1_000_000, toTag: "callee-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 1_000_001, toTag: "callee-tag" })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(sut, callee), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: sut, dst: callee, ts_ms: 70 }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: 2_420, toTag: "callee-tag", headers: TIMER, sdp: ANSWER_SDP }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: sut, dst: callee, ts_ms: 2_437, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "INVITE", src: callee, dst: sut, ts_ms: 902_437, toTag: "callee-tag", headers: ["Session-Expires: 1800;refresher=uas"], body: { contentType: "application/sdp", text: ANSWER_SDP } }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: callee, ts_ms: 902_440, toTag: "callee-tag", sdp: ANSWER_SDP }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "ACK", src: callee, dst: sut, ts_ms: 902_450, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "BYE", src: sut, dst: callee, ts_ms: 1_000_002, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: callee, dst: sut, ts_ms: 1_000_010, toTag: "callee-tag" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+
+  it("is timer-linked: the party's session timer sent it", () => {
+    const flow = synthesize(refreshed, build(refreshed, BOTH_VANTAGES, sutSet(), plan(), derivesOnePrefix), plan())
+    const refresh = flow.steps.find((s) => s.leg === "B" && s.op === "send" && s.msg.method === "INVITE")
+    expect(refresh?.delay.timer_linked).toBe(true)
+  })
+})

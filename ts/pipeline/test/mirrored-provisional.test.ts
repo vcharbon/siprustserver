@@ -379,3 +379,31 @@ describe("an emission on a second early dialog (§6.9, RFC 3261 §13.2.2.4)", ()
     expect(arrivals[3]!.early).not.toBe(arrivals[1]!.early)
   })
 })
+
+describe("a second early dialog holding one emission (§6.9)", () => {
+  /**
+   * The second dialog's one bare 183 carries the same `X-Same` value as the
+   * first dialog's. A header both dialogs carry at one value is no dialog's
+   * identity: it is compared, never re-read off a relay of the second dialog,
+   * which the capture does not hold.
+   */
+  const progress = (ts_ms: number, side: "caller" | "callee", toTag: string, sdp: boolean): Flows.Msg =>
+    response({
+      callId: side === "caller" ? CALLER_CALL_ID : CALLEE_CALL_ID,
+      seq: 1, status: 183, reason: "Session Progress", cseqMethod: "INVITE",
+      src: side === "caller" ? sut : callee,
+      dst: side === "caller" ? caller : sut,
+      ts_ms, toTag,
+      headers: ["X-Same: v", ...(sdp ? [] : ["P-Early-Media: sendonly"])],
+      ...(sdp ? { sdp: ANSWER_SDP } : {})
+    })
+  const flows = ringingCall(
+    [progress(1_188, "caller", "dialog-1", true), progress(1_189, "caller", "dialog-1", false)],
+    [progress(1_186, "callee", "dialog-1", true), progress(1_187, "callee", "dialog-1", false), progress(7_489, "callee", "dialog-2", false)],
+    7_697
+  )
+
+  it("derives the relay of its bare provisional", () => {
+    expect(ringsOn(flowOf(flows), "A", "expect", 183).length).toBe(3)
+  })
+})

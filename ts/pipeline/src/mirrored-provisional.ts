@@ -35,7 +35,7 @@
  * several early dialogs (RFC 3261 §13.2.2.4) may write a header whose value is
  * fixed per dialog — the To-tag's companion. Two emissions on two dialogs are
  * compared without the headers each dialog carries at one value on every
- * emission, and the derived arrival takes such a header's value from a relay
+ * emission and the two dialogs carry at different values, and the derived arrival takes such a header's value from a relay
  * of its OWN dialog the capture holds; with none to read it from, nothing is
  * derived.
  *
@@ -259,7 +259,9 @@ export const mirrorRelayedProvisionals = (input: MirrorInput): Array<Mirrored> =
       const twinDialog = dialogOf(sources[e]!)
       if (twinDialog === dialog) return shape(steps[e]!) === shape(step) ? [{ twin: e, perDialog: new Set<string>() }] : []
       const theirs = dialogHeaders(steps, sources, dialogOf, step.leg, twinDialog)
-      const perDialog = new Set([...own.keys()].filter((name) => theirs.has(name)))
+      const perDialog = new Set(
+        [...own.keys()].filter((name) => theirs.has(name) && theirs.get(name) !== own.get(name))
+      )
       return shape(steps[e]!, perDialog) === shape(step, perDialog) ? [{ twin: e, perDialog }] : []
     })[0]
     if (match === undefined) return

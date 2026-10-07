@@ -3,9 +3,10 @@
  * classification. Every pivot delay is relative to an explicit anchor, and a
  * delay is trustworthy only at the leg that CAUSED it:
  *
- * - a `send` the actor OWES on a transaction (a response, the ACK of a
- *   non-2xx final) is measured inside that transaction (`owedCauseOf`), never
- *   from a message of another transaction the system under test sent between;
+ * - a `send` the transaction layer OWES (the answers a received CANCEL draws,
+ *   the ACK of a non-2xx final) is measured from what drew it (`owedCauseOf`),
+ *   never from a message of another transaction the system under test sent
+ *   between;
  * - any other `send` is origin-side, measured from the actor's previous step on the
  *   same leg (or `trigger` for the first) — unless an actor emit on ANOTHER leg
  *   is the nearer preceding instant and sits within the proximity window, in
@@ -32,6 +33,8 @@
  * The CAUSALITY is this module's own reading and is not a pivot field: the
  * emitted delay keeps the anchor and drops the reason it was chosen.
  */
+
+import { identifiesSession } from "./relay-image.js"
 
 /** Why a delay is anchored where it is. */
 export type DelayCausality = "measured" | "propagated" | "sut-originated"
@@ -69,7 +72,9 @@ export interface StepTiming {
  * The index of the cross-leg emit listed before this arrival that relayed into
  * it, or -1 where the SUT minted the message itself. Among the emits of the
  * same message type inside the proximity window, the one carrying the
- * arrival's content (`image`) wins; among equals, the latest. Content decides
+ * arrival's session description (`image`, an `o=` line) wins; among equals,
+ * the latest. A bare message names nothing a minted one could not carry, so
+ * it pairs by time alone. Content decides
  * before time because a relay may leave in another order than its sources
  * arrived, and the latest emit would then collect the wrong arrival.
  *
@@ -86,7 +91,7 @@ export const relayOriginOf = (steps: ReadonlyArray<StepTiming>, i: number): numb
     const c = steps[p]!
     if (!c.emits || c.leg === s.leg || c.typeKey !== s.typeKey) continue
     if (s.ts_us - c.ts_us >= PROXIMITY_US) continue
-    const carries = s.image !== undefined && c.image === s.image
+    const carries = identifiesSession(s.image) && c.image === s.image
     const better =
       originIdx < 0 ||
       (carries && !originCarries) ||
@@ -118,29 +123,26 @@ const transactionPredecessorOf = (steps: ReadonlyArray<StepTiming>, i: number): 
 }
 
 /**
- * The arrival or answer a send the scripted party OWES is timed from, or -1
- * where the send is the party's own decision. A response is owed on its own
- * transaction: it is measured from that transaction's latest earlier step on
- * the leg, and an INVITE's non-2xx final also from the CANCEL that drew it
- * (RFC 3261 §9.2). The ACK of a non-2xx final is owed to that final (§17.1.1.3).
+ * The arrival a send the scripted party OWES on the transaction layer is timed
+ * from, or -1 where the send is not one of those: the 200 to a received CANCEL
+ * and the non-2xx INVITE final that CANCEL draws are timed from the CANCEL
+ * (RFC 3261 §9.2), the ACK of a non-2xx final from that final (§17.1.1.3).
  * A message the system under test sent on another transaction in between never
- * gates the owed send: a system that does not send it must still be answered.
+ * gates them: a system that does not send it must still be answered. Every
+ * other send keeps its leg's previous step.
  */
 const owedCauseOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
   const s = steps[i]!
-  const response = /^resp:(\d+):(.+)$/.exec(s.typeKey)
-  const answersInvite = response !== null && response[2] === "INVITE" && Number(response[1]) >= 300
+  const final = /^resp:(\d+):INVITE$/.exec(s.typeKey)
+  const answersCancel = s.typeKey === "resp:200:CANCEL" || (final !== null && Number(final[1]) >= 300)
   for (let p = i - 1; p >= 0; p--) {
     const c = steps[p]!
-    if (c.leg !== s.leg || c.cseq !== s.cseq) continue
-    if (response !== null) {
-      if (transaction(c) === transaction(s)) return p
-      if (answersInvite && !c.emits && c.typeKey === "req:CANCEL") return p
-      continue
+    if (c.leg !== s.leg || c.cseq !== s.cseq || c.emits) continue
+    if (answersCancel && c.typeKey === "req:CANCEL") return p
+    if (s.typeKey === "req:ACK") {
+      const acked = /^resp:(\d+):INVITE$/.exec(c.typeKey)
+      if (acked !== null) return Number(acked[1]) >= 300 ? p : -1
     }
-    if (s.typeKey !== "req:ACK") return -1
-    const acked = /^resp:(\d+):INVITE$/.exec(c.typeKey)
-    if (acked !== null && !c.emits) return Number(acked[1]) >= 300 ? p : -1
   }
   return -1
 }

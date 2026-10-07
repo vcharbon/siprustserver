@@ -43,6 +43,10 @@ const canon = (name: string): string => {
 /**
  * The datagram's head as text and its body as bytes, through the one decoder
  * (`Contracts.Wire`); an opaque datagram's head reads one character per byte.
+ * A header frozen off such a head carries each non-ASCII byte as the character
+ * U+0080–U+00FF of that value, which the emitter writes back as UTF-8: its bytes
+ * on the wire differ from the capture's (a display name in CESU-8 or Latin-1 is
+ * the population). The document has no byte-valued header to state it exactly.
  */
 const headBody = (m: Wire.Msg): readonly [string, Uint8Array] => {
   const split = Wire.headBodyOf(m)

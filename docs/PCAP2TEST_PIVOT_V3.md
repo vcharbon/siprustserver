@@ -1795,8 +1795,8 @@ derivation the arithmetic would otherwise state:
 
 - **One arrival per emission.** Which emission an arrival relays is the delay
   classification's own reading: inside its window the emission carrying the
-  arrival's content (a session description's `o=` line, or none) wins, the
-  latest among equals. That reading is many-to-one — two bare emissions
+  arrival's session description (its `o=` line) wins, the latest among equals;
+  a bare arrival pairs by time alone. That reading is many-to-one — two bare emissions
   milliseconds apart collect BOTH their arrivals on the second. A relay emits one datagram per datagram, so
   a second arrival naming a claimed emission belongs to the nearest earlier
   unclaimed one of that status. What is left unclaimed is the deficit.
@@ -1819,10 +1819,12 @@ derivation the arithmetic would otherwise state:
 is not always causal order: a platform may relay two provisionals in another
 order than they reached it, and a vantage capturing the two directions on
 different interfaces can stamp a relay before the datagram it relays. The
-generator moves such an arrival behind its source, keyed on content: a relay
-stamped before its source only where it carries the source's session
-description (a bare message names nothing a minted one could not carry), and two
-relays of one type on one leg into the order of their sources. It rides
+generator moves such an arrival behind its source, keyed on content and only for
+a relayed provisional (a 101–199 to an INVITE; an ACK to a non-2xx is hop-by-hop
+and relays nothing): a relay stamped before its source only where it carries the
+source's session description (a bare message names nothing a minted one could
+not carry), and two relays of one type adjacent on one leg into the order of
+their sources. Neither move passes another step of the arrival's own leg. It rides
 `relay-placed-after-source` (§13.2).
 
 **And the far side of a relayed in-dialog INVITE the capture holds on one leg
