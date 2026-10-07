@@ -147,11 +147,26 @@ impl<'p> Cursor<'p> {
     ///
     /// `overlap` is symmetric — "this step and the named one may arrive in
     /// either order" (§6.1) — so either side may carry the field and the reading
-    /// is the same.
+    /// is the same. A race outlives a member that settled first: a step naming
+    /// a completed one races whatever that one raced ([`Self::races_of`]).
     fn races_with(&self, frontier: &[String], armed: &[String]) -> bool {
-        let names =
-            |a: &str, b: &str| self.plan.step(a).and_then(|s| s.overlap.as_deref()) == Some(b);
+        let names = |a: &str, b: &str| self.races_of(a).contains(&b);
         frontier.iter().any(|id| armed.iter().any(|prev| names(id, prev) || names(prev, id)))
+    }
+
+    /// The steps `step` races: the one its `overlap` names and, while each
+    /// named step has already completed, the one that step names in turn.
+    fn races_of(&self, step: &str) -> Vec<&'p str> {
+        let mut out: Vec<&'p str> = Vec::new();
+        let mut at = self.plan.step(step).and_then(|s| s.overlap.as_deref());
+        while let Some(named) = at.filter(|n| !out.contains(n) && *n != step) {
+            out.push(named);
+            if self.steps.get(named).copied() != Some(StepStatus::Complete) {
+                break;
+            }
+            at = self.plan.step(named).and_then(|s| s.overlap.as_deref());
+        }
+        out
     }
 
     /// Whether every step of an item is an arrival some OTHER leg has already
@@ -784,6 +799,24 @@ mod tests {
         // Either side may settle first: here the arrival beats the send.
         cursor.complete("s3");
         assert_eq!(cursor.frontier(), ["s2"]);
+    }
+
+    /// A race chain outlives its middle settling first: s3 races s2, which
+    /// races the send s1. Once s2 has arrived, s3 still races s1 — whatever
+    /// the wire settles first settles first — so it stays armed beside the send
+    /// rather than queueing behind it.
+    #[test]
+    fn a_race_chain_keeps_its_tail_armed_once_its_middle_settled() {
+        let p = plan(&format!(
+            "[{},{},{}]",
+            send("s1", "A", "BYE"),
+            racing_expect("s2", "A", 200, "s1"),
+            racing_expect("s3", "A", 486, "s2")
+        ));
+        let mut cursor = Cursor::new(&p);
+        assert_eq!(cursor.frontier(), ["s1", "s2", "s3"], "the chain arms together");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s1", "s3"], "s3 races s1 through the settled s2");
     }
 
     /// The race walks past ONE neighbour, not the whole leg.

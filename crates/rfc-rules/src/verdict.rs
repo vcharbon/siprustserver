@@ -199,8 +199,9 @@ pub enum RuleId {
     #[serde(rename = "proxy-100-within-grace")]
     Proxy100WithinGrace,
     /// RFC 3261 §17.1.1.3: a non-2xx INVITE final is ACKed, and the ACK reaches
-    /// the UAS that sent it. Charges that UAS — an un-ACKed reject retransmits
-    /// to Timer H and its transaction never completes.
+    /// the UAS that sent it. Charges the UAC that took the final and owed the
+    /// ACK — an un-ACKed reject retransmits to Timer H and its transaction
+    /// never completes.
     #[serde(rename = "unacked-invite-non-2xx-final")]
     UnackedInviteNon2xxFinal,
     /// RFC 3261 §14.1 / §17.1.1.2: a re-INVITE that drew a provisional draws a
@@ -574,6 +575,7 @@ impl RuleId {
         RuleId::NoAckToDialogCreating2xx,
         RuleId::NoCancelAfterFinal,
         RuleId::SecondAnswerRepeatsTheFirst,
+        RuleId::UnackedInviteNon2xxFinal,
     ];
 
     /// The rule's wire token — the same spelling serde uses.

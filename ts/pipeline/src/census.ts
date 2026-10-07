@@ -253,6 +253,11 @@ export const describeHit = (hit: Census.CensusHit): string => {
         `dialog with another transport plan — first [${hit.first_plan.join(", ")}], then ` +
         `[${hit.second_plan.join(", ")}], which the peer takes as no answer at all`
       )
+    case "unacked-invite-non-2xx-final":
+      return (
+        `took the ${hit.status} to its INVITE on CSeq ${hit.cseq} from ${hit.taker} and never ` +
+        `ACKed it on branch '${hit.branch}'; the capture ran ${ms(hit.window_us)} ms longer`
+      )
   }
 }
 

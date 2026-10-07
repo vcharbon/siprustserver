@@ -1406,7 +1406,12 @@ inverts it. Two BYEs crossing 1.8 ms apart on one leg is the canonical case: the
 capture states which arrived first, and nothing a lane can reproduce makes it so.
 
 Only a shared anchor declares a race. Two dwells measured from two anchors are
-both the document's, however close together they sit, and their order stands.
+both the document's, however close together they sit, and their order stands —
+with one consequence of the shape above: an arrival the SUT minted right behind
+a minted arrival that races a send races that send too, since both are the
+SUT's reaction to one cause timed against the same dwell. It names its
+neighbour, and a CHAIN of races outlives a member that settled first: a step
+naming one that already arrived races whatever that one raced.
 
 ### 6.7b The undeclared race: a relay behind a send
 
@@ -2645,18 +2650,27 @@ its detector:
 | `unacked-reliable-provisional` | RFC 3262 §4 — a UAC that took a reliable provisional (§3: an INVITE offering `100rel`, answered by a 101-199 carrying BOTH `Require: 100rel` and an `RSeq`) answers it with a PRACK whose `RAck` names it (§7.2) |
 | `no-ack-to-dialog-creating-2xx` | RFC 3261 §13.2.2.4 — a UAC that took a dialog-creating 2xx to its own INVITE answers it with an ACK on that dialog. One ACK is owed per 2xx RECEIVED (the core sends it, not the client transaction — §17.1.1.3), keyed on the INVITE's CSeq number and the To tag, so a retransmission ladder is one obligation and a fork's 2xx is its own |
 | `no-cancel-after-final` | RFC 3261 §9.1 — a UAC CANCELs a client transaction still in flight. Once a final has landed the transaction is completed (§17.1.1.2) and the CANCEL names none the server holds, so it draws a 481 (§9.2) and changes nothing. Conservative on the pairing's own terms: a final observed just before the CANCEL may have crossed it in flight, so only a CANCEL sent after the emitter's OWN ACK for that final (§17.1.1.3, same branch) is charged |
+| `unacked-invite-non-2xx-final` | RFC 3261 §17.1.1.3 — a UAC that took a non-2xx final to its INVITE ACKs it on the INVITE's own branch, hop by hop. Charged to the UAC that owed the ACK; decided only once the observation outlasts the §17.2.1 Timer H give-up |
 
 The detectors are `sipflow --rfc-census`
 (`crates/sip-pcap/src/rfc/`), and each one's exact conditions, its
 conservatism and its corpus numbers live with the census report.
 
-**Emitter attribution decides gating.** A violation a SCRIPTED PEER emits is
-what the case exists to reproduce: the run lists it prominently in its verdict
-and never gates on it, and nothing about the run turns red for reproducing the
-behaviour it was written for. A violation the SYSTEM UNDER TEST emits is a
-defect of the thing being tested, and it gates. Until a detector decides the
-rule off the wire, a run that meets a SUT-emitted entry refuses by name rather
-than passing a claim nothing verified.
+**A violation is charged to the party that commits it, and an entry is the
+statement that cancels it.** The run's RFC audit names every finding by the
+party it charges, the scripted peers included. A finding against a SCRIPTED PEER
+gates like any other unless the document states the same violation against that
+peer on the same transaction — an entry here, whose `step` lands on that
+transaction — and then it is CANCELLED: still written, beside the statement that
+cancels it, and no longer gating. Replaying a peer is no licence for it to break
+a rule the source never saw it break. A captured document's entries come from
+the census over the captured trace, so the cancellation is the source's own
+evidence; an authored document's are its author's statement, and so is a
+`suppress-auto` deviation withholding the message the finding misses. An entry
+gates nothing itself. An entry the SYSTEM UNDER TEST emits is a defect of the
+thing being tested, and it gates. Until a detector decides the rule off the
+wire, a run that meets a SUT-emitted entry refuses by name rather than passing a
+claim nothing verified.
 
 `races` on a deviation stays exactly what it is: informative race-existence
 metadata. A race with no violation is still a fact worth keeping, and nothing
@@ -3047,7 +3061,9 @@ Its whole job:
    unless the run configuration states that class outright. One comparison, no
    vocabulary, no third status.
 6. **`rfc_violations`** (§11.1): list every entry in the verdict. A scripted
-   peer's gates nothing; the system under test's gates.
+   peer's gates nothing itself and cancels the audit's finding of the same
+   violation against that peer on the same transaction; the system under
+   test's gates.
 7. **`auto` steps**: the stack COMPOSES them — R-URI, Route, Via and CSeq off
    the transaction that obliged the message — and the step's STORED CONTENT
    rides them like any other step's: the frozen headers on every class, plus the

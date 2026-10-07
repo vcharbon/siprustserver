@@ -48,6 +48,15 @@
       "relayed": 0,
       "buckets": {}
     },
+    "unacked-invite-non-2xx-final": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "unacked-reliable-provisional": {
       "hits": 0,
       "documents": 0,

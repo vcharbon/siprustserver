@@ -334,9 +334,9 @@ impl std::fmt::Display for Failure {
 
 /// One RFC violation the document declares, as the verdict lists it (§11.1).
 ///
-/// A scripted peer's violation is the case's own subject matter: it is listed
-/// prominently and gates nothing, so a reader of the bundle sees what the run
-/// deliberately reproduced without the run turning red for reproducing it.
+/// A scripted peer's entry states what that party broke in the source: it is
+/// listed and gates nothing itself, and the RFC audit cancels the run's finding
+/// of the same violation on the same transaction against it (`rfc.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ViolationNote {
@@ -623,7 +623,8 @@ impl RunVerdict {
     }
 
     /// List a declared violation. A scripted peer's is recorded and nothing
-    /// else; the system under test's also fails the run, because it gates.
+    /// else here — the RFC audit reads it as a cancellation; the system under
+    /// test's also fails the run, because it gates.
     pub fn note_violation(&mut self, violation: &crate::violation::RfcViolation) {
         let gating = violation.sut_emitted();
         self.rfc_violations.push(ViolationNote {

@@ -133,13 +133,28 @@ export const SecondAnswerHit = Schema.Struct({
 })
 export interface SecondAnswerHit extends Schema.Schema.Type<typeof SecondAnswerHit> {}
 
+/** `unacked-invite-non-2xx-final`: the non-2xx final taken and never ACKed on its INVITE's branch. */
+export const UnackedRejectHit = Schema.Struct({
+  ...HitHead,
+  rule: Schema.Literal("unacked-invite-non-2xx-final"),
+  reject_msg: Schema.Int,
+  reject_hop: Schema.Int,
+  reject_ts_us: Schema.Int,
+  status: Schema.Int,
+  invite_msg: Schema.Int,
+  branch: Schema.String,
+  window_us: Schema.Int
+})
+export interface UnackedRejectHit extends Schema.Schema.Type<typeof UnackedRejectHit> {}
+
 /** One hit, internally tagged on `rule`. */
 export const CensusHit = Schema.Union([
   CancelHit,
   UnackedHit,
   NoAckHit,
   LateCancelHit,
-  SecondAnswerHit
+  SecondAnswerHit,
+  UnackedRejectHit
 ])
 export type CensusHit = typeof CensusHit.Type
 

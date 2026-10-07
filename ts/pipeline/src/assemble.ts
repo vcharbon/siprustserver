@@ -180,6 +180,23 @@ export const assemble = (input: AssembleInput): Assembled => {
   })
   for (const w of stamped.warnings) flags.push(unanchoredFlag(w))
 
+  // What the census decided a scripted party broke at this vantage: the
+  // statements the run's RFC audit cancels that party's findings against.
+  const captured = policy.captured({
+    capture,
+    callIds,
+    flows,
+    layout,
+    sources: flow.sources,
+    steps: flow.steps
+  })
+  const violations = [
+    ...stamped.violations,
+    ...captured.filter(
+      (c) => !stamped.violations.some((v) => v.rule === c.rule && v.step === c.step)
+    )
+  ]
+
   // What this case's replay CANNOT do compliantly. A negative case is generated,
   // never excused: the declaration rides the document and the run owes exactly
   // that failure (§11.2).
@@ -236,7 +253,7 @@ export const assemble = (input: AssembleInput): Assembled => {
     legs: layout.legs,
     flow: flow.steps,
     ...(deviations.length > 0 ? { deviations } : {}),
-    ...(stamped.violations.length > 0 ? { rfc_violations: stamped.violations } : {}),
+    ...(violations.length > 0 ? { rfc_violations: violations } : {}),
     ...(declared.entries.length > 0 ? { must_fail: declared.entries } : {}),
     postconditions: { cdr: { absent: NO_CDR_ORACLE } },
     timing: {

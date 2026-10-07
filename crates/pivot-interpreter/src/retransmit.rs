@@ -199,6 +199,10 @@ enum Closer {
     /// transaction to Proceeding and RESET Timer E to T2 — it slows the ladder,
     /// it does not stop it.
     Final,
+    /// A CANCEL: its own final, or the final to the INVITE it names. Once that
+    /// INVITE has its final the CANCEL is moot (§9.1) and its ladder stops
+    /// (ADR-0028 X4), whether or not the CANCEL itself was ever answered.
+    Cancel,
     /// A class whose repeats are drawn by the wire, so nothing this vantage
     /// sees ends a ladder it never paced.
     Nothing,
@@ -220,6 +224,7 @@ impl Closer {
         match sip_message::sniff::req_method(raw).as_deref() {
             Some("ACK") => Closer::Nothing,
             Some("INVITE") => Closer::AnyResponse,
+            Some("CANCEL") => Closer::Cancel,
             Some(_) => Closer::Final,
             None => Closer::Nothing,
         }
@@ -280,6 +285,19 @@ impl StepLadder {
             None => true,
             Some(tag) => sip_message::sniff::to_tag(raw) == *tag,
         }
+    }
+
+    /// Whether `bye`, sent by the SUT, ends this ladder: an expect-side 2xx to
+    /// an INVITE whose dialog the BYE names from the 2xx's own side — its From
+    /// tag is the 2xx's To tag, the tag the SUT holds the dialog under.
+    fn ended_by_emitters_bye(&self, bye: &[u8]) -> bool {
+        let two_xx =
+            sip_message::sniff::resp_status(&self.claimed).is_some_and(|s| (200..300).contains(&s));
+        self.side == LadderSide::Expect
+            && self.closer == Closer::Ack
+            && two_xx
+            && self.call_id == sip_message::sniff::call_id(bye)
+            && self.to_tag.as_deref() == Some(sip_message::sniff::from_tag(bye).as_str())
     }
 
     /// How long the ladder ran: the claimed datagram to the closer that ended
@@ -362,6 +380,10 @@ impl Repeats {
 
     /// Register the datagram `step` put on the wire or matched, with the count
     /// the document declares for it.
+    ///
+    /// A BYE an expect claims is the SUT ending a dialog (RFC 3261 §15): every
+    /// 2xx ladder the SUT runs on that dialog stops there, so the claim closes
+    /// them ([`StepLadder::ended_by_emitters_bye`]).
     pub fn claim(
         &mut self,
         step: &str,
@@ -372,6 +394,15 @@ impl Repeats {
         raw: &[u8],
         at_us: u64,
     ) {
+        if side == LadderSide::Expect
+            && sip_message::sniff::req_method(raw).as_deref() == Some("BYE")
+        {
+            for ladder in self.ladders.iter_mut().filter(|l| l.leg == leg) {
+                if ladder.closed_us.is_none() && ladder.ended_by_emitters_bye(raw) {
+                    ladder.closed_us = Some(at_us);
+                }
+            }
+        }
         self.ladders.retain(|l| l.step != step);
         self.ladders.push(StepLadder {
             step: step.to_string(),
@@ -445,6 +476,12 @@ impl Repeats {
                 Closer::AnyResponse => is_response && same_transaction,
                 Closer::Final => {
                     is_response && status.is_some_and(|s| s >= 200) && same_transaction
+                }
+                Closer::Cancel => {
+                    is_response
+                        && status.is_some_and(|s| s >= 200)
+                        && ladder.cseq == cseq
+                        && (method == "CANCEL" || method == "INVITE")
                 }
                 Closer::Nothing => false,
             };

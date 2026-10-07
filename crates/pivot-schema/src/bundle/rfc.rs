@@ -3,10 +3,11 @@
 //! wire, or the stated fact that no fabric recorded it.
 //!
 //! A gating finding fails the cell — the same mandatory gate the e2e lane
-//! rides, narrowed to what the SUT side EMITTED: a document actor's own
-//! deviation is the capture's, replayed as scripted, and is written but never
-//! gates. An advisory finding is written so a triage session can read it,
-//! never counted. `not-audited` is a value of its own, so a lane that recorded
+//! rides, whichever party committed it. A document actor's violation is named
+//! as that actor's, and it is CANCELLED only by the document's statement of the
+//! same violation on the same transaction (§11.1): the cancellation is written
+//! beside it and the finding stops gating. An advisory finding is written so a
+//! triage session can read it, never counted. `not-audited` is a value of its own, so a lane that recorded
 //! nothing can never be read as a clean audit.
 
 use schemars::JsonSchema;
@@ -24,8 +25,8 @@ pub struct RfcFinding {
     pub detail: String,
     /// `true` ⇒ informational only, never gating.
     pub advisory: bool,
-    /// `true` ⇒ the finding fails the cell: non-advisory, unwaived, and not a
-    /// document actor's own deviation (`actor` absent).
+    /// `true` ⇒ the finding fails the cell: non-advisory, unwaived, and not
+    /// cancelled (`cancelled_by` absent).
     pub gating: bool,
     /// The 1-based audit wire-entry index of the offending message, where the
     /// rule pinpoints one.
@@ -38,10 +39,16 @@ pub struct RfcFinding {
     /// SUT's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charged: Option<String>,
-    /// The document endpoint `charged` is, when it is one: the deviation is
-    /// then the scripted peer's, replayed from the capture.
+    /// The document endpoint `charged` is, when it is one: the violation is
+    /// then the scripted peer's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// What cancels an actor's finding, where something does: the document's
+    /// statement of the same violation on the same transaction — an
+    /// `rfc_violations` entry, or a `suppress-auto` deviation withholding the
+    /// message the finding misses — named so a reader sees both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_by: Option<String>,
 }
 
 /// What the post-run audit came to.
@@ -88,6 +95,7 @@ mod tests {
             offending: Some(7),
             charged: Some("127.0.0.1:5080".into()),
             actor: None,
+            cancelled_by: None,
         }
     }
 

@@ -161,6 +161,13 @@ struct LegView {
     /// The tags of the dialogs this leg ENDED by answering a BYE 2xx: a request
     /// still pending under one of them is owed its 487 (§15.1.2).
     ended: BTreeSet<Option<String>>,
+    /// The tag of the last dialog this leg held established, kept once the
+    /// dialog is over: what a BYE this leg would send now names.
+    last_held: Option<String>,
+    /// The dialogs, by the tag this leg holds them under, on which it sent a
+    /// REFER or a SUBSCRIBE: the subscriptions whose NOTIFYs it answers (RFC
+    /// 6665 §4.1.3, RFC 3515 §2.4.4).
+    subscribed: BTreeSet<Option<String>>,
     /// The From-tag of the INVITE this leg sent, before anything answers it.
     own_tag: Option<String>,
     /// The early dialogs this leg is ringing (§12.1.1): the tag of each
@@ -359,7 +366,8 @@ impl LegView {
 /// the endpoint's own whatever a document scripts — the `200` a CANCEL is
 /// answered with and the `487` the INVITE it names ends with (RFC 3261 §9.2),
 /// the ACK a non-2xx INVITE final is owed on its own branch (§17.1.1.3), the
-/// final a PRACK draws (RFC 3262 §3), and the final a BYE draws — `200` on
+/// final a PRACK draws (RFC 3262 §3), the `200` a NOTIFY of a subscription
+/// this leg holds draws (RFC 6665 §4.1.3), and the final a BYE draws — `200` on
 /// a dialog this leg holds, established or early (§15), `481` on none
 /// (§15.1.2), then the `487` a request still pending on the dialog that 200
 /// ended is owed (§15.1.2, last paragraph). Anything else owes nothing:
@@ -395,6 +403,19 @@ pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<
                 None => open(Method::Invite).map(|invite| invite.answer(487)),
             }
         }
+        // RFC 6665 §4.1.3: a subscriber answers every NOTIFY of a subscription
+        // it holds 200 — the implicit one a REFER it sent created (RFC 3515
+        // §2.4.4) included — so the notifier's transaction ends instead of
+        // retransmitting to its Timer F. A NOTIFY for no subscription of this
+        // leg's is left to the flow.
+        SipMessage::Request(request) if *request.method() == Method::Notify => {
+            let transaction = transaction_of(request);
+            if !view.subscribed.contains(&transaction.1) {
+                return None;
+            }
+            let open = view.unanswered.iter().find(|open| open.transaction == transaction)?;
+            Some(open.answer(200))
+        }
         // RFC 3262 §3: a UAS answers every PRACK — 2xx for the unacknowledged
         // reliable provisional its RAck names, 481 for anything else — so the
         // relay it rode gets its own final and the caller's PRACK is not left
@@ -413,6 +434,14 @@ pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<
         }
         _ => None,
     }
+}
+
+/// Whether a BYE this leg would send now names a dialog it already ended by
+/// answering the peer's BYE 2xx (RFC 3261 §15.1.2): the dialog is gone, so the
+/// BYE would draw a 481 and end nothing.
+pub fn bye_moot(messages: &[RecordedMessage]) -> bool {
+    let view = view(messages);
+    view.held_dialog.is_none() && view.last_held.is_some() && view.ended.contains(&view.last_held)
 }
 
 /// The final status a request the close answers is answered with, where the
@@ -454,6 +483,9 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     }
                     Method::Cancel => view.sent_cancel = true,
                     Method::Bye => view.bye_seen = true,
+                    Method::Refer | Method::Subscribe => {
+                        view.subscribed.insert(request.from().tag().map(str::to_string));
+                    }
                     _ => {}
                 }
             }
@@ -525,6 +557,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                             if let Some(tag) = &to_tag {
                                 view.rang.remove(tag);
                             }
+                            view.last_held.clone_from(&to_tag);
                             view.held_dialog = to_tag;
                         } else {
                             view.rang.retain(|_, invite| *invite != cseq.seq());
@@ -580,6 +613,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                         view.peer_rang.remove(tag);
                     }
                     view.held_dialog = view.own_tag.clone();
+                    view.last_held = view.own_tag.clone();
                 } else {
                     view.peer_rang.clear();
                 }

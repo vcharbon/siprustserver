@@ -28,6 +28,13 @@
  * the source platform's own message-moving granularity and no replay
  * reproduces it. A teardown frontier is where this falls out: a request still
  * pending when the BYE lands, and the BYE, answered microseconds apart.
+ *
+ * A THIRD shape follows from the first: an arrival the SUT minted right behind
+ * a minted arrival that races a send. Both are the SUT's own reaction to one
+ * cause, timed against the same dwell the document holds, so the second races
+ * that send exactly as the first does. A relayed first arrival carries no such
+ * second: what the SUT mints behind a relay is timed off the relay, which the
+ * leg already orders.
  */
 import type { DelayCausality } from "./delay.js"
 import type { StepDraft } from "./draft.js"
@@ -51,7 +58,11 @@ export const stampOverlaps = (
     for (let n = 1; n < positions.length; n++) {
       const earlier = positions[n - 1]!
       const later = positions[n]!
-      if (!races(steps, derived, earlier, later) && !arrivalsRace(steps, earlier, later, floor)) {
+      if (
+        !races(steps, derived, earlier, later) &&
+        !arrivalsRace(steps, earlier, later, floor) &&
+        !mintedBehindARace(steps, derived, earlier, later)
+      ) {
         continue
       }
       steps[later] = { ...steps[later]!, overlap: steps[earlier]!.id }
@@ -140,3 +151,21 @@ const races = (
     (derived[arrival] === "propagated" || derived[arrival] === "sut-originated")
   )
 }
+
+/**
+ * Whether `b` is an arrival the SUT minted off `a`, itself a minted arrival
+ * already declared racing its neighbouring send — the SUT's next reaction to
+ * the same cause, put on the wire right behind the first.
+ */
+const mintedBehindARace = (
+  steps: ReadonlyArray<StepDraft>,
+  derived: ReadonlyArray<DelayCausality>,
+  a: number,
+  b: number
+): boolean =>
+  steps[a]!.op === "expect" &&
+  steps[b]!.op === "expect" &&
+  steps[a]!.overlap !== undefined &&
+  derived[a] === "sut-originated" &&
+  derived[b] === "sut-originated" &&
+  anchorStep(steps[b]!.delay.from) === steps[a]!.id

@@ -8,8 +8,10 @@
 //!
 //! `rule` is a CLOSED enum, unlike a deviation `kind`: a rule nothing detects is
 //! a rule nothing can be held to, so the vocabulary grows one detector at a
-//! time. `emitter` decides gating — a scripted peer's violation is listed and
-//! never gates, the system under test's gates.
+//! time. A scripted peer's entry is the statement of what that party broke in
+//! the source — it gates nothing itself, and it is what cancels the replay's
+//! finding of the same violation on the same transaction; the system under
+//! test's gates.
 
 use std::fmt;
 use std::str::FromStr;
@@ -30,9 +32,10 @@ pub struct RfcViolation {
     /// The flow step whose message breaks it — the anchor, so a reader lands on
     /// the datagram rather than on a paragraph.
     pub step: String,
-    /// Who emitted it: an `actors` id, or `sut`. A scripted peer's violation is
-    /// listed loudly and gates nothing, because reproducing a peer's
-    /// non-compliance is what the case is for; the system under test's gates.
+    /// Who emitted it: an `actors` id, or `sut`. A scripted peer's entry is
+    /// listed and gates nothing; it cancels the run's finding of the same rule
+    /// against that actor on the transaction `step` names. The system under
+    /// test's gates.
     pub emitter: String,
 }
 
@@ -73,6 +76,10 @@ pub enum RfcRule {
     /// one, since the peer takes the first and ignores the rest.
     #[serde(rename = "second-answer-repeats-the-first")]
     SecondAnswerRepeatsTheFirst,
+    /// RFC 3261 §17.1.1.3: a UAC that took a non-2xx final to its INVITE
+    /// acknowledges it on that INVITE's branch, hop by hop.
+    #[serde(rename = "unacked-invite-non-2xx-final")]
+    UnackedInviteNon2xxFinal,
 }
 
 impl RfcRule {
@@ -88,6 +95,7 @@ impl RfcRule {
             RfcRule::NoAckToDialogCreating2xx => rfc_rules::RuleId::NoAckToDialogCreating2xx,
             RfcRule::NoCancelAfterFinal => rfc_rules::RuleId::NoCancelAfterFinal,
             RfcRule::SecondAnswerRepeatsTheFirst => rfc_rules::RuleId::SecondAnswerRepeatsTheFirst,
+            RfcRule::UnackedInviteNon2xxFinal => rfc_rules::RuleId::UnackedInviteNon2xxFinal,
         }
     }
 }
@@ -100,6 +108,7 @@ impl fmt::Display for RfcRule {
             RfcRule::NoAckToDialogCreating2xx => f.write_str("no-ack-to-dialog-creating-2xx"),
             RfcRule::NoCancelAfterFinal => f.write_str("no-cancel-after-final"),
             RfcRule::SecondAnswerRepeatsTheFirst => f.write_str("second-answer-repeats-the-first"),
+            RfcRule::UnackedInviteNon2xxFinal => f.write_str("unacked-invite-non-2xx-final"),
         }
     }
 }
@@ -114,6 +123,7 @@ impl FromStr for RfcRule {
             "no-ack-to-dialog-creating-2xx" => Ok(RfcRule::NoAckToDialogCreating2xx),
             "no-cancel-after-final" => Ok(RfcRule::NoCancelAfterFinal),
             "second-answer-repeats-the-first" => Ok(RfcRule::SecondAnswerRepeatsTheFirst),
+            "unacked-invite-non-2xx-final" => Ok(RfcRule::UnackedInviteNon2xxFinal),
             other => Err(format!("rfc violation rule {other:?} is not in the closed vocabulary")),
         }
     }
@@ -172,6 +182,7 @@ mod tests {
             RfcRule::NoAckToDialogCreating2xx,
             RfcRule::NoCancelAfterFinal,
             RfcRule::SecondAnswerRepeatsTheFirst,
+            RfcRule::UnackedInviteNon2xxFinal,
         ];
         assert_eq!(mine.len(), rfc_rules::RuleId::WIRE.len());
         for (rule, id) in mine.into_iter().zip(rfc_rules::RuleId::WIRE) {

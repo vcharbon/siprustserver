@@ -22,7 +22,8 @@ export const RFC_RULES = [
   "unacked-reliable-provisional",
   "no-ack-to-dialog-creating-2xx",
   "no-cancel-after-final",
-  "second-answer-repeats-the-first"
+  "second-answer-repeats-the-first",
+  "unacked-invite-non-2xx-final"
 ] as const
 
 export const RfcRule = Schema.Literals(RFC_RULES)

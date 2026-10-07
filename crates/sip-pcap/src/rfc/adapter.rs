@@ -8,7 +8,7 @@
 //! numbers behind them are run — plus the candidates a sweep names to take
 //! their baseline.
 
-use rfc_rules::rules::ack::NoAckToDialogCreating2xx;
+use rfc_rules::rules::ack::{NoAckToDialogCreating2xx, UnackedInviteNon2xxFinal};
 use rfc_rules::rules::cancel::{No200AfterCancel, NoCancelAfterFinal};
 use rfc_rules::rules::offer_answer::SecondAnswerRepeatsTheFirst;
 use rfc_rules::rules::prack::UnackedReliableProvisional;
@@ -29,12 +29,13 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
     let view = WireView { msgs: &msgs, obs: &obs };
     // Report order is the census order: CANCEL, PRACK, ACK,
     // then whatever joined the WIRE subset after them.
-    let rules: [&dyn Obligation; 5] = [
+    let rules: [&dyn Obligation; 6] = [
         &No200AfterCancel,
         &UnackedReliableProvisional,
         &NoAckToDialogCreating2xx,
         &NoCancelAfterFinal,
         &SecondAnswerRepeatsTheFirst,
+        &UnackedInviteNon2xxFinal,
     ];
     let candidates: Vec<Box<dyn Obligation>> = rfc_rules::all_rules()
         .into_iter()

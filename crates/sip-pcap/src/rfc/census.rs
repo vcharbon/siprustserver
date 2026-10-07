@@ -300,6 +300,7 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
                 "a stream's port or formats changed"
             }
         }
+        Evidence::UnackedReject { .. } => "non-2xx final never acked",
         // Not census rules (RuleId::WIRE) — no capture hit carries these yet,
         // so each names its own measure and no bucket of theirs is counted.
         Evidence::Uncleared { .. } => "uncleared",
@@ -335,7 +336,6 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
         Evidence::ByeOffDialog { early_dialog: true, .. } => "callee byed an early dialog",
         Evidence::OverlappingReInvite { .. } => "re-invite overlapped its own prior one",
         Evidence::TryingNotSentInGrace { .. } => "no 100 trying inside the grace",
-        Evidence::UnackedReject { .. } => "non-2xx final never acked",
         Evidence::AbandonedReInvite { .. } => "re-invite drew a provisional and no final",
         Evidence::LateProvisional { .. } => "provisional after the final",
         Evidence::Unreliable1xx { .. } => "provisional not sent reliably",

@@ -76,7 +76,8 @@ const MESSAGE_OF: Record<Violation.RfcRule, string> = {
   "unacked-reliable-provisional": "that reliable provisional",
   "no-ack-to-dialog-creating-2xx": "that dialog-creating 2xx",
   "no-cancel-after-final": "that late CANCEL",
-  "second-answer-repeats-the-first": "that second answer"
+  "second-answer-repeats-the-first": "that second answer",
+  "unacked-invite-non-2xx-final": "that non-2xx INVITE final"
 }
 
 /**
@@ -93,6 +94,7 @@ const MESSAGE_OF: Record<Violation.RfcRule, string> = {
  * | `no-ack-to-dialog-creating-2xx` | the first dialog-creating 2xx the originator TOOK | its receiver |
  * | `no-cancel-after-final` | the CANCEL the originator EMITTED past its own final | its sender |
  * | `second-answer-repeats-the-first` | the SECOND binding answer the originator EMITTED on one dialog | its sender |
+ * | `unacked-invite-non-2xx-final` | the first non-2xx INVITE final the originator TOOK | its receiver |
  *
  * The last one is the only rule whose anchor is not the first message its
  * predicate admits — the first binding answer is the compliant one — so its
@@ -111,7 +113,8 @@ const anchorOf = (
 ): Violation.RfcViolation | undefined => {
   const charges =
     entry.rule === "unacked-reliable-provisional" ||
-      entry.rule === "no-ack-to-dialog-creating-2xx"
+      entry.rule === "no-ack-to-dialog-creating-2xx" ||
+      entry.rule === "unacked-invite-non-2xx-final"
       ? "receiver"
       : "sender"
   const seconds = entry.rule === "second-answer-repeats-the-first"
@@ -199,6 +202,8 @@ const isAnchorFor = (rule: Violation.RfcRule, msg: Flows.Msg): boolean => {
   // The second answer is not the first message its own predicate admits, so it
   // anchors off the LEG ahead of the walk (see `secondAnswers`), never here.
   if (rule === "second-answer-repeats-the-first") return false
+  // RFC 3261 §17.1.1.3: the ACK this rule misses is owed to a non-2xx final.
+  if (rule === "unacked-invite-non-2xx-final") return status >= 300
   return isReliableProvisional(msg, status)
 }
 

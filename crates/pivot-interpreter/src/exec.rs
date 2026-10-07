@@ -1483,6 +1483,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                 continue;
             }
             let sent = sip_message::sniff::first_line(&wire);
+            // An emission the run authored ends a ladder as a scripted one does.
+            self.repeats.answered(&leg, &wire, self.now_us());
             self.instance.recording().push(
                 &leg,
                 Dir::Out,
@@ -1529,6 +1531,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                 });
                 return;
             }
+            // An emission the run authored ends a ladder as a scripted one does.
+            self.repeats.answered(leg, &wire, self.now_us());
             self.instance.recording().push(
                 leg,
                 Dir::Out,
@@ -1721,6 +1725,33 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    /// Whether `step` is a BYE its leg's dialog no longer holds:
+    /// [`close::bye_moot`] over the leg's recorded ladder.
+    fn bye_moot(&mut self, step: &CompiledStep) -> bool {
+        let bye = matches!(&step.discriminator, Discriminator::Request { method }
+            if Method::from_wire(method) == Method::Bye);
+        bye && close::bye_moot(
+            &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
+        )
+    }
+
+    /// Retire every expect on `send`'s leg waiting on the transaction `send`
+    /// would have opened: a request never sent draws no response.
+    fn retire_answers_to(&mut self, send: &CompiledStep) {
+        let answers: Vec<String> = self
+            .instance
+            .plan()
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == send.leg && s.is_expect())
+            .filter(|s| self.instance.cursor().opening_send(&s.id) == Some(send.id.as_str()))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in answers {
+            self.instance.retire_step(&id);
+        }
+    }
+
     /// Mark a step done and remember when, for the dwells anchored on it.
     fn complete(&mut self, step: &CompiledStep) {
         let now = Instant::now();
@@ -1814,6 +1845,23 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Some("withheld by a suppress-auto deviation"),
             );
             self.complete(step);
+            return true;
+        }
+        // RFC 3261 §15.1.2: a BYE on a dialog this leg already ended by
+        // answering the peer's BYE names nothing and would draw a 481. It is
+        // moot: never put on the wire, and the final it would have drawn is
+        // retired with it.
+        if self.bye_moot(step) {
+            self.instance.recording().push(
+                &step.leg,
+                Dir::Out,
+                self.now_us(),
+                Vec::new(),
+                Some(&step.id),
+                Some("moot: the dialog ended when this leg answered the peer's BYE"),
+            );
+            self.complete(step);
+            self.retire_answers_to(step);
             return true;
         }
         let message = match self.compose(step, &effects) {
