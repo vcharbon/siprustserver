@@ -15,11 +15,16 @@
  * itself in the live audit, and a stated SUT entry would refuse the run as a
  * claim nothing verifies.
  */
-import { Violation, type Census, type Flows } from "@sip/contracts"
+import { Violation, type Case, type Census, type Flows } from "@sip/contracts"
 import type { DeclarationInput } from "./policy.js"
 
-/** The index, in its leg's messages, of the message a hit's decision rests on. */
-export const anchorOf = (hit: Census.CensusHit): number => {
+/**
+ * The index, in its leg's messages, of the message a hit's decision rests on:
+ * the head's `anchor_msg`, or — on a report taken before every hit stated it —
+ * the modelled rule's own evidence field. `undefined` where neither says.
+ */
+export const anchorOf = (hit: Census.CensusHit): number | undefined => {
+  if (hit.anchor_msg !== undefined) return hit.anchor_msg
   switch (hit.rule) {
     case "no-200-after-cancel":
       return hit.response_msg
@@ -33,12 +38,26 @@ export const anchorOf = (hit: Census.CensusHit): number => {
       return hit.second_answer_msg
     case "unacked-invite-non-2xx-final":
       return hit.reject_msg
+    default:
+      return undefined
   }
 }
 
+/** What the census states about one case: the violations, and the flags saying where it could not. */
+export interface Statements {
+  readonly violations: ReadonlyArray<Violation.RfcViolation>
+  readonly flags: ReadonlyArray<Case.Flag>
+}
+
+/** The flag a case of a capture the census did not cover carries. */
+export const UNCOVERED = "census-uncovered"
+
 /**
  * The violations `hits` charge a scripted party with at this case's vantage,
- * one per rule and step.
+ * one per rule and step, and a flag where the census never covered the case's
+ * capture — an empty list there is no reading at all, and a scripted party's
+ * finding has nothing to be cancelled by. `covered` is the report's coverage;
+ * absent, coverage is not judged.
  *
  * A hit is stated where a step's own coordinate IS its anchor message and the
  * charged endpoint is that step's party: the message's sender on a `send`, its
@@ -47,15 +66,27 @@ export const anchorOf = (hit: Census.CensusHit): number => {
  * statement to cancel against, and the scripted party's finding gates.
  */
 export const capturedWith =
-  (hits: ReadonlyArray<Census.CensusHit>) =>
-  (input: DeclarationInput): ReadonlyArray<Violation.RfcViolation> => {
+  (hits: ReadonlyArray<Census.CensusHit>, covered?: ReadonlySet<string>) =>
+  (input: DeclarationInput): Statements => {
+    const flags: Array<Case.Flag> =
+      covered === undefined || covered.has(input.capture)
+        ? []
+        : [
+            {
+              kind: UNCOVERED,
+              detail:
+                `the census report covers no capture '${input.capture}': nothing states what ` +
+                `its scripted parties broke, so every finding against one gates`
+            }
+          ]
     const wanted = new Set(input.callIds)
     const stepById = new Map(input.steps.map((s) => [s.id, s]))
     const actorOfLeg = new Map(input.layout.legs.map((l) => [l.id, l.actor]))
-    const out: Array<Violation.RfcViolation> = []
+    const violations: Array<Violation.RfcViolation> = []
     for (const hit of hits) {
       if (hit.capture !== input.capture || !wanted.has(hit.call_id)) continue
       const anchor = anchorOf(hit)
+      if (anchor === undefined) continue
       const msg: Flows.Msg | undefined = input.flows.legs[hit.leg]?.msgs[anchor]
       if (msg === undefined) continue
       for (const src of input.sources) {
@@ -67,10 +98,10 @@ export const capturedWith =
           (step.op === "expect" && msg.dst === hit.emitter)
         const actor = actorOfLeg.get(step.leg)
         if (!charged || actor === undefined) continue
-        if (!out.some((v) => v.rule === hit.rule && v.step === step.id)) {
-          out.push({ rule: hit.rule, step: step.id, emitter: actor })
+        if (!violations.some((v) => v.rule === hit.rule && v.step === step.id)) {
+          violations.push({ rule: hit.rule, step: step.id, emitter: actor })
         }
       }
     }
-    return out
+    return { violations, flags }
   }

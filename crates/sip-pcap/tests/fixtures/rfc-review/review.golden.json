@@ -1,9 +1,327 @@
 {
   "documents": 1,
+  "captures": [
+    "capture.pcap.gz"
+  ],
   "groups": 1,
   "legs": 3,
   "messages": 19,
   "rules": {
+    "ack-body-after-complete-offer-answer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "ack-cseq-matches-invite": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "ack-preserves-invite-route": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "ack-require-subset-of-invite": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "allow-supported-on-invite": {
+      "hits": 4,
+      "documents": 1,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {
+        "peer": 2,
+        "platform": 2
+      },
+      "by_side": {
+        "peer": 3,
+        "platform": 1
+      },
+      "relayed": 0,
+      "buckets": {
+        "allow/supported not advertised": 4
+      }
+    },
+    "answer-m-line-count-matches-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "answer-media-type-matches-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "answer-stream-matches-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "answer-t-line-equals-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "branch-prefix": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 6,
+      "decided": 6,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "c0-port-non-zero": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 8,
+      "decided": 8,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cancel-after-1xx": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cancel-cseq-method": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cancel-request-uri": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cancel-route-echoes-invite": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cancel-via-branch": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "concurrent-re-invite-500-or-491": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "contact-presence": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "content-length": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 17,
+      "decided": 17,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "content-type": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 8,
+      "decided": 8,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "cseq-in-dialog-order": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 5,
+      "decided": 5,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "delay-2xx-on-unacked-reliable-1xx-with-sdp": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "dialog-call-id-stable": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "direction-pair-valid": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "failed-reinvite-tears-down-dialog": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "final-2xx-answers-the-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "in-dialog-to-tag": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 2,
+      "decided": 2,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "max-forwards": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 6,
+      "decided": 6,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "mid-dialog-route": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "mid-dialog-tags": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 15,
+      "decided": 12,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "mid-dialog-uri": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 2,
+      "decided": 2,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "mid-dialog-wire-destination": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-100rel-require-on-non-invite": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 2,
+      "decided": 2,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-1xx-after-final": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "no-200-after-cancel": {
       "hits": 0,
       "documents": 0,
@@ -30,6 +348,15 @@
         "the dialog went silent": 2
       }
     },
+    "no-bye-outside-or-early-dialog": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "no-cancel-after-final": {
       "hits": 0,
       "documents": 0,
@@ -39,11 +366,412 @@
       "relayed": 0,
       "buckets": {}
     },
+    "no-contact-on-bye": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-new-offer-while-offer-pending": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-new-reliable-1xx-after-final": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-overlapping-reliable-provisionals": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-prack-of-100-trying": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-prack-of-out-of-order-rseq": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-re-invite-while-invite-in-progress": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-record-route-from-ua": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 6,
+      "decided": 6,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-reliable-1xx-on-in-dialog": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-require-on-cancel-or-ack": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-target-404": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-to-tag-on-initial-request": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 3,
+      "decided": 3,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "non-contiguous-rseq": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "options-response-echoes": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "payload-type-mapping-stable": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 8,
+      "decided": 8,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "peer-uri-stable": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 2,
+      "decided": 2,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "prack-2xx-or-481": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "prack-accepted-after-final": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "prack-answers-1xx-offer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "proxy-100-trying-not-forwarded": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "proxy-100-within-grace": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "rack-without-known-invite": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "re-offer-m-line-count-monotonic": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "record-route-placement": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 13,
+      "decided": 13,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "register-no-route-set": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "rejected-stream-minimal-answer": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "reliable-1xx-headers": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 8,
+      "decided": 8,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "reliable-needs-client-opt-in": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "require-reliable-1xx-on-require": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "response-correlation": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 13,
+      "decided": 10,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "response-cseq-matches-transaction": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 13,
+      "decided": 13,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "response-echoes-request-via": {
+      "hits": 2,
+      "documents": 1,
+      "occasions": 13,
+      "decided": 13,
+      "by_role": {
+        "platform": 2
+      },
+      "by_side": {
+        "platform": 2
+      },
+      "relayed": 0,
+      "buckets": {
+        "response via stack off its request's": 2
+      }
+    },
+    "rport-echo": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 3,
+      "decided": 3,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "rung-byte-identical": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "sdp-body-parseable": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 8,
+      "decided": 8,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "sdp-origin-continuity": {
+      "hits": 1,
+      "documents": 1,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {
+        "platform": 1
+      },
+      "by_side": {
+        "peer": 1
+      },
+      "relayed": 0,
+      "buckets": {
+        "sdp origin names another session": 1
+      }
+    },
     "second-answer-repeats-the-first": {
       "hits": 0,
       "documents": 0,
       "occasions": 0,
       "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "serial-register": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "single-final-per-server-txn": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "strict-route-rewrite-handled": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "strict-route-shuffle-on-send": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "tag-consistency": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "to-tag-presence": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 9,
+      "decided": 9,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unacked-2xx-not-cleared": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 1,
       "by_role": {},
       "relayed": 0,
       "buckets": {}
@@ -65,6 +793,69 @@
       "by_role": {},
       "relayed": 0,
       "buckets": {}
+    },
+    "unknown-dialog-481": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 1,
+      "decided": 1,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unmatched-prack-proxied": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unsupported-415-accepts": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unsupported-extension-420": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unsupported-extension-421": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unsupported-method-405-allow": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "zero-port-propagation": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 4,
+      "decided": 4,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
     }
   },
   "hits": [
@@ -80,6 +871,7 @@
       "side": "peer",
       "taker": "192.0.2.10:5072",
       "cseq": 101,
+      "anchor_msg": 3,
       "relayed": false,
       "final_msg": 3,
       "final_hop": 0,
@@ -102,6 +894,7 @@
       "side": "platform",
       "taker": "198.51.100.2:5060",
       "cseq": 201,
+      "anchor_msg": 7,
       "relayed": false,
       "final_msg": 7,
       "final_hop": 0,
@@ -111,6 +904,163 @@
       "retransmits": 0,
       "window_us": 21454381,
       "emitter_window_us": 22082
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "allow-supported-on-invite",
+      "group": 0,
+      "leg": 0,
+      "call_id": "call-a-0001@198.51.100.5",
+      "emitter": "192.0.2.10:5072",
+      "emitter_role": "platform",
+      "side": "platform",
+      "taker": "198.51.100.2:5060",
+      "cseq": 101,
+      "anchor_msg": 3,
+      "relayed": false,
+      "capability_msg": 3,
+      "capability_hop": 0,
+      "capability_ts_us": 1704067211458863,
+      "missing": [
+        "Supported"
+      ],
+      "status": 200
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "allow-supported-on-invite",
+      "group": 0,
+      "leg": 1,
+      "call_id": "1-call-a-0001@198.51.100.5",
+      "emitter": "198.51.100.8:5060",
+      "emitter_role": "peer",
+      "side": "peer",
+      "taker": "198.51.100.2:5060",
+      "cseq": 201,
+      "anchor_msg": 6,
+      "relayed": false,
+      "capability_msg": 6,
+      "capability_hop": 1,
+      "capability_ts_us": 1704067211418808,
+      "missing": [
+        "Supported"
+      ],
+      "status": 200
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "allow-supported-on-invite",
+      "group": 0,
+      "leg": 1,
+      "call_id": "1-call-a-0001@198.51.100.5",
+      "emitter": "198.51.100.2:5060",
+      "emitter_role": "platform",
+      "side": "peer",
+      "taker": "192.0.2.10:5072",
+      "cseq": 201,
+      "anchor_msg": 7,
+      "relayed": false,
+      "capability_msg": 7,
+      "capability_hop": 0,
+      "capability_ts_us": 1704067211436781,
+      "missing": [
+        "Supported"
+      ],
+      "status": 200
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "allow-supported-on-invite",
+      "group": 0,
+      "leg": 2,
+      "call_id": "call-b2-0001",
+      "emitter": "198.51.100.9:5060",
+      "emitter_role": "peer",
+      "side": "peer",
+      "taker": "198.51.100.7:5060",
+      "cseq": 201,
+      "anchor_msg": 3,
+      "relayed": false,
+      "capability_msg": 3,
+      "capability_hop": 0,
+      "capability_ts_us": 1704067211414561,
+      "missing": [
+        "Supported"
+      ],
+      "status": 200
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "sdp-origin-continuity",
+      "group": 0,
+      "leg": 1,
+      "call_id": "1-call-a-0001@198.51.100.5",
+      "emitter": "198.51.100.2:5060",
+      "emitter_role": "platform",
+      "side": "peer",
+      "taker": "192.0.2.10:5072",
+      "cseq": 201,
+      "anchor_msg": 7,
+      "relayed": false,
+      "origin_msg": 7,
+      "origin_hop": 0,
+      "origin_ts_us": 1704067211436781,
+      "prior_origin_msg": 2,
+      "origin_line": "o=anon 3238003208 375266564 IN IP4 198.51.100.9",
+      "prior_origin_line": "o=anon 432354 968093 IN IP4 198.51.100.5",
+      "same_session": false,
+      "body_changed": true,
+      "session_version": 375266564,
+      "prior_session_version": 968093
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "response-echoes-request-via",
+      "group": 0,
+      "leg": 0,
+      "call_id": "call-a-0001@198.51.100.5",
+      "emitter": "192.0.2.10:5072",
+      "emitter_role": "platform",
+      "side": "platform",
+      "taker": "198.51.100.2:5060",
+      "cseq": 101,
+      "anchor_msg": 2,
+      "relayed": false,
+      "via_msg": 2,
+      "via_hop": 0,
+      "via_ts_us": 1704067200821806,
+      "response_branch": "z9hG4bK-b0001",
+      "request_branch": "z9hG4bK-b0001",
+      "response_vias": 1,
+      "request_vias": 2
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "response-echoes-request-via",
+      "group": 0,
+      "leg": 0,
+      "call_id": "call-a-0001@198.51.100.5",
+      "emitter": "192.0.2.10:5072",
+      "emitter_role": "platform",
+      "side": "platform",
+      "taker": "198.51.100.2:5060",
+      "cseq": 101,
+      "anchor_msg": 3,
+      "relayed": false,
+      "via_msg": 3,
+      "via_hop": 0,
+      "via_ts_us": 1704067211458863,
+      "response_branch": "z9hG4bK-b0001",
+      "request_branch": "z9hG4bK-b0001",
+      "response_vias": 1,
+      "request_vias": 2
     }
   ],
   "failures": [],

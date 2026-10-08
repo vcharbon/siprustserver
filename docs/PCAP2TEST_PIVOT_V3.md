@@ -2634,15 +2634,17 @@ differently.
 
 | field | meaning |
 |---|---|
-| `rule` | which rule is broken. CLOSED vocabulary |
+| `rule` | which rule is broken: any rule of the RFC validator, by its token |
 | `step` | the flow step whose message breaks it — the anchor, so a reader lands on the datagram |
 | `emitter` | who emits it: an `actors` id, or `sut` |
 
-`rule` is closed where a deviation `kind` is open, and the difference is
-deliberate: a kind an interpreter cannot execute still parses so lint can say
-so, while a rule nothing can DECIDE off the wire is a claim nothing can hold a
-run to. The vocabulary grows one detector at a time, and a member arrives with
-its detector:
+`rule` is closed over the rules the validator has a body for (`rfc-rules`,
+`RuleId`), where a deviation `kind` is open: a kind an interpreter cannot
+execute still parses so lint can say so, while a rule nothing can DECIDE off
+the wire is a claim nothing can hold a run to. Every rule with a body is
+decidable both ways, so every one can be stated — the census decides each off
+a capture, the live audit off a run, with the same rule code over the same
+messages. A few of them, with their reading:
 
 | rule | what it decides |
 |---|---|
@@ -2652,9 +2654,18 @@ its detector:
 | `no-cancel-after-final` | RFC 3261 §9.1 — a UAC CANCELs a client transaction still in flight. Once a final has landed the transaction is completed (§17.1.1.2) and the CANCEL names none the server holds, so it draws a 481 (§9.2) and changes nothing. Conservative on the pairing's own terms: a final observed just before the CANCEL may have crossed it in flight, so only a CANCEL sent after the emitter's OWN ACK for that final (§17.1.1.3, same branch) is charged |
 | `unacked-invite-non-2xx-final` | RFC 3261 §17.1.1.3 — a UAC that took a non-2xx final to its INVITE ACKs it on the INVITE's own branch, hop by hop. Charged to the UAC that owed the ACK; decided only once the observation outlasts the §17.2.1 Timer H give-up |
 
-The detectors are `sipflow --rfc-census`
-(`crates/sip-pcap/src/rfc/`), and each one's exact conditions, its
-conservatism and its corpus numbers live with the census report.
+The census is `sipflow --rfc-census` (`crates/sip-pcap/src/rfc/`), running
+every rule over each leg of a capture; each rule's exact conditions and its
+conservatism live with its body, its corpus numbers with the census report.
+
+**One reading of the observation.** A rule decides from the messages; what the
+observation adds is only where it ENDS. A capture is OPEN — it may have stopped
+recording before an absence came due — so an absence is decided only once the
+recording outlasts the rule's window; a run is CLOSED — the harness drained, so
+nothing was in flight — and decides an absence at its end. Every other gate is
+a fact of the messages and reads alike in both: a transaction released inside
+a rule's window (a final, a CANCEL) leaves an absence undecided in a run as in
+a capture.
 
 **A violation is charged to the party that commits it, and an entry is the
 statement that cancels it.** The run's RFC audit names every finding by the

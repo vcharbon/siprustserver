@@ -909,7 +909,12 @@ impl LegStack {
             };
             self.ring_early(&tag, fork, rseq);
         }
-        if response.status() >= 200 && response.status() < 300 {
+        // A 2xx to a PRACK or UPDATE an early dialog carried confirms nothing
+        // (RFC 3261 §12.1, RFC 3262 §4, RFC 3311 §5.1): the fork keeps its own
+        // sequence, and the INVITE's 2xx continues it.
+        let answers_early_request =
+            !self.confirmed && matches!(response.cseq().method(), Method::Prack | Method::Update);
+        if response.status() >= 200 && response.status() < 300 && !answers_early_request {
             self.has_dialog = true;
             if let Some(tag) = response.to().tag() {
                 let fork = self.early_dialog(tag).map(|early| early.dialog.local_cseq);
@@ -2387,6 +2392,60 @@ mod tests {
             2,
             "fork 2's only prior request was the INVITE's CSeq 1"
         );
+    }
+
+    /// RFC 3261 §12.2.1.1 across confirmation: a 2xx to the PRACK or UPDATE an
+    /// early dialog carries confirms nothing, so the requests the leg sends on
+    /// that early dialog keep advancing ITS sequence, and the 2xx to the INVITE
+    /// continues from the last of them — the BYE behind PRACK 2 and UPDATE 3 is 4.
+    #[test]
+    fn a_2xx_to_an_early_request_confirms_nothing_and_the_sequence_carries_on() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        let rings = uas
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1"),
+                Vec::new(),
+                None,
+            )
+            .expect("the callee rings reliably");
+        uac.learn_response(&rings);
+        let prack = uac.prack(None, &[], Vec::new(), None, None).expect("the caller PRACKs");
+        assert_eq!(prack.cseq().seq(), 2);
+        uas.learn_request(&prack);
+        let pracked = uas
+            .respond(
+                &Answer { status: 200, reason: "OK", cseq_method: Some("PRACK"), early_tag: None },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers the PRACK");
+        uac.learn_response(&pracked);
+        let update = uac.update(None, &[], Vec::new(), None, None).expect("the caller updates");
+        assert_eq!(update.cseq().seq(), 3);
+        let ok = uas
+            .respond(
+                &Answer {
+                    status: 200,
+                    reason: "OK",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers");
+        uac.learn_response(&ok);
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("a BYE");
+        assert_eq!(bye.cseq().seq(), 4, "the BYE follows the UPDATE's 3");
     }
 
     /// A confirming To-tag that rang no provisional confirms a dialog whose

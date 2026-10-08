@@ -124,12 +124,9 @@ impl Obligation for NoAckToDialogCreating2xx {
                 seen.invite.get(&(uac, call, cseq)).is_some_and(|at_us| *at_us == opened_us);
             let forwarded_it =
                 seen.propagated.get(&(call, cseq, dialog)).is_some_and(|last| f.ts_us < *last);
-            let relayed_unacked = seen.emitted.iter().any(|(up, sent)| {
-                up.party == uac
-                    && up.call != call
-                    && sent.ts_us >= f.ts_us
-                    && !seen.acked.contains(&(up.call, up.cseq, up.dialog))
-            });
+            let relayed_unacked = seen
+                .relayed_upstream(uac, call, f.ts_us)
+                .is_some_and(|up| !seen.acked.contains(&(up.call, up.cseq, up.dialog)));
             let window_us = wire.obs.last_us.saturating_sub(f.ts_us);
             let undecidable = if !opened_it {
                 Some("the charged endpoint did not open the INVITE (a hop is not a UAC)")
@@ -374,6 +371,9 @@ struct Reading<'a> {
     /// (endpoint, Call-ID, INVITE CSeq number) → when that endpoint SENT the
     /// dialog-creating INVITE.
     invite: BTreeMap<(&'a str, &'a str, u32), u64>,
+    /// (endpoint, Call-ID) → when that endpoint first TOOK a dialog-creating
+    /// INVITE on that call: the dial a B2BUA relays onto another call.
+    invite_taken: BTreeMap<(&'a str, &'a str), u64>,
     /// (Call-ID, INVITE CSeq number) → the first time a dialog-creating INVITE
     /// with that number crossed any vantage of the view. An endpoint whose own
     /// emission is not that first one relayed a dial somebody else opened.
@@ -435,6 +435,36 @@ impl Bye<'_> {
 }
 
 impl<'a> Reading<'a> {
+    /// The 2xx `endpoint` passed on for the answer it took at `taken_us` on
+    /// `call`, where it is a B2BUA relaying one: the call whose INVITE it took
+    /// LAST before dialling `call` is the one it relayed, and the first 2xx it
+    /// emitted there from `taken_us` on is the answer passed on.
+    fn relayed_upstream(
+        &self,
+        endpoint: &'a str,
+        call: &'a str,
+        taken_us: u64,
+    ) -> Option<ObligationKey<'a>> {
+        let dialled_us = self
+            .invite
+            .iter()
+            .filter(|((src, c, _), _)| *src == endpoint && *c == call)
+            .map(|(_, at)| *at)
+            .min()?;
+        let (upstream, _) = self
+            .invite_taken
+            .iter()
+            .filter(|((dst, c), at)| *dst == endpoint && *c != call && **at < dialled_us)
+            .max_by_key(|(_, at)| **at)?;
+        self.emitted
+            .iter()
+            .filter(|(k, sent)| {
+                k.party == endpoint && k.call == upstream.1 && sent.ts_us >= taken_us
+            })
+            .min_by_key(|(_, sent)| sent.ts_us)
+            .map(|(k, _)| *k)
+    }
+
     fn of(msgs: &'a [Msg]) -> Self {
         let mut seen = Reading::default();
         for (mi, msg) in msgs.iter().enumerate() {
@@ -473,6 +503,7 @@ impl<'a> Reading<'a> {
             let first = self.invite_first_us.entry((call, msg.cseq)).or_insert(msg.at_us);
             *first = (*first).min(msg.at_us);
             self.invite.entry((msg.src.as_str(), call, msg.cseq)).or_insert(msg.at_us);
+            self.invite_taken.entry((msg.dst.as_str(), call)).or_insert(msg.at_us);
         } else if let Some(status) = msg.status() {
             if !(200..300).contains(&status) || !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                 return;
@@ -842,6 +873,36 @@ mod tests {
             matches!(of(B2BUA).decision, Decision::Undecidable(_)),
             "the B2BUA's ACK waits on the caller's: {f:?}"
         );
+    }
+
+    /// The B2BUA's hold is read off the call it relays, never off another one
+    /// it happens to carry: x's caller ACKed the answer relayed to her, so the
+    /// B2BUA's missing ACK on y is its own — an older call p whose 2xx nobody
+    /// ACKed says nothing about y.
+    #[test]
+    fn another_calls_unacked_2xx_does_not_excuse_a_b2buas_missing_ack() {
+        const B2BUA: &str = "10.0.0.5:5060";
+        const OTHER: &str = "10.0.0.9:5060";
+        let on = |mut m: Msg, call: &str| {
+            m.call_id = call.to_string();
+            m
+        };
+        let ok = |at, src, dst, to: &str, call| {
+            on(msg(at, src, dst, Kind::Response { status: 200 }, 1, Some("fa"), Some(to)), call)
+        };
+        let msgs = vec![
+            on(req(500_000, OTHER, B2BUA, "INVITE", 1, None), "p"),
+            on(req(1_000_000, UAC, B2BUA, "INVITE", 1, None), "x"),
+            on(req(1_010_000, B2BUA, UAS, "INVITE", 1, None), "y"),
+            ok(1_200_000, UAS, B2BUA, "ty", "y"),
+            ok(1_210_000, B2BUA, UAC, "tx", "x"),
+            on(req(1_300_000, UAC, B2BUA, "ACK", 1, Some("tx")), "x"),
+            ok(1_400_000, B2BUA, OTHER, "tp", "p"),
+        ];
+        let closed = obs(&msgs, true);
+        let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &closed });
+        let b2bua = f.iter().find(|f| f.emitter == B2BUA).expect("the B2BUA's occasion on y");
+        assert!(b2bua.violated(), "x was ACKed, so y's missing ACK is the B2BUA's: {f:?}");
     }
 
     /// One trace — a dialog-creating 2xx that is BYE'd but never ACKed — and

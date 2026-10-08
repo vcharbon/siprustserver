@@ -13,9 +13,9 @@ use crate::wire::Endpoint;
 /// kebab-case wire token of the pivot vocabulary (§11.1); the dotted
 /// `rfc_audit` ids die as each live module's rung ports it.
 ///
-/// The WIRE subset — what a pivot document may name in `rfc_violations[].rule`
-/// — is [`RuleId::WIRE`], and it grows one census-verified member at a time;
-/// membership here alone does not put a rule on the wire contract.
+/// What a pivot document may name in `rfc_violations[].rule` is
+/// [`RuleId::WIRE`]: every rule, each decided by the census off a capture as
+/// the live audit decides it off a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuleId {
     /// RFC 3261 §9.2: a UAS that has taken a CANCEL for an INVITE answers that
@@ -566,17 +566,11 @@ impl RuleId {
         RuleId::RungByteIdentical,
     ];
 
-    /// The pivot §11.1 wire contract: the rules a pivot document may claim.
-    /// Each member arrived with its detector, its conservatism and its corpus
-    /// numbers; growing this list takes a census run, not a code move.
-    pub const WIRE: &'static [RuleId] = &[
-        RuleId::No200AfterCancel,
-        RuleId::UnackedReliableProvisional,
-        RuleId::NoAckToDialogCreating2xx,
-        RuleId::NoCancelAfterFinal,
-        RuleId::SecondAnswerRepeatsTheFirst,
-        RuleId::UnackedInviteNon2xxFinal,
-    ];
+    /// The pivot §11.1 wire contract: the rules a pivot document may state and
+    /// the census decides off a capture — every rule with a body, so a scripted
+    /// party's violation of any of them can be cancelled by the same violation
+    /// in the captured trace.
+    pub const WIRE: &'static [RuleId] = RuleId::ALL;
 
     /// The rule's wire token — the same spelling serde uses.
     pub fn token(self) -> &'static str {

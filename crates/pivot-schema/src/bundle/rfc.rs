@@ -39,8 +39,10 @@ pub struct RfcFinding {
     /// SUT's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charged: Option<String>,
-    /// The document endpoint `charged` is, when it is one: the violation is
-    /// then the scripted peer's.
+    /// The document actor `charged` names, when it is a document endpoint: the
+    /// actor playing the leg the offending call rides (several may share an
+    /// endpoint), or the endpoint id where no leg of the run carries it. The
+    /// violation is then the scripted peer's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     /// What cancels an actor's finding, where something does: the document's

@@ -69,6 +69,9 @@ pub struct ReadFailure {
 pub struct Census {
     /// Documents read and scanned.
     pub documents: u64,
+    /// The captures those documents came from, each once: what this census
+    /// covers, so a reader tells a capture with no hit from one never scanned.
+    pub captures: BTreeSet<String>,
     pub groups: u64,
     pub legs: u64,
     pub messages: u64,
@@ -79,8 +82,9 @@ pub struct Census {
     /// stated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sut: Option<SutSet>,
-    /// Rules run beside the WIRE vocabulary to take their baseline (see
-    /// [`scan_with`](super::scan_with)). Sweep configuration, not a result: it is not reported.
+    /// Rules a sweep named beside the vocabulary (see
+    /// [`scan_with`](super::scan_with)) — every rule runs regardless. Sweep
+    /// configuration, not a result: it is not reported.
     #[serde(skip)]
     pub candidates: Vec<RfcRule>,
 }
@@ -92,11 +96,13 @@ impl Census {
         Census::with_candidates(&[])
     }
 
-    /// A census that also runs `candidates` — rules taking their corpus
-    /// baseline — each present at zero like the WIRE rules.
+    /// A census naming `candidates` beside the vocabulary; every rule is
+    /// present at zero whichever are named.
     pub fn with_candidates(candidates: &[RfcRule]) -> Self {
         let mut census = Census { candidates: candidates.to_vec(), ..Census::default() };
-        for rule in RfcRule::WIRE.iter().chain(candidates) {
+        for rule in
+            RfcRule::WIRE.iter().chain(candidates.iter().filter(|c| !RfcRule::WIRE.contains(c)))
+        {
             census.rules.insert(rule.token().to_string(), RuleTally::default());
         }
         census
@@ -124,6 +130,7 @@ impl Census {
             }
         }
         self.documents += 1;
+        self.captures.insert(capture.to_string());
         self.groups += doc.groups.len() as u64;
         self.legs += doc.legs.len() as u64;
         self.messages += doc.legs.iter().map(|l| l.msgs.len() as u64).sum::<u64>();
@@ -167,6 +174,7 @@ impl Census {
     /// Fold another census in — the shape a parallel sweep merges with.
     pub fn merge(&mut self, other: Census) {
         self.documents += other.documents;
+        self.captures.extend(other.captures);
         self.groups += other.groups;
         self.legs += other.legs;
         self.messages += other.messages;
@@ -429,7 +437,14 @@ mod tests {
         assert_eq!((tally.hits, tally.documents), (1, 1));
         assert_eq!(tally.by_role["undetermined"], 1, "a single-leg call attributes neither side");
         assert_eq!(tally.buckets["gap <10ms"], 1);
-        assert_eq!(first.hits[0].capture, "cap-b");
+        let cancelled =
+            first.hits.iter().find(|h| h.hit.rule == RfcRule::No200AfterCancel).expect("the hit");
+        assert_eq!(cancelled.capture, "cap-b");
+        assert_eq!(
+            first.captures.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["cap-a", "cap-b"],
+            "the merged census covers both captures"
+        );
         assert_eq!(first.failures.len(), 1);
         assert!(first.summary().contains("no-200-after-cancel: 1 hit(s)"));
         assert!(first.summary().contains("unacked-reliable-provisional: 0 hit(s)"));
@@ -479,24 +494,35 @@ mod tests {
         assert_eq!(census.rules["unacked-reliable-provisional"].buckets["window <10s"], 1);
         assert_eq!(census.rules["no-ack-to-dialog-creating-2xx"].hits, 1);
         assert_eq!(census.rules["no-ack-to-dialog-creating-2xx"].buckets["torn down un-ACKed"], 1);
-        assert_eq!(census.hits.len(), 3);
-        let json = serde_json::to_value(&census.hits[1]).unwrap();
+        let three: Vec<&LocatedHit> = census
+            .hits
+            .iter()
+            .filter(|h| {
+                [
+                    RfcRule::No200AfterCancel,
+                    RfcRule::UnackedReliableProvisional,
+                    RfcRule::NoAckToDialogCreating2xx,
+                ]
+                .contains(&h.hit.rule)
+            })
+            .collect();
+        assert_eq!(three.len(), 3);
+        let json = serde_json::to_value(three[1]).unwrap();
         assert_eq!(json["rule"], "unacked-reliable-provisional");
         assert_eq!(json["emitter"], A, "the UAC that owed the PRACK");
         assert_eq!(json["rseq"], 1);
-        let ack = serde_json::to_value(&census.hits[2]).unwrap();
+        let ack = serde_json::to_value(three[2]).unwrap();
         assert_eq!(ack["rule"], "no-ack-to-dialog-creating-2xx");
         assert_eq!(ack["emitter"], A, "the UAC that owed the ACK");
         assert_eq!(ack["to_tag"], "tb");
         assert_eq!(ack["bye_by"], B);
     }
 
-    /// A candidate rule is run only where the sweep names it: present at zero
-    /// like a WIRE rule, tallied under its own token and bucketed by its own
-    /// measure — and absent from a census that did not name it, so the WIRE
-    /// vocabulary a report decodes through never grows by being counted.
+    /// Every rule runs: a census names no candidates and still tallies a rule
+    /// beyond the first ones the vocabulary held, under its own token and
+    /// bucketed by its own measure, with the hit anchored on its message.
     #[test]
-    fn a_named_candidate_is_tallied_and_an_unnamed_one_is_not() {
+    fn every_rule_is_tallied_without_being_named() {
         let ok = response(200, "OK", 1, "INVITE", "r1", "fa", Some("tb"));
         let recomposed =
             response_hdr(200, "OK", 1, "INVITE", "r1", "fa", Some("tb"), "Server: x\r\n");
@@ -506,31 +532,21 @@ mod tests {
             dg(1_600_000, B, A, recomposed),
             dg(1_700_000, A, B, request("ACK", 1, "r1", "fa", Some("tb"))),
         ]);
-        let mut named = Census::with_candidates(&[RfcRule::RungByteIdentical]);
-        named.absorb("r.json", "cap-r", &doc);
-        let tally = &named.rules["rung-byte-identical"];
+        let mut census = Census::new();
+        census.absorb("r.json", "cap-r", &doc);
+        let tally = &census.rules["rung-byte-identical"];
         assert_eq!((tally.occasions, tally.decided, tally.hits), (1, 1, 1));
         assert_eq!(tally.buckets["2xx final"], 1);
-        let hit = serde_json::to_value(&named.hits[0]).unwrap();
-        assert_eq!(hit["rule"], "rung-byte-identical");
+        let rung = census
+            .hits
+            .iter()
+            .find(|h| h.hit.rule == RfcRule::RungByteIdentical)
+            .expect("the rung hit");
+        let hit = serde_json::to_value(rung).unwrap();
         assert_eq!(hit["emitter"], B, "the UAS that re-composed its rung");
         assert_eq!(hit["region"], "head");
-        assert!(named.summary().contains("rung-byte-identical: 1 hit(s)"));
-
-        let mut plain = Census::new();
-        plain.absorb("r.json", "cap-r", &doc);
-        assert!(!plain.rules.contains_key("rung-byte-identical"), "{:?}", plain.rules.keys());
-        assert!(plain.hits.is_empty());
-        let mut zero = Census::with_candidates(&[RfcRule::RungByteIdentical]);
-        zero.absorb(
-            "clean.json",
-            "cap-c",
-            &doc_of(vec![
-                dg(1_000_000, A, B, request("INVITE", 1, "r2", "fa", None)),
-                dg(1_100_000, B, A, response(200, "OK", 1, "INVITE", "r2", "fa", Some("tb"))),
-                dg(1_200_000, A, B, request("ACK", 1, "r2", "fa", Some("tb"))),
-            ]),
-        );
-        assert_eq!(zero.rules["rung-byte-identical"].hits, 0, "reported, not omitted");
+        assert_eq!(hit["anchor_msg"], 2, "anchored on the re-composed rung");
+        assert!(census.summary().contains("rung-byte-identical: 1 hit(s)"));
+        assert_eq!(census.rules.len(), RfcRule::ALL.len(), "every rule is a reported result");
     }
 }

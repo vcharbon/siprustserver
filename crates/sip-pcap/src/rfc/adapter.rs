@@ -4,15 +4,9 @@
 //!
 //! Observation policy lives here, not in the rules: the capture is an OPEN
 //! observation (`closed: false` — the recording span, not the harness, bounds
-//! the evidence), and only the [`RfcRule::WIRE`]-subset rules with corpus
-//! numbers behind them are run — plus the candidates a sweep names to take
-//! their baseline.
+//! the evidence), and every rule of the [`RfcRule::WIRE`] contract — all of
+//! them — is run.
 
-use rfc_rules::rules::ack::{NoAckToDialogCreating2xx, UnackedInviteNon2xxFinal};
-use rfc_rules::rules::cancel::{No200AfterCancel, NoCancelAfterFinal};
-use rfc_rules::rules::offer_answer::SecondAnswerRepeatsTheFirst;
-use rfc_rules::rules::prack::UnackedReliableProvisional;
-use rfc_rules::rules::Obligation;
 use rfc_rules::{Decision, Kind, Msg, Observation, WireView};
 
 use crate::doc::{MsgJson, Payload, Summary};
@@ -27,25 +21,13 @@ pub(super) fn detect(at: &Site<'_>, out: &mut Scan, candidates: &[RfcRule]) {
         closed: false,
     };
     let view = WireView { msgs: &msgs, obs: &obs };
-    // Report order is the census order: CANCEL, PRACK, ACK,
-    // then whatever joined the WIRE subset after them.
-    let rules: [&dyn Obligation; 6] = [
-        &No200AfterCancel,
-        &UnackedReliableProvisional,
-        &NoAckToDialogCreating2xx,
-        &NoCancelAfterFinal,
-        &SecondAnswerRepeatsTheFirst,
-        &UnackedInviteNon2xxFinal,
-    ];
-    let candidates: Vec<Box<dyn Obligation>> = rfc_rules::all_rules()
-        .into_iter()
-        .filter(|r| candidates.contains(&r.id()) && !RfcRule::WIRE.contains(&r.id()))
-        .collect();
-    for rule in rules.into_iter().chain(candidates.iter().map(|r| r.as_ref())) {
+    // Every rule with a body: `candidates` names nothing beyond them.
+    let _ = candidates;
+    for rule in rfc_rules::all_rules() {
         for f in rule.eval(&view) {
             out.count(f.rule, f.decided());
-            if let Decision::Violated(evidence) = f.decision {
-                out.hits.push(at.hit(f.rule, &f.emitter, &f.taker, f.cseq, f.relayed, evidence));
+            if let Decision::Violated(evidence) = &f.decision {
+                out.hits.push(at.hit(&f, evidence.clone()));
             }
         }
     }

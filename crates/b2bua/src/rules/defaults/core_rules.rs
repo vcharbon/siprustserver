@@ -521,6 +521,23 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
             },
         ),
+        // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
+        // b-leg sent, under a To-tag no dialog of that leg carries, once another
+        // fork confirmed the leg. The UAC ACKs every 2xx and BYEs a dialog it
+        // does not want; the call keeps the winner. A repeat is re-ACKed alone.
+        rule(
+            "release-fork-straggler-2xx",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .leg_states(&[LegState::Confirmed, LegState::Terminated])
+                .direction(Direction::FromB)
+                .filter(fork_straggler),
+            |ctx| {
+                ok(vec![RuleAction::ReleaseStraggler2xx { leg_id: ctx.source_leg_id.to_string() }])
+            },
+        ),
         // ── dialog ──────────────────────────────────────────────────────────
         // A callee's INVITE provisional, relayed toward the originator while
         // her INVITE transaction is open. Once that transaction sent its
@@ -2043,4 +2060,22 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
     ]
+}
+
+/// Whether the current response is a fork straggler's 2xx on its b-leg: a To-tag
+/// no dialog of the leg carries, on a leg a confirmed dialog holds, answering an
+/// INVITE no later than the one that dialog's ACK acknowledges (every fork of
+/// one INVITE answers on its CSeq, RFC 3261 §12.1.2).
+fn fork_straggler(ctx: &RuleContext) -> bool {
+    let Some(resp) = ctx.response() else { return false };
+    let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) else { return false };
+    let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {
+        return false;
+    };
+    let Some(confirmed) = leg.dialogs.first().filter(|d| !d.sip.remote_tag.is_empty()) else {
+        return false;
+    };
+    !leg.dialogs.iter().any(|d| d.sip.remote_tag == tag)
+        && crate::rules::relay::acked_invite_cseq(confirmed)
+            .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

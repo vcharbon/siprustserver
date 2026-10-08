@@ -354,7 +354,7 @@ impl ActionExecutor<'_> {
     /// Such a read falls back to the configured outbound proxy as the dialog's
     /// one route and names the call on stderr; with no proxy configured
     /// (local/dev, where the transport IS peer-direct) the set stays empty.
-    fn dialog_route_set(
+    pub(super) fn dialog_route_set(
         &self,
         read: Result<Vec<String>, SipParseError>,
         call_ref: &str,
@@ -399,7 +399,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
 /// §12.1.1/§12.1.2). `None` when the peer sent none; a Contact no reader
 /// accepts is named on stderr and leaves the dialog's current target in place
 /// rather than silently retargeting it at nothing.
-fn contact_uri(
+pub(super) fn contact_uri(
     contact: Option<Result<header::Contact, SipParseError>>,
     call_ref: &str,
     leg_id: &str,
@@ -423,7 +423,7 @@ fn contact_uri(
 /// the front proxy's double record-route — yields both halves in wire order.
 /// Errs when a recorded route does not read; the caller decides, and an empty
 /// route set is never that decision (see `ActionExecutor::dialog_route_set`).
-fn uac_route_set(resp: &sip_message::SipResponse) -> Result<Vec<String>, SipParseError> {
+pub(super) fn uac_route_set(resp: &sip_message::SipResponse) -> Result<Vec<String>, SipParseError> {
     let mut set = route_texts(resp.list::<RecordRouteEntry>()?);
     set.reverse();
     Ok(set)

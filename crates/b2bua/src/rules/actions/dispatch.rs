@@ -62,6 +62,9 @@ impl ActionExecutor<'_> {
                     author,
                 );
             }
+            RuleAction::ReleaseStraggler2xx { leg_id } => {
+                self.release_straggler(call, fx, ctx, leg_id);
+            }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
             }

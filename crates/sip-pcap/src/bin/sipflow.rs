@@ -228,10 +228,9 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     rfc_census_jobs: usize,
 
-    /// Rule tokens (`rfc_rules::RuleId`) to run BESIDE the WIRE vocabulary in
-    /// the census — a rule with a body but no corpus numbers yet, whose
-    /// baseline this sweep takes. The report then carries its token too, so it
-    /// is not a dated run the cut may read.
+    /// Rule tokens (`rfc_rules::RuleId`) named beside the census vocabulary.
+    /// The census runs every rule with a body already, so naming one changes
+    /// nothing the report carries.
     #[arg(long = "rfc-census-with", value_delimiter = ',', requires = "rfc_census")]
     rfc_census_with: Vec<rfc_rules::RuleId>,
 

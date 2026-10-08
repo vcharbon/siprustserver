@@ -5,7 +5,23 @@
 #[cfg(test)]
 mod tests {
     use super::super::testkit::*;
-    use super::super::{detect, scan, EndpointRole, Evidence, RfcRule};
+    use super::super::{EndpointRole, Evidence, FlowsDoc, Hit, RfcRule, Scan};
+
+    /// The rules this module pins: the census runs every rule, and the pins
+    /// read only these.
+    const PINNED: &[RfcRule] = &[RfcRule::No200AfterCancel, RfcRule::NoCancelAfterFinal];
+
+    /// The pinned rules' hits over `doc`.
+    fn detect(doc: &FlowsDoc) -> Vec<Hit> {
+        super::super::detect(doc).into_iter().filter(|h| PINNED.contains(&h.rule)).collect()
+    }
+
+    /// The census scan over `doc`, its hits narrowed to the pinned rules.
+    fn scan(doc: &FlowsDoc) -> Scan {
+        let mut scanned = super::super::scan(doc);
+        scanned.hits.retain(|h| PINNED.contains(&h.rule));
+        scanned
+    }
 
     /// The violation: the callee takes the CANCEL and answers 200 anyway.
     #[test]

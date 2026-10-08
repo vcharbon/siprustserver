@@ -1515,6 +1515,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         for _ in 0..2 {
             let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
             let Some(owed) = close::unscripted(&ladder, message) else { return };
+            // The CANCEL's 487 waits on the leg's own scripted reject, where
+            // the flow still owes one (`scripted_reject_pending`).
+            let cancelled_invite = matches!(&owed,
+                Owed::Answer { cseq_method, status: 487, .. } if cseq_method == "INVITE");
+            if cancelled_invite && self.scripted_reject_pending(leg) {
+                return;
+            }
             let Some(agent) = self.agent_of_leg(leg) else { return };
             let (wire, dst) = match self.compose_close(leg, &owed, UNSCRIPTED) {
                 Ok(composed) => composed,
@@ -1726,13 +1733,64 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Whether `step` is a BYE its leg's dialog no longer holds:
-    /// [`close::bye_moot`] over the leg's recorded ladder.
+    /// [`close::bye_moot`] over the leg's recorded ladder. A BYE the document
+    /// scripts behind an expect of the peer's BYE on its leg is the captured
+    /// party's own act, 481 included, and is sent as written.
     fn bye_moot(&mut self, step: &CompiledStep) -> bool {
-        let bye = matches!(&step.discriminator, Discriminator::Request { method }
-            if Method::from_wire(method) == Method::Bye);
-        bye && close::bye_moot(
-            &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
-        )
+        let is_bye = |s: &CompiledStep| {
+            matches!(&s.discriminator, Discriminator::Request { method }
+                if Method::from_wire(method) == Method::Bye)
+        };
+        let steps = self.instance.plan().steps();
+        let scripted_behind = steps
+            .iter()
+            .take_while(|s| s.id != step.id)
+            .any(|s| s.leg == step.leg && s.is_expect() && is_bye(s));
+        is_bye(step)
+            && !scripted_behind
+            && close::bye_moot(
+                &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
+            )
+    }
+
+    /// Whether `step` is a final to an INVITE its leg already answered:
+    /// [`close::final_moot`] over the leg's recorded ladder.
+    fn final_moot(&mut self, step: &CompiledStep) -> bool {
+        let final_to_invite = matches!(&step.discriminator,
+            Discriminator::Response { status, cseq_method: Some(method) }
+                if *status >= 200 && Method::from_wire(method) == Method::Invite);
+        final_to_invite
+            && close::final_moot(
+                &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
+            )
+    }
+
+    /// Whether `leg`'s flow still owes its own non-2xx final to the INVITE the
+    /// leg last took: the first final-to-INVITE send behind the step that took
+    /// it is pending and rejects. That captured final is the faithful answer
+    /// to a CANCEL the flow never scripted (RFC 3261 §9.2 recommends 487 and
+    /// admits any non-2xx); a 2xx cannot be one, and the stack's 487 stands.
+    fn scripted_reject_pending(&self, leg: &str) -> bool {
+        let steps = self.instance.plan().steps();
+        let took = steps.iter().rposition(|s| {
+            s.leg == leg
+                && s.is_expect()
+                && matches!(&s.discriminator, Discriminator::Request { method }
+                    if Method::from_wire(method) == Method::Invite)
+                && self.instance.cursor().node_complete(&s.id)
+        });
+        let Some(took) = took else { return false };
+        let answer = steps[took + 1..].iter().find(|s| {
+            s.leg == leg
+                && s.is_send()
+                && matches!(&s.discriminator,
+                    Discriminator::Response { status, cseq_method: Some(method) }
+                        if *status >= 200 && Method::from_wire(method) == Method::Invite)
+        });
+        answer.is_some_and(|s| {
+            matches!(&s.discriminator, Discriminator::Response { status, .. } if *status >= 300)
+                && !self.instance.cursor().node_complete(&s.id)
+        })
     }
 
     /// Retire every expect on `send`'s leg waiting on the transaction `send`
@@ -1862,6 +1920,21 @@ impl<'a, 'p> Runner<'a, 'p> {
             );
             self.complete(step);
             self.retire_answers_to(step);
+            return true;
+        }
+        // RFC 3261 §17.2.1: a server transaction sends one final. A scripted
+        // final to an INVITE this leg already answered is moot: never sent, so
+        // its ladder never starts.
+        if self.final_moot(step) {
+            self.instance.recording().push(
+                &step.leg,
+                Dir::Out,
+                self.now_us(),
+                Vec::new(),
+                Some(&step.id),
+                Some("moot: the INVITE this final answers already has its final"),
+            );
+            self.complete(step);
             return true;
         }
         let message = match self.compose(step, &effects) {

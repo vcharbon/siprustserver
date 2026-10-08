@@ -5,7 +5,23 @@
 #[cfg(test)]
 mod tests {
     use super::super::testkit::*;
-    use super::super::{detect, scan, Evidence, RfcRule};
+    use super::super::{Evidence, FlowsDoc, Hit, RfcRule, Scan};
+
+    /// The rules this module pins: the census runs every rule, and the pins
+    /// read only these.
+    const PINNED: &[RfcRule] = &[RfcRule::UnackedReliableProvisional];
+
+    /// The pinned rules' hits over `doc`.
+    fn detect(doc: &FlowsDoc) -> Vec<Hit> {
+        super::super::detect(doc).into_iter().filter(|h| PINNED.contains(&h.rule)).collect()
+    }
+
+    /// The census scan over `doc`, its hits narrowed to the pinned rules.
+    fn scan(doc: &FlowsDoc) -> Scan {
+        let mut scanned = super::super::scan(doc);
+        scanned.hits.retain(|h| PINNED.contains(&h.rule));
+        scanned
+    }
 
     const REL_180: &str = "Require: 100rel\r\nRSeq: 1\r\n";
     const OFFER: &str = "Supported: 100rel\r\n";

@@ -190,9 +190,10 @@ export const assemble = (input: AssembleInput): Assembled => {
     sources: flow.sources,
     steps: flow.steps
   })
+  flags.push(...captured.flags)
   const violations = [
     ...stamped.violations,
-    ...captured.filter(
+    ...captured.violations.filter(
       (c) => !stamped.violations.some((v) => v.rule === c.rule && v.step === c.step)
     )
   ]

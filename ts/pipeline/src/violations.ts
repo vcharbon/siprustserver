@@ -51,7 +51,7 @@ export const stampRfcViolations = (input: StampInput): Stamped => {
       if (anchor === undefined) {
         out.warnings.push(
           `${input.capture}: allowed-errors entry '${e.rule}' on call-id '${callId}' ` +
-            `(originator ${e.originator}) is NOT stamped — no step carries ${MESSAGE_OF[e.rule]} ` +
+            `(originator ${e.originator}) is NOT stamped — no step carries ${MESSAGE_OF[e.rule] ?? "its anchor message"} ` +
             `at this case's vantage`
         )
         continue
@@ -71,7 +71,7 @@ export const unanchoredFlag = (detail: string): Case.Flag => ({
 })
 
 /** What a rule's anchor message IS, in the words a warning uses. */
-const MESSAGE_OF: Record<Violation.RfcRule, string> = {
+const MESSAGE_OF: Partial<Record<Violation.RfcRule, string>> = {
   "no-200-after-cancel": "that 200 to INVITE",
   "unacked-reliable-provisional": "that reliable provisional",
   "no-ack-to-dialog-creating-2xx": "that dialog-creating 2xx",
@@ -204,7 +204,10 @@ const isAnchorFor = (rule: Violation.RfcRule, msg: Flows.Msg): boolean => {
   if (rule === "second-answer-repeats-the-first") return false
   // RFC 3261 §17.1.1.3: the ACK this rule misses is owed to a non-2xx final.
   if (rule === "unacked-invite-non-2xx-final") return status >= 300
-  return isReliableProvisional(msg, status)
+  if (rule === "unacked-reliable-provisional") return isReliableProvisional(msg, status)
+  // A rule the registry reading has no anchor shape for anchors nothing here:
+  // the census hit's own `anchor_msg` states it (`./captured.ts`).
+  return false
 }
 
 /** RFC 3262 §3: reliable means BOTH headers, and 100 is never reliable. */

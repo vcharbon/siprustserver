@@ -28,7 +28,7 @@ export const RfcFinding = Schema.Struct({
   offending: Schema.optionalKey(Schema.Int),
   /** The socket the rule holds responsible: emitted the offending message, or owed the missing one. `lane` is where it was reported. */
   charged: Schema.optionalKey(Schema.String),
-  /** The document endpoint `charged` is, when it is one: the violation is the scripted peer's. */
+  /** The document actor `charged` names (through the leg the offending call rides), when it is a document endpoint: the violation is the scripted peer's. */
   actor: Schema.optionalKey(Schema.String),
   /** What cancels an actor's finding: the document's statement of the same violation on the same transaction. */
   cancelled_by: Schema.optionalKey(Schema.String)

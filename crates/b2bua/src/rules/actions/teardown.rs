@@ -360,7 +360,7 @@ impl ActionExecutor<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn bye_on_dialog(
+    pub(super) fn bye_on_dialog(
         &self,
         marks: relay::CallMarks,
         leg_id: &str,
@@ -736,13 +736,18 @@ fn pending_reinvite_cancel(
 
 /// What a minted teardown request carries of the peer's: its end-to-end
 /// headers and, on a BYE minted from the peer's BYE, its body.
-struct Relayed {
+pub(super) struct Relayed {
     headers: Vec<SipHeader>,
     body: Vec<u8>,
     content_type: Option<MediaType>,
 }
 
 impl Relayed {
+    /// Nothing of a peer's: a request this stack mints on its own account.
+    pub(super) fn none() -> Self {
+        Self::headers(Vec::new())
+    }
+
     /// Headers alone, no body.
     fn headers(headers: Vec<SipHeader>) -> Self {
         Self { headers, body: Vec::new(), content_type: None }

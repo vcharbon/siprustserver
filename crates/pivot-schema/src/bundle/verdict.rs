@@ -160,7 +160,12 @@ pub enum Failure {
     /// The document states an RFC violation the SYSTEM UNDER TEST emits. Such a
     /// violation gates (§11.1), and no detector decides it yet, so the run
     /// refuses rather than passing a claim nothing verified.
-    RfcViolationUnverified { rule: RfcRule, step: String, emitter: String },
+    RfcViolationUnverified {
+        #[schemars(with = "crate::violation::RuleToken")]
+        rule: RfcRule,
+        step: String,
+        emitter: String,
+    },
     /// A step's retransmission ladder (§6.9) is not the one its emitter owed:
     /// the count is a protocol fact, so it gates on every lane. `declared` is
     /// what the document stated and `expected` what the ladder's pacer owes —
@@ -341,6 +346,7 @@ impl std::fmt::Display for Failure {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ViolationNote {
     /// The rule broken.
+    #[schemars(with = "crate::violation::RuleToken")]
     pub rule: RfcRule,
     /// The flow step whose message breaks it.
     pub step: String,
@@ -365,6 +371,7 @@ pub struct DeclaredNote {
     /// The anchor the declaration names: the step the divergence turns on.
     pub step: String,
     /// The §11.1 rule the SOURCE broke, whose violation predicted this.
+    #[schemars(with = "crate::violation::RuleToken")]
     pub derived_from: RfcRule,
     /// The failure the run actually produced for it, where the gate raised one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -587,6 +587,12 @@ pub enum RuleAction {
         leg_id: String,
         body: Option<Body>,
     },
+    /// Release the fork straggler whose 2xx the current event carries on a
+    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK that
+    /// 2xx, and BYE its dialog the first time it arrives.
+    ReleaseStraggler2xx {
+        leg_id: String,
+    },
     ConfirmDialog {
         leg_id: String,
     },
@@ -1096,6 +1102,7 @@ impl RuleAction {
             | RuleAction::Respond { .. }
             | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
+            | RuleAction::ReleaseStraggler2xx { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }

@@ -18,8 +18,9 @@
  * Extension is Layer substitution and nothing else: a deployment builds one of
  * these and hands it to {@link CaseAssembler}.
  */
-import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens, Violation } from "@sip/contracts"
+import type { Call, Case, Flow, Flows, MustFail, Placement, Tokens } from "@sip/contracts"
 import type { BackgroundMap } from "./background.js"
+import type * as Captured from "./captured.js"
 import type { CaptureRule } from "./capture-rules.js"
 import { CASE_RULES, type CaseRule } from "./case-rules.js"
 import { CUT_RULES } from "./cut.js"
@@ -255,7 +256,7 @@ export interface CasePolicy {
    * document's `rfc_violations` (`./captured.ts`): the statements a run's RFC
    * audit cancels that party's findings against. Neutral: none.
    */
-  readonly captured: (input: DeclarationInput) => ReadonlyArray<Violation.RfcViolation>
+  readonly captured: (input: DeclarationInput) => Captured.Statements
   /**
    * Why a call family yields no case, decided on the family alone. Evaluated
    * before {@link CasePolicy.refuse} because it needs strictly less.
@@ -301,7 +302,7 @@ export const neutralPolicy: CasePolicy = {
   detectors: () => [],
   lanes: () => ({}),
   declare: () => ({ entries: [], flags: [], coverage: [] }),
-  captured: () => [],
+  captured: () => ({ violations: [], flags: [] }),
   refuseAtCapture: [],
   refuse: [],
   refuseOnDocument: [],

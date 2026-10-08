@@ -14,6 +14,7 @@
 //!   (ADR-0032 X4): arm / repeat / discharge / retire, keyed by obligation
 //! - `teardown` — termination policy + BYE/CANCEL builders
 //! - `select` — shared leg/dialog selection views
+//! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
 mod dialog_track;
 mod dispatch;
@@ -23,6 +24,7 @@ mod relay_request;
 mod relay_response;
 mod respond;
 mod select;
+mod straggler;
 mod teardown;
 
 use call::helpers::{cap_keepalive_fire_at, replace_timer_by_id};
