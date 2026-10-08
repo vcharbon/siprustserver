@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 pivot-schema = { path = "../pivot-schema" }
+# The validator's RFC facts the simulated party obeys too (the 64·T1 an early
+# dialog stands after the first 2xx).
+rfc-rules = { path = "../rfc-rules" }
 # The wire layer: message rendering, parsing and header identity live in
 # `sip-message` and nowhere else.
 sip-message = { path = "../sip-message" }

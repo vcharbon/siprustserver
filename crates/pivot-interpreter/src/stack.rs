@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
+use rfc_rules::rules::correlation::EARLY_DIALOG_WINDOW_US;
 use sip_message::generators::{
     generate_ack_for_2xx, generate_ack_for_non_2xx, generate_cancel, generate_in_dialog_request,
     generate_out_of_dialog_request, generate_response, GenerateAckFor2xxOpts,
@@ -28,11 +29,6 @@ use sip_message::generators::{
 };
 use sip_message::header::{self, MediaType, NameAddr, Uri, Via};
 use sip_message::{Method, SipHeader, SipRequest, SipResponse, SipStr, TemplateHeader};
-
-/// How long after a leg's dialog confirms the early dialogs of its other forks
-/// still stand: RFC 3261 §13.2.2.4 has the UAC terminate them 64·T1 (32 s)
-/// after the first 2xx.
-pub const EARLY_DIALOG_WINDOW_US: u64 = 32_000_000;
 
 /// The tier-2 addresses a dialog-opening request carries: the lane composed
 /// them, and the stack regenerates every tier-1 header around them.
@@ -875,10 +871,13 @@ impl LegStack {
     /// set from a 1xx/2xx to a dialog-creating request alone (RFC 3261
     /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). A
     /// final to a CANCEL or a BYE, or a non-2xx final, states no dialog fact
-    /// and leaves the dialog as it is.
+    /// and leaves the dialog as it is; so does, once a 2xx confirmed the
+    /// dialog, a response under another fork's tag (§13.2.2.4).
     pub fn learn_response(&mut self, response: &SipResponse) {
         let status = response.status();
-        if establishes_dialog(response) {
+        let other_dialog =
+            self.confirmed && response.to().tag() != Some(self.dialog.remote_tag.as_str());
+        if establishes_dialog(response) && !other_dialog {
             if let Some(tag) = response.to().tag() {
                 self.dialog.remote_tag = tag.to_string();
             }
@@ -890,7 +889,7 @@ impl LegStack {
                 self.dialog.route_set = routes.into_iter().rev().collect();
             }
         }
-        if status < 300 {
+        if status < 300 && !other_dialog {
             if let Some(contact) = response.contacts().as_slice().first() {
                 self.dialog.remote_target = contact.uri().to_string();
             }
@@ -957,9 +956,14 @@ impl LegStack {
 
     /// Learn the dialog facts an inbound request carries, and keep it so a
     /// later response can answer it. The remote tag is learned only until a
-    /// 2xx confirms the dialog, which fixes it (RFC 3261 §12.1.2).
+    /// 2xx confirms the dialog, which fixes it (RFC 3261 §12.1.2); a request
+    /// under another fork's tag then teaches the confirmed dialog nothing.
     pub fn learn_request(&mut self, request: &SipRequest) {
         let tag = request.from().tag().map(|t| t.to_string()).unwrap_or_default();
+        if self.confirmed && !tag.is_empty() && tag != self.dialog.remote_tag {
+            self.received.push(request.clone());
+            return;
+        }
         if !tag.is_empty() && !self.confirmed {
             self.dialog.remote_tag = tag;
         }
@@ -2744,6 +2748,73 @@ mod tests {
         assert_eq!(uac.remote_tag(), Some("B-f3"));
         let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("BYE");
         assert_eq!(bye.to().tag(), Some("B-f3"));
+    }
+
+    /// The response `text` holds, re-read after `edit` rewrote it.
+    fn edited(text: &[u8], edit: impl Fn(String) -> String) -> SipResponse {
+        use sip_message::parser::custom::CustomParser;
+        use sip_message::{SipMessage, SipParser};
+        let rewritten = edit(String::from_utf8(text.to_vec()).expect("text"));
+        match CustomParser::new().parse(rewritten.as_bytes()).expect("parses") {
+            SipMessage::Response(r) => r,
+            _ => panic!("a response"),
+        }
+    }
+
+    /// Once fork 3's 2xx confirmed the dialog, another fork's late provisional
+    /// or 2xx confirms nothing of it (RFC 3261 §12.1.2, §13.2.2.4): the leg
+    /// keeps the remote tag and target its own 2xx gave it.
+    #[test]
+    fn another_forks_late_response_leaves_the_confirmed_dialog_as_it_was() {
+        let (mut uac, _, ok) = answered_on_an_unrung_fork();
+        let target = uac.remote_target().to_string();
+        let elsewhere = |text: String| {
+            text.replacen("tag=B-f3", "tag=B-f1", 1).replacen(
+                "Contact: <sip:",
+                "Contact: <sip:elsewhere-",
+                1,
+            )
+        };
+        let late_180 = edited(ok.image(), |t| {
+            elsewhere(t).replacen("SIP/2.0 200 OK", "SIP/2.0 180 Ringing", 1)
+        });
+        let late_200 = edited(ok.image(), elsewhere);
+        for late in [late_180, late_200] {
+            uac.learn_response(&late);
+            assert_eq!(uac.remote_tag(), Some("B-f3"), "{}", late.status());
+            assert_eq!(uac.remote_target(), target, "{}", late.status());
+        }
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("BYE");
+        assert_eq!(bye.to().tag(), Some("B-f3"));
+    }
+
+    /// A request taken inside 64·T1 on another fork's early dialog still
+    /// standing is that dialog's: the confirmed dialog keeps its remote target
+    /// and route set.
+    #[test]
+    fn a_request_on_another_forks_early_dialog_leaves_the_confirmed_dialog_as_it_was() {
+        let (mut uac, mut uas, _) = answered_on_an_unrung_fork();
+        let target = uac.remote_target().to_string();
+        let routes = uac.route_set().to_vec();
+        let update = uas.in_dialog(Method::Update, &[], Vec::new(), None, None).expect("UPDATE");
+        let early = {
+            use sip_message::parser::custom::CustomParser;
+            use sip_message::{SipMessage, SipParser};
+            let text = String::from_utf8(update.image().to_vec())
+                .expect("text")
+                .replacen("tag=B-f3", "tag=B-f1", 1)
+                .replacen("Contact: <sip:", "Contact: <sip:elsewhere-", 1)
+                .replacen("CSeq:", "Record-Route: <sip:10.9.9.9;lr>\r\nCSeq:", 1);
+            match CustomParser::new().parse(text.as_bytes()).expect("parses") {
+                SipMessage::Request(r) => r,
+                _ => panic!("a request"),
+            }
+        };
+        assert!(!uac.names_no_dialog(&early, 1_000_001), "fork 1's early dialog still stands");
+        uac.learn_request(&early);
+        assert_eq!(uac.remote_target(), target);
+        assert_eq!(uac.route_set(), routes.as_slice());
+        assert_eq!(uac.remote_tag(), Some("B-f3"));
     }
 
     /// The answering seat holds the caller's From-tag: her requests under it

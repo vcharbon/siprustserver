@@ -3037,6 +3037,7 @@ dependencies = [
  "http-net",
  "pivot-schema",
  "regex",
+ "rfc-rules",
  "scenario-harness",
  "serde",
  "serde_json",

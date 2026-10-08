@@ -1570,8 +1570,8 @@ INVITE's From-tag on the answering side. A request the leg then takes whose
 From-tag is the remote tag of no dialog a 2xx confirmed names no dialog the leg
 holds, and a real UA answers it 481 (§12.2.2). So does the interpreter:
 
-- the request is recorded, answered `481`, and is the unexpected datagram it is
-  (during settle, the late arrival). No `expect` and no `background` policy
+- the request is recorded, answered `481`, and is the unexpected datagram it is,
+  mid-flow and during settle alike. No `expect` and no `background` policy
   takes it, and the leg learns nothing from it: its dialog keeps the remote tag
   its 2xx gave it;
 - the early dialog of another fork still stands for 64·T1 (32 s) after the first

@@ -45,7 +45,7 @@ use tokio::time::Instant;
 
 use crate::cancel;
 use crate::checks::{self, MessageObservables};
-use crate::close::{self, Owed};
+use crate::close::{self, Owed, FOREIGN_DIALOG, FOREIGN_DIALOG_481};
 use crate::deviation::StepEffects;
 use crate::early::{EarlyDialogs, LearnedForks};
 use crate::gate::{self, GateVerdict, Inbound};
@@ -89,13 +89,6 @@ fn scripts_a_bye_final(step: &CompiledStep) -> bool {
             if *status >= 200 && method.eq_ignore_ascii_case("BYE")
     )
 }
-
-/// The note on a request naming no dialog its leg holds (RFC 3261 §12.2.2).
-const FOREIGN_DIALOG: &str =
-    "names no dialog this leg holds (RFC 3261 §12.2.2): refused 481, nothing learned";
-
-/// The note on the 481 that refuses it.
-const FOREIGN_DIALOG_481: &str = "481: the request names no dialog this leg holds";
 
 /// How long a step holds a datagram out for a better candidate.
 ///
@@ -727,7 +720,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // its leg holds is answered 481, and neither a policy nor the flow
         // takes it.
         if let Some(leg) = self.foreign_dialog_leg(&message) {
-            return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat, false).await;
+            return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
         }
 
         // Background next (§5.1): a policy's traffic never touches the cursor.
@@ -1289,9 +1282,9 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Answer `message` 481 (RFC 3261 §12.2.2): it names no dialog its leg
-    /// holds, so it is recorded, refused, and taught to nothing. Mid-flow it is
-    /// the unexpected datagram it is; during settle the arrival is recorded as
-    /// such. `false` when the 481 could not be sent.
+    /// holds, so it is recorded, refused, taught to nothing, and failed as the
+    /// unexpected datagram it is — mid-flow and during settle alike. `false`
+    /// when the 481 could not be sent.
     async fn refuse_foreign_dialog(
         &mut self,
         actor: &str,
@@ -1299,17 +1292,14 @@ impl<'a, 'p> Runner<'a, 'p> {
         message: &SipMessage,
         bytes: Vec<u8>,
         repeat: bool,
-        settling: bool,
     ) -> bool {
         let SipMessage::Request(request) = message else { return true };
         self.record_arrival(leg, bytes, None, Some(FOREIGN_DIALOG), repeat);
-        if !settling {
-            self.instance.fail(Failure::UnexpectedDatagram {
-                leg: leg.to_string(),
-                arrived: Inbound::of(message).arrived(),
-                detail: Some(FOREIGN_DIALOG.to_string()),
-            });
-        }
+        self.instance.fail(Failure::UnexpectedDatagram {
+            leg: leg.to_string(),
+            arrived: Inbound::of(message).arrived(),
+            detail: Some(FOREIGN_DIALOG.to_string()),
+        });
         let Some(agent) = self.lane.agents.get(actor).cloned() else { return true };
         let response = sip_message::generators::generate_response(
             request,
@@ -1447,7 +1437,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             return;
         }
         if let Some(leg) = self.foreign_dialog_leg(&message) {
-            self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat, true).await;
+            self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
             return;
         }
         if let Some(method) = &inbound.method {

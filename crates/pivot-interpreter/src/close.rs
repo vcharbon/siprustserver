@@ -134,6 +134,14 @@ pub fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
         .collect()
 }
 
+/// The recording note on a request a leg refused as naming no dialog it holds
+/// (RFC 3261 §12.2.2).
+pub(crate) const FOREIGN_DIALOG: &str =
+    "names no dialog this leg holds (RFC 3261 §12.2.2): refused 481, nothing learned";
+
+/// The recording note on the 481 that refuses it.
+pub(crate) const FOREIGN_DIALOG_481: &str = "481: the request names no dialog this leg holds";
+
 /// One leg's dialog and transaction state, as its own ladder states it.
 #[derive(Default)]
 struct LegView {
@@ -469,6 +477,11 @@ fn view(messages: &[RecordedMessage]) -> LegView {
         if recorded.repeat_of.is_some() {
             continue;
         }
+        // A request refused as naming no dialog the leg holds, and its 481,
+        // are no part of the leg's dialog state (RFC 3261 §12.2.2).
+        if matches!(recorded.note.as_deref(), Some(FOREIGN_DIALOG | FOREIGN_DIALOG_481)) {
+            continue;
+        }
         let Some(message) = parse(recorded.wire()) else { continue };
         match (recorded.dir, message) {
             (Dir::Out, SipMessage::Request(request)) => {
@@ -770,6 +783,22 @@ mod tests {
 
     fn message(raw: &str) -> SipMessage {
         parse(raw.as_bytes()).expect("the fixture parses")
+    }
+
+    /// A BYE the leg refused 481 as naming no dialog it holds (RFC 3261
+    /// §12.2.2) ended nothing: the dialog the leg opened still owes its BYE.
+    #[test]
+    fn a_bye_refused_as_naming_no_dialog_ends_nothing() {
+        let recording = Recording::new();
+        recording.declare("A");
+        let foreign_bye = request("BYE", "2 BYE").replace("tag=b1", "tag=b9");
+        let refusal = reply(481, "2 BYE").replace("tag=b1", "tag=b9");
+        recording.push("A", Dir::Out, 0, INVITE.to_string(), None, None);
+        recording.push("A", Dir::In, 1, response(200, "1 INVITE"), None, None);
+        recording.push("A", Dir::Out, 2, request("ACK", "1 ACK"), None, None);
+        recording.push("A", Dir::In, 3, foreign_bye, None, Some(FOREIGN_DIALOG));
+        recording.push("A", Dir::Out, 4, refusal, None, Some(FOREIGN_DIALOG_481));
+        assert_eq!(obligations(&recording).remove("A"), Some(Owed::Bye));
     }
 
     #[test]
