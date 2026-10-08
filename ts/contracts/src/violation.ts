@@ -68,7 +68,6 @@ export const RFC_RULES = [
   "unmatched-prack-proxied",
   "prack-2xx-or-481",
   "delay-2xx-on-unacked-reliable-1xx-with-sdp",
-  "prack-accepted-after-final",
   "no-new-reliable-1xx-after-final",
   "no-prack-of-100-trying",
   "prack-answers-1xx-offer",

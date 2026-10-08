@@ -84,17 +84,15 @@ async fn a_481_answering_a_stack_originated_prack_does_not_end_the_call() {
     // that no longer holds that provisional (its state lost, or already
     // acknowledged) owes §3's 481, and the wire cannot see the difference.
     // Waived on bob alone, so every B2BUA bind stays gated.
-    for rule in ["prack-2xx-or-481", "prack-accepted-after-final"] {
-        h.waive(
-            WaiverScope::rule(
-                rule,
-                "bob deliberately answers the stack's PRACK 481 (RFC 3262 §3's answer for a \
-                 provisional he no longer holds unacknowledged) — surviving that 481 is what \
-                 this test measures",
-            )
-            .on_party("bob"),
-        );
-    }
+    h.waive(
+        WaiverScope::rule(
+            "prack-2xx-or-481",
+            "bob deliberately answers the stack's PRACK 481 (RFC 3262 §3's answer for a \
+             provisional he no longer holds unacknowledged) — surviving that 481 is what this \
+             test measures",
+        )
+        .on_party("bob"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5177").await;
     let bob = h.agent("bob", "127.0.0.1:5178").await;
     let b2bua = B2buaSut::builder(decision_offering_100rel_toward_bob(5178))

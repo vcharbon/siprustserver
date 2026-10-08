@@ -2451,46 +2451,6 @@ impl CrossMessageAuditRule for Delay2xxOnUnackedReliable1xxWithSdpRule {
     }
 }
 
-/// RFC 3262 §3 live: the merged `prack-accepted-after-final` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK's own server
-/// transaction outlives the INVITE's.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, for the
-/// reason its `prack-2xx-or-481` sibling carries.
-pub struct PrackAcceptedAfterFinalRule;
-
-impl CrossMessageAuditRule for PrackAcceptedAfterFinalRule {
-    fn name(&self) -> &'static str {
-        rfc_rules::RuleId::PrackAcceptedAfterFinal.token()
-    }
-
-    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
-    }
-
-    fn check_positioned(
-        &self,
-        events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        let relays = relay_lanes(events);
-        surfaced(events, &rfc_rules::rules::prack::PrackAcceptedAfterFinal, |f, cid| {
-            let Decision::Violated(rfc_rules::Evidence::LatePrackRejected {
-                status, branch, ..
-            }) = &f.decision
-            else {
-                return String::new();
-            };
-            format!(
-                "Received PRACK after final INVITE response was sent (callId {cid}, PRACK branch \
-                 {branch}) but PRACK got {status} instead of 2xx — RFC 3262 §3 / RFC3262-MUST-015"
-            )
-        })
-        .into_iter()
-        .filter(|(lane, _, _, _)| !relays.contains(lane))
-        .collect()
-    }
-}
-
 /// RFC 3262 §3 live: the merged `no-new-reliable-1xx-after-final` rule
 /// (`rfc_rules::rules::prack`) at this bind's vantage — no fresh `RSeq` on a
 /// transaction that has answered.
@@ -4617,7 +4577,6 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(UnmatchedPrackProxiedRule),
         std::sync::Arc::new(Prack2xxOr481Rule),
         std::sync::Arc::new(Delay2xxOnUnackedReliable1xxWithSdpRule),
-        std::sync::Arc::new(PrackAcceptedAfterFinalRule),
         std::sync::Arc::new(NoNewReliable1xxAfterFinalRule),
         std::sync::Arc::new(NoPrackOf100TryingRule),
         std::sync::Arc::new(PrackAnswers1xxOfferRule),
@@ -6453,25 +6412,6 @@ mod tests {
             recv(SUT, req("ACK", "z9hG4bK-i", 1, Some("bt")), ALICE, 4),
         ];
         assert!(Delay2xxOnUnackedReliable1xxWithSdpRule.check(&waited).is_empty());
-    }
-
-    #[test]
-    fn a_late_prack_rejected_after_the_final_is_flagged() {
-        let rejected = vec![
-            sent(SUT, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 0),
-            recv(SUT, prack_3262("z9hG4bK-p", "1 1 INVITE", false), ALICE, 1),
-            sent(SUT, prack_resp_3262(481, "z9hG4bK-p"), ALICE, 2),
-        ];
-        let out = PrackAcceptedAfterFinalRule.check(&rejected);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert!(out[0].1.contains("MUST-015"), "{}", out[0].1);
-
-        let accepted = vec![
-            sent(SUT, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 0),
-            recv(SUT, prack_3262("z9hG4bK-p", "1 1 INVITE", false), ALICE, 1),
-            sent(SUT, prack_resp_3262(200, "z9hG4bK-p"), ALICE, 2),
-        ];
-        assert!(PrackAcceptedAfterFinalRule.check(&accepted).is_empty());
     }
 
     #[test]

@@ -982,12 +982,16 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
     }
 }
 
-/// A request for a vanished call draws the answer a request naming no call is
-/// owed ([`super::unroutable::refusal`]); an ACK or a response draws nothing.
+/// A request for a vanished call draws the 200 of a PRACK its released call
+/// still answers ([`super::late_prack::answer`]), else the answer a request
+/// naming no call is owed ([`super::unroutable::refusal`]); an ACK or a
+/// response draws nothing.
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if let Some(answer) = super::unroutable::refusal(ctx, req) {
+            let answer = super::late_prack::answer(ctx, req)
+                .or_else(|| super::unroutable::refusal(ctx, req));
+            if let Some(answer) = answer {
                 let _ = ctx.txn.send_response(answer, *src).await;
             }
         }

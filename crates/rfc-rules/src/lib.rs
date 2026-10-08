@@ -73,7 +73,6 @@ pub fn all_rules() -> Vec<Box<dyn rules::Obligation>> {
         Box::new(rules::prack::UnmatchedPrackProxied),
         Box::new(rules::prack::Prack2xxOr481),
         Box::new(rules::prack::Delay2xxOnUnackedReliable1xxWithSdp),
-        Box::new(rules::prack::PrackAcceptedAfterFinal),
         Box::new(rules::prack::NoNewReliable1xxAfterFinal),
         Box::new(rules::prack::NoPrackOf100Trying),
         Box::new(rules::prack::PrackAnswers1xxOffer),

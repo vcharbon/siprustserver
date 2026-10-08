@@ -537,15 +537,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "prack-accepted-after-final": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "prack-answers-1xx-offer": {
       "hits": 0,
       "documents": 0,

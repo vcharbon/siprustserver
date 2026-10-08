@@ -1,4 +1,4 @@
-//! The RFC 3262 reliable-provisional family: fifteen obligations that share one
+//! The RFC 3262 reliable-provisional family: fourteen obligations that share one
 //! reading of the wire — who opened the INVITE, which provisionals were sent
 //! reliably, and which PRACK named which `RSeq`.
 //!
@@ -794,63 +794,6 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
     }
 }
 
-/// **RFC 3262 §3 — a late PRACK is still answered 2xx.** The PRACK's own server
-/// transaction is not the INVITE's and does not end with it, so a PRACK that
-/// crossed the final response still names a provisional the UAS really sent.
-/// Rejecting it leaves the UAC believing its acknowledgement never landed.
-///
-/// The occasion is the FIRST response the endpoint sent on the transaction of a
-/// PRACK it took AFTER its own INVITE final. A PRACK that arrived while the
-/// INVITE was still open is [`Prack2xxOr481`]'s occasion, never this one's.
-/// Charges the UAS.
-pub struct PrackAcceptedAfterFinal;
-
-impl Obligation for PrackAcceptedAfterFinal {
-    fn id(&self) -> RuleId {
-        RuleId::PrackAcceptedAfterFinal
-    }
-
-    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        let seen = Reading::of(wire.msgs);
-        let mut out = Vec::new();
-        for (key, list) in &seen.answers {
-            let Some(prack) =
-                seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
-            else {
-                continue;
-            };
-            let Some(prior) = seen.invite_final_before(key.uas, key.call_id, prack.ts_us) else {
-                continue;
-            };
-            let Some(a) = list.iter().find(|a| a.answers("PRACK")) else { continue };
-            out.push(Finding {
-                rule: RuleId::PrackAcceptedAfterFinal,
-                emitter: key.uas.to_string(),
-                taker: a.taker.to_string(),
-                cseq: a.cseq,
-                relayed: false,
-                anchor: a.msg,
-                decision: if (200..300).contains(&a.status) {
-                    Decision::Compliant
-                } else {
-                    Decision::Violated(Evidence::LatePrackRejected {
-                        late_prack_answer_msg: a.msg,
-                        late_prack_answer_hop: a.hop,
-                        late_prack_answer_ts_us: a.ts_us,
-                        status: a.status,
-                        late_prack_msg: prack.msg,
-                        prior_final_msg: prior.msg,
-                        prior_final_status: prior.status,
-                        branch: key.branch.to_string(),
-                    })
-                },
-            });
-        }
-        out.sort_by_key(|f| f.anchor);
-        out
-    }
-}
-
 /// **RFC 3262 §3 — no NEW reliable provisional after the final.** The final
 /// answered the offer and completed the transaction; a fresh `RSeq` after it
 /// opens an acknowledgement the UAC has nowhere to put and the UAS will
@@ -1513,17 +1456,6 @@ impl<'a> Reading<'a> {
             .collect()
     }
 
-    /// The FIRST INVITE final `uas` sent on `call` before `ts_us`: what makes a
-    /// PRACK arriving then a LATE one (§3).
-    fn invite_final_before(&self, uas: &str, call: &str, ts_us: u64) -> Option<&Answer<'a>> {
-        self.answers
-            .iter()
-            .filter(|(k, _)| k.uas == uas && k.call_id == call)
-            .flat_map(|(_, list)| list.iter())
-            .filter(|a| a.ts_us < ts_us && a.status >= 200 && a.answers("INVITE"))
-            .min_by_key(|a| a.ts_us)
-    }
-
     /// Whether `uas` took a PRACK naming `rseq` on that early dialog of `call`
     /// between the provisional that owed it and a later emission of its own.
     fn pracked_between(&self, key: (&str, &str, &str, u64), after: u64, before: u64) -> bool {
@@ -1618,9 +1550,9 @@ mod tests {
     use super::{
         Delay2xxOnUnackedReliable1xxWithSdp, NoNewReliable1xxAfterFinal,
         NoOverlappingReliableProvisionals, NoPrackOf100Trying, NoPrackOfOutOfOrderRseq,
-        NoReliable1xxOnInDialog, NonContiguousRseq, Prack2xxOr481, PrackAcceptedAfterFinal,
-        PrackAnswers1xxOffer, RackWithoutKnownInvite, ReliableNeedsClientOptIn,
-        RequireReliable1xxOnRequire, UnackedReliableProvisional, UnmatchedPrackProxied,
+        NoReliable1xxOnInDialog, NonContiguousRseq, Prack2xxOr481, PrackAnswers1xxOffer,
+        RackWithoutKnownInvite, ReliableNeedsClientOptIn, RequireReliable1xxOnRequire,
+        UnackedReliableProvisional, UnmatchedPrackProxied,
     };
 
     const UAC: &str = "10.0.0.1:5060";
@@ -2709,40 +2641,35 @@ mod tests {
         assert!(f[0].violated(), "the winning fork's own offer is unacked: {:?}", f[0].decision);
     }
 
-    /// `prack-accepted-after-final`: the PRACK's own transaction outlives the
-    /// INVITE's; one that beat the final is the other rule's occasion.
+    /// A PRACK after the final is answered by its match (RFC 3262 §3-§4): no
+    /// registered rule charges a 481 to one naming nothing, and
+    /// a non-2xx to one naming a provisional sent is still charged.
     #[test]
-    fn a_prack_after_the_final_still_draws_2xx() {
-        let msgs = vec![
+    fn a_prack_after_the_final_draws_what_its_match_decides() {
+        let unmatched = vec![
             inv_resp(1_100_000, 200, "", false),
             prack_on(1_200_000, "1 1 INVITE", false),
             prack_answer(1_250_000, 481),
         ];
-        let f = decide(&PrackAcceptedAfterFinal, &msgs);
-        assert_eq!(f.len(), 1, "{f:?}");
-        let Decision::Violated(Evidence::LatePrackRejected { status, prior_final_status, .. }) =
-            &f[0].decision
-        else {
-            panic!("late-prack evidence: {:?}", f[0].decision)
-        };
-        assert_eq!((*status, *prior_final_status), (481, 200));
+        for rule in crate::all_rules() {
+            let charged: Vec<_> = decide(rule.as_ref(), &unmatched)
+                .into_iter()
+                .filter(|f| f.violated() && f.anchor == 2)
+                .collect();
+            assert!(charged.is_empty(), "a 481 to a late PRACK naming nothing: {charged:?}");
+        }
 
-        let accepted = vec![
-            inv_resp(1_100_000, 200, "", false),
+        let matched = vec![
+            inv_resp(1_000_000, 180, &reliable_rows(1), false),
+            inv_resp(1_100_000, 486, "", false),
             prack_on(1_200_000, "1 1 INVITE", false),
-            prack_answer(1_250_000, 200),
+            prack_answer(1_250_000, 481),
         ];
-        assert!(matches!(
-            decide(&PrackAcceptedAfterFinal, &accepted)[0].decision,
-            Decision::Compliant
-        ));
-
-        let early = vec![
-            prack_on(1_100_000, "1 1 INVITE", false),
-            prack_answer(1_150_000, 481),
-            inv_resp(1_200_000, 200, "", false),
-        ];
-        assert!(decide(&PrackAcceptedAfterFinal, &early).is_empty());
+        let f = decide(&Prack2xxOr481, &matched);
+        assert!(
+            f.iter().any(|f| f.violated()),
+            "a late PRACK naming a provisional sent owes a 2xx: {f:?}"
+        );
     }
 
     /// `no-new-reliable-1xx-after-final`: a fresh RSeq after the final is the

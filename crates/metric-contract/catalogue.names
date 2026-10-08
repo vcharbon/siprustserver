@@ -19,6 +19,7 @@ b2bua-runner b2bua_termination_unrecorded_total counter fixed {}
 b2bua-runner b2bua_second_final_refused_total counter fixed {}
 b2bua-runner b2bua_provisional_after_final_refused_total counter fixed {}
 b2bua-runner b2bua_going_away_absorbed_total counter fixed {}
+b2bua-runner b2bua_late_prack_answered_total counter fixed {}
 b2bua-runner b2bua_other_incarnation_dropped_total counter fixed {}
 b2bua-runner b2bua_store_fault_rejected_total counter fixed {}
 b2bua-runner b2bua_store_fault_audit_skipped_total counter fixed {}

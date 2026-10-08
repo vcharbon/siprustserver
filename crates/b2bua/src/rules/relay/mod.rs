@@ -48,7 +48,7 @@ mod originate_tests;
 pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::ack_b_leg;
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
-pub(crate) use delayed_offer::invite_carried_offer;
+pub(crate) use delayed_offer::{ack_answer_on_leg, invite_carried_offer, offers_owed_at_ack};
 pub(crate) use originate::{apply_withheld_option_tags, clamp_no_answer, dialling_invite};
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};

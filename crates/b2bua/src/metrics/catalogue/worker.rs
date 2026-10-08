@@ -166,6 +166,12 @@ pub const PROVISIONAL_AFTER_FINAL_REFUSED: Family = Family::counter(
     "provisionals toward the a-leg's initial INVITE refused because that transaction already sent its final (RFC 3261 §13.3.1.1 / §17.2.1); a rule showed a ringing leg to an answered caller — expected 0",
 );
 
+pub const LATE_PRACK_ANSWERED: Family = Family::counter(
+    "b2bua_late_prack_answered_total",
+    Labels::None,
+    "PRACKs that reached this node after their call's release and named a reliable provisional it showed, answered 200 (RFC 3262 §3); the caller's PRACK crossing the final",
+);
+
 pub const GOING_AWAY_ABSORBED: Family = Family::counter(
     "b2bua_going_away_absorbed_total",
     Labels::None,

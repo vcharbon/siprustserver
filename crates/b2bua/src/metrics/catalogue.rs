@@ -179,6 +179,7 @@ pub const WORKER: &[Family] = &[
     worker::SECOND_FINAL_REFUSED,
     worker::PROVISIONAL_AFTER_FINAL_REFUSED,
     worker::GOING_AWAY_ABSORBED,
+    worker::LATE_PRACK_ANSWERED,
     worker::OTHER_INCARNATION_DROPPED,
     worker::STORE_FAULT_REJECTED,
     worker::STORE_FAULT_AUDIT_SKIPPED,

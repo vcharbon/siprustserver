@@ -867,18 +867,36 @@ fn the_unacknowledged_shown_provisionals_are_grouped_per_shown_dialog() {
     );
 }
 
-/// A PRACK naming a shown provisional is answered here once this stack PRACKed
-/// its responder, or once the call is ending; a live call relays the rest
-/// (RFC 3262 §3).
+/// Only a dialog's first description-carrying provisional carries the offer
+/// (RFC 3264 §4): a later one owes its PRACK no answer, whether the first is
+/// still owed or was acknowledged already.
 #[test]
-fn a_shown_prack_is_answered_here_once_pracked_or_ending() {
-    let (call, shown) =
-        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, false);
-    assert!(!prack_answered_here(&call, "a1", rack(shown, 1)), "a live call relays it");
-    let (pracked, _) = record_pracked_provisional(call.clone(), "b-1", "bf1", 1, 4711, false);
-    assert!(prack_answered_here(&pracked, "a1", rack(shown, 1)), "never a second PRACK");
-    let mut ending = call.clone();
-    ending.state = CallModelState::Terminating;
-    assert!(prack_answered_here(&ending, "a1", rack(shown, 1)), "the call is ending");
-    assert!(!prack_answered_here(&ending, "a1", rack(shown + 1, 1)), "it names nothing shown");
+fn only_the_first_offer_of_a_dialog_is_owed_an_answer() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, true, true);
+    let (call, _) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, true, true);
+    let (call, _) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 4711, 7_000, true, true);
+    let call = note_responder_offer(call, "b-1", "bf1", 1, 4711, b"offer-1");
+    let call = note_responder_offer(call, "b-1", "bf1", 1, 4712, b"offer-1-again");
+    let call = note_responder_offer(call, "b-1", "bf2", 1, 4711, b"offer-2");
+    let offers = |call: &Call| -> Vec<(String, i64, Option<Vec<u8>>)> {
+        unacknowledged_relayed_provisionals(call, "b-1", None)
+            .into_iter()
+            .map(|o| (o.b_tag, o.rseq, o.offer))
+            .collect()
+    };
+    assert_eq!(
+        offers(&call),
+        vec![
+            ("bf1".to_string(), 4711, Some(b"offer-1".to_vec())),
+            ("bf1".to_string(), 4712, None),
+            ("bf2".to_string(), 4711, Some(b"offer-2".to_vec())),
+        ],
+    );
+    let call = retire_a_rseq(call, "a1", a1);
+    assert_eq!(
+        offers(&call),
+        vec![("bf1".to_string(), 4712, None), ("bf2".to_string(), 4711, Some(b"offer-2".to_vec()))],
+        "the offer was answered in the caller's PRACK"
+    );
 }

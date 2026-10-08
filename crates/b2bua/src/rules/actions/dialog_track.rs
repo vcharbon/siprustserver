@@ -165,6 +165,12 @@ impl ActionExecutor<'_> {
         if !remote_tag.is_empty() {
             self.track_b_early_dialog(call, leg_id, resp, &remote_tag);
         }
+        let offered_reliably = call::helpers::offered_in_reliable_provisional(
+            call,
+            leg_id,
+            &remote_tag,
+            i64::from(resp.cseq().seq()),
+        );
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
             // dialog — the one whose callee tag it carries. Promote *that* fork
@@ -232,11 +238,11 @@ impl ActionExecutor<'_> {
                 d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
             }
             // A delayed offer: the INVITE this stack sent carried none, so the
-            // 2xx's description is the offer the ACK MUST answer (§13.2.2.4).
-            // An offerless leg is never offered 100rel, so no reliable
-            // provisional answered it first.
-            let delayed =
-                leg.dialogs.first().is_some_and(|d| !relay::acked_invite_carries_offer(d));
+            // 2xx's description is the offer the ACK MUST answer (§13.2.2.4) —
+            // unless a reliable provisional of this dialog carried the offer
+            // first, whose PRACK carries the answer (RFC 3262 §5).
+            let delayed = !offered_reliably
+                && leg.dialogs.first().is_some_and(|d| !relay::acked_invite_carries_offer(d));
             if let Some(offer) = resp.sdp().filter(|_| delayed) {
                 crate::rules::delayed_offer::note(leg, awaited_ack_cseq, offer);
             }

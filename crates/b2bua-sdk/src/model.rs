@@ -1226,12 +1226,6 @@ impl<'a> RuleCall<'a> {
     pub fn rack_pracked_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
         call::helpers::rack_pracked_here(self.0, a_tag, rack)
     }
-    /// Whether a PRACK in the `a_tag` dialog naming `rack` is answered 200 by
-    /// this face rather than relayed (RFC 3262 §3,
-    /// [`call::helpers::prack_answered_here`]).
-    pub fn prack_answered_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
-        call::helpers::prack_answered_here(self.0, a_tag, rack)
-    }
     /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
     /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
     /// is its retransmission to discard (RFC 3262 §4).

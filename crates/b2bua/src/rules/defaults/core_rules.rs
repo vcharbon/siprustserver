@@ -1213,19 +1213,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
-        // A PRACK naming a reliable provisional this stack showed is answered
-        // 200 here wherever relaying it would be wrong (RFC 3262 §3): this
-        // stack already PRACKed the responder itself — as it CANCELled, or at
-        // the responder's final — so a relay would be a second PRACK for one
-        // `RSeq`, or the call is tearing down. Outranks `post-bye-481`, whose
-        // 481 would deny a provisional this face really sent.
+        // A PRACK naming a reliable provisional this stack already PRACKed
+        // toward its responder — as it CANCELled, at the responder's final, or
+        // ahead of a BYE — is answered 200 here (RFC 3262 §3): a relay would
+        // be a second PRACK for one `RSeq`. Outranks `post-bye-481`, whose 481
+        // would deny a provisional this face really sent.
         rule(
             "answer-pracked-prack",
             &["post-bye-481", "relay-prack"],
             Match::request().method("PRACK").filter(|ctx| {
                 let Some(req) = ctx.request() else { return false };
                 let a_tag = req.to().tag().unwrap_or_default();
-                rack_tokens(req).is_some_and(|rack| ctx.call.prack_answered_here(a_tag, rack))
+                rack_tokens(req).is_some_and(|rack| ctx.call.rack_pracked_here(a_tag, rack))
             }),
             |_ctx| {
                 ok(vec![RuleAction::Respond {

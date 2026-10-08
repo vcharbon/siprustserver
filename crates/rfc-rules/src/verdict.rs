@@ -249,8 +249,6 @@ pub enum RuleId {
     /// RFC 3262 §3: a PRACK arriving after the INVITE final still draws a 2xx —
     /// the PRACK server transaction outlives the INVITE's. Charges the endpoint
     /// that answered it.
-    #[serde(rename = "prack-accepted-after-final")]
-    PrackAcceptedAfterFinal,
     /// RFC 3262 §3: a UAS emits no NEW reliable provisional on an INVITE
     /// transaction it has already answered. Charges that UAS; the reliable-only
     /// sibling of [`RuleId::No1xxAfterFinal`], keyed on `RSeq`.
@@ -528,7 +526,6 @@ impl RuleId {
         RuleId::UnmatchedPrackProxied,
         RuleId::Prack2xxOr481,
         RuleId::Delay2xxOnUnackedReliable1xxWithSdp,
-        RuleId::PrackAcceptedAfterFinal,
         RuleId::NoNewReliable1xxAfterFinal,
         RuleId::NoPrackOf100Trying,
         RuleId::PrackAnswers1xxOffer,
@@ -634,7 +631,6 @@ impl RuleId {
             RuleId::Delay2xxOnUnackedReliable1xxWithSdp => {
                 "delay-2xx-on-unacked-reliable-1xx-with-sdp"
             }
-            RuleId::PrackAcceptedAfterFinal => "prack-accepted-after-final",
             RuleId::NoNewReliable1xxAfterFinal => "no-new-reliable-1xx-after-final",
             RuleId::NoPrackOf100Trying => "no-prack-of-100-trying",
             RuleId::PrackAnswers1xxOffer => "prack-answers-1xx-offer",
@@ -1709,34 +1705,12 @@ pub enum Evidence {
         /// The top-Via branch the provisional shares with the 2xx (§17).
         branch: String,
     },
-    /// The PRACK that arrived after the INVITE final and drew something other
-    /// than a 2xx.
-    ///
-    /// Untagged and unambiguous both ways: it is the only variant carrying
-    /// `late_prack_answer_msg`/`late_prack_msg`, and it carries none of the
-    /// required keys of any other variant (`prack_answer_msg` included).
-    LatePrackRejected {
-        /// Index into the view's `msgs` of the response the emitter sent.
-        late_prack_answer_msg: usize,
-        late_prack_answer_hop: usize,
-        late_prack_answer_ts_us: u64,
-        status: u16,
-        /// Index into the view's `msgs` of the PRACK it answers.
-        late_prack_msg: usize,
-        /// Index into the view's `msgs` of the INVITE final already sent, and
-        /// its status — what made this PRACK late.
-        prior_final_msg: usize,
-        prior_final_status: u16,
-        /// The top-Via branch the PRACK shares with this response (§17).
-        branch: String,
-    },
     /// The NEW reliable provisional a UAS sent on an INVITE transaction it had
     /// already answered.
     ///
     /// Untagged and unambiguous both ways: it is the only variant carrying
     /// `stray_1xx_msg`, and it carries none of the required keys of any other
-    /// variant — `LatePrackRejected` requires `late_prack_answer_msg` and
-    /// `late_prack_msg`, which this one has not.
+    /// variant.
     Reliable1xxAfterFinal {
         /// Index into the view's `msgs` of the provisional the emitter sent.
         stray_1xx_msg: usize,
@@ -2466,7 +2440,6 @@ impl Evidence {
             Evidence::PrackAbsorbed { absorbed_prack_msg, .. } => *absorbed_prack_msg,
             Evidence::PrackAnsweredWrongly { prack_answer_msg, .. } => *prack_answer_msg,
             Evidence::AnsweredOverUnackedOffer { early_2xx_msg, .. } => *early_2xx_msg,
-            Evidence::LatePrackRejected { late_prack_answer_msg, .. } => *late_prack_answer_msg,
             Evidence::Reliable1xxAfterFinal { stray_1xx_msg, .. } => *stray_1xx_msg,
             Evidence::PrackedTrying { trying_prack_msg, .. } => *trying_prack_msg,
             Evidence::PrackWithoutAnswer { bodiless_prack_msg, .. } => *bodiless_prack_msg,

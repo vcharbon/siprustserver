@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::{settle_until, stated, B2buaSut};
+use b2bua_harness::{settle_until, stated, stated_by_response, B2buaSut};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
+use sip_message::generators::InDialogMethod;
 use sip_net::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -236,6 +237,12 @@ async fn a_late_caller_prack_after_the_rejection_is_answered_here() {
     h.advance(Duration::from_millis(70)).await;
     let mut late = call.try_prack(&ringing).await.expect("alice PRACKs the reliable 180");
     late.expect(200).await;
+    assert_eq!(b2bua.metrics().late_prack_answered_total(), 1, "counted as a late PRACK");
+    assert_eq!(
+        b2bua.metrics().unroutable_refused_total(),
+        0,
+        "a late PRACK answered 200 is no unroutable refusal"
+    );
 
     h.advance(Duration::from_secs(1)).await;
     settle_until(|| b2bua.is_reaped()).await;
@@ -379,14 +386,6 @@ async fn a_refused_own_prack_at_the_2xx_keeps_the_call() {
     h.waive(
         WaiverScope::rule(
             "prack-2xx-or-481",
-            "bob deliberately refuses the PRACK of a provisional he sent — the call surviving it \
-             is the subject",
-        )
-        .on_party("bob"),
-    );
-    h.waive(
-        WaiverScope::rule(
-            "prack-accepted-after-final",
             "bob deliberately refuses the PRACK of a provisional he sent — the call surviving it \
              is the subject",
         )
@@ -607,6 +606,208 @@ async fn a_2xx_over_an_unpracked_delayed_offer_is_answered_in_the_prack_with_the
     prack.respond(200, "OK").await;
     let ack = bob.receive("ACK").await;
     assert!(ack.request().body().is_empty(), "the exchange closed in the PRACK");
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// The second fork's own offer, carried by its 2xx.
+const FORK2_OFFER: &str = "v=0\r\no=bob 3 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0\r\n";
+
+/// The answer the caller's later ACK gives to a re-offer.
+const ALICE_REANSWER: &str = "v=0\r\no=alice 2 3 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
+
+/// A delayed-offer INVITE forks: fork1's reliable 183 carries an offer the
+/// caller never PRACKs, fork2 answers 200 with its own. Fork1's provisional is
+/// PRACKed as the 2xx arrives, its offer answered rejecting every stream; the
+/// caller's answer on her ACK answers fork2's offer and reaches fork2 on the
+/// relayed ACK (RFC 3261 §13.2.2.4) — and so does the answer on the ACK of a
+/// later offerless re-INVITE on that dialog.
+#[tokio::test(start_paused = true)]
+async fn a_losing_forks_delayed_offer_is_pracked_at_the_2xx_and_the_winners_ack_keeps_its_answer() {
+    let h = Harness::with_transit_delay("b2bua-prack-owed-at-final-forked-delayed", 0);
+    caller_withholds_prack(&h);
+    let alice = h.agent("alice", "127.0.0.1:7435").await;
+    let bob = h.agent("bob", "127.0.0.1:7436").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 7436).start(&h, "b2bua", "127.0.0.1:7437").await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv
+        .respond(183, "Session Progress")
+        .with_to_tag("fork1")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "11")
+        .with_sdp(BOB_OFFER)
+        .await;
+    call.expect(183).await;
+
+    b_inv.respond(200, "OK").with_to_tag("fork2").with_sdp(FORK2_OFFER).await;
+    let mut prack = bob.receive("PRACK").await;
+    assert_eq!(prack.request().to().tag(), Some("fork1"), "the losing fork's own dialog");
+    let body = String::from_utf8_lossy(prack.request().body()).into_owned();
+    assert!(
+        body.lines().any(|l| l.starts_with("m=audio 0 ")),
+        "the losing fork's offer is answered rejecting its stream: {body:?}"
+    );
+    prack.respond(200, "OK").await;
+    call.expect(200).await;
+    let mut dialog = call.ack_with(Some(ALICE_ANSWER)).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(
+        String::from_utf8_lossy(ack.request().body()),
+        ALICE_ANSWER,
+        "the winner's ACK carries the caller's answer"
+    );
+
+    let mut reinv = dialog.send_request(InDialogMethod::Invite).send().await;
+    let mut re_uas = bob.receive("INVITE").await;
+    re_uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    let ok = reinv.expect(200).await;
+    dialog.ack_for(ok.cseq().seq(), Some(ALICE_REANSWER)).await;
+    let re_ack = bob.receive("ACK").await;
+    assert_eq!(
+        String::from_utf8_lossy(re_ack.request().body()),
+        ALICE_REANSWER,
+        "a later delayed-offer ACK on the leg keeps its answer"
+    );
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// A delayed-offer INVITE answered 200 over its reliable 183 offer; the
+/// caller does not PRACK in time and never ACKs, so the 2xx's give-up ends the
+/// call before any ACK could carry her answer. The PRACK still owed leaves ahead of the
+/// callee's BYE, answering the offer rejecting every stream (RFC 3262 §4-§5);
+/// her PRACK crossing the teardown draws 200 here, one naming nothing 481.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_offer_is_pracked_before_a_teardown_that_comes_before_the_ack() {
+    const ACK_TIMEOUT_SEC: u64 = 6;
+    let h = Harness::with_transit_delay("b2bua-prack-owed-at-final-deferred-teardown", 0);
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "alice deliberately never ACKs — the teardown before her answer is the subject",
+        )
+        .on_party("alice"),
+    );
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "bob deliberately answers 200 before his reliable offer is PRACKed",
+        )
+        .on_party("bob"),
+    );
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "the SUT relays bob's early 200 toward alice, who never PRACKs the 183 it showed her",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:7438").await;
+    let bob = h.agent("bob", "127.0.0.1:7439").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 7439)
+        .tune(|c| c.ack_timeout_sec = ACK_TIMEOUT_SEC as i64)
+        .start(&h, "b2bua", "127.0.0.1:7440")
+        .await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    reliable_183_offer(&mut uas).await;
+    let progress = call.expect(183).await;
+    uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC) + Duration::from_millis(100)).await;
+    alice.drain().await;
+    let mut prack = bob.receive("PRACK").await;
+    let body = String::from_utf8_lossy(prack.request().body()).into_owned();
+    assert!(
+        body.lines().any(|l| l.starts_with("m=audio 0 ")),
+        "the owed PRACK answers the offer, rejecting its stream: {body:?}"
+    );
+    prack.respond(200, "OK").await;
+    let mut bob_bye = bob.receive("BYE").await;
+
+    // Her PRACK crosses the teardown: it names the 183 she was shown, and
+    // answers its offer.
+    let shown_rseq = stated_by_response(&progress, "RSeq").expect("a reliable 183");
+    let mut late = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&format!("{shown_rseq} {} INVITE", progress.cseq().seq()))
+        .with_sdp(ALICE_ANSWER)
+        .try_send()
+        .await
+        .expect("alice PRACKs the reliable 183");
+    late.expect(200).await;
+    let mut stray = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&format!("{} {} INVITE", BOB_RSEQ + 1000, progress.cseq().seq()))
+        .try_send()
+        .await
+        .expect("alice sends a PRACK naming nothing");
+    stray.expect(481).await;
+
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob_bye.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// A delayed-offer INVITE whose offer rode a reliable 183 the caller PRACKed
+/// with her answer: the exchange closed in that PRACK (RFC 3262 §5), so the
+/// 2xx's description is no new offer and the caller's bare ACK reaches the
+/// callee bare (RFC 3264 §4).
+#[tokio::test(start_paused = true)]
+async fn an_offer_answered_in_the_callers_prack_leaves_the_ack_bare() {
+    let h = Harness::with_transit_delay("b2bua-prack-owed-at-final-offer-pracked", 0);
+    let alice = h.agent("alice", "127.0.0.1:7441").await;
+    let bob = h.agent("bob", "127.0.0.1:7442").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 7442).start(&h, "b2bua", "127.0.0.1:7443").await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    reliable_183_offer(&mut uas).await;
+    let progress = call.expect(183).await;
+    let shown_rseq = stated_by_response(&progress, "RSeq").expect("a reliable 183");
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&format!("{shown_rseq} {} INVITE", progress.cseq().seq()))
+        .with_sdp(ALICE_ANSWER)
+        .try_send()
+        .await
+        .expect("alice PRACKs the 183 with her answer");
+    let mut bob_prack = bob.receive("PRACK").await;
+    assert!(!bob_prack.request().body().is_empty(), "her answer is relayed");
+    bob_prack.respond(200, "OK").await;
+    prack.expect(200).await;
+
+    uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert!(
+        ack.request().body().is_empty(),
+        "the exchange closed in the PRACK: {:?}",
+        String::from_utf8_lossy(ack.request().body())
+    );
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

@@ -1,9 +1,11 @@
 //! An event that resolved to no call: the answer RFC 3261 owes the peer, and
-//! its accounting in three classes that never overlap.
+//! its accounting in classes that never overlap.
 //!
 //! - A wire request other than ACK is one a peer waits on, and draws
 //!   [`refusal`] (`b2bua_unroutable_refused_total{method,code}`). A stray
 //!   CANCEL's 481 is stateless, so each repeat of it counts again.
+//! - A PRACK a released call still answers draws 200 instead
+//!   ([`super::late_prack`], `b2bua_late_prack_answered_total`).
 //! - An ACK or a response is owed nothing and is dropped
 //!   (`b2bua_unroutable_dropped_total{kind}`).
 //! - This node's own event — a client transaction released from its call
@@ -21,7 +23,7 @@ use std::net::SocketAddr;
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use super::process::refuse_on_store_fault;
-use super::responses::{build_200, build_405, build_481};
+use super::responses::{build_405, build_481};
 use super::RouterCtx;
 use crate::store::StoreFaultPoint;
 use b2bua_sdk::event::CallEvent;
@@ -99,6 +101,10 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
 }
 
 async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
+    if let Some(answer) = super::late_prack::answer(ctx, req) {
+        let _ = ctx.txn.send_response(answer, src).await;
+        return;
+    }
     let method = req.method().as_str();
     let class = wave_label(req.method());
     let sample = format!("method={method} call_id={} src={src}", req.call_id().as_str());
@@ -129,8 +135,6 @@ fn wave_label(method: &Method) -> &str {
 /// The answer a request naming no call here is owed; `None` for an ACK, which
 /// draws no response (RFC 3261 §17.1.1.3).
 ///
-/// - A PRACK naming a provisional a released call showed in its dialog: 200
-///   (RFC 3262 §3, [`super::late_prack`]).
 /// - A To-tag names a dialog this node does not hold: 481 whatever the method
 ///   (§12.2.2), the answer that ends the peer's dialog (§12.2.1.2).
 /// - A CANCEL matching no INVITE: 481 (§9.2), under the tag the transaction
@@ -144,9 +148,6 @@ pub(super) fn refusal(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> 
     let method = req.method();
     if method == Method::Ack {
         return None;
-    }
-    if ctx.late_pracks.answers(req, ctx.clock.now_ms()) {
-        return Some(build_200(req));
     }
     if req.to().tag().is_some() || method == Method::Cancel {
         return Some(build_481(req, None));

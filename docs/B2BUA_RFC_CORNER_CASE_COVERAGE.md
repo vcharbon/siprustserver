@@ -177,7 +177,7 @@ Severity = operational risk if the behaviour is wrong.
 | PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `serialReliable1xx` |
 | PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | rfc-audit `uacRseqStrictness` |
 | PRACK-RTX-2 | 3262 §3 | Retransmitted PRACK after 2xx | Resend cached 2xx, no re-process | med | ❌ | add `prack_rtx_absorbed` |
-| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | Still 2xx it | med | ✅ | rfc-audit `prack-accepted-after-final` |
+| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | 2xx on a match, 481 without | med | ✅ | rfc-audit `prack-2xx-or-481` |
 | DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay-2xx-on-unacked-reliable-1xx-with-sdp` |
 
 ### Forking & early media

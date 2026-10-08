@@ -588,16 +588,11 @@ impl ActionExecutor<'_> {
         });
     }
 
-    /// PRACK, as the INVITE final `resp` arrives from `leg_id`, every reliable
-    /// provisional of that INVITE that was relayed and is still
-    /// unacknowledged: the final ends the shown party's chance to PRACK it, so
-    /// this stack, the leg's UAC, owes it (RFC 3262 §4), each on its own early
-    /// dialog. Runs before the rules handle the final, so the PRACK leaves
-    /// ahead of whatever they relay. Past a rejection an offer one carried is
-    /// answered rejecting every stream; past a 2xx it waits for the caller's
-    /// answer on her ACK (`prack_offers_owed_at_ack`), so the callee
-    /// is answered what the caller answered (RFC 3264). A response that is not
-    /// an INVITE final owes nothing here.
+    /// As the INVITE final `resp` arrives from `leg_id`, PRACKs each relayed
+    /// reliable provisional of that INVITE still unacknowledged, on its own
+    /// early dialog (RFC 3262 §4), an offer it carried answered rejecting every
+    /// stream — except an offer in the dialog a 2xx confirms, whose PRACK
+    /// carries the caller's answer at her ACK (RFC 3264).
     pub fn prack_owed_at_final(
         &self,
         call: &mut Call,
@@ -608,11 +603,14 @@ impl ActionExecutor<'_> {
         if resp.status() < 200 || resp.cseq().method() != Method::Invite {
             return;
         }
-        let answered = (200..300).contains(&resp.status());
+        let confirmed = (200..300).contains(&resp.status()).then(|| resp.to().tag()).flatten();
         let invite_cseq = i64::from(resp.cseq().seq());
         let owed =
             call::helpers::unacknowledged_relayed_provisionals(call, leg_id, Some(invite_cseq));
-        for o in owed.into_iter().filter(|o| !(answered && o.offer.is_some())) {
+        let deferred = |o: &call::helpers::OwedPrack| {
+            o.offer.is_some() && confirmed.is_some_and(|tag| tag == o.b_tag)
+        };
+        for o in owed.into_iter().filter(|o| !deferred(o)) {
             let answer = o.offer.as_deref().and_then(|offer| self.rejecting_answer(offer));
             self.send_prack_to_leg(
                 call,
@@ -627,19 +625,18 @@ impl ActionExecutor<'_> {
         }
     }
 
-    /// PRACK each relayed reliable provisional of `leg_id` whose offer still
-    /// awaits an answer past the 2xx ([`Self::prack_owed_at_final`]), as the
-    /// caller's ACK for that 2xx is relayed: the PRACK carries `answer`, the
-    /// answer her ACK gives, or rejects every stream where it gives none
-    /// (RFC 3262 §5, RFC 3264 §6). The relayed ACK then carries no answer.
+    /// PRACKs `owed` — the provisionals whose offer the 2xx left to the caller's
+    /// ACK ([`crate::rules::relay::offers_owed_at_ack`]) — on `leg_id`, each
+    /// offer answered with `answer`, or rejecting every stream where the ACK
+    /// gives none (RFC 3262 §5, RFC 3264 §6).
     pub(super) fn prack_offers_owed_at_ack(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         leg_id: &str,
+        owed: Vec<call::helpers::OwedPrack>,
         answer: Option<Vec<u8>>,
     ) {
-        let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, None);
         for o in owed {
             let Some(offer) = o.offer.as_deref() else { continue };
             let body = answer.clone().or_else(|| self.rejecting_answer(offer));

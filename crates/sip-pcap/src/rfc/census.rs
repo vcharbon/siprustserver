@@ -352,7 +352,6 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
         Evidence::PrackAbsorbed { .. } => "unmatched prack absorbed",
         Evidence::PrackAnsweredWrongly { .. } => "prack answered off its rseq state",
         Evidence::AnsweredOverUnackedOffer { .. } => "2xx over an unacked reliable offer",
-        Evidence::LatePrackRejected { .. } => "late prack rejected",
         Evidence::Reliable1xxAfterFinal { .. } => "new reliable provisional after the final",
         Evidence::PrackedTrying { .. } => "prack of a 100 trying",
         Evidence::PrackWithoutAnswer { .. } => "prack of an offer carries no answer",
