@@ -537,7 +537,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 ok(vec![RuleAction::ReleaseStraggler2xx { leg_id: ctx.source_leg_id.to_string() }])
             },
-        ),
+        )
+        // A call already ending still owes the straggler its ACK and BYE.
+        .runs_while_terminating(),
         // ── dialog ──────────────────────────────────────────────────────────
         // A callee's INVITE provisional, relayed toward the originator while
         // her INVITE transaction is open. Once that transaction sent its
@@ -1146,6 +1148,34 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![]),
         ),
+        // ── fork-straggler release ──────────────────────────────────────────
+        // The BYE that released a fork straggler (`release-fork-straggler-2xx`)
+        // is that release's alone: its final, whatever the status, and its
+        // transaction timeout are absorbed, and the winning dialog on the same
+        // leg never reads them as its own.
+        rule(
+            "absorb-straggler-release-final",
+            &[],
+            Match::response().method("BYE").filter(|ctx| {
+                let tag = ctx.response().and_then(|r| r.to().tag()).unwrap_or_default();
+                ctx.source_leg()
+                    .is_some_and(|l| crate::rules::fork_straggler::Book::of(l).releases(tag))
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
+        rule(
+            "absorb-straggler-release-timeout",
+            &[],
+            Match::timeout().filter(|ctx| {
+                let branch = ctx.timeout_branch().unwrap_or_default();
+                ctx.source_leg().is_some_and(|l| {
+                    crate::rules::fork_straggler::Book::of(l).owns_bye_branch(branch)
+                })
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
         // ── terminating ─────────────────────────────────────────────────────
         rule(
             "resolve-bye-response",

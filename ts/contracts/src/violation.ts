@@ -74,6 +74,7 @@ export const RFC_RULES = [
   "prack-answers-1xx-offer",
   "ack-body-after-complete-offer-answer",
   "final-2xx-answers-the-offer",
+  "delayed-offer-answered-in-ack",
   "second-answer-repeats-the-first",
   "answer-stream-matches-offer",
   "sdp-origin-continuity",

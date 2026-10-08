@@ -79,6 +79,7 @@ pub fn all_rules() -> Vec<Box<dyn rules::Obligation>> {
         Box::new(rules::prack::PrackAnswers1xxOffer),
         Box::new(rules::offer_answer::AckBodyAfterCompleteOfferAnswer),
         Box::new(rules::offer_answer::Final2xxAnswersTheOffer),
+        Box::new(rules::offer_answer::DelayedOfferAnsweredInAck),
         Box::new(rules::offer_answer::SecondAnswerRepeatsTheFirst),
         Box::new(rules::offer_answer::AnswerStreamMatchesOffer),
         Box::new(rules::offer_answer::SdpOriginContinuity),

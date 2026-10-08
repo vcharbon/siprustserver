@@ -124,6 +124,42 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// The answer a relayed ACK carrying none owes `target_leg`'s delayed offer
+    /// ([`crate::rules::delayed_offer`]), and whether it is the caller's: the
+    /// offer answered out of her own description (her INVITE's offer, which
+    /// the 2xx answered on her face), else every stream rejected on this
+    /// stack's account (RFC 3264 §6).
+    fn answer_owed(
+        &self,
+        call: &Call,
+        target_leg: &str,
+        ack: &sip_message::SipRequest,
+    ) -> Option<(Vec<u8>, bool)> {
+        if ack.sdp().is_some() {
+            return None;
+        }
+        let leg = call.b_legs.iter().find(|l| l.leg_id == target_leg)?;
+        let offer = crate::rules::delayed_offer::owed(leg, ack.cseq().seq() as i64)?;
+        let caller = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let own = caller.sdp().and_then(|own| {
+            sip_message::sdp_answer::answer_from_own(
+                &offer,
+                own,
+                sip_message::sdp_answer::FormatPreference::Offerer,
+                None,
+            )
+        });
+        if let Some(answer) = own {
+            return Some((answer, true));
+        }
+        let options = sip_message::BuildHeldSdpOptions {
+            local_ip: self.config.sip_local_ip.clone(),
+            now_ms: self.now_ms,
+        };
+        let rejected = sip_message::sdp_answer::reject_offer(&offer, &options)?;
+        Some((rejected, false))
+    }
+
     /// Relay an inbound SIP request to `target_leg`. Replicates the source's
     /// per-dialog CSeq bookkeeping (`relay_cseq_delta` — each dialog has its own
     /// sequence, RFC 3261 §12.2.1.1), the PRACK `RAck` CSeq rewrite (RFC 3262
@@ -165,15 +201,21 @@ impl ActionExecutor<'_> {
             let face = capabilities::Face::of_leg(target_leg);
             let (extra_headers, _) =
                 relayed_request_headers(call, req, target_leg, face, self.config, self.now_ms);
+            let caller = relay::Author::Leg(ctx.source_leg_id);
+            let (body, content_type, author) = match self.answer_owed(call, target_leg, req) {
+                Some((answer, true)) => (answer, Some(relay::sdp()), caller),
+                Some((answer, false)) => (answer, Some(relay::sdp()), relay::Author::Stack),
+                None => (req.body().to_vec(), content_type, caller),
+            };
             self.ack_leg(
                 call,
                 fx,
                 target_leg,
-                req.body().to_vec(),
+                body,
                 content_type,
                 extra_headers,
                 Provenance::Relayed,
-                relay::Author::Leg(ctx.source_leg_id),
+                author,
             );
             return;
         }

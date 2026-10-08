@@ -193,6 +193,15 @@ impl ActionExecutor<'_> {
                 // The session it carries becomes the leg's.
                 relay::adopt_confirmed_dialog(leg, idx);
                 let winner = leg.dialogs.remove(idx);
+                // A losing fork may still answer: keep the sequence it spent, so
+                // the BYE that releases it continues it (RFC 3261 §12.2.1.1).
+                let mut book = crate::rules::fork_straggler::Book::of(leg);
+                for lost in leg.dialogs.iter().filter(|d| !d.sip.remote_tag.is_empty()) {
+                    book.forks.insert(lost.sip.remote_tag.clone(), lost.sip.local_cseq);
+                }
+                if !book.forks.is_empty() {
+                    book.store(leg);
+                }
                 leg.dialogs = vec![winner];
             }
             leg.state = LegState::Confirmed;
@@ -204,6 +213,15 @@ impl ActionExecutor<'_> {
             // (`re-ack-retransmitted-2xx`), so no branch exists until then.
             if let Some(d) = leg.dialogs.first_mut() {
                 d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
+            }
+            // A delayed offer: the INVITE this stack sent carried none, so the
+            // 2xx's description is the offer the ACK MUST answer (§13.2.2.4).
+            // An offerless leg is never offered 100rel, so no reliable
+            // provisional answered it first.
+            let delayed =
+                leg.dialogs.first().is_some_and(|d| !relay::acked_invite_carries_offer(d));
+            if let Some(offer) = resp.sdp().filter(|_| delayed) {
+                crate::rules::delayed_offer::note(leg, awaited_ack_cseq, offer);
             }
         }
         // The a-facing tag this callee dialog is mapped to: the one its relayed

@@ -59,6 +59,7 @@ use crate::render::{self, UriComposer};
 use crate::resolve::Resolver;
 use crate::retransmit::{self, DrawnAck, DrawnAcks, Repeats};
 use crate::scope::Finding;
+use crate::scripted_final;
 use crate::settle::{self, Sut};
 use crate::stack::LegStack;
 use crate::state::StepOutcome;
@@ -460,7 +461,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     async fn emit_ready(&mut self) -> bool {
         loop {
             let Some(step) = self.next_send() else { return true };
-            if !self.emit(&step).await {
+            if !self.emit(&step, None).await {
                 // A send the run cannot compose, pace or put on the wire is a
                 // script it cannot keep following (§11.2): the close ends what
                 // the legs still hold.
@@ -1515,12 +1516,18 @@ impl<'a, 'p> Runner<'a, 'p> {
         for _ in 0..2 {
             let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
             let Some(owed) = close::unscripted(&ladder, message) else { return };
-            // The CANCEL's 487 waits on the leg's own scripted reject, where
-            // the flow still owes one (`scripted_reject_pending`).
-            let cancelled_invite = matches!(&owed,
-                Owed::Answer { cseq_method, status: 487, .. } if cseq_method == "INVITE");
-            if cancelled_invite && self.scripted_reject_pending(leg) {
-                return;
+            // A CANCELled INVITE the flow still owes its own reject draws that
+            // step at once, its dwell not waited on (RFC 3261 §9.2: any non-2xx
+            // may answer it); the flow walks on from it as from any send.
+            if let Owed::Answer { cseq_method, status: 487, cseq, to_tag, .. } = &owed {
+                if cseq_method == "INVITE" {
+                    if let Some(step) = self.pending_reject(leg, *cseq) {
+                        if !self.emit(&step, Some((*cseq, to_tag.clone()))).await {
+                            self.end_script(Some(leg), Some(&step.id));
+                        }
+                        return;
+                    }
+                }
             }
             let Some(agent) = self.agent_of_leg(leg) else { return };
             let (wire, dst) = match self.compose_close(leg, &owed, UNSCRIPTED) {
@@ -1753,44 +1760,28 @@ impl<'a, 'p> Runner<'a, 'p> {
             )
     }
 
-    /// Whether `step` is a final to an INVITE its leg already answered:
-    /// [`close::final_moot`] over the leg's recorded ladder.
-    fn final_moot(&mut self, step: &CompiledStep) -> bool {
-        let final_to_invite = matches!(&step.discriminator,
-            Discriminator::Response { status, cseq_method: Some(method) }
-                if *status >= 200 && Method::from_wire(method) == Method::Invite);
-        final_to_invite
-            && close::final_moot(
-                &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
-            )
+    /// Whether `step` is a final to an INVITE its leg already answered: the
+    /// INVITE it answers ([`scripted_final::answered_invite`]) arrived and
+    /// already drew a final. One whose INVITE has not arrived is not moot.
+    fn final_moot(&self, step: &CompiledStep) -> bool {
+        if !scripted_final::is_final_to_invite(step) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(&step.leg).unwrap_or_default();
+        let steps = self.instance.plan().steps();
+        let Some(at) = steps.iter().position(|s| s.id == step.id) else { return false };
+        scripted_final::answered_invite(&steps, at, &ladder)
+            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq))
     }
 
-    /// Whether `leg`'s flow still owes its own non-2xx final to the INVITE the
-    /// leg last took: the first final-to-INVITE send behind the step that took
-    /// it is pending and rejects. That captured final is the faithful answer
-    /// to a CANCEL the flow never scripted (RFC 3261 §9.2 recommends 487 and
-    /// admits any non-2xx); a 2xx cannot be one, and the stack's 487 stands.
-    fn scripted_reject_pending(&self, leg: &str) -> bool {
+    /// The reject `leg`'s flow still owes its INVITE CSeq `cseq`
+    /// ([`scripted_final::pending_reject`]).
+    fn pending_reject(&self, leg: &str, cseq: u32) -> Option<CompiledStep> {
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
         let steps = self.instance.plan().steps();
-        let took = steps.iter().rposition(|s| {
-            s.leg == leg
-                && s.is_expect()
-                && matches!(&s.discriminator, Discriminator::Request { method }
-                    if Method::from_wire(method) == Method::Invite)
-                && self.instance.cursor().node_complete(&s.id)
-        });
-        let Some(took) = took else { return false };
-        let answer = steps[took + 1..].iter().find(|s| {
-            s.leg == leg
-                && s.is_send()
-                && matches!(&s.discriminator,
-                    Discriminator::Response { status, cseq_method: Some(method) }
-                        if *status >= 200 && Method::from_wire(method) == Method::Invite)
-        });
-        answer.is_some_and(|s| {
-            matches!(&s.discriminator, Discriminator::Response { status, .. } if *status >= 300)
-                && !self.instance.cursor().node_complete(&s.id)
-        })
+        let cursor = self.instance.cursor();
+        scripted_final::pending_reject(&steps, leg, cseq, &ladder, |id| cursor.node_complete(id))
+            .cloned()
     }
 
     /// Retire every expect on `send`'s leg waiting on the transaction `send`
@@ -1882,7 +1873,11 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Emit one send step.
-    async fn emit(&mut self, step: &CompiledStep) -> bool {
+    async fn emit(
+        &mut self,
+        step: &CompiledStep,
+        answering: Option<(u32, Option<String>)>,
+    ) -> bool {
         let effects = StepEffects::of(self.instance.plan().deviations_for(&step.id));
         let refusals = effects.refusals();
         if !refusals.is_empty() {
@@ -1937,7 +1932,8 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.complete(step);
             return true;
         }
-        let message = match self.compose(step, &effects) {
+        let answering = answering.as_ref().map(|(cseq, tag)| (*cseq, tag.as_deref()));
+        let message = match self.compose(step, &effects, answering) {
             Ok(message) => message,
             Err(failure) => {
                 self.instance.fail(failure);
@@ -2265,11 +2261,14 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.stacks.get(leg).map(|s| s.sent_invite_cseqs().collect()).unwrap_or_default()
     }
 
-    /// Compose the message a send step emits.
+    /// Compose the message a send step emits. A response answers the request
+    /// `answering` names — CSeq number and dialog To-tag — where given, else
+    /// the leg's latest of its CSeq method.
     fn compose(
         &mut self,
         step: &CompiledStep,
         effects: &StepEffects,
+        answering: Option<(u32, Option<&str>)>,
     ) -> Result<SipMessage, Failure> {
         let site = format!("step {:?}", step.id);
         // The lane's per-call directives (§4.3) reach exactly one step: the
@@ -2379,9 +2378,13 @@ impl<'a, 'p> Runner<'a, 'p> {
                 cseq_method: step.msg.cseq_method.as_deref(),
                 early_tag: early_tag.as_deref(),
             };
-            let response = stack
-                .respond(&answer, &headers, body, content_type)
-                .map_err(|e| fail(e.to_string()))?;
+            let response = match answering {
+                Some((cseq, to_tag)) => {
+                    stack.respond_to(cseq, to_tag, &answer, &headers, body, content_type)
+                }
+                None => stack.respond(&answer, &headers, body, content_type),
+            }
+            .map_err(|e| fail(e.to_string()))?;
             let message = SipMessage::Response(response);
             preserved_block(step, effects, &rendered, &message)?;
             return Ok(message);

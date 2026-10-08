@@ -1442,6 +1442,14 @@ impl<'a> RuleContext<'a> {
             _ => None,
         }
     }
+    /// For a `Timeout` event: the branch of the client transaction that timed
+    /// out. `None` for every other event kind.
+    pub fn timeout_branch(&self) -> Option<&str> {
+        match self.event {
+            CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
+            _ => None,
+        }
+    }
     /// For a `Timeout` event: which client-transaction timeout fired —
     /// `Response` (nothing at all answered: the hop is dead) or `Transaction`
     /// (it answered a provisional, then went silent past the INVITE bound).

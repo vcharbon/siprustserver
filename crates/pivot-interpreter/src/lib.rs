@@ -95,6 +95,7 @@ mod replay;
 pub(crate) mod resolve;
 pub(crate) mod retransmit;
 pub(crate) mod scope;
+pub(crate) mod scripted_final;
 pub(crate) mod settle;
 pub(crate) mod stack;
 pub(crate) mod state;

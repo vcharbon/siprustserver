@@ -358,6 +358,7 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
         Evidence::PrackWithoutAnswer { .. } => "prack of an offer carries no answer",
         Evidence::AckBodyOnClosedRound { .. } => "ack body on a completed round",
         Evidence::OfferLeftUnanswered { .. } => "offer left unanswered",
+        Evidence::DelayedOfferUnanswered { .. } => "delayed offer left unanswered in the ack",
         Evidence::AnswerStreamRetyped { .. } => "answer re-typed an offered stream",
         Evidence::SdpOriginDiverged { same_session: false, .. } => {
             "sdp origin names another session"

@@ -2730,6 +2730,51 @@ impl CrossMessageAuditRule for Final2xxAnswersTheOfferRule {
     }
 }
 
+/// RFC 3261 §13.2.2.4 live: the merged `delayed-offer-answered-in-ack` rule
+/// (`rfc_rules::rules::offer_answer`) — the ACK to a 2xx that carried a
+/// delayed offer carries the answer.
+///
+/// The live policy this bind adds to the rule body: reported once, at the
+/// 2xx's sender where it is a recorded bind and at the ACK's sender otherwise,
+/// charged to the ACK's sender; a relay lane is skipped, as its siblings skip
+/// it — the answer it relays is its peer's.
+pub struct DelayedOfferAnsweredInAckRule;
+
+impl CrossMessageAuditRule for DelayedOfferAnsweredInAckRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::DelayedOfferAnsweredInAck.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        let relays = relay_lanes(events);
+        surfaced_at_taker_else_emitter(
+            events,
+            &rfc_rules::rules::offer_answer::DelayedOfferAnsweredInAck,
+            |f, cid| {
+                if !f.violated() {
+                    return String::new();
+                }
+                format!(
+                    "Sent an ACK (callId {cid}, CSeq {cseq}) carrying no session description \
+                     although the 2xx it acknowledges carried the offer (the INVITE had none) — \
+                     the ACK MUST carry the answer, RFC 3261 §13.2.2.4 / §13.2.1",
+                    cseq = f.cseq,
+                )
+            },
+        )
+        .into_iter()
+        .filter(|(lane, _, _, _)| !relays.contains(lane))
+        .collect()
+    }
+}
+
 /// RFC 3261 §13.2.1 live: the merged `second-answer-repeats-the-first` rule
 /// (`rfc_rules::rules::offer_answer`) — one dialog carries one answer, and a
 /// later description on it re-states that answer's transport plan.
@@ -4536,6 +4581,7 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(PrackAnswers1xxOfferRule),
         std::sync::Arc::new(AckBodyAfterCompleteOfferAnswerRule),
         std::sync::Arc::new(Final2xxAnswersTheOfferRule),
+        std::sync::Arc::new(DelayedOfferAnsweredInAckRule),
         std::sync::Arc::new(SecondAnswerRepeatsTheFirstRule),
         std::sync::Arc::new(AnswerStreamMatchesOfferRule),
         std::sync::Arc::new(SdpOriginContinuityRule),
@@ -6573,6 +6619,28 @@ m=audio 20000 RTP/AVP 0\r\n";
         let plain = resp_sdp(status, cseq, "INVITE", branch, body);
         let text = String::from_utf8(plain).unwrap();
         text.replacen("CSeq:", "Require: 100rel\r\nRSeq: 1\r\nCSeq:", 1).into_bytes()
+    }
+
+    /// §13.2.2.4 GATES: an ACK to a delayed-offer 2xx that carries no answer
+    /// is flagged at the 2xx sender's lane, charged to the ACK's sender.
+    #[test]
+    fn a_delayed_offer_acked_without_an_answer_gates() {
+        assert!(!DelayedOfferAnsweredInAckRule.force_advisory(), "a MUST gates");
+        let answered = vec![
+            recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
+            sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
+            recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), Some(AUDIO_ANSWER)), ALICE, 2),
+        ];
+        assert!(DelayedOfferAnsweredInAckRule.check(&answered).is_empty());
+        let silent = vec![
+            recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
+            sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
+            recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
+        ];
+        let out = DelayedOfferAnsweredInAckRule.check_positioned(&silent);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].0, BOB, "reported where the answer had to arrive");
+        assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the ACK's sender");
     }
 
     #[test]

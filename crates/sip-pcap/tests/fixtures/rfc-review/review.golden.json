@@ -214,6 +214,15 @@
       "relayed": 0,
       "buckets": {}
     },
+    "delayed-offer-answered-in-ack": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "dialog-call-id-stable": {
       "hits": 0,
       "documents": 0,

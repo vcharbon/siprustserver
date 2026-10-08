@@ -275,6 +275,10 @@ pub enum RuleId {
     /// already stated one on that dialog. Charges the answerer.
     #[serde(rename = "final-2xx-answers-the-offer")]
     Final2xxAnswersTheOffer,
+    /// RFC 3261 §13.2.2.4 / §13.2.1: an ACK to a 2xx that carried a delayed
+    /// offer carries the answer. Charges the ACK's sender.
+    #[serde(rename = "delayed-offer-answered-in-ack")]
+    DelayedOfferAnsweredInAck,
     /// RFC 3261 §13.2.1: one dialog carries ONE answer — a later description on
     /// that dialog re-states the transport plan the first stated, never another
     /// one, since the peer takes the first and ignores the rest. Charges the
@@ -525,6 +529,7 @@ impl RuleId {
         RuleId::PrackAnswers1xxOffer,
         RuleId::AckBodyAfterCompleteOfferAnswer,
         RuleId::Final2xxAnswersTheOffer,
+        RuleId::DelayedOfferAnsweredInAck,
         RuleId::SecondAnswerRepeatsTheFirst,
         RuleId::AnswerStreamMatchesOffer,
         RuleId::SdpOriginContinuity,
@@ -629,6 +634,7 @@ impl RuleId {
             RuleId::PrackAnswers1xxOffer => "prack-answers-1xx-offer",
             RuleId::AckBodyAfterCompleteOfferAnswer => "ack-body-after-complete-offer-answer",
             RuleId::Final2xxAnswersTheOffer => "final-2xx-answers-the-offer",
+            RuleId::DelayedOfferAnsweredInAck => "delayed-offer-answered-in-ack",
             RuleId::SecondAnswerRepeatsTheFirst => "second-answer-repeats-the-first",
             RuleId::AnswerStreamMatchesOffer => "answer-stream-matches-offer",
             RuleId::SdpOriginContinuity => "sdp-origin-continuity",
@@ -1817,6 +1823,18 @@ pub enum Evidence {
         /// no `m=` line.
         offered_streams: Vec<String>,
     },
+    /// The ACK an agent sent on a delayed-offer round carrying no answer.
+    ///
+    /// Untagged and unambiguous both ways: it is the only variant carrying
+    /// `unanswering_ack_msg`/`delayed_offer_msg`.
+    DelayedOfferUnanswered {
+        /// Index into the view's `msgs` of the answerless ACK.
+        unanswering_ack_msg: usize,
+        unanswering_ack_hop: usize,
+        unanswering_ack_ts_us: u64,
+        /// Index into the view's `msgs` of the 2xx that carried the offer.
+        delayed_offer_msg: usize,
+    },
     /// The second description an answerer put on one dialog, stating a
     /// transport plan its first answer did not.
     ///
@@ -2429,6 +2447,7 @@ impl Evidence {
             Evidence::PrackWithoutAnswer { bodiless_prack_msg, .. } => *bodiless_prack_msg,
             Evidence::AckBodyOnClosedRound { ack_body_msg, .. } => *ack_body_msg,
             Evidence::OfferLeftUnanswered { unanswered_final_msg, .. } => *unanswered_final_msg,
+            Evidence::DelayedOfferUnanswered { unanswering_ack_msg, .. } => *unanswering_ack_msg,
             Evidence::SecondAnswerDiverged { second_answer_msg, .. } => *second_answer_msg,
             Evidence::AnswerStreamRetyped { answer_stream_msg, .. } => *answer_stream_msg,
             Evidence::SdpOriginDiverged { origin_msg, .. } => *origin_msg,

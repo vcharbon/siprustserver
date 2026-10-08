@@ -444,14 +444,6 @@ pub fn bye_moot(messages: &[RecordedMessage]) -> bool {
     view.held_dialog.is_none() && view.last_held.is_some() && view.ended.contains(&view.last_held)
 }
 
-/// Whether a final this leg would send to an INVITE now answers none: the leg
-/// took an INVITE and holds none unanswered, so the server transaction it would
-/// ride already sent its one final (RFC 3261 §17.2.1).
-pub fn final_moot(messages: &[RecordedMessage]) -> bool {
-    let view = view(messages);
-    view.took_invite && !view.unanswered.iter().any(|open| open.method == Method::Invite)
-}
-
 /// The final status a request the close answers is answered with, where the
 /// method alone decides it. `None` where the RFC states no termination answer
 /// for the method: an unanswered INFO or OPTIONS holds no call up, and inventing

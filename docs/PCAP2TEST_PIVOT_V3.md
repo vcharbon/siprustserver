@@ -1548,6 +1548,14 @@ CANCEL `expect` standing before it has COMPLETED. The bounds:
 - nothing else is reordered: the steps it walks past keep their place, and an
   answer to the arrival it walked past (the BYE's own `200`) waits for it.
 
+A CANCEL no `expect` scripts is refused and still answered when it arrives: `200`,
+then the CANCELled INVITE's final. That final is the leg's own scripted reject
+where a pending `send` still owes one for THAT INVITE (the one its leg's last
+INVITE `expect` before it took): the step is drawn forward and sent at once, its
+dwell not waited on, and the flow walks on from it. Otherwise it is the stack's
+`487`, and a scripted final that comes due later is moot (§17.2.1: one final). A
+scripted `2xx` is never that answer.
+
 ### 6.8 delay and dwell
 
 ```json

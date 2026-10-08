@@ -1024,6 +1024,12 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
 /// behind the CANCEL the system relays: `status` 500 ms after its ringing, once
 /// the relayed CANCEL is in.
 fn unscripted_cancel_then_final(status: u16, reason: &str) -> Case {
+    unscripted_cancel_then_final_after(status, reason, 500)
+}
+
+/// [`unscripted_cancel_then_final`] with the scripted final `dwell_ms` behind
+/// the 180.
+fn unscripted_cancel_then_final_after(status: u16, reason: &str, dwell_ms: u64) -> Case {
     let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let text = std::fs::read_to_string(base_dir.join("unscripted-cancel.v3.json")).unwrap();
     let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -1035,7 +1041,7 @@ fn unscripted_cancel_then_final(status: u16, reason: &str) -> Case {
         serde_json::json!({
             "id": "s4b", "leg": "B", "op": "send",
             "msg": { "cseq-method": "INVITE", "reason": reason, "status": status },
-            "delay": { "compressible": true, "from": "step:s4", "ms": 500, "timer_linked": false }
+            "delay": { "compressible": true, "from": "step:s4", "ms": dwell_ms, "timer_linked": false }
         }),
     );
     let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
@@ -1128,6 +1134,34 @@ async fn a_scripted_reject_answers_the_invite_an_unscripted_cancel_named() {
         "one final, the scripted one: {:#?}",
         legs["B"]
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The CANCEL is answered when it arrives, whatever the script's dwell before
+/// its own reject: leg B's 486 is scheduled 40 s behind its 180, yet the
+/// CANCELled INVITE draws it at once — a UAS answers a CANCELled INVITE
+/// promptly (RFC 3261 §9.2), and holding it would outlast the canceller's own
+/// wait for that final (§17.1.1.2, 64*T1).
+#[tokio::test(start_paused = true)]
+async fn a_scripted_reject_behind_a_long_dwell_answers_the_cancel_at_once() {
+    let scene = api_scene("pivot-unscripted-cancel-reject-dwell").await;
+    let case = unscripted_cancel_then_final_after(486, "Busy Here", 40_000);
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_eq!(invite_finals(&legs), ["SIP/2.0 486 Busy Here"], "{:#?}", legs["B"]);
+    let at = |pred: &dyn Fn(&str) -> bool| {
+        legs["B"].iter().find(|m| pred(&text(m))).map(|m| m.at_us).expect("on leg B")
+    };
+    let cancel = at(&|t| t.starts_with("CANCEL "));
+    let reject = at(&|t| t.starts_with("SIP/2.0 486"));
+    assert!(
+        reject - cancel < 100_000,
+        "the reject answers the CANCEL at once: {cancel} → {reject}"
+    );
+    let sent = legs["B"].iter().find(|m| text(m).starts_with("SIP/2.0 486")).expect("the 486");
+    assert_eq!(sent.step.as_deref(), Some("s4b"), "it is the scripted step, drawn forward");
     b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;

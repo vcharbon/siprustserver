@@ -46,7 +46,7 @@
 //! SDP grammar is [`sip_message::sdp_doc`]'s and [`sip_message::sdp`]'s: this
 //! module reads a description, it never parses one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sip_message::sdp_doc::{self, SdpDirection, SdpDoc, SdpOrigin};
 use sip_message::{sdp, sniff};
@@ -224,6 +224,23 @@ struct AckSighting<'a> {
     round: AckRound,
 }
 
+/// One ACK an agent sent on a delayed-offer round (§13.2.1: the 2xx carried
+/// the offer), whether or not it carried the answer.
+#[derive(Debug)]
+struct DelayedAck<'a> {
+    /// Index into the view's `msgs` of the ACK.
+    msg: usize,
+    src: &'a str,
+    dst: &'a str,
+    cseq: u32,
+    /// Index into the view's `msgs` of the 2xx that carried the offer.
+    offer: usize,
+    /// The ACK carried a description: the answer.
+    answered: bool,
+    /// The vantage carried the ACK's body bytes, so its absence is a fact.
+    body_known: bool,
+}
+
 /// One round an agent CLOSED with a description of its own.
 #[derive(Debug)]
 struct Answered<'a> {
@@ -312,6 +329,10 @@ struct AgentState<'a> {
     /// Round index of a DELAYED offer, keyed by the INVITE CSeq, whether this
     /// agent sent that INVITE, and the early dialog the 2xx presented.
     delayed_at: BTreeMap<(u32, bool, &'a str), usize>,
+    /// The same keys where a reliable provisional carried the offer first (RFC
+    /// 3262 §5): its round closed by PRACK, so the 2xx's description is no
+    /// offer the ACK owes an answer to.
+    offered_reliably: BTreeSet<(u32, bool, &'a str)>,
     /// Index into the view's `msgs` of this agent's last SENT description with
     /// a readable `o=` line on this call.
     last_origin: Option<usize>,
@@ -352,6 +373,10 @@ struct Reading<'a> {
     /// had already stated, in send order. Read by
     /// [`SecondAnswerRepeatsTheFirst`].
     re_answers: Vec<ReAnswer<'a>>,
+    /// Every ACK an agent sent acknowledging a delayed-offer 2xx — the round's
+    /// answer is owed in it — with the offer it owed. Read by
+    /// [`DelayedOfferAnsweredInAck`].
+    delayed_acks: Vec<DelayedAck<'a>>,
     /// Per agent and call, the indexes into the view's `msgs` of the
     /// descriptions that agent SENT, ascending. Read by
     /// [`ReOfferMLineCountMonotonic`] (consecutive pairs) and
@@ -463,6 +488,20 @@ impl<'a> Reading<'a> {
                     request_sent_by_agent: sent,
                 };
                 let round = state.round_at.get(&round_key).map(|i| &state.rounds[*i]);
+                let slot = (msg.cseq, sent, dialog);
+                if sent && !state.offered_reliably.contains(&slot) {
+                    if let Some(ri) = state.delayed_at.get(&slot) {
+                        self.delayed_acks.push(DelayedAck {
+                            msg: mi,
+                            src: msg.src.as_str(),
+                            dst: msg.dst.as_str(),
+                            cseq: msg.cseq,
+                            offer: state.rounds[*ri].offer,
+                            answered: has_doc,
+                            body_known: msg.body.is_some(),
+                        });
+                    }
+                }
                 let outcome = match (round, msg.body.is_some(), has_doc) {
                     (_, false, _) => AckRound::BodyUnknown,
                     (_, true, false) => AckRound::NoDescription,
@@ -604,13 +643,16 @@ impl<'a> Reading<'a> {
                     None => {
                         // No offer on this transaction: a 2xx to an INVITE is
                         // the delayed offer, answered in the ACK.
-                        if !has_doc
-                            || *status < 200
-                            || !msg.cseq_method.eq_ignore_ascii_case("INVITE")
-                        {
+                        if !has_doc || !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                             return;
                         }
                         let slot = (msg.cseq, request_sent_by_agent, dialog);
+                        if *status < 200 {
+                            if binds(*status, msg) {
+                                state.offered_reliably.insert(slot);
+                            }
+                            return;
+                        }
                         if state.delayed_at.contains_key(&slot) {
                             return;
                         }
@@ -767,6 +809,60 @@ impl Obligation for Final2xxAnswersTheOffer {
                 decision,
             });
         }
+        out.sort_by_key(|f| f.anchor);
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// delayed-offer-answered-in-ack
+// ---------------------------------------------------------------------------
+
+/// **RFC 3261 §13.2.2.4 / §13.2.1 — a delayed offer is answered in the ACK.**
+/// Where the INVITE carried no offer, the 2xx carries it, and the ACK MUST
+/// carry the answer: it is the last message of the round, so an ACK without
+/// one leaves the two ends with no agreed session at all.
+///
+/// The occasion is an ACK an agent sent on a delayed-offer round it was
+/// presented (`delayed_at`): met by a description on the ACK. An ACK whose body
+/// bytes the vantage never carried is undecided. Charges the ACK's sender,
+/// anchored at the ACK.
+pub struct DelayedOfferAnsweredInAck;
+
+impl Obligation for DelayedOfferAnsweredInAck {
+    fn id(&self) -> RuleId {
+        RuleId::DelayedOfferAnsweredInAck
+    }
+
+    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let seen = Reading::of(wire.msgs);
+        let mut out: Vec<Finding> = seen
+            .delayed_acks
+            .iter()
+            .map(|ack| {
+                let decision = if ack.answered {
+                    Decision::Compliant
+                } else if !ack.body_known {
+                    Decision::Undecidable("the vantage carried no body bytes for this ACK")
+                } else {
+                    Decision::Violated(Evidence::DelayedOfferUnanswered {
+                        unanswering_ack_msg: ack.msg,
+                        unanswering_ack_hop: wire.msgs[ack.msg].hop,
+                        unanswering_ack_ts_us: wire.msgs[ack.msg].at_us,
+                        delayed_offer_msg: ack.offer,
+                    })
+                };
+                Finding {
+                    rule: RuleId::DelayedOfferAnsweredInAck,
+                    emitter: ack.src.to_string(),
+                    taker: ack.dst.to_string(),
+                    cseq: ack.cseq,
+                    relayed: false,
+                    anchor: ack.msg,
+                    decision,
+                }
+            })
+            .collect();
         out.sort_by_key(|f| f.anchor);
         out
     }
@@ -2002,6 +2098,49 @@ m=audio 20000 RTP/AVP 0\r\n";
             req(3, ALICE, BOB, "ACK", 1, Some("bt"), Some(AUDIO_ANSWER)),
         ];
         assert!(run(&Final2xxAnswersTheOffer, &msgs).is_empty(), "the ACK answers, not the 2xx");
+    }
+
+    /// §13.2.2.4: the ACK MUST answer the offer a delayed-offer 2xx carried;
+    /// a bodyless ACK leaves it unanswered, charged to the ACK's sender.
+    #[test]
+    fn a_delayed_offer_acked_without_an_answer_is_violated() {
+        let answered = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, None),
+            resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_OFFER)),
+            req(3, ALICE, BOB, "ACK", 1, Some("bt"), Some(AUDIO_ANSWER)),
+        ];
+        assert!(violations(&DelayedOfferAnsweredInAck, &answered).is_empty());
+        let silent = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, None),
+            resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_OFFER)),
+            req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        ];
+        let f = violations(&DelayedOfferAnsweredInAck, &silent);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].emitter, ALICE, "the ACK's sender owed the answer");
+        assert_eq!(f[0].anchor, 2, "anchored at the ACK");
+        // An offer a reliable 183 carried closed by PRACK (RFC 3262 §5): the
+        // 2xx's description offers nothing, and the ACK owes no answer.
+        let reliable = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, None),
+            reliable_1xx(2, 183, 1, Some(AUDIO_OFFER)),
+            req(3, ALICE, BOB, "PRACK", 2, Some("bt"), Some(AUDIO_ANSWER)),
+            resp(4, BOB, ALICE, 200, 2, "PRACK", None),
+            resp(5, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_OFFER)),
+            req(6, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        ];
+        assert!(
+            run(&DelayedOfferAnsweredInAck, &reliable).is_empty(),
+            "{:?}",
+            run(&DelayedOfferAnsweredInAck, &reliable)
+        );
+        // An offer in the INVITE leaves the ACK owing nothing.
+        let early = vec![
+            req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)),
+            resp(2, BOB, ALICE, 200, 1, "INVITE", Some(AUDIO_ANSWER)),
+            req(3, ALICE, BOB, "ACK", 1, Some("bt"), None),
+        ];
+        assert!(run(&DelayedOfferAnsweredInAck, &early).is_empty(), "no occasion");
     }
 
     #[test]
