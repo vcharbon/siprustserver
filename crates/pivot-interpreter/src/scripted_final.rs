@@ -77,6 +77,48 @@ pub fn pending_reject<'s>(
         .then_some(step)
 }
 
+/// Whether `ladder`'s leg sent a non-2xx final to its INVITE CSeq `cseq`: the
+/// server transaction an ACK with that CSeq belongs to, hop by hop (RFC 3261
+/// §17.2.1).
+pub fn rejected(ladder: &[RecordedMessage], cseq: u32) -> bool {
+    ladder.iter().filter(|m| m.dir == Dir::Out).any(|m| {
+        matches!(parse(m.wire()), Some(SipMessage::Response(r))
+            if r.status() >= 300
+                && r.cseq().seq() == cseq
+                && *r.cseq().method() == Method::Invite)
+    })
+}
+
+/// Whether `leg`'s flow scripts the ACK to the reject it sent its INVITE CSeq
+/// `cseq`: a pending (`!complete`) ACK `expect` on the leg behind the step that
+/// took that INVITE, before the next step taking one. An INVITE no step took
+/// has no scripted ACK.
+pub fn scripts_reject_ack(
+    steps: &[&CompiledStep],
+    leg: &str,
+    cseq: u32,
+    ladder: &[RecordedMessage],
+    complete: impl Fn(&str) -> bool,
+) -> bool {
+    let took = ladder.iter().filter(|m| m.dir == Dir::In).find_map(|m| {
+        let step = m.step.as_deref()?;
+        match parse(m.wire())? {
+            SipMessage::Request(r) if *r.method() == Method::Invite && r.cseq().seq() == cseq => {
+                Some(step.to_string())
+            }
+            _ => None,
+        }
+    });
+    let Some(took) = took else { return false };
+    let Some(at) = steps.iter().position(|s| s.id == took) else { return false };
+    steps[at + 1..].iter().filter(|s| s.leg == leg).take_while(|s| !takes_invite(s)).any(|s| {
+        s.is_expect()
+            && !complete(&s.id)
+            && matches!(&s.discriminator, Discriminator::Request { method }
+                    if Method::from_wire(method) == Method::Ack)
+    })
+}
+
 fn parse(wire: &[u8]) -> Option<SipMessage> {
     CustomParser::new().parse(wire).ok()
 }
@@ -195,6 +237,40 @@ mod tests {
         assert!(!moot, "r2 answers nothing yet: it stays to be composed, loudly");
         assert!(invite_answered(&rec, 1));
         assert!(!invite_answered(&rec, 2));
+    }
+
+    fn ack_expect(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"B","op":"expect","check":"record","msg":{{"method":"ACK"}},"delay":{D}}}"#
+        )
+    }
+
+    /// The ACK to a reject is scripted only by an ACK `expect` between the step
+    /// that took its INVITE and the next one taking an INVITE.
+    #[test]
+    fn a_reject_ack_is_scripted_only_inside_its_invites_window() {
+        let flow = format!(
+            "[{},{},{},{},{}]",
+            take("t1"),
+            answer("r1", 486),
+            take("t2"),
+            answer("r2", 487),
+            ack_expect("a2")
+        );
+        let plan = plan(&flow);
+        let steps = plan.steps();
+        let rec = ladder(&[
+            (Dir::In, invite(1, None), Some("t1")),
+            (Dir::Out, final_to(486, 1), Some("r1")),
+            (Dir::In, invite(2, None), Some("t2")),
+            (Dir::Out, final_to(487, 2), Some("r2")),
+        ]);
+        let pending = |id: &str| id != "a2";
+        assert!(rejected(&rec, 1) && rejected(&rec, 2));
+        assert!(!scripts_reject_ack(&steps, "B", 1, &rec, pending), "a2 is t2's, not t1's");
+        assert!(scripts_reject_ack(&steps, "B", 2, &rec, pending));
+        assert!(!scripts_reject_ack(&steps, "B", 2, &rec, |_| true), "a2 already took its ACK");
+        assert!(!scripts_reject_ack(&steps, "B", 3, &rec, pending), "no step took CSeq 3");
     }
 
     /// §9.2: a scripted 2xx is no answer to a CANCELled INVITE.

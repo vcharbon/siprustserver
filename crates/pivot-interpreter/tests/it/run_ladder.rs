@@ -1167,6 +1167,95 @@ async fn a_scripted_reject_behind_a_long_dwell_answers_the_cancel_at_once() {
     scene.finish().await;
 }
 
+/// The re-INVITE leg B sends is relayed to leg A, which answers `100` and
+/// scripts a `487` 40 s later; leg B CANCELs it, so the SUT CANCELs leg A's
+/// copy, which the flow never scripts. The `487` is drawn forward and the SUT
+/// ACKs it. `scripts_ack` adds leg A's `expect` of that ACK.
+fn cancelled_reinvite(scripts_ack: bool) -> Case {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = std::fs::read_to_string(base_dir.join("reinvite-captured-cseq.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["case"]["id"] = format!("cancelled-reinvite-ack-{scripts_ack}").into();
+    let d = |from: &str, ms: u64| serde_json::json!({ "compressible": true, "from": format!("step:{from}"), "ms": ms, "timer_linked": false });
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(12);
+    flow.push(serde_json::json!({ "id": "s12a", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+        "msg": { "cseq-method": "INVITE", "reason": "Trying", "status": 100 }, "delay": d("s12", 0) }));
+    flow.push(serde_json::json!({ "id": "s13", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "method": "CANCEL" }, "delay": d("s12", 30) }));
+    flow.push(serde_json::json!({ "id": "s14", "leg": "A", "op": "send", "in_dialog": true,
+        "msg": { "cseq-method": "INVITE", "reason": "Request Terminated", "status": 487 },
+        "delay": d("s12a", 40_000) }));
+    if scripts_ack {
+        flow.push(serde_json::json!({ "id": "s14a", "leg": "A", "op": "expect", "auto": true,
+            "check": "record", "in_dialog": true, "msg": { "method": "ACK" }, "delay": d("s14", 0) }));
+    }
+    flow.push(serde_json::json!({ "id": "u1", "op": "unordered", "steps": [
+        { "id": "s15", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+          "msg": { "cseq-method": "CANCEL", "reason": "OK", "status": 200 }, "delay": d("s13", 0) },
+        { "id": "s16", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+          "msg": { "cseq-method": "INVITE", "reason": "Request Terminated", "status": 487 },
+          "delay": d("s13", 0) } ] }));
+    flow.push(serde_json::json!({ "id": "s16a", "leg": "B", "op": "send", "auto": true,
+        "in_dialog": true, "msg": { "method": "ACK" }, "delay": d("s16", 0) }));
+    flow.push(serde_json::json!({ "id": "s17", "leg": "A", "op": "send", "in_dialog": true,
+        "msg": { "method": "BYE" }, "delay": d("s16a", 50) }));
+    flow.push(serde_json::json!({ "id": "s18", "leg": "B", "op": "expect", "check": "record",
+        "in_dialog": true, "msg": { "method": "BYE" }, "delay": d("s17", 0) }));
+    flow.push(serde_json::json!({ "id": "s19", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 }, "delay": d("s18", 0) }));
+    flow.push(serde_json::json!({ "id": "s20", "leg": "A", "op": "expect", "check": "record",
+        "in_dialog": true, "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": d("s19", 0) }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    Case { document, base_dir }
+}
+
+/// The one failure a CANCEL no step scripts leaves: its own refusal (§6.7e).
+fn assert_only_the_cancel_refused(failures: &[Failure], ladder: &[RecordedMessage]) {
+    let refused = |f: &Failure| matches!(f, Failure::UnexpectedDatagram { arrived, .. } if format!("{arrived:?}").contains("CANCEL"));
+    assert!(
+        failures.len() == 1 && refused(&failures[0]),
+        "only the CANCEL is refused: {failures:#?}\n{ladder:#?}"
+    );
+}
+
+/// RFC 3261 §17.2.1: the ACK to a non-2xx final leg A sent is hop-by-hop and
+/// belongs to that INVITE server transaction. No step scripts it, so the
+/// transaction layer consumes it: no unexpected datagram, and the run is clean.
+#[tokio::test(start_paused = true)]
+async fn the_ack_to_a_reject_no_step_scripts_is_the_transactions_own() {
+    let scene = api_scene("pivot-cancelled-reinvite-ack-unscripted").await;
+    let (outcome, _dir) = replay_case(&scene, cancelled_reinvite(false), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_only_the_cancel_refused(&outcome.verdict.failures, &legs["A"]);
+    let ack = legs["A"]
+        .iter()
+        .find(|m| m.dir == Dir::In && text(m).starts_with("ACK "))
+        .expect("the SUT ACKed the 487");
+    assert_eq!(ack.step, None, "no step claims it");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The same ACK, scripted: the document's `expect` takes it as today.
+#[tokio::test(start_paused = true)]
+async fn the_ack_to_a_reject_a_step_scripts_is_that_steps() {
+    let scene = api_scene("pivot-cancelled-reinvite-ack-scripted").await;
+    let (outcome, _dir) = replay_case(&scene, cancelled_reinvite(true), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_only_the_cancel_refused(&outcome.verdict.failures, &legs["A"]);
+    let ack = legs["A"]
+        .iter()
+        .find(|m| m.dir == Dir::In && text(m).starts_with("ACK "))
+        .expect("the SUT ACKed the 487");
+    assert_eq!(ack.step.as_deref(), Some("s14a"), "the scripted expect claims it");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// A scripted 2xx cannot answer a CANCELled INVITE (§9.2: 487, never 2xx), so
 /// the stack's `487` does, and the scripted 2xx — a second final on a
 /// transaction already answered (§17.2.1) — is moot: never sent.
@@ -1287,16 +1376,23 @@ async fn an_unscripted_non_2xx_final_is_refused_and_acked_on_the_invite_s_branch
     );
 
     // And ONLY the act the RFC names: the ACK the system sends leg B for its own
-    // 486 is unscripted too, and no rule makes it anyone's to answer — it is
-    // refused, and nothing is invented in reply.
+    // 486 is no step's, so leg B's server transaction consumes it (§17.2.1) —
+    // no failure, and nothing is invented in reply.
     assert!(
-        outcome.verdict.failures.iter().any(|f| matches!(
+        !outcome.verdict.failures.iter().any(|f| matches!(
             f,
             Failure::UnexpectedDatagram { leg, arrived: Arrived::Request { method, .. }, .. }
                 if leg == "B" && method == "ACK"
         )),
         "{:#?}",
         outcome.verdict.failures
+    );
+    assert!(
+        legs["B"].iter().any(|m| m.dir == Dir::In
+            && text(m).starts_with("ACK ")
+            && m.note.as_deref().is_some_and(|n| n.contains("§17.2.1"))),
+        "leg B's transaction consumed the ACK: {:#?}",
+        legs["B"]
     );
     assert!(
         legs["B"]

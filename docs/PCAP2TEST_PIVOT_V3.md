@@ -1556,6 +1556,12 @@ dwell not waited on, and the flow walks on from it. Otherwise it is the stack's
 `487`, and a scripted final that comes due later is moot (§17.2.1: one final). A
 scripted `2xx` is never that answer.
 
+The ACK to any non-2xx INVITE final a leg sent is hop-by-hop and its server
+transaction's (RFC 3261 §17.2.1). Where a pending ACK `expect` sits behind the step
+that took that INVITE (before the next one taking an INVITE), it matches as any
+arrival does; otherwise the transaction consumes it, recorded with a note: never
+an unexpected datagram, never a match for another step.
+
 ### 6.8 delay and dwell
 
 ```json

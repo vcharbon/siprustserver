@@ -72,6 +72,10 @@ const UNSCRIPTED: &str = "(unscripted)";
 const OWED_BYE_FINAL: &str =
     "absorbed: the §15.1.2 final owed to the BYE this leg sent, which no expect scripts";
 
+/// The recording note for the RFC 3261 §17.2.1 ACK to a reject no step scripts.
+const REJECT_ACK: &str =
+    "absorbed: the §17.2.1 ACK to the non-2xx final this leg sent, which no expect scripts";
+
 /// The recording note for the RFC 3261 §17.1.1.3 ACK the settle waited for.
 const OWED_FINAL_ACK: &str =
     "absorbed: the §17.1.1.3 ACK owed to the non-2xx final this leg sent, which the settle awaited";
@@ -918,6 +922,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return true;
         }
+        if self.unscripted_reject_ack(&leg, &inbound) {
+            self.record_arrival(&leg, bytes, None, Some(REJECT_ACK), repeat);
+            return true;
+        }
         let seq = match held_seq {
             Some(seq) => {
                 self.instance.recording().renote(&leg, seq, HELD_TAKEN);
@@ -1227,16 +1235,32 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
-    /// Whether `inbound` is the ACK a non-2xx INVITE final this leg SENT is
-    /// owed (RFC 3261 §17.1.1.3): the closer of the server transaction the
-    /// settle floor holds the run open for, so it is the settle's own arrival
-    /// and never the late datagram a completed flow reports.
+    /// Whether `inbound` is an ACK to a non-2xx INVITE final this leg SENT
+    /// (RFC 3261 §17.1.1.3): its server transaction's own, which the settle
+    /// floor holds the run open for, so it is the settle's arrival and never
+    /// the late datagram a completed flow reports — a repeat included.
     fn owed_final_ack(&self, leg: &str, inbound: &Inbound) -> bool {
         if !inbound.method.as_deref().is_some_and(|method| method.eq_ignore_ascii_case("ACK")) {
             return false;
         }
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
-        close::unacked_finals(&ladder).iter().any(|owed| owed.cseq == inbound.cseq)
+        scripted_final::rejected(&ladder, inbound.cseq)
+    }
+
+    /// Whether `inbound` is an ACK to a non-2xx INVITE final this leg sent that
+    /// no pending `expect` scripts ([`scripted_final::scripts_reject_ack`]):
+    /// hop by hop, its server transaction consumes it (RFC 3261 §17.2.1), so it
+    /// is neither unexpected nor a match for another step.
+    fn unscripted_reject_ack(&self, leg: &str, inbound: &Inbound) -> bool {
+        if !self.owed_final_ack(leg, inbound) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        let steps = self.instance.plan().steps();
+        let cursor = self.instance.cursor();
+        !scripted_final::scripts_reject_ack(&steps, leg, inbound.cseq, &ladder, |id| {
+            cursor.node_complete(id)
+        })
     }
 
     /// Answer a background policy's message. It is answered and recorded; the
