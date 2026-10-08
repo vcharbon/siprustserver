@@ -424,9 +424,11 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// call knows both of its peers and is not charged for either. Naming the local
 /// half instead would charge every such face.
 ///
-/// **A non-2xx final to the INVITE ends the early dialog it rode (§12.3)**, so
-/// a request the UAS takes after sending that final names no dialog. A dialog
-/// a 2xx accepted stays. A PRACK on the ended dialog is left to
+/// **A non-2xx final to the establishing INVITE (sent without a To-tag) ends
+/// the early dialog it rode (§12.3)**, so a request the UAS takes after sending
+/// that final names no dialog. A dialog a 2xx accepted stays, and every other
+/// tagged answer shows its dialog. A request is judged once, at its first
+/// copy. A PRACK on the ended dialog is left to
 /// [`super::prack::Prack2xxOr481`], which judges it by the `RSeq` it names.
 ///
 /// **ACK and CANCEL are not occasions.** An ACK elicits no response at all
@@ -451,6 +453,9 @@ impl Obligation for UnknownDialog481 {
         let mut accepted: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
         // The early dialogs a non-2xx final ended.
         let mut ended: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+        // `(Call-ID, branch)` of every INVITE sent without a To-tag: the
+        // establishing transactions whose non-2xx final ends an early dialog.
+        let mut establishing: BTreeSet<(&str, &str)> = BTreeSet::new();
         // Requests on an unknown dialog, awaiting the final the taker sent on
         // their transaction (0 = none yet).
         let mut unknown: Vec<usize> = Vec::new();
@@ -466,7 +471,19 @@ impl Obligation for UnknownDialog481 {
                         method.eq_ignore_ascii_case("ACK") || method.eq_ignore_ascii_case("CANCEL");
                     let from_tag = msg.from_tag.as_deref().unwrap_or_default();
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
-                    if hop_by_hop || from_tag.is_empty() || to_tag.is_empty() || call.is_empty() {
+                    if method.eq_ignore_ascii_case("INVITE") && to_tag.is_empty() {
+                        if let Some(branch) = branch {
+                            establishing.insert((call, branch));
+                        }
+                    }
+                    // A retransmission is the same request again, judged at
+                    // its first copy.
+                    if msg.repeat
+                        || hop_by_hop
+                        || from_tag.is_empty()
+                        || to_tag.is_empty()
+                        || call.is_empty()
+                    {
                         continue;
                     }
                     let Some(branch) = branch else { continue };
@@ -488,26 +505,30 @@ impl Obligation for UnknownDialog481 {
                 }
                 Kind::Response { status } => {
                     // A tagged answer names both halves: the peer tag this
-                    // endpoint learns, and the one it minted itself. A 1xx/2xx
-                    // opens the dialog; a non-2xx final to the INVITE ends the
-                    // early one it rode (§12.3) unless a 2xx confirmed it.
+                    // endpoint learns, and the one it minted itself, and shows
+                    // the dialog — except a non-2xx final on an establishing
+                    // INVITE's branch, which ends the early dialog (§12.3)
+                    // unless a 2xx accepted it.
                     let tagged = (200..300).contains(status)
                         || (*status > 100 && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()));
                     let both = msg.from_tag.as_deref().is_some_and(|t| !t.is_empty())
                         && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty());
                     let invite = msg.cseq_method.eq_ignore_ascii_case("INVITE");
+                    let ends = *status >= 300
+                        && invite
+                        && branch.is_some_and(|b| establishing.contains(&(call, b)));
                     if tagged && both && !call.is_empty() {
                         for endpoint in [msg.src.as_str(), msg.dst.as_str()] {
                             let key =
                                 (endpoint, call, remote_tag_of(msg, endpoint == msg.src.as_str()));
                             creating_seen.insert((endpoint, call));
-                            if *status < 300 {
+                            if !ends {
                                 confirmed.insert(key);
                                 ended.remove(&key);
-                                if invite && *status >= 200 {
+                                if invite && (200..300).contains(status) {
                                     accepted.insert(key);
                                 }
-                            } else if invite && !accepted.contains(&key) {
+                            } else if !accepted.contains(&key) {
                                 confirmed.remove(&key);
                                 ended.insert(key);
                             }
@@ -563,6 +584,11 @@ impl Obligation for UnknownDialog481 {
     }
 }
 
+/// How long after a non-2xx final this vantage saw the caller take her BYE
+/// may still have crossed it in flight; one second, as
+/// [`UNKNOWN_DIALOG_WINDOW_US`].
+pub const BYE_CROSSING_WINDOW_US: u64 = 1_000_000;
+
 /// **§15 — a BYE names a dialog, and never an early one the sender is callee
 /// of.** BYE ends a session; a request with no dialog to end is answered 481 by
 /// a real peer, and the callee of a dialog it has not yet accepted has other
@@ -574,9 +600,12 @@ impl Obligation for UnknownDialog481 {
 /// The occasion is ONE BYE an endpoint SENT, fresh (a retransmission is the
 /// same act again). Charges that endpoint.
 ///
-/// **Two ways to fail it, one obligation.** A BYE carrying no peer tag names no
-/// dialog at all; a BYE whose sender ANSWERED the dialog-establishing INVITE
-/// but never accepted it ends a dialog that is still early. Everything else —
+/// **Three ways to fail it, one obligation.** A BYE carrying no peer tag names
+/// no dialog at all; a BYE whose sender ANSWERED the dialog-establishing INVITE
+/// but never accepted it ends a dialog that is still early; a BYE the caller
+/// sends more than [`BYE_CROSSING_WINDOW_US`] after this vantage saw her take
+/// a non-2xx final to that INVITE names the early dialog the final ended
+/// (§12.3) — inside the window it is undecidable. Everything else —
 /// including a BYE the caller sends, whose own INVITE the dialog rests on — is
 /// compliant.
 ///
@@ -619,10 +648,19 @@ impl Obligation for NoByeOutsideOrEarlyDialog {
             // CANCEL, not a BYE.
             let early =
                 bye.dialog.answered_establishing_invite && !bye.dialog.accepted_establishing_invite;
-            out.push(bye.finding(
-                RuleId::NoByeOutsideOrEarlyDialog,
-                if early { evidence(true) } else { Decision::Compliant },
-            ));
+            // The caller whose INVITE took a non-2xx final has no early dialog
+            // left (§12.3); a BYE inside the window may have crossed it.
+            let decision = match bye.dialog.rejected_at_us {
+                _ if early => evidence(true),
+                Some(at) if bye.ts_us > at.saturating_add(BYE_CROSSING_WINDOW_US) => {
+                    evidence(false)
+                }
+                Some(at) if bye.ts_us >= at => Decision::Undecidable(
+                    "the BYE may have crossed the final that ended its early dialog",
+                ),
+                _ => Decision::Compliant,
+            };
+            out.push(bye.finding(RuleId::NoByeOutsideOrEarlyDialog, decision));
         }
         out.sort_by_key(|f| f.anchor);
         out
@@ -681,6 +719,10 @@ struct Dialog {
     /// One of those answers was a 2xx: the dialog it is the UAS of is
     /// confirmed, not early.
     accepted_establishing_invite: bool,
+    /// When the endpoint, as UAC, took a non-2xx final on the establishing
+    /// INVITE's branch (§12.3 ends the early dialog); cleared by any INVITE 2xx
+    /// it takes and by a provisional on a later INVITE (a challenge retried).
+    rejected_at_us: Option<u64>,
 }
 
 /// One request an endpoint SENT, with the dialog state that held when it went.
@@ -824,6 +866,17 @@ impl<'a> Reading<'a> {
 
         let Kind::Response { status } = &msg.kind else { return };
 
+        // The UAC's own reading of its establishing INVITE's outcome.
+        if !sent && msg.cseq_method.eq_ignore_ascii_case("INVITE") {
+            let on_initial = !dialog.initial_invite_sent_branch.is_empty()
+                && msg.via_branch.as_deref() == Some(dialog.initial_invite_sent_branch.as_str());
+            if (200..300).contains(status) || (*status > 100 && *status < 200 && !on_initial) {
+                dialog.rejected_at_us = None;
+            } else if *status >= 300 && on_initial && dialog.rejected_at_us.is_none() {
+                dialog.rejected_at_us = Some(msg.at_us);
+            }
+        }
+
         // A tagged answer the endpoint SENT on the establishing INVITE's own
         // transaction makes it this dialog's UAS (§15's early-BYE test): the
         // branch is what says the answer is to THAT INVITE and not a later
@@ -899,7 +952,7 @@ mod tests {
     use super::super::Obligation;
     use super::{
         MidDialogRoute, MidDialogUri, MidDialogWireDestination, NoByeOutsideOrEarlyDialog,
-        RecordRoutePlacement, UnknownDialog481,
+        RecordRoutePlacement, UnknownDialog481, BYE_CROSSING_WINDOW_US,
     };
 
     const ALICE: &str = "127.0.0.1:5060";
@@ -1843,6 +1896,74 @@ mod tests {
         assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
     }
 
+    /// A view that opens mid-call carries no establishing INVITE: a re-INVITE
+    /// it rejects (503, 491) ends nothing, and the BYE after it rides the
+    /// dialog the earlier tagged answer showed.
+    #[test]
+    fn a_rejected_reinvite_mid_call_ends_nothing() {
+        for status in [503, 491] {
+            let msgs = [
+                in_dialog(1_000, "INFO", "z9hG4bK-n", 2, "at", "bt"),
+                rsp(2_000, 200, 2, "INFO", "z9hG4bK-n", ""),
+                in_dialog(3_000, "INVITE", "z9hG4bK-r", 3, "at", "bt"),
+                rsp(4_000, status, 3, "INVITE", "z9hG4bK-r", ""),
+                in_dialog(5_000, "BYE", "z9hG4bK-b", 4, "at", "bt"),
+                rsp(6_000, 200, 4, "BYE", "z9hG4bK-b", ""),
+            ];
+            assert!(
+                hits(&UnknownDialog481, &msgs).is_empty(),
+                "{status}: {:?}",
+                eval(&UnknownDialog481, &msgs)
+            );
+        }
+    }
+
+    /// A tagged rejection of a non-INVITE request shows the dialog it was
+    /// sent in: the BYE after an UPDATE answered 405 rides that dialog.
+    #[test]
+    fn a_rejected_update_shows_its_dialog() {
+        let msgs = [
+            in_dialog(1_000, "UPDATE", "z9hG4bK-u", 2, "at", "bt"),
+            rsp(2_000, 405, 2, "UPDATE", "z9hG4bK-u", ""),
+            in_dialog(3_000, "BYE", "z9hG4bK-b", 3, "at", "bt"),
+            rsp(4_000, 200, 3, "BYE", "z9hG4bK-b", ""),
+        ];
+        assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+    }
+
+    /// A captured flow that starts mid-call: its first tagged answer is a
+    /// re-INVITE's 503, which shows the dialog rather than ending it.
+    #[test]
+    fn a_flow_starting_mid_call_is_not_charged() {
+        let msgs = [
+            in_dialog(1_000, "INVITE", "z9hG4bK-r", 3, "at", "bt"),
+            rsp(2_000, 503, 3, "INVITE", "z9hG4bK-r", ""),
+            in_dialog(3_000, "BYE", "z9hG4bK-b", 4, "at", "bt"),
+            rsp(4_000, 200, 4, "BYE", "z9hG4bK-b", ""),
+        ];
+        assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+    }
+
+    /// A request is judged once per transaction, at its first copy: a BYE
+    /// taken before the 487 is the caller's early BYE, and its retransmission
+    /// after the 487 is the same act again.
+    #[test]
+    fn a_bye_retransmitted_across_the_final_is_judged_once() {
+        let mut again = in_dialog(5_000, "BYE", "z9hG4bK-b", 2, "at", "bt");
+        again.repeat = true;
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+            rsp(4_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+            again,
+            rsp(6_000, 200, 2, "BYE", "z9hG4bK-b", ""),
+        ];
+        let f = eval(&UnknownDialog481, &msgs);
+        assert_eq!(f.len(), 1, "one occasion for one BYE transaction: {f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
     /// A PRACK on the early dialog a final ended is judged by the `RSeq` it
     /// names (RFC 3262 §3, `Prack2xxOr481`), not here.
     #[test]
@@ -1990,6 +2111,61 @@ mod tests {
             from_bob(3_000, "INVITE", "z9hG4bK-r", 1, "bt", "at"),
             reverse_500,
             in_dialog(5_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+        ];
+        assert!(
+            hits(&NoByeOutsideOrEarlyDialog, &msgs).is_empty(),
+            "{:?}",
+            eval(&NoByeOutsideOrEarlyDialog, &msgs)
+        );
+    }
+
+    /// The caller BYE-ing an early dialog well after the non-2xx final that
+    /// ended it reached her (§12.3) names no dialog.
+    #[test]
+    fn a_caller_bye_long_after_the_final_names_no_dialog() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", ""),
+            rsp(3_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(3_000 + 2 * BYE_CROSSING_WINDOW_US, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+        ];
+        let f = hits(&NoByeOutsideOrEarlyDialog, &msgs);
+        assert_eq!(f.len(), 1, "{:?}", eval(&NoByeOutsideOrEarlyDialog, &msgs));
+        assert_eq!(f[0].emitter, ALICE, "the caller is charged");
+        let Decision::Violated(Evidence::ByeOffDialog { early_dialog, .. }) = &f[0].decision else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert!(!early_dialog, "the no-dialog shape");
+    }
+
+    /// A caller BYE seen shortly after the final may have left before the
+    /// final reached her: inside the window it settles nothing.
+    #[test]
+    fn a_caller_bye_inside_the_window_after_the_final_settles_nothing() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", ""),
+            rsp(3_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(103_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+        ];
+        let f = eval(&NoByeOutsideOrEarlyDialog, &msgs);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Undecidable(_)), "{:?}", f[0].decision);
+    }
+
+    /// A challenged INVITE retried and answered: the 2xx of the retry
+    /// confirms the dialog the challenge's tag also named, and the BYE on it
+    /// is the ordinary teardown.
+    #[test]
+    fn a_bye_after_a_challenge_retried_and_answered_is_compliant() {
+        let mut retry = invite(4_000, "z9hG4bK-i2", "");
+        retry.cseq = 2;
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 407, 1, "INVITE", "z9hG4bK-i", ""),
+            retry,
+            rsp(5_000, 200, 2, "INVITE", "z9hG4bK-i2", ""),
+            in_dialog(5_000 + 2 * BYE_CROSSING_WINDOW_US, "BYE", "z9hG4bK-b", 3, "at", "bt"),
         ];
         assert!(
             hits(&NoByeOutsideOrEarlyDialog, &msgs).is_empty(),
