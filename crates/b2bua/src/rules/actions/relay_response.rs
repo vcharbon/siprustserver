@@ -4,7 +4,7 @@
 //! bare-180 downgrade (`relayFirst18xTo180`). Request relay does NOT live
 //! here — see [`super::relay_request`].
 
-use call::helpers::{add_tag_mapping, find_pending_request, remove_pending_request, Scope};
+use call::helpers::{find_pending_request, remove_pending_request, Scope};
 use call::{Call, PendingRequest, TagMapping};
 use sip_message::draft::Entry;
 use sip_message::generators::{
@@ -174,15 +174,19 @@ impl ActionExecutor<'_> {
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
         // Resolve the *exact* source dialog the response belongs to by its
-        // To-tag (the responder's tag = this leg's dialog `remote_tag`). Under
-        // forking (RFC 3261 §12.1.2) the source leg holds several early dialogs;
-        // `source_dialog()` would return `dialogs.first()` (fork 1), so fork 2's
-        // PRACK/UPDATE response would miss its pending entry and fall through to
-        // the INVITE-response regeneration below — corrupting a `200 (PRACK)` /
+        // identity tag (a b-leg's: the responder's To-tag; the a-leg's: our
+        // From-tag, one dialog per caller-facing tag). Under forking (RFC 3261
+        // §12.1.2) the source leg holds several early dialogs; `source_dialog()`
+        // would return `dialogs.first()`, so another dialog's PRACK/UPDATE
+        // response would miss its pending entry and fall through to the
+        // INVITE-response regeneration below — corrupting a `200 (PRACK)` /
         // `200 (UPDATE)` into a spurious `200 (INVITE)` toward the caller.
+        let identity =
+            call::helpers::response_identity(&source_leg_id, resp.to().tag(), resp.from().tag());
         let src_dialog = ctx
             .source_leg()
-            .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, &to_tag))
+            .zip(identity)
+            .and_then(|(leg, tag)| call::helpers::dialog_by_identity(leg, tag))
             .or_else(|| ctx.source_dialog())
             .cloned();
         if let Some(src_dialog) = src_dialog {
@@ -614,8 +618,8 @@ impl ActionExecutor<'_> {
         }
         let stored = call::helpers::relay_first_18x_stored_a_tag(call).map(str::to_string);
         let a_facing_tag = self.ensure_a_dialog_with(call, stored);
-        *call = add_tag_mapping(
-            call.clone(),
+        super::dialog_track::map_a_face(
+            call,
             TagMapping {
                 a_tag: a_facing_tag.clone(),
                 b_leg_id: leg_id.to_string(),

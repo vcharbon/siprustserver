@@ -25,7 +25,8 @@ pub enum OpenOffer {
 /// stack showed in a reliable provisional is open until the PRACK.
 pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<OpenOffer> {
     let shown = req.to().tag().unwrap_or_default();
-    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, req.to().tag());
+    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
+    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, tags);
     if let Some(p) = peer.and_then(|(_, d)| pending_invite(d)) {
         return relayed(call, shown, p);
     }

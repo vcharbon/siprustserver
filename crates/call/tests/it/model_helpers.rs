@@ -50,20 +50,28 @@ fn cseq_lens_helpers() {
     assert_eq!(relay_cseq_delta(5, Some(9)), 1); // clamped ≥ 1
 }
 
-/// §12.2.2: a b-leg request below its dialog's last CSeq is out of order; the
-/// last one again, a higher one, a dialog with no request yet and a remote tag
-/// naming no dialog are not.
+/// §12.2.2: a request below the last CSeq of the dialog its tags name is out
+/// of order — a b-leg dialog named by the peer's From-tag, an a-leg dialog by
+/// the To-tag (ours). The last one again, a higher one, a dialog with no
+/// request yet and tags naming no dialog are not.
 #[test]
-fn out_of_order_measures_a_b_leg_dialog_against_its_last_cseq() {
+fn out_of_order_measures_the_named_dialog_against_its_last_cseq() {
+    let from_bob = |tag| RequestTags::new(Some("ours"), Some(tag));
     let call = update_remote_cseq(representative_call(), "b-1", B_TAG, 7);
-    assert!(out_of_order(&call, "b-1", B_TAG, 6));
-    assert!(!out_of_order(&call, "b-1", B_TAG, 7));
-    assert!(!out_of_order(&call, "b-1", B_TAG, 8));
-    assert!(!out_of_order(&call, "b-1", "another-fork", 1));
+    assert!(out_of_order(&call, "b-1", from_bob(B_TAG), 6));
+    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 7));
+    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 8));
+    assert!(!out_of_order(&call, "b-1", from_bob("another-fork"), 1));
 
     let mut unseen = call.clone();
     unseen.b_legs[0].dialogs[0].ext.remote_cseq = None;
-    assert!(!out_of_order(&unseen, "b-1", B_TAG, 1));
+    assert!(!out_of_order(&unseen, "b-1", from_bob(B_TAG), 1));
+
+    let to_us = |tag| RequestTags::new(Some(tag), Some("alice-tag"));
+    let call = update_remote_cseq(call, "a", A_TAG, 4);
+    assert!(out_of_order(&call, "a", to_us(A_TAG), 3));
+    assert!(!out_of_order(&call, "a", to_us(A_TAG), 5));
+    assert!(!out_of_order(&call, "a", to_us("another-face"), 1));
 }
 
 #[test]

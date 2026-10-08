@@ -225,13 +225,14 @@ impl ActionExecutor<'_> {
         let Some(t_idx) = leg_index(call, target_leg) else {
             return;
         };
-        // Forking: pick the early dialog by its callee tag (RFC 3261 §12.2.1.1 —
-        // each forked early dialog is independent); else the first/only dialog.
+        // Forking: pick the early dialog by its identity tag — the callee fork
+        // toward a b-leg, the caller-facing dialog toward the a-leg (RFC 3261
+        // §12.2.1.1: each early dialog is independent); else the first/only one.
         let target_dialog = {
             let leg = leg_at(call, t_idx);
             let picked = target_to_tag
                 .as_deref()
-                .and_then(|tt| leg.dialogs.iter().find(|d| d.sip.remote_tag == tt))
+                .and_then(|tt| call::helpers::dialog_by_identity(leg, tt))
                 .or_else(|| leg.dialogs.first());
             match picked {
                 Some(d) => d.clone(),

@@ -4,8 +4,8 @@
 //! respond / dialog_track / teardown).
 
 use call::helpers::{
-    add_cdr_event, add_tag_mapping, deactivate_rule, mark_decision, merge_leg,
-    remove_pending_request, set_leg_disposition, set_leg_state, split_leg,
+    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request,
+    set_leg_disposition, set_leg_state, split_leg,
 };
 use call::{Call, CdrEvent, TagMapping};
 
@@ -75,8 +75,8 @@ impl ActionExecutor<'_> {
                 }
             }
             RuleAction::AddTagMapping { a_tag, b_leg_id, b_tag } => {
-                *call = add_tag_mapping(
-                    call.clone(),
+                super::dialog_track::map_a_face(
+                    call,
                     TagMapping {
                         a_tag: a_tag.clone(),
                         b_leg_id: b_leg_id.clone(),

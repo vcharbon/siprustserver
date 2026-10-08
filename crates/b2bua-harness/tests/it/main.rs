@@ -26,6 +26,7 @@ mod basic_call_media;
 mod bye_no_200_reap;
 mod bye_reinvite_2xx_ack_cross;
 mod call_keyed_holds;
+mod caller_facing_early_dialogs;
 mod cancel_200_crossing;
 mod cancel_200_crossing_internal;
 mod cancel_after_answer;

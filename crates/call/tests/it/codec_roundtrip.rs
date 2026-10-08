@@ -229,6 +229,31 @@ fn the_invite_final_sent_fact_round_trips() {
 /// relayed back to its originator echoes, so a takeover node relaying that
 /// response must still know it: the pending snapshot keeps it through the
 /// replication codec.
+/// Each caller-facing early dialog is a record of its own on the a-leg, with
+/// its own tag and sequences (RFC 3261 §12.1.2): a takeover copy holds every
+/// one of them, in order, so a request in any of them is numbered and
+/// measured as before the copy.
+#[test]
+fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+    let mut second = call.a_leg.dialogs[0].clone();
+    second.sip.local_tag = "second-face".into();
+    second.sip.local_cseq = 3;
+    second.ext.remote_cseq = Some(2);
+    call.a_leg.dialogs.push(second);
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call);
+    let faces: Vec<_> = decoded
+        .a_leg
+        .dialogs
+        .iter()
+        .map(|d| (d.sip.local_tag.as_str(), d.sip.local_cseq, d.ext.remote_cseq))
+        .collect();
+    assert_eq!(faces.len(), 2);
+    assert_eq!(faces[1], ("second-face", 3, Some(2)));
+}
+
 #[test]
 fn a_pending_requests_timestamp_survives_a_takeover_copy() {
     let codec = MsgpackCodec::new();

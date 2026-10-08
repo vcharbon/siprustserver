@@ -653,9 +653,9 @@ async fn refuse_out_of_order(
         return None;
     }
     req.to().tag()?;
-    let from_tag = req.from().tag()?;
+    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
     let cseq = i64::from(req.cseq().seq());
-    if !call::helpers::out_of_order(call, &res.source_leg_id, from_tag, cseq) {
+    if !call::helpers::out_of_order(call, &res.source_leg_id, tags, cseq) {
         return None;
     }
     // An in-call refusal is a message of the leg it resolved to: it takes the

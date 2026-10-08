@@ -4,7 +4,8 @@
 
 use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
 
-use super::leg::{confirmed_dialog, find_b_leg, find_dialog_by_to_tag, find_leg};
+use super::identity::{dialog_by_identity, RequestTags};
+use super::leg::{confirmed_dialog, find_leg};
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
 
@@ -22,14 +23,14 @@ pub fn update_remote_cseq(call: Call, leg_id: &str, identity_tag: &str, remote_c
     update_dialog(call, leg_id, identity_tag, |d| d.ext.remote_cseq = Some(remote_cseq))
 }
 
-/// Whether a request the peer of b-leg `leg_id` sent in the dialog whose
-/// remote tag is `from_tag` carries a CSeq below the last one that dialog took:
-/// out of order (RFC 3261 §12.2.2). A b-leg holds one record per peer dialog.
-/// FIXME(b2bua): the a-leg's one record serves every early dialog the caller was shown,
-/// so the caller goes unmeasured; track her CSeq per a-facing tag.
-pub fn out_of_order(call: &Call, leg_id: &str, from_tag: &str, cseq: i64) -> bool {
-    find_b_leg(call, leg_id)
-        .and_then(|leg| find_dialog_by_to_tag(leg, from_tag))
+/// Whether a request `leg_id`'s peer sent in the dialog its `tags` name carries
+/// a CSeq below the last one that dialog took: out of order (RFC 3261 §12.2.2).
+/// Each dialog record is one peer dialog (`identity`), so each is measured on
+/// its own sequence; a request naming no record is not measured.
+pub fn out_of_order(call: &Call, leg_id: &str, tags: RequestTags<'_>, cseq: i64) -> bool {
+    find_leg(call, leg_id)
+        .zip(tags.identity(leg_id))
+        .and_then(|(leg, tag)| dialog_by_identity(leg, tag))
         .and_then(|d| d.ext.remote_cseq)
         .is_some_and(|last| cseq < last)
 }
@@ -143,29 +144,24 @@ pub fn invite_transaction_open(dialog: &Dialog) -> bool {
         || dialog.ext.awaited_ack_cseq.is_some()
 }
 
-/// Whether an INVITE from `source_leg_id`'s peer, To-tag `request_to_tag`,
+/// Whether an INVITE from `source_leg_id`'s peer, carrying `tags`,
 /// meets glare (RFC 3261 §14.1): an INVITE transaction still open
 /// ([`invite_transaction_open`]) on the dialog it arrived on (the leg's
 /// confirmed dialog, else its first) or on the dialog its relay would be
 /// regenerated on ([`relay_peer_dialog`]).
-pub fn invite_glare(call: &Call, source_leg_id: &str, request_to_tag: Option<&str>) -> bool {
+pub fn invite_glare(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
     let source = find_leg(call, source_leg_id)
         .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()));
     source.is_some_and(invite_transaction_open)
-        || relay_peer_dialog(call, source_leg_id, request_to_tag)
+        || relay_peer_dialog(call, source_leg_id, tags)
             .is_some_and(|(_, d)| invite_transaction_open(d))
 }
 
-/// Whether `source_leg_id`'s peer, sending an INVITE with To-tag
-/// `request_to_tag`, has an earlier INVITE of its own on the dialog that this
+/// Whether `source_leg_id`'s peer, sending an INVITE carrying `tags`, has an earlier INVITE of its own on the dialog that this
 /// side has sent no final to (RFC 3261 §14.2, first clause): its relay awaits
 /// a final on the relay-target dialog and was not CANCELled.
-pub fn sender_invite_unanswered(
-    call: &Call,
-    source_leg_id: &str,
-    request_to_tag: Option<&str>,
-) -> bool {
-    relay_peer_dialog(call, source_leg_id, request_to_tag).is_some_and(|(_, d)| {
+pub fn sender_invite_unanswered(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
+    relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
         d.ext
             .inbound_pending_requests
             .iter()
@@ -184,9 +180,9 @@ pub fn sender_invite_unacknowledged(call: &Call, source_leg_id: &str) -> bool {
 
 /// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
 /// final (RFC 3311 §5.2): its relay snapshot is on the dialog a request from
-/// that leg, To-tag `request_to_tag`, is relayed on.
-pub fn peer_update_pending(call: &Call, source_leg_id: &str, request_to_tag: Option<&str>) -> bool {
-    relay_peer_dialog(call, source_leg_id, request_to_tag).is_some_and(|(_, d)| {
+/// that leg, carrying `tags`, is relayed on.
+pub fn peer_update_pending(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
+    relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
         d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
     })
 }

@@ -311,8 +311,8 @@ impl ActionExecutor<'_> {
         if b_tag.is_empty() || find_by_b_tag(call, b_leg_id, b_tag).is_some() {
             return;
         }
-        *call = add_tag_mapping(
-            call.clone(),
+        map_a_face(
+            call,
             TagMapping {
                 a_tag: self.id_gen.new_tag(),
                 b_leg_id: b_leg_id.to_string(),
@@ -340,8 +340,8 @@ impl ActionExecutor<'_> {
             call.tag_map.iter().any(|m| m.b_leg_id == b_leg_id)
         };
         let a_face = if already_published { self.id_gen.new_tag() } else { primary };
-        *call = add_tag_mapping(
-            call.clone(),
+        map_a_face(
+            call,
             TagMapping {
                 a_tag: a_face.clone(),
                 b_leg_id: b_leg_id.to_string(),
@@ -446,14 +446,59 @@ impl ActionExecutor<'_> {
     }
 }
 
+/// Map a callee dialog to its a-facing tag, opening the caller-facing early
+/// dialog that tag names when the a-leg does not hold it yet: a record of its
+/// own beside the a-dialog — same caller, route set and target — whose two
+/// sequences start from the caller's INVITE (RFC 3261 §12.1.2, §12.2.1.1). An
+/// a-leg with no dialog yet opens nothing: its first dialog takes the tag.
+pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
+    let tag = mapping.a_tag.clone();
+    *call = add_tag_mapping(call.clone(), mapping);
+    if tag.is_empty() || call.a_leg.dialogs.iter().any(|d| d.sip.local_tag == tag) {
+        return;
+    }
+    let Some(primary) = call.a_leg.dialogs.first() else { return };
+    let cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+    let ctx = call::helpers::MakeDialogLegCtx {
+        call_id: &primary.sip.call_id,
+        local_uri: &primary.sip.local_uri,
+        remote_uri: &primary.sip.remote_uri,
+        local_tag: &tag,
+        remote_tag: &primary.sip.remote_tag,
+    };
+    let mut face =
+        call::helpers::make_dialog_from_incoming(&ctx, cseq, primary.sip.route_set.clone(), cseq);
+    face.sip.remote_target = primary.sip.remote_target.clone();
+    call.a_leg.dialogs.push(face);
+}
+
 /// Identify the caller's answered dialog by `tag`: the one a-dialog takes it
-/// as its local tag and every mapping under any other a-facing tag is retired,
-/// so a request the caller sends on an early dialog the answer abandoned
-/// matches no dialog and draws `481` (RFC 3261 §12.2.2) instead of landing on
-/// the answered session. The wire shows several dialogs; the model holds one.
+/// as its local tag, with the sequences of the caller-facing dialog `tag`
+/// named (fresh ones from the caller's INVITE for a tag never shown), and
+/// every other caller-facing dialog and mapping is retired, so a request the
+/// caller sends on an early dialog the answer abandoned matches no dialog and
+/// draws `481` (RFC 3261 §12.2.2) instead of landing on the answered session.
 pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
-    let Some(d) = call.a_leg.dialogs.first_mut() else { return };
-    d.sip.local_tag = tag.to_string();
+    let fresh = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+    let dialogs = &mut call.a_leg.dialogs;
+    if dialogs.first().is_some_and(|d| d.sip.local_tag != tag) {
+        let own = dialogs.iter().position(|d| d.sip.local_tag == tag).map(|i| dialogs.remove(i));
+        let d = &mut dialogs[0];
+        d.sip.local_tag = tag.to_string();
+        match own {
+            Some(own) => {
+                d.sip.local_cseq = own.sip.local_cseq;
+                d.ext.remote_cseq = own.ext.remote_cseq;
+                d.ext.inbound_pending_requests = own.ext.inbound_pending_requests;
+            }
+            None => {
+                d.sip.local_cseq = fresh;
+                d.ext.remote_cseq = Some(fresh);
+                d.ext.inbound_pending_requests.clear();
+            }
+        }
+    }
+    dialogs.truncate(1);
     call.tag_map.retain(|m| m.a_tag == tag);
 }
 

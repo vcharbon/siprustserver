@@ -10,6 +10,7 @@
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution, tags
+//!   - [`identity`] — which dialog of a leg an in-dialog message names
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
 //!   - [`dialog`] — CSeq, ACK branch, pending relays, SDP cache, constructors
@@ -28,6 +29,7 @@
 
 pub mod decision_log;
 pub mod dialog;
+pub mod identity;
 pub mod leg;
 pub mod lens;
 pub mod lifecycle;
@@ -49,6 +51,7 @@ pub use dialog::{
     retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
     set_awaited_ack_cseq, update_remote_cseq, MakeDialogLegCtx,
 };
+pub use identity::{dialog_by_identity, request_dialog, response_identity, RequestTags};
 pub use leg::{
     add_b_leg, b2bua_tag, caller_answered, confirmed_dialog, find_b_leg, find_b_leg_by_call_id,
     find_dialog_by_to_tag, find_leg, holds_local_tag, is_adopted, is_fully_resolved,

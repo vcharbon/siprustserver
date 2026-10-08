@@ -294,7 +294,8 @@ fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
 /// [`peer_sends`], then pending on the relay target's dialog until its final.
 fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     peer_sends(call, leg, method, with_sdp);
-    let target = call::helpers::resolve_relay_peer(call, leg, Some("b")).0.expect("a relay target");
+    let tags = call::helpers::RequestTags::new(Some("b"), None);
+    let target = call::helpers::resolve_relay_peer(call, leg, tags).0.expect("a relay target");
     let pending = call::PendingRequest {
         method: method.into(),
         outbound_cseq: 7,
