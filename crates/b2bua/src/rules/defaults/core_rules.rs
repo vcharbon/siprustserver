@@ -87,22 +87,17 @@ pub(crate) fn unacked_2xx_give_up_actions(
     actions
 }
 
-/// Every leg still holding a 2xx whose ACK this stack can compose alone: the
-/// §13.2.2.4 obligation is armed and undischarged, and the ACK owes no answer
-/// body (RFC 3264 §4) — the INVITE this stack sent on that dialog carried the
-/// offer, or a reliable provisional carried it and the PRACK this stack owes
-/// carries the answer (RFC 3262 §5). Either face qualifies — a b-leg
+/// Every leg still holding a 2xx whose ACK this stack can compose alone
+/// ([`crate::rules::relay::bare_ack_owed`]). Either face qualifies — a b-leg
 /// answering the call, or the caller's face answering a relayed callee
 /// re-INVITE. Absent: a delayed-offer 2xx (only the silent peer's own ACK
 /// supplies its answer) and the a-leg's initial round, where this stack sent
 /// no INVITE and owes no ACK.
 fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
-    std::iter::once(call.a_leg()).chain(call.b_legs().iter()).filter_map(|leg| {
-        let d = leg.dialogs.first()?;
-        let bare = crate::rules::relay::acked_invite_carries_offer(d)
-            || call.offer_owed_prack(&leg.leg_id);
-        (d.ext.awaited_ack_cseq.is_some() && bare).then(|| leg.leg_id.clone())
-    })
+    std::iter::once(call.a_leg())
+        .chain(call.b_legs().iter())
+        .filter(|leg| crate::rules::relay::bare_ack_owed(leg, call.offer_owed_prack(&leg.leg_id)))
+        .map(|leg| leg.leg_id.clone())
 }
 
 /// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL

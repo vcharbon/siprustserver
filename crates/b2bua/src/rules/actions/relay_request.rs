@@ -124,6 +124,25 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// ACK `leg_id`'s confirmed dialog on this stack's own account, bare
+    /// (RFC 3261 §13.2.2.4): an offer of the dialog a reliable provisional
+    /// carried is answered first, in the PRACK still owed (RFC 3262 §5), so
+    /// the wire reads PRACK, ACK.
+    pub(super) fn ack_own_bare(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+        let owed = relay::offers_owed_at_ack(call, leg_id);
+        self.prack_offers_owed_at_ack(call, fx, leg_id, owed, None);
+        self.ack_leg(
+            call,
+            fx,
+            leg_id,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Provenance::Authored,
+            relay::Author::Stack,
+        );
+    }
+
     /// The answer a relayed ACK carrying none owes `target_leg`'s delayed offer
     /// ([`crate::rules::delayed_offer`]), and whether it is the caller's: the
     /// offer answered out of her own description (her INVITE's offer, which

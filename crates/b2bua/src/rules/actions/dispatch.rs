@@ -47,26 +47,23 @@ impl ActionExecutor<'_> {
                 // §13.2.2.4); default its type to `application/sdp` when none is
                 // given. An empty ACK stays a bare ACK — no body, no Content-Type.
                 let (bytes, content_type, author, descriptors) = parts(body);
-                // A bare ACK whose dialog's offer rode a reliable provisional
-                // follows the PRACK that answers it (RFC 3262 §5).
                 if bytes.is_empty() {
-                    let owed = relay::offers_owed_at_ack(call, leg_id);
-                    self.prack_offers_owed_at_ack(call, fx, leg_id, owed, None);
+                    self.ack_own_bare(call, fx, leg_id);
+                } else {
+                    let ct = content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp);
+                    let mut own = Vec::new();
+                    relay::describe_body(&mut own, bytes, descriptors);
+                    self.ack_leg(
+                        call,
+                        fx,
+                        leg_id,
+                        bytes.to_vec(),
+                        Some(ct),
+                        own,
+                        Provenance::Authored,
+                        author,
+                    );
                 }
-                let ct = (!bytes.is_empty())
-                    .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
-                let mut own = Vec::new();
-                relay::describe_body(&mut own, bytes, descriptors);
-                self.ack_leg(
-                    call,
-                    fx,
-                    leg_id,
-                    bytes.to_vec(),
-                    ct,
-                    own,
-                    Provenance::Authored,
-                    author,
-                );
             }
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);

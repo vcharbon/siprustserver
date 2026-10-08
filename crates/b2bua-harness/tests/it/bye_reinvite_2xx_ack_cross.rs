@@ -324,8 +324,10 @@ async fn caller_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
 }
 
 /// **The receiving half.** bob re-INVITEs and alice answers 200; bob then BYEs
-/// without ACKing it, so nothing was ever composable toward alice, the whole
-/// call is reaped, and bob's late ACK arrives. §17.1.1.3 gives an ACK no
+/// without ACKing it. The teardown ACKs alice's 2xx on this stack's own
+/// account before its BYE (RFC 3261 §13.2.2.4 — the re-INVITE carried the
+/// offer, so the ACK is bare), the whole call is reaped, and bob's late ACK
+/// arrives. §17.1.1.3 gives an ACK no
 /// response at all, so the SUT must absorb it: a 481 here is a response to a
 /// request that can never take one, and it would restart the peer's teardown
 /// reasoning on a call already gone.
@@ -355,6 +357,13 @@ async fn a_late_ack_into_a_reaped_dialog_is_absorbed_never_answered() {
     // ── bob BYEs instead of ACKing; the call tears down and is reaped ────────
     let mut bob_bye = bob_dialog.bye().await;
     bob_bye.expect(200).await;
+    let ack = alice.receive("ACK").await;
+    assert_eq!(
+        ack.request().cseq().seq(),
+        alice_reinv.request().cseq().seq(),
+        "§13.2.2.4: the teardown ACKs alice's 2xx on the re-INVITE's CSeq"
+    );
+    assert!(ack.request().body().is_empty(), "the re-INVITE carried the offer");
     alice.receive("BYE").await.respond(200, "OK").await;
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();

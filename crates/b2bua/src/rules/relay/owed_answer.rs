@@ -5,10 +5,10 @@
 //! to the caller's ACK, whose answer that PRACK carries.
 
 use call::helpers::OwedPrack;
-use call::Call;
+use call::{Call, Leg};
 use sip_message::SipRequest;
 
-use super::ack::parse_request;
+use super::ack::{acked_invite_carries_offer, parse_request};
 use super::sdp_session::{continue_on_leg, Author, Carried};
 use crate::config::SdpFormPolicy;
 
@@ -62,4 +62,21 @@ pub(crate) fn ack_answer_on_leg(
         Some(&super::sdp()),
         policy,
     ))
+}
+
+/// Whether `leg` holds a 2xx whose ACK this stack composes alone: the
+/// §13.2.2.4 obligation is armed and undischarged, and the ACK owes no answer
+/// body (RFC 3264 §4) — the INVITE this stack sent carried the offer, or
+/// (`offer_owed`) a reliable provisional carried it and the PRACK this stack
+/// owes carries the answer (RFC 3262 §5).
+pub(crate) fn bare_ack_owed(leg: &Leg, offer_owed: bool) -> bool {
+    leg.dialogs.first().is_some_and(|d| {
+        d.ext.awaited_ack_cseq.is_some() && (offer_owed || acked_invite_carries_offer(d))
+    })
+}
+
+/// [`bare_ack_owed`] for `leg_id` of `call`.
+pub(crate) fn owes_bare_ack(call: &Call, leg_id: &str) -> bool {
+    call::helpers::find_leg(call, leg_id)
+        .is_some_and(|leg| bare_ack_owed(leg, !offers_owed_at_ack(call, leg_id).is_empty()))
 }

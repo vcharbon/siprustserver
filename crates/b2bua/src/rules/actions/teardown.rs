@@ -142,10 +142,15 @@ impl ActionExecutor<'_> {
             }
             match state {
                 LegState::Confirmed => {
-                    // Every relayed provisional of the leg still unacknowledged
-                    // — a 2xx's deferred offer, a pending re-INVITE's — is
-                    // PRACKed ahead of the BYE (RFC 3262 §4).
+                    // A 2xx still unACKed is ACKed bare ahead of the BYE
+                    // (RFC 3261 §13.2.2.4), and every relayed provisional of
+                    // the leg still unacknowledged — a 2xx's deferred offer, a
+                    // pending re-INVITE's — is PRACKed first (RFC 3262 §4).
+                    let ack_owed = relay::owes_bare_ack(call, &id);
                     self.prack_relayed_unacknowledged(call, fx, &id, None);
+                    if ack_owed {
+                        self.ack_own_bare(call, fx, &id);
+                    }
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
                     let e = if is_a {
@@ -238,10 +243,15 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                // Every relayed provisional of the leg still unacknowledged — a
-                // 2xx's deferred offer, a pending re-INVITE's — is PRACKed
-                // ahead of the BYE (RFC 3262 §4).
+                // A 2xx still unACKed is ACKed bare ahead of the BYE (RFC 3261
+                // §13.2.2.4), and every relayed provisional of the leg still
+                // unacknowledged — a 2xx's deferred offer, a pending
+                // re-INVITE's — is PRACKed first (RFC 3262 §4).
+                let ack_owed = relay::owes_bare_ack(call, leg_id);
                 self.prack_relayed_unacknowledged(call, fx, leg_id, None);
+                if ack_owed {
+                    self.ack_own_bare(call, fx, leg_id);
+                }
                 // A release no peer asked for states the deployment's cause
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));

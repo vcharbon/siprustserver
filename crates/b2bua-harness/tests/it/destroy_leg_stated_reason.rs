@@ -234,8 +234,9 @@ async fn a_bye_stating_nothing_carries_no_reason_whatever_the_caller_stated() {
 
 /// A service ends an answered callee whose 2xx carried no new offer: the
 /// callee's reliable 183 carried it on a delayed-offer INVITE, the caller
-/// never PRACKed it and has not ACKed yet. The `BYE` is preceded by the PRACK
-/// still owed, answering the offer rejecting every stream (RFC 3262 §4-§5).
+/// never PRACKed it and has not ACKed yet. The callee sees the PRACK still
+/// owed, answering the offer rejecting every stream (RFC 3262 §4-§5), then
+/// this stack's bare ACK of his 2xx (RFC 3261 §13.2.2.4), then the `BYE`.
 #[tokio::test(start_paused = true)]
 async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     let h = Harness::new("destroy-leg-owed-prack");
@@ -282,6 +283,50 @@ async fn a_destroyed_callee_is_pracked_for_an_offer_still_owed() {
     let body = String::from_utf8_lossy(prack.request().body()).into_owned();
     assert!(body.lines().any(|l| l.starts_with("m=audio 0 ")), "rejecting answer: {body:?}");
     prack.respond(200, "OK").await;
+    let ack = bob.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "the answer rode the PRACK");
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+/// A service ends an answered callee before the caller ACKed the 2xx: the
+/// UAC core ACKs every 2xx it receives (RFC 3261 §13.2.2.4), so the callee
+/// sees this stack's own bare ACK — the INVITE carried the offer — on the
+/// INVITE's CSeq, then the `BYE`.
+#[tokio::test(start_paused = true)]
+async fn a_callee_destroyed_before_the_callers_ack_is_acked_before_its_bye() {
+    let h = Harness::new("destroy-leg-unacked-2xx");
+    h.waive(
+        scenario_harness::WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "alice has not ACKed when the service fires",
+        )
+        .on_party("alice"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:7453").await;
+    let bob = h.agent("bob", "127.0.0.1:7454").await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 7454)))
+            .services(vec![releaser::service_def()])
+            .tune(|c| c.keepalive_interval_sec = 3_600)
+            .start(&h, "b2bua", "127.0.0.1:7455")
+            .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    h.advance(Duration::from_secs(releaser::FIRE_SEC as u64 + 1)).await;
+    alice.drain().await;
+    let ack = bob.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "the INVITE carried the offer");
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     bob.receive("BYE").await.respond(200, "OK").await;
     alice.receive("BYE").await.respond(200, "OK").await;
 
