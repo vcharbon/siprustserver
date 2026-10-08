@@ -49,8 +49,8 @@
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
   <!-- An admission rejection of the initial INVITE (503 overload shed, 480/486
-       admission control) ends the call cleanly at `rejected`: sipp auto-ACKs the
-       final, and the SUT's shed counters carry the decision, not this stream's
+       admission control) ends the call cleanly at `rejected`, which ACKs the final;
+       and the SUT's shed counters carry the decision, not this stream's
        unexpected_msg. -->
   <recv response="503" optional="true" next="rejected"/>
   <recv response="480" optional="true" next="rejected"/>
@@ -91,10 +91,27 @@
 
   <recv response="200" crlf="true"/>
 
-  <!-- Terminal join point: the admitted path falls through after its BYE/200, a
-       rejected initial INVITE jumps straight here. Either way the call ends
-       Successful. -->
+  <nop next="rejected_done"/>
+
+  <!-- A non-2xx final of the initial INVITE that an optional recv above takes
+       jumps to `rejected`. SIPp sends no ACK for such a final, so the call ACKs
+       it on the INVITE's branch (RFC 3261 section 17.1.1.3; [branch-12] is
+       this send's own index). The admitted path skips the ACK. Either way the
+       call ends Successful. -->
   <label id="rejected"/>
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-12];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="rejected_done"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="100, 1000, 10000, 15000"/>

@@ -41,10 +41,9 @@
   <!-- EXPLICIT rejection branch: a cap-rejected call gets 486 (480 from an
        admission refusal), optionally after a 100. Catch them
        BEFORE the mandatory 200 so they do not fall through to that recv as an
-       unexpected message. sipp's UAC mode auto-ACKs the final response (closing
-       the INVITE client transaction), and `next` jumps past the ACK/hold/BYE to
-       the terminal `rejected` label → the call ends cleanly and is counted
-       Successful; the SUT's own limiter / shed counters carry the decision. When
+       unexpected message. `next` jumps past the hold/BYE to `rejected`, which
+       ACKs the final (closing the INVITE client transaction) → the call ends
+       cleanly and is counted Successful; the SUT's own limiter / shed counters carry the decision. When
        the call is admitted instead, no final but the 200 arrives, these optional
        recvs are skipped, and the mandatory 200 below matches normally. -->
   <recv response="480" optional="true" next="rejected"/>
@@ -163,11 +162,27 @@
     </action>
   </send>
 
-  <!-- Terminal join point: the admitted path falls through here after its BYE/200;
-       a rejected initial INVITE (486/480) jumps straight here (auto-ACKed,
-       nothing more to do). Reaching the end of the scenario counts the call
-       Successful either way. -->
+  <nop next="rejected_done"/>
+
+  <!-- A non-2xx final of the initial INVITE that an optional recv above takes
+       jumps to `rejected`. SIPp sends no ACK for such a final, so the call ACKs
+       it on the INVITE's branch (RFC 3261 section 17.1.1.3; [branch-19] is
+       this send's own index). The admitted path skips the ACK. Either way the
+       call ends Successful. -->
   <label id="rejected"/>
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-19];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+  </send>
+  <label id="rejected_done"/>
 
   <nop next="end"/>
 
