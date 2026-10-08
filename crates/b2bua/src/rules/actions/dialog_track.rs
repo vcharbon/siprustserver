@@ -211,6 +211,14 @@ impl ActionExecutor<'_> {
                 if !book.forks.is_empty() {
                     book.store(leg);
                 }
+                // A request relayed into a losing fork still gets that fork's
+                // final, relayed back to its originator (RFC 3261 §8.1.3.3).
+                for lost in std::mem::take(&mut leg.dialogs) {
+                    if !lost.sip.remote_tag.is_empty() {
+                        let tag = lost.sip.remote_tag;
+                        call::helpers::retire_pending(leg, &tag, lost.ext.inbound_pending_requests);
+                    }
+                }
                 leg.dialogs = vec![winner];
             }
             leg.state = LegState::Confirmed;

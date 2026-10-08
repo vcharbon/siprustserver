@@ -194,15 +194,15 @@ pub fn peer_update_pending(call: &Call, source_leg_id: &str, tags: RequestTags<'
 pub enum PendingHolder {
     /// On the leg's dialog with this identity tag.
     Dialog(String),
-    /// On the a-leg, for the caller-facing dialog with this tag the answer
+    /// Among the relays of the leg's dialog with this identity tag the answer
     /// retired ([`super::retired`]).
     Retired(String),
 }
 
 /// The relay a response arriving on `leg_id` with outbound CSeq `cseq`
 /// answers (RFC 3261 §8.1.3.3), and where it is kept: on the dialog the
-/// response's identity tag names, else — on the a-leg — among the relays of
-/// the retired caller-facing dialog that tag names. A response with no
+/// response's identity tag names, else among the relays of the retired early
+/// dialog that tag names. A response with no
 /// identity tag reads the leg's confirmed dialog. Never another dialog's
 /// relay: two dialogs may carry the same CSeq.
 pub fn relayed_pending(
@@ -229,10 +229,9 @@ pub fn relayed_pending(
         Some(d) => {
             find_pending_request(d, cseq).map(|p| (PendingHolder::Dialog(identity(d)), p.clone()))
         }
-        None if leg_id == "a" => {
+        None => {
             retired_pending(leg, tag, cseq).map(|p| (PendingHolder::Retired(tag.to_string()), p))
         }
-        None => None,
     }
 }
 

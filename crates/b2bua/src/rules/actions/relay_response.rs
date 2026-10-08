@@ -176,7 +176,7 @@ impl ActionExecutor<'_> {
         // The relay this response answers is read only through the dialog its
         // identity tag names (a b-leg's: the responder's To-tag; the a-leg's:
         // our From-tag, one dialog per caller-facing tag), or the relays kept
-        // for a caller-facing dialog the answer retired. Two dialogs may carry
+        // for an early dialog the answer retired. Two dialogs may carry
         // the same CSeq, so a fallback onto another dialog would deliver the
         // final to a transaction it does not answer — or, finding none, fall
         // through to the INVITE-response regeneration below and corrupt a
@@ -327,7 +327,9 @@ impl ActionExecutor<'_> {
                             remove_pending_request(call.clone(), &source_leg_id, s_id, cseq_num);
                     }
                     PendingHolder::Retired(tag) => {
-                        call::helpers::release_retired(&mut call.a_leg, tag, cseq_num);
+                        *call = call::helpers::update_leg(call.clone(), &source_leg_id, |l| {
+                            call::helpers::release_retired(l, tag, cseq_num)
+                        });
                     }
                 }
                 // The final ends this transaction's reliable provisionals
