@@ -24,6 +24,7 @@ mod attached_parts;
 mod basic_call;
 mod basic_call_media;
 mod bye_no_200_reap;
+mod bye_on_an_ended_early_dialog;
 mod bye_reinvite_2xx_ack_cross;
 mod call_keyed_holds;
 mod caller_facing_early_dialogs;

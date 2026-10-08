@@ -1350,6 +1350,27 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
+        // A caller's BYE after this stack answered her INVITE with a non-2xx
+        // final names no dialog: that final ended every early dialog the INVITE
+        // opened (RFC 3261 §12.3), so the BYE draws 481 (§12.2.2) and changes
+        // nothing. Outranks the rules that answer a BYE 200, which hold for a
+        // dialog that exists (a confirmed one crossing our BYE included).
+        rule(
+            "ended-early-dialog-bye",
+            &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
+            Match::request()
+                .method("BYE")
+                .direction(Direction::FromA)
+                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_some_and(|s| s >= 300)),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 481,
+                    reason: "Call/Transaction Does Not Exist".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
         // A BYE from a live party of an Active call ends the session; a BYE on a
         // leg this stack already ended is `resolve-ended-leg-bye`'s.
         rule(

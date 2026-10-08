@@ -424,6 +424,11 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 /// call knows both of its peers and is not charged for either. Naming the local
 /// half instead would charge every such face.
 ///
+/// **A non-2xx final to the INVITE ends the early dialog it rode (§12.3)**, so
+/// a request the UAS takes after sending that final names no dialog. A dialog
+/// a 2xx accepted stays. A PRACK on the ended dialog is left to
+/// [`super::prack::Prack2xxOr481`], which judges it by the `RSeq` it names.
+///
 /// **ACK and CANCEL are not occasions.** An ACK elicits no response at all
 /// (§17.1.1.3), so it cannot be answered 481; a CANCEL is matched by
 /// transaction, not by dialog (§9.1).
@@ -441,6 +446,11 @@ impl Obligation for UnknownDialog481 {
         // what the endpoint knew BEFORE it.
         let mut confirmed: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
         let mut creating_seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+        // The confirmed dialogs a 2xx to an INVITE accepted: no later non-2xx
+        // final ends them.
+        let mut accepted: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+        // The early dialogs a non-2xx final ended.
+        let mut ended: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
         // Requests on an unknown dialog, awaiting the final the taker sent on
         // their transaction (0 = none yet).
         let mut unknown: Vec<usize> = Vec::new();
@@ -468,24 +478,39 @@ impl Obligation for UnknownDialog481 {
                         out.push(finding_481(mi, msg, Decision::Compliant));
                         continue;
                     }
+                    if method.eq_ignore_ascii_case("PRACK")
+                        && ended.contains(&(taker, call, from_tag))
+                    {
+                        continue;
+                    }
                     unknown.push(mi);
                     answers.entry((taker, call, branch)).or_insert(0);
                 }
                 Kind::Response { status } => {
-                    // A dialog-creating answer names both halves: the peer tag
-                    // this endpoint learns, and the one it minted itself.
-                    let creating = (200..300).contains(status)
+                    // A tagged answer names both halves: the peer tag this
+                    // endpoint learns, and the one it minted itself. A 1xx/2xx
+                    // opens the dialog; a non-2xx final to the INVITE ends the
+                    // early one it rode (§12.3) unless a 2xx confirmed it.
+                    let tagged = (200..300).contains(status)
                         || (*status > 100 && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()));
                     let both = msg.from_tag.as_deref().is_some_and(|t| !t.is_empty())
                         && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty());
-                    if creating && both && !call.is_empty() {
+                    let invite = msg.cseq_method.eq_ignore_ascii_case("INVITE");
+                    if tagged && both && !call.is_empty() {
                         for endpoint in [msg.src.as_str(), msg.dst.as_str()] {
+                            let key =
+                                (endpoint, call, remote_tag_of(msg, endpoint == msg.src.as_str()));
                             creating_seen.insert((endpoint, call));
-                            confirmed.insert((
-                                endpoint,
-                                call,
-                                remote_tag_of(msg, endpoint == msg.src.as_str()),
-                            ));
+                            if *status < 300 {
+                                confirmed.insert(key);
+                                ended.remove(&key);
+                                if invite && *status >= 200 {
+                                    accepted.insert(key);
+                                }
+                            } else if invite && !accepted.contains(&key) {
+                                confirmed.remove(&key);
+                                ended.insert(key);
+                            }
                         }
                     }
                     if *status >= 200 {
@@ -1764,6 +1789,87 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(!f[0].decided(), "{:?}", f[0].decision);
         assert_eq!(hits(&UnknownDialog481, &msgs).len(), 1, "closed, it decides at once");
+    }
+
+    /// §12.3: the non-2xx final to the establishing INVITE ends the early
+    /// dialog its tagged provisional opened, so a BYE the UAS takes after
+    /// sending that final names no dialog and serving it is the miss.
+    #[test]
+    fn a_bye_after_the_final_that_ended_its_early_dialog_is_violated() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", ""),
+            rsp(3_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(4_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+            rsp(5_000, 200, 2, "BYE", "z9hG4bK-b", ""),
+        ];
+        let f = hits(&UnknownDialog481, &msgs);
+        assert_eq!(f.len(), 1, "{:?}", eval(&UnknownDialog481, &msgs));
+        assert_eq!(f[0].emitter, BOB, "the UAS that ended the dialog owed the 481");
+
+        let mut refused = msgs.clone();
+        refused[4] = rsp(5_000, 481, 2, "BYE", "z9hG4bK-b", "");
+        assert!(
+            hits(&UnknownDialog481, &refused).is_empty(),
+            "{:?}",
+            eval(&UnknownDialog481, &refused)
+        );
+    }
+
+    /// A tagged non-2xx final opens no dialog: a BYE after it is the miss too.
+    #[test]
+    fn a_tagged_rejection_opens_no_dialog() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 486, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+            rsp(4_000, 200, 2, "BYE", "z9hG4bK-b", ""),
+        ];
+        assert_eq!(hits(&UnknownDialog481, &msgs).len(), 1, "{:?}", eval(&UnknownDialog481, &msgs));
+    }
+
+    /// The early dialog still exists while the INVITE is pending: a BYE taken
+    /// before the final is the caller's legitimate early BYE (§15), whatever
+    /// final follows.
+    #[test]
+    fn a_bye_taken_before_the_final_rides_the_early_dialog() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(3_000, "BYE", "z9hG4bK-b", 2, "at", "bt"),
+            rsp(4_000, 200, 2, "BYE", "z9hG4bK-b", ""),
+            rsp(5_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+        ];
+        assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+    }
+
+    /// A PRACK on the early dialog a final ended is judged by the `RSeq` it
+    /// names (RFC 3262 §3, `Prack2xxOr481`), not here.
+    #[test]
+    fn a_prack_after_the_final_is_left_to_the_rseq_rule() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 180, 1, "INVITE", "z9hG4bK-i", "RSeq: 1\r\nRequire: 100rel\r\n"),
+            rsp(3_000, 487, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(4_000, "PRACK", "z9hG4bK-p", 2, "at", "bt"),
+            rsp(5_000, 200, 2, "PRACK", "z9hG4bK-p", ""),
+        ];
+        assert!(eval(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
+    }
+
+    /// A non-2xx final to a re-INVITE leaves the confirmed dialog in place
+    /// (§14.1): only the establishing exchange's failure ends a dialog here.
+    #[test]
+    fn a_rejected_reinvite_keeps_the_confirmed_dialog() {
+        let msgs = [
+            invite(1_000, "z9hG4bK-i", ""),
+            rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
+            in_dialog(3_000, "INVITE", "z9hG4bK-r", 2, "at", "bt"),
+            rsp(4_000, 488, 2, "INVITE", "z9hG4bK-r", ""),
+            in_dialog(5_000, "BYE", "z9hG4bK-b", 3, "at", "bt"),
+            rsp(6_000, 200, 3, "BYE", "z9hG4bK-b", ""),
+        ];
+        assert!(hits(&UnknownDialog481, &msgs).is_empty(), "{:?}", eval(&UnknownDialog481, &msgs));
     }
 
     // ── NoByeOutsideOrEarlyDialog (RFC 3261 §15) ────────────────────────────

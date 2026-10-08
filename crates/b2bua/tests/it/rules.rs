@@ -887,6 +887,46 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
     );
 }
 
+/// A caller's BYE on the early dialog this stack already ended with a non-2xx
+/// final to her INVITE (RFC 3261 §12.3; here the 487 answering her CANCEL)
+/// names no dialog: it draws 481 (§12.2.2) and nothing else, whether the
+/// call is still terminating or already terminated.
+#[test]
+fn bye_on_an_early_a_dialog_ended_by_a_non_2xx_final_draws_481_alone() {
+    let rules = default_rules();
+    for state in [CallModelState::Terminating, CallModelState::Terminated] {
+        let mut call = call_with_early_a_dialog("early");
+        call.a_leg.invite_final_sent = Some(487);
+        call.a_leg.state = LegState::Terminated;
+        call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
+        call.state = state;
+        let bye = in_dialog_request(sip_message::Method::Bye);
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(bye)),
+            src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 0,
+            config: &B2buaConfig::default(),
+            discharged: None,
+        };
+        let ranked = pick_ranked(&rules, &call, &ctx);
+        let top = ranked.first().unwrap_or_else(|| panic!("{state:?}: a rule answers the BYE"));
+        let actions = (top.handle)(&ctx).expect("the rule handles the BYE").actions;
+        assert!(
+            matches!(actions.as_slice(), [RuleAction::Respond { status: 481, .. }]),
+            "{state:?}: `{}` answers 481 and touches nothing else, got {actions:?}",
+            top.id,
+        );
+    }
+}
+
 /// A BYE from a leg this stack already ended (Terminated, its own BYE sent)
 /// on a call that stays Active selects `resolve-ended-leg-bye`, never
 /// `relay-bye`: the leg is no longer a party of the session, so its crossing
