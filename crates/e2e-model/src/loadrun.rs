@@ -80,7 +80,8 @@ pub struct LoadRunMeta {
 #[serde(rename_all = "camelCase")]
 pub struct CountRow {
     pub scenario: String,
-    /// The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …).
+    /// The result class label (`ok`, `expected_reject`, `timeout`, `status_503`,
+    /// `check_fail`, …).
     pub class: String,
     /// The bounded case discriminator refining the class into its distinct
     /// failure modes (RFC rule id(s), failed check id(s), `agent@phase`).
@@ -90,7 +91,8 @@ pub struct CountRow {
     /// Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).
     pub chaos: String,
     pub count: u64,
-    /// `true` iff `class == "ok"` (drives the OK-green / NOK-red split).
+    /// `true` iff the class is no failure: `ok`, or `expected_reject` (the
+    /// shape's declared reject). Drives the OK-green / NOK-red split.
     pub ok: bool,
 }
 

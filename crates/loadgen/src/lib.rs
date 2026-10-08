@@ -34,7 +34,13 @@
 //!   (the shipped bin passes `with_defaults()`).
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
-//! - [`class`] — result classification.
+//! - `hist` — the fixed-bucket histogram behind every latency the report
+//!   holds: whole calls and checkpoints, and SIP round trips.
+//! - [`class`] — result classification, the shape's expected reject a
+//!   non-failure class of its own.
+//! - [`mux`] — the multiplexed SIP transport; its `rtt` module times each SIP
+//!   exchange that holds no scripted timer (request → 100 / 18x / final,
+//!   2xx → ACK) into `loadgen_rtt_seconds{scenario,exchange}`.
 //!
 //! [`Agent`]: scenario_harness::Agent
 
@@ -45,6 +51,7 @@ pub mod chaos;
 pub mod class;
 pub mod ctx;
 pub mod driver;
+mod hist;
 pub mod mux;
 pub mod rate;
 pub mod report;
@@ -63,7 +70,7 @@ pub use driver::{
 };
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
-    EndpointSpec, LegInfo, LegPicker, MuxCore, Role, TargetedDrop,
+    EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};

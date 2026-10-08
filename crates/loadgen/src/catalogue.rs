@@ -1,23 +1,25 @@
 //! The load generator's catalogued metric families: completed calls and
-//! their latency per scenario, the demux's canaries, the simulated loss, the
+//! their latency per scenario, the SIP round trips per scenario and exchange,
+//! the demux's canaries, the simulated loss, the
 //! chaos markers, the offered rate and the process's RSS. [`CATALOGUE`] lists
 //! them in `/metrics` order.
 
 use metric_catalogue::{Catalogue, Dim, Family, Labels};
 use sip_message::method::Method;
 
-use crate::mux::OrphanReason;
+use crate::mux::{Exchange, OrphanReason};
 
 /// A scenario of the run's mix: none declared here; the reporter writes the
 /// mix's scenarios from the start.
 pub const SCENARIO: Dim = Dim::new("scenario", &[]);
 
 /// A call's result class; a wrong status is `status_<code>`, under its own
-/// series.
+/// series; the shape's expected reject is `expected_reject`.
 pub const CLASS: Dim = Dim::new(
     "class",
     &[
         "ok",
+        "expected_reject",
         "timeout",
         "wrong_method",
         "unexpected",
@@ -33,11 +35,13 @@ pub const CLASS: Dim = Dim::new(
 /// Whether a chaos marker fell within the call's lifetime.
 pub const CHAOS: Dim = Dim::new("chaos", &["clear", "near"]);
 
-/// The latency quantiles published as gauges.
-pub const QUANTILE: Dim = Dim::new("quantile", &["0.5", "0.9", "0.99"]);
-
 /// A scenario's named checkpoint: each one observed gets its own series.
 pub const CHECKPOINT: Dim = Dim::new("checkpoint", &[]);
+
+const EXCHANGE_VALUES: [&str; 15] = metric_catalogue::label_values!(Exchange::ALL, Exchange::label);
+/// A timed SIP exchange, indexed like `Exchange::ALL`; each one observed for
+/// a scenario gets its own series.
+pub const EXCHANGE: Dim = Dim::new("exchange", &EXCHANGE_VALUES);
 
 const ORPHAN_REASON_VALUES: [&str; 7] =
     metric_catalogue::label_values!(OrphanReason::ALL, OrphanReason::label);
@@ -89,20 +93,6 @@ pub const RINGING_RECEIVED: Family = Family::counter(
     "Of those, calls whose caller received the 18x ringing provisional.",
 );
 
-pub const E2E_SECONDS: Family = Family::gauge(
-    "loadgen_e2e_seconds",
-    Labels::Product(&[SCENARIO, QUANTILE]),
-    "End-to-end call latency quantiles.",
-)
-.semi_open();
-
-pub const CHECKPOINT_SECONDS: Family = Family::gauge(
-    "loadgen_checkpoint_seconds",
-    Labels::Product(&[SCENARIO, CHECKPOINT, QUANTILE]),
-    "Named-checkpoint latency quantiles.",
-)
-.semi_open();
-
 pub const E2E_LATENCY_SECONDS: Family = Family::histogram(
     "loadgen_e2e_latency_seconds",
     Labels::Product(&[SCENARIO]),
@@ -114,6 +104,13 @@ pub const CHECKPOINT_LATENCY_SECONDS: Family = Family::histogram(
     "loadgen_checkpoint_latency_seconds",
     Labels::Product(&[SCENARIO, CHECKPOINT]),
     "Named-checkpoint latency.",
+)
+.semi_open();
+
+pub const RTT_SECONDS: Family = Family::histogram(
+    "loadgen_rtt_seconds",
+    Labels::Product(&[SCENARIO, EXCHANGE]),
+    "SIP round trip of one exchange, from the first transmission (no scripted timer inside).",
 )
 .semi_open();
 
@@ -219,10 +216,9 @@ pub const CATALOGUE: Catalogue = Catalogue {
         STARTED,
         RINGING_EXPECTED,
         RINGING_RECEIVED,
-        E2E_SECONDS,
-        CHECKPOINT_SECONDS,
         E2E_LATENCY_SECONDS,
         CHECKPOINT_LATENCY_SECONDS,
+        RTT_SECONDS,
         MUX_ORPHAN,
         MUX_ORPHAN_OVERFLOW,
         MUX_REGISTRY_SIZE,
@@ -254,7 +250,8 @@ mod tests {
     use crate::report::{Reporter, ReporterCfg};
 
     /// The body holds its catalogue exactly: before any call, the run's
-    /// scenarios are already written.
+    /// scenarios are already written; a measured round trip is written under
+    /// its scenario and exchange.
     #[tokio::test]
     #[ignore = "slow lane: loadgen"]
     async fn the_body_holds_its_catalogue_exactly() {
@@ -272,6 +269,7 @@ mod tests {
         .unwrap();
         let reporter = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
         reporter.declare_scenarios(["basic_call"]);
+        reporter.record_rtt("basic_call", Exchange::Invite100, Duration::from_millis(2));
         let chaos = ChaosLog::new(sip_clock::Clock::test_at(0));
         let text = crate::app::metrics_body(&reporter, &core, &chaos, &RateHandle::new(5.0));
         if let Err(mismatches) = CATALOGUE.check(&text) {
@@ -281,8 +279,12 @@ mod tests {
             "loadgen_calls_total{scenario=\"basic_call\",class=\"ok\",chaos=\"clear\"} 0\n"
         ));
         assert!(
-            text.contains("loadgen_e2e_seconds{scenario=\"basic_call\",quantile=\"0.5\"} NaN\n"),
-            "a quantile of no call is no latency: {text}"
+            text.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 0\n"),
+            "a declared scenario's call latency is written from the start: {text}"
         );
+        assert!(!text.contains("loadgen_e2e_seconds"), "no lifetime quantile gauge: {text}");
+        assert!(text.contains(
+            "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"invite_100\"} 1\n"
+        ));
     }
 }

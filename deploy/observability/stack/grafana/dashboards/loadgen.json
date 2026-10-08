@@ -63,10 +63,10 @@
       "id": 2,
       "type": "stat",
       "title": "In-flight calls",
-      "description": "Live concurrent calls held by the load generator.",
+      "description": "Live concurrent calls summed over every loadgen. At a steady rate in-flight \u2248 offered cps \u00d7 mean call hold (Little's law): a refused call lasts milliseconds, so in-flight falls as refusals rise at constant cps.",
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 0,
         "y": 1
       },
@@ -76,7 +76,7 @@
       },
       "targets": [
         {
-          "expr": "max(loadgen_inflight)",
+          "expr": "sum(loadgen_inflight)",
           "refId": "A",
           "legendFormat": "inflight"
         }
@@ -118,8 +118,8 @@
       "description": "Calls/s the generator is starting (target ~20).",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 4,
+        "w": 3,
+        "x": 3,
         "y": 1
       },
       "datasource": {
@@ -165,14 +165,14 @@
       }
     },
     {
-      "id": 4,
+      "id": 9,
       "type": "stat",
-      "title": "OK ratio (5m)",
-      "description": "Fraction of completed calls classified ok over the last 5 min.",
+      "title": "Mean call hold (s, 1m)",
+      "description": "Mean completed-call duration from the end-to-end histogram (sum / count). Dominated by the scripted ring and talk; with the offered rate it explains in-flight.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 8,
+        "w": 3,
+        "x": 6,
         "y": 1
       },
       "datasource": {
@@ -181,7 +181,60 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(loadgen_calls_total{class=\"ok\"}[5m])) / clamp_min(sum(increase(loadgen_calls_total[5m])),1)",
+          "expr": "sum(rate(loadgen_e2e_latency_seconds_sum[1m])) / sum(rate(loadgen_e2e_latency_seconds_count[1m]))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Success ratio (admitted, 5m)",
+      "description": "ok over the completed calls the SUT admitted: completed minus the shapes' expected rejects (class expected_reject) minus the 503 refusals (shown apart).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "(sum(increase(loadgen_calls_total{class=\"ok\"}[5m])) or vector(0)) / clamp_min(sum(increase(loadgen_calls_total[5m])) - (sum(increase(loadgen_calls_total{class=\"expected_reject\"}[5m])) or vector(0)) - (sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)), 1)",
           "refId": "A",
           "legendFormat": ""
         }
@@ -218,14 +271,119 @@
       }
     },
     {
+      "id": 8,
+      "type": "stat",
+      "title": "Refused 503 ratio (5m)",
+      "description": "Completed calls refused with 503 over all completed calls. A ramp past capacity refuses on purpose; a 503 below capacity is a defect.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "(sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) / clamp_min(sum(increase(loadgen_calls_total[5m])), 1)",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Shed (max-in-flight)",
+      "description": "Calls dropped at the max-in-flight cap (offered load the generator itself shed \u2014 raise --max-in-flight if non-zero).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vm"
+      },
+      "targets": [
+        {
+          "expr": "sum(loadgen_shed_total)",
+          "refId": "A",
+          "legendFormat": "shed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
       "id": 5,
       "type": "stat",
       "title": "Process RSS (memory canary)",
       "description": "Load generator resident memory. Watch this with full recording on \u2014 a steady climb at flat in-flight means recording-memory growth.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 12,
+        "w": 3,
+        "x": 18,
         "y": 1
       },
       "datasource": {
@@ -274,11 +432,11 @@
       "id": 6,
       "type": "stat",
       "title": "Mux registry (leak canary)",
-      "description": "Live demux entries. Should track in-flight and return toward 0; a monotonic climb is a per-call leak.",
+      "description": "Live demux entries summed over every loadgen; tracks in-flight, a steady rise above it is a leak.",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
+        "w": 3,
+        "x": 21,
         "y": 1
       },
       "datasource": {
@@ -287,61 +445,9 @@
       },
       "targets": [
         {
-          "expr": "max(loadgen_mux_registry_size)",
+          "expr": "sum(loadgen_mux_registry_size)",
           "refId": "A",
           "legendFormat": "registry"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area"
-      }
-    },
-    {
-      "id": 7,
-      "type": "stat",
-      "title": "Shed (max-in-flight)",
-      "description": "Calls dropped at the max-in-flight cap (offered load the generator itself shed \u2014 raise --max-in-flight if non-zero).",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "vm"
-      },
-      "targets": [
-        {
-          "expr": "sum(loadgen_shed_total)",
-          "refId": "A",
-          "legendFormat": "shed"
         }
       ],
       "fieldConfig": {
@@ -378,7 +484,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Completed calls/s by result class",
-      "description": "Completion rate split by result class (ok / status_503 / timeout / unexpected / panic / rfc_audit_fail / \u2026).",
+      "description": "Completion rate split by result class (ok / status_503 / timeout / unexpected / panic / rfc_audit_fail / \u2026). expected_reject is the shape's declared reject (an outcome, not a failure); status_503 a SUT refusal.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -481,8 +587,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "End-to-end latency quantiles (s)",
-      "description": "Per-scenario end-to-end call latency. NOTE: basic/reinvite/long_call include the realistic ring+talk+hold dwell, so e2e is dominated by those, not the SUT.",
+      "title": "SIP round trip by exchange, p50 / p99 (s)",
+      "description": "Windowed quantiles of loadgen_rtt_seconds over every scenario: request first sent \u2192 first 100 / first 18x (INVITE) / final (non-INVITE), and UAS 2xx first sent \u2192 ACK. No scripted timer is inside these exchanges, so they measure the SUT.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -495,19 +601,14 @@
       },
       "targets": [
         {
-          "expr": "max by (scenario)(loadgen_e2e_seconds{quantile=\"0.5\"})",
+          "expr": "histogram_quantile(0.5, sum by (le, exchange)(rate(loadgen_rtt_seconds_bucket[1m])))",
           "refId": "A",
-          "legendFormat": "{{scenario}} p50"
+          "legendFormat": "{{exchange}} p50"
         },
         {
-          "expr": "max by (scenario)(loadgen_e2e_seconds{quantile=\"0.9\"})",
+          "expr": "histogram_quantile(0.99, sum by (le, exchange)(rate(loadgen_rtt_seconds_bucket[1m])))",
           "refId": "B",
-          "legendFormat": "{{scenario}} p90"
-        },
-        {
-          "expr": "max by (scenario)(loadgen_e2e_seconds{quantile=\"0.99\"})",
-          "refId": "C",
-          "legendFormat": "{{scenario}} p99"
+          "legendFormat": "{{exchange}} p99"
         }
       ],
       "fieldConfig": {
@@ -539,8 +640,8 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Setup checkpoint latency p90 (s)",
-      "description": "Named checkpoint latencies (time_to_200, time_to_reinvite_200, time_to_options_200, time_to_202, time_to_charlie_200) \u2014 the SUT-facing signal independent of dwell.",
+      "title": "SIP round trip p90 by scenario \u00d7 exchange (s)",
+      "description": "Windowed p90 of loadgen_rtt_seconds per scenario and exchange (1m rate).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -553,9 +654,9 @@
       },
       "targets": [
         {
-          "expr": "max by (scenario,checkpoint)(loadgen_checkpoint_seconds{quantile=\"0.9\"})",
+          "expr": "histogram_quantile(0.9, sum by (le, scenario, exchange)(rate(loadgen_rtt_seconds_bucket[1m])))",
           "refId": "A",
-          "legendFormat": "{{scenario}}/{{checkpoint}}"
+          "legendFormat": "{{scenario}} {{exchange}}"
         }
       ],
       "fieldConfig": {
@@ -649,12 +750,12 @@
       },
       "targets": [
         {
-          "expr": "max(loadgen_mux_registry_size)",
+          "expr": "sum(loadgen_mux_registry_size)",
           "refId": "A",
           "legendFormat": "registry_size"
         },
         {
-          "expr": "max(loadgen_inflight)",
+          "expr": "sum(loadgen_inflight)",
           "refId": "B",
           "legendFormat": "inflight"
         },

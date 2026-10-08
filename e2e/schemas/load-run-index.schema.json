@@ -175,7 +175,7 @@
           "type": "string"
         },
         "class": {
-          "description": "The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …).",
+          "description": "The result class label (`ok`, `expected_reject`, `timeout`, `status_503`,\n`check_fail`, …).",
           "type": "string"
         },
         "count": {
@@ -184,7 +184,7 @@
           "minimum": 0
         },
         "ok": {
-          "description": "`true` iff `class == \"ok\"` (drives the OK-green / NOK-red split).",
+          "description": "`true` iff the class is no failure: `ok`, or `expected_reject` (the\nshape's declared reject). Drives the OK-green / NOK-red split.",
           "type": "boolean"
         },
         "scenario": {

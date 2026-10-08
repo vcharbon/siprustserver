@@ -37,14 +37,14 @@ export interface LoadRunMeta extends Schema.Schema.Type<typeof LoadRunMeta> {}
 /** One `(scenario, class, case, chaos)` completed-call count. */
 export const CountRow = Schema.Struct({
   scenario: Schema.String,
-  /** The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …). */
+  /** The result class label (`ok`, `expected_reject`, `timeout`, `status_503`, `check_fail`, …). */
   class: Schema.String,
   /** The bounded case discriminator refining the class. Empty = un-refined. */
   case: defaulted(Schema.String, ""),
   /** Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral). */
   chaos: Schema.String,
   count: Schema.Int,
-  /** `true` iff `class == "ok"`. */
+  /** `true` iff the class is no failure: `ok` or `expected_reject`. */
   ok: Schema.Boolean
 })
 export interface CountRow extends Schema.Schema.Type<typeof CountRow> {}

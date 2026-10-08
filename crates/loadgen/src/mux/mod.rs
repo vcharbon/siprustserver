@@ -35,6 +35,8 @@
 //!   [`sip_net::RandomLoss`] + the deterministic, test-owned [`TargetedDrop`].
 //! - `retransmit` — opt-in per-call SIP transaction engine (Timer A/E/G)
 //!   recovering modeled loss.
+//! - `rtt` — per-endpoint SIP round-trip timing (request → 100 / 18x /
+//!   final, 2xx → ACK), on whenever the call's network has an [`RttSink`].
 //! - `stats` — process-wide counters + Prometheus rendering.
 //!
 //! # Key lifetime (shared sockets, reused keys)
@@ -62,6 +64,7 @@ mod demux;
 mod endpoint;
 mod loss;
 mod retransmit;
+mod rtt;
 mod stats;
 
 pub use correlation::Correlation;
@@ -70,12 +73,14 @@ pub use endpoint::{CallRouting, MuxNetwork};
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
 pub use loss::{DropDir, TargetedDrop};
 pub use retransmit::RELEASE_HOLD;
+pub use rtt::{Exchange, RttSink};
 pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 pub(crate) use stats::OrphanReason;
 
 use loss::DropModel;
 use retransmit::CallTxns;
+use rtt::RttTracker;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -130,8 +135,9 @@ pub(in crate::mux) enum Key {
 }
 
 /// Everything the inbound route path needs to hand a datagram to one call: its
-/// inbox, its loss model (applied above the retransmit engine), and its
-/// optional retransmit engine (present iff `--auto-retransmit` is on for the call).
+/// inbox, its loss model (applied above the retransmit engine), its optional
+/// retransmit engine (present iff `--auto-retransmit` is on for the call) and
+/// its optional round-trip tracker (present iff the call has an [`RttSink`]).
 #[derive(Clone)]
 pub(in crate::mux) struct Delivery {
     /// Whether the dialog is a caller's own (its Call-ID minted by the caller).
@@ -139,6 +145,7 @@ pub(in crate::mux) struct Delivery {
     pub(in crate::mux) queue: Arc<PacketQueue>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
+    pub(in crate::mux) rtt: Option<Arc<RttTracker>>,
 }
 
 /// One receiver bound on a socket: an inbox + its label (the agent name a
@@ -150,6 +157,7 @@ pub(in crate::mux) struct ReceiverEntry {
     pub(in crate::mux) keyset: Arc<Mutex<Vec<Key>>>,
     pub(in crate::mux) drop: Arc<DropModel>,
     pub(in crate::mux) txns: Option<Arc<CallTxns>>,
+    pub(in crate::mux) rtt: Option<Arc<RttTracker>>,
     /// The scenario-declared claim this receiver holds over its inbound
     /// initial INVITE (claim-mode slots only — all receivers of a slot either
     /// carry a claim or none do, enforced at bind).
@@ -487,6 +495,7 @@ impl MuxCore {
             retransmit,
             drop_seed: AtomicU64::new(seed | 1),
             drop_nth,
+            rtt_sink: None,
         }
     }
 }

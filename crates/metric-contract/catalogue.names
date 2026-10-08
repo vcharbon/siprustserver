@@ -310,10 +310,9 @@ loadgen loadgen_inflight gauge fixed {}
 loadgen loadgen_started_total counter fixed {}
 loadgen loadgen_ringing_expected_total counter fixed {}
 loadgen loadgen_ringing_received_total counter fixed {}
-loadgen loadgen_e2e_seconds gauge semi_open {scenario,quantile}
-loadgen loadgen_checkpoint_seconds gauge semi_open {scenario,checkpoint,quantile}
 loadgen loadgen_e2e_latency_seconds histogram semi_open {scenario}
 loadgen loadgen_checkpoint_latency_seconds histogram semi_open {scenario,checkpoint}
+loadgen loadgen_rtt_seconds histogram semi_open {scenario,exchange}
 loadgen loadgen_mux_orphan_total counter capped:256 {reason,method}
 loadgen loadgen_mux_orphan_overflow_total counter fixed {}
 loadgen loadgen_mux_registry_size gauge fixed {}

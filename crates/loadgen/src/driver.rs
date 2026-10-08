@@ -151,6 +151,9 @@ pub struct MixEntry {
     pub legs: &'static [LegSpec],
     /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
     pub emergency: bool,
+    /// The reject status the shape expects ([`ShapeDescriptor::expected_reject`]):
+    /// a call ending on it classes `expected_reject`, a non-failure.
+    pub expected_reject: Option<u16>,
     /// **Deferred-by-design auth adapter** (see
     /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
     /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
@@ -168,6 +171,7 @@ impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
             case: None,
             legs: LegSpec::historic(false, false),
             emergency: false,
+            expected_reject: None,
             challenge_responder: None,
         }
     }
@@ -191,6 +195,7 @@ impl MixEntry {
             case: None,
             legs: shape.callee_legs(),
             emergency: shape.emergency,
+            expected_reject: shape.expected_reject,
             challenge_responder: None,
         })
     }
@@ -413,7 +418,16 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
+    let MixEntry {
+        id,
+        body,
+        case,
+        legs,
+        emergency,
+        expected_reject,
+        challenge_responder,
+        weight: _,
+    } = entry;
 
     let from_user = transport.correlation.is_from_user();
     let record = reporter.should_record(id);
@@ -451,13 +465,19 @@ async fn run_one(
         // datagrams). The loss RNG is seeded off the call seed so a run is
         // reproducible; 0 rate is a no-op, and retransmit off leaves the
         // transport untouched.
-        let mux_net = transport.core.network_tuned(
-            call_routing(&transport, legs, &token),
-            tuning.drop_rate,
-            tuning.retransmit,
-            next_seed(seed_base),
-            tuning.drop_nth,
-        );
+        let rtt_reporter = reporter.clone();
+        let mux_net = transport
+            .core
+            .network_tuned(
+                call_routing(&transport, legs, &token),
+                tuning.drop_rate,
+                tuning.retransmit,
+                next_seed(seed_base),
+                tuning.drop_nth,
+            )
+            .with_rtt_sink(Arc::new(move |exchange, rtt| {
+                rtt_reporter.record_rtt(id, exchange, rtt)
+            }));
         let binder = AgentBinder::mux(
             Arc::new(mux_net),
             transport.clock.clone(),
@@ -575,7 +595,7 @@ async fn run_one(
                 CallOutcome::RfcAuditFail(wo.findings)
             }
         }
-        Ok(Err(e)) => CallOutcome::Step(e),
+        Ok(Err(e)) => CallOutcome::Step(e).expecting(expected_reject),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
 
