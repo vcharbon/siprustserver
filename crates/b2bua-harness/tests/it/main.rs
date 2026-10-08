@@ -140,6 +140,7 @@ mod relayed_provisional_withhold;
 mod relayed_retry_targets;
 mod release_event;
 mod release_reason;
+mod reliable_1xx_crossing_cancel;
 mod reliable_1xx_giveup_in_dialog;
 mod reliable_provisional_repeat_prack;
 mod reoffer_late_events_of_the_first_call;

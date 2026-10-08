@@ -573,4 +573,23 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Authored,
         });
     }
+
+    /// PRACK every reliable provisional `leg_id`'s responder sent on the INVITE
+    /// `invite_cseq` that was relayed and is still unacknowledged, as this
+    /// stack ends that INVITE with a CANCEL: the party it was shown to will
+    /// not PRACK it any more, and the CANCEL does not end the transaction, so
+    /// this stack — the leg's UAC — owes the acknowledgement (RFC 3262 §4).
+    /// `None` reads every INVITE of the leg (a leg still ringing has one).
+    pub(super) fn prack_relayed_unacknowledged(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        invite_cseq: Option<i64>,
+    ) {
+        let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, invite_cseq);
+        for (b_tag, b_cseq, b_rseq, responder_sdp) in owed {
+            self.send_prack_to_leg(call, fx, leg_id, b_rseq, b_cseq, &b_tag, responder_sdp);
+        }
+    }
 }

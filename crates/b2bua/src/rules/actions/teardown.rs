@@ -172,6 +172,7 @@ impl ActionExecutor<'_> {
                         }
                     } else {
                         let relayed = relayed(&Method::Cancel, &id);
+                        self.prack_relayed_unacknowledged(call, fx, &id, None);
                         if let Some(e) = self.cancel_to_leg(call, &id, &relayed.headers) {
                             fx.outbound.push(e);
                         }
@@ -246,6 +247,7 @@ impl ActionExecutor<'_> {
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
+                self.prack_relayed_unacknowledged(call, fx, leg_id, None);
                 if let Some(e) = self.cancel_to_leg(call, leg_id, &stated) {
                     fx.outbound.push(e);
                 }
@@ -277,6 +279,7 @@ impl ActionExecutor<'_> {
         // re-offers a leg being cancelled.
         self.retire(call, fx, Scope::Leg(leg_id));
         let situation = RelaySituation::request(&Method::Cancel, relay::toward_leg(leg_id));
+        self.prack_relayed_unacknowledged(call, fx, leg_id, None);
         if let Some(e) = self.cancel_to_leg(call, leg_id, &relayed_teardown(ctx, situation).headers)
         {
             fx.outbound.push(e);
@@ -452,6 +455,7 @@ impl ActionExecutor<'_> {
         outbound_cseq: i64,
         cancel: PendingReinviteCancel,
     ) {
+        self.prack_relayed_unacknowledged(call, fx, leg_id, Some(outbound_cseq));
         fx.outbound.push(cancel.effect);
         *call = call::helpers::cancel_pending_request(
             call.clone(),

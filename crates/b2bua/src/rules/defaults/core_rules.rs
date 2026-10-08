@@ -15,7 +15,7 @@ use sip_message::header::RAck;
 use sip_message::Method;
 use sip_txn::TimeoutKind as TxnTimeoutKind;
 
-use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
+use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent, owed_prack};
 
 use b2bua_sdk::header_update::final_adds;
 use b2bua_sdk::model::{
@@ -296,10 +296,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A provisional (1xx) from a callee whose leg is being CANCELLed: the
         // caller's INVITE server transaction has already completed (487 on the
         // CANCEL), so relaying it would put a new 1xx after that final — forbidden
-        // (RFC 3261 §13.3.1.1 / §17.2.1). Absorb it; the crossing 2xx/487 is owned
-        // by `cancel-200-crossing` / `resolve-cancel-response`. The 1xx sibling of
-        // `cancel-200-crossing`; outranks `relay-provisional`, which is
-        // disposition-blind.
+        // (RFC 3261 §13.3.1.1 / §17.2.1). Absorbed; a reliable one is still
+        // PRACKed, since the CANCEL does not end the INVITE transaction (RFC 3262
+        // §4). The crossing 2xx/487 is owned by `cancel-200-crossing` /
+        // `resolve-cancel-response`. The 1xx sibling of `cancel-200-crossing`;
+        // outranks `relay-provisional`, which is disposition-blind.
         rule(
             "absorb-1xx-crossing-cancel",
             &["relay-provisional"],
@@ -308,7 +309,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .status_class(1)
                 .leg_disposition(LegDisposition::Cancelling)
                 .direction(Direction::FromB),
-            |_ctx| ok(vec![]),
+            |ctx| ok(owed_prack(ctx).into_iter().collect()),
         ),
         rule(
             "resolve-cancel-response",

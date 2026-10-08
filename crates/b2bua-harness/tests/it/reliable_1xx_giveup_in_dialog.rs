@@ -145,6 +145,9 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     // with it — transaction-scoped (RFC 3261 §9.1), leg state untouched.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     reinv.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
 
@@ -241,6 +244,9 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     // toward alice ends with it.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     reinv.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    alice.receive("PRACK").await.respond(200, "OK").await;
     alice.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
 

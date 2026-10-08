@@ -77,10 +77,11 @@ pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_curs
 pub use reliable::{
     admits_reliable_provisional, advance_reliable_ladder, assign_a_rseq, b_rseq_for,
     clear_all_reliable_provisional_emissions, clear_reliable_provisional_emission, leg_shown,
-    owns_rseq_numbering, pending_invite_answered_by, pracked_provisional,
+    owns_rseq_numbering, pending_invite_answered_by, pracked_provisional, provisional_acknowledged,
     record_pracked_provisional, record_reliable_provisional_emission,
     reliable_provisional_emission, reliable_provisional_relayed, retire_a_rseq,
-    starts_reliable_ladder, unacknowledgeable_rack, RAckTokens,
+    starts_reliable_ladder, unacknowledgeable_rack, unacknowledged_relayed_provisionals,
+    RAckTokens,
 };
 pub use retired::{release_retired, retire_pending, retired_count, retired_pending, take_retired};
 pub use services::{

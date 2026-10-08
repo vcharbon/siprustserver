@@ -237,6 +237,44 @@ pub fn pracked_provisional(
     })
 }
 
+/// Whether the responder's `(leg_id, remote_tag, invite_cseq, rseq)` reliable
+/// provisional has been acknowledged toward it (RFC 3262 §4): PRACKed by this
+/// stack itself, or relayed and PRACKed by the party it was shown to.
+pub fn provisional_acknowledged(
+    call: &Call,
+    leg_id: &str,
+    remote_tag: &str,
+    invite_cseq: i64,
+    rseq: i64,
+) -> bool {
+    pracked_provisional(call, leg_id, remote_tag, invite_cseq, rseq)
+        || call.reliable_provisionals.iter().any(|r| {
+            r.acknowledged
+                && r.b_leg_id == leg_id
+                && r.b_tag == remote_tag
+                && r.b_cseq == invite_cseq
+                && r.b_rseq == rseq
+        })
+}
+
+/// The reliable provisionals `leg_id`'s responder sent on the INVITE
+/// `invite_cseq` that were relayed and still await a PRACK from anyone — the
+/// party shown them has not acknowledged them, nor has this stack — as
+/// `(b_tag, b_cseq, b_rseq, responder_sdp)`. `None` reads every INVITE of the leg: a
+/// leg still Trying or Early has only its initial one.
+pub fn unacknowledged_relayed_provisionals(
+    call: &Call,
+    leg_id: &str,
+    invite_cseq: Option<i64>,
+) -> Vec<(String, i64, i64, bool)> {
+    call.reliable_provisionals
+        .iter()
+        .filter(|r| r.b_leg_id == leg_id && invite_cseq.is_none_or(|c| c == r.b_cseq))
+        .filter(|r| !provisional_acknowledged(call, leg_id, &r.b_tag, r.b_cseq, r.b_rseq))
+        .map(|r| (r.b_tag.clone(), r.b_cseq, r.b_rseq, r.responder_sdp))
+        .collect()
+}
+
 /// The relayed INVITE transaction, still pending toward its target, that the
 /// provisional shown as `a_rseq` in the `a_tag` dialog answers: the target leg
 /// and the CSeq the request carries there. `None` for the initial INVITE (no

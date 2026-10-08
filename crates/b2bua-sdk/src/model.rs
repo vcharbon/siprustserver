@@ -1216,6 +1216,18 @@ impl<'a> RuleCall<'a> {
     ) -> bool {
         call::helpers::pracked_provisional(self.0, leg_id, remote_tag, invite_cseq, rseq)
     }
+    /// Whether the responder's `(leg_id, remote_tag, invite_cseq, rseq)`
+    /// reliable provisional was already acknowledged toward it — by this
+    /// stack, or by the party it was relayed to (RFC 3262 §4).
+    pub fn acknowledged_provisional(
+        &self,
+        leg_id: &str,
+        remote_tag: &str,
+        invite_cseq: i64,
+        rseq: i64,
+    ) -> bool {
+        call::helpers::provisional_acknowledged(self.0, leg_id, remote_tag, invite_cseq, rseq)
+    }
     /// The relayed INVITE still pending toward its target — `(leg_id,
     /// outbound_cseq)` there — that the provisional shown as `a_rseq` in the
     /// `a_tag` dialog answers; `None` for the initial INVITE or a transaction

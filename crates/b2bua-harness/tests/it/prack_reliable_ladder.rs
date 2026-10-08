@@ -340,6 +340,9 @@ async fn the_ladder_gives_up_at_64_t1() {
     // her — on a B2BUA the reject is a call teardown, not a timer's last line.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     call.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
 
@@ -547,6 +550,9 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
 

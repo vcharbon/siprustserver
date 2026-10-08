@@ -497,6 +497,31 @@ fn a_stack_pracked_provisional_is_acknowledged_once() {
     assert!(!pracked_provisional(&call, "b-1", "bf2", 2, 4711), "another fork's provisional");
 }
 
+/// A relayed reliable provisional is owed its PRACK until someone sends one:
+/// the party shown it (its entry acknowledged) or this stack itself. Only the
+/// leg's own entries on the INVITE named are read (RFC 3262 §4).
+#[test]
+fn a_relayed_provisional_stays_owed_until_either_side_acknowledges_it() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, true);
+    let (call, _) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, false, false);
+    let (call, _) = assign_a_rseq(call, "a2", 1, "b-2", "bf2", 1, 4711, 9_000, false, false);
+    assert_eq!(
+        unacknowledged_relayed_provisionals(&call, "b-1", None),
+        vec![("bf1".to_string(), 1, 4711, true), ("bf1".to_string(), 1, 4712, false)],
+    );
+    assert!(
+        unacknowledged_relayed_provisionals(&call, "b-1", Some(2)).is_empty(),
+        "another INVITE"
+    );
+    let call = retire_a_rseq(call, "a1", a1);
+    assert!(provisional_acknowledged(&call, "b-1", "bf1", 1, 4711), "the caller's PRACK");
+    let (call, _) = record_pracked_provisional(call, "b-1", "bf1", 1, 4712, false);
+    assert!(provisional_acknowledged(&call, "b-1", "bf1", 1, 4712), "this stack's PRACK");
+    assert!(unacknowledged_relayed_provisionals(&call, "b-1", None).is_empty());
+    assert_eq!(unacknowledged_relayed_provisionals(&call, "b-2", Some(1)).len(), 1);
+}
+
 /// Forks mirrored as DISTINCT a-facing early dialogs each carry their own
 /// ladder (RFC 3262 §4, errata 4603/4604), so interleaving them never shows
 /// either caller dialog a gap — the failure a single call-wide ladder produces.
