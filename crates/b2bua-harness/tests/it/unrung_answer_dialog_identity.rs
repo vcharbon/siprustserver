@@ -150,3 +150,138 @@ async fn a_bye_on_the_abandoned_early_tag_draws_481() {
     settle_until(|| s.b2bua.is_reaped()).await;
     let _report = s.finish().await;
 }
+
+/// alice calls; bob rings on each of `rung` in turn, then answers on `winner`
+/// (rung or not). Returns alice's confirmed dialog, the a-facing tag of every
+/// branch she was shown, and the 2xx's To-tag, once the ACK reached bob.
+async fn ring_then_answer(
+    s: &B2buaScene,
+    rung: &[&str],
+    winner: &str,
+) -> (Dialog, Vec<String>, String) {
+    let mut call: ClientInvite =
+        s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
+    let mut uas = s.bob.receive("INVITE").await;
+    let mut shown = Vec::new();
+    for fork in rung {
+        uas.respond(180, "Ringing").with_to_tag(fork).await;
+        let ringing = call.expect(180).await;
+        shown.push(ringing.to().tag().expect("the 180 carries an a-facing tag").to_string());
+    }
+    uas.respond(200, "OK").with_to_tag(winner).with_sdp(ANSWER_SDP).await;
+    let ok = call.expect(200).await;
+    let answer_tag = ok.to().tag().expect("the 2xx carries an a-facing tag").to_string();
+    let dialog = call.ack().await;
+    let ack = s.bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some(winner), "the ACK rides the answering branch");
+    (dialog, shown, answer_tag)
+}
+
+/// Once one branch answered, every other early dialog the caller was shown
+/// names no dialog the B2BUA holds (§12.2.2): a `method` request under each
+/// draws `481`, nothing reaches the callee, and the answered call stays up.
+/// One request per abandoned dialog: its `481` ends that dialog at the caller
+/// (§12.2.1.2), so nothing follows it there.
+async fn every_other_shown_tag_draws_481(
+    name: &str,
+    rung: &[&str],
+    winner: &str,
+    method: InDialogMethod,
+) {
+    let s = B2buaScene::new(name).await;
+    let (mut dialog, shown, answer_tag) = ring_then_answer(&s, rung, winner).await;
+    let others: Vec<&String> = shown.iter().filter(|t| **t != answer_tag).collect();
+    assert!(!others.is_empty(), "the scenario shows the caller a branch that did not answer");
+    for tag in others {
+        // A request in another dialog spends nothing of this dialog's CSeq
+        // space (§12.2.1.1): the counter is put back once it has left.
+        let cseq_before = dialog.local_cseq();
+        let mut stale = dialog.send_request(method).with_to_tag(tag).send().await;
+        dialog.set_local_cseq(cseq_before);
+        stale.expect(481).await;
+    }
+    s.h.advance(Duration::from_millis(500)).await;
+    for wire in ["BYE", "UPDATE"] {
+        assert!(
+            s.bob.try_receive_tolerating(wire, &[]).await.is_none(),
+            "a {wire} naming an abandoned early dialog does not reach the callee",
+        );
+    }
+    assert_eq!(s.b2bua.metrics().removals_total(), 0, "the answered call stays up");
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    let _report = s.finish().await;
+}
+
+const TWO_SHOWN: &[&str] = &["bobfork1", "bobfork2"];
+const THREE_SHOWN: &[&str] = &["bobfork1", "bobfork2", "bobfork3"];
+
+/// Two branches shown, a third that never rang answers.
+#[tokio::test(start_paused = true)]
+async fn an_unrung_answer_abandons_every_shown_branch_bye() {
+    every_other_shown_tag_draws_481(
+        "b2bua-unrung-two-shown-bye",
+        TWO_SHOWN,
+        "bobfork3",
+        InDialogMethod::Bye,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unrung_answer_abandons_every_shown_branch_update() {
+    every_other_shown_tag_draws_481(
+        "b2bua-unrung-two-shown-update",
+        TWO_SHOWN,
+        "bobfork3",
+        InDialogMethod::Update,
+    )
+    .await;
+}
+
+/// Three branches shown, the second answers: the first and the third are
+/// abandoned alike.
+#[tokio::test(start_paused = true)]
+async fn a_rung_later_answer_abandons_every_other_shown_branch_bye() {
+    every_other_shown_tag_draws_481(
+        "b2bua-rung-later-bye",
+        THREE_SHOWN,
+        "bobfork2",
+        InDialogMethod::Bye,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rung_later_answer_abandons_every_other_shown_branch_update() {
+    every_other_shown_tag_draws_481(
+        "b2bua-rung-later-update",
+        THREE_SHOWN,
+        "bobfork2",
+        InDialogMethod::Update,
+    )
+    .await;
+}
+
+/// Two branches shown, the first answers: the second is abandoned.
+#[tokio::test(start_paused = true)]
+async fn a_rung_first_answer_abandons_the_other_shown_branch_bye() {
+    every_other_shown_tag_draws_481(
+        "b2bua-rung-first-bye",
+        TWO_SHOWN,
+        "bobfork1",
+        InDialogMethod::Bye,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rung_first_answer_abandons_the_other_shown_branch_update() {
+    every_other_shown_tag_draws_481(
+        "b2bua-rung-first-update",
+        TWO_SHOWN,
+        "bobfork1",
+        InDialogMethod::Update,
+    )
+    .await;
+}

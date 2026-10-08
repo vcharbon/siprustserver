@@ -259,11 +259,13 @@ impl ActionExecutor<'_> {
         //    transfer target and the failover crossing-200 callee) are unaffected.
         let confirmed_leg_adopted =
             call.b_legs.iter().find(|l| l.leg_id == leg_id).is_none_or(call::helpers::is_adopted);
-        let answers_the_caller =
-            call.state == call::CallModelState::Active && confirmed_leg_adopted;
-        if answers_the_caller {
+        let bridges = call.state == call::CallModelState::Active && confirmed_leg_adopted;
+        if bridges {
             *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
         }
+        // The 2xx that becomes the final to the caller's INVITE: relayed, not
+        // reaped, and nothing has answered her yet.
+        let answers_the_caller = bridges && !reaped && call.a_leg.invite_final_sent.is_none();
         // The a-facing tag of the dialog this 2xx creates (§12.1.2): the one its
         // relayed provisional minted, the one `MapUnshownDialog` gave a dialog
         // the caller was never shown, or — for a live answer the map does not
@@ -271,20 +273,17 @@ impl ActionExecutor<'_> {
         // (`a_face_tag`).
         let preferred = match find_by_b_tag(call, leg_id, &remote_tag_clone) {
             Some(m) => Some(m.a_tag.clone()),
-            None if answers_the_caller && !reaped && !remote_tag_clone.is_empty() => {
+            None if answers_the_caller && !remote_tag_clone.is_empty() => {
                 Some(self.a_face_tag(call, leg_id, &remote_tag_clone))
             }
             None => None,
         };
         self.ensure_a_dialog_with(call, preferred.clone());
         // The a-dialog may already exist under another tag (an earlier fork's
-        // provisional); the confirmed a-dialog takes the one the caller saw on
-        // the 2xx. Only a live answer re-identifies her dialog: a 2xx learned
-        // for a reap on a call already ending leaves the tag she rang on.
-        if let Some(pref) = preferred.filter(|p| !p.is_empty()) {
-            if call.state == call::CallModelState::Active {
-                adopt_a_tag(call, &pref);
-            }
+        // provisional); the confirmed a-dialog takes the one the caller sees on
+        // the 2xx. Only the answer to her INVITE re-identifies her dialog.
+        if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
+            adopt_a_tag(call, &pref);
         }
         // Keep the answer SDP relayed toward alice on the 2xx as the a-dialog's
         // `cached_sdp` (the relayFirst18x / fake-PRACK cache). The §13.3.1.4
@@ -321,29 +320,11 @@ impl ActionExecutor<'_> {
     }
 
     /// The a-facing tag of the callee dialog `(b_leg_id, b_tag)`: the one the
-    /// map holds, else one minted and mapped now. Which caller-facing dialog a
-    /// new callee dialog lands in is the 18x policy's to decide, and the two
-    /// policies answer it oppositely:
-    ///
-    /// - TRANSPARENT (no `relayFirst18xTo180` arm): while the caller's INVITE
-    ///   is in setup her dialog set mirrors the callee's, so every early dialog
-    ///   past the first this call published mints its own tag, a rerouted
-    ///   leg's included. That keeps a second reliable provisional out of an
-    ///   unacknowledged one's dialog: RFC 3262 §3's ban is per early dialog
-    ///   (§4, errata 4603/4604), and `assign_a_rseq` seeds the fresh tag its
-    ///   own `RSeq` space.
-    /// - MASKING (`drop-sdp` / `keep-sdp` / `fake-prack` / `promote-pem-to-200`):
-    ///   the relayed provisionals hold one early dialog toward the caller —
-    ///   `relayFirst18x` maps its 180s, and `answering-dialog-identity` maps the
-    ///   2xx of a dialog she was never shown. What reaches here unmapped is the
-    ///   PEM machine's: a second fork on this leg mints, a rerouted leg fuses
-    ///   onto the primary. §3 is unreachable: the caller only sees a bare 180.
-    ///
-    /// Once the a-leg is confirmed (a leg ringing inside her answered dialog —
-    /// an MRF hold, a transfer target — and the 2xx itself, decided after
-    /// `confirm_dialog` confirms her) there is no early dialog left to mirror
-    /// (RFC 3261 §12.1, §13.2.2.3), so both policies mint only for a second
-    /// dialog of the same leg and a fresh leg takes the primary.
+    /// map holds, else one minted and mapped now. While the caller's INVITE is
+    /// in setup a transparent relay mirrors the callee's early dialogs (every
+    /// one past the first gets its own tag, RFC 3262 §3/§4); a masking policy,
+    /// or a confirmed a-leg, mints only for a second dialog of the same leg and
+    /// gives a fresh leg the primary.
     pub(super) fn a_face_tag(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) -> String {
         if let Some(m) = find_by_b_tag(call, b_leg_id, b_tag) {
             return m.a_tag.clone();
@@ -463,20 +444,15 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// Re-identify the caller's dialog under `tag`: the one a-dialog takes it as
-/// its local tag and every mapping of the tag it held before is retired, so a
-/// request the caller sends under the abandoned tag matches no dialog and
-/// draws `481` (RFC 3261 §12.2.2) instead of landing on the answered session.
-/// The wire shows a second dialog; the model holds one, re-tagged.
+/// Identify the caller's answered dialog by `tag`: the one a-dialog takes it
+/// as its local tag and every mapping under any other a-facing tag is retired,
+/// so a request the caller sends on an early dialog the answer abandoned
+/// matches no dialog and draws `481` (RFC 3261 §12.2.2) instead of landing on
+/// the answered session. The wire shows several dialogs; the model holds one.
 pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
     let Some(d) = call.a_leg.dialogs.first_mut() else { return };
-    if d.sip.local_tag == tag {
-        return;
-    }
-    let old = std::mem::replace(&mut d.sip.local_tag, tag.to_string());
-    if !old.is_empty() {
-        call.tag_map.retain(|m| m.a_tag != old);
-    }
+    d.sip.local_tag = tag.to_string();
+    call.tag_map.retain(|m| m.a_tag == tag);
 }
 
 /// The dialog's remote target: the URI of the peer's Contact (RFC 3261
