@@ -6203,6 +6203,31 @@ mod tests {
         assert!(UnackedReliableProvisionalRule.check(&unwitnessed).is_empty());
     }
 
+    /// RFC 3262 §4 live: a reliable 180 the SUT takes after its own CANCEL,
+    /// the 487 two seconds later, is owed its PRACK — the CANCEL ends nothing.
+    #[test]
+    fn a_reliable_provisional_after_the_cancel_still_owes_its_prack() {
+        let cancel = format!(
+            "CANCEL {B} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
+             From: <{A}>;tag=at\r\n\
+             To: <{B}>\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 1 CANCEL\r\n\
+             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+        )
+        .into_bytes();
+        let events = vec![
+            sent(SUT, invite_3262("z9hG4bK-i", "Supported: 100rel\r\n", None, false), BOB, 0),
+            sent(SUT, cancel, BOB, 50),
+            recv(SUT, inv_resp_3262(180, "z9hG4bK-i", &reliable_rows(1), false), BOB, 100),
+            recv(SUT, inv_resp_3262(487, "z9hG4bK-i", "", false), BOB, 2_100),
+        ];
+        let out = UnackedReliableProvisionalRule.check(&events);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].1.contains("MUST-021"), "{}", out[0].1);
+    }
+
     #[test]
     fn pracking_out_of_order_is_flagged_at_the_prack() {
         let in_order = vec![

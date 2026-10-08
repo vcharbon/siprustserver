@@ -47,14 +47,13 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
-/// How long a UAC must be seen holding an unPRACKed reliable provisional,
-/// unreleased, before the absence is charged to it: a release inside it leaves
-/// the absence undecided in every observation, and an OPEN observation must run
-/// past it.
+/// How long a UAC must be seen holding an unPRACKed reliable provisional, its
+/// INVITE unanswered, before the absence is charged to it: a final reaching it
+/// inside the window owed it nothing, and an OPEN observation must run past it.
 ///
 /// One second: RFC 3262 §3 has the UAS retransmit the provisional on the T1
 /// ladder (500 ms, then 1 s, …) until the PRACK arrives, and §4 has the UAC
-/// PRACK on receipt. A UAC that has neither PRACKed nor been released a full
+/// PRACK on receipt. A UAC that has neither PRACKed nor taken the final a full
 /// second later is not slow, and anything shorter would charge a dialog whose
 /// PRACK was still in flight.
 pub const PRACK_WINDOW_US: u64 = 1_000_000;
@@ -69,13 +68,14 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 /// dialog must stay observably alive for [`PRACK_WINDOW_US`] after the
 /// provisional.
 ///
-/// **The window rule, one for every observation.** A transaction RELEASED —
-/// its final reached the UAC, or the UAC cancelled it — inside
-/// [`PRACK_WINDOW_US`] after the provisional is undecided: the UAC may have
-/// taken the final before it got to PRACK, and that is a reading of the
+/// **The window rule, one for every observation.** The occasion is a reliable
+/// provisional taken while the INVITE awaits its final; a CANCEL ends nothing
+/// (§4: every reliable provisional of a pending transaction is PRACKed). A
+/// final reaching the UAC first leaves no occasion, and one inside
+/// [`PRACK_WINDOW_US`] after the provisional owed nothing: a reading of the
 /// messages, so the census over a capture and the live audit over a run reach
 /// it alike. What differs is the END of the observation alone: a CLOSED one
-/// (the harness drained, nothing in flight) decides an unreleased absence at
+/// (the harness drained, nothing in flight) decides an unanswered absence at
 /// once, an OPEN one only after the window, before which the stop is
 /// truncation.
 ///
@@ -108,10 +108,13 @@ impl Obligation for UnackedReliableProvisional {
                 out.push(head(Decision::Compliant));
                 continue;
             }
-            let released_us = seen.released.get(&(uac, call, cseq)).copied();
-            let alive_until = released_us.unwrap_or(seen.last_ts_us).min(seen.last_ts_us);
-            let window_us = alive_until.saturating_sub(p.ts_us);
-            let released_inside = released_us.is_some() && window_us < PRACK_WINDOW_US;
+            let final_us = seen.final_at.get(&(uac, call, cseq)).copied();
+            if final_us.is_some_and(|at| at <= p.ts_us) {
+                continue; // the final came first: nothing was left to PRACK
+            }
+            let alive_until = final_us.unwrap_or(seen.last_ts_us).min(seen.last_ts_us);
+            let window_us = alive_until - p.ts_us.min(alive_until);
+            let final_inside = final_us.is_some() && window_us < PRACK_WINDOW_US;
             // The two hop tests, each the other's blind spot: an INVITE this
             // endpoint did not open, and a provisional it passed on.
             let opened_it = seen
@@ -128,8 +131,9 @@ impl Obligation for UnackedReliableProvisional {
                 Some("the INVITE did not offer 100rel — the negotiation was never witnessed")
             } else if seen.unreadable_prack.contains(uac) {
                 Some("a PRACK the emitter sent has an unreadable RAck — it may be the one")
-            } else if released_inside {
-                Some("the transaction was released inside the window — the final may have come first")
+            } else if final_inside {
+                out.push(head(Decision::Compliant)); // the final came before a PRACK was due
+                continue;
             } else if !(wire.obs.closed || window_us >= PRACK_WINDOW_US) {
                 Some("the observation stopped inside the window — truncation, not absence")
             } else {
@@ -1094,10 +1098,9 @@ struct Reading<'a> {
     /// A PRACK this endpoint sent whose `RAck` will not parse: every
     /// obligation of that endpoint on this view becomes undecidable.
     unreadable_prack: BTreeSet<&'a str>,
-    /// (UAC, Call-ID, INVITE CSeq number) → when the transaction was
-    /// released, whether by a final response reaching the UAC or by the UAC
-    /// cancelling it.
-    released: BTreeMap<(&'a str, &'a str, u32), u64>,
+    /// (UAC, Call-ID, INVITE CSeq number) → when the INVITE's first final
+    /// reached the UAC. A CANCEL ends nothing (RFC 3262 §4).
+    final_at: BTreeMap<(&'a str, &'a str, u32), u64>,
     /// The last timestamp on this view's own stream: after it, an absence is
     /// the observation's rather than the wire's.
     last_ts_us: u64,
@@ -1362,16 +1365,12 @@ impl<'a> Reading<'a> {
                 rack,
                 rack_triple: head.and_then(rack_triple),
             });
-        } else if msg.is_request("CANCEL") {
-            // The UAC gave up on the transaction: nothing it took before that
-            // is charged, because a PRACK may have crossed the CANCEL.
-            self.release(msg.src.as_str(), msg.call_id.as_str(), msg.cseq, msg.at_us);
         } else if let Some(status) = msg.status() {
             if !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
                 return;
             }
             if status >= 200 {
-                self.release(msg.dst.as_str(), msg.call_id.as_str(), msg.cseq, msg.at_us);
+                self.answered_finally(msg.dst.as_str(), msg.call_id.as_str(), msg.cseq, msg.at_us);
                 return;
             }
             let Some(head) = head else { return };
@@ -1513,8 +1512,8 @@ impl<'a> Reading<'a> {
         self.pracked_at.get(&key).is_some_and(|at| *at > after && *at < before)
     }
 
-    fn release(&mut self, uac: &'a str, call: &'a str, cseq: u32, ts_us: u64) {
-        let at = self.released.entry((uac, call, cseq)).or_insert(ts_us);
+    fn answered_finally(&mut self, uac: &'a str, call: &'a str, cseq: u32, ts_us: u64) {
+        let at = self.final_at.entry((uac, call, cseq)).or_insert(ts_us);
         *at = (*at).min(ts_us);
     }
 
@@ -1711,14 +1710,13 @@ mod tests {
         Observation { last_us, endpoint_last_us, closed }
     }
 
-    /// A reliable 180 followed 20 ms later by the 200 OK: the release ended the
-    /// transaction inside the PRACK window, so the UAC may never have owed the
-    /// PRACK it did not send (a final that arrives first leaves nothing to
-    /// PRACK). That reading is the MESSAGES', so an open and a closed
-    /// observation reach the same undecided verdict: the census over a capture
-    /// and the live audit over a run decide one sequence alike.
+    /// A reliable 180 followed 20 ms later by the 200 OK: the final reached the
+    /// UAC inside the PRACK window, before a PRACK could be expected of it, so
+    /// none was owed. That reading is the MESSAGES', so an open and a closed
+    /// observation reach the same verdict: the census over a capture and the
+    /// live audit over a run decide one sequence alike.
     #[test]
-    fn a_provisional_a_fast_final_released_is_undecided_whatever_the_observation() {
+    fn a_provisional_a_fast_final_answered_owes_nothing_whatever_the_observation() {
         let msgs = vec![
             invite(1_000_000, UAC, UAS, 1),
             reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"),
@@ -1729,18 +1727,18 @@ mod tests {
             let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
             assert_eq!(f.len(), 1);
             assert!(
-                matches!(f[0].decision, Decision::Undecidable(_)),
-                "closed={closed}: released inside the window: {:?}",
+                matches!(f[0].decision, Decision::Compliant),
+                "closed={closed}: the final came inside the window: {:?}",
                 f[0].decision
             );
         }
     }
 
-    /// A CLOSED observation still decides an absence at its end: nothing
-    /// released the transaction, the stream simply stopped, and the drained
+    /// A CLOSED observation still decides an absence at its end: no final
+    /// answered the INVITE, the stream simply stopped, and the drained
     /// harness had nothing in flight. An OPEN one calls that truncation.
     #[test]
-    fn a_closed_observation_decides_an_unreleased_provisional_at_its_end() {
+    fn a_closed_observation_decides_an_unanswered_provisional_at_its_end() {
         let msgs =
             vec![invite(1_000_000, UAC, UAS, 1), reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb")];
         let open = obs(&msgs, false);
@@ -1773,6 +1771,61 @@ mod tests {
         let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &closed });
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].violated(), "this call's UAC never PRACKed: {:?}", f[0].decision);
+    }
+
+    /// The final, here a `487`.
+    fn final_status(at_us: u64, status: u16, cseq: u32, to_tag: &str) -> Msg {
+        let head = format!(
+            "SIP/2.0 {status} X\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
+             CSeq: {cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
+        );
+        msg(at_us, UAS, UAC, Kind::Response { status }, cseq, Some(to_tag), head)
+    }
+
+    /// The UAC's CANCEL of its INVITE.
+    fn cancel(at_us: u64, cseq: u32) -> Msg {
+        let head = format!(
+            "CANCEL sip:bob@h SIP/2.0\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>\r\n\
+             CSeq: {cseq} CANCEL\r\nContent-Length: 0\r\n\r\n"
+        );
+        let mut m =
+            msg(at_us, UAC, UAS, Kind::Request { method: "CANCEL".to_string() }, cseq, None, head);
+        m.cseq_method = "CANCEL".to_string();
+        m
+    }
+
+    /// RFC 3262 §4: a CANCEL does not end the INVITE transaction, so a reliable
+    /// provisional taken after it, the final still a window away, is owed its
+    /// PRACK — in an open observation and a closed one alike.
+    #[test]
+    fn a_reliable_provisional_taken_after_the_cancel_is_still_owed_its_prack() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            cancel(1_050_000, 1),
+            reliable(1_100_000, UAS, UAC, 183, 1, 5, "tb"),
+            final_status(2_600_000, 487, 1, "tb"),
+        ];
+        for closed in [false, true] {
+            let o = obs(&msgs, closed);
+            let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].violated(), "closed={closed}: {:?}", f[0].decision);
+            assert_eq!(f[0].emitter, UAC);
+        }
+    }
+
+    /// A final that reached the UAC before the provisional leaves nothing to
+    /// PRACK: no occasion.
+    #[test]
+    fn a_provisional_after_the_final_is_no_occasion() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            final_status(1_100_000, 487, 1, "tb"),
+            reliable(1_150_000, UAS, UAC, 183, 1, 5, "tb"),
+        ];
+        let o = obs(&msgs, true);
+        let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+        assert!(f.is_empty(), "{f:?}");
     }
 
     /// The PRACK discharges the obligation whatever else follows.
