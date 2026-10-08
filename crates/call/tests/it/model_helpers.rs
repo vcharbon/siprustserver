@@ -50,6 +50,22 @@ fn cseq_lens_helpers() {
     assert_eq!(relay_cseq_delta(5, Some(9)), 1); // clamped ≥ 1
 }
 
+/// §12.2.2: a b-leg request below its dialog's last CSeq is out of order; the
+/// last one again, a higher one, a dialog with no request yet and a remote tag
+/// naming no dialog are not.
+#[test]
+fn out_of_order_measures_a_b_leg_dialog_against_its_last_cseq() {
+    let call = update_remote_cseq(representative_call(), "b-1", B_TAG, 7);
+    assert!(out_of_order(&call, "b-1", B_TAG, 6));
+    assert!(!out_of_order(&call, "b-1", B_TAG, 7));
+    assert!(!out_of_order(&call, "b-1", B_TAG, 8));
+    assert!(!out_of_order(&call, "b-1", "another-fork", 1));
+
+    let mut unseen = call.clone();
+    unseen.b_legs[0].dialogs[0].ext.remote_cseq = None;
+    assert!(!out_of_order(&unseen, "b-1", B_TAG, 1));
+}
+
 #[test]
 fn pending_request_lifecycle() {
     let call = representative_call();

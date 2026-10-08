@@ -4,7 +4,7 @@
 
 use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
 
-use super::leg::{confirmed_dialog, find_leg};
+use super::leg::{confirmed_dialog, find_b_leg, find_dialog_by_to_tag, find_leg};
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
 
@@ -20,6 +20,18 @@ pub fn bump_local_cseq(call: Call, leg_id: &str, identity_tag: &str, delta: i64)
 /// Track the other side's latest CSeq on a dialog.
 pub fn update_remote_cseq(call: Call, leg_id: &str, identity_tag: &str, remote_cseq: i64) -> Call {
     update_dialog(call, leg_id, identity_tag, |d| d.ext.remote_cseq = Some(remote_cseq))
+}
+
+/// Whether a request the peer of b-leg `leg_id` sent in the dialog whose
+/// remote tag is `from_tag` carries a CSeq below the last one that dialog took:
+/// out of order (RFC 3261 §12.2.2). A b-leg holds one record per peer dialog.
+/// FIXME(b2bua): the a-leg's one record serves every early dialog the caller was shown,
+/// so the caller goes unmeasured; track her CSeq per a-facing tag.
+pub fn out_of_order(call: &Call, leg_id: &str, from_tag: &str, cseq: i64) -> bool {
+    find_b_leg(call, leg_id)
+        .and_then(|leg| find_dialog_by_to_tag(leg, from_tag))
+        .and_then(|d| d.ext.remote_cseq)
+        .is_some_and(|last| cseq < last)
 }
 
 /// CSeq delta for a relayed request: `inbound - sourceRemoteCSeq`, clamped ≥ 1.

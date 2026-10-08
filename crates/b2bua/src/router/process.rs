@@ -22,7 +22,10 @@ use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::{build_481, build_merged_482, build_retry_later_500, build_store_fault_500};
+use super::responses::{
+    build_481, build_merged_482, build_out_of_order_500, build_retry_later_500,
+    build_store_fault_500,
+};
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::answer_deadline::Screened;
@@ -175,6 +178,12 @@ pub(super) async fn process(
         if let Some(answer) =
             reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
         {
+            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
+            return;
+        }
+        // A request below its dialog's last CSeq is refused before any rule
+        // reads it (RFC 3261 §12.2.2).
+        if let Some(answer) = refuse_out_of_order(ctx, &call, &event, &res).await {
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
@@ -626,6 +635,35 @@ async fn refuse_foreign_dialog(
     crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(Some(refusal))
+}
+
+/// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a CSeq below the
+/// last one its dialog took ([`call::helpers::out_of_order`]) draws 500 and
+/// touches nothing. ACK and CANCEL carry the CSeq of the request they belong
+/// to and are never measured. The 500 sent, if refused.
+async fn refuse_out_of_order(
+    ctx: &RouterCtx,
+    call: &Call,
+    event: &CallEvent,
+    res: &Resolution,
+) -> Option<sip_message::SipResponse> {
+    let CallEvent::Sip { message, src, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
+    if matches!(req.method(), Method::Ack | Method::Cancel) {
+        return None;
+    }
+    req.to().tag()?;
+    let from_tag = req.from().tag()?;
+    let cseq = i64::from(req.cseq().seq());
+    if !call::helpers::out_of_order(call, &res.source_leg_id, from_tag, cseq) {
+        return None;
+    }
+    // An in-call refusal is a message of the leg it resolved to: it takes the
+    // call's stated headers.
+    let mut refusal = build_out_of_order_500(req);
+    crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
+    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
+    Some(refusal)
 }
 
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer

@@ -99,6 +99,7 @@ mod orphan_reject_no_leak;
 mod overflow_teardown;
 mod own_answer_past_bounds;
 mod own_timer_past_bounds;
+mod peer_cseq_across_confirmation;
 mod prack;
 mod prack_481_keeps_the_call;
 mod prack_crossing_invite_final;

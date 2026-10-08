@@ -1585,6 +1585,17 @@ impl<'a> RuleContext<'a> {
         let leg = self.source_leg()?;
         call::helpers::confirmed_dialog(leg).or_else(|| leg.dialogs.first())
     }
+    /// The dialog the current in-dialog request rides on the source leg: the
+    /// one whose remote tag is the request's From-tag, since each forked early
+    /// dialog keeps its own sequence (RFC 3261 §12.1.2, §12.2.1.1); else
+    /// [`Self::source_dialog`].
+    pub fn request_dialog(&self) -> Option<&Dialog> {
+        let from_tag = self.request().and_then(|r| r.from().tag());
+        self.source_leg()
+            .zip(from_tag)
+            .and_then(|(leg, tag)| call::helpers::find_dialog_by_to_tag(leg, tag))
+            .or_else(|| self.source_dialog())
+    }
     /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
     /// regenerated on, resolved with the SAME resolver as the relay executor
     /// ([`call::helpers::relay_peer_dialog`]) so match and action never

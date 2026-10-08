@@ -44,10 +44,10 @@ pub use decision_log::mark_decision;
 pub use dialog::{
     add_pending_request, bump_local_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
     cancel_pending_request, close_rejected_invite_round, find_pending_request, invite_glare,
-    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, peer_update_pending,
-    relay_cseq_delta, remove_pending_request, retain_ack_branch, retain_emitted_ack,
-    sender_invite_unacknowledged, sender_invite_unanswered, set_awaited_ack_cseq,
-    update_remote_cseq, MakeDialogLegCtx,
+    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, out_of_order,
+    peer_update_pending, relay_cseq_delta, remove_pending_request, retain_ack_branch,
+    retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
+    set_awaited_ack_cseq, update_remote_cseq, MakeDialogLegCtx,
 };
 pub use leg::{
     add_b_leg, b2bua_tag, caller_answered, confirmed_dialog, find_b_leg, find_b_leg_by_call_id,

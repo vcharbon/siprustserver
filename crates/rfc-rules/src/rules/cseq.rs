@@ -847,6 +847,37 @@ mod tests {
         assert_eq!(f[0].anchor, 1, "the request that skipped ahead");
     }
 
+    /// The answerer's own stream opens on the early dialog, with no
+    /// dialog-creating request of its own to anchor it, and runs on across the
+    /// 2xx: a request after the answer that skips past the early ones is
+    /// violated.
+    #[test]
+    fn a_skip_after_the_early_dialog_requests_is_violated() {
+        let clean = [
+            in_dialog(1_000, "UPDATE", 2, "z9hG4bK-u1"),
+            in_dialog(2_000, "UPDATE", 3, "z9hG4bK-u2"),
+            in_dialog(3_000, "INVITE", 4, "z9hG4bK-ri"),
+            in_dialog(4_000, "BYE", 5, "z9hG4bK-b"),
+        ];
+        assert!(order(&clean).is_empty(), "{:?}", order(&clean));
+
+        let skipped = [
+            in_dialog(1_000, "UPDATE", 2, "z9hG4bK-u1"),
+            in_dialog(2_000, "UPDATE", 3, "z9hG4bK-u2"),
+            in_dialog(3_000, "INVITE", 5, "z9hG4bK-ri"),
+            in_dialog(4_000, "BYE", 6, "z9hG4bK-b"),
+        ];
+        let f = order(&skipped);
+        assert_eq!(f.len(), 1, "{f:?}");
+        let Decision::Violated(Evidence::CseqNotContiguous { cseq, prior_cseq, method, .. }) =
+            &f[0].decision
+        else {
+            panic!("{:?}", f[0].decision)
+        };
+        assert_eq!((*cseq, *prior_cseq, method.as_str()), (5, 3, "INVITE"));
+        assert_eq!(f[0].anchor, 2, "the request that skipped ahead");
+    }
+
     /// ACK and CANCEL reuse the CSeq of the request they answer: exempt, and
     /// they never advance the dialog's own sequence.
     #[test]

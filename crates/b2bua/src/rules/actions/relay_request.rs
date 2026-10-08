@@ -247,10 +247,11 @@ impl ActionExecutor<'_> {
         }
 
         // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
-        //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq). ──
+        //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq), the
+        //    source dialog being the one the request rides (its From-tag). ──
         let inbound_cseq = req.cseq().seq() as i64;
         let source_leg_id = ctx.source_leg_id.to_string();
-        let source_dialog = ctx.source_dialog().cloned();
+        let source_dialog = ctx.request_dialog().cloned();
         let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
         let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
         let target_invite_cseq =

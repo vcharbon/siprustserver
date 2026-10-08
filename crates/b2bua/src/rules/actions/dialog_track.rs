@@ -193,7 +193,9 @@ impl ActionExecutor<'_> {
                     if !route_set.is_empty() {
                         d.sip.route_set = route_set;
                     }
-                    d.ext.remote_cseq = Some(resp.cseq().seq() as i64);
+                    // The 2xx echoes our INVITE's CSeq, a number of our own
+                    // sequence: `remote_cseq` keeps the callee's, as its early
+                    // requests left it (RFC 3261 §12.2.1.1, §12.2.2).
                 }
                 // One dialog survives confirmation (model: "one survives after
                 // confirmed") — drop the losing forks so per-call state is bounded.
