@@ -1000,8 +1000,10 @@ impl LegStack {
     /// (RFC 3261 §12.2.2), so a real UA answers it 481 and learns nothing from
     /// it: an in-dialog request on a confirmed leg whose From-tag is the remote
     /// tag of no dialog a 2xx confirmed, nor of another fork's early dialog
-    /// still standing ([`EARLY_DIALOG_WINDOW_US`]). An ACK draws no response
-    /// and a CANCEL is matched by its transaction (§9.1); neither is judged.
+    /// still standing ([`EARLY_DIALOG_WINDOW_US`]) — which a BYE (§15) and an
+    /// INVITE (§14.1) from the answering side never ride. An ACK draws no
+    /// response and a CANCEL is matched by its transaction (§9.1); neither is
+    /// judged.
     pub fn names_no_dialog(&self, request: &SipRequest, now_us: u64) -> bool {
         if !self.confirmed
             || request.to().tag().is_none()
@@ -1016,7 +1018,8 @@ impl LegStack {
         let early_standing = self
             .confirmed_at_us
             .is_none_or(|at| now_us <= at.saturating_add(EARLY_DIALOG_WINDOW_US));
-        !(early_standing && self.early_dialog(remote).is_some())
+        let early_request = !matches!(request.method(), Method::Bye | Method::Invite);
+        !(early_standing && early_request && self.early_dialog(remote).is_some())
     }
 
     /// The CSeq the peer last used on this leg.
@@ -2712,6 +2715,22 @@ mod tests {
             "inside 64·T1 fork 1's early dialog still stands"
         );
         assert!(uac.names_no_dialog(&under_from_tag(&options, "never-seen"), 1_000_001));
+    }
+
+    /// The answering side never BYEs an early dialog (RFC 3261 §15) nor
+    /// re-INVITEs one while its INVITE is in progress (§14.1): under fork 1's
+    /// tag they name no dialog the caller holds, inside 64·T1 too.
+    #[test]
+    fn a_bye_or_invite_under_another_forks_tag_names_no_dialog_inside_the_window() {
+        let (uac, mut uas, _) = answered_on_an_unrung_fork();
+        for method in [Method::Bye, Method::Invite] {
+            let request =
+                uas.in_dialog(method.clone(), &[], Vec::new(), None, None).expect("composes");
+            assert!(
+                uac.names_no_dialog(&under_from_tag(&request, "B-f1"), 1_000_001),
+                "{method:?} under fork 1's tag"
+            );
+        }
     }
 
     /// The tag a request carries is learned only while no 2xx has confirmed the

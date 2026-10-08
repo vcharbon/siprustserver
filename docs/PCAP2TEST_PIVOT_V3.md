@@ -1576,7 +1576,8 @@ holds, and a real UA answers it 481 (§12.2.2). So does the interpreter:
   its 2xx gave it;
 - the early dialog of another fork still stands for 64·T1 (32 s) after the first
   2xx (§13.2.2.4): a request under that fork's tag inside the window is taken as
-  any other;
+  any other, except a BYE (§15) or an INVITE (§14.1), which the answering side
+  never sends on an early dialog;
 - an ACK and a CANCEL are never refused here (§17.1.1.3, §9.1).
 
 ### 6.8 delay and dwell

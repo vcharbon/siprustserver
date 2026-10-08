@@ -943,9 +943,11 @@ pub const EARLY_DIALOG_WINDOW_US: u64 = 32_000_000;
 /// occasion: a To-tag naming no confirmed dialog of the taker
 /// ([`MidDialogTags`] judges it), and a From-tag naming an early dialog of
 /// another branch the taker still holds — a provisional's To-tag, inside
-/// [`EARLY_DIALOG_WINDOW_US`] of the first 2xx. A vantage relaying both
-/// directions stands `Undecidable`. Charges the endpoint that sent the
-/// request.
+/// [`EARLY_DIALOG_WINDOW_US`] of the first 2xx — on a request the answering
+/// side may send there. A BYE (§15) and an INVITE (§14.1: the dialog's INVITE
+/// is still in progress) never ride an early dialog from that side, so they
+/// stay occasions. A vantage relaying both directions stands `Undecidable`.
+/// Charges the endpoint that sent the request.
 pub struct InDialogFromTag;
 
 impl Obligation for InDialogFromTag {
@@ -1019,7 +1021,11 @@ impl ConfirmedDialogs {
         let early_standing = self
             .first_2xx_taken_us
             .is_some_and(|t| msg.at_us <= t.saturating_add(EARLY_DIALOG_WINDOW_US));
-        if early_standing && self.early.contains(&(local.to_string(), remote.to_string())) {
+        let early_request = !["BYE", "INVITE"].iter().any(|m| method.eq_ignore_ascii_case(m));
+        if early_standing
+            && early_request
+            && self.early.contains(&(local.to_string(), remote.to_string()))
+        {
             return None;
         }
         Some(Decision::Violated(Evidence::DialogRemoteTagForeign {
@@ -2110,6 +2116,20 @@ mod tests {
         let mut late = answered_on_an_unrung_branch();
         late.push(toward_caller(3_001 + EARLY_DIALOG_WINDOW_US, "UPDATE", 1, "b1"));
         assert!(run(&InDialogFromTag, &late).iter().any(Finding::violated));
+    }
+
+    /// The answering side never BYEs an early dialog (§15) nor re-INVITEs one
+    /// while its INVITE is in progress (§14.1): under the rung branch's tag,
+    /// inside the window too, they name no dialog the caller holds.
+    #[test]
+    fn a_bye_or_invite_under_an_early_tag_is_violated_inside_the_window() {
+        for method in ["BYE", "INVITE"] {
+            let mut msgs = answered_on_an_unrung_branch();
+            msgs.push(toward_caller(5_000, method, 1, "b1"));
+            let f = charged(run(&InDialogFromTag, &msgs), B);
+            assert_eq!(f.len(), 1, "{method}: {f:?}");
+            assert!(f[0].violated(), "{method}: {:?}", f[0].decision);
+        }
     }
 
     /// Before any 2xx, no dialog is confirmed: early-dialog traffic is no
