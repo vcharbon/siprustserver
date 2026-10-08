@@ -218,10 +218,11 @@ async fn the_callee_sequence_is_its_own_across_a_reinvite_answer() {
     let _ = h.finish().await;
 }
 
-/// The mirror direction: the caller's PRACK and two UPDATEs on the early
-/// dialog, then — past the answer and a callee re-INVITE whose 2xx carries the
-/// B2BUA's number on the caller leg — its re-INVITE and BYE reach the callee
-/// as one unbroken run.
+/// Regression guard for the mirror direction, which confirmation never
+/// renumbered: the caller's PRACK and two UPDATEs on the early dialog, then —
+/// past the answer and a callee re-INVITE whose 2xx carries the B2BUA's
+/// number on the caller leg — its re-INVITE and BYE reach the callee as one
+/// unbroken run.
 #[tokio::test(start_paused = true)]
 async fn caller_requests_after_the_answer_continue_its_early_sequence() {
     let h = Harness::with_transit_delay("b2bua-caller-early-cseq-continues", 1);
@@ -562,6 +563,56 @@ async fn the_confirmed_fork_is_measured_against_its_early_sequence() {
     bye.expect(200).await;
 
     view.assert_each_dialog_contiguous();
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// §12.2.2 after the answer: fork 2 lost, so a request it sends once fork 1's
+/// 2xx confirmed the leg names no dialog the B2BUA holds — 481, not relayed —
+/// and leaves fork 1's sequence alone, so fork 1's BYE (its CSeq 1) is in
+/// order and ends the call.
+#[tokio::test(start_paused = true)]
+async fn a_losing_fork_request_after_the_answer_names_no_dialog() {
+    let h = Harness::with_transit_delay("b2bua-losing-fork-request-after-answer", 1);
+    let alice = h.agent("alice", "127.0.0.1:7330").await;
+    let bob = h.agent("bob", "127.0.0.1:7331").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 7331).start(&h, "b2bua", "127.0.0.1:7332").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    call.expect(180).await;
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
+    call.expect(180).await;
+
+    uas.adopt_to_tag("bobfork2");
+    let mut fork2 = uas.dialog();
+    uas.adopt_to_tag("bobfork1");
+    let mut fork1 = uas.dialog();
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    fork2.set_local_cseq(4);
+    let mut stray = fork2.request(InDialogMethod::Info, None).await;
+    stray.expect(481).await;
+    h.advance(Duration::from_millis(500)).await;
+    assert!(
+        alice.try_receive_tolerating("INFO", &[]).await.is_none(),
+        "a request on a dialog the answer abandoned is not relayed"
+    );
+
+    let mut bye = fork1.bye().await;
+    let mut at_alice = alice.receive("BYE").await;
+    at_alice.respond(200, "OK").await;
+    bye.expect(200).await;
 
     settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;

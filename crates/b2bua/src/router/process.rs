@@ -606,8 +606,9 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
 }
 
 /// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a To-tag naming
-/// no dialog this stack holds on the leg it arrived on draws 481 and touches
-/// nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
+/// no dialog this stack holds on the leg it arrived on — or, on a confirmed
+/// b-leg, a From-tag naming none ([`call::helpers::abandoned_dialog`]) — draws
+/// 481 and touches nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
 /// §13.3.1.4 ladder keeps repeating the 2xx it failed to acknowledge. A CANCEL
 /// is matched by transaction (§9.1) and never read here. `Some` when refused,
 /// holding the 481 sent, if any.
@@ -623,7 +624,10 @@ async fn refuse_foreign_dialog(
         return None;
     }
     let tag = req.to().tag()?;
-    if call::helpers::holds_local_tag(call, &res.source_leg_id, tag) != Some(false) {
+    let tags = call::helpers::RequestTags::new(Some(tag), req.from().tag());
+    let foreign = call::helpers::holds_local_tag(call, &res.source_leg_id, tag) == Some(false)
+        || call::helpers::abandoned_dialog(call, &res.source_leg_id, tags);
+    if !foreign {
         return None;
     }
     if req.method() == Method::Ack {

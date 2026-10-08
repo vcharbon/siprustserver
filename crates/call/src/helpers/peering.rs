@@ -146,9 +146,9 @@ pub fn relay_peer_dialog_ready(call: &Call, source_leg_id: &str, tags: RequestTa
 
 /// The `(leg, dialog)` a relayed in-dialog request from `source_leg_id` would
 /// be regenerated on: [`resolve_relay_peer`]'s leg pick, then the relay path's
-/// dialog pick (the dialog its identity tag names, else the first). The single resolver
-/// behind both [`relay_peer_dialog_ready`] and the rule-vocabulary peer-dialog
-/// reads, so match and action never disagree.
+/// dialog pick (the dialog its identity tag names, else the first). The
+/// single resolver behind both [`relay_peer_dialog_ready`] and the
+/// rule-vocabulary peer-dialog reads, so match and action never disagree.
 pub fn relay_peer_dialog<'a>(
     call: &'a Call,
     source_leg_id: &str,

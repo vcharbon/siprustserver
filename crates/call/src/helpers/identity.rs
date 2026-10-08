@@ -2,9 +2,9 @@
 //! dialog per caller-facing tag, keyed by the B2BUA's own tag; a b-leg keeps
 //! one per callee fork, keyed by the peer's tag (RFC 3261 §12.1.2).
 
-use crate::model::{Call, Dialog, Leg};
+use crate::model::{Call, Dialog, Leg, LegState};
 
-use super::leg::{confirmed_dialog, find_leg};
+use super::leg::{find_b_leg, find_leg};
 use super::lens::match_dialog_identity;
 
 /// The To-tag and From-tag an in-dialog request carries.
@@ -49,13 +49,23 @@ pub fn dialog_by_identity<'a>(leg: &'a Leg, tag: &str) -> Option<&'a Dialog> {
     leg.dialogs.iter().find(|d| match_dialog_identity(&leg.leg_id, tag, d))
 }
 
-/// The dialog a request from `leg_id`'s peer rides: the one its tags name,
-/// else the leg's confirmed dialog.
+/// The dialog a request from `leg_id`'s peer rides: the one its tags name.
+/// `None` when they name none — no other dialog's sequence is the request's.
 pub fn request_dialog<'a>(
     call: &'a Call,
     leg_id: &str,
     tags: RequestTags<'_>,
 ) -> Option<&'a Dialog> {
     let leg = find_leg(call, leg_id)?;
-    tags.identity(leg_id).and_then(|t| dialog_by_identity(leg, t)).or_else(|| confirmed_dialog(leg))
+    tags.identity(leg_id).and_then(|t| dialog_by_identity(leg, t))
+}
+
+/// Whether a request from confirmed b-leg `leg_id`'s peer names by its
+/// From-tag no dialog the leg holds: an early dialog the answer abandoned, or
+/// none at all (RFC 3261 §12.2.2).
+pub fn abandoned_dialog(call: &Call, leg_id: &str, tags: RequestTags<'_>) -> bool {
+    find_b_leg(call, leg_id)
+        .filter(|leg| leg.state == LegState::Confirmed)
+        .zip(tags.from)
+        .is_some_and(|(leg, tag)| dialog_by_identity(leg, tag).is_none())
 }

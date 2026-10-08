@@ -1552,28 +1552,24 @@ impl<'a> RuleContext<'a> {
     }
 
     /// Does the current response answer a request THIS STACK RELAYED — i.e.
-    /// does the responder's dialog hold a pending-relay snapshot for the
-    /// response CSeq? The dialog is picked fork-correctly (the one the
-    /// response's identity tag names, else the source dialog), mirroring the
-    /// relay executor. `false` for a request the B2BUA originated itself (keepalive OPTIONS, its own
-    /// PRACK, a REFER-progress NOTIFY), which leaves no snapshot, and for any
-    /// non-response event.
+    /// does the relay it answers hold a pending-relay snapshot for the
+    /// response CSeq? Read through [`call::helpers::relayed_pending`], as the
+    /// relay executor reads it: the dialog the response's identity tag names,
+    /// never another one. `false` for a request the B2BUA originated itself
+    /// (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY), which
+    /// leaves no snapshot, and for any non-response event.
     pub fn answers_relayed_request(&self) -> bool {
         let Some(resp) = self.response() else {
             return false;
         };
-        let cseq = resp.cseq().seq() as i64;
-        let identity = call::helpers::response_identity(
+        call::helpers::relayed_pending(
+            self.call.0,
             self.source_leg_id,
             resp.to().tag(),
             resp.from().tag(),
-        );
-        self.source_leg()
-            .zip(identity)
-            .and_then(|(leg, tag)| call::helpers::dialog_by_identity(leg, tag))
-            .or_else(|| self.source_dialog())
-            .and_then(|d| call::helpers::find_pending_request(d, cseq))
-            .is_some()
+            resp.cseq().seq() as i64,
+        )
+        .is_some()
     }
 
     /// The leg the event arrived on.
@@ -1597,11 +1593,10 @@ impl<'a> RuleContext<'a> {
     }
     /// The dialog the current in-dialog request rides on the source leg: the
     /// one its tags name — each caller-facing dialog and each callee fork keeps
-    /// its own sequence (RFC 3261 §12.1.2, §12.2.1.1) — else
-    /// [`Self::source_dialog`].
+    /// its own sequence (RFC 3261 §12.1.2, §12.2.1.1). `None` when they name
+    /// none: no other dialog's sequence is the request's.
     pub fn request_dialog(&self) -> Option<&Dialog> {
         call::helpers::request_dialog(self.call.0, self.source_leg_id, self.request_tags())
-            .or_else(|| self.source_dialog())
     }
     /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
     /// regenerated on, resolved with the SAME resolver as the relay executor

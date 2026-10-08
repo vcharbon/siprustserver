@@ -449,9 +449,16 @@ impl ActionExecutor<'_> {
 /// Map a callee dialog to its a-facing tag, opening the caller-facing early
 /// dialog that tag names when the a-leg does not hold it yet: a record of its
 /// own beside the a-dialog — same caller, route set and target — whose two
-/// sequences start from the caller's INVITE (RFC 3261 §12.1.2, §12.2.1.1). An
-/// a-leg with no dialog yet opens nothing: its first dialog takes the tag.
+/// sequences start from the caller's INVITE (RFC 3261 §12.1.2, §12.2.1.1).
+/// Nothing is mapped or opened once the caller's INVITE has its final, nor for
+/// a callee dialog already mapped; an a-leg with no dialog yet opens nothing,
+/// its first dialog takes the tag.
 pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
+    if call.a_leg.invite_final_sent.is_some()
+        || find_by_b_tag(call, &mapping.b_leg_id, &mapping.b_tag).is_some()
+    {
+        return;
+    }
     let tag = mapping.a_tag.clone();
     *call = add_tag_mapping(call.clone(), mapping);
     if tag.is_empty() || call.a_leg.dialogs.iter().any(|d| d.sip.local_tag == tag) {
@@ -473,32 +480,43 @@ pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
 }
 
 /// Identify the caller's answered dialog by `tag`: the one a-dialog takes it
-/// as its local tag, with the sequences of the caller-facing dialog `tag`
-/// named (fresh ones from the caller's INVITE for a tag never shown), and
-/// every other caller-facing dialog and mapping is retired, so a request the
-/// caller sends on an early dialog the answer abandoned matches no dialog and
-/// draws `481` (RFC 3261 §12.2.2) instead of landing on the answered session.
+/// as its local tag, with the sequences and open relays of the caller-facing
+/// dialog `tag` named (fresh sequences from the caller's INVITE for a tag
+/// never shown). Every other caller-facing dialog and mapping is retired, so a
+/// request the caller sends on an early dialog the answer abandoned matches no
+/// dialog and draws `481` (RFC 3261 §12.2.2); the relays still open in them
+/// are kept per tag ([`call::helpers::retire_pending`]) for the caller's finals.
 pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
     let fresh = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
-    let dialogs = &mut call.a_leg.dialogs;
-    if dialogs.first().is_some_and(|d| d.sip.local_tag != tag) {
-        let own = dialogs.iter().position(|d| d.sip.local_tag == tag).map(|i| dialogs.remove(i));
-        let d = &mut dialogs[0];
-        d.sip.local_tag = tag.to_string();
+    let leg = &mut call.a_leg;
+    let mut retired = Vec::new();
+    if leg.dialogs.first().is_some_and(|d| d.sip.local_tag != tag) {
+        let own = leg.dialogs.iter().position(|d| d.sip.local_tag == tag);
+        let own = own.map(|i| leg.dialogs.remove(i));
+        let d = &mut leg.dialogs[0];
+        let old_tag = std::mem::replace(&mut d.sip.local_tag, tag.to_string());
         match own {
             Some(own) => {
                 d.sip.local_cseq = own.sip.local_cseq;
                 d.ext.remote_cseq = own.ext.remote_cseq;
-                d.ext.inbound_pending_requests = own.ext.inbound_pending_requests;
+                let open = std::mem::replace(
+                    &mut d.ext.inbound_pending_requests,
+                    own.ext.inbound_pending_requests,
+                );
+                retired.push((old_tag, open));
             }
             None => {
                 d.sip.local_cseq = fresh;
                 d.ext.remote_cseq = Some(fresh);
-                d.ext.inbound_pending_requests.clear();
             }
         }
     }
-    dialogs.truncate(1);
+    for lost in leg.dialogs.drain(1..) {
+        retired.push((lost.sip.local_tag, lost.ext.inbound_pending_requests));
+    }
+    for (lost_tag, open) in retired {
+        call::helpers::retire_pending(leg, &lost_tag, open);
+    }
     call.tag_map.retain(|m| m.a_tag == tag);
 }
 

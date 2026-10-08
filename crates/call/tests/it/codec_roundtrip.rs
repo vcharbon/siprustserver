@@ -225,10 +225,6 @@ fn the_invite_final_sent_fact_round_trips() {
     assert_eq!(call.b_legs[0].invite_final_sent, Some(200));
 }
 
-/// RFC 3261 §8.2.6.1: a relayed request's `Timestamp` is what the response
-/// relayed back to its originator echoes, so a takeover node relaying that
-/// response must still know it: the pending snapshot keeps it through the
-/// replication codec.
 /// Each caller-facing early dialog is a record of its own on the a-leg, with
 /// its own tag and sequences (RFC 3261 §12.1.2): a takeover copy holds every
 /// one of them, in order, so a request in any of them is numbered and
@@ -254,6 +250,10 @@ fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
     assert_eq!(faces[1], ("second-face", 3, Some(2)));
 }
 
+/// RFC 3261 §8.2.6.1: a relayed request's `Timestamp` is what the response
+/// relayed back to its originator echoes, so a takeover node relaying that
+/// response must still know it: the pending snapshot keeps it through the
+/// replication codec.
 #[test]
 fn a_pending_requests_timestamp_survives_a_takeover_copy() {
     let codec = MsgpackCodec::new();

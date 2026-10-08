@@ -4,10 +4,11 @@
 
 use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
 
-use super::identity::{dialog_by_identity, RequestTags};
+use super::identity::{dialog_by_identity, response_identity, RequestTags};
 use super::leg::{confirmed_dialog, find_leg};
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
+use super::retired::retired_pending;
 
 // ── CSeq ────────────────────────────────────────────────────────────────────
 
@@ -157,9 +158,10 @@ pub fn invite_glare(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> 
             .is_some_and(|(_, d)| invite_transaction_open(d))
 }
 
-/// Whether `source_leg_id`'s peer, sending an INVITE carrying `tags`, has an earlier INVITE of its own on the dialog that this
-/// side has sent no final to (RFC 3261 §14.2, first clause): its relay awaits
-/// a final on the relay-target dialog and was not CANCELled.
+/// Whether `source_leg_id`'s peer, sending an INVITE carrying `tags`, has an
+/// earlier INVITE of its own on the dialog that this side has sent no final
+/// to (RFC 3261 §14.2, first clause): its relay awaits a final on the
+/// relay-target dialog and was not CANCELled.
 pub fn sender_invite_unanswered(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
     relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
         d.ext
@@ -185,6 +187,53 @@ pub fn peer_update_pending(call: &Call, source_leg_id: &str, tags: RequestTags<'
     relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
         d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
     })
+}
+
+/// Where the relay a response answers is kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingHolder {
+    /// On the leg's dialog with this identity tag.
+    Dialog(String),
+    /// On the a-leg, for the caller-facing dialog with this tag the answer
+    /// retired ([`super::retired`]).
+    Retired(String),
+}
+
+/// The relay a response arriving on `leg_id` with outbound CSeq `cseq`
+/// answers (RFC 3261 §8.1.3.3), and where it is kept: on the dialog the
+/// response's identity tag names, else — on the a-leg — among the relays of
+/// the retired caller-facing dialog that tag names. A response with no
+/// identity tag reads the leg's confirmed dialog. Never another dialog's
+/// relay: two dialogs may carry the same CSeq.
+pub fn relayed_pending(
+    call: &Call,
+    leg_id: &str,
+    to: Option<&str>,
+    from: Option<&str>,
+    cseq: i64,
+) -> Option<(PendingHolder, PendingRequest)> {
+    let leg = find_leg(call, leg_id)?;
+    let identity = |d: &Dialog| {
+        if leg_id == "a" {
+            d.sip.local_tag.clone()
+        } else {
+            d.sip.remote_tag.clone()
+        }
+    };
+    let Some(tag) = response_identity(leg_id, to, from) else {
+        let d = confirmed_dialog(leg)?;
+        let p = find_pending_request(d, cseq)?;
+        return Some((PendingHolder::Dialog(identity(d)), p.clone()));
+    };
+    match dialog_by_identity(leg, tag) {
+        Some(d) => {
+            find_pending_request(d, cseq).map(|p| (PendingHolder::Dialog(identity(d)), p.clone()))
+        }
+        None if leg_id == "a" => {
+            retired_pending(leg, tag, cseq).map(|p| (PendingHolder::Retired(tag.to_string()), p))
+        }
+        None => None,
+    }
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.
