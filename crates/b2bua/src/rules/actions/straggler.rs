@@ -29,7 +29,9 @@ impl ActionExecutor<'_> {
     /// A delayed offer (§13.2.1: the leg's INVITE carried none) puts the offer
     /// in the 2xx, and the ACK MUST answer it (§13.2.2.4): the answer rejects
     /// every stream (RFC 3264 §6, port 0), the least a dialog about to be
-    /// BYEd can commit to.
+    /// BYEd can commit to. Where a reliable provisional of the straggler's
+    /// dialog carried the offer, its PRACK answered it and the ACK is bare
+    /// (RFC 3262 §5).
     pub(super) fn release_straggler(
         &self,
         call: &mut Call,
@@ -56,7 +58,13 @@ impl ActionExecutor<'_> {
             local_cseq: i64::from(invite_cseq).max(spent),
             ..base.sip.clone()
         };
-        let answer = (!relay::acked_invite_carries_offer(base))
+        let offered_reliably = call::helpers::offered_in_reliable_provisional(
+            call,
+            leg_id,
+            &tag,
+            i64::from(invite_cseq),
+        );
+        let answer = (!relay::acked_invite_carries_offer(base) && !offered_reliably)
             .then(|| resp.sdp())
             .flatten()
             .and_then(|offer| {

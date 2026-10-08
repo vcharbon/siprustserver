@@ -142,8 +142,9 @@ impl ActionExecutor<'_> {
             }
             match state {
                 LegState::Confirmed => {
-                    // An offer a 2xx left to the ACK that never came is still
-                    // owed its PRACK (RFC 3262 §4), ahead of the BYE.
+                    // Every relayed provisional of the leg still unacknowledged
+                    // — a 2xx's deferred offer, a pending re-INVITE's — is
+                    // PRACKed ahead of the BYE (RFC 3262 §4).
                     self.prack_relayed_unacknowledged(call, fx, &id, None);
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
@@ -237,8 +238,9 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                // An offer a 2xx left to the ACK that never came is still owed
-                // its PRACK (RFC 3262 §4), ahead of the BYE.
+                // Every relayed provisional of the leg still unacknowledged — a
+                // 2xx's deferred offer, a pending re-INVITE's — is PRACKed
+                // ahead of the BYE (RFC 3262 §4).
                 self.prack_relayed_unacknowledged(call, fx, leg_id, None);
                 // A release no peer asked for states the deployment's cause
                 // where the rule states none (RFC 3326 §2).

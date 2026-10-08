@@ -8,7 +8,7 @@ use call::helpers::OwedPrack;
 use call::Call;
 use sip_message::SipRequest;
 
-use super::ack::{acked_invite_cseq, parse_request};
+use super::ack::parse_request;
 use super::sdp_session::{continue_on_leg, Author, Carried};
 use crate::config::SdpFormPolicy;
 
@@ -26,18 +26,15 @@ pub(crate) fn invite_carried_offer(call: &Call, leg_id: &str, invite_cseq: i64) 
         .is_none_or(|r| r.sdp().is_some())
 }
 
-/// The relayed reliable provisionals whose offer the 2xx confirming
-/// `leg_id`'s dialog left to the caller's ACK: offers of that dialog, under
-/// the INVITE that 2xx answered, still unacknowledged. Their PRACK carries the
-/// answer her ACK gives (RFC 3262 §5, RFC 3264).
+/// The relayed reliable provisionals of `leg_id` whose offer is still owed an
+/// answer once its 2xx arrived: the 2xx left the confirmed dialog's offer to
+/// the caller's ACK, and PRACKed every other provisional of its INVITE as it
+/// arrived. Their PRACK carries the answer her ACK gives (RFC 3262 §5,
+/// RFC 3264).
 pub(crate) fn offers_owed_at_ack(call: &Call, leg_id: &str) -> Vec<OwedPrack> {
-    let Some(dialog) = call::helpers::find_leg(call, leg_id).and_then(|l| l.dialogs.first()) else {
-        return Vec::new();
-    };
-    let Some(invite_cseq) = acked_invite_cseq(dialog) else { return Vec::new() };
-    call::helpers::unacknowledged_relayed_provisionals(call, leg_id, Some(i64::from(invite_cseq)))
+    call::helpers::unacknowledged_relayed_provisionals(call, leg_id, None)
         .into_iter()
-        .filter(|o| o.offer.is_some() && o.b_tag == dialog.sip.remote_tag)
+        .filter(|o| o.offer.is_some())
         .collect()
 }
 

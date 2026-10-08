@@ -246,9 +246,6 @@ pub enum RuleId {
     /// its own that carried a body is still unPRACKed. Charges that UAS.
     #[serde(rename = "delay-2xx-on-unacked-reliable-1xx-with-sdp")]
     Delay2xxOnUnackedReliable1xxWithSdp,
-    /// RFC 3262 §3: a PRACK arriving after the INVITE final still draws a 2xx —
-    /// the PRACK server transaction outlives the INVITE's. Charges the endpoint
-    /// that answered it.
     /// RFC 3262 §3: a UAS emits no NEW reliable provisional on an INVITE
     /// transaction it has already answered. Charges that UAS; the reliable-only
     /// sibling of [`RuleId::No1xxAfterFinal`], keyed on `RSeq`.

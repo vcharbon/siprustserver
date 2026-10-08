@@ -733,6 +733,9 @@ async fn a_deferred_offer_is_pracked_before_a_teardown_that_comes_before_the_ack
 
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC) + Duration::from_millis(100)).await;
     alice.drain().await;
+    // Bob sees PRACK, ACK, BYE: the PRACK closes the offer/answer exchange
+    // the 2xx left open, so the ACK that follows owes no body (RFC 3262 §5,
+    // RFC 3261 §13.2.2.4) — the order of the caller's own ACK path.
     let mut prack = bob.receive("PRACK").await;
     let body = String::from_utf8_lossy(prack.request().body()).into_owned();
     assert!(
@@ -740,6 +743,9 @@ async fn a_deferred_offer_is_pracked_before_a_teardown_that_comes_before_the_ack
         "the owed PRACK answers the offer, rejecting its stream: {body:?}"
     );
     prack.respond(200, "OK").await;
+    let ack = bob.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "the answer rode the PRACK");
+    assert_eq!(ack.request().cseq().seq(), uas.request().cseq().seq(), "the 2xx's INVITE");
     let mut bob_bye = bob.receive("BYE").await;
 
     // Her PRACK crosses the teardown: it names the 183 she was shown, and
@@ -815,4 +821,93 @@ async fn an_offer_answered_in_the_callers_prack_leaves_the_ack_bare() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
+}
+
+/// A losing fork's reliable 183 carried the offer and was PRACKed — by the
+/// stack as the winning fork's 2xx arrived, or by the caller with her answer;
+/// that fork's own late 2xx is ACKed bare and BYEd: its offer/answer exchange
+/// closed in the PRACK (RFC 3262 §5, RFC 3264 §4).
+async fn losing_fork_late_2xx_is_acked_bare(caller_pracks: bool, ports: [&str; 3]) {
+    let h = Harness::with_transit_delay("b2bua-prack-owed-at-final-straggler", 0);
+    if !caller_pracks {
+        caller_withholds_prack(&h);
+    }
+    let alice = h.agent("alice", ports[0]).await;
+    let bob = h.agent("bob", ports[1]).await;
+    let bob_port: u16 = ports[1].rsplit(':').next().unwrap().parse().unwrap();
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", bob_port).start(&h, "b2bua", ports[2]).await;
+
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv
+        .respond(183, "Session Progress")
+        .with_to_tag("fork1")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "11")
+        .with_sdp(BOB_OFFER)
+        .await;
+    let progress = call.expect(183).await;
+    if caller_pracks {
+        let shown_rseq = stated_by_response(&progress, "RSeq").expect("a reliable 183");
+        // Fork-addressed: the PRACK rides the early dialog the 183 created,
+        // on that dialog's own CSeq sequence.
+        let mut prack = call
+            .send_request(InDialogMethod::Prack)
+            .with_to_tag(progress.to().tag().expect("a tagged 183"))
+            .with_rack(&format!("{shown_rseq} {} INVITE", progress.cseq().seq()))
+            .with_sdp(ALICE_ANSWER)
+            .try_send()
+            .await
+            .expect("alice PRACKs fork1's 183 with her answer");
+        bob.receive("PRACK").await.respond(200, "OK").await;
+        prack.expect(200).await;
+    }
+
+    b_inv.respond(200, "OK").with_to_tag("fork2").with_sdp(FORK2_OFFER).await;
+    if !caller_pracks {
+        bob.receive("PRACK").await.respond(200, "OK").await;
+    }
+    call.expect(200).await;
+    let mut dialog = call.ack_with(Some(ALICE_ANSWER)).await;
+    bob.receive("ACK").await;
+
+    // Fork1 answers too, late.
+    b_inv.respond(200, "OK").with_to_tag("fork1").with_sdp(BOB_OFFER).await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("fork1"));
+    assert!(
+        ack.request().body().is_empty(),
+        "fork1's exchange closed in its PRACK: {:?}",
+        String::from_utf8_lossy(ack.request().body())
+    );
+    let mut fork1_bye = bob.receive("BYE").await;
+    assert_eq!(fork1_bye.request().to().tag(), Some("fork1"));
+    fork1_bye.respond(200, "OK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _report = h.finish().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_losing_forks_late_2xx_after_the_stacks_prack_is_acked_bare() {
+    losing_fork_late_2xx_is_acked_bare(
+        false,
+        ["127.0.0.1:7444", "127.0.0.1:7445", "127.0.0.1:7446"],
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_losing_forks_late_2xx_after_the_callers_prack_is_acked_bare() {
+    losing_fork_late_2xx_is_acked_bare(
+        true,
+        ["127.0.0.1:7447", "127.0.0.1:7448", "127.0.0.1:7449"],
+    )
+    .await;
 }

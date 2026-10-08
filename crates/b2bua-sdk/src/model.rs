@@ -1226,6 +1226,13 @@ impl<'a> RuleCall<'a> {
     pub fn rack_pracked_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
         call::helpers::rack_pracked_here(self.0, a_tag, rack)
     }
+    /// Whether a relayed reliable provisional of `leg_id` still owes its offer
+    /// an answer in the PRACK this stack sends (RFC 3262 §5).
+    pub fn offer_owed_prack(&self, leg_id: &str) -> bool {
+        call::helpers::unacknowledged_relayed_provisionals(self.0, leg_id, None)
+            .iter()
+            .any(|o| o.offer.is_some())
+    }
     /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
     /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
     /// is its retransmission to discard (RFC 3262 §4).
