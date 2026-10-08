@@ -979,9 +979,11 @@ impl Obligation for NoPrackOf100Trying {
 /// endpoint of every such flow. An INVITE this vantage never carried keeps the
 /// conservative reading (a body is an offer).
 ///
-/// The occasion is ONE PRACK, keyed by the offer's `RSeq` on its CALL rather
-/// than by direction: the offer and the answer are two ends of one negotiation
-/// and either party's copy is the same fact. Charges the PRACK's sender.
+/// The occasion is ONE PRACK, keyed by the offer's `RSeq` in its early dialog
+/// (the To tag, which both directions carry) rather than by direction: the
+/// offer and the answer are two ends of one negotiation and either party's
+/// copy is the same fact, and each fork numbers its `RSeq`s on its own (§3,
+/// errata 4600). Charges the PRACK's sender.
 ///
 /// **This reads BODY PRESENCE, never the offer/answer state machine** — it
 /// walks the view directly rather than through the family's `Reading`,
@@ -998,7 +1000,7 @@ impl Obligation for PrackAnswers1xxOffer {
         // Per call: whether an INVITE carried the offer, and where each
         // offer-bearing reliable provisional's `RSeq` was first seen.
         let mut invite_offered: BTreeMap<&str, bool> = BTreeMap::new();
-        let mut offers: BTreeMap<(&str, u64), usize> = BTreeMap::new();
+        let mut offers: BTreeMap<(&str, &str, u64), usize> = BTreeMap::new();
         let mut out = Vec::new();
 
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -1014,7 +1016,8 @@ impl Obligation for PrackAnswers1xxOffer {
             }
             if msg.is_request("PRACK") {
                 let Some(rseq) = head.and_then(sniff::rack_rseq) else { continue };
-                let Some(&offer_1xx_msg) = offers.get(&(call, rseq)) else { continue };
+                let dialog = msg.to_tag.as_deref().unwrap_or_default();
+                let Some(&offer_1xx_msg) = offers.get(&(call, dialog, rseq)) else { continue };
                 out.push(Finding {
                     rule: RuleId::PrackAnswers1xxOffer,
                     emitter: msg.src.to_string(),
@@ -1050,7 +1053,8 @@ impl Obligation for PrackAnswers1xxOffer {
                 continue; // the INVITE carried the offer: this body is the answer
             }
             if let Some(rseq) = sniff::rseq_of(head) {
-                offers.entry((call, rseq)).or_insert(mi);
+                let dialog = msg.to_tag.as_deref().unwrap_or_default();
+                offers.entry((call, dialog, rseq)).or_insert(mi);
             }
         }
         out
@@ -2791,6 +2795,29 @@ mod tests {
         let f = decide(&NoPrackOf100Trying, &ignored);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
+    /// `prack-answers-1xx-offer` reads the offer in its EARLY DIALOG: each fork
+    /// numbers its `RSeq`s on its own (RFC 3262 §3, errata 4600), so a PRACK on
+    /// one fork's dialog naming the number another fork's offer carried answers
+    /// no offer there — no occasion — while the offer's own PRACK still owes it.
+    #[test]
+    fn a_prack_naming_another_forks_offer_rseq_is_no_occasion() {
+        let on = |mut m: Msg, tag: &str| {
+            m.to_tag = Some(tag.to_string());
+            m
+        };
+        let msgs = vec![
+            invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
+            on(inv_resp(1_100_000, 183, &reliable_rows(1), true), "f1"),
+            on(prack_on(1_150_000, "1 1 INVITE", true), "f1"),
+            on(inv_resp(1_200_000, 183, &reliable_rows(200), true), "f2"),
+            on(prack_on(1_250_000, "200 1 INVITE", true), "f2"),
+            on(prack_on(1_300_000, "200 1 INVITE", false), "f1"),
+        ];
+        let f = decide(&PrackAnswers1xxOffer, &msgs);
+        assert_eq!(f.len(), 2, "the two PRACKs of the two offers only: {f:?}");
+        assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
     }
 
     /// `prack-answers-1xx-offer`: the 1xx body is the OFFER only where the

@@ -2576,11 +2576,10 @@ impl CrossMessageAuditRule for NoPrackOf100TryingRule {
 /// carries the answer.
 ///
 /// The live policy this bind adds to the rule body: subject `{Uac, Uas}`; a
-/// relay-lane skip; the finding is surfaced at BOTH ends, because the occasion
-/// is one negotiation and the party that sent the PRACK need not be a recorded
-/// bind at all; and it is **advisory**, because a genuine reliable-1xx offer and
-/// its PRACK answer can straddle two legs of a B2BUA, which rewrites the
-/// Call-ID between them.
+/// relay-lane skip; and the finding is surfaced at BOTH ends, because the
+/// occasion is one negotiation and the party that sent the PRACK need not be a
+/// recorded bind at all. It gates: the rule reads each offer within its own
+/// call and early dialog, so the two legs of a B2BUA never meet in it.
 pub struct PrackAnswers1xxOfferRule;
 
 impl CrossMessageAuditRule for PrackAnswers1xxOfferRule {
@@ -2590,10 +2589,6 @@ impl CrossMessageAuditRule for PrackAnswers1xxOfferRule {
 
     fn subject(&self) -> std::collections::HashSet<UaRole> {
         std::collections::HashSet::from([UaRole::Uac, UaRole::Uas])
-    }
-
-    fn force_advisory(&self) -> bool {
-        true
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
@@ -6521,7 +6516,7 @@ mod tests {
 
     #[test]
     fn a_bodiless_prack_for_a_1xx_offer_is_named_at_either_end() {
-        assert!(PrackAnswers1xxOfferRule.force_advisory());
+        assert!(!PrackAnswers1xxOfferRule.force_advisory(), "a bodiless PRACK to an offer gates");
         assert_eq!(PrackAnswers1xxOfferRule.subject(), HashSet::from([UaRole::Uac, UaRole::Uas]));
         // The bind SENT the offending PRACK: charged party and vantage are one.
         let sender = vec![

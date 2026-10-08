@@ -467,13 +467,14 @@ async fn the_ladder_ceases_at_the_final_response() {
     );
     // Alice's silence leaves the callee's own reliable provisional unPRACKed
     // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. Whether it should acknowledge it itself is
-    // open; it is not this test's subject.
+    // end and has none to relay. The stack is to PRACK it itself when that
+    // final arrives; until it does, this waiver names the gap.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
-             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
+             PRACK the still-unacknowledged reliable provisional itself on that final \
+             (RFC 3262 §4)",
         )
         .on_party("b2bua"),
     );
@@ -603,13 +604,14 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
     );
     // Alice's silence leaves the callee's own reliable provisional unPRACKed
     // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. Whether it should acknowledge it itself is
-    // open; it is not this test's subject.
+    // end and has none to relay. The stack is to PRACK it itself when that
+    // final arrives; until it does, this waiver names the gap.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
-             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
+             PRACK the still-unacknowledged reliable provisional itself on that final \
+             (RFC 3262 §4)",
         )
         .on_party("b2bua"),
     );
@@ -710,13 +712,14 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
     );
     // Alice's silence leaves the callee's own reliable provisional unPRACKed
     // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. Whether it should acknowledge it itself is
-    // open; it is not this test's subject.
+    // end and has none to relay. The stack is to PRACK it itself when that
+    // final arrives; until it does, this waiver names the gap.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
-             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
+             PRACK the still-unacknowledged reliable provisional itself on that final \
+             (RFC 3262 §4)",
         )
         .on_party("b2bua"),
     );
@@ -854,13 +857,14 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     );
     // Alice's silence leaves the callee's own reliable provisional unPRACKed
     // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. Whether it should acknowledge it itself is
-    // open; it is not this test's subject.
+    // end and has none to relay. The stack is to PRACK it itself when that
+    // final arrives; until it does, this waiver names the gap.
     h.waive(
         WaiverScope::rule(
             "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
-             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
+             PRACK the still-unacknowledged reliable provisional itself on that final \
+             (RFC 3262 §4)",
         )
         .on_party("b2bua"),
     );
