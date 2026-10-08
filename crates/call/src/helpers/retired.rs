@@ -72,3 +72,21 @@ pub fn release_retired(leg: &mut Leg, tag: &str, outbound_cseq: i64) {
     }
     retired.store(leg);
 }
+
+/// Close every relay still open in `leg`'s retired dialogs and return them,
+/// each with its dialog's tag: the leg ends, so no final reaches them but the
+/// one this stack answers (RFC 3261 §8.2.6).
+pub fn take_retired(leg: &mut Leg) -> Vec<(String, PendingRequest)> {
+    let retired = Retired::of(leg);
+    Retired::default().store(leg);
+    retired
+        .pending
+        .into_iter()
+        .flat_map(|(tag, ps)| ps.into_iter().map(move |p| (tag.clone(), p)))
+        .collect()
+}
+
+/// How many relays are still open in `leg`'s retired dialogs.
+pub fn retired_count(leg: &Leg) -> usize {
+    Retired::of(leg).pending.values().map(Vec::len).sum()
+}

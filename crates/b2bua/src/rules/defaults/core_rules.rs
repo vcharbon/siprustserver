@@ -423,16 +423,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "resolve-cancelled-reinvite-response",
             &["relay-reinvite-response", "relay-provisional", "confirm-dialog", "route-failure"],
-            Match::response().method("INVITE").filter(|ctx| {
-                let cseq = match ctx.response() {
-                    Some(r) => r.cseq().seq() as i64,
-                    None => return false,
-                };
-                ctx.source_dialog()
-                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
-                    .map(|p| p.cancelled)
-                    .unwrap_or(false)
-            }),
+            Match::response()
+                .method("INVITE")
+                .filter(|ctx| ctx.relayed_pending().is_some_and(|p| p.cancelled)),
             |ctx| {
                 let resp = ctx.response()?;
                 if resp.status() < 200 {
@@ -463,19 +456,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "relay-reinvite-response",
             &["relay-provisional", "confirm-dialog", "route-failure", "handle-481"],
-            Match::response().method("INVITE").filter(|ctx| {
-                let cseq = match ctx.response() {
-                    Some(r) => r.cseq().seq() as i64,
-                    None => return false,
-                };
-                // A `cancelled` snapshot is NOT relayable — its originator was
-                // already 487'd by the txn layer when the CANCEL matched; the
-                // final resolves via `resolve-cancelled-reinvite-response`.
-                ctx.source_dialog()
-                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
-                    .map(|p| !p.cancelled)
-                    .unwrap_or(false)
-            }),
+            // A `cancelled` snapshot is NOT relayable — its originator was
+            // already 487'd by the txn layer when the CANCEL matched; the final
+            // resolves via `resolve-cancelled-reinvite-response`.
+            Match::response()
+                .method("INVITE")
+                .filter(|ctx| ctx.relayed_pending().is_some_and(|p| !p.cancelled)),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was

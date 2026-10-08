@@ -557,7 +557,7 @@ pub const CENSUS_CDR_EVENTS: Family = Family::gauge(
 pub const CENSUS_PENDING_REQUESTS: Family = Family::gauge(
     "b2bua_census_pending_requests",
     Labels::None,
-    "sum of inbound_pending_requests across all dialogs of live calls (removed only on a correlated final response; a climbing ratio = uncorrelated/lost-response leak)",
+    "sum of inbound_pending_requests across all dialogs of live calls, retired early dialogs' included (removed only on a correlated final response; a climbing ratio = uncorrelated/lost-response leak)",
 );
 
 pub const CENSUS_PENDING_REQUESTS_MAX: Family = Family::gauge(

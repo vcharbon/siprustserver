@@ -466,8 +466,9 @@ impl ActionExecutor<'_> {
     /// where that leg goes `Terminated`: its target's answer relays no further,
     /// and RFC 3261 §8.2.6 owes the originator a final. A PRACK draws 200 — it
     /// named a provisional this stack showed under its own number (RFC 3262
-    /// §3); anything else 481. The snapshot is dropped so a late answer from
-    /// the target is never a second final (§17.2.1). A confirmed leg being
+    /// §3); anything else 481 — the relays of early dialogs the answer retired
+    /// included. The snapshot is dropped so a late answer from the target is
+    /// never a second final (§17.2.1). A confirmed leg being
     /// BYEd keeps its relays; a pending INVITE is [`Self::reject_pending_reinvite`]'s.
     pub(super) fn reject_pending_non_invites(
         &self,
@@ -481,7 +482,7 @@ impl ActionExecutor<'_> {
             call.b_legs.iter().find(|l| l.leg_id == leg_id)
         };
         let Some(leg) = leg else { return };
-        let pending: Vec<(String, call::PendingRequest)> = leg
+        let mut pending: Vec<(Option<String>, call::PendingRequest)> = leg
             .dialogs
             .iter()
             .flat_map(|d| {
@@ -490,18 +491,31 @@ impl ActionExecutor<'_> {
                     .inbound_pending_requests
                     .iter()
                     .filter(|p| !p.method.eq_ignore_ascii_case("INVITE"))
-                    .map(move |p| (tag.clone(), p.clone()))
+                    .map(move |p| (Some(tag.clone()), p.clone()))
             })
             .collect();
+        // The relays of early dialogs the answer retired end with the leg too.
+        let mut retired = Vec::new();
+        *call = call::helpers::update_leg(call.clone(), leg_id, |l| {
+            retired = call::helpers::take_retired(l);
+        });
+        pending.extend(
+            retired
+                .into_iter()
+                .filter(|(_, p)| !p.method.eq_ignore_ascii_case("INVITE"))
+                .map(|(_, p)| (None, p)),
+        );
         let originator =
             call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
         for (identity_tag, p) in pending {
-            *call = call::helpers::remove_pending_request(
-                call.clone(),
-                leg_id,
-                &identity_tag,
-                p.outbound_cseq,
-            );
+            if let Some(identity_tag) = identity_tag {
+                *call = call::helpers::remove_pending_request(
+                    call.clone(),
+                    leg_id,
+                    &identity_tag,
+                    p.outbound_cseq,
+                );
+            }
             // §18.2.2: the final goes to the originator's top Via sent-by.
             let Some(dest) =
                 p.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))

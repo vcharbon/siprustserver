@@ -290,20 +290,26 @@ impl ActionExecutor<'_> {
                     }
                 }
             }
-            // The dialog the answered request came in on: its sender's tag.
+            // The dialog the answered request came in on: its sender's tag. A
+            // relay of a dialog the answer retired leaves as written: its
+            // description belongs to no session this stack keeps, and never
+            // moves the answered one's (RFC 3264 §8).
             let dialog = From::parse(&SipStr::owned(&pending.source_from))
                 .ok()
                 .and_then(|from| from.tag().map(str::to_string));
-            let relay_body = relay::continue_on_leg(
-                call,
-                target_leg,
-                dialog.as_deref(),
-                relay::Author::Leg(&source_leg_id),
-                relay::Carried::answering(&Method::from_wire(&cseq_method), status),
-                relay_body.clone(),
-                relay_content_type.as_ref(),
-                self.config.sdp_form.as_ref(),
-            );
+            let relay_body = match &holder {
+                PendingHolder::Retired(_) => relay_body.clone(),
+                PendingHolder::Dialog(_) => relay::continue_on_leg(
+                    call,
+                    target_leg,
+                    dialog.as_deref(),
+                    relay::Author::Leg(&source_leg_id),
+                    relay::Carried::answering(&Method::from_wire(&cseq_method), status),
+                    relay_body.clone(),
+                    relay_content_type.as_ref(),
+                    self.config.sdp_form.as_ref(),
+                ),
+            };
             let opts = snapshot_response_opts(
                 &pending,
                 &cseq_method,

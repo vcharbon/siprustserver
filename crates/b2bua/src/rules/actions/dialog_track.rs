@@ -489,8 +489,8 @@ pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
 
 /// Identify the caller's answered dialog by `tag`: the one a-dialog takes it
 /// as its local tag, with the sequences and open relays of the caller-facing
-/// dialog `tag` named (fresh sequences from the caller's INVITE for a tag
-/// never shown). Every other caller-facing dialog and mapping is retired, so a
+/// dialog `tag` named (fresh sequences and none for a tag never shown). Every
+/// other caller-facing dialog and mapping is retired, so a
 /// request the caller sends on an early dialog the answer abandoned matches no
 /// dialog and draws `481` (RFC 3261 §12.2.2); the relays still open in them
 /// are kept per tag ([`call::helpers::retire_pending`]) for the caller's finals.
@@ -516,6 +516,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
             None => {
                 d.sip.local_cseq = fresh;
                 d.ext.remote_cseq = Some(fresh);
+                retired.push((old_tag, std::mem::take(&mut d.ext.inbound_pending_requests)));
             }
         }
     }

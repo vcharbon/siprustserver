@@ -148,6 +148,7 @@ mod repeated_2xx_before_caller_ack;
 mod reroute_limiter_holds;
 mod reroute_rejection_tag;
 mod response_contact_scope;
+mod retired_early_dialog_relays;
 mod retransmission_turn_and_message_cap;
 mod retry_on_an_ending_identity;
 mod route_fold_limiter_holds;

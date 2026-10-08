@@ -1097,6 +1097,7 @@ impl CallState {
             let mut call_pend = 0u64;
             for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
                 dialogs += leg.dialogs.len() as u64;
+                call_pend += call::helpers::retired_count(leg) as u64;
                 for d in &leg.dialogs {
                     rset += d.sip.route_set.len() as u64;
                     call_pend += d.ext.inbound_pending_requests.len() as u64;

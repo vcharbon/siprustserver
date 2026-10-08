@@ -1551,17 +1551,13 @@ impl<'a> RuleContext<'a> {
         }
     }
 
-    /// Does the current response answer a request THIS STACK RELAYED — i.e.
-    /// does the relay it answers hold a pending-relay snapshot for the
-    /// response CSeq? Read through [`call::helpers::relayed_pending`], as the
-    /// relay executor reads it: the dialog the response's identity tag names,
-    /// never another one. `false` for a request the B2BUA originated itself
-    /// (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY), which
-    /// leaves no snapshot, and for any non-response event.
-    pub fn answers_relayed_request(&self) -> bool {
-        let Some(resp) = self.response() else {
-            return false;
-        };
+    /// The pending-relay snapshot the current response answers, read through
+    /// [`call::helpers::relayed_pending`] as the relay executor reads it: the
+    /// dialog the response's identity tag names, or the relays kept for a
+    /// dialog the answer retired — never another dialog's. `None` for any
+    /// non-response event.
+    pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
+        let resp = self.response()?;
         call::helpers::relayed_pending(
             self.call.0,
             self.source_leg_id,
@@ -1569,7 +1565,15 @@ impl<'a> RuleContext<'a> {
             resp.from().tag(),
             resp.cseq().seq() as i64,
         )
-        .is_some()
+        .map(|(_, p)| p)
+    }
+
+    /// Does the current response answer a request THIS STACK RELAYED
+    /// ([`Self::relayed_pending`])? `false` for a request the B2BUA originated
+    /// itself (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY),
+    /// which leaves no snapshot, and for any non-response event.
+    pub fn answers_relayed_request(&self) -> bool {
+        self.relayed_pending().is_some()
     }
 
     /// The leg the event arrived on.

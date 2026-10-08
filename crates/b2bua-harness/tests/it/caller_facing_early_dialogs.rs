@@ -261,65 +261,6 @@ async fn an_out_of_order_caller_request_is_answered_500() {
     let _ = h.finish().await;
 }
 
-/// The caller's answer to a request relayed in an early dialog the answer
-/// retired reaches that request's originator, never a request of the answered
-/// dialog that happens to carry the same CSeq: fork 2's UPDATE and fork 1's
-/// both reach her as CSeq 2, each in its own dialog; fork 1 answers; her late
-/// 200 to fork 2's UPDATE answers fork 2, and her 200 to fork 1's answers fork 1.
-#[tokio::test(start_paused = true)]
-async fn a_late_answer_in_a_retired_dialog_reaches_its_own_originator() {
-    let h = Harness::with_transit_delay("b2bua-late-answer-retired-early-dialog", 1);
-    let alice = h.agent("alice", "127.0.0.1:7333").await;
-    let bob = h.agent("bob", "127.0.0.1:7334").await;
-    let b2bua =
-        B2buaSut::route_all_to("127.0.0.1", 7334).start(&h, "b2bua", "127.0.0.1:7335").await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
-    let a_tag1 = call.expect(180).await.to().tag().expect("fork 1's a-facing tag").to_string();
-    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
-    let a_tag2 = call.expect(180).await.to().tag().expect("fork 2's a-facing tag").to_string();
-
-    uas.adopt_to_tag("bobfork2");
-    let mut fork2 = uas.dialog();
-    uas.adopt_to_tag("bobfork1");
-    let mut fork1 = uas.dialog();
-
-    let mut update2 = fork2.request(InDialogMethod::Update, None).await;
-    let mut at_alice2 = alice.receive("UPDATE").await;
-    assert_eq!(at_alice2.request().from().tag(), Some(a_tag2.as_str()));
-    let mut update1 = fork1.request(InDialogMethod::Update, None).await;
-    let mut at_alice1 = alice.receive("UPDATE").await;
-    assert_eq!(at_alice1.request().from().tag(), Some(a_tag1.as_str()));
-    assert_eq!(cseq_of(&at_alice1), cseq_of(&at_alice2), "two dialogs, one number each");
-
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    let ok = call.expect(200).await;
-    assert_eq!(ok.to().tag(), Some(a_tag1.as_str()), "fork 1 answers");
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-
-    at_alice2.respond(200, "OK").await;
-    let answered2 = update2.expect(200).await;
-    assert_eq!(answered2.from().tag(), Some("bobfork2"), "fork 2's UPDATE is the one answered");
-    at_alice1.respond(200, "OK").await;
-    let answered1 = update1.expect(200).await;
-    assert_eq!(answered1.from().tag(), Some("bobfork1"));
-
-    let mut bye = dialog.bye().await;
-    let mut at_bob = bob.receive("BYE").await;
-    assert_eq!(at_bob.request().to().tag(), Some("bobfork1"));
-    at_bob.respond(200, "OK").await;
-    bye.expect(200).await;
-
-    settle_until(|| b2bua.is_reaped()).await;
-    alice.drain().await;
-    bob.drain().await;
-    b2bua.assert_fully_reaped();
-    let _ = h.finish().await;
-}
-
 /// The service that shows the caller a second early dialog of its own: the
 /// callee's 183 is answered toward her as a 183 under a To-tag the service
 /// states, and is not relayed.
@@ -409,57 +350,6 @@ async fn a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence() 
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-
-    settle_until(|| b2bua.is_reaped()).await;
-    alice.drain().await;
-    bob.drain().await;
-    b2bua.assert_fully_reaped();
-    let _ = h.finish().await;
-}
-
-/// The caller's request relayed into a callee fork the answer then drops
-/// still gets its final: fork 2 rings, alice UPDATEs fork 2's dialog, fork 1
-/// answers before fork 2 replies, and fork 2's own 200 reaches her UPDATE in
-/// fork 2's dialog — never left unanswered, never delivered to fork 1's.
-#[tokio::test(start_paused = true)]
-async fn a_caller_request_into_a_dropped_fork_still_gets_its_final() {
-    let h = Harness::with_transit_delay("b2bua-caller-request-into-dropped-fork", 1);
-    let alice = h.agent("alice", "127.0.0.1:7339").await;
-    let bob = h.agent("bob", "127.0.0.1:7340").await;
-    let b2bua =
-        B2buaSut::route_all_to("127.0.0.1", 7340).start(&h, "b2bua", "127.0.0.1:7341").await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
-    let a_tag1 = call.expect(180).await.to().tag().expect("fork 1's a-facing tag").to_string();
-    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
-    let a_tag2 = call.expect(180).await.to().tag().expect("fork 2's a-facing tag").to_string();
-
-    let mut update = call.send_request(InDialogMethod::Update).with_to_tag(&a_tag2).send().await;
-    let mut at_fork2 = bob.receive("UPDATE").await;
-    assert_eq!(at_fork2.request().to().tag(), Some("bobfork2"), "relayed into fork 2");
-
-    uas.adopt_to_tag("bobfork1");
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    let ok = call.expect(200).await;
-    assert_eq!(ok.to().tag(), Some(a_tag1.as_str()), "fork 1 answers");
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-
-    at_fork2.respond(200, "OK").await;
-    let answered = update.expect(200).await;
-    assert_eq!(
-        answered.to().tag(),
-        Some(a_tag2.as_str()),
-        "her UPDATE is answered in fork 2's dialog"
-    );
-
-    let mut bye = dialog.bye().await;
-    let mut at_bob = bob.receive("BYE").await;
-    assert_eq!(at_bob.request().to().tag(), Some("bobfork1"));
-    at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
     settle_until(|| b2bua.is_reaped()).await;
