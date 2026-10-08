@@ -47,15 +47,14 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
-/// How long a UAC must be seen holding an unPRACKed reliable provisional, its
-/// INVITE unanswered, before the absence is charged to it: a final reaching it
-/// inside the window owed it nothing, and an OPEN observation must run past it.
+/// How long an OPEN observation must run past an unPRACKed reliable
+/// provisional, with no final seen, before the absence is charged rather than
+/// read as truncation.
 ///
 /// One second: RFC 3262 §3 has the UAS retransmit the provisional on the T1
 /// ladder (500 ms, then 1 s, …) until the PRACK arrives, and §4 has the UAC
-/// PRACK on receipt. A UAC that has neither PRACKed nor taken the final a full
-/// second later is not slow, and anything shorter would charge a dialog whose
-/// PRACK was still in flight.
+/// PRACK on receipt. A recording that runs a full second past the provisional
+/// without a PRACK did not merely stop before it.
 pub const PRACK_WINDOW_US: u64 = 1_000_000;
 
 /// **RFC 3262 §4 — a UAC that took a reliable provisional answers it with a
@@ -64,20 +63,19 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 /// The offence is an ABSENCE; each conservatism gate costs an occasion the
 /// population counts as undecided rather than clean: the negotiation must be
 /// witnessed, the charged endpoint must be the transaction's UAC, a PRACK
-/// whose `RAck` will not parse contaminates its sender's obligations, and the
-/// dialog must stay observably alive for [`PRACK_WINDOW_US`] after the
+/// whose `RAck` will not parse contaminates its sender's obligations, and an
+/// open observation with no final must run [`PRACK_WINDOW_US`] past the
 /// provisional.
 ///
-/// **The window rule, one for every observation.** The occasion is a reliable
+/// **The rule, one for every observation.** The occasion is a reliable
 /// provisional taken while the INVITE awaits its final; a CANCEL ends nothing
-/// (§4: every reliable provisional of a pending transaction is PRACKed). A
-/// final reaching the UAC first leaves no occasion, and one inside
-/// [`PRACK_WINDOW_US`] after the provisional owed nothing: a reading of the
-/// messages, so the census over a capture and the live audit over a run reach
-/// it alike. What differs is the END of the observation alone: a CLOSED one
-/// (the harness drained, nothing in flight) decides an unanswered absence at
-/// once, an OPEN one only after the window, before which the stop is
-/// truncation.
+/// (§4: every reliable provisional of a pending transaction is PRACKed). Only
+/// a final reaching the UAC BEFORE the provisional leaves no occasion; a final
+/// after it, however soon, decides the absence, while a PRACK crossing that
+/// final in flight still discharges it. What differs is the END of an
+/// observation with no final: a CLOSED one (the harness drained, nothing in
+/// flight) decides the absence at once, an OPEN one only after
+/// [`PRACK_WINDOW_US`], before which the stop is truncation.
 ///
 /// Repeats collapse on the RSeq: one PRACK answers every retransmission of one
 /// reliable provisional (§3), so an obligation is keyed by its early dialog's
@@ -114,7 +112,6 @@ impl Obligation for UnackedReliableProvisional {
             }
             let alive_until = final_us.unwrap_or(seen.last_ts_us).min(seen.last_ts_us);
             let window_us = alive_until - p.ts_us.min(alive_until);
-            let final_inside = final_us.is_some() && window_us < PRACK_WINDOW_US;
             // The two hop tests, each the other's blind spot: an INVITE this
             // endpoint did not open, and a provisional it passed on.
             let opened_it = seen
@@ -131,10 +128,7 @@ impl Obligation for UnackedReliableProvisional {
                 Some("the INVITE did not offer 100rel — the negotiation was never witnessed")
             } else if seen.unreadable_prack.contains(uac) {
                 Some("a PRACK the emitter sent has an unreadable RAck — it may be the one")
-            } else if final_inside {
-                out.push(head(Decision::Compliant)); // the final came before a PRACK was due
-                continue;
-            } else if !(wire.obs.closed || window_us >= PRACK_WINDOW_US) {
+            } else if final_us.is_none() && !(wire.obs.closed || window_us >= PRACK_WINDOW_US) {
                 Some("the observation stopped inside the window — truncation, not absence")
             } else {
                 None
@@ -1710,13 +1704,13 @@ mod tests {
         Observation { last_us, endpoint_last_us, closed }
     }
 
-    /// A reliable 180 followed 20 ms later by the 200 OK: the final reached the
-    /// UAC inside the PRACK window, before a PRACK could be expected of it, so
-    /// none was owed. That reading is the MESSAGES', so an open and a closed
+    /// A reliable 180 followed 20 ms later by the 200 OK, never PRACKed: a
+    /// final arriving soon after the provisional does not excuse the PRACK
+    /// (RFC 3262 §4). That reading is the MESSAGES', so an open and a closed
     /// observation reach the same verdict: the census over a capture and the
     /// live audit over a run decide one sequence alike.
     #[test]
-    fn a_provisional_a_fast_final_answered_owes_nothing_whatever_the_observation() {
+    fn a_fast_final_does_not_excuse_the_prack_whatever_the_observation() {
         let msgs = vec![
             invite(1_000_000, UAC, UAS, 1),
             reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"),
@@ -1727,10 +1721,53 @@ mod tests {
             let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
             assert_eq!(f.len(), 1);
             assert!(
-                matches!(f[0].decision, Decision::Compliant),
-                "closed={closed}: the final came inside the window: {:?}",
+                f[0].violated(),
+                "closed={closed}: the final came after it: {:?}",
                 f[0].decision
             );
+            assert_eq!(f[0].emitter, UAC);
+        }
+    }
+
+    /// A PRACK the UAC sent before the final reached it may be seen after that
+    /// final at the vantage: the two crossed in flight, and the PRACK still
+    /// discharges the obligation.
+    #[test]
+    fn a_prack_crossing_the_final_in_flight_is_compliant() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            reliable(1_100_000, UAS, UAC, 183, 1, 5, "tb"),
+            final_status(1_120_000, 487, 1, "tb"),
+            prack(1_121_000, UAC, UAS, 2, 5, 1, "tb"),
+        ];
+        for closed in [false, true] {
+            let o = obs(&msgs, closed);
+            let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+            assert_eq!(f.len(), 1);
+            assert!(
+                matches!(f[0].decision, Decision::Compliant),
+                "closed={closed}: {:?}",
+                f[0].decision
+            );
+        }
+    }
+
+    /// RFC 3262 §4: a reliable provisional crossing the UAC's CANCEL is owed
+    /// its PRACK even when the 487 follows within milliseconds.
+    #[test]
+    fn a_provisional_crossing_the_cancel_is_owed_its_prack_whatever_the_final_delay() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            cancel(1_295_000, 1),
+            reliable(1_324_000, UAS, UAC, 183, 1, 1, "tb"),
+            final_status(1_419_000, 487, 1, "tb"),
+        ];
+        for closed in [false, true] {
+            let o = obs(&msgs, closed);
+            let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].violated(), "closed={closed}: {:?}", f[0].decision);
+            assert_eq!(f[0].emitter, UAC);
         }
     }
 

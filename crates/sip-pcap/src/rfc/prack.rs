@@ -143,11 +143,10 @@ mod tests {
         assert_eq!((p.occasions, p.decided), (1, 0));
     }
 
-    /// The final comes before the window closes: a 486 four hundred
-    /// milliseconds after the reliable provisional, before a PRACK was due. The
-    /// occasion is decided, and nothing was owed.
+    /// A 486 four hundred milliseconds after the reliable provisional does not
+    /// excuse the PRACK (RFC 3262 §4): the occasion is decided, and charged.
     #[test]
-    fn a_transaction_that_ended_inside_the_prack_window_is_not_charged() {
+    fn a_final_soon_after_the_provisional_does_not_excuse_the_prack() {
         let scanned = scan(&doc_of(vec![
             dg(1_000_000, A, B, request_hdr("INVITE", 1, "e1", "fa", None, OFFER)),
             dg(
@@ -162,15 +161,16 @@ mod tests {
             dg(9_100_000, B, A, response(486, "Busy Here", 5, "INVITE", "e1", "fa", Some("tb"))),
             dg(9_110_000, A, B, request("ACK", 5, "e1", "fa", Some("tb"))),
         ]));
-        assert!(scanned.hits.is_empty(), "answered 400 ms in: {:?}", scanned.hits);
+        assert_eq!(scanned.hits.len(), 1, "answered 400 ms in, never PRACKed: {:?}", scanned.hits);
+        assert_eq!(scanned.hits[0].emitter, A, "the UAC owed the PRACK");
         let p = scanned.population["unacked-reliable-provisional"];
         assert_eq!((p.occasions, p.decided), (1, 1));
     }
 
-    /// A CANCEL ends nothing (RFC 3262 §4); the 487 four hundred milliseconds
-    /// after the provisional came before a PRACK was due, so none was owed.
+    /// A CANCEL ends nothing (RFC 3262 §4), and the 487 four hundred
+    /// milliseconds after the provisional does not excuse its PRACK.
     #[test]
-    fn a_final_inside_the_window_after_a_cancel_is_not_charged() {
+    fn a_final_soon_after_a_cancel_does_not_excuse_the_prack() {
         let scanned = scan(&doc_of(vec![
             dg(1_000_000, A, B, request_hdr("INVITE", 1, "k1", "fa", None, OFFER)),
             dg(
@@ -192,7 +192,8 @@ mod tests {
             dg(9_100_000, B, A, response(486, "Busy Here", 5, "INVITE", "k1", "fa", Some("tb"))),
             dg(9_110_000, A, B, request("ACK", 5, "k1", "fa", Some("tb"))),
         ]));
-        assert!(scanned.hits.is_empty(), "the 487 came 400 ms in: {:?}", scanned.hits);
+        assert_eq!(scanned.hits.len(), 1, "the 487 came 400 ms in, no PRACK: {:?}", scanned.hits);
+        assert_eq!(scanned.hits[0].emitter, A, "the UAC owed the PRACK");
     }
 
     /// RFC 3262 §4: the CANCEL does not end the INVITE transaction. A reliable
