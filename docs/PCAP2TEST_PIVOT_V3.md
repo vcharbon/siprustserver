@@ -1562,6 +1562,23 @@ that took that INVITE (before the next one taking an INVITE), it matches as any
 arrival does; otherwise the transaction consumes it, recorded with a note: never
 an unexpected datagram, never a match for another step.
 
+### 6.7f A request naming no dialog the leg holds
+
+Once a 2xx to INVITE has confirmed a leg's dialog, its identifier is fixed (RFC
+3261 §12.1.2): the remote tag is the 2xx's To-tag on the calling side, the
+INVITE's From-tag on the answering side. A request the leg then takes whose
+From-tag is the remote tag of no dialog a 2xx confirmed names no dialog the leg
+holds, and a real UA answers it 481 (§12.2.2). So does the interpreter:
+
+- the request is recorded, answered `481`, and is the unexpected datagram it is
+  (during settle, the late arrival). No `expect` and no `background` policy
+  takes it, and the leg learns nothing from it: its dialog keeps the remote tag
+  its 2xx gave it;
+- the early dialog of another fork still stands for 64·T1 (32 s) after the first
+  2xx (§13.2.2.4): a request under that fork's tag inside the window is taken as
+  any other;
+- an ACK and a CANCEL are never refused here (§17.1.1.3, §9.1).
+
 ### 6.8 delay and dwell
 
 ```json

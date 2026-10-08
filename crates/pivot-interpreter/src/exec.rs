@@ -90,6 +90,13 @@ fn scripts_a_bye_final(step: &CompiledStep) -> bool {
     )
 }
 
+/// The note on a request naming no dialog its leg holds (RFC 3261 §12.2.2).
+const FOREIGN_DIALOG: &str =
+    "names no dialog this leg holds (RFC 3261 §12.2.2): refused 481, nothing learned";
+
+/// The note on the 481 that refuses it.
+const FOREIGN_DIALOG_481: &str = "481: the request names no dialog this leg holds";
+
 /// How long a step holds a datagram out for a better candidate.
 ///
 /// A BACKSTOP, not a wait: the hold normally ends on the next arrival, and this
@@ -716,6 +723,13 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         }
 
+        // RFC 3261 §12.2.2 before anything reads it: a request naming no dialog
+        // its leg holds is answered 481, and neither a policy nor the flow
+        // takes it.
+        if let Some(leg) = self.foreign_dialog_leg(&message) {
+            return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat, false).await;
+        }
+
         // Background next (§5.1): a policy's traffic never touches the cursor.
         // The policy is sought over every actor on the RECEIVING endpoint, not
         // only the one whose pump surfaced it: a loopback endpoint hosts a UAC
@@ -942,11 +956,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         let confirmed_before = self.stacks.get(&leg).is_some_and(|stack| stack.confirmed());
         // Learn the dialog facts before matching: a step's inline checks may
         // read what this very message taught the leg.
+        let now_us = self.now_us();
         if let Some(stack) = self.stacks.get_mut(&leg) {
             match &message {
                 SipMessage::Request(r) => stack.learn_request(r),
                 SipMessage::Response(r) => stack.learn_response(r),
             }
+            stack.note_confirmed_at(now_us);
         }
         // Only an INVITE final is ACKed, so only one kind is kept: a 200 to a
         // CANCEL is a final too, and ACKing it would answer the wrong
@@ -1263,6 +1279,69 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
+    /// The leg of `message` when it is a request naming no dialog that leg
+    /// holds ([`LegStack::names_no_dialog`]).
+    fn foreign_dialog_leg(&self, message: &SipMessage) -> Option<String> {
+        let SipMessage::Request(request) = message else { return None };
+        let leg = self.leg_by_call_id(request.call_id().as_str())?;
+        let stack = self.stacks.get(&leg)?;
+        stack.names_no_dialog(request, self.now_us()).then_some(leg)
+    }
+
+    /// Answer `message` 481 (RFC 3261 §12.2.2): it names no dialog its leg
+    /// holds, so it is recorded, refused, and taught to nothing. Mid-flow it is
+    /// the unexpected datagram it is; during settle the arrival is recorded as
+    /// such. `false` when the 481 could not be sent.
+    async fn refuse_foreign_dialog(
+        &mut self,
+        actor: &str,
+        leg: &str,
+        message: &SipMessage,
+        bytes: Vec<u8>,
+        repeat: bool,
+        settling: bool,
+    ) -> bool {
+        let SipMessage::Request(request) = message else { return true };
+        self.record_arrival(leg, bytes, None, Some(FOREIGN_DIALOG), repeat);
+        if !settling {
+            self.instance.fail(Failure::UnexpectedDatagram {
+                leg: leg.to_string(),
+                arrived: Inbound::of(message).arrived(),
+                detail: Some(FOREIGN_DIALOG.to_string()),
+            });
+        }
+        let Some(agent) = self.lane.agents.get(actor).cloned() else { return true };
+        let response = sip_message::generators::generate_response(
+            request,
+            481,
+            reason_for(481),
+            &sip_message::generators::GenerateResponseOpts::default(),
+        );
+        let wire = sip_message::serialize(&SipMessage::Response(response));
+        let dst = via_target(request).unwrap_or(self.lane.route_target);
+        match agent.try_send_datagram(&wire, dst).await {
+            Ok(()) => {
+                self.instance.recording().push(
+                    leg,
+                    Dir::Out,
+                    self.now_us(),
+                    wire,
+                    None,
+                    Some(FOREIGN_DIALOG_481),
+                );
+                true
+            }
+            Err(e) => {
+                self.instance.fail(Failure::SendFailed {
+                    step: "(foreign dialog)".into(),
+                    leg: leg.to_string(),
+                    detail: e.to_string(),
+                });
+                false
+            }
+        }
+    }
+
     /// Answer a background policy's message. It is answered and recorded; the
     /// flow never sees it.
     async fn answer_background(
@@ -1367,6 +1446,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.draw_for_repeat(&message).await;
             return;
         }
+        if let Some(leg) = self.foreign_dialog_leg(&message) {
+            self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat, true).await;
+            return;
+        }
         if let Some(method) = &inbound.method {
             if let Some((index, policy)) = self.background_policy(
                 actor,
@@ -1398,11 +1481,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         // takes here too, past the same absorbed final `deliver` never learns
         // — a request it never took is one it cannot answer (§11.2), whether
         // the generic close or this window answers it.
+        let now_us = self.now_us();
         if let Some(stack) = self.stacks.get_mut(&leg) {
             match &message {
                 SipMessage::Request(r) => stack.learn_request(r),
                 SipMessage::Response(r) => stack.learn_response(r),
             }
+            stack.note_confirmed_at(now_us);
         }
         self.record_arrival(
             &leg,
