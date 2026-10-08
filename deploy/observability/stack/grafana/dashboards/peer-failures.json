@@ -887,7 +887,7 @@
       "id": 20,
       "type": "stat",
       "title": "loadgen ok ratio",
-      "description": "Fraction of loadgen calls classed ok over the window. Drops here \u21d2 scan the per-peer failure tables to find the culprit hop.",
+      "description": "Fraction of loadgen calls that are no failure (class ok or expected_reject) over the window. Drops here \u21d2 scan the per-peer failure tables to find the culprit hop.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -900,7 +900,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(loadgen_calls_total{class=\"ok\"}[$__range])) / clamp_min(sum(rate(loadgen_calls_total[$__range])), 0.0001)",
+          "expr": "sum(rate(loadgen_calls_total{class=~\"ok|expected_reject\"}[$__range])) / clamp_min(sum(rate(loadgen_calls_total[$__range])), 0.0001)",
           "refId": "A"
         }
       ],
@@ -938,7 +938,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(loadgen_calls_total{class!=\"ok\"}[$__rate_interval]))",
+          "expr": "sum(rate(loadgen_calls_total{class!~\"ok|expected_reject\"}[$__rate_interval]))",
           "refId": "A"
         }
       ],
@@ -976,12 +976,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(loadgen_calls_total{class=\"ok\"}[$__rate_interval]))",
+          "expr": "sum(rate(loadgen_calls_total{class=~\"ok|expected_reject\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "ok"
         },
         {
-          "expr": "sum(rate(loadgen_calls_total{class!=\"ok\"}[$__rate_interval]))",
+          "expr": "sum(rate(loadgen_calls_total{class!~\"ok|expected_reject\"}[$__rate_interval]))",
           "refId": "B",
           "legendFormat": "nok"
         }

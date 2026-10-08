@@ -153,12 +153,38 @@ impl From<&CallOutcome> for ResultClass {
 }
 
 impl CallOutcome {
-    /// This outcome under the call's declared expected reject status: a step
-    /// that received exactly that status where it expected another becomes
-    /// [`CallOutcome::ExpectedReject`]; any other outcome is unchanged.
-    pub fn expecting(self, expected_reject: Option<u16>) -> Self {
+    /// This outcome after the sampled RFC audit: `audit` runs on an outcome
+    /// that is no failure, and any finding it returns makes the call
+    /// [`CallOutcome::RfcAuditFail`] (carried structured, so the report
+    /// buckets samples by rule id).
+    pub fn audited(self, audit: impl FnOnce() -> Vec<sip_net::RfcFinding>) -> Self {
+        if !self.is_checkable() {
+            return self;
+        }
+        let findings = audit();
+        if findings.is_empty() {
+            self
+        } else {
+            CallOutcome::RfcAuditFail(findings)
+        }
+    }
+
+    /// Whether an attached case's checks judge this outcome: one that is no
+    /// failure (a failed or RFC-dirty call already explains itself).
+    pub fn is_checkable(&self) -> bool {
+        matches!(self, CallOutcome::Ok | CallOutcome::ExpectedReject(_))
+    }
+
+    /// This outcome under the call's declared expected reject status: the
+    /// `caller` agent receiving exactly that status on its initial INVITE —
+    /// before the call reached `connected` — becomes
+    /// [`CallOutcome::ExpectedReject`]. Any other outcome, or that status on
+    /// another agent or after connect (a re-INVITE, BYE, REFER), is unchanged.
+    pub fn expecting(self, expected_reject: Option<u16>, caller: &str, connected: bool) -> Self {
         match (&self, expected_reject) {
-            (CallOutcome::Step(StepError::WrongStatus { got, .. }), Some(code)) if *got == code => {
+            (CallOutcome::Step(StepError::WrongStatus { who, got, .. }), Some(code))
+                if *got == code && who == caller && !connected =>
+            {
                 CallOutcome::ExpectedReject(code)
             }
             _ => self,
@@ -312,7 +338,7 @@ mod tests {
     #[test]
     #[ignore = "slow lane: loadgen"]
     fn the_expected_reject_is_its_own_non_failure_class() {
-        let expected = wrong_status(486).expecting(Some(486));
+        let expected = wrong_status(486).expecting(Some(486), "alice", false);
         let class = ResultClass::from(&expected);
         assert_eq!(class.label(), "expected_reject");
         assert!(class.is_ok());
@@ -320,14 +346,56 @@ mod tests {
         assert!(expected.chaos_excusable());
         assert_eq!(expected.case(Some("start")), "486");
 
-        let refused = ResultClass::from(&wrong_status(503).expecting(Some(486)));
+        let refused = ResultClass::from(&wrong_status(503).expecting(Some(486), "alice", false));
         assert_eq!(refused.label(), "status_503");
         assert!(!refused.is_ok());
         assert!(!ResultClass::label_is_ok("status_503"));
 
-        let undeclared = ResultClass::from(&wrong_status(486).expecting(None));
+        let undeclared = ResultClass::from(&wrong_status(486).expecting(None, "alice", false));
         assert_eq!(undeclared.label(), "status_486");
         assert!(!undeclared.is_ok());
-        assert!(matches!(CallOutcome::Ok.expecting(Some(486)), CallOutcome::Ok));
+        assert!(matches!(CallOutcome::Ok.expecting(Some(486), "alice", false), CallOutcome::Ok));
+    }
+
+    /// A reject status seen by another agent than the caller (a callee's
+    /// answer to its own BYE or REFER), or by the caller once the call
+    /// connected (a re-INVITE, a BYE), is no expected reject.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn only_the_callers_reject_is_expected() {
+        let busy = |who: &str| {
+            CallOutcome::Step(StepError::WrongStatus {
+                who: who.into(),
+                expected: 200,
+                got: 486,
+                reason: "Busy Here".into(),
+            })
+        };
+        let class = |o: CallOutcome| ResultClass::from(&o).label();
+        assert_eq!(class(busy("bob").expecting(Some(486), "alice", false)), "status_486");
+        assert_eq!(class(busy("alice").expecting(Some(486), "alice", true)), "status_486");
+        assert_eq!(class(busy("alice").expecting(Some(486), "alice", false)), "expected_reject");
+    }
+
+    /// An expected reject is no failure, so the sampled RFC audit and the
+    /// case's checks judge it like an ok call; a failure is not audited.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn an_expected_reject_is_audited_and_checked_like_ok() {
+        let finding = sip_net::RfcFinding {
+            rule: "unacked-invite-non-2xx-final".to_string(),
+            lane: "10.0.0.1:5060".to_string(),
+            detail: "reject never ACKed".to_string(),
+            advisory: false,
+            offending: None,
+            charged: None,
+        };
+        let dirty = CallOutcome::ExpectedReject(486).audited(|| vec![finding.clone()]);
+        assert_eq!(ResultClass::from(&dirty), ResultClass::RfcAuditFail);
+        let clean = CallOutcome::ExpectedReject(486).audited(Vec::new);
+        assert!(matches!(clean, CallOutcome::ExpectedReject(486)));
+        assert!(clean.is_checkable());
+        let failed = wrong_status(503).audited(|| panic!("a failure is not audited"));
+        assert!(!failed.is_checkable());
     }
 }

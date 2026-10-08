@@ -26,8 +26,9 @@ pub struct LoadRunIndex {
     /// Run metadata: when it ran and the echoed knobs it ran with.
     pub meta: LoadRunMeta,
     /// Per-`(scenario, class, chaos)` completed-call counts (the report's main
-    /// table). `class == "ok"` is the success bucket; `chaos == "near"` is
-    /// accepted kill collateral, `chaos == "clear"` is a genuine result.
+    /// table). A row's `ok` marks its class as no failure (`ok`, or the shape's
+    /// `expected_reject`); `chaos == "near"` is accepted kill collateral,
+    /// `chaos == "clear"` is a genuine result.
     pub counts: Vec<CountRow>,
     /// Per-scenario end-to-end latency summary (ms).
     pub latency: Vec<LatencyRow>,

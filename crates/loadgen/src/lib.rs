@@ -34,6 +34,9 @@
 //!   (the shipped bin passes `with_defaults()`).
 //! - [`report`] — bounded-memory counters, latency histograms, sampling gate,
 //!   Prometheus text, on-disk report.
+//! - `call_rtt` — one call's SIP round trips, held by the call and folded
+//!   into the reporter when it ends (the mux dispatch path never takes the
+//!   reporter's lock).
 //! - `hist` — the fixed-bucket histogram behind every latency the report
 //!   holds: whole calls and checkpoints, and SIP round trips.
 //! - [`class`] — result classification, the shape's expected reject a
@@ -45,6 +48,7 @@
 //! [`Agent`]: scenario_harness::Agent
 
 pub mod app;
+mod call_rtt;
 pub mod case;
 pub mod catalogue;
 pub mod chaos;

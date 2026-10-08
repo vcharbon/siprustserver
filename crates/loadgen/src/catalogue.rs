@@ -269,7 +269,7 @@ mod tests {
         .unwrap();
         let reporter = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
         reporter.declare_scenarios(["basic_call"]);
-        reporter.record_rtt("basic_call", Exchange::Invite100, Duration::from_millis(2));
+        reporter.record_rtts("basic_call", &[(Exchange::Invite100, Duration::from_millis(2))]);
         let chaos = ChaosLog::new(sip_clock::Clock::test_at(0));
         let text = crate::app::metrics_body(&reporter, &core, &chaos, &RateHandle::new(5.0));
         if let Err(mismatches) = CATALOGUE.check(&text) {

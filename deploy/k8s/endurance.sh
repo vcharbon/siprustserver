@@ -1461,10 +1461,11 @@ fetch_loadgen_report() {
     warn "fetch-loadgen: $dest/index.html not present yet (report may not be snapshotted yet)"
   fi
   # Live OK ratio from the loadgen series (best-effort; 0 if VM unreachable).
+  # A shape's expected reject is no failure: it counts with ok.
   local ok_n tot_n
-  ok_n="$(vmq 'sum(loadgen_calls_total{class="ok"})')"
+  ok_n="$(vmq 'sum(loadgen_calls_total{class=~"ok|expected_reject"})')"
   tot_n="$(vmq 'sum(loadgen_calls_total)')"
-  log "loadgen totals: ok=${ok_n%.*} total=${tot_n%.*} rss=$(vmq 'max(loadgen_process_resident_memory_bytes)') inflight=$(vmq 'max(loadgen_inflight)')"
+  log "loadgen totals: ok=${ok_n%.*} total=${tot_n%.*} rss=$(vmq 'max(loadgen_process_resident_memory_bytes)') inflight=$(vmq 'sum(loadgen_inflight)')"
 
   # 18x-delivery gate: the non-PRACK ringing is best-effort (a lost 18x is expected,
   # NOT a failed call — see crates/loadgen), so we do not fail per call; instead the

@@ -221,7 +221,7 @@
       "id": 4,
       "type": "stat",
       "title": "Success ratio (admitted, 5m)",
-      "description": "ok over the completed calls the SUT admitted: completed minus the shapes' expected rejects (class expected_reject) minus the 503 refusals (shown apart).",
+      "description": "ok over the completed calls the SUT admitted: completed minus the shapes' expected rejects (class expected_reject) minus the 503 refusals (shown apart). No admitted call in the window reads as no data.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -234,7 +234,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(increase(loadgen_calls_total{class=\"ok\"}[5m])) or vector(0)) / clamp_min(sum(increase(loadgen_calls_total[5m])) - (sum(increase(loadgen_calls_total{class=\"expected_reject\"}[5m])) or vector(0)) - (sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)), 1)",
+          "expr": "(sum(increase(loadgen_calls_total{class=\"ok\"}[5m])) or vector(0)) / (sum(increase(loadgen_calls_total[5m])) - (sum(increase(loadgen_calls_total{class=\"expected_reject\"}[5m])) or vector(0)) - (sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) > 0)",
           "refId": "A",
           "legendFormat": ""
         }
@@ -274,7 +274,7 @@
       "id": 8,
       "type": "stat",
       "title": "Refused 503 ratio (5m)",
-      "description": "Completed calls refused with 503 over all completed calls. A ramp past capacity refuses on purpose; a 503 below capacity is a defect.",
+      "description": "Completed calls refused with 503 over all completed calls. A ramp past capacity refuses on purpose; a 503 below capacity is a defect. No completed call in the window reads as no data.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -287,7 +287,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) / clamp_min(sum(increase(loadgen_calls_total[5m])), 1)",
+          "expr": "(sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) / (sum(increase(loadgen_calls_total[5m])) > 0)",
           "refId": "A",
           "legendFormat": ""
         }

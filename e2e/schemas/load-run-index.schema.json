@@ -23,7 +23,7 @@
       }
     },
     "counts": {
-      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). `class == \"ok\"` is the success bucket; `chaos == \"near\"` is\naccepted kill collateral, `chaos == \"clear\"` is a genuine result.",
+      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). A row's `ok` marks its class as no failure (`ok`, or the shape's\n`expected_reject`); `chaos == \"near\"` is accepted kill collateral,\n`chaos == \"clear\"` is a genuine result.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/CountRow"
