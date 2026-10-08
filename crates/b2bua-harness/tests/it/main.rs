@@ -107,6 +107,7 @@ mod prack_crossing_invite_final;
 mod prack_delayed_offer_on_cancel;
 mod prack_forking;
 mod prack_owed_at_cancel;
+mod prack_owed_at_final;
 mod prack_reinvite_reliability_gates;
 mod prack_reinvite_rseq_ownership;
 mod prack_reliable_ladder;

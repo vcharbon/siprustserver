@@ -465,19 +465,6 @@ async fn the_ladder_ceases_at_the_final_response() {
         )
         .on_party("alice"),
     );
-    // Alice's silence leaves the callee's own reliable provisional unPRACKed
-    // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. The stack is to PRACK it itself when that
-    // final arrives; until it does, this waiver names the gap.
-    h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
-             PRACK the still-unacknowledged reliable provisional itself on that final \
-             (RFC 3262 §4)",
-        )
-        .on_party("b2bua"),
-    );
     let alice = h.agent("alice", "127.0.0.1:5404").await;
     let bob = h.agent("bob", "127.0.0.1:5414").await;
     let b2bua =
@@ -500,6 +487,9 @@ async fn the_ladder_ceases_at_the_final_response() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
+    // The final ends alice's chance to PRACK: the stack acknowledges the
+    // callee's provisional itself (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -602,19 +592,6 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
         )
         .on_party("alice"),
     );
-    // Alice's silence leaves the callee's own reliable provisional unPRACKed
-    // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. The stack is to PRACK it itself when that
-    // final arrives; until it does, this waiver names the gap.
-    h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
-             PRACK the still-unacknowledged reliable provisional itself on that final \
-             (RFC 3262 §4)",
-        )
-        .on_party("b2bua"),
-    );
     let alice = h.agent("alice", "127.0.0.1:5406").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5416").await;
     let bob2 = h.agent("bob2", "127.0.0.1:5417").await;
@@ -650,8 +627,11 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
     alice.drain().await;
 
     // …then fails. The rejection is not relayed: the call reroutes to bob2.
+    // The failed fork's ring is PRACKed by the stack as its final arrives
+    // (RFC 3262 §4).
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await;
+    bob1.receive("PRACK").await.respond(200, "OK").await;
     let mut uas2 = bob2.receive("INVITE").await;
 
     // Two rungs' worth of quiet is owed here — the leg that raised the ring is
@@ -710,19 +690,6 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
         )
         .on_party("alice"),
     );
-    // Alice's silence leaves the callee's own reliable provisional unPRACKed
-    // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. The stack is to PRACK it itself when that
-    // final arrives; until it does, this waiver names the gap.
-    h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
-             PRACK the still-unacknowledged reliable provisional itself on that final \
-             (RFC 3262 §4)",
-        )
-        .on_party("b2bua"),
-    );
     let alice = h.agent("alice", "127.0.0.1:5408").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5418").await;
     let bob2 = h.agent("bob2", "127.0.0.1:5419").await;
@@ -756,9 +723,11 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
 
-    // …then fails, and the call reroutes.
+    // …then fails, and the call reroutes; its ring is PRACKed by the stack as
+    // its final arrives (RFC 3262 §4).
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await;
+    bob1.receive("PRACK").await.respond(200, "OK").await;
     let mut uas2 = bob2.receive("INVITE").await;
 
     // Attempt 2 rings reliably too. Under the primary tag this is §3's
@@ -855,19 +824,6 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
         )
         .on_party("alice"),
     );
-    // Alice's silence leaves the callee's own reliable provisional unPRACKed
-    // when the callee's final comes first: the B2BUA relays the PRACK end to
-    // end and has none to relay. The stack is to PRACK it itself when that
-    // final arrives; until it does, this waiver names the gap.
-    h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "the caller never PRACKs and the callee's final arrives first: the stack does not yet \
-             PRACK the still-unacknowledged reliable provisional itself on that final \
-             (RFC 3262 §4)",
-        )
-        .on_party("b2bua"),
-    );
     let alice = h.agent("alice", "127.0.0.1:5109").await;
     let bob = h.agent("bob", "127.0.0.1:5110").await;
     let b2bua =
@@ -900,6 +856,9 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
     re_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    // The re-INVITE's final ends alice's chance to PRACK its 180: the stack
+    // acknowledges it toward bob itself (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     reinv.expect(200).await;
     dialog.ack_for(reinvite_cseq, None).await;
     bob.receive("ACK").await;

@@ -213,6 +213,7 @@ pub(super) async fn process_result(
     // Terminal eviction last of all (ADR-0020 X2): the CDR is enqueued before
     // the call — and its replicated Element — ceases to exist anywhere.
     if remove_call {
+        ctx.late_pracks.remember(&result.call, now_ms);
         release_call(ctx, call_ref, ReleaseKind::Terminated).await;
     }
 

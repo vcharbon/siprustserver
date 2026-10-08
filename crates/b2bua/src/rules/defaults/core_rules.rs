@@ -12,7 +12,7 @@ use call::{
     TerminationCause, TimeoutKind, TimerType,
 };
 use sip_message::header::RAck;
-use sip_message::Method;
+use sip_message::{Method, SipRequest};
 use sip_txn::TimeoutKind as TxnTimeoutKind;
 
 use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent, owed_prack};
@@ -1213,6 +1213,29 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // A PRACK naming a reliable provisional this stack showed is answered
+        // 200 here wherever relaying it would be wrong (RFC 3262 §3): this
+        // stack already PRACKed the responder itself — as it CANCELled, or at
+        // the responder's final — so a relay would be a second PRACK for one
+        // `RSeq`, or the call is tearing down. Outranks `post-bye-481`, whose
+        // 481 would deny a provisional this face really sent.
+        rule(
+            "answer-pracked-prack",
+            &["post-bye-481", "relay-prack"],
+            Match::request().method("PRACK").filter(|ctx| {
+                let Some(req) = ctx.request() else { return false };
+                let a_tag = req.to().tag().unwrap_or_default();
+                rack_tokens(req).is_some_and(|rack| ctx.call.prack_answered_here(a_tag, rack))
+            }),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
         // A dialog whose BYE is in flight answers in-dialog requests 481 locally:
         // BYE terminates the session (RFC 3261 §15.1.2, §12.2.2), so relaying would
         // offer the request to a peer that already hung up. ACK passes (`relay-ack`),
@@ -1369,12 +1392,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         // A PRACK is answered here where it names nothing this stack showed
-        // on its face (481, RFC 3262 §4), carries no readable `RAck` (400,
-        // RFC 3261 §21.4.1), or names a provisional this stack already PRACKed
-        // toward its responder as it CANCELled (200, §3 — a second PRACK would
-        // draw the responder's 481); why this stack and not the far party is
-        // `call::helpers::unacknowledgeable_rack`. A SERVICE_LAYER rule
-        // matching PRACK would out-rank this and bypass the check; none does.
+        // on its face (481, RFC 3262 §4) or carries no readable `RAck` (400,
+        // RFC 3261 §21.4.1); why this stack and not the far party is
+        // `call::helpers::unacknowledgeable_rack`. One this stack answers 200
+        // itself is `answer-pracked-prack`'s. A SERVICE_LAYER rule matching
+        // PRACK would out-rank this and bypass the check; none does.
         rule("relay-prack", &[], Match::request().method("PRACK"), |ctx| {
             let relay = || ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]);
             let refuse = |status: u16, reason: &str| {
@@ -1386,24 +1408,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             };
             let Some(req) = ctx.request() else { return relay() };
-            let Some(rack) = req.header::<RAck>().and_then(Result::ok) else {
+            let Some(tokens) = rack_tokens(req) else {
                 return if ctx.call.owns_rseq_numbering(ctx.source_leg_id) {
                     refuse(400, "Bad Request")
                 } else {
                     relay()
                 };
             };
-            let tokens = RAckTokens {
-                rseq: i64::from(rack.rseq()),
-                cseq: i64::from(rack.seq()),
-                names_invite: *rack.method() == Method::Invite,
-            };
             let a_tag = req.to().tag().unwrap_or_default();
             if ctx.call.unacknowledgeable_rack(ctx.source_leg_id, a_tag, tokens) {
                 return refuse(481, "Call/Transaction Does Not Exist");
-            }
-            if ctx.call.rack_pracked_here(a_tag, tokens) {
-                return refuse(200, "OK");
             }
             relay()
         }),
@@ -2096,6 +2110,17 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
     ]
+}
+
+/// The three `RAck` tokens a PRACK carries (RFC 3262 §7.2), or `None` when it
+/// carries no readable `RAck`.
+fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
+    let rack = req.header::<RAck>().and_then(Result::ok)?;
+    Some(RAckTokens {
+        rseq: i64::from(rack.rseq()),
+        cseq: i64::from(rack.seq()),
+        names_invite: *rack.method() == Method::Invite,
+    })
 }
 
 /// Whether the current response is a fork straggler's 2xx on its b-leg: a To-tag

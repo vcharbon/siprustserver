@@ -802,6 +802,7 @@ pub(super) fn rule_chain_turn(
     // as in flight before the rules read it.
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
+            exec.prack_owed_at_final(&mut call, &mut ladder_fx, &res.source_leg_id, resp);
             if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
                 if let Some(branch) = resp.top_via().branch() {
                     call = call::helpers::close_rejected_invite_round(

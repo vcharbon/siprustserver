@@ -23,6 +23,7 @@ mod answer_deadline_tests;
 mod callouts;
 mod ingress;
 mod interpret;
+pub(crate) mod late_prack;
 mod materialise;
 mod owed;
 mod peer_metrics;
@@ -154,6 +155,8 @@ pub struct RouterCtx {
     pub keepalive_waves: Arc<observe::WaveSet>,
     /// Events that resolved to no call, aggregated per class (ADR-0026).
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
+    /// The PRACKs released calls still answer 200 (RFC 3262 §3).
+    pub(crate) late_pracks: late_prack::LatePrackBook,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
     /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
     /// `None` → the `ServiceHttpRequest` dispatch arm folds an `outcome:"error"`

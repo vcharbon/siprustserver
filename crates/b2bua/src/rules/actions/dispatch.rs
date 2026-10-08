@@ -242,11 +242,12 @@ impl ActionExecutor<'_> {
                 // (RFC 3262 §5); a live setup leaves the answer to its owner.
                 let cancelling = call::helpers::find_leg(call, leg_id)
                     .is_some_and(|l| l.disposition == call::LegDisposition::Cancelling);
-                let offer = ctx
+                let answer = ctx
                     .response()
                     .and_then(|r| r.sdp())
                     .filter(|_| cancelling)
-                    .filter(|_| !relay::invite_carried_offer(call, leg_id, *invite_cseq));
+                    .filter(|_| !relay::invite_carried_offer(call, leg_id, *invite_cseq))
+                    .and_then(|offer| self.rejecting_answer(offer));
                 self.send_prack_to_leg(
                     call,
                     fx,
@@ -255,7 +256,7 @@ impl ActionExecutor<'_> {
                     *invite_cseq,
                     b_tag,
                     responder_sdp,
-                    offer,
+                    answer,
                 );
             }
             RuleAction::TrackEarlyDialog { leg_id, b_tag } => {

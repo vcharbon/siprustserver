@@ -202,6 +202,41 @@ impl ActionExecutor<'_> {
             let (extra_headers, _) =
                 relayed_request_headers(call, req, target_leg, face, self.config, self.now_ms);
             let caller = relay::Author::Leg(ctx.source_leg_id);
+            // A reliable provisional's offer still owed its PRACK past the 2xx
+            // takes the caller's answer there; the ACK then carries none.
+            let offer_owed =
+                call::helpers::unacknowledged_relayed_provisionals(call, target_leg, None)
+                    .iter()
+                    .any(|o| o.offer.is_some());
+            if offer_owed {
+                let dialog = call::helpers::find_leg(call, target_leg)
+                    .and_then(|l| l.dialogs.first())
+                    .map(|d| d.sip.remote_tag.clone());
+                let answer = req.sdp().map(|sdp| {
+                    relay::continue_on_leg(
+                        call,
+                        target_leg,
+                        dialog.as_deref(),
+                        caller,
+                        relay::Carried::InDialog,
+                        sdp.to_vec(),
+                        Some(&relay::sdp()),
+                        self.config.sdp_form.as_ref(),
+                    )
+                });
+                self.prack_offers_owed_at_ack(call, fx, target_leg, answer);
+                self.ack_leg(
+                    call,
+                    fx,
+                    target_leg,
+                    Vec::new(),
+                    None,
+                    extra_headers,
+                    Provenance::Relayed,
+                    caller,
+                );
+                return;
+            }
             let (body, content_type, author) = match self.answer_owed(call, target_leg, req) {
                 Some((answer, true)) => (answer, Some(relay::sdp()), caller),
                 Some((answer, false)) => (answer, Some(relay::sdp()), relay::Author::Stack),

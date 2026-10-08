@@ -494,10 +494,8 @@ impl ActionExecutor<'_> {
     /// INVITE CANCELled here). Once per provisional: the acknowledgement and
     /// its client branch are recorded, and a repeat of it — the responder's
     /// §3 retransmission — sends nothing (§4), so no second PRACK names the
-    /// same `RAck` on a fresh CSeq. `offer`: the OFFER the provisional carried
-    /// where this stack ends the setup — its PRACK answers it rejecting every
-    /// stream (RFC 3262 §5, RFC 3264 §6), the least a dialog about to end can
-    /// commit to.
+    /// same `RAck` on a fresh CSeq. `answer`: the session description the
+    /// PRACK carries, answering an offer the provisional carried (RFC 3262 §5).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_prack_to_leg(
         &self,
@@ -508,7 +506,7 @@ impl ActionExecutor<'_> {
         invite_cseq: i64,
         b_tag: &str,
         responder_sdp: bool,
-        offer: Option<&[u8]>,
+        answer: Option<Vec<u8>>,
     ) {
         let idx = match leg_index(call, leg_id) {
             Some(i) => i,
@@ -561,15 +559,6 @@ impl ActionExecutor<'_> {
             rseq,
             &branch,
         );
-        let answer = offer.and_then(|offer| {
-            sip_message::sdp_answer::reject_offer(
-                offer,
-                &sip_message::BuildHeldSdpOptions {
-                    local_ip: self.config.sip_local_ip.clone(),
-                    now_ms: self.now_ms,
-                },
-            )
-        });
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
@@ -599,13 +588,81 @@ impl ActionExecutor<'_> {
         });
     }
 
+    /// PRACK, as the INVITE final `resp` arrives from `leg_id`, every reliable
+    /// provisional of that INVITE that was relayed and is still
+    /// unacknowledged: the final ends the shown party's chance to PRACK it, so
+    /// this stack, the leg's UAC, owes it (RFC 3262 §4), each on its own early
+    /// dialog. Runs before the rules handle the final, so the PRACK leaves
+    /// ahead of whatever they relay. Past a rejection an offer one carried is
+    /// answered rejecting every stream; past a 2xx it waits for the caller's
+    /// answer on her ACK (`prack_offers_owed_at_ack`), so the callee
+    /// is answered what the caller answered (RFC 3264). A response that is not
+    /// an INVITE final owes nothing here.
+    pub fn prack_owed_at_final(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        resp: &sip_message::SipResponse,
+    ) {
+        if resp.status() < 200 || resp.cseq().method() != Method::Invite {
+            return;
+        }
+        let answered = (200..300).contains(&resp.status());
+        let invite_cseq = i64::from(resp.cseq().seq());
+        let owed =
+            call::helpers::unacknowledged_relayed_provisionals(call, leg_id, Some(invite_cseq));
+        for o in owed.into_iter().filter(|o| !(answered && o.offer.is_some())) {
+            let answer = o.offer.as_deref().and_then(|offer| self.rejecting_answer(offer));
+            self.send_prack_to_leg(
+                call,
+                fx,
+                leg_id,
+                o.rseq,
+                o.invite_cseq,
+                &o.b_tag,
+                o.responder_sdp,
+                answer,
+            );
+        }
+    }
+
+    /// PRACK each relayed reliable provisional of `leg_id` whose offer still
+    /// awaits an answer past the 2xx ([`Self::prack_owed_at_final`]), as the
+    /// caller's ACK for that 2xx is relayed: the PRACK carries `answer`, the
+    /// answer her ACK gives, or rejects every stream where it gives none
+    /// (RFC 3262 §5, RFC 3264 §6). The relayed ACK then carries no answer.
+    pub(super) fn prack_offers_owed_at_ack(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        answer: Option<Vec<u8>>,
+    ) {
+        let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, None);
+        for o in owed {
+            let Some(offer) = o.offer.as_deref() else { continue };
+            let body = answer.clone().or_else(|| self.rejecting_answer(offer));
+            self.send_prack_to_leg(
+                call,
+                fx,
+                leg_id,
+                o.rseq,
+                o.invite_cseq,
+                &o.b_tag,
+                o.responder_sdp,
+                body,
+            );
+        }
+    }
+
     /// PRACK every reliable provisional `leg_id`'s responder sent on the INVITE
     /// `invite_cseq` that was relayed and is still unacknowledged, as this
     /// stack ends that INVITE with a CANCEL: the party it was shown to will
     /// not PRACK it any more, and the CANCEL does not end the transaction, so
     /// this stack — the leg's UAC — owes the acknowledgement (RFC 3262 §4),
-    /// answering an offer one carried (§5). `None` reads every INVITE of the
-    /// leg (a leg still ringing has one).
+    /// answering an offer one carried rejecting every stream (§5). `None`
+    /// reads every INVITE of the leg (a leg still ringing has one).
     pub(super) fn prack_relayed_unacknowledged(
         &self,
         call: &mut Call,
@@ -615,7 +672,7 @@ impl ActionExecutor<'_> {
     ) {
         let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, invite_cseq);
         for o in owed {
-            let offer = o.offer.as_deref();
+            let answer = o.offer.as_deref().and_then(|offer| self.rejecting_answer(offer));
             self.send_prack_to_leg(
                 call,
                 fx,
@@ -624,8 +681,21 @@ impl ActionExecutor<'_> {
                 o.invite_cseq,
                 &o.b_tag,
                 o.responder_sdp,
-                offer,
+                answer,
             );
         }
+    }
+
+    /// The answer to `offer` rejecting every stream (RFC 3264 §6, port 0) —
+    /// the least a dialog about to end, or a party that gave no answer, can
+    /// commit to.
+    pub(super) fn rejecting_answer(&self, offer: &[u8]) -> Option<Vec<u8>> {
+        sip_message::sdp_answer::reject_offer(
+            offer,
+            &sip_message::BuildHeldSdpOptions {
+                local_ip: self.config.sip_local_ip.clone(),
+                now_ms: self.now_ms,
+            },
+        )
     }
 }

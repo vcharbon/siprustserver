@@ -839,3 +839,46 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     owes_ack.ext.awaited_ack_cseq = Some(4002);
     assert!(invite_transaction_open(&owes_ack));
 }
+
+/// A released call leaves, per shown dialog, the provisionals its party never
+/// PRACKed, under that dialog's Call-ID: an unknown tag is an a-facing fork
+/// tag, the a-leg's (RFC 3262 §3).
+#[test]
+fn the_unacknowledged_shown_provisionals_are_grouped_per_shown_dialog() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, false);
+    let (call, a2) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, false, false);
+    let (call, f2) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 4711, 7_000, false, false);
+    let call = retire_a_rseq(call, "a1", a1);
+    assert_eq!(
+        unacknowledged_shown(&call),
+        vec![
+            UnackedShown {
+                call_id: "call-id-deadbeef@example.com".into(),
+                tag: "a1".into(),
+                racks: vec![(a2, 1)],
+            },
+            UnackedShown {
+                call_id: "call-id-deadbeef@example.com".into(),
+                tag: "a2".into(),
+                racks: vec![(f2, 1)],
+            },
+        ],
+    );
+}
+
+/// A PRACK naming a shown provisional is answered here once this stack PRACKed
+/// its responder, or once the call is ending; a live call relays the rest
+/// (RFC 3262 §3).
+#[test]
+fn a_shown_prack_is_answered_here_once_pracked_or_ending() {
+    let (call, shown) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, false);
+    assert!(!prack_answered_here(&call, "a1", rack(shown, 1)), "a live call relays it");
+    let (pracked, _) = record_pracked_provisional(call.clone(), "b-1", "bf1", 1, 4711, false);
+    assert!(prack_answered_here(&pracked, "a1", rack(shown, 1)), "never a second PRACK");
+    let mut ending = call.clone();
+    ending.state = CallModelState::Terminating;
+    assert!(prack_answered_here(&ending, "a1", rack(shown, 1)), "the call is ending");
+    assert!(!prack_answered_here(&ending, "a1", rack(shown + 1, 1)), "it names nothing shown");
+}

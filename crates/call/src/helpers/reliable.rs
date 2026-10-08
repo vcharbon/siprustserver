@@ -487,6 +487,15 @@ pub fn rack_pracked_here(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
         })
 }
 
+/// Whether a PRACK in the `a_tag` dialog naming `rack` is answered 200 by this
+/// face rather than relayed (RFC 3262 §3): it names a provisional this stack
+/// showed there, and either this stack already PRACKed its responder
+/// ([`rack_pracked_here`]) or the call is ending, its responder's leg with it.
+pub fn prack_answered_here(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
+    rack_pracked_here(call, a_tag, rack)
+        || (call.state != crate::CallModelState::Active && acknowledges_recorded(call, a_tag, rack))
+}
+
 /// Whether `rack` names a reliable provisional recorded in the `a_tag` early
 /// dialog on all three §7.2 tokens.
 fn acknowledges_recorded(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
@@ -502,4 +511,38 @@ fn acknowledges_recorded(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
 /// for a dialog that has not.
 pub fn starts_reliable_ladder(call: &Call, a_tag: &str) -> bool {
     !call.reliable_provisionals.iter().any(|r| r.a_tag == a_tag)
+}
+
+/// One dialog's reliable provisionals this stack showed and the party shown
+/// them never PRACKed: the dialog's `Call-ID`, this stack's tag in it, and
+/// each provisional's `(RSeq, CSeq-num)` — the §7.2 tokens a PRACK naming it
+/// carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnackedShown {
+    pub call_id: String,
+    pub tag: String,
+    pub racks: Vec<(i64, i64)>,
+}
+
+/// The reliable provisionals shown on either face of `call` that are still
+/// unacknowledged by the party shown them, grouped per shown dialog. A tag no
+/// dialog carries is an a-facing fork tag, the a-leg's ([`leg_shown`]).
+pub fn unacknowledged_shown(call: &Call) -> Vec<UnackedShown> {
+    let mut out: Vec<UnackedShown> = Vec::new();
+    for r in call.reliable_provisionals.iter().filter(|r| !r.acknowledged) {
+        let call_id = leg_shown(call, &r.a_tag)
+            .and_then(|id| crate::helpers::find_leg(call, id))
+            .unwrap_or(&call.a_leg)
+            .call_id
+            .clone();
+        match out.iter_mut().find(|u| u.call_id == call_id && u.tag == r.a_tag) {
+            Some(u) => u.racks.push((r.a_rseq, r.a_cseq)),
+            None => out.push(UnackedShown {
+                call_id,
+                tag: r.a_tag.clone(),
+                racks: vec![(r.a_rseq, r.a_cseq)],
+            }),
+        }
+    }
+    out
 }
