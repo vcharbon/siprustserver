@@ -238,7 +238,25 @@ impl ActionExecutor<'_> {
                 // b_tag)` (no first-dialog fallback).
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
                 let responder_sdp = ctx.response().is_some_and(|r| r.sdp().is_some());
-                self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag, responder_sdp);
+                // A leg this stack is CANCELling answers a crossing offer here
+                // (RFC 3262 §5); a live setup leaves the answer to its owner.
+                let cancelling = call::helpers::find_leg(call, leg_id)
+                    .is_some_and(|l| l.disposition == call::LegDisposition::Cancelling);
+                let offer = ctx
+                    .response()
+                    .and_then(|r| r.sdp())
+                    .filter(|_| cancelling)
+                    .filter(|_| !relay::invite_carried_offer(call, leg_id, *invite_cseq));
+                self.send_prack_to_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    *rseq,
+                    *invite_cseq,
+                    b_tag,
+                    responder_sdp,
+                    offer,
+                );
             }
             RuleAction::TrackEarlyDialog { leg_id, b_tag } => {
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);

@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, stated, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -141,5 +141,70 @@ async fn a_reliable_183_releasing_a_held_cancel_is_pracked_before_the_487() {
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.cdr_records().len(), 1, "one record");
 
+    let _report = h.finish().await;
+}
+
+/// RFC 3262 §4: a reliable provisional whose `RSeq` is not one higher than the
+/// last one taken on its dialog is not PRACKed (nor processed further). The
+/// callee skips a number after its crossing 183 was PRACKed; the skipped-to
+/// 183 draws no PRACK, and the 487 still settles the leg.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_order_reliable_provisional_crossing_the_cancel_is_not_pracked() {
+    let h = Harness::with_transit_delay("b2bua-reliable-1xx-crossing-cancel-rseq-gap", 1);
+    h.waive(
+        WaiverScope::rule(
+            "non-contiguous-rseq",
+            "bob skips an RSeq (RFC 3262 §3) — the out-of-order provisional is this test's subject",
+        )
+        .on_party("bob"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5201").await;
+    let bob = h.agent("bob", "127.0.0.1:5202").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5202).start(&h, "b2bua", "127.0.0.1:5203").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv.respond(100, "Trying").await;
+    h.advance(Duration::from_millis(20)).await;
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+
+    let reliable_183 = |rseq: u32| rseq.to_string();
+    b_inv
+        .respond(183, "Session Progress")
+        .with_to_tag("bob-early")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", &reliable_183(BOB_RSEQ))
+        .with_sdp(ANSWER)
+        .await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    // ── one number skipped ──
+    b_inv
+        .respond(183, "Session Progress")
+        .with_to_tag("bob-early")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", &reliable_183(BOB_RSEQ + 2))
+        .await;
+    h.advance(Duration::from_millis(100)).await;
+    assert!(
+        bob.try_receive_tolerating("PRACK", &[]).await.is_none(),
+        "an out-of-order reliable provisional is never PRACKed (RFC 3262 §4)"
+    );
+    b_inv.respond(487, "Request Terminated").with_to_tag("bob-early").await;
+    bob.receive("ACK").await;
+
+    h.advance(Duration::from_secs(1)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

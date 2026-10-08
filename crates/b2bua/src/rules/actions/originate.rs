@@ -485,14 +485,19 @@ impl ActionExecutor<'_> {
         });
     }
 
-    /// Originate a PRACK toward the b-leg early dialog (selected by callee tag)
-    /// acknowledging a reliable 1xx (RFC 3262 §4). The RAck is
+    /// Originate a PRACK toward the responder's early dialog (selected by its
+    /// tag) acknowledging a reliable 1xx (RFC 3262 §4). The RAck is
     /// `<rseq> <invite_cseq> INVITE`; the dialog's local CSeq advances by one.
-    /// This stack PRACKs on the originator's behalf wherever it never saw the
-    /// reliable provisional (a masking policy, or no `100rel` offered). Once
-    /// per provisional: the acknowledgement is recorded, and a repeat of it —
-    /// the responder's §3 retransmission — sends nothing (§4), so no second
-    /// PRACK names the same `RAck` on a fresh CSeq.
+    /// This stack PRACKs itself wherever the originator never saw the reliable
+    /// provisional (a masking policy, no `100rel` offered, a provisional
+    /// crossing this stack's CANCEL) or will not acknowledge it any more (its
+    /// INVITE CANCELled here). Once per provisional: the acknowledgement and
+    /// its client branch are recorded, and a repeat of it — the responder's
+    /// §3 retransmission — sends nothing (§4), so no second PRACK names the
+    /// same `RAck` on a fresh CSeq. `offer`: the OFFER the provisional carried
+    /// where this stack ends the setup — its PRACK answers it rejecting every
+    /// stream (RFC 3262 §5, RFC 3264 §6), the least a dialog about to end can
+    /// commit to.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_prack_to_leg(
         &self,
@@ -503,6 +508,7 @@ impl ActionExecutor<'_> {
         invite_cseq: i64,
         b_tag: &str,
         responder_sdp: bool,
+        offer: Option<&[u8]>,
     ) {
         let idx = match leg_index(call, leg_id) {
             Some(i) => i,
@@ -547,12 +553,31 @@ impl ActionExecutor<'_> {
         *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
+        *call = call::helpers::note_own_prack_branch(
+            call.clone(),
+            leg_id,
+            b_tag,
+            invite_cseq,
+            rseq,
+            &branch,
+        );
+        let answer = offer.and_then(|offer| {
+            sip_message::sdp_answer::reject_offer(
+                offer,
+                &sip_message::BuildHeldSdpOptions {
+                    local_ip: self.config.sip_local_ip.clone(),
+                    now_ms: self.now_ms,
+                },
+            )
+        });
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
             rack: Some(RAck::new(rseq.max(0) as u32, invite_cseq.max(0) as u32, Method::Invite)),
             cseq: Some(outbound_cseq as u32),
+            content_type: answer.is_some().then(relay::sdp),
+            body: answer.unwrap_or_default(),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts);
@@ -578,8 +603,9 @@ impl ActionExecutor<'_> {
     /// `invite_cseq` that was relayed and is still unacknowledged, as this
     /// stack ends that INVITE with a CANCEL: the party it was shown to will
     /// not PRACK it any more, and the CANCEL does not end the transaction, so
-    /// this stack — the leg's UAC — owes the acknowledgement (RFC 3262 §4).
-    /// `None` reads every INVITE of the leg (a leg still ringing has one).
+    /// this stack — the leg's UAC — owes the acknowledgement (RFC 3262 §4),
+    /// answering an offer one carried (§5). `None` reads every INVITE of the
+    /// leg (a leg still ringing has one).
     pub(super) fn prack_relayed_unacknowledged(
         &self,
         call: &mut Call,
@@ -588,8 +614,18 @@ impl ActionExecutor<'_> {
         invite_cseq: Option<i64>,
     ) {
         let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, invite_cseq);
-        for (b_tag, b_cseq, b_rseq, responder_sdp) in owed {
-            self.send_prack_to_leg(call, fx, leg_id, b_rseq, b_cseq, &b_tag, responder_sdp);
+        for o in owed {
+            let offer = o.offer.as_deref();
+            self.send_prack_to_leg(
+                call,
+                fx,
+                leg_id,
+                o.rseq,
+                o.invite_cseq,
+                &o.b_tag,
+                o.responder_sdp,
+                offer,
+            );
         }
     }
 }

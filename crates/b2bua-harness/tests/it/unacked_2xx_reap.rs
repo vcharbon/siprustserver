@@ -406,7 +406,7 @@ async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
              delayed-offer 2xx — whose ACK owes the answer only she could supply — is \
              acknowledged; that silence is the give-up under test",
         )
-        .on_party("b2bua"),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
@@ -456,7 +456,7 @@ async fn a_route_dropped_offer_gets_the_give_up_bye_with_no_ack() {
              2xx to the offerless INVITE the route minted — whose ACK owes an answer only \
              she could supply — is acknowledged; that silence is the give-up under test",
         )
-        .on_party("b2bua"),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
@@ -516,7 +516,7 @@ async fn a_body_without_a_description_gets_the_give_up_bye_with_no_ack() {
              carried no description — its ACK owes an answer only she could supply; that \
              silence is the give-up under test",
         )
-        .on_party("b2bua"),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;

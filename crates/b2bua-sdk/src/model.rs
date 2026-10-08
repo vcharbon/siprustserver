@@ -1204,6 +1204,28 @@ impl<'a> RuleCall<'a> {
     ) -> bool {
         call::helpers::unacknowledgeable_rack(self.0, source_leg_id, a_tag, rack)
     }
+    /// Whether the responder's reliable provisional `rseq` is the next in its
+    /// early dialog's sequence (RFC 3262 §4).
+    pub fn rseq_in_order(
+        &self,
+        leg_id: &str,
+        remote_tag: &str,
+        invite_cseq: i64,
+        rseq: i64,
+    ) -> bool {
+        call::helpers::rseq_in_order(self.0, leg_id, remote_tag, invite_cseq, rseq)
+    }
+    /// Whether `branch` is a PRACK client transaction this stack originated
+    /// itself, never one it relayed.
+    pub fn own_prack_branch(&self, branch: &str) -> bool {
+        call::helpers::own_prack_branch(self.0, branch)
+    }
+    /// Whether a PRACK in the `a_tag` dialog naming `rack` acknowledges a
+    /// provisional this stack already PRACKed toward its responder itself, so
+    /// this face answers it rather than relaying a second PRACK (RFC 3262 §3).
+    pub fn rack_pracked_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
+        call::helpers::rack_pracked_here(self.0, a_tag, rack)
+    }
     /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
     /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
     /// is its retransmission to discard (RFC 3262 §4).

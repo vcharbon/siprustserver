@@ -651,6 +651,7 @@ fn arb_reliable_provisional() -> impl Strategy<Value = ReliableProvisional> {
                     a_cseq,
                     carried_sdp: false,
                     responder_sdp: false,
+                    responder_offer: None,
                 }
             },
         )

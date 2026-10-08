@@ -304,6 +304,7 @@ fn the_reliable_provisional_map_round_trips() {
             a_cseq: 1,
             carried_sdp: false,
             responder_sdp: false,
+            responder_offer: None,
         },
         ReliableProvisional {
             a_tag: "a2".into(),
@@ -317,6 +318,7 @@ fn the_reliable_provisional_map_round_trips() {
             a_cseq: 1,
             carried_sdp: false,
             responder_sdp: false,
+            responder_offer: None,
         },
     ];
     let decoded = codec.decode(&codec.encode(&call)).unwrap();

@@ -277,6 +277,14 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
 #[tokio::test(start_paused = true)]
 async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-100rel", 1);
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "alice BYEs her early dialog instead of PRACKing its reliable 180 — the caller's \
+             withheld PRACK is this test's subject",
+        )
+        .on_party("alice"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
     let b2bua =

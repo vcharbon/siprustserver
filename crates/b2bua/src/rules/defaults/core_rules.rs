@@ -1163,6 +1163,20 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![]),
         )
         .runs_while_terminating(),
+        // The timeout of a PRACK this stack originated itself (RFC 3261
+        // §17.1.2.2 Timer F) denies that one acknowledgement, as its non-2xx
+        // final does (`absorb-own-request-failure`): the dialog and the call
+        // stay as they were. A relayed PRACK's timeout keeps `handle-timeout`.
+        rule(
+            "absorb-own-prack-timeout",
+            &[],
+            Match::timeout().filter(|ctx| {
+                ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("PRACK"))
+                    && ctx.call.own_prack_branch(ctx.timeout_branch().unwrap_or_default())
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
         // ── terminating ─────────────────────────────────────────────────────
         rule(
             "resolve-bye-response",
@@ -1355,8 +1369,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         // A PRACK is answered here where it names nothing this stack showed
-        // on its face (481, RFC 3262 §4) or carries no readable `RAck` (400,
-        // RFC 3261 §21.4.1); why this stack and not the far party is
+        // on its face (481, RFC 3262 §4), carries no readable `RAck` (400,
+        // RFC 3261 §21.4.1), or names a provisional this stack already PRACKed
+        // toward its responder as it CANCELled (200, §3 — a second PRACK would
+        // draw the responder's 481); why this stack and not the far party is
         // `call::helpers::unacknowledgeable_rack`. A SERVICE_LAYER rule
         // matching PRACK would out-rank this and bypass the check; none does.
         rule("relay-prack", &[], Match::request().method("PRACK"), |ctx| {
@@ -1385,6 +1401,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             let a_tag = req.to().tag().unwrap_or_default();
             if ctx.call.unacknowledgeable_rack(ctx.source_leg_id, a_tag, tokens) {
                 return refuse(481, "Call/Transaction Does Not Exist");
+            }
+            if ctx.call.rack_pracked_here(a_tag, tokens) {
+                return refuse(200, "OK");
             }
             relay()
         }),

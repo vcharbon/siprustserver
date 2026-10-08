@@ -2879,6 +2879,7 @@ mod answer_a_leg_new_dialog {
             emission: None,
             carried_sdp: false,
             responder_sdp: false,
+            responder_offer: None,
         });
         let provisional = call::Obligation::PrackOf { a_tag: "A1early".into(), a_rseq: 1 };
         for (timer_type, fire_at) in [
@@ -5101,6 +5102,7 @@ mod ladder_give_up {
             ),
             carried_sdp: false,
             responder_sdp: false,
+            responder_offer: None,
         });
         let obligation = Obligation::PrackOf { a_tag: A_TAG.into(), a_rseq: 1 };
         let mut rules = vec![parking_rule(is_prack_give_up)];
@@ -5886,6 +5888,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
         a_cseq: 1,
         carried_sdp: true,
         responder_sdp: true,
+        responder_offer: None,
     };
     call.reliable_provisionals.push(shown("b-1", "c1"));
 

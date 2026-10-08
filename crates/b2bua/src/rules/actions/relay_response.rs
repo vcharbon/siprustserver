@@ -71,6 +71,20 @@ impl ActionExecutor<'_> {
             resp.sdp().is_some(),
         );
         *call = updated;
+        // Kept for a PRACK this stack may yet owe in the originator's place:
+        // the description is the OFFER where the INVITE carried none (§5).
+        if let Some(offer) = resp.sdp() {
+            if !relay::invite_carried_offer(call, source_leg_id, b_cseq) {
+                *call = call::helpers::note_responder_offer(
+                    call.clone(),
+                    source_leg_id,
+                    &b_tag,
+                    b_cseq,
+                    b_rseq,
+                    offer,
+                );
+            }
+        }
         relay::own_the_rseq(headers, a_rseq);
         Some(a_rseq)
     }
@@ -285,6 +299,7 @@ impl ActionExecutor<'_> {
                                 cseq_num,
                                 &to_tag,
                                 resp.sdp().is_some(),
+                                None,
                             );
                         }
                     }
@@ -420,6 +435,7 @@ impl ActionExecutor<'_> {
                         invite_cseq,
                         &to_tag,
                         responder_sdp,
+                        None,
                     );
                 }
             }

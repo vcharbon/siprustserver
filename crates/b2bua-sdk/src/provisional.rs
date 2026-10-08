@@ -30,7 +30,8 @@ pub fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
 /// no one is shown it: the early dialog it establishes (RFC 3261 §12.1.2),
 /// the leg `Early` (a later teardown CANCELs it), its PRACK
 /// ([`owed_prack`]), and the CDR carrying it. A reliable provisional already
-/// acknowledged is the responder's retransmission and is owed nothing (§4).
+/// acknowledged is the responder's retransmission, and one out of `RSeq` order
+/// is not processed; both are owed nothing (§4).
 /// Empty for an event that is not a response.
 pub fn absorbed_provisional_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let Some(resp) = ctx.response() else { return Vec::new() };
@@ -63,16 +64,19 @@ pub fn absorbed_provisional_actions(ctx: &RuleContext) -> Vec<RuleAction> {
 /// it to no one: this stack is the leg's UAC and the only party that took it,
 /// so it acknowledges it on the provisional's own early dialog (RFC 3262 §4),
 /// a CANCEL already sent notwithstanding. `None` for a response that is not a
-/// reliable provisional, and for one already acknowledged — by this stack or
-/// by the party it was relayed to — whose repeat is the responder's
-/// retransmission.
+/// reliable provisional, for one already acknowledged — by this stack or by
+/// the party it was relayed to — whose repeat is the responder's
+/// retransmission, and for one out of its dialog's `RSeq` order, which §4
+/// forbids acknowledging.
 pub fn owed_prack(ctx: &RuleContext) -> Option<RuleAction> {
     let resp = ctx.response()?;
     let rseq = reliable_rseq(resp)?;
     let leg = ctx.source_leg_id;
     let b_tag = resp.to().tag().unwrap_or_default();
     let invite_cseq = i64::from(resp.cseq().seq());
-    if ctx.call.acknowledged_provisional(leg, b_tag, invite_cseq, rseq) {
+    if ctx.call.acknowledged_provisional(leg, b_tag, invite_cseq, rseq)
+        || !ctx.call.rseq_in_order(leg, b_tag, invite_cseq, rseq)
+    {
         return None;
     }
     Some(RuleAction::SendPrackToLeg {

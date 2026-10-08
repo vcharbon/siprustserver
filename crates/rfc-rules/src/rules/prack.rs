@@ -77,6 +77,9 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 /// flight) decides the absence at once, an OPEN one only after
 /// [`PRACK_WINDOW_US`], before which the stop is truncation.
 ///
+/// A provisional out of its dialog's `RSeq` order is owed nothing: §4 forbids
+/// PRACKing it.
+///
 /// Repeats collapse on the RSeq: one PRACK answers every retransmission of one
 /// reliable provisional (§3), so an obligation is keyed by its early dialog's
 /// To tag and its `RSeq`, never by datagram.
@@ -110,16 +113,26 @@ impl Obligation for UnackedReliableProvisional {
             if final_us.is_some_and(|at| at <= p.ts_us) {
                 continue; // the final came first: nothing was left to PRACK
             }
+            let arrivals: Vec<&Reliable<'_>> = seen
+                .taken
+                .get(&(uac, dialog))
+                .map(|list| list.iter().filter(|r| r.cseq == cseq && r.ts_us <= p.ts_us).collect())
+                .unwrap_or_default();
+            if rseq_order(&arrivals).1.contains(&rseq) {
+                out.push(head(Decision::Compliant)); // §4: out of order, never PRACKed
+                continue;
+            }
             let alive_until = final_us.unwrap_or(seen.last_ts_us).min(seen.last_ts_us);
             let window_us = alive_until - p.ts_us.min(alive_until);
             // The two hop tests, each the other's blind spot: an INVITE this
             // endpoint did not open, and a provisional it passed on.
+            let from_tag = wire.msgs[p.msg].from_tag.as_deref().unwrap_or_default();
             let opened_it = seen
                 .opened
                 .get(&(uac, call, cseq))
-                .is_some_and(|at| seen.invite_first_us.get(&(call, cseq)) == Some(at));
+                .is_some_and(|at| seen.invite_first_us.get(&(call, from_tag, cseq)) == Some(at));
             let forwarded_it =
-                seen.propagated.get(&(cseq, dialog, rseq)).is_some_and(|last| p.ts_us < *last);
+                seen.propagated.get(&(uac, cseq, dialog, rseq)).is_some_and(|last| p.ts_us < *last);
             let undecidable = if !opened_it {
                 Some("the charged endpoint did not open the INVITE (a hop is not a UAC)")
             } else if forwarded_it {
@@ -1068,10 +1081,12 @@ struct Reading<'a> {
     /// (endpoint, Call-ID, INVITE CSeq number) → when that endpoint SENT the
     /// INVITE: the per-call reading the obligation's hop test takes.
     opened: BTreeMap<(&'a str, &'a str, u32), u64>,
-    /// (Call-ID, INVITE CSeq number) → the first time that INVITE crossed any
-    /// vantage of the view. An endpoint whose own emission is not that first
-    /// one relayed an INVITE somebody else opened.
-    invite_first_us: BTreeMap<(&'a str, u32), u64>,
+    /// (Call-ID, From tag, INVITE CSeq number) → the first time that INVITE
+    /// crossed any vantage of the view. An endpoint whose own emission is not
+    /// that first one relayed an INVITE somebody else opened. The From tag
+    /// keeps the two directions of one dialog apart: each side numbers its own
+    /// CSeq space (RFC 3261 §12.2.1.1).
+    invite_first_us: BTreeMap<(&'a str, &'a str, u32), u64>,
     /// The reliable provisionals taken, one entry per obligation.
     owed: BTreeMap<ObligationKey<'a>, Reliable<'a>>,
     /// (endpoint, To tag) → the reliable provisionals that endpoint SENT on
@@ -1085,10 +1100,11 @@ struct Reading<'a> {
     acked_at: BTreeMap<(u32, &'a str, u64), u64>,
     /// Every PRACK the view carried, in observation order.
     pracks: Vec<Prack<'a>>,
-    /// (INVITE CSeq number, To tag, RSeq) → the LAST time that provisional
-    /// crossed any vantage of the view. A taker that saw it before then passed
-    /// it on.
-    propagated: BTreeMap<(u32, &'a str, u64), u64>,
+    /// (sender, INVITE CSeq number, To tag, RSeq) → the LAST time that
+    /// endpoint SENT that provisional. A taker that sent it after taking it
+    /// passed it on; a copy it only received again is the responder's
+    /// retransmission, which forwards nothing.
+    propagated: BTreeMap<(&'a str, u32, &'a str, u64), u64>,
     /// A PRACK this endpoint sent whose `RAck` will not parse: every
     /// obligation of that endpoint on this view becomes undecidable.
     unreadable_prack: BTreeSet<&'a str>,
@@ -1331,7 +1347,8 @@ impl<'a> Reading<'a> {
         self.absorb_transaction(mi, msg, head);
         if msg.is_request("INVITE") {
             let call = msg.call_id.as_str();
-            let first = self.invite_first_us.entry((call, msg.cseq)).or_insert(msg.at_us);
+            let from_tag = msg.from_tag.as_deref().unwrap_or_default();
+            let first = self.invite_first_us.entry((call, from_tag, msg.cseq)).or_insert(msg.at_us);
             *first = (*first).min(msg.at_us);
             self.opened.entry((msg.src.as_str(), call, msg.cseq)).or_insert(msg.at_us);
             self.invite
@@ -1374,7 +1391,10 @@ impl<'a> Reading<'a> {
             }
             let Some(rseq) = sniff::rseq_of(head) else { return };
             let dialog = msg.to_tag.as_deref().unwrap_or_default();
-            let last = self.propagated.entry((msg.cseq, dialog, rseq)).or_insert(msg.at_us);
+            let last = self
+                .propagated
+                .entry((msg.src.as_str(), msg.cseq, dialog, rseq))
+                .or_insert(msg.at_us);
             *last = (*last).max(msg.at_us);
             let common = Reliable {
                 msg: mi,
@@ -1769,6 +1789,87 @@ mod tests {
             assert!(f[0].violated(), "closed={closed}: {:?}", f[0].decision);
             assert_eq!(f[0].emitter, UAC);
         }
+    }
+
+    /// A responder's retransmission of its reliable provisional is a second
+    /// copy the UAC RECEIVED, not one it passed on: the UAC that never PRACKs
+    /// either copy is charged (RFC 3262 §3, §4).
+    #[test]
+    fn a_retransmitted_provisional_does_not_make_its_taker_a_hop() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"),
+            reliable(1_600_000, UAS, UAC, 180, 1, 5, "tb"),
+            ok200(3_000_000, 1, "tb"),
+        ];
+        for closed in [false, true] {
+            let o = obs(&msgs, closed);
+            let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+            assert_eq!(f.len(), 1, "{f:?}");
+            assert!(f[0].violated(), "closed={closed}: {:?}", f[0].decision);
+            assert_eq!(f[0].emitter, UAC);
+        }
+    }
+
+    /// A hop that takes the provisional and SENDS it on is no UAC: its
+    /// obligation stays undecidable, whoever PRACKs downstream.
+    #[test]
+    fn a_hop_that_sends_the_provisional_on_is_not_charged() {
+        const HOP: &str = "10.0.0.3:5060";
+        let msgs = vec![
+            invite(1_000_000, UAC, HOP, 1),
+            invite(1_010_000, HOP, UAS, 1),
+            reliable(1_100_000, UAS, HOP, 180, 1, 5, "tb"),
+            reliable(1_110_000, HOP, UAC, 180, 1, 5, "tb"),
+            ok200(3_000_000, 1, "tb"),
+        ];
+        let o = obs(&msgs, true);
+        let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+        let at_hop: Vec<_> = f.iter().filter(|f| f.emitter == HOP).collect();
+        assert_eq!(at_hop.len(), 1, "{f:?}");
+        assert!(matches!(at_hop[0].decision, Decision::Undecidable(_)), "{:?}", at_hop[0].decision);
+    }
+
+    /// Each side of a dialog numbers its own CSeq space (RFC 3261 §12.2.1.1):
+    /// the far end's re-INVITE may carry the number the initial INVITE did. Its
+    /// sender opened THAT INVITE — the From tag tells the two apart — so it
+    /// owes the PRACK of the reliable provisional answering it.
+    #[test]
+    fn a_reverse_reinvite_reusing_the_initial_cseq_is_its_senders_to_prack() {
+        let from = |mut m: Msg, tag: &str| {
+            m.from_tag = Some(tag.to_string());
+            m
+        };
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            ok200(1_100_000, 1, "tb"),
+            from(invite(5_000_000, UAS, UAC, 1), "tb"),
+            from(reliable(5_100_000, UAC, UAS, 183, 1, 9, "fa"), "tb"),
+            from(final_status(9_000_000, 504, 1, "fa"), "tb"),
+        ];
+        let o = obs(&msgs, true);
+        let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].violated(), "{:?}", f[0].decision);
+        assert_eq!(f[0].emitter, UAS, "the re-INVITE's sender owed the PRACK");
+    }
+
+    /// RFC 3262 §4: a reliable provisional whose `RSeq` is not one higher than
+    /// the last taken on its dialog MUST NOT be PRACKed, so leaving it
+    /// unacknowledged is compliant; the in-order one before it is still owed.
+    #[test]
+    fn an_out_of_order_provisional_is_owed_no_prack() {
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            reliable(1_100_000, UAS, UAC, 183, 1, 5, "tb"),
+            prack(1_150_000, UAC, UAS, 2, 5, 1, "tb"),
+            reliable(1_200_000, UAS, UAC, 183, 1, 7, "tb"),
+            final_status(1_300_000, 487, 1, "tb"),
+        ];
+        let o = obs(&msgs, true);
+        let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
     }
 
     /// A CLOSED observation still decides an absence at its end: no final

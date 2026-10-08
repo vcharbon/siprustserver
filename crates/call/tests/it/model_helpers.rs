@@ -506,10 +506,11 @@ fn a_relayed_provisional_stays_owed_until_either_side_acknowledges_it() {
         assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, true);
     let (call, _) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, false, false);
     let (call, _) = assign_a_rseq(call, "a2", 1, "b-2", "bf2", 1, 4711, 9_000, false, false);
-    assert_eq!(
-        unacknowledged_relayed_provisionals(&call, "b-1", None),
-        vec![("bf1".to_string(), 1, 4711, true), ("bf1".to_string(), 1, 4712, false)],
-    );
+    let owed: Vec<_> = unacknowledged_relayed_provisionals(&call, "b-1", None)
+        .into_iter()
+        .map(|o| (o.b_tag, o.invite_cseq, o.rseq, o.responder_sdp))
+        .collect();
+    assert_eq!(owed, vec![("bf1".to_string(), 1, 4711, true), ("bf1".to_string(), 1, 4712, false)]);
     assert!(
         unacknowledged_relayed_provisionals(&call, "b-1", Some(2)).is_empty(),
         "another INVITE"
@@ -636,6 +637,7 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
         emission: None,
         carried_sdp: false,
         responder_sdp: false,
+        responder_offer: None,
     });
 
     let provisionals = obligations_in(&call, &Scope::Provisionals);

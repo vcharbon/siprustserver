@@ -387,6 +387,7 @@ mod tests {
             a_cseq: 1,
             carried_sdp: false,
             responder_sdp: false,
+            responder_offer: None,
         });
         let mut stated = StatedHeaders::default();
         stated.every_message.insert("X-Late".into(), HeaderUpdate::line("late"));

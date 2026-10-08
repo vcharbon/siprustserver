@@ -5,9 +5,10 @@
 //! Party attribution is a MECHANISM, not a convention: it references the
 //! offending message STRUCTURALLY. A finding carries
 //! [`RfcFinding::offending`](sip_net::RfcFinding) — the wire-entry index of the
-//! exact message that violated the rule — and the emitter is that entry's
-//! `from_lane` party (who sent it). A party-scoped waiver filters a finding only
-//! when the emitter matches, so a finding attributed to any other party — in a
+//! exact message that violated the rule — and the party is the finding's
+//! `charged` bind (who sent it, or for an omission who owed it), else that
+//! entry's `from_lane` party. A party-scoped waiver filters a finding only
+//! when the party matches, so a finding attributed to any other party — in a
 //! SUT-full lane, the SUT — is never filtered by it.
 //!
 //! A finding whose rule does NOT populate `offending` is unattributable: a
@@ -122,13 +123,18 @@ fn party_of(from_lane: &Option<String>, attr: &Attribution) -> Option<String> {
     }
 }
 
-/// The emitting party of a finding — the `from_lane` party of its offending
-/// wire entry. `None` when the rule does not pinpoint the entry.
+/// The party a finding holds responsible: its `charged` bind where the rule
+/// names one — the emitter of the offending message, or for an omission the
+/// party that owed the message never sent — else the `from_lane` party of its
+/// offending wire entry. `None` when the rule pinpoints neither.
 fn finding_party(
     f: &RfcFinding,
     entries: &[RecordedSipEntry],
     attr: &Attribution,
 ) -> Option<String> {
+    if let Some(charged) = &f.charged {
+        return party_of(&Some(charged.clone()), attr);
+    }
     let idx = f.offending?;
     let entry = entries.get(idx.checked_sub(1)?)?;
     party_of(&entry.from_lane, attr)
@@ -312,6 +318,23 @@ mod tests {
             &entries,
             &attr,
         ));
+    }
+
+    /// An omission is charged to the party that OWED the missing message, not
+    /// to the sender of the message it is anchored on: a waiver naming the
+    /// owing party covers it, one naming the anchor's sender does not.
+    #[test]
+    fn an_omission_is_attributed_to_the_party_that_owed_it() {
+        let entries = vec![entry("10.0.0.9:5070")]; // the anchor: the B2BUA's provisional
+        let mut map = HashMap::new();
+        map.insert("10.0.0.9:5070".parse().unwrap(), "b2bua".to_string());
+        map.insert("10.0.0.1:5060".parse().unwrap(), "alice".to_string());
+        let attr = Attribution::AddrNames(&map);
+        let owed = RfcFinding { charged: Some("10.0.0.1:5060".into()), ..finding(RULE, 1) };
+        let alice = WaiverScope::rule(RULE, "alice never PRACKs").on_party("alice");
+        let b2bua = WaiverScope::rule(RULE, "wrong party").on_party("b2bua");
+        assert!(covers(&alice, &owed, &entries, &attr), "the owing party's waiver covers it");
+        assert!(!covers(&b2bua, &owed, &entries, &attr), "the anchor's sender owed nothing");
     }
 
     /// A rule-only waiver covers by rule alone (a plain rule-name filter)

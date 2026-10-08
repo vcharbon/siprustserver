@@ -72,7 +72,7 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
             "alice CANCELs the renegotiation instead of PRACKing its reliable provisional \
              (RFC 3261 §9.1) — the unacknowledged provisional is this test's subject",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5184").await;
     let bob = h.agent("bob", "127.0.0.1:5185").await;

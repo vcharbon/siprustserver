@@ -309,7 +309,7 @@ async fn the_ladder_gives_up_at_64_t1() {
             "alice deliberately never PRACKs, so the a-face ladder runs to its 64·T1 bound \
              (RFC 3262 §3) — the caller's silence is this test's subject",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5403").await;
     let bob = h.agent("bob", "127.0.0.1:5413").await;
@@ -463,7 +463,19 @@ async fn the_ladder_ceases_at_the_final_response() {
             "alice deliberately never PRACKs — the subject is the ladder's cancellation at the \
              final response, which a PRACK would reach first",
         )
-        .conditional(),
+        .on_party("alice"),
+    );
+    // Alice's silence leaves the callee's own reliable provisional unPRACKed
+    // when the callee's final comes first: the B2BUA relays the PRACK end to
+    // end and has none to relay. Whether it should acknowledge it itself is
+    // open; it is not this test's subject.
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
+             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+        )
+        .on_party("b2bua"),
     );
     let alice = h.agent("alice", "127.0.0.1:5404").await;
     let bob = h.agent("bob", "127.0.0.1:5414").await;
@@ -524,7 +536,7 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
             "alice CANCELs instead of PRACKing — the subject is the ladder's cancellation on an \
              abandoned setup",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5405").await;
     let bob = h.agent("bob", "127.0.0.1:5415").await;
@@ -587,7 +599,19 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
             "alice never PRACKs the failed fork's ring — the subject is what happens to its \
              ladder when the call reroutes underneath it",
         )
-        .conditional(),
+        .on_party("alice"),
+    );
+    // Alice's silence leaves the callee's own reliable provisional unPRACKed
+    // when the callee's final comes first: the B2BUA relays the PRACK end to
+    // end and has none to relay. Whether it should acknowledge it itself is
+    // open; it is not this test's subject.
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
+             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+        )
+        .on_party("b2bua"),
     );
     let alice = h.agent("alice", "127.0.0.1:5406").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5416").await;
@@ -682,7 +706,19 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
             "alice never PRACKs the FAILED fork's ring — that dialog dies with its leg, and the \
              subject is the dialog the reroute opens next",
         )
-        .conditional(),
+        .on_party("alice"),
+    );
+    // Alice's silence leaves the callee's own reliable provisional unPRACKed
+    // when the callee's final comes first: the B2BUA relays the PRACK end to
+    // end and has none to relay. Whether it should acknowledge it itself is
+    // open; it is not this test's subject.
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
+             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+        )
+        .on_party("b2bua"),
     );
     let alice = h.agent("alice", "127.0.0.1:5408").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5418").await;
@@ -814,7 +850,19 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
             "alice deliberately never PRACKs the re-INVITE's 183 — the subject is the ladder's \
              cancellation at the re-INVITE's final, which a PRACK would reach first",
         )
-        .conditional(),
+        .on_party("alice"),
+    );
+    // Alice's silence leaves the callee's own reliable provisional unPRACKed
+    // when the callee's final comes first: the B2BUA relays the PRACK end to
+    // end and has none to relay. Whether it should acknowledge it itself is
+    // open; it is not this test's subject.
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "the caller never PRACKs and the callee's final arrives first, so the B2BUA has no \
+             PRACK to relay toward the callee — the open end-to-end case this test does not settle",
+        )
+        .on_party("b2bua"),
     );
     let alice = h.agent("alice", "127.0.0.1:5109").await;
     let bob = h.agent("bob", "127.0.0.1:5110").await;
