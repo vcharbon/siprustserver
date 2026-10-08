@@ -394,7 +394,9 @@ impl RuleHandleResult {
     /// the event as it would have. The observation's effects precede the
     /// claim's. The candidates are selected once, on the call before any
     /// observation, so a later rule's filter never sees the writes; and an
-    /// observer ranked below the rule that claims the event never runs.
+    /// observer ranked below the rule that claims the event never runs. A later
+    /// claimer bound to the observer's machine is selected on the cursor before
+    /// the observation and its own move checked against the cursor after it.
     pub fn observe(actions: Vec<RuleAction>) -> Self {
         Self { actions, diagnostics: Vec::new(), observes: true }
     }

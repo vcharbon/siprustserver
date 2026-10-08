@@ -3,11 +3,11 @@
 //! through the [`ActionExecutor`], then termination is finalized + invariants
 //! enforced. A handler that only observes writes its call-ext slices and its
 //! own machine's bookkeeping, and the chain goes on
-//! ([`RuleHandleResult::observe`]). No candidate → the default handler. Selection gates on the
-//! call's lifecycle too: a call already going away makes no forward progress
-//! on its own clock, so an asynchronous trigger reaches only its teardown
-//! rules there (`RuleDefinition::teardown`) and every other candidate is
-//! absorbed and counted.
+//! ([`RuleHandleResult::observe`]). No candidate → the default handler.
+//! Selection gates on the call's lifecycle too: a call already going away
+//! makes no forward progress on its own clock, so an asynchronous trigger
+//! reaches only its teardown rules there (`RuleDefinition::teardown`) and
+//! every other candidate is absorbed and counted.
 
 use std::collections::HashSet;
 
@@ -122,6 +122,7 @@ pub fn execute_rules(
                 report_diagnostics(rule, call, &outcome);
                 let next = apply_observation(rule, call, ctx, exec, &outcome.actions);
                 crate::trace::emit::rule_observed(&next.call, exec.now_ms, rule.id);
+                record_cursor_moves(rule, call, &next.call, exec.now_ms);
                 observed_fx.extend(next.effects);
                 observed = Some(next.call);
                 continue;
@@ -287,6 +288,19 @@ fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms
         return;
     }
     crate::trace::emit::rule_fired(after, now_ms, rule.id);
+    record_cursor_moves(rule, before, after, now_ms);
+    if before.state != after.state {
+        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
+    }
+}
+
+/// Record on a traced call every state-machine cursor `rule`'s turn moved
+/// between `before` and `after`, a claim's or an observation's alike
+/// (ADR-0026). Guarded like [`record_transitions`].
+fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+    if !crate::trace::sampled(after) {
+        return;
+    }
     for (machine, to) in &after.sm_cursors {
         if before.sm_cursors.get(machine) != Some(to) {
             let from = before.sm_cursors.get(machine).map(call::StateLabel::as_str).unwrap_or("");
@@ -312,9 +326,6 @@ fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms
                 "terminal",
             );
         }
-    }
-    if before.state != after.state {
-        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
     }
 }
 
