@@ -4,10 +4,8 @@
 //! bare-180 downgrade (`relayFirst18xTo180`). Request relay does NOT live
 //! here — see [`super::relay_request`].
 
-use call::helpers::{
-    add_tag_mapping, find_by_b_tag, find_pending_request, remove_pending_request, Scope,
-};
-use call::{Call, LegState, PendingRequest, TagMapping};
+use call::helpers::{add_tag_mapping, find_pending_request, remove_pending_request, Scope};
+use call::{Call, PendingRequest, TagMapping};
 use sip_message::draft::Entry;
 use sip_message::generators::{
     self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
@@ -430,61 +428,7 @@ impl ActionExecutor<'_> {
             && source_leg_id != "a"
         {
             self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
-            let a_face = match find_by_b_tag(call, &source_leg_id, &to_tag) {
-                Some(m) => m.a_tag.clone(),
-                None => {
-                    // Which caller-facing dialog a new callee early dialog lands
-                    // in is the 18x policy's to decide (the route's 18x relay
-                    // and 100rel features), and the two policies answer it oppositely.
-                    //
-                    // TRANSPARENT (no `relayFirst18xTo180` arm): the caller's
-                    // dialog set mirrors the callee's, so every early dialog
-                    // past the first this CALL published mints its own a-tag —
-                    // a rerouted leg's included. That is what keeps a second
-                    // reliable provisional out of an unacknowledged one's
-                    // dialog: §3's ban is per early dialog (§4, errata
-                    // 4603/4604), and `assign_a_rseq` seeds the fresh tag its
-                    // own `RSeq` space.
-                    //
-                    // MASKING (`drop-sdp` / `keep-sdp` / `fake-prack` /
-                    // `promote-pem-to-200`): the relayed provisionals hold one
-                    // early dialog toward the caller — `relayFirst18x` maps its
-                    // 180s before they reach here, and a 2xx of a dialog she was
-                    // never shown is mapped to a fresh tag by its own rule
-                    // (`answering-dialog-identity`). What reaches this seam
-                    // unmapped is the PEM machine's: a second fork ON THIS LEG
-                    // mints, a rerouted leg fuses onto the primary. §3 cannot be
-                    // reached under a mask: the caller is shown a bare 180,
-                    // never a reliable provisional.
-                    let primary = self.ensure_a_dialog(call);
-                    let mirrors_callee_dialogs =
-                        call::helpers::relay_first_18x_strategy(call).is_none();
-                    // …and only while the caller's INVITE is still in SETUP.
-                    // An early dialog exists only between a provisional and the
-                    // final that ends it (RFC 3261 §12.1/§13.2.2.3), so once she
-                    // is answered there is no early dialog left to mirror: a leg
-                    // ringing after that point (an MRF hold, a transfer target)
-                    // rings inside a dialog she has CONFIRMED, and a fresh tag
-                    // there re-identifies an established dialog instead of
-                    // opening a second early one.
-                    let in_setup = call.a_leg.state != LegState::Confirmed;
-                    let already_published = if mirrors_callee_dialogs && in_setup {
-                        !call.tag_map.is_empty()
-                    } else {
-                        call.tag_map.iter().any(|m| m.b_leg_id == source_leg_id)
-                    };
-                    let a_face = if already_published { self.id_gen.new_tag() } else { primary };
-                    *call = add_tag_mapping(
-                        call.clone(),
-                        TagMapping {
-                            a_tag: a_face.clone(),
-                            b_leg_id: source_leg_id.clone(),
-                            b_tag: to_tag.to_string(),
-                        },
-                    );
-                    a_face
-                }
-            };
+            let a_face = self.a_face_tag(call, &source_leg_id, &to_tag);
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
             let contact =
                 relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);
