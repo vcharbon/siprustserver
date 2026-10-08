@@ -108,6 +108,7 @@ export const RFC_RULES = [
   "cancel-cseq-method",
   "no-to-tag-on-initial-request",
   "in-dialog-to-tag",
+  "in-dialog-from-tag",
   "no-require-on-cancel-or-ack",
   "strict-route-shuffle-on-send",
   "sdp-body-parseable",

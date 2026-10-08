@@ -259,6 +259,15 @@
       "relayed": 0,
       "buckets": {}
     },
+    "in-dialog-from-tag": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 2,
+      "decided": 2,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
     "in-dialog-to-tag": {
       "hits": 0,
       "documents": 0,

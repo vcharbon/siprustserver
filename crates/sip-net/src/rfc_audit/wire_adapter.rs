@@ -4270,6 +4270,53 @@ impl CrossMessageAuditRule for InDialogToTagRule {
     }
 }
 
+/// RFC 3261 §12.2.1.1 live: the merged `in-dialog-from-tag` rule — a request
+/// taken inside a confirmed dialog carries that dialog's remote tag in From.
+///
+/// The live policy this bind adds to the rule body: reported once, at the
+/// taker where it is a recorded bind (the dialog the request fails to name is
+/// its own) and at the sender otherwise, charged to the sender.
+pub struct InDialogFromTagRule;
+
+impl CrossMessageAuditRule for InDialogFromTagRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::InDialogFromTag.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        surfaced_at_taker_else_emitter(
+            events,
+            &rfc_rules::rules::correlation::InDialogFromTag,
+            |f, cid| {
+                let Decision::Violated(rfc_rules::Evidence::DialogRemoteTagForeign {
+                    method,
+                    from_tag,
+                    dialog_remote_tags,
+                    ..
+                }) = &f.decision
+                else {
+                    return String::new();
+                };
+                format!(
+                    "{method} (callId {cid}, CSeq {cseq}) taken inside a confirmed dialog carries \
+                     From-tag \"{from_tag}\", but the dialogs confirmed under its To-tag have \
+                     remote tags [{remotes}] — RFC 3261 §12.2.1.1 / §12.1.2 (the request names no \
+                     dialog its taker holds)",
+                    cseq = f.cseq,
+                    remotes = dialog_remote_tags.join(" | "),
+                )
+            },
+        )
+    }
+}
+
 /// RFC 3261 §8.2.2.3 live: the merged `no-require-on-cancel-or-ack` rule at
 /// this bind's vantage — the sender writes the demand.
 pub struct NoRequireOnCancelOrAckRule;
@@ -4616,6 +4663,7 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(CancelCseqMethodRule),
         std::sync::Arc::new(NoToTagOnInitialRequestRule),
         std::sync::Arc::new(InDialogToTagRule),
+        std::sync::Arc::new(InDialogFromTagRule),
         std::sync::Arc::new(NoRequireOnCancelOrAckRule),
         std::sync::Arc::new(StrictRouteShuffleOnSendRule),
         std::sync::Arc::new(SdpBodyParseableRule),
@@ -6644,6 +6692,41 @@ m=audio 20000 RTP/AVP 0\r\n";
         let plain = resp_sdp(status, cseq, "INVITE", branch, body);
         let text = String::from_utf8(plain).unwrap();
         text.replacen("CSeq:", "Require: 100rel\r\nRSeq: 1\r\nCSeq:", 1).into_bytes()
+    }
+
+    /// §12.2.1.1 GATES: a request the caller takes long after a forking
+    /// callee's answer, under the tag of the branch that only rang, is flagged
+    /// at the caller's lane and charged to its sender.
+    #[test]
+    fn a_request_under_a_rung_branch_tag_after_the_answer_gates() {
+        assert!(!InDialogFromTagRule.force_advisory(), "a MUST gates");
+        let toward_alice = |from_tag: &str| {
+            format!(
+                "OPTIONS {A} SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-o1\r\n\
+                 From: <{B}>;tag={from_tag}\r\n\
+                 To: <{A}>;tag=at\r\n\
+                 Call-ID: cid-1@127.0.0.1\r\n\
+                 CSeq: 1 OPTIONS\r\n\
+                 Max-Forwards: 70\r\n\
+                 Content-Length: 0\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let call = |from_tag: &str| {
+            vec![
+                sent(ALICE, req("INVITE", "z9hG4bK-i1", 1, None), BOB, 0),
+                recv(ALICE, resp(180, 1, "INVITE", "b1", "z9hG4bK-i1"), BOB, 1),
+                recv(ALICE, resp(200, 1, "INVITE", "b2", "z9hG4bK-i1"), BOB, 2),
+                sent(ALICE, req("ACK", "z9hG4bK-a1", 1, Some("b2")), BOB, 3),
+                recv(ALICE, toward_alice(from_tag), BOB, 300_000),
+            ]
+        };
+        assert!(InDialogFromTagRule.check(&call("b2")).is_empty());
+        let out = InDialogFromTagRule.check_positioned(&call("b1"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].0, ALICE, "reported at the caller, whose dialog it fails to name");
+        assert_eq!(out[0].3, Some(BOB.to_string()), "charged to the request's sender");
     }
 
     /// §13.2.2.4 GATES: an ACK to a delayed-offer 2xx that carries no answer

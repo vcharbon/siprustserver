@@ -1,6 +1,6 @@
 //! What a message must name in ONE endpoint's OWN traffic — the obligations
 //! that can only be judged from that party's seat, against the dialog and
-//! transaction state it built as it sent and received. TEN of them, eight
+//! transaction state it built as it sent and received. ELEVEN of them, nine
 //! reading a message the endpoint TOOK and two reading one it SENT against the
 //! same state:
 //!
@@ -22,6 +22,8 @@
 //!     puts on a Call-ID names no peer, so it states no To-tag.
 //!   - [`InDialogToTag`] (§12.2.1.1) — once the endpoint has watched a dialog
 //!     confirm, the requests it sends on it carry that dialog's remote tag.
+//!   - [`InDialogFromTag`] (§12.2.1.1) — a request the endpoint takes inside a
+//!     dialog it confirmed carries that dialog's remote tag in From.
 //!
 //! **The state is per `(endpoint, Call-ID)` and built from that endpoint's own
 //! stream** (`PeerDialogs`): the tags it minted, the requests it sent, the
@@ -39,8 +41,9 @@
 //! partition would make a Call-ID CHANGE invisible by opening a second one —
 //! [`TagConsistency`] keys on the server transaction rather than the dialog, and
 //! [`InDialogToTag`] needs a witness `PeerDialogs` does not carry (which
-//! branch established the dialog, which drew a non-2xx), so each walks the view
-//! under its own key.
+//! branch established the dialog, which drew a non-2xx), and [`InDialogFromTag`]
+//! one per confirmed dialog (its tag pair), so each walks the view under its
+//! own key.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -920,6 +923,149 @@ impl Obligation for InDialogToTag {
             by.entry((msg.dst.clone(), msg.call_id.clone())).or_default().observe(msg, false);
         }
         out
+    }
+}
+
+/// How long after an endpoint takes the first 2xx to its INVITE an early
+/// dialog of another branch still stands: §13.2.2.4 has the UAC terminate the
+/// early dialogs no 2xx confirmed 64·T1 (32 s) after that first 2xx.
+pub const EARLY_DIALOG_WINDOW_US: u64 = 32_000_000;
+
+/// **§12.2.1.1 / §12.1.2 — a request taken inside a confirmed dialog carries
+/// that dialog's remote tag in From.** The 2xx that confirms a dialog fixes
+/// its identifier: the UAC reads the remote tag off the 2xx's To, the UAS off
+/// the INVITE's From. A request the endpoint then takes under its own tag of
+/// that dialog, with a From-tag naming none of the dialogs it confirmed, is
+/// in no dialog it holds, and a real UA answers 481.
+///
+/// The occasion is one request the endpoint TOOK carrying both tags, whose
+/// To-tag is the endpoint's own tag of a dialog it has seen confirmed. Not an
+/// occasion: a To-tag naming no confirmed dialog of the taker
+/// ([`MidDialogTags`] judges it), and a From-tag naming an early dialog of
+/// another branch the taker still holds — a provisional's To-tag, inside
+/// [`EARLY_DIALOG_WINDOW_US`] of the first 2xx. A vantage relaying both
+/// directions stands `Undecidable`. Charges the endpoint that sent the
+/// request.
+pub struct InDialogFromTag;
+
+impl Obligation for InDialogFromTag {
+    fn id(&self) -> RuleId {
+        RuleId::InDialogFromTag
+    }
+
+    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let mut by: HashMap<(String, String), ConfirmedDialogs> = HashMap::new();
+        let mut out = Vec::new();
+        for (mi, msg) in wire.msgs.iter().enumerate() {
+            if msg.call_id.is_empty() {
+                continue;
+            }
+            let taker = (msg.dst.clone(), msg.call_id.clone());
+            if !msg.repeat {
+                if let Some(d) = by.get(&taker).and_then(|c| c.decision(msg, mi)) {
+                    out.push(charge(RuleId::InDialogFromTag, msg, mi, d));
+                }
+            }
+            by.entry((msg.src.clone(), msg.call_id.clone())).or_default().observe(msg, true);
+            by.entry(taker).or_default().observe(msg, false);
+        }
+        out
+    }
+}
+
+/// The dialogs ONE endpoint has seen confirmed on ONE Call-ID, as
+/// [`InDialogFromTag`] needs them.
+#[derive(Default)]
+struct ConfirmedDialogs {
+    /// `(local tag, remote tag)` of each confirmed dialog: a 2xx to INVITE
+    /// this endpoint took gives `(From-tag, To-tag)`, one it sent
+    /// `(To-tag, From-tag)`.
+    confirmed: BTreeSet<(String, String)>,
+    /// `(local tag, remote tag)` of each early dialog a provisional to its
+    /// INVITE gave it.
+    early: BTreeSet<(String, String)>,
+    /// When it took its first 2xx to INVITE: the early dialogs of the other
+    /// branches end [`EARLY_DIALOG_WINDOW_US`] later.
+    first_2xx_taken_us: Option<u64>,
+    /// The establishing INVITE crossed in this direction.
+    sent_establishing: bool,
+    took_establishing: bool,
+}
+
+impl ConfirmedDialogs {
+    /// Forwarding both directions of this Call-ID — see the module doc.
+    fn relays(&self) -> bool {
+        self.sent_establishing && self.took_establishing
+    }
+
+    /// The verdict on a request this endpoint takes, or `None` where no
+    /// obligation arises.
+    fn decision(&self, msg: &Msg, mi: usize) -> Option<Decision> {
+        let Kind::Request { method } = &msg.kind else { return None };
+        let (Some(local), Some(remote)) = (msg.to_tag.as_deref(), msg.from_tag.as_deref()) else {
+            return None;
+        };
+        let remotes: Vec<String> =
+            self.confirmed.iter().filter(|(l, _)| l == local).map(|(_, r)| r.clone()).collect();
+        if remotes.is_empty() {
+            return None;
+        }
+        if self.relays() {
+            return Some(Decision::Undecidable(RELAYED));
+        }
+        if remotes.iter().any(|r| r == remote) {
+            return Some(Decision::Compliant);
+        }
+        let early_standing = self
+            .first_2xx_taken_us
+            .is_some_and(|t| msg.at_us <= t.saturating_add(EARLY_DIALOG_WINDOW_US));
+        if early_standing && self.early.contains(&(local.to_string(), remote.to_string())) {
+            return None;
+        }
+        Some(Decision::Violated(Evidence::DialogRemoteTagForeign {
+            foreign_from_msg: mi,
+            foreign_from_hop: msg.hop,
+            foreign_from_ts_us: msg.at_us,
+            method: method.clone(),
+            from_tag: remote.to_string(),
+            dialog_remote_tags: remotes,
+        }))
+    }
+
+    /// Fold one carried message in, from this endpoint's side of it.
+    fn observe(&mut self, msg: &Msg, sent: bool) {
+        match &msg.kind {
+            Kind::Request { method } => {
+                if method.eq_ignore_ascii_case("INVITE") && msg.to_tag.is_none() {
+                    if sent {
+                        self.sent_establishing = true;
+                    } else {
+                        self.took_establishing = true;
+                    }
+                }
+            }
+            Kind::Response { status } => {
+                if !msg.cseq_method.eq_ignore_ascii_case("INVITE") {
+                    return;
+                }
+                let (Some(from), Some(to)) = (msg.from_tag.clone(), msg.to_tag.clone()) else {
+                    return;
+                };
+                let pair = if sent { (to, from) } else { (from, to) };
+                match status {
+                    101..=199 if !sent => {
+                        self.early.insert(pair);
+                    }
+                    200..=299 => {
+                        if !sent && self.first_2xx_taken_us.is_none() {
+                            self.first_2xx_taken_us = Some(msg.at_us);
+                        }
+                        self.confirmed.insert(pair);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -1877,5 +2023,188 @@ mod tests {
             req(3_000, B, c, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", None, 1),
         ];
         assert!(charged(run(&InDialogToTag, &msgs), B).is_empty());
+    }
+
+    // ── in-dialog-from-tag ──────────────────────────────────────────────────
+
+    /// A forking callee rings on one branch (tag `b1`) and answers on another
+    /// that never rang (tag `b2`); the caller ACKs the answer.
+    fn answered_on_an_unrung_branch() -> Vec<Msg> {
+        vec![
+            req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
+            resp(2_000, B, A, 180, 1, "INVITE", "z9hG4bK-i", "at", Some("b1"), 1),
+            resp(3_000, B, A, 200, 1, "INVITE", "z9hG4bK-i", "at", Some("b2"), 1),
+            req(
+                4_000,
+                A,
+                B,
+                "ACK",
+                "sip:bob@h",
+                1,
+                "z9hG4bK-k",
+                "sip:alice@h",
+                "at",
+                Some("b2"),
+                1,
+            ),
+        ]
+    }
+
+    /// A request the callee side sends the caller at `at_us` under From-tag
+    /// `from_tag`, naming the caller's tag.
+    fn toward_caller(at_us: u64, method: &str, cseq: u32, from_tag: &str) -> Msg {
+        let branch = format!("z9hG4bK-{method}-{at_us}");
+        req(at_us, B, A, method, "sip:alice@h", cseq, &branch, "sip:bob@h", from_tag, Some("at"), 1)
+    }
+
+    #[test]
+    fn a_request_in_the_answered_dialog_is_compliant() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.push(toward_caller(300_000_000, "OPTIONS", 1, "b2"));
+        let f = charged(run(&InDialogFromTag, &msgs), B);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
+    /// Long after the answer, the branch that only rang has no dialog left at
+    /// the caller: a request under its tag names nothing she holds.
+    #[test]
+    fn a_request_under_the_rung_branch_tag_after_the_answer_is_violated() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.push(toward_caller(300_000_000, "OPTIONS", 1, "b1"));
+        let f = charged(run(&InDialogFromTag, &msgs), B);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].taker, A, "read at the caller's seat");
+        let Decision::Violated(Evidence::DialogRemoteTagForeign {
+            foreign_from_msg,
+            method,
+            from_tag,
+            dialog_remote_tags,
+            ..
+        }) = &f[0].decision
+        else {
+            panic!("in-dialog-from-tag evidence: {:?}", f[0].decision)
+        };
+        assert_eq!(*foreign_from_msg, 4);
+        assert_eq!((method.as_str(), from_tag.as_str()), ("OPTIONS", "b1"));
+        assert_eq!(dialog_remote_tags, &vec!["b2".to_string()]);
+    }
+
+    /// A tag the caller was never shown names no dialog at all.
+    #[test]
+    fn a_request_under_an_unknown_tag_is_violated() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.push(toward_caller(5_000, "BYE", 1, "zz"));
+        let f = charged(run(&InDialogFromTag, &msgs), B);
+        assert!(f.iter().any(Finding::violated), "{f:?}");
+    }
+
+    /// Inside 64·T1 of the first 2xx the rung branch's early dialog still
+    /// stands at the caller (§13.2.2.4): a request on it names a dialog she
+    /// holds, and this rule has nothing to say.
+    #[test]
+    fn a_request_on_an_early_dialog_still_standing_is_no_occasion() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.push(toward_caller(3_000 + EARLY_DIALOG_WINDOW_US, "UPDATE", 1, "b1"));
+        assert!(charged(run(&InDialogFromTag, &msgs), B).is_empty());
+        let mut late = answered_on_an_unrung_branch();
+        late.push(toward_caller(3_001 + EARLY_DIALOG_WINDOW_US, "UPDATE", 1, "b1"));
+        assert!(run(&InDialogFromTag, &late).iter().any(Finding::violated));
+    }
+
+    /// Before any 2xx, no dialog is confirmed: early-dialog traffic is no
+    /// occasion.
+    #[test]
+    fn a_request_before_the_answer_is_no_occasion() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.truncate(2);
+        msgs.push(toward_caller(2_500, "UPDATE", 1, "b1"));
+        assert!(run(&InDialogFromTag, &msgs).is_empty());
+    }
+
+    /// Every 2xx a forking callee sends confirms a dialog of its own
+    /// (§13.2.2.4): a request in either is compliant.
+    #[test]
+    fn each_confirmed_branch_is_its_own_dialog() {
+        let mut msgs = answered_on_an_unrung_branch();
+        msgs.push(resp(5_000, B, A, 200, 1, "INVITE", "z9hG4bK-i", "at", Some("b1"), 1));
+        msgs.push(toward_caller(300_000_000, "BYE", 1, "b1"));
+        msgs.push(toward_caller(300_000_001, "BYE", 1, "b2"));
+        let f = charged(run(&InDialogFromTag, &msgs), B);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
+    }
+
+    /// At the answering seat the remote tag is the INVITE's From-tag: the
+    /// caller's request under another From-tag is charged to the caller.
+    #[test]
+    fn the_answering_seat_holds_the_invite_from_tag() {
+        let mut msgs = answered_on_an_unrung_branch();
+        let bye = |at_us, from_tag: &str| {
+            req(
+                at_us,
+                A,
+                B,
+                "BYE",
+                "sip:bob@h",
+                2,
+                "z9hG4bK-b",
+                "sip:alice@h",
+                from_tag,
+                Some("b2"),
+                1,
+            )
+        };
+        msgs.push(bye(5_000, "at"));
+        let f = charged(run(&InDialogFromTag, &msgs), A);
+        assert_eq!(f.len(), 2, "the ACK and the BYE: {f:?}");
+        assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
+
+        let mut foreign = answered_on_an_unrung_branch();
+        foreign.push(bye(5_000, "other"));
+        let f: Vec<Finding> = charged(run(&InDialogFromTag, &foreign), A)
+            .into_iter()
+            .filter(Finding::violated)
+            .collect();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!((f[0].taker.as_str(), f[0].anchor), (B, 4));
+    }
+
+    /// A To-tag naming no dialog the taker confirmed is [`MidDialogTags`]'
+    /// finding, not this one's.
+    #[test]
+    fn a_to_tag_naming_no_confirmed_dialog_is_no_occasion() {
+        let mut msgs = answered_on_an_unrung_branch();
+        let mut stray = toward_caller(300_000_000, "OPTIONS", 1, "b1");
+        stray.to_tag = Some("not-the-callers".to_string());
+        msgs.push(stray);
+        assert!(charged(run(&InDialogFromTag, &msgs), B).is_empty());
+    }
+
+    /// A vantage carrying the establishing INVITE both ways forwards the
+    /// originator's headers: it decides nothing.
+    #[test]
+    fn a_relaying_taker_decides_nothing() {
+        let c = "10.0.0.3:5080";
+        let msgs = vec![
+            req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
+            req(1_500, B, c, "INVITE", "sip:bob@h", 1, "z9hG4bK-j", "sip:alice@h", "at", None, 1),
+            resp(2_000, c, B, 200, 1, "INVITE", "z9hG4bK-j", "at", Some("ct"), 1),
+            req(
+                3_000,
+                c,
+                B,
+                "BYE",
+                "sip:alice@h",
+                1,
+                "z9hG4bK-b",
+                "sip:bob@h",
+                "xx",
+                Some("at"),
+                1,
+            ),
+        ];
+        let f = charged(run(&InDialogFromTag, &msgs), c);
+        assert!(f.iter().all(|x| !x.violated()), "{f:?}");
     }
 }

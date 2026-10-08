@@ -381,6 +381,7 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
         Evidence::ResponseViaDiverged { .. } => "response via stack off its request's",
         Evidence::ResponseCseqPhantom { .. } => "response cseq names no sent request",
         Evidence::DialogTagForeign { .. } => "in-dialog tag the taker never minted",
+        Evidence::DialogRemoteTagForeign { .. } => "in-dialog from-tag naming no confirmed dialog",
         Evidence::PeerUriRewritten { .. } => "peer uri rewritten mid-dialog",
         Evidence::DialogCallIdChanged { .. } => "call-id changed mid-dialog",
         Evidence::CancelUriDiverged { .. } => "cancel uri off its invite's",

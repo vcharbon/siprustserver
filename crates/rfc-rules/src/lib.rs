@@ -113,6 +113,7 @@ pub fn all_rules() -> Vec<Box<dyn rules::Obligation>> {
         Box::new(rules::wellformed::CancelCseqMethod),
         Box::new(rules::correlation::NoToTagOnInitialRequest),
         Box::new(rules::correlation::InDialogToTag),
+        Box::new(rules::correlation::InDialogFromTag),
         Box::new(rules::capability::NoRequireOnCancelOrAck),
         Box::new(rules::proxy::StrictRouteShuffleOnSend),
         Box::new(rules::offer_answer::SdpBodyParseable),

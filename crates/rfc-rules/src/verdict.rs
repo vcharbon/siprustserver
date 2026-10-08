@@ -435,6 +435,11 @@ pub enum RuleId {
     /// that dialog's remote tag in To. Charges the sender that omitted it.
     #[serde(rename = "in-dialog-to-tag")]
     InDialogToTag,
+    /// RFC 3261 §12.2.1.1 / §12.1.2: a request an endpoint takes inside a
+    /// dialog it confirmed carries that dialog's remote tag in From. Charges
+    /// the sender.
+    #[serde(rename = "in-dialog-from-tag")]
+    InDialogFromTag,
     /// RFC 3261 §8.2.2.3: a CANCEL, and the ACK of a non-2xx final, state no
     /// `Require` / `Proxy-Require` — a transaction-management request imposes
     /// no extension. Charges the sender.
@@ -563,6 +568,7 @@ impl RuleId {
         RuleId::CancelCseqMethod,
         RuleId::NoToTagOnInitialRequest,
         RuleId::InDialogToTag,
+        RuleId::InDialogFromTag,
         RuleId::NoRequireOnCancelOrAck,
         RuleId::StrictRouteShuffleOnSend,
         RuleId::SdpBodyParseable,
@@ -667,6 +673,7 @@ impl RuleId {
             RuleId::Reliable1xxHeaders => "reliable-1xx-headers",
             RuleId::NoToTagOnInitialRequest => "no-to-tag-on-initial-request",
             RuleId::InDialogToTag => "in-dialog-to-tag",
+            RuleId::InDialogFromTag => "in-dialog-from-tag",
             RuleId::NoRequireOnCancelOrAck => "no-require-on-cancel-or-ack",
             RuleId::CancelCseqMethod => "cancel-cseq-method",
             RuleId::StrictRouteShuffleOnSend => "strict-route-shuffle-on-send",
@@ -2203,6 +2210,24 @@ pub enum Evidence {
         /// The tags the taker had minted on this dialog by then.
         local_tags: Vec<String>,
     },
+    /// The request taken inside a confirmed dialog whose From-tag is not the
+    /// remote tag of any dialog its taker confirmed under that To-tag.
+    ///
+    /// Untagged and unambiguous both ways: it is the only variant carrying
+    /// `foreign_from_msg`, so no other payload deserializes into it; and every
+    /// other variant requires a key it has not.
+    DialogRemoteTagForeign {
+        /// Index into the view's `msgs` of the request the taker took.
+        foreign_from_msg: usize,
+        foreign_from_hop: usize,
+        foreign_from_ts_us: u64,
+        method: String,
+        /// The From-tag the request carried.
+        from_tag: String,
+        /// The remote tags of the dialogs the taker had confirmed under the
+        /// request's To-tag by then, sorted.
+        dialog_remote_tags: Vec<String>,
+    },
     /// The in-dialog request whose From URI is not the one the dialog was
     /// created with.
     ///
@@ -2468,6 +2493,7 @@ impl Evidence {
             Evidence::ResponseViaDiverged { via_msg, .. } => *via_msg,
             Evidence::ResponseCseqPhantom { phantom_msg, .. } => *phantom_msg,
             Evidence::DialogTagForeign { foreign_tag_msg, .. } => *foreign_tag_msg,
+            Evidence::DialogRemoteTagForeign { foreign_from_msg, .. } => *foreign_from_msg,
             Evidence::PeerUriRewritten { peer_uri_msg, .. } => *peer_uri_msg,
             Evidence::DialogCallIdChanged { call_id_msg, .. } => *call_id_msg,
             Evidence::CancelUriDiverged { cancel_uri_msg, .. } => *cancel_uri_msg,
