@@ -73,13 +73,7 @@ async fn response_with_foreign_top_via_is_discarded() {
     // We inject a raw response from a bind that never sent the matching request,
     // so the locally-minted-tag audit legitimately fires on the fixture. The
     // proxy (not the UA) is the SUT here; waive that UA-side rule.
-    h.waive(
-        WaiverScope::rule(
-            "mid-dialog-tags",
-            "the test injects the deviant tags; the proxy relays them as RFC 3261 §16.7 requires",
-        )
-        .on_party("proxy"),
-    );
+    h.allow_violation("mid-dialog-tags", "raw-injected response; proxy is the SUT, not a real UA");
     let (strategy, registry) = forward_all("127.0.0.1:5070".parse().unwrap());
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
     let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
