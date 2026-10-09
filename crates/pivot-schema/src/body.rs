@@ -8,8 +8,10 @@
 //! references files that already exist.
 //!
 //! A body is emitted as the document holds it: every part's payload byte-exact,
-//! its `Content-ID` and its entity headers verbatim (RFC 2045 §3). SDP is the
-//! ONE content the tool rewrites, because replay rebooks addresses and ports.
+//! its `Content-ID` and its entity headers verbatim (RFC 2045 §3). Two contents
+//! are rewritten, direct or as a part: SDP, because replay rebooks addresses
+//! and ports, and an MSCML `<response>`'s `id`, which echoes the client-defined
+//! id of the request the leg received (RFC 5022 §10.2).
 //!
 //! Per-part handling is a content-type registry, exported by [`crate::tiers`].
 

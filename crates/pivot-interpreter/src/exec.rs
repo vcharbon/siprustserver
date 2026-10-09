@@ -50,6 +50,7 @@ use crate::deviation::StepEffects;
 use crate::early::{EarlyDialogs, LearnedForks};
 use crate::gate::{self, GateVerdict, Inbound};
 use crate::instance::Instance;
+use crate::mscml::MscmlRequests;
 use crate::plan::{CompiledStep, Discriminator, Plan};
 use crate::preserve;
 use crate::program::ItemKind;
@@ -721,6 +722,12 @@ impl<'a, 'p> Runner<'a, 'p> {
         // takes it.
         if let Some(leg) = self.foreign_dialog_leg(&message) {
             return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
+        }
+
+        // Before any policy or step consumes it: a response the leg sends later
+        // echoes the id of the MSCML request it answers (RFC 5022 §10.2).
+        if let Some(leg) = self.leg_by_call_id(&inbound.call_id) {
+            self.instance.leg_mut(&leg).mscml.remember(&inbound);
         }
 
         // Background next (§5.1): a policy's traffic never touches the cursor.
@@ -2380,8 +2387,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             .and_then(|call| self.instance.config().headers_for_call(call))
             .cloned()
             .unwrap_or_default();
+        let received = MscmlRequests::default();
         let (rendered, cseq_override) = {
             let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
+            let mscml = self.instance.state().leg(&step.leg).map_or(&received, |leg| &leg.mscml);
             let cx = render::Context {
                 resolver: &resolver,
                 config: self.instance.config(),
@@ -2390,6 +2399,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 base_dir: &self.lane.base_dir,
                 media: &self.lane.media,
                 leg: &step.leg,
+                mscml,
                 call_headers: &call_headers,
             };
             let rendered =

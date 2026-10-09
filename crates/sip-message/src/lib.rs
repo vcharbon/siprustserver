@@ -23,6 +23,7 @@ pub mod deviation;
 pub mod emergency;
 pub mod generators;
 pub mod hops;
+pub mod mscml;
 pub mod multipart;
 pub mod param_codec;
 pub mod payload;

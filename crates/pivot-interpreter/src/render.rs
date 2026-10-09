@@ -1,7 +1,9 @@
 //! Composing a `send` step's message (`PCAP2TEST_PIVOT_V3.md` §14 item 3).
 //!
 //! A send emits **exactly what `msg` states, plus tier-1 regeneration, plus any
-//! run-config injected headers, plus any accessor substitution. Nothing else.**
+//! run-config injected headers, plus any accessor substitution, plus the two
+//! body rewrites: SDP's lane-owned lines and an MSCML response's echoed id
+//! (RFC 5022 §10.2). Nothing else.**
 //! This module owns the "plus" list and hands the stack a
 //! [`MessageTemplate`](sip_message::MessageTemplate): tier-1 (Via and branch,
 //! Call-ID, tags, CSeq numbering, Max-Forwards, Content-Length, Contact,
@@ -28,6 +30,7 @@ use sip_message::{HeaderName, MessageTemplate, Method, MultipartPart, SipStr, Te
 
 use crate::deviation::StepEffects;
 use crate::media::{Booking, MediaMode};
+use crate::mscml::{self, MscmlRequests};
 use crate::resolve::{ResolveError, Resolver};
 
 /// Why a step's message could not be composed.
@@ -138,6 +141,9 @@ pub struct Context<'a> {
     pub media: &'a Booking,
     /// The leg this send rides, which is what a media port is booked against.
     pub leg: &'a str,
+    /// The MSCML requests that leg has received: the ids an MSCML response it
+    /// sends echoes.
+    pub mscml: &'a MscmlRequests,
     /// The lane directives for the CALL this step dials, where it dials one —
     /// empty on every other step. A call's egress is its own (§4.3).
     pub call_headers: &'a BTreeMap<String, String>,
@@ -145,7 +151,8 @@ pub struct Context<'a> {
 
 /// Compose `msg` for the wire.
 pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, RenderError> {
-    let Context { resolver, config, effects, composer, base_dir, media, leg, call_headers } = *cx;
+    let Context { resolver, config, effects, composer, base_dir, media, leg, mscml, call_headers } =
+        *cx;
     let mut headers: Vec<TemplateHeader> = Vec::new();
     for header in &msg.headers {
         let name = resolver.text(&header.name).map_err(|e| RenderError::from((site, e)))?;
@@ -175,7 +182,7 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
 
     let (body, content_type) = match &msg.body {
         None => (Vec::new(), None),
-        Some(body) => load_body(body, base_dir, media, leg)?,
+        Some(body) => load_body(body, base_dir, media, leg, mscml)?,
     };
     if let Some(ct) = &content_type {
         if !headers.iter().any(|h| HeaderName::ContentType.matches(&h.name)) {
@@ -275,19 +282,21 @@ impl Rewrite {
     }
 }
 
-/// Load a body resource and derive its content type. SDP (declared by its
-/// rewrite tags, direct or as a part) is the ONE content rewritten, and only the
-/// lines its tokens name, and only where the lane's booking answers them — a
+/// Load a body resource and derive its content type. Two contents are
+/// rewritten, direct or as a part: SDP (declared by its rewrite tags), only the
+/// lines its tokens name and only where the lane's booking answers them — a
 /// verbatim booking emits the stored bytes unchanged under the type the tags
-/// declare, never decoding them; every other payload, every part's `Content-ID`
-/// and every part entity header rides exactly as stored (§8.3). A single
-/// reference declaring neither rewrite tags nor a type is REFUSED rather than
-/// mislabelled.
+/// declare, never decoding them; and an MSCML `<response>`, whose `id` takes
+/// the one `requests` remembered for its type ([`mscml::echo`]). Every other
+/// payload, every part's `Content-ID` and every part entity header rides
+/// exactly as stored (§8.3). A single reference declaring neither rewrite tags
+/// nor a type is REFUSED rather than mislabelled.
 fn load_body(
     body: &Body,
     base_dir: &Path,
     media: &Booking,
     leg: &str,
+    requests: &MscmlRequests,
 ) -> Result<(Vec<u8>, Option<String>), RenderError> {
     match body {
         // A shape is an expect-side assertion, never a send body.
@@ -313,7 +322,7 @@ fn load_body(
                     let text = String::from_utf8_lossy(&bytes);
                     rewrite_sdp(&text, rewrite, media, leg, &mut stream).into_bytes()
                 } else {
-                    bytes
+                    mscml::echo(bytes, &part.content_type, requests)
                 };
                 // Content-Type is the composer's own first line; the stored
                 // `Content-ID` leads the rest so a `cid:` reference resolves,
@@ -336,7 +345,7 @@ fn load_body(
             let rewrite = Rewrite::of(&r.rewrite);
             if !rewrite.any() {
                 return match &r.content_type {
-                    Some(ct) => Ok((bytes, Some(ct.clone()))),
+                    Some(ct) => Ok((mscml::echo(bytes, ct, requests), Some(ct.clone()))),
                     None => Err(RenderError::BodyUnlabelled { reference: r.reference.clone() }),
                 };
             }
@@ -397,6 +406,7 @@ mod tests {
     use pivot_schema::bundle::{ClockMode, IdentityBindings};
     use pivot_schema::msg::{Header, PositionalRef};
     use sip_message::header::Uri;
+    use sip_message::SipParser;
 
     struct TestComposer;
 
@@ -463,6 +473,7 @@ mod tests {
                 base_dir: Path::new("."),
                 media: &Booking::new("127.0.0.1", 40000),
                 leg: "A",
+                mscml: &MscmlRequests::default(),
                 call_headers: &BTreeMap::new(),
             },
         )
@@ -501,6 +512,7 @@ mod tests {
                 base_dir: Path::new("."),
                 media: &Booking::new("127.0.0.1", 40000),
                 leg: "A",
+                mscml: &MscmlRequests::default(),
                 call_headers: &BTreeMap::new(),
             },
         )
@@ -528,6 +540,7 @@ mod tests {
             base_dir: Path::new("."),
             media: &Booking::new("127.0.0.1", 40000),
             leg: "A",
+            mscml: &MscmlRequests::default(),
             call_headers: &BTreeMap::new(),
         };
         for (field, addr) in
@@ -567,6 +580,7 @@ mod tests {
                 base_dir: Path::new("."),
                 media: &Booking::new("127.0.0.1", 40000),
                 leg: "A",
+                mscml: &MscmlRequests::default(),
                 call_headers: &call_headers,
             },
         )
@@ -615,6 +629,7 @@ mod tests {
                 base_dir: Path::new("."),
                 media: &Booking::new("127.0.0.1", 40000),
                 leg: "A",
+                mscml: &MscmlRequests::default(),
                 call_headers: &BTreeMap::new(),
             },
         )
@@ -650,6 +665,7 @@ mod tests {
                 base_dir: Path::new("."),
                 media: &Booking::new("127.0.0.1", 40000),
                 leg: "A",
+                mscml: &MscmlRequests::default(),
                 call_headers: &BTreeMap::new(),
             },
         )
@@ -670,7 +686,13 @@ mod tests {
             compare: None,
         });
         assert!(matches!(
-            load_body(&unlabelled, &dir, &Booking::new("127.0.0.1", 40000), "A"),
+            load_body(
+                &unlabelled,
+                &dir,
+                &Booking::new("127.0.0.1", 40000),
+                "A",
+                &MscmlRequests::default()
+            ),
             Err(RenderError::BodyUnlabelled { .. })
         ));
         let typed = Body::Resource(pivot_schema::body::ResourceBody {
@@ -680,7 +702,14 @@ mod tests {
             content_type: Some("application/EmergencyCallData.eCall.MSD".into()),
             compare: None,
         });
-        let (bytes, ct) = load_body(&typed, &dir, &Booking::new("127.0.0.1", 40000), "A").unwrap();
+        let (bytes, ct) = load_body(
+            &typed,
+            &dir,
+            &Booking::new("127.0.0.1", 40000),
+            "A",
+            &MscmlRequests::default(),
+        )
+        .unwrap();
         assert_eq!(bytes, b"\x00\x01");
         assert_eq!(ct.as_deref(), Some("application/EmergencyCallData.eCall.MSD"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -738,7 +767,7 @@ mod tests {
             },
         });
         let media = Booking::new("127.0.0.9", 41000);
-        let (bytes, ct) = load_body(&body, &dir, &media, "A").unwrap();
+        let (bytes, ct) = load_body(&body, &dir, &media, "A", &MscmlRequests::default()).unwrap();
         let ct = ct.expect("a multipart body states the type it framed under");
         let boundary = ct.split("boundary=").nth(1).expect("the type names its boundary");
         assert!(ct.starts_with("multipart/mixed;boundary="), "{ct}");
@@ -786,8 +815,14 @@ mod tests {
                 }],
             },
         });
-        let error =
-            load_body(&body, Path::new("."), &Booking::new("127.0.0.1", 40000), "A").unwrap_err();
+        let error = load_body(
+            &body,
+            Path::new("."),
+            &Booking::new("127.0.0.1", 40000),
+            "A",
+            &MscmlRequests::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(&error, RenderError::MultipartCidUnstated { headers, .. } if headers == &["call-info"]),
             "{error}"
@@ -819,7 +854,14 @@ mod tests {
                 }],
             },
         });
-        let (bytes, _) = load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "A").unwrap();
+        let (bytes, _) = load_body(
+            &body,
+            &dir,
+            &Booking::new("127.0.0.1", 40000),
+            "A",
+            &MscmlRequests::default(),
+        )
+        .unwrap();
         let text = String::from_utf8_lossy(&bytes).into_owned();
         assert!(text.contains("Content-ID: <msd@example.invalid>\r\n"), "{text}");
         assert!(text.contains("Content-Transfer-Encoding: binary\r\n"), "{text}");
@@ -928,7 +970,8 @@ mod tests {
             compare: None,
         });
         let verbatim = Booking::verbatim();
-        let (bytes, ct) = load_body(&body, &dir, &verbatim, "A").unwrap();
+        let (bytes, ct) =
+            load_body(&body, &dir, &verbatim, "A", &MscmlRequests::default()).unwrap();
         assert_eq!(String::from_utf8_lossy(&bytes), stored, "no line is rewritten");
         assert_eq!(ct.as_deref(), Some("application/sdp"), "the tokens still label the body");
         assert_eq!(verbatim.held("A", 0), None, "and the port book stays empty");
@@ -942,11 +985,12 @@ mod tests {
             reference: "odd.sdp".into(),
             ..resource.clone()
         });
-        let (bytes, _) = load_body(&odd_body, &dir, &verbatim, "A").unwrap();
+        let (bytes, _) =
+            load_body(&odd_body, &dir, &verbatim, "A", &MscmlRequests::default()).unwrap();
         assert_eq!(bytes, odd, "the stored bytes ride unchanged");
 
         let rebooked = Booking::new("127.0.0.1", 40000);
-        let (bytes, _) = load_body(&body, &dir, &rebooked, "A").unwrap();
+        let (bytes, _) = load_body(&body, &dir, &rebooked, "A", &MscmlRequests::default()).unwrap();
         assert_eq!(
             String::from_utf8_lossy(&bytes),
             "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\n\
@@ -973,10 +1017,214 @@ mod tests {
             compare: None,
         });
         let media = Booking::new("127.0.0.1", 40000);
-        let (bytes, ct) = load_body(&body, &dir, &media, "A").unwrap();
+        let (bytes, ct) = load_body(&body, &dir, &media, "A", &MscmlRequests::default()).unwrap();
         assert_eq!(String::from_utf8_lossy(&bytes), stored, "a frozen body is not rewritten");
         assert_eq!(ct.as_deref(), Some("application/sdp"));
         assert_eq!(media.held("A", 0), None, "and books nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const MSCML: &str = "application/mediaservercontrol+xml";
+
+    /// An MSCML body as the wire frames it.
+    fn mscml_body(inner: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><MediaServerControl version=\"1.0\">{inner}</MediaServerControl>"
+        )
+    }
+
+    /// The leg's record after it received each of `requests` as an INFO.
+    fn received(requests: &[&str]) -> MscmlRequests {
+        let mut record = MscmlRequests::default();
+        for (cseq, inner) in requests.iter().enumerate() {
+            let body = mscml_body(inner);
+            let raw = format!(
+                "INFO sip:ms@127.0.0.1:5070 SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-{cseq}\r\n\
+                 From: <sip:as@example.invalid>;tag=a1\r\n\
+                 To: <sip:ms@example.invalid>;tag=b1\r\n\
+                 Call-ID: call-b\r\n\
+                 CSeq: {} INFO\r\n\
+                 Content-Type: {MSCML}\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                cseq + 2,
+                body.len()
+            );
+            let message = sip_message::CustomParser::new().parse(raw.as_bytes()).expect("parses");
+            record.remember(&crate::gate::Inbound::of(&message));
+        }
+        record
+    }
+
+    /// The bytes a frozen MSCML resource holding `stored` emits after the leg
+    /// received `requests`.
+    fn emitted(stored: &str, requests: &MscmlRequests) -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("pivot-render-mscml-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("response.xml"), stored).unwrap();
+        let body = Body::Resource(pivot_schema::body::ResourceBody {
+            reference: "response.xml".into(),
+            rewrite: vec![],
+            mode: Some(pivot_schema::body::BodyMode::Frozen),
+            content_type: Some(MSCML.into()),
+            compare: None,
+        });
+        let (bytes, ct) =
+            load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "B", requests).unwrap();
+        assert_eq!(ct.as_deref(), Some(MSCML), "the stored type labels the body");
+        std::fs::remove_dir_all(&dir).unwrap();
+        String::from_utf8(bytes).expect("UTF-8")
+    }
+
+    /// RFC 5022 §10.2: the response echoes the id the request carried, live,
+    /// and no other byte of the recorded body changes.
+    #[test]
+    fn an_mscml_response_echoes_the_id_its_request_carried() {
+        let requests =
+            received(&[r#"<request><playcollect id="332985001" maxdigits="1"/></request>"#]);
+        let stored = mscml_body(
+            r#"<response playduration="11081" reason="timeout" request="playcollect" code="200" digits=""></response>"#,
+        );
+        assert_eq!(
+            emitted(&stored, &requests),
+            mscml_body(
+                r#"<response id="332985001" playduration="11081" reason="timeout" request="playcollect" code="200" digits=""></response>"#
+            )
+        );
+    }
+
+    /// Two types in flight: the stop's own response and the stopped play's
+    /// each take their OWN request's id, never the last request's of any type.
+    #[test]
+    fn each_response_echoes_the_request_of_its_own_type() {
+        let requests = received(&[
+            r#"<request><play id="p-1"><prompt/></play></request>"#,
+            r#"<request><stop id="s-1"/></request>"#,
+        ]);
+        assert_eq!(
+            emitted(&mscml_body(r#"<response request="stop" code="200"/>"#), &requests),
+            mscml_body(r#"<response id="s-1" request="stop" code="200"/>"#)
+        );
+        assert_eq!(
+            emitted(
+                &mscml_body(r#"<response request="play" code="200" reason="stopped"/>"#),
+                &requests
+            ),
+            mscml_body(r#"<response id="p-1" request="play" code="200" reason="stopped"/>"#)
+        );
+    }
+
+    /// The client sent no id this time: the id the capture's response held
+    /// names a request this run never made, so it goes.
+    #[test]
+    fn a_recorded_id_is_removed_where_the_live_request_carried_none() {
+        let requests = received(&[r#"<request><play><prompt/></play></request>"#]);
+        assert_eq!(
+            emitted(
+                &mscml_body(r#"<response request="play" id="captured-9" code="200"/>"#),
+                &requests
+            ),
+            mscml_body(r#"<response request="play" code="200"/>"#)
+        );
+    }
+
+    /// A response of a type this leg never received rides as recorded, its
+    /// recorded id included.
+    #[test]
+    fn a_response_of_a_type_never_received_rides_byte_for_byte() {
+        let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let stored = mscml_body(r#"<response request="playrecord" id="captured-3" code="200"/>"#);
+        assert_eq!(emitted(&stored, &requests), stored);
+        assert_eq!(emitted(&stored, &MscmlRequests::default()), stored);
+    }
+
+    /// A later request of a type replaces the id an earlier one left.
+    #[test]
+    fn a_later_request_of_the_same_type_replaces_the_remembered_id() {
+        let requests = received(&[
+            r#"<request><play id="p-1"/></request>"#,
+            r#"<request><play id="p-2"/></request>"#,
+        ]);
+        assert_eq!(requests.id_of("play"), Some(Some("p-2")));
+        assert_eq!(
+            emitted(&mscml_body(r#"<response request="play" code="200"/>"#), &requests),
+            mscml_body(r#"<response id="p-2" request="play" code="200"/>"#)
+        );
+        let cleared =
+            received(&[r#"<request><play id="p-1"/></request>"#, r#"<request><play/></request>"#]);
+        assert_eq!(cleared.id_of("play"), Some(None), "a request without one clears it");
+    }
+
+    /// Only a `<response>` echoes: a notification and a request a replayed
+    /// party sends ride as recorded, whatever ids they hold.
+    #[test]
+    fn an_mscml_body_that_is_no_response_is_untouched() {
+        let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let notification = mscml_body(
+            r#"<notification><keypress digit="1" request="play" id="n-1"/></notification>"#,
+        );
+        assert_eq!(emitted(&notification, &requests), notification);
+        let request = mscml_body(r#"<request><play id="mine"/></request>"#);
+        assert_eq!(emitted(&request, &requests), request);
+    }
+
+    /// A response a replayed party SENDS is not one it received: the record is
+    /// built from requests alone.
+    #[test]
+    fn only_a_received_request_is_remembered() {
+        let body = mscml_body(r#"<request><play id="p-1"/></request>"#);
+        let raw = format!(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-1\r\n\
+             From: <sip:as@example.invalid>;tag=a1\r\n\
+             To: <sip:ms@example.invalid>;tag=b1\r\n\
+             Call-ID: call-b\r\n\
+             CSeq: 2 INFO\r\n\
+             Content-Type: {MSCML}\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let message = sip_message::CustomParser::new().parse(raw.as_bytes()).expect("parses");
+        let mut record = MscmlRequests::default();
+        record.remember(&crate::gate::Inbound::of(&message));
+        assert_eq!(record, MscmlRequests::default());
+    }
+
+    /// The echo reaches an MSCML part of a multipart body too, and only it.
+    #[test]
+    fn an_mscml_response_part_echoes_and_its_siblings_ride_as_stored() {
+        let dir =
+            std::env::temp_dir().join(format!("pivot-render-mscml-mp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stored = mscml_body(r#"<response request="play" code="200"/>"#);
+        std::fs::write(dir.join("response.xml"), &stored).unwrap();
+        std::fs::write(dir.join("other.xml"), &stored).unwrap();
+        let part = |reference: &str, content_type: &str| pivot_schema::body::Part {
+            content_type: content_type.into(),
+            reference: reference.into(),
+            rewrite: vec![],
+            mode: Some(pivot_schema::body::BodyMode::Frozen),
+            compare: None,
+            content_id: None,
+            headers: vec![],
+            cid_linked: vec![],
+        };
+        let body = Body::Multipart(pivot_schema::body::MultipartBody {
+            multipart: pivot_schema::body::Multipart {
+                content_type: "multipart/mixed".into(),
+                parts: vec![part("response.xml", MSCML), part("other.xml", "application/xml")],
+            },
+        });
+        let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let (bytes, _) =
+            load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "B", &requests).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let echoed = mscml_body(r#"<response id="p-1" request="play" code="200"/>"#);
+        assert_eq!(text.matches(&echoed).count(), 1, "the MSCML part echoes:\n{text}");
+        assert_eq!(text.matches(&stored).count(), 1, "the other part rides as stored:\n{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

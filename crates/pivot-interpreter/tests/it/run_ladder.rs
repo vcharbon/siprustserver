@@ -514,7 +514,7 @@ fn read_case(path: &std::path::Path, base_dir: PathBuf) -> Case {
 /// its doc comment explains the anti-loop invariant behind it). The ladder uses
 /// the honouring decision so its bundles carry a Request-URI a strict UAS would
 /// accept.
-async fn api_scene(name: &str) -> B2buaScene {
+pub(crate) async fn api_scene(name: &str) -> B2buaScene {
     B2buaScene::with_b2bua(name, |bob_port| {
         B2buaSut::route_api_call("127.0.0.1", bob_port)
             // Short enough that a call held up for a couple of seconds really is
@@ -538,7 +538,7 @@ fn bundle_dir(case: &str) -> PathBuf {
 
 /// Run one fixture on the default demo lane (alice → b2bua → bob), write its
 /// bundle, and hand back what the run decided.
-async fn replay(scene: &B2buaScene, fixture_name: &str) -> (Outcome, PathBuf) {
+pub(crate) async fn replay(scene: &B2buaScene, fixture_name: &str) -> (Outcome, PathBuf) {
     replay_case(scene, fixture(fixture_name), BTreeMap::new()).await
 }
 
@@ -684,7 +684,7 @@ async fn replay_directed(
 
 /// Every rung asserts the same floor: green verdict, a settled run, and a
 /// bundle on disk holding both legs.
-fn assert_bundle_is_complete(outcome: &Outcome, dir: &std::path::Path) {
+pub(crate) fn assert_bundle_is_complete(outcome: &Outcome, dir: &std::path::Path) {
     assert_eq!(
         outcome.verdict.status,
         VerdictStatus::Ok,
@@ -4744,7 +4744,7 @@ async fn a_ladder_paces_its_own_leg_and_parks_no_other() {
 /// The recorded lines of one leg, read back off the bundle as raw JSON so the
 /// on-disk encoding itself is what the rung asserts, not a decoder's reading
 /// of it.
-fn recorded_lines(dir: &std::path::Path, leg: &str) -> Vec<serde_json::Value> {
+pub(crate) fn recorded_lines(dir: &std::path::Path, leg: &str) -> Vec<serde_json::Value> {
     let text = std::fs::read_to_string(dir.join(format!("recording/{leg}.jsonl")))
         .unwrap_or_else(|e| panic!("recording/{leg}.jsonl: {e}"));
     text.lines()
@@ -4755,7 +4755,7 @@ fn recorded_lines(dir: &std::path::Path, leg: &str) -> Vec<serde_json::Value> {
 
 /// The datagram a recorded line carries, reassembled from whichever of the
 /// three arms the line wrote (`raw` | `head` + `body_b64` | `raw_b64`).
-fn recorded_wire(line: &serde_json::Value) -> Vec<u8> {
+pub(crate) fn recorded_wire(line: &serde_json::Value) -> Vec<u8> {
     use base64::Engine as _;
     let b64 = |key: &str| {
         base64::engine::general_purpose::STANDARD

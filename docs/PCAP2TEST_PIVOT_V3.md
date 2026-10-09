@@ -70,6 +70,14 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-10-09 — a replayed MSCML response echoes its request's id.** RFC 5022
+§4.1 lets the client put an `id` on a request's command element, chosen live,
+and §10.2 has the `<response>` echo it. Each leg remembers, per command type,
+the id the last MSCML request it received carried, or that it carried none; a
+`<response request="T">` a send emits takes the leg's T id, inserted, replacing
+a recorded one, or removing it. Render rewrites two contents, SDP and this
+id (§8.3, §14 item 3). No document field changes.
+
 **2026-10-05 — a From or To ref states the name-addr its number rode in.** A
 tier-2 ref on a From or To may carry `addr`: the captured value with its tag
 dropped (display name, URI and user parameters, header parameters), each role
@@ -423,7 +431,7 @@ reads the two forks' own tags and RSeqs.
 | change | where |
 |---|---|
 | `body.parts[]` gains `content-id`, the part's OWN `Content-ID` value (distinct from `cid-linked`, which is the LINK record), and `headers`, its remaining entity headers verbatim in wire order (RFC 2045 §3). Extraction reads both off the wire and the generator states them where the capture carried them | §8.3 |
-| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and SDP, direct or as a part, is the ONE content the tool rewrites, because replay rebooks addresses and ports | §8.3 |
+| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and SDP, direct or as a part, is the ONE content the tool rewrites, because replay rebooks addresses and ports. **Amended 2026-10-09:** an MSCML `<response>` is the second, its `id` echoing the live request's (RFC 5022 §10.2) | §8.3 |
 | a `cid-linked` part stating a `content-id` EMITS under it; one stating none is refused by name, so a document written before the id was stored fails loudly rather than emitting a stranded reference (RFC 5621 §3) | §8.3, §14 |
 
 The flows schema is NOT bumped: `msgs[].body.parts[].headers` is additive and
@@ -2292,9 +2300,25 @@ where it did not. A part that `cid-linked` names but that states no
 resolve against nothing (RFC 5621 §3).
 
 **A body is emitted as the document holds it.** Every part rides byte-exact —
-its payload, its `content-id`, its `headers`, in the order stated — and the ONE
-content the tool may rewrite is SDP, direct or as a part, because replay rebooks
-addresses and ports. Nothing else in a body is edited, ever.
+its payload, its `content-id`, its `headers`, in the order stated — and the tool
+rewrites two contents, direct or as a part: SDP, because replay rebooks
+addresses and ports, and an MSCML response's `id`, because the client chose it
+live. Nothing else in a body is edited, ever.
+
+**An MSCML response echoes the id of the request it answers** (RFC 5022 §4.1,
+§10.2). Every request a leg RECEIVES whose body (or a part of it) is
+`application/mediaservercontrol+xml` with a `<request>` under its
+`<MediaServerControl>` root is remembered under the name of the command element
+inside `<request>` (`play`, `playcollect`, `stop` …): the value of that
+element's `id`, or its absence. A later request of the same type replaces it,
+whether or not an expect matched the request. A `<response request="T" …>` a
+send emits on that leg takes the remembered T id: `id` inserted after the
+element name, a recorded `id` replaced in place, or a recorded `id` removed
+where the T request carried none. The match is by type, so a `<stop>`'s own
+response and the stopped `<play>`'s `reason="stopped"` response each echo their
+own request's id. A response of a type the leg never received, a
+`<notification>`, a `<request>` a replayed party sends and every other body ride
+as stored. Only the `id` attribute of the `<response>` element changes.
 
 **Both tokens read one source: the lane's own media booking** (`legs[].media.rtp`,
 §5). `c=addr` writes the lane's media address into every connection line;
@@ -2316,7 +2340,8 @@ carried ride through. A part is framed `Content-Type` first, then its
 `content-id`, then its stated `headers` in order.
 
 So the body on the wire is the captured body BYTE FOR BYTE once the regenerated
-boundary and SDP's rewritten lines are substituted back, and nothing else may
+boundary, SDP's rewritten lines and an MSCML response's echoed `id` are
+substituted back, and nothing else may
 differ — not a MIME parameter, not an entity header, not a delimiter's CRLF.
 That is asserted, on real traffic, by the multipart rung.
 
@@ -3101,7 +3126,8 @@ Its whole job:
    any run-config injected headers — the run's own, and on a call's DIAL that
    call's own directive (§4.3) — plus any accessor substitution: a `${num:…}`
    resolving through the identity binding the driver compiled (§4.3), never
-   through a number in the document. Nothing else. The interpreter never judges
+   through a number in the document, plus §8.3's two body rewrites: SDP's
+   lane-owned lines and an MSCML response's echoed `id`. Nothing else. The interpreter never judges
    one message a repeat of another, in either direction: it does not collapse,
    and it expands a count only for a class RFC 3261/3262 paces or one item 7
    draws.

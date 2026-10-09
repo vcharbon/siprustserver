@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=pivot-interpreter) & binary(it)' <module>::`.
 
 mod foreign_dialog;
+mod mscml_echo;
 mod plan_compilation;
 mod recording_bytes;
 mod run_ladder;
