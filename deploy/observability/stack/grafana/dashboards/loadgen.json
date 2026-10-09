@@ -273,8 +273,8 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Refused 503 ratio (5m)",
-      "description": "Completed calls refused with 503 over all completed calls: the status_503 failures plus, in a run that declares 503 as its overload refusal, the accepted refused_overload branch. A ramp past capacity refuses on purpose; a 503 below capacity is a defect. No completed call in the window reads as no data.",
+      "title": "Refused ratio (5m)",
+      "description": "Completed calls refused over all completed calls: 503 is the status_503 failures; refused (overload) is the accepted refused_overload branch of a run that declares its SUT's overload refusal (overloadReject), whatever final it declared. A ramp past capacity refuses on purpose; a refusal below capacity is a defect. No completed call in the window reads as no data.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -287,9 +287,14 @@
       },
       "targets": [
         {
-          "expr": "((sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) + (sum(increase(loadgen_branch_total{branch=\"refused_overload\"}[5m])) or vector(0))) / (sum(increase(loadgen_calls_total[5m])) > 0)",
+          "expr": "(sum(increase(loadgen_calls_total{class=\"status_503\"}[5m])) or vector(0)) / (sum(increase(loadgen_calls_total[5m])) > 0)",
           "refId": "A",
-          "legendFormat": ""
+          "legendFormat": "503"
+        },
+        {
+          "expr": "(sum(increase(loadgen_branch_total{branch=\"refused_overload\"}[5m])) or vector(0)) / (sum(increase(loadgen_calls_total[5m])) > 0)",
+          "refId": "B",
+          "legendFormat": "refused (overload)"
         }
       ],
       "fieldConfig": {

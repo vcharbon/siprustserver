@@ -554,6 +554,7 @@ pub fn build_b_leg(
         adopted: None,
         in_session_timer: Some(takes_part),
         invite_final_sent: None,
+        answer_preempted: None,
         messages: Default::default(),
         sdp_session: Default::default(),
     };

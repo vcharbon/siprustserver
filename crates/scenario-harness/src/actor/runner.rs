@@ -115,8 +115,9 @@ pub(super) struct DialogTable {
     pub(super) won_invite: Option<ClientInvite>,
 }
 
-/// An actor's fatal failure: its role, its pending goal as `(kind, index)`
-/// (`None` once its goals are exhausted), and the cause. The controller adds
+/// An actor's fatal failure: its role, the goal it failed at as `(kind,
+/// index)` — the pending one, or the INVITE goal a final to the establishing
+/// INVITE answers; `None` once its goals are exhausted — and the cause. The controller adds
 /// the barrier pending at that moment ([`FailedAt`](super::FailedAt)).
 #[derive(Debug)]
 pub struct ActorFailure {
@@ -302,6 +303,12 @@ pub struct ActorState<'c> {
     /// ([`Expect::NONE`] for every other): an accepted non-2xx final on the
     /// establishing INVITE ends this actor's call cleanly.
     pub(super) accepts: Expect,
+    /// The goal that sent the establishing INVITE, as `(kind, index)` — the
+    /// step a final to that INVITE answers.
+    pub(super) invite_goal: Option<(&'static str, u16)>,
+    /// The goal a failure is attributed to when it is not the pending one (a
+    /// final to the establishing INVITE fails [`Self::invite_goal`]).
+    pub(super) failed_goal: Option<(&'static str, u16)>,
     /// Where this actor's inbound comes from: its own UA (the unshared default)
     /// or the shared endpoint's pump. Taken by [`run_actor`] at entry.
     inbox: Option<Inbox>,
@@ -387,6 +394,8 @@ impl<'c> ActorState<'c> {
             reception_observer,
             early_provisionals: HashSet::new(),
             accepts: Expect::NONE,
+            invite_goal: None,
+            failed_goal: None,
             inbox: None,
             endpoint: None,
         }
@@ -436,7 +445,10 @@ impl<'c> ActorState<'c> {
 pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), ActorFailure> {
     match react_until_done(&mut st).await {
         Ok(()) => Ok(()),
-        Err(cause) => Err(ActorFailure { who: st.role, goal: st.goals.pending(), cause }),
+        Err(cause) => {
+            let goal = st.failed_goal.or_else(|| st.goals.pending());
+            Err(ActorFailure { who: st.role, goal, cause })
+        }
     }
 }
 
@@ -472,6 +484,9 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
             // own loop body, so the gate is re-evaluated on each iteration.
             ready = st.goals.next_ready(&obs, step_timeout), if st.goals.has_pending() && goal_arm_enabled(st) => {
                 let step = ready?;
+                if matches!(step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. }) {
+                    st.invite_goal = st.goals.pending();
+                }
                 drive_goal(st, step).await?;
                 st.goals.advance();
                 // Requeue on advance: auto-react any parked request no

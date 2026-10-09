@@ -78,8 +78,8 @@ pub enum Establishment {
     /// CANCEL×200 CROSSING (C2/E5): the caller CANCELs while the callee answers,
     /// so the terminal outcome is EITHER confirmed (the 200 crossed the CANCEL,
     /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). Both are
-    /// accepted endings ([`Branch::ANSWERED`] / [`Branch::ABANDONED`]); the
-    /// verdict names whichever occurred. Terminal-style (no stages, no separate
+    /// accepted endings ([`Branch::ANSWERED_DESPITE_CANCEL`] /
+    /// [`Branch::ABANDONED`]); the verdict names whichever occurred. Terminal-style (no stages, no separate
     /// teardown): the branch-conditional teardown rides the callee.
     CancelAnswerCrossing,
 }
@@ -648,7 +648,8 @@ impl ShapePlan {
                 // branch-conditional teardown rides bob (ByeIfConfirmed), so a
                 // 487 never trips alice's incidental-failure path — she keeps
                 // only [Invite, Cancel].
-                const E5_BRANCHES: &[Branch] = &[Branch::ANSWERED, Branch::ABANDONED];
+                const E5_BRANCHES: &[Branch] =
+                    &[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED];
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
                 let ringing = |s: &StateInner| s.leg_rang("alice");
                 b.caller_goals.push(Goal::new(

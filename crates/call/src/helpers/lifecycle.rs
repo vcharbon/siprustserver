@@ -5,18 +5,21 @@
 
 use crate::model::{Call, CallModelState};
 
-/// The call's position as `(the caller was answered, active < terminating <
-/// terminated)`. Both components are monotone over one owner's copy: neither
-/// ever moves backward, and "answered" is read from the durable record of the
-/// final the a-leg's initial INVITE server transaction took, so it stays true
-/// once the leg is `Terminated`.
+/// The call's position as `(an answer was recorded for the caller, active <
+/// terminating < terminated)`. Both components are monotone over one owner's
+/// copy: neither ever moves backward. "Answered" is read from the durable
+/// record of the final the a-leg's initial INVITE server transaction took, so
+/// it stays true once the leg is `Terminated`, and from the answer a CANCEL
+/// pre-empted ([`crate::Leg::answer_preempted`]), so it stays true when the
+/// transaction layer's 487 overtook a recorded 2xx.
 pub fn lifecycle_position(call: &Call) -> (u8, u8) {
     let ending = match call.state {
         CallModelState::Active => 0,
         CallModelState::Terminating => 1,
         CallModelState::Terminated => 2,
     };
-    (u8::from(super::caller_answered(call)), ending)
+    let answered = super::caller_answered(call) || call.a_leg.answer_preempted.is_some();
+    (u8::from(answered), ending)
 }
 
 /// Does `incoming` sit BEHIND `held` on either axis? Then it is a branch off a

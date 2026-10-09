@@ -1,5 +1,13 @@
 # Actor-harness P1 downstream-contract table
 
+> **Superseded verdict contract.** The `Expect` variants (`HappyBye`,
+> `Reject`, `AbandonedEarly`, `TransferDeclined`, `EitherOf`), `into_result`
+> and the "voluntarily-failing" shapes below are the plan this harness was
+> built from. A scenario now declares its accepted endings
+> (`scenario_harness::actor::{Expect, Branch}`) and the runner returns a
+> `ScenarioVerdict`: the reject, abandon and declined-transfer shapes succeed on
+> their own branch, and a failure is keyed by its `FailedAt` step.
+
 **P1-entry artifact** for plan §4.2 (B7, decisions 3/5) of
 [`actor-harness-impl-plan.md`](actor-harness-impl-plan.md). Read that section
 (lines ~238–303) alongside this.

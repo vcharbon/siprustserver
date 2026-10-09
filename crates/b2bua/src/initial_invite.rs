@@ -188,6 +188,7 @@ pub fn build_initial_call(
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        answer_preempted: None,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),

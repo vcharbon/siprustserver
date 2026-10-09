@@ -155,6 +155,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: Some(200),
+        answer_preempted: None,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: LegSdpSession {
@@ -203,6 +204,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: None,
+        answer_preempted: None,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: LegSdpSession::default(),
@@ -682,7 +684,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
             proptest::option::of(200u16..700),
             proptest::option::of(any::<bool>()),
         ),
-        arb_message_ring(),
+        (arb_message_ring(), proptest::option::of(200u16..300)),
         arb_sdp_session(),
     )
         .prop_map(
@@ -697,7 +699,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 (no_answer_timeout_sec, bye_disposition),
                 (local_uri, remote_uri, invite_request_uri),
                 (pending_invite_txn, ext, kind, adopted, invite_final_sent, in_session_timer),
-                messages,
+                (messages, answer_preempted),
                 sdp_session,
             )| Leg {
                 leg_id,
@@ -718,6 +720,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 adopted,
                 in_session_timer,
                 invite_final_sent,
+                answer_preempted,
                 messages,
                 sdp_session,
             },

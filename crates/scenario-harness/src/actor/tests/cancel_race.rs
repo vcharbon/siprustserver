@@ -48,7 +48,7 @@ fn cancel_crossing_plan(
                 // dialog or no-ops on the cancelled one. Alice keeps only
                 // [Invite, Cancel] so a 487 never trips her incidental-
                 // failure WrongStatus path (it stays a clean terminal that
-                // the EitherOf oracle maps).
+                // the race's accepted endings read).
                 goals: vec![Goal::new(
                     Barrier::pred("bob_resolved", |s| s.leg_at_least("bob", LegPhase::Confirmed)),
                     GoalStep::ByeIfConfirmed,
@@ -73,7 +73,7 @@ fn cancel_crossing_plan(
 /// C2/E5 branch — CANCEL WINS: alice CANCELs well before bob's answer timer
 /// fires (cancel_after < ring − 2·transit), so bob 487s the held INVITE. The
 /// call reaches a clean terminal (both legs terminated, alice ACKs the 487)
-/// and the EitherOf oracle maps it to the abandoned `Timeout`.
+/// and its accepted endings read it as `abandoned`.
 #[tokio::test(start_paused = true)]
 async fn cancel_answer_crossing_cancel_wins() {
     let h = Harness::new("actor-cancel-wins").describe(
@@ -88,8 +88,8 @@ async fn cancel_answer_crossing_cancel_wins() {
         cancel_crossing_plan(&alice, &bob, Duration::from_millis(20), Duration::from_millis(2));
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the CANCEL-wins call must reach a clean terminal, got {verdict:?}");
-    // The observed 487 → the abandoned branch: pinned in the oracle unit
-    // test `either_of_oracle_maps_each_branch`.
+    // The observed 487 → the `abandoned` branch: pinned by
+    // `either_branch_of_the_race_is_its_accepted_ending`.
     h.finish().await;
 }
 

@@ -2160,6 +2160,7 @@ fn b_leg_pending() -> Leg {
         kind: Some(LegKind::Destination),
         adopted: None,
         invite_final_sent: None,
+        answer_preempted: None,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),

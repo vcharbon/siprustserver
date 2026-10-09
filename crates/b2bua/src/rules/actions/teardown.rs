@@ -140,12 +140,8 @@ impl ActionExecutor<'_> {
             if disposition == LegDisposition::Cancelling {
                 continue;
             }
-            // A caller whose INVITE ended on a non-2xx final holds no dialog,
-            // whatever state a 2xx built too late left in the record (§15).
-            let undialogued_a =
-                is_a && call.a_leg.invite_final_sent.is_some_and(|s| !(200..300).contains(&s));
             match state {
-                LegState::Confirmed if !undialogued_a => {
+                LegState::Confirmed => {
                     // A 2xx still unACKed is ACKed bare ahead of the BYE
                     // (RFC 3261 §13.2.2.4), and every relayed provisional of
                     // the leg still unacknowledged — a 2xx's deferred offer, a
@@ -167,7 +163,7 @@ impl ActionExecutor<'_> {
                     }
                     *call = set_bye_disposition(call.clone(), &id, ByeDisposition::ByeSent);
                 }
-                LegState::Trying | LegState::Early | LegState::Confirmed => {
+                LegState::Trying | LegState::Early => {
                     if is_a {
                         // a-leg trying/early: the rule already sent the SIP reply.
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::None);

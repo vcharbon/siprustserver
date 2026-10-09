@@ -125,6 +125,12 @@ pub struct Leg {
     /// layer sends on a CANCEL; a leg carrying one is never sent a second
     /// final (RFC 3261 §17.2.1).
     pub invite_final_sent: Option<u16>,
+    /// The 2xx this stack recorded on the leg's initial inbound INVITE that the
+    /// transaction layer's autonomous `487` (its answer to the caller's CANCEL)
+    /// pre-empted before it reached the wire (RFC 3261 §9.2). `None` unless
+    /// that race happened; the leg then states the 487 as its final and holds
+    /// no confirmed dialog.
+    pub answer_preempted: Option<u16>,
     /// The leg's distinct SIP messages, received and sent, under the
     /// configured cap; empty while the ring is off. Written only by
     /// [`crate::helpers::record_message`].

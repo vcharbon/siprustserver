@@ -174,12 +174,22 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         // CANCEL the still-pending initial INVITE (RFC 3261 §9.1). KEEP the
         // pending INVITE so its `487` still routes to it (→ `Failed{487}` →
-        // LegTerminated); the peer's CANCEL→200+487 is handled reactively.
+        // LegTerminated); the peer's CANCEL→200+487 is handled reactively. The
+        // CANCEL's own transaction is an obligation its final closes, so the
+        // call settles only once the server answered it.
         GoalStep::Cancel { stated } => {
             if let Some(inv) = st.dialogs.pending_invite.as_ref() {
                 let stated: Vec<(&str, &str)> =
                     stated.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+                let cseq = inv.invite_cseq();
                 let _cxl = inv.cancel_stating(&stated).await;
+                st.obs.record(
+                    Observation::RequestSent {
+                        key: ObligationKey::new(st.role, ObligationKind::Cancel, cseq),
+                        detail: "CANCEL awaiting its final".to_string(),
+                    },
+                    Instant::now(),
+                );
             }
         }
         // A plain in-dialog request (INFO/MESSAGE) carrying an optional typed

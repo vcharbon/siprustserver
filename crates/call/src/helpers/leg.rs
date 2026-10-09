@@ -60,9 +60,23 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
 /// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
 /// initial INVITE with (RFC 3261 §9.2). It is the final the wire carries even
 /// when the record already holds a 2xx: one built after the layer's 487, which
-/// the completed transaction never sent, so it formed no dialog.
+/// the completed transaction never sent. That 2xx is kept as
+/// [`Leg::answer_preempted`], and the leg goes back to the early dialog its
+/// provisional opened: no confirmation, no 2xx awaiting its ACK.
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
-    update_leg(call, leg_id, |l| l.invite_final_sent = Some(487))
+    update_leg(call, leg_id, |l| {
+        if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
+            l.answer_preempted = Some(answer);
+            if l.state == LegState::Confirmed {
+                l.state = LegState::Early;
+            }
+            for d in &mut l.dialogs {
+                d.ext.answered_2xx = None;
+                d.ext.awaited_ack_cseq = None;
+            }
+        }
+        l.invite_final_sent = Some(487);
+    })
 }
 
 /// Whether a single leg has reached a terminal resolution for termination
@@ -181,13 +195,15 @@ pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
     b.dialogs.first().map(|d| d.sip.remote_tag.clone())
 }
 
-/// Whether this stack answered the caller — a **durable** fact of the record,
-/// true from the 2xx onward and still true once the leg is `Terminated`. It
-/// reads the final the a-leg's initial INVITE server transaction took
-/// (`invite_final_sent`, written at the one a-facing final seam), not
-/// `LegState::Confirmed`, which the teardown clears. Replication reconciliation
-/// compares two copies of a call on this fact, so it must not read differently
-/// before and after the call ends.
+/// Whether this stack answered the caller: true from the 2xx onward and still
+/// true once the leg is `Terminated`. It reads the final the a-leg's initial
+/// INVITE server transaction took (`invite_final_sent`, written at the one
+/// a-facing final seam), not `LegState::Confirmed`, which the teardown clears.
+/// One case turns it back to false: a 2xx the transaction layer's CANCEL 487
+/// pre-empted before it reached the wire, which the record then states apart
+/// ([`Leg::answer_preempted`]). Replication reconciliation reads the two
+/// together ([`super::lifecycle_position`]), so its answer axis never moves
+/// back.
 pub fn caller_answered(call: &Call) -> bool {
     matches!(call.a_leg.invite_final_sent, Some(status) if (200..300).contains(&status))
 }

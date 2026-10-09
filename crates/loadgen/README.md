@@ -562,7 +562,12 @@ and the `callflows/<sc>/<class>/clear/` flows; revisit `near` only if wanted.
 
 Sampling is bounded: a small fraction of calls record their trace (`--sample-cap`
 per bucket); the rest are counted only. A non-sampled failure still gets a stub
-page with its one-line reason.
+page with its one-line reason. A bucket still under its cap keeps its scenario
+recording for 64 calls after its last sample, then leaves it to
+`--background-record-every`. So after warm-up the RFC audit and the case
+checks, which run on recorded calls only, cover fewer calls: a rare outcome
+may go without its second sample. Lower `--background-record-every`
+(`1` records every call) when the audit's reach matters more than CPU.
 
 ---
 

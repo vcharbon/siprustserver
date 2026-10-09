@@ -26,6 +26,11 @@ pub enum Ending {
     /// The caller received a provisional carrying SDP (early media), then its
     /// establishing INVITE drew this non-2xx final.
     EarlyMediaRefused(u16),
+    /// The callee's 2xx crossed the caller's CANCEL (RFC 3261 §9.2): her
+    /// INVITE drew a 2xx before her CANCEL drew its 200, and no non-2xx final.
+    /// A server that ignores the CANCEL — no final to it, or a 2xx after its
+    /// 200 — shows neither order and is no crossing.
+    AnsweredAcrossCancel,
     /// A scenario-specific predicate over the final observed state.
     Observed(fn(&StateInner) -> bool),
 }
@@ -47,7 +52,7 @@ impl Branch {
     /// (RFC 3261 §9.2), so the caller ACKed the 2xx and hung up with a BYE
     /// (§15).
     pub const ANSWERED_DESPITE_CANCEL: Branch =
-        Branch::new("answered_despite_cancel", Ending::Answered);
+        Branch::new("answered_despite_cancel", Ending::AnsweredAcrossCancel);
     pub const fn new(name: &'static str, ending: Ending) -> Self {
         Branch { name, ending }
     }
@@ -81,6 +86,17 @@ impl Branch {
             Ending::EarlyMediaRefused(code) => {
                 leg.is_some_and(|l| l.saw_early_media() && l.saw_final(code))
             }
+            Ending::AnsweredAcrossCancel => leg.is_some_and(|l| {
+                let facts = l.responses();
+                let answered = facts
+                    .iter()
+                    .position(|f| (200..300).contains(&f.status) && f.cseq_method == "INVITE");
+                let cancel_final =
+                    facts.iter().position(|f| f.status >= 200 && f.cseq_method == "CANCEL");
+                l.first_final().is_none()
+                    && matches!((answered, cancel_final), (Some(a), Some(c))
+                        if a < c && facts[c].status == 200)
+            }),
             Ending::Observed(pred) => pred(s),
         }
     }

@@ -14,9 +14,10 @@ use crate::StepError;
 /// pending goal, and the controller barrier pending at that moment. Bounded
 /// static strings and a small index, so it keys samples and metric labels.
 ///
-/// - An actor failure names the actor's role, its pending goal as
-///   `(kind, index)` (`None` once its goals are exhausted), and the pending
-///   barrier.
+/// - An actor failure names the actor's role, the goal it failed at as
+///   `(kind, index)` — the pending one, or the INVITE goal when a final to the
+///   establishing INVITE failed it; `None` once its goals are exhausted — and
+///   the pending barrier.
 /// - A barrier that never holds names that barrier as both `who` and
 ///   `barrier`, with no goal; `torn_down` and `settle` are barriers too.
 /// - A call that settles on an ending none of its branches accepts names the

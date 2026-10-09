@@ -125,6 +125,7 @@ async fn absorb_establishing_failure(
         return Ok(false);
     }
     if st.goals.has_pending() && !reception_pending {
+        st.failed_goal = st.invite_goal;
         return Err(StepError::WrongStatus {
             who: st.role.to_string(),
             expected: st.expected_provisional,

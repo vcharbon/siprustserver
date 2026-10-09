@@ -78,6 +78,8 @@ pub enum ObligationKind {
     /// recovered by the Timer-G final retransmit + the SUT's §17.1.1.2 re-ACK
     /// — the UA-outlives-the-call contract for an abandoned reject leg.
     RejectFinal,
+    /// A CANCEL we sent, awaiting its final (RFC 3261 §9.1).
+    Cancel,
 }
 
 impl ObligationKind {
@@ -93,6 +95,7 @@ impl ObligationKind {
             ObligationKind::Update => "UPDATE",
             ObligationKind::InDialog => "in-dialog",
             ObligationKind::RejectFinal => "reject-final",
+            ObligationKind::Cancel => "CANCEL",
         }
     }
 
@@ -111,6 +114,7 @@ impl ObligationKind {
             // it (no ACK, no sub-flow) — the generic origination behind
             // [`super::goals::GoalStep::InDialog`].
             "INFO" | "MESSAGE" => Some(ObligationKind::InDialog),
+            "CANCEL" => Some(ObligationKind::Cancel),
             // A re-INVITE's 2xx is matched by the ReInvite kind; the initial
             // INVITE creates the dialog and opens no obligation (its CSeq seeds
             // the gap detector instead).
