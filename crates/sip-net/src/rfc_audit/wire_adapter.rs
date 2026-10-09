@@ -12,7 +12,9 @@
 //!
 //! Projection reads each arrival's production-time [`WireStamp`](crate::WireStamp)
 //! (parse-once + the §17.2 repeat mark) and dedups SENDS by transaction key
-//! here, at projection — the send-side twin of that stamp.
+//! here, at projection — the send-side twin of that stamp. A copy is a repeat
+//! only when the audit view holds an earlier copy: the first copy the view
+//! holds of a chain whose first sighting it does not (modeled loss) is new.
 
 use std::collections::HashMap;
 
