@@ -204,6 +204,13 @@ impl LegObservation {
         self.finals.iter().next().map(|(s, r)| (*s, r.as_str()))
     }
 
+    /// Whether this leg received a provisional above 100 to an INVITE — the
+    /// callee is ringing (or playing early media). Unlike [`LegPhase::Early`],
+    /// which a caller reaches the moment she originates, it needs the response.
+    pub fn rang(&self) -> bool {
+        self.responses.iter().any(|f| (101..200).contains(&f.status) && f.cseq_method == "INVITE")
+    }
+
     /// Whether this leg received a provisional carrying SDP — early media
     /// (RFC 3261 §13.2.1, RFC 3262).
     pub fn saw_early_media(&self) -> bool {
@@ -284,6 +291,12 @@ impl StateInner {
     /// allocation-free read the call's verdict takes.
     pub fn leg_ref(&self, role: &str) -> Option<&LegObservation> {
         self.legs.get(role)
+    }
+
+    /// Whether `role` received a provisional above 100 to an INVITE
+    /// ([`LegObservation::rang`]); borrows, so a barrier poll clones nothing.
+    pub fn leg_rang(&self, role: &str) -> bool {
+        self.legs.get(role).is_some_and(LegObservation::rang)
     }
 
     /// Whether the caller's establishing INVITE ended on a final the call

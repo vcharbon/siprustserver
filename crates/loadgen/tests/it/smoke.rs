@@ -1129,8 +1129,10 @@ async fn loadgen_post_call_cleanup_no_leak() {
 
     let mut scenarios = MixEntry::abnormal_end_mix(&ShapeRegistry::with_defaults(), &inputs());
     scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
-    let driver =
-        Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    let mut c = cfg(b2bua.addr, 50.0, 3, 12, 0xFA17);
+    // A ring long enough that the caller's CANCEL always precedes the answer.
+    c.call.ring_delay = Duration::from_millis(500);
+    let driver = Driver::new(c, scenarios, reporter.clone(), transport);
     run_throttled(&driver).await;
 
     // Each abnormal end completed on its own branch, and the happy path too.

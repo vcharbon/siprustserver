@@ -28,10 +28,10 @@ fn established(s: &StateInner) -> bool {
     s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
 }
 
-/// Alice's leg reached (at least) an early dialog — she received the 180 (the
-/// abandon body's CANCEL trigger).
-fn alice_early(s: &StateInner) -> bool {
-    s.leg_at_least("alice", LegPhase::Early)
+/// Alice received the 180 (the abandon body's CANCEL trigger): the callee
+/// holds the INVITE, so her CANCEL reaches a ringing leg (RFC 3261 §9.1).
+fn alice_ringing(s: &StateInner) -> bool {
+    s.leg_rang("alice")
 }
 
 /// Guard [`StepError`] under a fixed synthetic `who` (a bounded sample-key) —
@@ -935,7 +935,7 @@ impl ActorScenario for AbandonRinging {
                         GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
                     Goal::new(
-                        Barrier::pred("ringing", alice_early),
+                        Barrier::pred("ringing", alice_ringing),
                         GoalStep::Cancel { stated: Vec::new() },
                     ),
                 ],
@@ -971,7 +971,7 @@ impl ActorScenario for AbandonRinging {
         ];
 
         // Internal controller gating only: alice rang (Early) → both torn down.
-        let plan = vec![phase("ringing", alice_early)];
+        let plan = vec![phase("ringing", alice_ringing)];
 
         Ok(ActorCall {
             actors,

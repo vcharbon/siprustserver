@@ -13,6 +13,7 @@ mod delta_request;
 mod delta_response;
 mod endings;
 mod forking;
+mod rang;
 mod reception_observer;
 mod reinvite_ack_body;
 mod reneg;

@@ -602,7 +602,7 @@ impl ShapePlan {
             }
             Establishment::AbandonAfterRinging => {
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
-                let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+                let ringing = |s: &StateInner| s.leg_rang("alice");
                 b.caller_goals.push(Goal::new(
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
@@ -639,7 +639,7 @@ impl ShapePlan {
                 // only [Invite, Cancel].
                 const E5_BRANCHES: &[Branch] = &[Branch::ANSWERED, Branch::ABANDONED];
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
-                let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+                let ringing = |s: &StateInner| s.leg_rang("alice");
                 b.caller_goals.push(Goal::new(
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
