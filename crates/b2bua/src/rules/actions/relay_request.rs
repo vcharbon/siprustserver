@@ -7,7 +7,7 @@ use call::helpers::{
     add_pending_request, bump_local_cseq, find_b_leg, leg_kind, relay_cseq_delta,
     update_remote_cseq,
 };
-use call::{Call, PendingRequest, RetainedEmission};
+use call::{ByeDisposition, Call, PendingRequest, RetainedEmission};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
 };
@@ -262,6 +262,14 @@ impl ActionExecutor<'_> {
             );
             return;
         }
+        // A dialog a BYE ended carries no more requests of its INVITE usage
+        // (RFC 3261 §15.1.2, RFC 5057 §5.2): the sender hears 481 from here
+        // (§12.2.2). A NOTIFY rides a subscription usage, and a BYE crossing
+        // one ends nothing more.
+        if bye_ended(call, target_leg) && !matches!(req.method(), Method::Notify | Method::Bye) {
+            self.respond(call, fx, ctx, 481, "Call/Transaction Does Not Exist", &[], None, vec![]);
+            return;
+        }
         let Some(method) = in_dialog_method(req.method()) else {
             return;
         };
@@ -447,6 +455,20 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Relayed,
         });
     }
+}
+
+/// Whether a BYE ended `leg_id`'s dialog: the peer's BYE answered, or one this
+/// stack sent.
+fn bye_ended(call: &Call, leg_id: &str) -> bool {
+    call::helpers::find_leg(call, leg_id).and_then(|l| l.bye_disposition).is_some_and(|d| {
+        matches!(
+            d,
+            ByeDisposition::ByeSent
+                | ByeDisposition::ByeReceived
+                | ByeDisposition::ByeConfirmed
+                | ByeDisposition::ByeTimeout
+        )
+    })
 }
 
 /// What a request relayed in dialog toward `target_leg` carries, and the
