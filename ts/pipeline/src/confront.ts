@@ -40,6 +40,7 @@ import { answering, collecting, type Driven, identitiesIn, type Ledger, readOrig
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import { legPlaces } from "./leg-role.js"
+import { receptionsOf } from "./receptions.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -238,7 +239,8 @@ const runShape = (
         const opener = recording.find((m) => m.repeat_of === undefined && scopeOf(m)?.kind === "initial-invite")
         return opener === undefined ? [] : [[leg, headersInOrder(opener)] as const]
       })
-    )
+    ),
+    receptions: receptionsOf(recordings)
   }
 }
 
