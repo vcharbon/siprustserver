@@ -14,6 +14,7 @@ pub mod docgen;
 pub mod executor;
 pub mod fork_straggler;
 pub mod invariants;
+pub mod model_invariants;
 mod pending_refusal;
 pub mod promote_pem;
 pub mod refer_transfer;

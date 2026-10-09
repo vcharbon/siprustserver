@@ -2546,6 +2546,9 @@ impl Drop for FailoverHarness {
             }));
         }
 
+        // A turn of any worker that broke a model invariant fails the test.
+        b2bua_harness::model_gate::gate_on_drop();
+
         // If the harness was consumed there is nothing to audit — skip (mirrors
         // the write-on-Drop guard).
         if self.harness.inner.lock().map(|g| g.is_none()).unwrap_or(true) {

@@ -84,7 +84,9 @@ pub use reliable::{
     starts_reliable_ladder, unacknowledgeable_rack, unacknowledged_relayed_provisionals,
     unacknowledged_shown, OwedPrack, RAckTokens, UnackedShown,
 };
-pub use retired::{release_retired, retire_pending, retired_count, retired_pending, take_retired};
+pub use retired::{
+    holds_retired, release_retired, retire_pending, retired_count, retired_pending, take_retired,
+};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

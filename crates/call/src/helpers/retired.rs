@@ -90,3 +90,9 @@ pub fn take_retired(leg: &mut Leg) -> Vec<(String, PendingRequest)> {
 pub fn retired_count(leg: &Leg) -> usize {
     Retired::of(leg).pending.values().map(Vec::len).sum()
 }
+
+/// Whether `leg` keeps relays open in its retired dialog with identity tag
+/// `tag`.
+pub fn holds_retired(leg: &Leg, tag: &str) -> bool {
+    Retired::of(leg).pending.contains_key(tag)
+}

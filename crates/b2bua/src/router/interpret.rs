@@ -61,11 +61,13 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
 }
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
+/// `turn` names what the turn handled, for a model-invariant violation.
 pub(super) async fn process_result(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
+    turn: &(dyn std::fmt::Display + Sync),
 ) {
     // Every request sent off the call's turn has its answer's deadline on
     // the record the turn lands (ADR-0039).
@@ -95,6 +97,14 @@ pub(super) async fn process_result(
         },
         None => result,
     };
+    // The record this turn lands states the model invariants, against the
+    // one the previous turn landed.
+    if ctx.config.model_invariants {
+        let before = ctx.state.peek(call_ref);
+        let turn_record =
+            crate::rules::model_invariants::Turn { before: before.as_ref(), after: &result.call };
+        crate::rules::model_invariants::check(&turn_record, turn);
+    }
     // Persist first (state lands before effects run). A quiet turn replaces
     // the live copy without a bump and skips the flush gate below: the armed
     // rung advances, the backup keeps the last write that changed the call.

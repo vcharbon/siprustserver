@@ -36,6 +36,7 @@ use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 
 pub mod limiter;
+pub mod model_gate;
 pub mod terminated;
 pub mod witness;
 
@@ -154,6 +155,9 @@ pub fn spawn_b2bua_core(
         sip_local_ip: sip_addr.ip().to_string(),
         sip_local_port: sip_addr.port(),
         b2b_outbound_proxy: outbound_proxy,
+        // Every harness B2BUA checks the model invariants after each turn,
+        // release builds included.
+        model_invariants: true,
         ..Default::default()
     };
     tune(&mut config);
@@ -699,6 +703,14 @@ impl B2buaSutBuilder {
     }
 }
 
+/// A SUT dropped at the end of a test fails it on any model-invariant
+/// violation a turn met ([`model_gate`]).
+impl Drop for B2buaSut {
+    fn drop(&mut self) {
+        model_gate::gate_on_drop();
+    }
+}
+
 impl B2buaSut {
     /// Base builder: a B2BUA driven by `decision`, every other axis at its
     /// default (no outbound proxy, the default limiter, no services, no-op tune).
@@ -1067,6 +1079,7 @@ impl B2buaSut {
     /// and 7 require exactly `leak`, every other check is unchanged.
     #[track_caller]
     pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
+        model_gate::assert_no_model_violation();
         self.assert_calls_reaped();
         // 6. every limiter hold granted is released once, the store counts
         //    none, and the default limiter never failed open.

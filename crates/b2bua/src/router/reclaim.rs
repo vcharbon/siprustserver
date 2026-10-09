@@ -146,7 +146,8 @@ pub(super) async fn discharge_materialized_terminal(
         // Reclaim-discharge stays OFF the SIP wire (ADR-0022 / ADR-0014).
         crate::rules::invariants::UnansweredCaller::Leave,
     );
-    process_result(ctx, call_ref, result, now_ms).await;
+    process_result(ctx, call_ref, result, now_ms, &"the discharge of a materialised terminal body")
+        .await;
 }
 
 /// Discharge an already-`Terminated` body (a backup's deferred terminal, folded
@@ -173,7 +174,7 @@ async fn discharge_folded_terminal(
         // `discharge_materialized_terminal` above.
         crate::rules::invariants::UnansweredCaller::Leave,
     );
-    process_result(ctx, call_ref, result, now_ms).await;
+    process_result(ctx, call_ref, result, now_ms, &"the discharge of a folded terminal body").await;
 }
 
 /// Periodic replica-store maintenance. **No CDR is ever written here** — the
@@ -536,7 +537,7 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
         // unanswered the caller is waiting on OUR server txn: answer it.
         crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
     );
-    process_result(ctx, call_ref, result, now_ms).await;
+    process_result(ctx, call_ref, result, now_ms, &"the reaper discharge").await;
 }
 
 #[cfg(test)]

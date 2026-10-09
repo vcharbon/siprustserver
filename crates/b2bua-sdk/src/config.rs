@@ -159,6 +159,11 @@ pub struct B2buaConfig {
     /// debugging escape hatch only — the in-process "released exactly once, one
     /// CDR" promise does not hold without it.
     pub reaper_enabled: bool,
+    /// Check the call model's invariants at the end of every turn, before
+    /// the record lands, and panic with the call's dump on a violation
+    /// (`b2bua::rules::model_invariants`). On by default in debug builds, off
+    /// in release builds; every test harness turns it on.
+    pub model_invariants: bool,
     /// Reaper sweep cadence, seconds (rides `tokio::time::interval` —
     /// deterministic under `start_paused` tests). Default 30 s; the sweep is
     /// one short store-lock pass, off the call path.
@@ -527,6 +532,7 @@ impl Default for B2buaConfig {
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
             reaper_enabled: true,
+            model_invariants: cfg!(debug_assertions),
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,

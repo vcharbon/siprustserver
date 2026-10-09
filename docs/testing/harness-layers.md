@@ -75,6 +75,10 @@ Automatic (you cannot opt out, only waive per-rule):
   proxy agent keeps no table (`Agent::hold_no_dialogs` for a hand-built one),
   and the scenario interpreter reads the verdicts itself
   (`Agent::hand_dialogs_to_driver`).
+- **Model invariants** — every harness B2BUA (`B2buaConfig::model_invariants`,
+  on by default in debug builds) checks the call record at the end of each
+  turn against the list in `b2bua::rules::model_invariants` and panics with
+  the invariant's name, the turn and the call's dump on a violation.
 - **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
   compact wire trace to stderr. Read it before adding instrumentation.
 - **Failure artifacts** (env-gated) — with `SCENARIO_ARTIFACT_DIR=<dir>` set, a

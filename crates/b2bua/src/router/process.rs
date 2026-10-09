@@ -208,7 +208,8 @@ pub(super) async fn process(
 
     record_keepalive_timeout_peer(ctx, &event, &result.call);
 
-    process_result(ctx, &call_ref, result, now_ms).await;
+    let turn = crate::rules::model_invariants::EventSummary { call_ref: &call_ref, event: &event };
+    process_result(ctx, &call_ref, result, now_ms, &turn).await;
 }
 
 /// How a pre-handler gate resolved the event.
