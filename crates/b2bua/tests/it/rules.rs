@@ -769,6 +769,37 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     );
 }
 
+/// A callee's 2xx relayed toward the caller lost the race to her CANCEL: the
+/// transaction layer had already answered her INVITE 487 (RFC 3261 §9.2), so
+/// the 2xx never left and she holds no dialog. The `Cancelled` turn records
+/// the 487 over the record's 2xx, and the termination sends her no BYE
+/// (§15: a BYE names a dialog that exists).
+#[test]
+fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
+    let mut call = call_with_early_a_dialog("a1");
+    call.a_leg.state = LegState::Confirmed;
+    call.a_leg.invite_final_sent = Some(200);
+    let call = call::helpers::record_cancelled_invite(call, "a");
+    assert_eq!(call.a_leg.invite_final_sent, Some(487), "the wire's final is the layer's 487");
+    let result = execute_on(
+        &call,
+        &[RuleAction::BeginTermination {
+            reason: Some("CANCEL".into()),
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+        }],
+    );
+    let to_a: Vec<String> = result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .map(|e| e.label.clone())
+        .collect();
+    assert!(to_a.is_empty(), "nothing goes to the caller, got {to_a:?}");
+    assert_eq!(result.call.a_leg.state, LegState::Terminated);
+}
+
 #[test]
 fn in_dialog_bye_selects_relay_bye() {
     let mut call = test_call();

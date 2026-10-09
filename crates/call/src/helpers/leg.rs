@@ -57,6 +57,14 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
     })
 }
 
+/// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
+/// initial INVITE with (RFC 3261 §9.2). It is the final the wire carries even
+/// when the record already holds a 2xx: one built after the layer's 487, which
+/// the completed transaction never sent, so it formed no dialog.
+pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
+    update_leg(call, leg_id, |l| l.invite_final_sent = Some(487))
+}
+
 /// Whether a single leg has reached a terminal resolution for termination
 /// bookkeeping. A `trying` leg with no `byeDisposition` never established, so it
 /// is considered resolved.

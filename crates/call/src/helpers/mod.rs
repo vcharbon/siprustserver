@@ -59,8 +59,8 @@ pub use identity::{
 pub use leg::{
     add_b_leg, b2bua_tag, caller_answered, confirmed_dialog, find_b_leg, find_b_leg_by_call_id,
     find_dialog_by_to_tag, find_leg, holds_local_tag, is_adopted, is_fully_resolved,
-    leg_is_going_away, leg_is_resolved, leg_kind, record_invite_final, remote_tag,
-    set_bye_disposition, set_leg_disposition, set_leg_state,
+    leg_is_going_away, leg_is_resolved, leg_kind, record_cancelled_invite, record_invite_final,
+    remote_tag, set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};

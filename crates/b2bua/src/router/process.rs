@@ -816,9 +816,10 @@ pub(super) fn rule_chain_turn(
     }
     // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record
-    // carries that transaction's one final before the rules read it.
+    // carries that transaction's one final before the rules read it, over a
+    // 2xx this stack built too late for the completed transaction to send.
     if let CallEvent::Cancelled { in_dialog: false, .. } = event {
-        call = call::helpers::record_invite_final(call, &res.source_leg_id, 487);
+        call = call::helpers::record_cancelled_invite(call, &res.source_leg_id);
     }
     if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
         ctx.metrics.record_repeat_give_up(obligation.kind());
