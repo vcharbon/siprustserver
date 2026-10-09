@@ -4,11 +4,11 @@
 //! disarms the backstop.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
-use layer_harness::{Channel, Recorder};
+use layer_harness::{Channel, NetworkTag, Recorder};
 use sip_net::{audit_wire_entries, RfcFinding, SignalingNetworkEvent};
 
 use super::waiver::{apply_waivers, WaiverState};
@@ -24,6 +24,33 @@ pub(super) fn addr_names(recorder: &Recorder) -> HashMap<SocketAddr, String> {
         .into_iter()
         .map(|l| (l.addr, l.names.first().cloned().unwrap_or_default()))
         .collect()
+}
+
+/// The names of the lanes the harness bound as SUT (`NetworkTag::Core`).
+fn sut_names(recorder: &Recorder) -> HashSet<String> {
+    recorder
+        .snapshot()
+        .lanes
+        .into_iter()
+        .filter(|l| l.network == NetworkTag::Core)
+        .flat_map(|l| l.names)
+        .collect()
+}
+
+/// The audit gate's outcome: the findings the run fails on, and per rule the
+/// findings charged to the SUT that a waiver naming it covered.
+pub(super) struct HardGate {
+    pub gating: Vec<GatedFinding>,
+    pub waived_sut: BTreeMap<String, usize>,
+}
+
+/// `waived SUT findings: rule×n, …`, or `None` when no SUT finding was waived.
+pub(super) fn waived_sut_line(waived: &BTreeMap<String, usize>) -> Option<String> {
+    if waived.is_empty() {
+        return None;
+    }
+    let rules: Vec<String> = waived.iter().map(|(rule, n)| format!("{rule}×{n}")).collect();
+    Some(format!("waived SUT findings: {}", rules.join(", ")))
 }
 
 /// One audit finding the gate fails the run on: the rule, the party it
@@ -66,13 +93,13 @@ impl GatedFinding {
 /// in-flight imbalance, queue leaks — are deliberately not consulted), so
 /// timeout / reap / stall fixtures are not gated. Shared by `Harness::finish`
 /// and the `Harness` Drop guard so the SAME suite runs on every run with no
-/// per-test opt-in. Empty ⇒ clean.
+/// per-test opt-in. Empty `gating` ⇒ clean.
 pub(super) fn rfc_hard_gate_findings(
     findings: &[RfcFinding],
     events: &[layer_harness::Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     recorder: &Recorder,
-) -> Vec<GatedFinding> {
+) -> HardGate {
     // `findings` is the output of the ONE shared evaluator
     // (`sip_net::evaluate_rfc_findings`, subject dispatch applied) — the SAME
     // set the report projection lists — so the gate and the report can never
@@ -83,7 +110,9 @@ pub(super) fn rfc_hard_gate_findings(
         Some(n) if !n.is_empty() => n.clone(),
         _ => addr.to_string(),
     };
-    apply_waivers(findings, events, waivers, &names)
+    let waived = apply_waivers(findings, events, waivers, &names, &sut_names(recorder));
+    let gating = waived
+        .gating
         .into_iter()
         .map(|(finding, party)| {
             let message = finding.offending.and_then(|n| entries.get(n.checked_sub(1)?)).map(|e| {
@@ -91,7 +120,8 @@ pub(super) fn rfc_hard_gate_findings(
             });
             GatedFinding { finding, party, message }
         })
-        .collect()
+        .collect();
+    HardGate { gating, waived_sut: waived.sut }
 }
 
 /// The hard-gate panic text: a first line naming the first rule that fired
@@ -163,7 +193,7 @@ impl Drop for CseqGate {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let events = self.channel.snapshot();
                 let suite = sip_net::evaluate_rfc_findings(&events);
-                rfc_hard_gate_findings(&suite, &events, &waivers, &self.recorder)
+                rfc_hard_gate_findings(&suite, &events, &waivers, &self.recorder).gating
             })) {
                 Ok(f) => f,
                 Err(_) => return,

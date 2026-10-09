@@ -11,32 +11,38 @@
 //! when the party matches, so a finding attributed to any other party — in a
 //! SUT-full lane, the SUT — is never filtered by it.
 //!
-//! A finding whose rule does NOT populate `offending` is unattributable: a
-//! party- or position-scoped waiver never matches it (it stays gated) and such a
-//! waiver goes unused-loud. Only the coarse rule-only waiver
-//! ([`Harness::allow_violation`](super::Harness::allow_violation)) covers it.
+//! A finding charged to the system under test (a party the harness bound as
+//! SUT, or a finding no simulated party is charged with) is covered only by a
+//! waiver that names that SUT party: a party-less waiver
+//! ([`Harness::allow_violation`](super::Harness::allow_violation),
+//! [`WaiverScope::rule`] alone) covers simulated-party findings only.
+//!
+//! A position-scoped waiver needs the finding's `offending` entry: a finding
+//! that does not carry one stays gated and such a waiver goes unused-loud.
 //!
 //! A declared waiver that filtered nothing is an ERROR at `finish()` by default
 //! (it catches a position-dependent waiver that stopped matching); a waiver
 //! whose shape is legitimately conditional opts out via [`WaiverScope::conditional`].
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 
 use layer_harness::Stamped;
 use sip_net::{audit_wire_entries, RecordedSipEntry, RfcFinding, SignalingNetworkEvent};
 
 /// A data-constructible RFC-audit waiver scoped to `(rule, party, position)`.
-/// Scenario-file portable (plain data). Coarse by default (any party, any
-/// message); narrow it with [`on_party`](Self::on_party) / [`at_position`](Self::at_position).
+/// Scenario-file portable (plain data). Without a party it covers the rule on
+/// any SIMULATED party; a finding charged to the SUT needs
+/// [`on_party`](Self::on_party) naming the SUT. Narrow it further with
+/// [`at_position`](Self::at_position).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiverScope {
     /// The audit rule id waived (e.g. `"cseq-in-dialog-order"`).
     pub rule: String,
     /// The EMITTING party (a bind/lane name) whose non-compliance is waived;
-    /// `None` = any party. A finding emitted by a different party is never
-    /// filtered by this waiver.
+    /// `None` = any simulated party (never the SUT). A finding emitted by a
+    /// different party is never filtered by this waiver.
     pub party: Option<String>,
     /// The 1-based wire-entry index of the OFFENDING message (into the audit
     /// view, `Harness::wire_entries()`); `None` = any message. Scopes a waiver to
@@ -52,7 +58,8 @@ pub struct WaiverScope {
 }
 
 impl WaiverScope {
-    /// A rule-scoped waiver (any party, any message), unused-loud by default.
+    /// A rule-scoped waiver (any simulated party, any message), unused-loud by
+    /// default.
     pub fn rule(rule: impl Into<String>, justification: impl Into<String>) -> Self {
         WaiverScope {
             rule: rule.into(),
@@ -100,20 +107,33 @@ impl WaiverState {
 /// resolves to a party name.
 pub(crate) enum Attribution<'a> {
     /// Functional lane: resolve the `from_lane` addr through the recorder's
-    /// addr→first-name map (one logical endpoint per socket).
-    AddrNames(&'a HashMap<SocketAddr, String>),
+    /// addr→first-name map (one logical endpoint per socket); `sut` holds the
+    /// names of the lanes the harness bound as SUT.
+    AddrNames { names: &'a HashMap<SocketAddr, String>, sut: &'a HashSet<String> },
     /// Load lane: the `from_lane` sub-lane suffix (`ip:port#name` → `name`). Mux
     /// sockets carry SEVERAL logical legs, so the addr→first-name map would
     /// mis-attribute every co-socketed leg to the first bind — the sub-lane key
-    /// is the leg's true identity.
+    /// is the leg's true identity. Every sub-lane is a simulated party.
     SubLane,
+}
+
+impl Attribution<'_> {
+    /// Whether `party` is a simulated party: named, and not a SUT lane. An
+    /// unattributed finding is not known to be a simulated party's.
+    fn is_simulated(&self, party: Option<&str>) -> bool {
+        match (party, self) {
+            (None, _) => false,
+            (Some(p), Attribution::AddrNames { sut, .. }) => !sut.contains(p),
+            (Some(_), Attribution::SubLane) => true,
+        }
+    }
 }
 
 /// The party name of a `from_lane` bind key under an [`Attribution`].
 fn party_of(from_lane: &Option<String>, attr: &Attribution) -> Option<String> {
     let key = from_lane.as_ref()?;
     match attr {
-        Attribution::AddrNames(map) => {
+        Attribution::AddrNames { names: map, .. } => {
             let addr: SocketAddr = key.split('#').next()?.parse().ok()?;
             map.get(&addr).filter(|n| !n.is_empty()).cloned()
         }
@@ -161,37 +181,30 @@ fn charged_lane(charged: &str, entry: Option<&RecordedSipEntry>) -> Option<Strin
     }
 }
 
-/// Whether `w` covers `finding`, referencing the offending message directly.
-fn covers(
-    w: &WaiverScope,
-    finding: &RfcFinding,
-    entries: &[RecordedSipEntry],
-    attr: &Attribution,
-) -> bool {
+/// Whether `w` covers `finding`, charged to `party`: the rule matches, the
+/// position (when scoped) is the offending entry, and the party is the one the
+/// waiver names — or, for a party-less waiver, a simulated party.
+fn covers(w: &WaiverScope, finding: &RfcFinding, party: Option<&str>, attr: &Attribution) -> bool {
     if w.rule != finding.rule {
         return false;
     }
-    // A coarse rule-only waiver covers by rule regardless of attribution
-    // (backward-compatible `allow_violation`).
-    if w.party.is_none() && w.position.is_none() {
-        return true;
-    }
-    // A party/position-scoped waiver needs a pinpointed offending message; a
-    // finding that does not carry one is unattributable and stays gated.
-    let Some(idx) = finding.offending else {
-        return false;
-    };
     if let Some(pos) = w.position {
-        if pos != idx {
+        if finding.offending != Some(pos) {
             return false;
         }
     }
-    if let Some(party) = &w.party {
-        if finding_party(finding, entries, attr).as_ref() != Some(party) {
-            return false;
-        }
+    match &w.party {
+        Some(named) => party == Some(named.as_str()),
+        None => attr.is_simulated(party),
     }
-    true
+}
+
+/// The findings a waiver set lets through, and the SUT findings it covered.
+pub(crate) struct Waived<T> {
+    /// The non-advisory findings no waiver covers.
+    pub gating: Vec<T>,
+    /// Per rule, how many findings charged to the SUT a waiver covered.
+    pub sut: BTreeMap<String, usize>,
 }
 
 /// The non-advisory findings that SURVIVE the waivers (marking each covering
@@ -204,44 +217,48 @@ fn survivors(
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     attr: &Attribution,
-) -> Vec<RfcFinding> {
-    let entries = audit_wire_entries(events);
-    findings
-        .iter()
-        .filter(|f| !f.advisory)
-        .filter(|f| {
-            let mut waived = false;
-            for w in waivers {
-                if covers(&w.scope, f, &entries, attr) {
-                    w.used.set(true);
-                    waived = true;
-                }
+) -> Waived<(RfcFinding, Option<String>)> {
+    waive(findings, &audit_wire_entries(events), waivers, attr)
+}
+
+/// [`survivors`] over the audit's wire entries.
+fn waive(
+    findings: &[RfcFinding],
+    entries: &[RecordedSipEntry],
+    waivers: &[WaiverState],
+    attr: &Attribution,
+) -> Waived<(RfcFinding, Option<String>)> {
+    let mut out = Waived { gating: Vec::new(), sut: BTreeMap::new() };
+    for f in findings.iter().filter(|f| !f.advisory) {
+        let party = finding_party(f, entries, attr);
+        let mut waived = false;
+        for w in waivers {
+            if covers(&w.scope, f, party.as_deref(), attr) {
+                w.used.set(true);
+                waived = true;
             }
-            !waived
-        })
-        .cloned()
-        .collect()
+        }
+        if !waived {
+            out.gating.push((f.clone(), party));
+        } else if !attr.is_simulated(party.as_deref()) {
+            *out.sut.entry(f.rule.clone()).or_default() += 1;
+        }
+    }
+    out
 }
 
 /// Apply the waivers to the PRE-EVALUATED audit findings: drop every
 /// non-advisory finding a waiver covers (marking that waiver used), returning
-/// each remaining gating finding with the party it charges — the
-/// functional-lane (addr→name) attribution.
+/// each remaining gating finding with the party it charges, and the waived SUT
+/// findings per rule — the functional-lane (addr→name) attribution.
 pub(super) fn apply_waivers(
     findings: &[RfcFinding],
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
-    addr_names: &HashMap<SocketAddr, String>,
-) -> Vec<(RfcFinding, Option<String>)> {
-    let attr = Attribution::AddrNames(addr_names);
-    let entries = audit_wire_entries(events);
-    survivors(findings, events, waivers, &attr)
-        .into_iter()
-        .map(|f| {
-            let party = finding_party(&f, &entries, &attr);
-            (f, party)
-        })
-        .collect()
+    names: &HashMap<SocketAddr, String>,
+    sut: &HashSet<String>,
+) -> Waived<(RfcFinding, Option<String>)> {
+    survivors(findings, events, waivers, &Attribution::AddrNames { names, sut })
 }
 
 /// The finding-preserving apply variant (ADR-0024 §6): the surviving structured
@@ -255,7 +272,7 @@ pub(crate) fn apply_waivers_findings(
     attr: &Attribution,
 ) -> Vec<RfcFinding> {
     let findings = sip_net::evaluate_rfc_findings(events);
-    survivors(&findings, events, waivers, attr)
+    survivors(&findings, events, waivers, attr).gating.into_iter().map(|(f, _)| f).collect()
 }
 
 /// The declared waivers that filtered NOTHING and are not `conditional` — an
@@ -297,6 +314,15 @@ mod tests {
 
     const RULE: &str = "cseq-in-dialog-order";
 
+    fn covered(
+        w: &WaiverScope,
+        f: &RfcFinding,
+        entries: &[RecordedSipEntry],
+        attr: &Attribution,
+    ) -> bool {
+        covers(w, f, finding_party(f, entries, attr).as_deref(), attr)
+    }
+
     /// ADR-0024 §6 load-lane specific: sub-lane party attribution. Two logical
     /// legs share ONE mux socket; a party-scoped waiver covers ONLY the leg it
     /// names, never its co-socketed sibling — because attribution resolves the
@@ -308,9 +334,9 @@ mod tests {
         let bob2 = finding(RULE, 2); // offending = entry #2 (bob2, same socket)
         let w = WaiverScope::rule(RULE, "only bob").on_party("bob");
         let attr = Attribution::SubLane;
-        assert!(covers(&w, &bob, &entries, &attr), "covers bob's finding");
+        assert!(covered(&w, &bob, &entries, &attr), "covers bob's finding");
         assert!(
-            !covers(&w, &bob2, &entries, &attr),
+            !covered(&w, &bob2, &entries, &attr),
             "does NOT cover the co-socketed sibling bob2's finding",
         );
     }
@@ -323,11 +349,11 @@ mod tests {
         let entries = vec![entry("10.0.0.9:5070#bob"), entry("10.0.0.9:5070#bob2")];
         let mut map = HashMap::new();
         map.insert("10.0.0.9:5070".parse().unwrap(), "bob".to_string());
-        let attr = Attribution::AddrNames(&map);
+        let attr = Attribution::AddrNames { names: &map, sut: &HashSet::new() };
         let w = WaiverScope::rule(RULE, "bob").on_party("bob");
-        assert!(covers(&w, &finding(RULE, 1), &entries, &attr));
+        assert!(covered(&w, &finding(RULE, 1), &entries, &attr));
         assert!(
-            covers(&w, &finding(RULE, 2), &entries, &attr),
+            covered(&w, &finding(RULE, 2), &entries, &attr),
             "addr map wrongly covers the sibling (both resolve to the first bind)",
         );
     }
@@ -338,7 +364,7 @@ mod tests {
     fn sublane_party_scope_gates_other_parties() {
         let entries = vec![entry("10.0.0.9:5070#bob")];
         let attr = Attribution::SubLane;
-        assert!(!covers(
+        assert!(!covered(
             &WaiverScope::rule(RULE, "proxy").on_party("proxy"),
             &finding(RULE, 1),
             &entries,
@@ -355,12 +381,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("10.0.0.9:5070".parse().unwrap(), "b2bua".to_string());
         map.insert("10.0.0.1:5060".parse().unwrap(), "alice".to_string());
-        let attr = Attribution::AddrNames(&map);
+        let attr = Attribution::AddrNames { names: &map, sut: &HashSet::new() };
         let owed = RfcFinding { charged: Some("10.0.0.1:5060".into()), ..finding(RULE, 1) };
         let alice = WaiverScope::rule(RULE, "alice never PRACKs").on_party("alice");
         let b2bua = WaiverScope::rule(RULE, "wrong party").on_party("b2bua");
-        assert!(covers(&alice, &owed, &entries, &attr), "the owing party's waiver covers it");
-        assert!(!covers(&b2bua, &owed, &entries, &attr), "the anchor's sender owed nothing");
+        assert!(covered(&alice, &owed, &entries, &attr), "the owing party's waiver covers it");
+        assert!(!covered(&b2bua, &owed, &entries, &attr), "the anchor's sender owed nothing");
     }
 
     /// A rule judged at the taker charges the sender by the bare source
@@ -382,12 +408,12 @@ mod tests {
         let alice = WaiverScope::rule(RULE, "alice").on_party("alice");
         let bob = WaiverScope::rule(RULE, "bob").on_party("bob");
         let bob2 = WaiverScope::rule(RULE, "bob2").on_party("bob2");
-        assert!(covers(&alice, &by_sender, &entries, &attr), "the sender's waiver covers it");
-        assert!(!covers(&bob, &by_sender, &entries, &attr), "the taker owed nothing");
-        assert!(covers(&bob, &by_taker, &entries, &attr), "the owing taker's waiver covers it");
-        assert!(!covers(&bob2, &by_taker, &entries, &attr), "a co-socketed sibling never does");
-        assert!(covers(&bob2, &by_bob2, &entries, &attr), "the sibling's own entry is its own");
-        assert!(!covers(&bob, &by_bob2, &entries, &attr), "and never bob's");
+        assert!(covered(&alice, &by_sender, &entries, &attr), "the sender's waiver covers it");
+        assert!(!covered(&bob, &by_sender, &entries, &attr), "the taker owed nothing");
+        assert!(covered(&bob, &by_taker, &entries, &attr), "the owing taker's waiver covers it");
+        assert!(!covered(&bob2, &by_taker, &entries, &attr), "a co-socketed sibling never does");
+        assert!(covered(&bob2, &by_bob2, &entries, &attr), "the sibling's own entry is its own");
+        assert!(!covered(&bob, &by_bob2, &entries, &attr), "and never bob's");
     }
 
     /// Two legs on one socket talking to each other: a bare charged address
@@ -402,8 +428,8 @@ mod tests {
         let unacked = RfcFinding { charged: Some("127.0.0.1:5060".into()), ..finding(RULE, 1) };
         let alice = WaiverScope::rule(RULE, "alice").on_party("alice");
         let bob = WaiverScope::rule(RULE, "bob").on_party("bob");
-        assert!(!covers(&bob, &unacked, &entries, &attr), "the sender is not the charged party");
-        assert!(!covers(&alice, &unacked, &entries, &attr), "nor is it known to be the taker");
+        assert!(!covered(&bob, &unacked, &entries, &attr), "the sender is not the charged party");
+        assert!(!covered(&alice, &unacked, &entries, &attr), "nor is it known to be the taker");
     }
 
     /// A rule-only waiver covers by rule alone (a plain rule-name filter)
@@ -412,13 +438,55 @@ mod tests {
     fn rule_only_covers_by_rule_regardless_of_party() {
         let entries = vec![entry("10.0.0.9:5070#bob")];
         let attr = Attribution::SubLane;
-        assert!(covers(&WaiverScope::rule(RULE, "coarse"), &finding(RULE, 1), &entries, &attr,));
+        assert!(covered(&WaiverScope::rule(RULE, "coarse"), &finding(RULE, 1), &entries, &attr,));
         // A different rule is never covered.
-        assert!(!covers(
+        assert!(!covered(
             &WaiverScope::rule("rfc3261.other", "coarse"),
             &finding(RULE, 1),
             &entries,
             &attr,
         ));
+    }
+
+    /// A party-less waiver covers a simulated party's finding, never one
+    /// charged to a lane the harness bound as SUT nor an unattributed one; a
+    /// waiver naming the SUT lane covers the SUT's.
+    #[test]
+    fn a_party_less_waiver_never_covers_the_sut() {
+        let entries = vec![entry("10.0.0.9:5070"), entry("10.0.0.1:5060")];
+        let mut map = HashMap::new();
+        map.insert("10.0.0.9:5070".parse().unwrap(), "sut".to_string());
+        map.insert("10.0.0.1:5060".parse().unwrap(), "alice".to_string());
+        let sut = HashSet::from(["sut".to_string()]);
+        let attr = Attribution::AddrNames { names: &map, sut: &sut };
+        let coarse = WaiverScope::rule(RULE, "coarse");
+        let by_sut = finding(RULE, 1);
+        let by_alice = finding(RULE, 2);
+        let unattributed = RfcFinding { offending: None, ..finding(RULE, 1) };
+        assert!(covered(&coarse, &by_alice, &entries, &attr), "a simulated party's finding");
+        assert!(!covered(&coarse, &by_sut, &entries, &attr), "never the SUT's");
+        assert!(!covered(&coarse, &unattributed, &entries, &attr), "nor an unattributed one");
+        let named = WaiverScope::rule(RULE, "accepted").on_party("sut");
+        assert!(covered(&named, &by_sut, &entries, &attr), "a waiver naming the SUT covers it");
+    }
+
+    /// The waived SUT findings are counted per rule; a waived simulated
+    /// party's finding is not.
+    #[test]
+    fn waived_sut_findings_are_counted_per_rule() {
+        let entries = vec![entry("10.0.0.9:5070"), entry("10.0.0.1:5060")];
+        let mut map = HashMap::new();
+        map.insert("10.0.0.9:5070".parse().unwrap(), "sut".to_string());
+        map.insert("10.0.0.1:5060".parse().unwrap(), "alice".to_string());
+        let sut = HashSet::from(["sut".to_string()]);
+        let attr = Attribution::AddrNames { names: &map, sut: &sut };
+        let waivers = [
+            WaiverState::new(WaiverScope::rule(RULE, "accepted").on_party("sut")),
+            WaiverState::new(WaiverScope::rule(RULE, "alice")),
+        ];
+        let findings = [finding(RULE, 1), finding(RULE, 1), finding(RULE, 2)];
+        let out = waive(&findings, &entries, &waivers, &attr);
+        assert!(out.gating.is_empty(), "every finding is waived");
+        assert_eq!(out.sut, BTreeMap::from([(RULE.to_string(), 2)]));
     }
 }

@@ -65,6 +65,9 @@ pub struct RunReport {
     /// report — the suite re-parses every recorded frame, so every consumer
     /// (gate, report projection) shares this set via [`Self::rfc_findings`].
     rfc_findings: std::sync::OnceLock<Vec<sip_net::RfcFinding>>,
+    /// Per rule, the findings charged to the SUT that a waiver naming it
+    /// covered at `finish`.
+    waived_sut_findings: std::collections::BTreeMap<String, usize>,
 }
 
 impl RunReport {
@@ -91,6 +94,7 @@ impl RunReport {
             events,
             anchors,
             rfc_findings: std::sync::OnceLock::new(),
+            waived_sut_findings: std::collections::BTreeMap::new(),
         }
     }
 
@@ -99,6 +103,21 @@ impl RunReport {
     /// the hard gate and hand the result here). No-op if already seeded.
     pub(crate) fn seed_rfc_findings(&self, findings: Vec<sip_net::RfcFinding>) {
         let _ = self.rfc_findings.set(findings);
+    }
+
+    /// Record the per-rule count of waived SUT findings the `finish` gate
+    /// computed.
+    pub(crate) fn seed_waived_sut_findings(
+        &mut self,
+        waived: std::collections::BTreeMap<String, usize>,
+    ) {
+        self.waived_sut_findings = waived;
+    }
+
+    /// Per rule, how many findings charged to the SUT a waiver naming it
+    /// covered: the accepted SUT deviations of the run.
+    pub fn waived_sut_findings(&self) -> &std::collections::BTreeMap<String, usize> {
+        &self.waived_sut_findings
     }
 
     /// The full RFC-suite finding set (advisory tags included) over the
@@ -240,6 +259,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         events,
         anchors: Vec::new(),
         rfc_findings: std::sync::OnceLock::new(),
+        waived_sut_findings: std::collections::BTreeMap::new(),
     }
 }
 

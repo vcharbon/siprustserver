@@ -91,10 +91,10 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
         "alice never ACKs the fixture terminus; testing relay, not the dialog",
     );
     h.allow_violation("allow-supported-on-invite", "bare INVITE fixture; proxy relay is the SUT");
-    let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
+    let (bob_ep, bob_addr) = h.bind_peer("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
-    let (alice, _alice_addr) = h.bind_sut("alice", "127.0.0.1:5060").await;
+    let (alice, _alice_addr) = h.bind_peer("alice", "127.0.0.1:5060").await;
 
     alice.send_to(ALICE_INVITE.as_bytes(), proxy.addr()).await.unwrap();
     let fwd = tokio::time::timeout(Duration::from_secs(2), bob_ep.recv())

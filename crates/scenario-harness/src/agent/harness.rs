@@ -23,7 +23,7 @@ use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
 use super::rr_fold::decide_rr_fold;
-use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate};
+use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate};
 use super::step::StepCounter;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::{Agent, Proxy};
@@ -306,18 +306,19 @@ impl Harness {
     /// hard gate — the **only** sanctioned way to deactivate a rule in a test.
     ///
     /// Reserve this for a deliberate non-compliance fixture, where Alice/Bob
-    /// intentionally emit non-conforming SIP to exercise the B2BUA's reject /
+    /// intentionally emit non-conforming SIP to exercise the SUT's reject /
     /// error path (e.g. an out-of-dialog BYE to drive a 481). The `justification`
-    /// is mandatory and logged. It is **not** an escape hatch for a finding that
-    /// reflects a real B2BUA bug — fix the B2BUA (or the test peer) instead.
+    /// is mandatory and logged.
     ///
     /// `rule` is the rule's `name()` (e.g. `"no-bye-outside-or-early-dialog"`). The
     /// finding is still recorded (advisory) so the report shows what was waived.
     ///
     /// This is the COARSE form, reimplemented over the scoped machinery: it
-    /// waives the rule for ANY emitting party and message and does not error if
-    /// it happens to filter nothing (a conditional waiver). Reach for
-    /// [`waive`](Self::waive) to scope a waiver to one party / message.
+    /// waives the rule for any SIMULATED party and message and does not error
+    /// if it happens to filter nothing (a conditional waiver). It never covers a
+    /// finding charged to the SUT: an accepted SUT deviation is waived with
+    /// [`waive`](Self::waive) and `.on_party(<the SUT's lane name>)`, and is
+    /// counted on the report ([`RunReport::waived_sut_findings`]).
     pub fn allow_violation(&self, rule: impl Into<String>, justification: impl Into<String>) {
         self.waive(WaiverScope::rule(rule, justification).conditional());
     }
@@ -572,6 +573,25 @@ impl Harness {
         (ep, addr)
     }
 
+    /// Bind a raw endpoint for a SIMULATED party (a byte-level fixture peer) on
+    /// the shared, recording-wrapped fabric: a UA-role (`{Uac, Uas}`) bind on
+    /// an `Ext` lane, so its findings are the party's own, never the SUT's
+    /// (a party-less waiver covers them). The SUT itself binds with
+    /// [`bind_sut`](Self::bind_sut).
+    pub async fn bind_peer(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+        let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.recorder.register_lane(addr, name.into(), NetworkTag::Ext);
+        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
+        let opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
+        let ep =
+            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        (ep, addr)
+    }
+
     /// Advance virtual time by `d` (requires a paused runtime —
     /// `#[tokio::test(start_paused = true)]`), running the work in flight at
     /// every instant a timer falls due inside the span
@@ -676,6 +696,7 @@ impl Harness {
                 panic!("{cause}");
             }
         }
+        let waived_sut;
         {
             let waivers = self.waivers.borrow();
             // The dialog verdicts first: they name the UA and the request, the
@@ -684,11 +705,14 @@ impl Harness {
             if !verdicts.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_dialog_panic(&self.name, &verdicts));
             }
-            let cseq_findings =
-                rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
-            if !cseq_findings.is_empty() && !std::thread::panicking() {
-                panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
+            let gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            if !gate.gating.is_empty() && !std::thread::panicking() {
+                panic!("{}", render_rfc_panic(&self.name, &gate.gating));
             }
+            if let Some(line) = waived_sut_line(&gate.waived_sut) {
+                eprintln!("[{}] {line}", self.name);
+            }
+            waived_sut = gate.waived_sut;
             // A declared, non-conditional waiver that filtered nothing is an
             // error — a position-dependent waiver that stopped matching is
             // silent otherwise.
@@ -715,7 +739,7 @@ impl Harness {
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        let report = RunReport::from_recording(
+        let mut report = RunReport::from_recording(
             self.name,
             description,
             self.recorder,
@@ -724,6 +748,7 @@ impl Harness {
             anchors,
         );
         report.seed_rfc_findings(rfc_findings);
+        report.seed_waived_sut_findings(waived_sut);
         report
     }
 
@@ -755,12 +780,15 @@ impl Harness {
             let gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
             (gate, surviving_verdicts(&self.judges.borrow(), &waivers))
         };
+        if let Some(line) = waived_sut_line(&gate.waived_sut) {
+            eprintln!("[{}] {line}", self.name);
+        }
         let mut gating = as_findings(verdicts);
-        gating.extend(gate.into_iter().map(|g| g.finding));
+        gating.extend(gate.gating.into_iter().map(|g| g.finding));
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        let report = RunReport::from_recording(
+        let mut report = RunReport::from_recording(
             self.name,
             description,
             self.recorder,
@@ -769,6 +797,7 @@ impl Harness {
             anchors,
         );
         report.seed_rfc_findings(rfc_findings);
+        report.seed_waived_sut_findings(gate.waived_sut);
         (report, gating)
     }
 }

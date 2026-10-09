@@ -431,3 +431,45 @@ async fn two_reuses_one_dialog_position_scopes_exactly_one() {
     h.waive(WaiverScope::rule(CSEQ_RULE, "only the first reuse").at_position(first_reuse_pos));
     h.finish().await;
 }
+
+/// An out-of-dialog OPTIONS the SUT sends bob without a Max-Forwards
+/// (RFC 3261 §8.1.1.6), answered 200.
+async fn sut_sends_options_without_max_forwards(h: &Harness) {
+    const OPTIONS: &str = "OPTIONS sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-sut-1\r\n\
+From: <sip:sut@127.0.0.1>;tag=s1\r\n\
+To: <sip:bob@127.0.0.1>\r\n\
+Call-ID: sut-options@127.0.0.1\r\n\
+CSeq: 1 OPTIONS\r\n\
+Content-Length: 0\r\n\r\n";
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (sut, _) = h.bind_sut("sut", "127.0.0.1:5080").await;
+    sut.send_to(OPTIONS.as_bytes(), bob.addr()).await.unwrap();
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    sut.recv().await.expect("the 200 reaches the SUT");
+}
+
+/// A party-less waiver covers simulated parties only: the SUT's finding
+/// stays gated.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "red because RFC audit rule max-forwards fired (charged to sut)")]
+async fn a_party_less_waiver_leaves_the_sut_finding_gated() {
+    let h = Harness::new("waiver-sut-coarse");
+    h.allow_violation("max-forwards", "covers simulated parties only");
+    sut_sends_options_without_max_forwards(&h).await;
+    h.finish().await;
+}
+
+/// A waiver naming the SUT lane covers its finding, and the report counts
+/// it per rule.
+#[tokio::test(start_paused = true)]
+async fn a_waiver_naming_the_sut_covers_it_and_is_counted() {
+    let h = Harness::new("waiver-sut-named");
+    h.waive(WaiverScope::rule("max-forwards", "an accepted SUT deviation").on_party("sut"));
+    sut_sends_options_without_max_forwards(&h).await;
+    let report = h.finish().await;
+    assert_eq!(
+        report.waived_sut_findings(),
+        &std::collections::BTreeMap::from([("max-forwards".to_string(), 1)]),
+    );
+}
