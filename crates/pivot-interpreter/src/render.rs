@@ -30,7 +30,7 @@ use sip_message::{HeaderName, MessageTemplate, Method, MultipartPart, SipStr, Te
 
 use crate::deviation::StepEffects;
 use crate::media::{Booking, MediaMode};
-use crate::mscml::{self, MscmlRequests};
+use crate::mscml::{Echo, MscmlRequests};
 use crate::resolve::{ResolveError, Resolver};
 
 /// Why a step's message could not be composed.
@@ -112,6 +112,9 @@ pub struct Rendered {
     pub ruri: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// The MSCML request types the message's responses answer, one entry per
+    /// response: what the leg's record consumes once the message is composed.
+    pub mscml_answered: Vec<String>,
 }
 
 /// How a lane turns a tier-2 position and a dial form into a URI. The
@@ -141,8 +144,8 @@ pub struct Context<'a> {
     pub media: &'a Booking,
     /// The leg this send rides, which is what a media port is booked against.
     pub leg: &'a str,
-    /// The MSCML requests that leg has received: the ids an MSCML response it
-    /// sends echoes.
+    /// The MSCML requests that leg has received and not yet answered: the ids
+    /// an MSCML response it sends echoes.
     pub mscml: &'a MscmlRequests,
     /// The lane directives for the CALL this step dials, where it dials one —
     /// empty on every other step. A call's egress is its own (§4.3).
@@ -180,9 +183,10 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
         }
     }
 
+    let mut echo = Echo::new(mscml);
     let (body, content_type) = match &msg.body {
         None => (Vec::new(), None),
-        Some(body) => load_body(body, base_dir, media, leg, mscml)?,
+        Some(body) => load_body(body, base_dir, media, leg, &mut echo)?,
     };
     if let Some(ct) = &content_type {
         if !headers.iter().any(|h| HeaderName::ContentType.matches(&h.name)) {
@@ -203,6 +207,7 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
         ruri: uri(msg.ruri.as_ref(), site, "ruri", true, resolver, composer)?,
         from: uri(msg.from.as_ref(), site, "from", false, resolver, composer)?,
         to: uri(msg.to.as_ref(), site, "to", false, resolver, composer)?,
+        mscml_answered: echo.answered(),
     })
 }
 
@@ -287,7 +292,7 @@ impl Rewrite {
 /// lines its tokens name and only where the lane's booking answers them — a
 /// verbatim booking emits the stored bytes unchanged under the type the tags
 /// declare, never decoding them; and an MSCML `<response>`, whose `id` takes
-/// the one `requests` remembered for its type ([`mscml::echo`]). Every other
+/// the one of the oldest request of its type `echo` has unanswered. Every other
 /// payload, every part's `Content-ID` and every part entity header rides
 /// exactly as stored (§8.3). A single reference declaring neither rewrite tags
 /// nor a type is REFUSED rather than mislabelled.
@@ -296,7 +301,7 @@ fn load_body(
     base_dir: &Path,
     media: &Booking,
     leg: &str,
-    requests: &MscmlRequests,
+    echo: &mut Echo<'_>,
 ) -> Result<(Vec<u8>, Option<String>), RenderError> {
     match body {
         // A shape is an expect-side assertion, never a send body.
@@ -322,7 +327,7 @@ fn load_body(
                     let text = String::from_utf8_lossy(&bytes);
                     rewrite_sdp(&text, rewrite, media, leg, &mut stream).into_bytes()
                 } else {
-                    mscml::echo(bytes, &part.content_type, requests)
+                    echo.body(bytes, &part.content_type)
                 };
                 // Content-Type is the composer's own first line; the stored
                 // `Content-ID` leads the rest so a `cid:` reference resolves,
@@ -345,7 +350,7 @@ fn load_body(
             let rewrite = Rewrite::of(&r.rewrite);
             if !rewrite.any() {
                 return match &r.content_type {
-                    Some(ct) => Ok((mscml::echo(bytes, ct, requests), Some(ct.clone()))),
+                    Some(ct) => Ok((echo.body(bytes, ct), Some(ct.clone()))),
                     None => Err(RenderError::BodyUnlabelled { reference: r.reference.clone() }),
                 };
             }
@@ -691,7 +696,7 @@ mod tests {
                 &dir,
                 &Booking::new("127.0.0.1", 40000),
                 "A",
-                &MscmlRequests::default()
+                &mut Echo::new(&MscmlRequests::default())
             ),
             Err(RenderError::BodyUnlabelled { .. })
         ));
@@ -707,7 +712,7 @@ mod tests {
             &dir,
             &Booking::new("127.0.0.1", 40000),
             "A",
-            &MscmlRequests::default(),
+            &mut Echo::new(&MscmlRequests::default()),
         )
         .unwrap();
         assert_eq!(bytes, b"\x00\x01");
@@ -767,7 +772,8 @@ mod tests {
             },
         });
         let media = Booking::new("127.0.0.9", 41000);
-        let (bytes, ct) = load_body(&body, &dir, &media, "A", &MscmlRequests::default()).unwrap();
+        let (bytes, ct) =
+            load_body(&body, &dir, &media, "A", &mut Echo::new(&MscmlRequests::default())).unwrap();
         let ct = ct.expect("a multipart body states the type it framed under");
         let boundary = ct.split("boundary=").nth(1).expect("the type names its boundary");
         assert!(ct.starts_with("multipart/mixed;boundary="), "{ct}");
@@ -820,7 +826,7 @@ mod tests {
             Path::new("."),
             &Booking::new("127.0.0.1", 40000),
             "A",
-            &MscmlRequests::default(),
+            &mut Echo::new(&MscmlRequests::default()),
         )
         .unwrap_err();
         assert!(
@@ -859,7 +865,7 @@ mod tests {
             &dir,
             &Booking::new("127.0.0.1", 40000),
             "A",
-            &MscmlRequests::default(),
+            &mut Echo::new(&MscmlRequests::default()),
         )
         .unwrap();
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -971,7 +977,8 @@ mod tests {
         });
         let verbatim = Booking::verbatim();
         let (bytes, ct) =
-            load_body(&body, &dir, &verbatim, "A", &MscmlRequests::default()).unwrap();
+            load_body(&body, &dir, &verbatim, "A", &mut Echo::new(&MscmlRequests::default()))
+                .unwrap();
         assert_eq!(String::from_utf8_lossy(&bytes), stored, "no line is rewritten");
         assert_eq!(ct.as_deref(), Some("application/sdp"), "the tokens still label the body");
         assert_eq!(verbatim.held("A", 0), None, "and the port book stays empty");
@@ -986,11 +993,14 @@ mod tests {
             ..resource.clone()
         });
         let (bytes, _) =
-            load_body(&odd_body, &dir, &verbatim, "A", &MscmlRequests::default()).unwrap();
+            load_body(&odd_body, &dir, &verbatim, "A", &mut Echo::new(&MscmlRequests::default()))
+                .unwrap();
         assert_eq!(bytes, odd, "the stored bytes ride unchanged");
 
         let rebooked = Booking::new("127.0.0.1", 40000);
-        let (bytes, _) = load_body(&body, &dir, &rebooked, "A", &MscmlRequests::default()).unwrap();
+        let (bytes, _) =
+            load_body(&body, &dir, &rebooked, "A", &mut Echo::new(&MscmlRequests::default()))
+                .unwrap();
         assert_eq!(
             String::from_utf8_lossy(&bytes),
             "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\n\
@@ -1017,7 +1027,8 @@ mod tests {
             compare: None,
         });
         let media = Booking::new("127.0.0.1", 40000);
-        let (bytes, ct) = load_body(&body, &dir, &media, "A", &MscmlRequests::default()).unwrap();
+        let (bytes, ct) =
+            load_body(&body, &dir, &media, "A", &mut Echo::new(&MscmlRequests::default())).unwrap();
         assert_eq!(String::from_utf8_lossy(&bytes), stored, "a frozen body is not rewritten");
         assert_eq!(ct.as_deref(), Some("application/sdp"));
         assert_eq!(media.held("A", 0), None, "and books nothing");
@@ -1057,8 +1068,8 @@ mod tests {
     }
 
     /// The bytes a frozen MSCML resource holding `stored` emits after the leg
-    /// received `requests`.
-    fn emitted(stored: &str, requests: &MscmlRequests) -> String {
+    /// received `requests`, the record left as the send leaves it.
+    fn emitted(stored: &str, requests: &mut MscmlRequests) -> String {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir =
@@ -1072,8 +1083,11 @@ mod tests {
             content_type: Some(MSCML.into()),
             compare: None,
         });
+        let mut echo = Echo::new(requests);
         let (bytes, ct) =
-            load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "B", requests).unwrap();
+            load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "B", &mut echo).unwrap();
+        let answered = echo.answered();
+        requests.answer(&answered);
         assert_eq!(ct.as_deref(), Some(MSCML), "the stored type labels the body");
         std::fs::remove_dir_all(&dir).unwrap();
         String::from_utf8(bytes).expect("UTF-8")
@@ -1083,13 +1097,13 @@ mod tests {
     /// and no other byte of the recorded body changes.
     #[test]
     fn an_mscml_response_echoes_the_id_its_request_carried() {
-        let requests =
+        let mut requests =
             received(&[r#"<request><playcollect id="332985001" maxdigits="1"/></request>"#]);
         let stored = mscml_body(
             r#"<response playduration="11081" reason="timeout" request="playcollect" code="200" digits=""></response>"#,
         );
         assert_eq!(
-            emitted(&stored, &requests),
+            emitted(&stored, &mut requests),
             mscml_body(
                 r#"<response id="332985001" playduration="11081" reason="timeout" request="playcollect" code="200" digits=""></response>"#
             )
@@ -1100,18 +1114,18 @@ mod tests {
     /// each take their OWN request's id, never the last request's of any type.
     #[test]
     fn each_response_echoes_the_request_of_its_own_type() {
-        let requests = received(&[
+        let mut requests = received(&[
             r#"<request><play id="p-1"><prompt/></play></request>"#,
             r#"<request><stop id="s-1"/></request>"#,
         ]);
         assert_eq!(
-            emitted(&mscml_body(r#"<response request="stop" code="200"/>"#), &requests),
+            emitted(&mscml_body(r#"<response request="stop" code="200"/>"#), &mut requests),
             mscml_body(r#"<response id="s-1" request="stop" code="200"/>"#)
         );
         assert_eq!(
             emitted(
                 &mscml_body(r#"<response request="play" code="200" reason="stopped"/>"#),
-                &requests
+                &mut requests
             ),
             mscml_body(r#"<response id="p-1" request="play" code="200" reason="stopped"/>"#)
         );
@@ -1121,11 +1135,11 @@ mod tests {
     /// names a request this run never made, so it goes.
     #[test]
     fn a_recorded_id_is_removed_where_the_live_request_carried_none() {
-        let requests = received(&[r#"<request><play><prompt/></play></request>"#]);
+        let mut requests = received(&[r#"<request><play><prompt/></play></request>"#]);
         assert_eq!(
             emitted(
                 &mscml_body(r#"<response request="play" id="captured-9" code="200"/>"#),
-                &requests
+                &mut requests
             ),
             mscml_body(r#"<response request="play" code="200"/>"#)
         );
@@ -1135,40 +1149,71 @@ mod tests {
     /// recorded id included.
     #[test]
     fn a_response_of_a_type_never_received_rides_byte_for_byte() {
-        let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let mut requests = received(&[r#"<request><play id="p-1"/></request>"#]);
         let stored = mscml_body(r#"<response request="playrecord" id="captured-3" code="200"/>"#);
-        assert_eq!(emitted(&stored, &requests), stored);
-        assert_eq!(emitted(&stored, &MscmlRequests::default()), stored);
+        assert_eq!(emitted(&stored, &mut requests), stored);
+        assert_eq!(emitted(&stored, &mut MscmlRequests::default()), stored);
     }
 
-    /// A later request of a type replaces the id an earlier one left.
+    /// RFC 5022 §6: the media server does not queue, so a second `play`
+    /// stops the first and each still draws its own response, oldest first —
+    /// the stopped play's response answers the play that carried no id, the
+    /// one that ends at EOF answers `final`.
     #[test]
-    fn a_later_request_of_the_same_type_replaces_the_remembered_id() {
-        let requests = received(&[
-            r#"<request><play id="p-1"/></request>"#,
-            r#"<request><play id="p-2"/></request>"#,
+    fn responses_of_one_type_answer_their_requests_oldest_first() {
+        let mut requests = received(&[
+            r#"<request><play><prompt/></play></request>"#,
+            r#"<request><play id="final"><prompt/></play></request>"#,
         ]);
-        assert_eq!(requests.id_of("play"), Some(Some("p-2")));
         assert_eq!(
-            emitted(&mscml_body(r#"<response request="play" code="200"/>"#), &requests),
-            mscml_body(r#"<response id="p-2" request="play" code="200"/>"#)
+            emitted(
+                &mscml_body(
+                    r#"<response request="play" id="captured-1" code="200" reason="stopped"/>"#
+                ),
+                &mut requests
+            ),
+            mscml_body(r#"<response request="play" code="200" reason="stopped"/>"#),
+            "the stopped play answers the older request, which carried no id"
         );
-        let cleared =
-            received(&[r#"<request><play id="p-1"/></request>"#, r#"<request><play/></request>"#]);
-        assert_eq!(cleared.id_of("play"), Some(None), "a request without one clears it");
+        assert_eq!(
+            emitted(
+                &mscml_body(r#"<response request="play" code="200" reason="eof"/>"#),
+                &mut requests
+            ),
+            mscml_body(r#"<response id="final" request="play" code="200" reason="eof"/>"#),
+            "the play that ran to its end answers the newer request"
+        );
+    }
+
+    /// A response consumes the request it answers: once every request of a
+    /// type is answered, a further response of that type rides as recorded.
+    #[test]
+    fn a_response_consumes_the_request_it_answers() {
+        let mut requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let response = mscml_body(r#"<response request="play" id="captured-3" code="200"/>"#);
+        assert_eq!(
+            emitted(&response, &mut requests),
+            mscml_body(r#"<response request="play" id="p-1" code="200"/>"#)
+        );
+        assert_eq!(emitted(&response, &mut requests), response, "no request is left to answer");
     }
 
     /// Only a `<response>` echoes: a notification and a request a replayed
     /// party sends ride as recorded, whatever ids they hold.
     #[test]
     fn an_mscml_body_that_is_no_response_is_untouched() {
-        let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
+        let mut requests = received(&[r#"<request><play id="p-1"/></request>"#]);
         let notification = mscml_body(
             r#"<notification><keypress digit="1" request="play" id="n-1"/></notification>"#,
         );
-        assert_eq!(emitted(&notification, &requests), notification);
+        assert_eq!(emitted(&notification, &mut requests), notification);
         let request = mscml_body(r#"<request><play id="mine"/></request>"#);
-        assert_eq!(emitted(&request, &requests), request);
+        assert_eq!(emitted(&request, &mut requests), request);
+        assert_eq!(
+            emitted(&mscml_body(r#"<response request="play" code="200"/>"#), &mut requests),
+            mscml_body(r#"<response id="p-1" request="play" code="200"/>"#),
+            "neither answered the play"
+        );
     }
 
     /// A response a replayed party SENDS is not one it received: the record is
@@ -1219,12 +1264,63 @@ mod tests {
             },
         });
         let requests = received(&[r#"<request><play id="p-1"/></request>"#]);
-        let (bytes, _) =
-            load_body(&body, &dir, &Booking::new("127.0.0.1", 40000), "B", &requests).unwrap();
+        let (bytes, _) = load_body(
+            &body,
+            &dir,
+            &Booking::new("127.0.0.1", 40000),
+            "B",
+            &mut Echo::new(&requests),
+        )
+        .unwrap();
         let text = String::from_utf8(bytes).unwrap();
         let echoed = mscml_body(r#"<response id="p-1" request="play" code="200"/>"#);
         assert_eq!(text.matches(&echoed).count(), 1, "the MSCML part echoes:\n{text}");
         assert_eq!(text.matches(&stored).count(), 1, "the other part rides as stored:\n{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two MSCML responses of one type in one body answer two requests, in
+    /// order, never one twice.
+    #[test]
+    fn two_response_parts_of_one_type_answer_two_requests() {
+        let dir =
+            std::env::temp_dir().join(format!("pivot-render-mscml-mp2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("first.xml"), mscml_body(r#"<response request="play" n="1"/>"#))
+            .unwrap();
+        std::fs::write(dir.join("second.xml"), mscml_body(r#"<response request="play" n="2"/>"#))
+            .unwrap();
+        let part = |reference: &str| pivot_schema::body::Part {
+            content_type: MSCML.into(),
+            reference: reference.into(),
+            rewrite: vec![],
+            mode: Some(pivot_schema::body::BodyMode::Frozen),
+            compare: None,
+            content_id: None,
+            headers: vec![],
+            cid_linked: vec![],
+        };
+        let body = Body::Multipart(pivot_schema::body::MultipartBody {
+            multipart: pivot_schema::body::Multipart {
+                content_type: "multipart/mixed".into(),
+                parts: vec![part("first.xml"), part("second.xml")],
+            },
+        });
+        let requests = received(&[
+            r#"<request><play id="p-1"/></request>"#,
+            r#"<request><play id="p-2"/></request>"#,
+        ]);
+        let (bytes, _) = load_body(
+            &body,
+            &dir,
+            &Booking::new("127.0.0.1", 40000),
+            "B",
+            &mut Echo::new(&requests),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(r#"<response id="p-1" request="play" n="1"/>"#), "{text}");
+        assert!(text.contains(r#"<response id="p-2" request="play" n="2"/>"#), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

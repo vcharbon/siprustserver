@@ -725,9 +725,12 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
 
         // Before any policy or step consumes it: a response the leg sends later
-        // echoes the id of the MSCML request it answers (RFC 5022 §10.2).
-        if let Some(leg) = self.leg_by_call_id(&inbound.call_id) {
-            self.instance.leg_mut(&leg).mscml.remember(&inbound);
+        // echoes the id of the MSCML request it answers (RFC 5022 §10.2). An
+        // initial INVITE is remembered by `deliver`, once its claim names the leg.
+        if !opens_dialog(&inbound) {
+            if let Some(leg) = self.leg_by_call_id(&inbound.call_id) {
+                self.instance.leg_mut(&leg).mscml.remember(&inbound);
+            }
         }
 
         // Background next (§5.1): a policy's traffic never touches the cursor.
@@ -932,6 +935,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 return true;
             }
         };
+        if opens_dialog(&inbound) {
+            self.instance.leg_mut(&leg).mscml.remember(&inbound);
+        }
         if self.owed_bye_final(&leg, &inbound) {
             self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return true;
@@ -2428,6 +2434,9 @@ impl<'a, 'p> Runner<'a, 'p> {
             };
             (rendered, cseq_override)
         };
+        // Composed once per emission: a retransmission re-sends these bytes and
+        // answers nothing again.
+        self.instance.leg_mut(&step.leg).mscml.answer(&rendered.mscml_answered);
         let body = rendered.template.body().to_vec();
         // A preserved emission (§11) keeps a stated Content-Type IN the stored
         // block: lifting it out would frame the body under a header the stack
@@ -2816,6 +2825,13 @@ fn preserved_block(
 }
 
 /// The step outcome a message contributes to the `${step:…}` namespace.
+/// Whether `inbound` is an initial INVITE: no To-tag yet, so no dialog the
+/// leg could be found by before a claim names it (RFC 3261 §12.1).
+fn opens_dialog(inbound: &Inbound) -> bool {
+    inbound.method.as_deref().map(Method::from_wire) == Some(Method::Invite)
+        && inbound.to_tag.is_none()
+}
+
 fn outcome_of(inbound: &Inbound) -> StepOutcome {
     StepOutcome {
         status: inbound.status,

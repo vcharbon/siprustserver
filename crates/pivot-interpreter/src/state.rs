@@ -28,8 +28,9 @@ pub struct LegState {
     pub cseq_remote: Option<u32>,
     /// The last RSeq seen on a reliable provisional of this leg.
     pub rseq: Option<u32>,
-    /// The MSCML requests the leg has received, which a response it sends
-    /// echoes the id of (RFC 5022 §10.2).
+    /// The MSCML requests the leg has received and not yet answered, whose ids
+    /// the responses it sends echo, oldest first per type (RFC 5022 §6,
+    /// §10.2).
     pub mscml: MscmlRequests,
 }
 

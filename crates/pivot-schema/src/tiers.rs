@@ -146,7 +146,8 @@ impl MediaTypeMatch {
 pub enum BodyHandling {
     /// Apply these rewrite tokens before emission.
     Rewrite { tokens: Vec<String> },
-    /// Replay byte-exact.
+    /// Replay byte-exact, except that an MSCML `<response>` takes the
+    /// client-defined id of the request it answers (RFC 5022 §10.2).
     Freeze { mode: crate::body::BodyMode },
 }
 

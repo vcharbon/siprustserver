@@ -72,11 +72,14 @@ now reads.
 
 **2026-10-09 — a replayed MSCML response echoes its request's id.** RFC 5022
 §4.1 lets the client put an `id` on a request's command element, chosen live,
-and §10.2 has the `<response>` echo it. Each leg remembers, per command type,
-the id the last MSCML request it received carried, or that it carried none; a
-`<response request="T">` a send emits takes the leg's T id, inserted, replacing
-a recorded one, or removing it. Render rewrites two contents, SDP and this
-id (§8.3, §14 item 3). No document field changes.
+and §10.2 has the `<response>` echo it. A media server does not queue, and
+every request it received draws its own response, the stopped one included
+(§6). So each leg queues, per command type, the MSCML requests it received
+and has not answered, oldest first, each with its id or none; a
+`<response request="T">` a send emits takes the id of the oldest unanswered T
+request, inserted, replacing a recorded one, or removing it, and answers that
+request. Render rewrites two contents, SDP and this id (§8.3, §14 item 3);
+`frozen` replays byte-exact but for it. No document field changes.
 
 **2026-10-05 — a From or To ref states the name-addr its number rode in.** A
 tier-2 ref on a From or To may carry `addr`: the captured value with its tag
@@ -431,7 +434,7 @@ reads the two forks' own tags and RSeqs.
 | change | where |
 |---|---|
 | `body.parts[]` gains `content-id`, the part's OWN `Content-ID` value (distinct from `cid-linked`, which is the LINK record), and `headers`, its remaining entity headers verbatim in wire order (RFC 2045 §3). Extraction reads both off the wire and the generator states them where the capture carried them | §8.3 |
-| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and SDP, direct or as a part, is the ONE content the tool rewrites, because replay rebooks addresses and ports. **Amended 2026-10-09:** an MSCML `<response>` is the second, its `id` echoing the live request's (RFC 5022 §10.2) | §8.3 |
+| a body is emitted as the document holds it — payloads, ids and entity headers byte-exact — and the tool rewrites two contents, direct or as a part: SDP, because replay rebooks addresses and ports, and an MSCML `<response>`'s `id`, which echoes the live request's (RFC 5022 §10.2) | §8.3 |
 | a `cid-linked` part stating a `content-id` EMITS under it; one stating none is refused by name, so a document written before the id was stored fails loudly rather than emitting a stranded reference (RFC 5621 §3) | §8.3, §14 |
 
 The flows schema is NOT bumped: `msgs[].body.parts[].headers` is additive and
@@ -2155,7 +2158,8 @@ own overlay.
 A single body on a SEND references a resource file, and the registry decides
 what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`{ "ref": "resources/…", "rewrite": ["c=addr", "m=port"] }`), or `mode`
-(`frozen`) plus the captured `content-type` where it replays byte-exact. A
+(`frozen`) plus the captured `content-type` where it replays byte-exact — an
+MSCML `<response>` but for its `id`, which echoes the request it answers. A
 resource file holds BYTES; whether they are text is a fact of the bytes, never
 a declared mode, and no rule names a media type to say so (ADR-0035).
 
@@ -2308,17 +2312,22 @@ live. Nothing else in a body is edited, ever.
 **An MSCML response echoes the id of the request it answers** (RFC 5022 §4.1,
 §10.2). Every request a leg RECEIVES whose body (or a part of it) is
 `application/mediaservercontrol+xml` with a `<request>` under its
-`<MediaServerControl>` root is remembered under the name of the command element
-inside `<request>` (`play`, `playcollect`, `stop` …): the value of that
-element's `id`, or its absence. A later request of the same type replaces it,
-whether or not an expect matched the request. A `<response request="T" …>` a
-send emits on that leg takes the remembered T id: `id` inserted after the
-element name, a recorded `id` replaced in place, or a recorded `id` removed
-where the T request carried none. The match is by type, so a `<stop>`'s own
-response and the stopped `<play>`'s `reason="stopped"` response each echo their
-own request's id. A response of a type the leg never received, a
-`<notification>`, a `<request>` a replayed party sends and every other body ride
-as stored. Only the `id` attribute of the `<response>` element changes.
+`<MediaServerControl>` root is queued under the name of the command element
+inside `<request>` (`play`, `playcollect`, `stop` …) with the value of that
+element's `id`, or its absence — whether an expect matched the request, a
+background policy absorbed it, or it rode the initial INVITE that opened the
+leg. A media server does not queue requests: a new one stops the one in
+progress, and each still draws its own response (RFC 5022 §6). So a
+`<response request="T" …>` a send emits on that leg answers the OLDEST queued T
+request and takes its id: `id` inserted after the element name, a recorded `id`
+replaced in place, or a recorded `id` removed where that request carried none.
+The request is answered once per emission; a retransmission re-sends the same
+bytes. Two plays and their two responses — the first `reason="stopped"`, the
+second at its end — answer the first play then the second, and a `<stop>`'s
+own response answers the `<stop>`, never the play it stopped. A response of a
+type with no request left to answer, a `<notification>`, a `<request>` a
+replayed party sends and every other body ride as stored. Only the `id`
+attribute of the `<response>` element changes.
 
 **Both tokens read one source: the lane's own media booking** (`legs[].media.rtp`,
 §5). `c=addr` writes the lane's media address into every connection line;
@@ -2352,7 +2361,7 @@ never changes how a part is handled:
 | part content-type | handling |
 |---|---|
 | `application/sdp` | rewrite `c=` and `m=` |
-| known non-SDP | freeze (`frozen`, text or bytes alike) |
+| known non-SDP | freeze (`frozen`, text or bytes alike; an MSCML `<response>` echoes its request's `id`) |
 | unrecognized | freeze AND flag when the payload carries number-like digits |
 
 The unrecognized arm is the point: a missing handler is a decision owed, not a

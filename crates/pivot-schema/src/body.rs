@@ -105,8 +105,10 @@ pub enum BodyShape {
 }
 
 /// How the registry handles a stored body or part: `frozen` replays and
-/// compares byte-exact whatever the payload holds. Whether the payload is text
-/// or bytes is a fact of the bytes, never a declared mode (ADR-0035).
+/// compares byte-exact whatever the payload holds, except that an MSCML
+/// `<response>` a send emits takes the client-defined id of the request it
+/// answers (RFC 5022 §10.2, §8.3). Whether the payload is text or bytes is a
+/// fact of the bytes, never a declared mode (ADR-0035).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum BodyMode {

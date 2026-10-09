@@ -9,14 +9,19 @@
  * resource body carrying a shape mode would be accepted by the wrong arm.
  *
  * A body is emitted as the document holds it: every part's payload byte-exact,
- * its `Content-ID` and its entity headers verbatim (RFC 2045 §3).
+ * its `Content-ID` and its entity headers verbatim (RFC 2045 §3). Two contents
+ * are rewritten, direct or as a part: SDP, because replay rebooks addresses
+ * and ports, and an MSCML `<response>`'s `id`, which echoes the client-defined
+ * id of the request the leg received (RFC 5022 §10.2).
  */
 import * as Schema from "effect/Schema"
 
 /**
  * How the registry handles a stored body or part: `frozen` replays and
- * compares byte-exact whatever the payload holds. Whether the payload is text
- * or bytes is a fact of the bytes, never a declared mode (ADR-0035).
+ * compares byte-exact whatever the payload holds, except that an MSCML
+ * `<response>` a send emits takes the client-defined id of the request it
+ * answers (RFC 5022 §10.2, §8.3). Whether the payload is text or bytes is a
+ * fact of the bytes, never a declared mode (ADR-0035).
  */
 export const BodyMode = Schema.Literals(["frozen"])
 export type BodyMode = typeof BodyMode.Type
