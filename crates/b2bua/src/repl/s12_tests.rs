@@ -199,6 +199,41 @@ async fn forward_put_behind_the_elements_backup_counter_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// FORWARD `Put`: a CANCEL that pre-empted the recorded answer moves the call
+// along, not back. A recorded the relayed 2xx and flushed it; B, after a
+// takeover in that window, holds that answered body at (1,1). A's next turn is
+// the CANCEL its transaction layer had already answered 487 before the 2xx
+// reached the wire: a Terminating body whose caller holds no dialog. It must
+// land, or a later takeover would bring back a call whose caller was never
+// answered as an answered one.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn forward_put_of_a_cancel_that_preempted_the_answer_applies() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (a, b, b_sup) = primary_and_backup(&net, &clock, 21).await;
+
+    let ringing = call_in("A", "B", "s12-preempt", LegState::Early, CallModelState::Active);
+    let call_ref = ringing.call_ref.clone();
+    forward(&a.store, &ringing, 1, 0).await;
+    tick(150).await;
+    let answered = call_in("A", "B", "s12-preempt", LegState::Confirmed, CallModelState::Active);
+    element(&b.store, &answered, 1, 1).await;
+
+    let mut cancelled = call::helpers::record_cancelled_invite(answered.clone(), "a");
+    cancelled.state = CallModelState::Terminating;
+    forward(&a.store, &cancelled, 2, 1).await;
+    tick(200).await;
+
+    let (state, a_state) = stored_state(&b.store, BAK, "A", &call_ref).await;
+    assert_eq!(state, CallModelState::Terminating, "the cancelled turn's body lands");
+    assert_ne!(a_state, LegState::Confirmed, "the Element's caller holds no dialog");
+    assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((2, 1)));
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 0, "not a branch");
+}
+
+// ---------------------------------------------------------------------------
 // FORWARD `Put`: the refusal is narrow — an equal or advanced `b'` is the
 // authority carrying the backup's progress forward, and applies.
 // ---------------------------------------------------------------------------

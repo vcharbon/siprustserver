@@ -111,9 +111,9 @@ async fn a_503_is_a_failure_when_the_run_declares_no_overload_refusal() {
     }
 }
 
-/// An undeclared 486 on the basic call fails at alice's pending goal (the BYE,
-/// goal #1, still waiting on its guard) while the controller waits on the
-/// `established` barrier; the key reads `<who>:<goal kind>#<index>@<barrier>`.
+/// An undeclared 486 on the basic call fails at the step it answers — alice's
+/// INVITE, goal #0 — while the controller waits on the `established` barrier;
+/// the key reads `<who>:<goal kind>#<index>@<barrier>`.
 #[tokio::test(start_paused = true)]
 async fn a_failed_goal_names_the_agent_its_pending_goal_and_the_barrier() {
     let v = basic_call_refused_with("verdict-failed-goal", 486, false, Some(503)).await;
@@ -121,8 +121,8 @@ async fn a_failed_goal_names_the_agent_its_pending_goal_and_the_barrier() {
         panic!("an undeclared 486 must fail, got {v:?}");
     };
     assert!(matches!(cause, StepError::WrongStatus { got: 486, .. }), "cause {cause:?}");
-    assert_eq!(at, FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" });
-    assert_eq!(at.to_string(), "alice:bye#1@established");
+    assert_eq!(at, FailedAt { who: "alice", goal: Some(("invite", 0)), barrier: "established" });
+    assert_eq!(at.to_string(), "alice:invite#0@established");
 }
 
 /// A barrier that never holds fails the call at that barrier, once every

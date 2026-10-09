@@ -278,10 +278,10 @@ async fn loadgen_fake_net_abnormal_end_mix_classes_ok_by_branch() {
 
 /// A failed call is counted by the step it failed at. An SUT whose admission
 /// bucket is empty refuses every non-emergency INVITE with 503, which a run
-/// that does not expect overload counts as a failure: alice's 503 arrives
-/// while her BYE (goal #1) waits on its guard and the controller waits on the
-/// `established` barrier, so `loadgen_failed_step_total` counts every call
-/// under `alice:bye#1@established`.
+/// declaring no overload refusal counts as a failure of alice's INVITE (goal
+/// #0) while the controller waits on the `established` barrier, so
+/// `loadgen_failed_step_total` counts every call under
+/// `alice:invite#0@established`.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_counts_failures_by_failed_step() {
@@ -309,7 +309,7 @@ async fn loadgen_fake_net_counts_failures_by_failed_step() {
         "every refused call is a status_503 failure:\n{prom}"
     );
     let line = format!(
-        "loadgen_failed_step_total{{scenario=\"basic_call\",step=\"alice:bye#1@established\"}} {total}"
+        "loadgen_failed_step_total{{scenario=\"basic_call\",step=\"alice:invite#0@established\"}} {total}"
     );
     assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
 
@@ -441,12 +441,14 @@ async fn loadgen_fake_net_crossing_bye() {
     b2bua.assert_fully_reaped();
 }
 
-/// C2/E5: CANCEL×200 crossing through the SUT — a branch-aware race. Each call
-/// terminates in one of the two RFC-legal outcomes: confirmed + torn down (the
-/// 200 crossed the CANCEL → `Ok`) or abandoned (the CANCEL won → `timeout`). The
-/// load lane ACCEPTS EITHER; the assertion is that classification stays BOUNDED
-/// (every call lands in {Ok, Timeout} — never a protocol-defect class), no
-/// audit false positive, and the SUT fully reaps.
+/// C2/E5: CANCEL×200 crossing through the SUT. Each call ends on one of its two
+/// RFC-legal endings, both accepted and classed `ok`: `answered_despite_cancel`
+/// (the 200 left before the CANCEL arrived, §9.2: the caller ACKs and BYEs) or
+/// `abandoned` (the CANCEL won, 487). On this paused fake net the timing is
+/// fixed: the caller CANCELs one ring after her 180, the callee answers one
+/// ring after sending it, so the 200 always leaves first and every call is the
+/// crossing. The `abandoned` branch through the SUT is pinned by the B2BUA's
+/// own crossing test.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
@@ -462,22 +464,13 @@ async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
     driver.run().await;
 
     let total = reporter.total_calls();
-    let ok = reporter.count("cancel_answer_crossing", &ResultClass::Ok);
-    let timeouts = reporter.count("cancel_answer_crossing", &ResultClass::Timeout);
+    let prom = reporter.render_prometheus();
     assert!(total >= 5, "governor under-delivered: {total}");
-    // Bounded classification: EVERY call is one of the two legal branches.
-    assert_eq!(
-        ok + timeouts,
-        total,
-        "a CANCEL×200 crossing landed outside {{Ok, Timeout}}:\n{}",
-        reporter.render_prometheus()
+    assert_eq!(reporter.count("cancel_answer_crossing", &ResultClass::Ok), total, "{prom}");
+    let crossed = format!(
+        "loadgen_branch_total{{scenario=\"cancel_answer_crossing\",branch=\"answered_despite_cancel\"}} {total}"
     );
-    assert_eq!(
-        reporter.count("cancel_answer_crossing", &ResultClass::RfcAuditFail),
-        0,
-        "the crossing produced an RFC-audit finding:\n{}",
-        reporter.render_prometheus()
-    );
+    assert!(prom.lines().any(|l| l == crossed), "expected `{crossed}` in:\n{prom}");
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");

@@ -21,6 +21,8 @@ mod admit;
 #[cfg(test)]
 mod answer_deadline_tests;
 mod callouts;
+#[cfg(test)]
+mod cancel_crossing_tests;
 mod ingress;
 mod interpret;
 pub(crate) mod late_prack;
