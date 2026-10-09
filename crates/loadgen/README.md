@@ -85,7 +85,7 @@ for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
 + auto-retransmit* below), `--load-profile` (see *The run-spec axis* below),
 `--overload-reject <code>` (see *Accepted endings*). Run `--help` for the full
-list. Each mux socket requests 4 MiB receive and send buffers: one socket
+list. Each mux socket requests 2 MiB receive and send buffers: one socket
 carries every concurrent call, so an overflowing buffer would drop datagrams
 before the loadgen sees them and fail their calls on a timeout. The loadgen
 warns at bind when `net.core.rmem_max` / `wmem_max` clamped the request.

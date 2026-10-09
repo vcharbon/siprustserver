@@ -8,9 +8,10 @@
 use sip_net::socket_stats::was_clamped;
 use sip_net::{BindUdpOpts, UdpEndpoint};
 
-/// `SO_RCVBUF` and `SO_SNDBUF` every mux endpoint requests, in bytes. The
+/// `SO_RCVBUF` and `SO_SNDBUF` every mux endpoint requests, in bytes: the
+/// smallest request that keeps kernel drops at zero through 2000 cps. The
 /// kernel clamps the request at `net.core.rmem_max` / `wmem_max`.
-const MUX_SOCKET_BUFFER: usize = 4 << 20;
+const MUX_SOCKET_BUFFER: usize = 2 << 20;
 
 /// `opts` requesting the mux socket buffers.
 pub(super) fn with_mux_buffers(opts: BindUdpOpts) -> BindUdpOpts {
