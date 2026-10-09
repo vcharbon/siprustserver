@@ -80,6 +80,28 @@ pub(super) fn stated_lines(stated: &[(&str, &str)]) -> Vec<SipHeader> {
         .collect()
 }
 
+/// A sent request as an expect names it: method, CSeq and the dialog it
+/// rides (Call-ID and tags). `method` overrides the request's own, for the
+/// CANCEL built from an INVITE (it shares the INVITE's CSeq number and tags).
+pub(super) fn request_label(method: Option<&str>, request: &SipRequest) -> String {
+    let to_tag = match request.to().tag() {
+        Some(t) if !t.is_empty() => format!("To-tag {t}"),
+        _ => "no To-tag".to_string(),
+    };
+    format!(
+        "{} CSeq {} (Call-ID {}, From-tag {}, {to_tag})",
+        method.unwrap_or(request.method().as_str()),
+        request.cseq().seq(),
+        request.call_id(),
+        request.from().tag().unwrap_or_default(),
+    )
+}
+
+/// What an expect of `status` to `request` waits for.
+pub(super) fn awaited_response(status: u16, request: &SipRequest) -> String {
+    format!("a {status} to {}", request_label(None, request))
+}
+
 /// Panicking veneer over [`try_expect_response`].
 pub(super) async fn expect_response(
     agent: &Agent,
@@ -136,7 +158,9 @@ pub(super) async fn try_expect_response_tolerating(
     ack: Option<&AckCtx<'_>>,
 ) -> Result<SipResponse, StepError> {
     loop {
-        match agent.try_recv().await? {
+        let next =
+            agent.try_recv().await.map_err(|e| e.awaiting(|| format!("a {status} response")));
+        match next? {
             SipMessage::Response(r) if r.status() == 100 && status != 100 => continue,
             SipMessage::Response(r) => {
                 if let Some(ctx) = ack {

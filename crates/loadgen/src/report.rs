@@ -897,7 +897,7 @@ mod tests {
         );
         let failed = CallOutcome::Step {
             at: FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" },
-            cause: scenario_harness::StepError::Timeout { who: "alice".into() },
+            cause: scenario_harness::StepError::timeout("alice", None, "a datagram"),
         };
         r.record(
             "basic_call",
@@ -981,7 +981,7 @@ mod tests {
         assert!(r.should_record("s"), "nothing recorded yet");
         let failed = || CallOutcome::Step {
             at: FailedAt::at_barrier("established"),
-            cause: scenario_harness::StepError::Timeout { who: "established".into() },
+            cause: scenario_harness::StepError::timeout("established", None, "a datagram"),
         };
         let record = |o: &CallOutcome| {
             let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
@@ -994,7 +994,7 @@ mod tests {
         assert!(!r.should_record("s"), "a full bucket is not chased");
         record(&CallOutcome::Step {
             at: FailedAt::at_barrier("torn_down"),
-            cause: scenario_harness::StepError::Timeout { who: "torn_down".into() },
+            cause: scenario_harness::StepError::timeout("torn_down", None, "a datagram"),
         });
         assert!(r.should_record("s"), "a new bucket re-arms the chase");
     }

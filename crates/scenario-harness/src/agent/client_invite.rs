@@ -4,6 +4,7 @@
 //! it lives in [`super::invite`].
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 
 use sip_message::generators::{
@@ -15,9 +16,11 @@ use sip_message::sip_str::SipStr;
 use sip_message::{Automatic, DelayedAutomatic, SipMessage, SipRequest, SipResponse};
 
 use super::addressing::next_hop;
-use super::client_txn::{stated_lines, try_expect_response, try_send_cancel, AckCtx};
+use super::client_txn::{
+    awaited_response, request_label, stated_lines, try_expect_response, try_send_cancel, AckCtx,
+};
 use super::dialog::{Dialog, InDialogRequest, InDialogTxn};
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
@@ -114,9 +117,12 @@ impl ClientInvite {
     /// the way a real txn layer does. A test whose *subject* is the
     /// ACK-retransmission dance hand-rolls raw sends instead.
     ///
-    /// Panicking veneer over [`try_expect`](ClientInvite::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// Panicking veneer over [`try_expect`](ClientInvite::try_expect): the
+    /// panic names the step and the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// THE expect core for this INVITE transaction: a wrong status / timeout /
@@ -124,7 +130,9 @@ impl ClientInvite {
     /// on it via [`expect`](ClientInvite::expect)). On success it learns the
     /// dialog state (remote tag / target / route set).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await?;
+        let resp = try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+            .await
+            .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))?;
         self.learn_from_response(&resp);
         Ok(resp)
     }
@@ -168,7 +176,12 @@ impl ClientInvite {
     ) -> Result<(SipResponse, Vec<SipResponse>), StepError> {
         let mut provisionals = Vec::new();
         loop {
-            match self.agent.try_recv().await? {
+            let next = self
+                .agent
+                .try_recv()
+                .await
+                .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)));
+            match next? {
                 SipMessage::Response(r) if r.status() == 100 => continue,
                 SipMessage::Response(r) if r.status() < 200 => {
                     self.learn_from_response(&r);
@@ -454,6 +467,7 @@ impl ClientInvite {
             // read — and auto-ACKed — via [`ClientInvite::expect`].
             None,
             self.wire_dst,
+            request_label(Some("CANCEL"), &self.original_invite),
         )
     }
 

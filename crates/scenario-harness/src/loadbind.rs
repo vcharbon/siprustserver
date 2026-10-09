@@ -272,6 +272,7 @@ impl AgentBinder {
             txn: Arc::new(crate::absorption::Absorption::raw_wire()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
+            steps: Arc::default(),
         })
     }
 

@@ -4,6 +4,7 @@
 //! absorbing receive policies live in [`super::tolerant_recv`].
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,13 +18,13 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_net::UdpEndpoint;
 
-use super::client_txn::expect_response;
+use super::client_txn::{expect_response, request_label};
 use super::dialog::InDialogTxn;
 use super::harness::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
 use super::rr_fold::RecordRouteFold;
 use super::server_txn::ServerTxn;
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepCounter, StepError, StepSite};
 use super::Invite;
 use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
 use crate::dialogs::{BackwardsCseq, DialogJudge, DialogJudging, DialogVerdict};
@@ -110,6 +111,9 @@ pub struct Agent {
     pub(crate) holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
     /// This UA's dialog table and the verdicts it recorded. Shared across clones.
     pub(crate) dialogs: Arc<DialogJudge>,
+    /// The ordinal source of the run's scripted waits, shared by every agent
+    /// of one harness.
+    pub(crate) steps: StepCounter,
 }
 
 impl Agent {
@@ -314,7 +318,13 @@ impl Agent {
                 return held;
             }
             let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
-                Err(_) => return Err(StepError::Timeout { who: self.name.clone() }),
+                Err(_) => {
+                    return Err(StepError::timeout(
+                        self.name.clone(),
+                        Some(self.recv_timeout),
+                        "a datagram",
+                    ))
+                }
                 Ok(None) => return Err(StepError::QueueClosed { who: self.name.clone() }),
                 Ok(Some(p)) => p,
             };
@@ -420,7 +430,9 @@ impl Agent {
     /// ACK-before-the-next-INVITE interleave needs no body-side boilerplate.
     pub async fn try_receive(&self, method: &str) -> Result<ServerTxn, StepError> {
         loop {
-            match self.try_recv().await? {
+            let next =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match next? {
                 SipMessage::Request(r) => {
                     self.dialog_check(&r)?;
                     if r.method() != method {
@@ -519,9 +531,27 @@ impl Agent {
 
     /// Receive the next request and assert its method. Returns a UAS-side
     /// transaction handle for sending responses. Panicking veneer over
-    /// [`try_receive`](Agent::try_receive).
-    pub async fn receive(&self, method: &str) -> ServerTxn {
-        unwrap_step(self.try_receive(method).await)
+    /// [`try_receive`](Agent::try_receive): the panic names the step and the
+    /// test line that called it.
+    #[track_caller]
+    pub fn receive<'a>(&'a self, method: &'a str) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive");
+        async move { unwrap_step_at(self.try_receive(method).await, site) }
+    }
+
+    /// The next scripted wait of this run, called from the caller's caller.
+    #[track_caller]
+    pub(super) fn step(&self, verb: &'static str) -> StepSite {
+        StepSite::next(&self.steps, verb)
+    }
+
+    /// What a receive of a `method` request waits for, with the dialogs this
+    /// UA holds: the tags the awaited request should carry.
+    pub(super) fn awaited_request(&self, method: &str) -> String {
+        match self.dialogs.live_dialogs() {
+            held if held.is_empty() => format!("a {method} request (holds no dialog)"),
+            held => format!("a {method} request in one of its dialogs: {}", held.join("; ")),
+        }
     }
 
     /// **Best-effort socket drain** — read (and discard) every datagram *currently
@@ -618,12 +648,14 @@ impl Agent {
             ..Default::default()
         };
         let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts);
+        let label = request_label(None, &res.request);
         self.send(&SipMessage::Request(res.request), dst).await;
         InDialogTxn::new(
             self.clone(),
             // A REFER's finals take no ACK.
             None,
             dst,
+            label,
         )
     }
 

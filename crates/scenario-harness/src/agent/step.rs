@@ -1,7 +1,12 @@
-//! The fallible-core step vocabulary: [`StepError`] and the panicking
-//! [`unwrap_step`] veneer. Every agent primitive is implemented once, fallibly
-//! (`try_receive`, `try_expect`, `try_send`, …); the panicking fluent methods
+//! The fallible-core step vocabulary: [`StepError`], the [`StepSite`] a
+//! scripted step was called from, and the panicking [`unwrap_step`] veneer.
+//! Every agent primitive is implemented once, fallibly (`try_receive`,
+//! `try_expect`, `try_send`, …); the panicking fluent methods
 //! (`receive`/`expect`/`send`) are thin veneers over it.
+
+use std::panic::Location;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::dialogs::DialogVerdict;
 
@@ -13,8 +18,10 @@ use crate::dialogs::DialogVerdict;
 /// humans).
 #[derive(Debug, Clone)]
 pub enum StepError {
-    /// No datagram arrived within the agent's `recv_timeout`.
-    Timeout { who: String },
+    /// Nothing the step waits for arrived in time. `awaited` names it — a
+    /// method or a status, with the dialog's tags when the step knows them —
+    /// and `after` is the wait bound when one applies.
+    Timeout { who: String, after: Option<Duration>, awaited: String },
     /// The endpoint's receive queue closed (socket/task gone).
     QueueClosed { who: String },
     /// A datagram arrived but did not parse as SIP.
@@ -31,10 +38,34 @@ pub enum StepError {
     Dialog { who: String, verdict: Box<DialogVerdict> },
 }
 
+impl StepError {
+    /// A [`StepError::Timeout`] of `who` waiting for `awaited`.
+    pub fn timeout(
+        who: impl Into<String>,
+        after: Option<Duration>,
+        awaited: impl Into<String>,
+    ) -> Self {
+        StepError::Timeout { who: who.into(), after, awaited: awaited.into() }
+    }
+
+    /// Name what a timed-out step waited for; any other error passes through.
+    pub(crate) fn awaiting(self, awaited: impl FnOnce() -> String) -> Self {
+        match self {
+            StepError::Timeout { who, after, .. } => {
+                StepError::Timeout { who, after, awaited: awaited() }
+            }
+            other => other,
+        }
+    }
+}
+
 impl std::fmt::Display for StepError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StepError::Timeout { who } => write!(f, "{who} timed out waiting for a datagram"),
+            StepError::Timeout { who, after, awaited } => match after {
+                Some(after) => write!(f, "{who} timed out after {after:?} waiting for {awaited}"),
+                None => write!(f, "{who} timed out waiting for {awaited}"),
+            },
             StepError::QueueClosed { who } => write!(f, "{who} endpoint queue closed"),
             StepError::Unparseable { who, detail } => {
                 write!(f, "{who} received an unparseable datagram: {detail}")
@@ -53,18 +84,55 @@ impl std::fmt::Display for StepError {
 }
 impl std::error::Error for StepError {}
 
+/// The ordinal source of a run's scripted steps, shared by every agent one
+/// harness binds.
+pub(crate) type StepCounter = std::sync::Arc<AtomicU64>;
+
+/// Where a scripted wait (a `receive` or an `expect`) was called from: its
+/// ordinal among the run's waits and the test line that called it. Captured
+/// synchronously by a `#[track_caller]` veneer, before its future runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StepSite {
+    ordinal: u64,
+    verb: &'static str,
+    at: &'static Location<'static>,
+}
+
+impl StepSite {
+    /// The next step of `steps`, called from the caller's caller.
+    #[track_caller]
+    pub(crate) fn next(steps: &StepCounter, verb: &'static str) -> Self {
+        StepSite {
+            ordinal: steps.fetch_add(1, Ordering::Relaxed) + 1,
+            verb,
+            at: Location::caller(),
+        }
+    }
+}
+
+impl std::fmt::Display for StepSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "step {} ({} at {}:{})", self.ordinal, self.verb, self.at.file(), self.at.line())
+    }
+}
+
 /// Unwrap a fallible-core step for the panicking (functional-test) lane: `Ok`
 /// passes through, `Err` becomes `panic!("{e}")` — the same message the load
 /// lane would have counted, now stopping the world instead (the panic-time
-/// trace dump renders the wire trace). `#[track_caller]` so the panic reports
-/// the veneer's line; it cannot reach the *test's* line yet because
-/// `#[track_caller]` on an `async fn` is still a no-op on stable
-/// (rust-lang/rust#110011) — no loss, the panicking bodies always reported
-/// this crate's lines.
+/// trace dump renders the wire trace).
 #[track_caller]
 pub(super) fn unwrap_step<T>(r: Result<T, StepError>) -> T {
     match r {
         Ok(v) => v,
         Err(e) => panic!("{e}"),
+    }
+}
+
+/// [`unwrap_step`] for a scripted wait: the panic message is one line naming
+/// the failure, then the step's ordinal and test line.
+pub(super) fn unwrap_step_at<T>(r: Result<T, StepError>, site: StepSite) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{e} at {site}"),
     }
 }

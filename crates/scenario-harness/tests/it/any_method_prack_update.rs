@@ -131,7 +131,13 @@ async fn generic_surface_errors_are_step_errors() {
 
     // Nothing was sent to bob → a fallible receive times out as a StepError.
     match bob.try_receive("UPDATE").await {
-        Err(StepError::Timeout { who }) => assert_eq!(who, "bob"),
+        Err(StepError::Timeout { who, awaited, .. }) => {
+            assert_eq!(who, "bob");
+            assert!(
+                awaited.starts_with("a UPDATE request"),
+                "names the awaited message: {awaited}"
+            );
+        }
         Err(other) => panic!("expected Timeout, got {other:?}"),
         Ok(_) => panic!("expected Timeout, got a request"),
     }

@@ -293,7 +293,7 @@ mod tests {
         assert!(!CallOutcome::Panic("p".into()).chaos_excusable());
         let timeout = CallOutcome::Step {
             at: FailedAt::at_barrier("established"),
-            cause: StepError::Timeout { who: "established".into() },
+            cause: StepError::timeout("established", None, "a datagram"),
         };
         assert!(timeout.chaos_excusable());
     }

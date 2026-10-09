@@ -355,7 +355,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
     let verdict = run_call(call, Duration::from_secs(32)).await;
     let elapsed = started.elapsed();
     match verdict {
-        CallVerdict::Failed(_, StepError::Timeout { who }) => assert_eq!(who, "never"),
+        CallVerdict::Failed(_, StepError::Timeout { who, .. }) => assert_eq!(who, "never"),
         other => panic!("expected the bounded guard Timeout, got {other:?}"),
     }
     assert!(

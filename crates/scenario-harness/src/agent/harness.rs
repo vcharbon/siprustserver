@@ -1,8 +1,9 @@
 //! The fluent session: [`Harness`] owns the recording-wrapped simulated
 //! network, binds agents/proxies/SUTs, advances virtual time, and renders the
 //! [`RunReport`] at [`Harness::finish`] behind the mandatory RFC hard gate.
-//! The Drop-armed backstops live in [`super::run_guards`] (wire trace, RFC
-//! gate) and [`super::log_dump`] (what the SUT logged and traced).
+//! The Drop-armed backstops live in [`super::run_guards`] (the RFC gate) and
+//! [`super::failure_dump`] (the digest, ladder, traces and tables of a failing
+//! run).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -20,9 +21,10 @@ use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetw
 
 use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
-use super::log_dump::LogDump;
+use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
 use super::rr_fold::decide_rr_fold;
-use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
+use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate};
+use super::step::StepCounter;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
@@ -61,25 +63,23 @@ pub struct Harness {
     /// [`describe`](Harness::describe) set — one cell, no second copy to
     /// drift.
     description: Rc<RefCell<Option<String>>>,
-    /// Dumps the recorded trace to stderr if the scenario task unwinds before
-    /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
-    dump: PanicDump,
-    /// Captures what the SUT logs and traces for the run and dumps it to stderr
-    /// next to [`dump`](Self::dump)'s wire trace on the same panic path.
-    /// Declared after `dump` so the wire trace prints first. `finish` disarms it.
-    log_dump: LogDump,
-    /// Writes the full report artifacts (SVG/HTML/text ladders) when the
-    /// harness drops WITHOUT [`finish`](Harness::finish) — panic unwind or a
-    /// forgotten `finish` — under `SCENARIO_ARTIFACT_DIR` (unset ⇒ off).
-    /// Declared after the stderr dumps so the compact trace prints first.
-    /// `finish` disarms it only AFTER its RFC hard gate, so a gate failure
-    /// still writes settled FAIL artifacts.
-    artifact_dump: ArtifactDump,
     /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
     /// any non-advisory RFC rule — the backstop for a harness dropped WITHOUT
     /// [`finish`](Harness::finish) (which enforces the same gate inline).
-    /// `finish` disarms it (it has already run the gate itself).
+    /// `finish` disarms it (it has already run the gate itself). Declared
+    /// first so its panic is dumped by the guards below.
     cseq_gate: CseqGate,
+    /// Writes the failure dump to stderr if the run unwinds before
+    /// [`finish`](Harness::finish) returns; `finish` disarms it once its gates
+    /// passed, so a gate failure is dumped too.
+    dump: FailureDump,
+    /// Writes the full report artifacts (SVG/HTML/text ladders) when the
+    /// harness drops WITHOUT [`finish`](Harness::finish) — panic unwind or a
+    /// forgotten `finish` — under `SCENARIO_ARTIFACT_DIR` (unset ⇒ off).
+    /// Declared after the stderr dump, which reads the panic note first.
+    /// `finish` disarms it only AFTER its RFC hard gate, so a gate failure
+    /// still writes settled FAIL artifacts.
+    artifact_dump: ArtifactDump,
     /// Scoped RFC-audit waivers a test declared (a deliberate non-compliance
     /// fixture where a simulated peer intentionally emits non-conforming SIP).
     /// The hard gate drops each finding a waiver covers. Shared (`Rc`) with
@@ -99,8 +99,12 @@ pub struct Harness {
     /// (see [`settle_before_finish`](Harness::settle_before_finish)).
     finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
     /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
-    /// gates their verdicts.
-    judges: RefCell<Vec<Arc<DialogJudge>>>,
+    /// gates their verdicts and the failure dump shows their tables.
+    judges: Judges,
+    /// What the SUTs bound on this harness add to its failure dump.
+    views: FailureViews,
+    /// The ordinal source of the run's scripted waits, shared by its agents.
+    steps: StepCounter,
     /// The `dialog-…` waivers, shared with every UA so a scripted receive
     /// honours them.
     dialog_opt_ins: DialogOptIns,
@@ -188,8 +192,15 @@ impl Harness {
             audit_opts,
             true,
         );
-        let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
-        let log_dump = LogDump::install(name.clone());
+        let judges: Judges = Rc::default();
+        let views: FailureViews = Rc::default();
+        let dump = FailureDump::new(
+            name.clone(),
+            wrapped.recording.channel(),
+            recorder.clone(),
+            judges.clone(),
+            views.clone(),
+        );
         super::panic_note::install();
         let anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>> =
             Rc::new(RefCell::new(Vec::new()));
@@ -215,15 +226,16 @@ impl Harness {
             ids: Arc::new(Ids(AtomicU64::new(1))),
             name,
             description,
-            dump,
-            log_dump,
-            artifact_dump,
             cseq_gate,
+            dump,
+            artifact_dump,
             waivers,
             recv_timeout,
             anchors,
             finish_settles: RefCell::new(Vec::new()),
-            judges: RefCell::new(Vec::new()),
+            judges,
+            views,
+            steps: StepCounter::default(),
             dialog_opt_ins: DialogOptIns::default(),
         }
     }
@@ -235,6 +247,17 @@ impl Harness {
             Arc::new(DialogJudge::new(party, self.dialog_opt_ins.clone(), DialogJudging::Harness));
         self.judges.borrow_mut().push(judge.clone());
         judge
+    }
+
+    /// Register what a SUT bound on this harness adds to the run's failure
+    /// dump; [`finish`](Self::finish) also fails on the cause it names.
+    pub fn add_failure_view(&self, view: Rc<dyn FailureView>) {
+        self.views.borrow_mut().push(view);
+    }
+
+    /// The ordinal source of the run's scripted waits.
+    pub(crate) fn steps(&self) -> StepCounter {
+        self.steps.clone()
     }
 
     /// Re-seed the shared branch/tag/Call-ID counter. The default (1) is
@@ -447,6 +470,7 @@ impl Harness {
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
             dialogs,
+            steps: self.steps.clone(),
         }
     }
 
@@ -627,14 +651,11 @@ impl Harness {
     /// (inFlightImbalance / queueLeak), which legitimately occur in timeout / reap
     /// / stall fixtures and must not fail those tests.
     pub async fn finish(self) -> RunReport {
-        // A returned report is by construction a passing run, so the post-mortem
-        // dump is no longer wanted: disarm it before tearing the session down. The
-        // Drop-time cseq backstop is likewise disarmed — `finish` runs the SAME
-        // gate inline just below, so the Drop guard would only double-check.
-        // The artifact writer stays armed THROUGH the gate: a gate panic unwinds
-        // with it live, so even a finish-time failure leaves its artifacts.
-        self.dump.disarm();
-        self.log_dump.disarm();
+        // The Drop-time cseq backstop is disarmed — `finish` runs the SAME gate
+        // inline just below, so the Drop guard would only double-check. The
+        // failure dump and the artifact writer stay armed THROUGH the gates: a
+        // gate panic unwinds with them live, so a finish-time failure is dumped
+        // (ladder included) and leaves its artifacts.
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
         self.settle_network().await;
@@ -648,6 +669,13 @@ impl Harness {
         // close() anomalies are intentionally NOT gated.
         // The whole waiver gate sits in a scope so the `RefCell` borrow is
         // released before the `close().await` below.
+        // A failure a SUT met out of the scenario's sight explains everything
+        // after it.
+        if let Some(cause) = first_cause(&self.views) {
+            if !std::thread::panicking() {
+                panic!("{cause}");
+            }
+        }
         {
             let waivers = self.waivers.borrow();
             // The dialog verdicts first: they name the UA and the request, the
@@ -656,8 +684,8 @@ impl Harness {
             if !verdicts.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_dialog_panic(&self.name, &verdicts));
             }
-            let names = super::run_guards::addr_names(&self.recorder);
-            let cseq_findings = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names);
+            let cseq_findings =
+                rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
             if !cseq_findings.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
             }
@@ -682,6 +710,7 @@ impl Harness {
                 );
             }
         }
+        self.dump.disarm();
         self.artifact_dump.disarm();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
@@ -711,7 +740,6 @@ impl Harness {
     /// (an executor keeps the report over a dead-waiver abort).
     pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         self.dump.disarm();
-        self.log_dump.disarm();
         self.artifact_dump.disarm();
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
@@ -720,27 +748,15 @@ impl Harness {
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
         // the returned gating findings, and (seeded) the report projection.
         let rfc_findings = sip_net::evaluate_rfc_findings(&events);
-        // The gating set the scoped waivers leave unwaived — drop the
-        // (lane, detail) pairs `rfc_hard_gate_findings` would waive, then keep
-        // the matching `RfcFinding`s so the caller gets the full objects.
-        // Compute the gating set in a scope so the borrow is released before the
-        // `close().await` below.
+        // The gating set the scoped waivers leave unwaived. Computed in a scope
+        // so the borrow is released before the `close().await` below.
         let (gate, verdicts) = {
             let waivers = self.waivers.borrow();
-            let names = super::run_guards::addr_names(&self.recorder);
-            let gate: std::collections::HashSet<(String, String)> =
-                rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names)
-                    .into_iter()
-                    .collect();
+            let gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
             (gate, surviving_verdicts(&self.judges.borrow(), &waivers))
         };
         let mut gating = as_findings(verdicts);
-        gating.extend(
-            rfc_findings
-                .iter()
-                .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
-                .cloned(),
-        );
+        gating.extend(gate.into_iter().map(|g| g.finding));
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();

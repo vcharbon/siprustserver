@@ -35,19 +35,24 @@
 //!   virtual-time advance, `finish()` + the RFC hard gate.
 //! - `dialog_gate` — `finish()`'s gate on the UAs' dialog verdicts
 //!   ([`crate::dialogs`]) and the `dialog-…` waivers that opt one out.
-//! - `run_guards` — Drop-armed backstops: panic-time trace dump, the
-//!   forgot-to-`finish` RFC gate.
-//! - `log_dump` — the panic-time dump of what the SUT logged and traced.
+//! - `run_guards` — the RFC audit hard gate: its findings, its panic text,
+//!   the forgot-to-`finish` backstop.
+//! - `failure_dump` — the panic-time dump of a failing run: the digest line,
+//!   then `ladder` (the wire), `call_trace` (each sampled call's SUT trace),
+//!   the [`FailureView`] sections a SUT adds, the UAs' dialog tables, and
+//!   `log_dump` (the capture buffer and the SUT log tail).
 //! - `artifact_dump` — the Drop-time report-artifact writer
 //!   (`SCENARIO_ARTIFACT_DIR`-gated), so a run that never reaches `finish()`
 //!   still leaves its SVG/HTML/text ladders.
 //! - `panic_note` — the chained process-wide panic hook that captures the
-//!   panic message the artifact writer stamps into its FAIL banner.
-//! - `step` — [`StepError`], the fallible-core step vocabulary.
+//!   panic message the failure dump digests and the artifact writer stamps
+//!   into its FAIL banner.
+//! - `step` — [`StepError`], the fallible-core step vocabulary, and the
+//!   ordinal + test line of a scripted wait.
 //! - `ua` + `tolerant_recv` — [`Agent`]: the send/receive cores and the
-//!   method-filtered receive policies.
-//! The §17.2 receive view itself is NOT here: it lives once for the whole tree
-//! in [`crate::absorption`], which every agent mode reads.
+//!   method-filtered receive policies. The §17.2 receive view itself is NOT
+//!   here: it lives once for the whole tree in [`crate::absorption`], which
+//!   every agent mode reads.
 //! - `invite` / `client_invite` / `out_of_dialog` / `dialog` —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
@@ -61,12 +66,15 @@
 
 mod addressing;
 mod artifact_dump;
+mod call_trace;
 mod client_invite;
 mod client_txn;
 mod dialog;
 pub(crate) mod dialog_gate;
+mod failure_dump;
 mod harness;
 mod invite;
+mod ladder;
 mod log_dump;
 mod out_of_dialog;
 mod panic_note;
@@ -83,6 +91,7 @@ pub(crate) mod waiver;
 
 pub use client_invite::{CancelHandle, ClientInvite};
 pub use dialog::{ClientReinvite, Dialog, InDialogRequest, InDialogTxn};
+pub use failure_dump::{expect_failure, DumpSection, FailedRun, FailureView};
 pub use harness::Harness;
 pub use invite::Invite;
 pub use out_of_dialog::OutOfDialogRequest;

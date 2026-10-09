@@ -69,7 +69,7 @@ impl Inbox {
                 match tokio::time::timeout(*idle, rx.recv()).await {
                     Ok(Some(m)) => Ok(m),
                     Ok(None) => Err(StepError::QueueClosed { who: role.to_string() }),
-                    Err(_) => Err(StepError::Timeout { who: role.to_string() }),
+                    Err(_) => Err(StepError::timeout(*role, Some(*idle), "a datagram")),
                 }
             }
         }

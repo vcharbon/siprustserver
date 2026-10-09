@@ -151,6 +151,33 @@ impl DialogJudge {
         self.opt_ins.lock().unwrap().iter().any(|w| covers(w, &self.party, v))
     }
 
+    /// The dialogs the UA holds early or confirmed, one ID each.
+    pub fn live_dialogs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().table.live()
+    }
+
+    /// The UA's table and the verdicts it recorded, for a failure dump: one
+    /// line per dialog, then one per verdict. Empty for a UA that keeps no
+    /// table.
+    pub fn summary(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.judging == DialogJudging::Off {
+            return Vec::new();
+        }
+        let mut lines: Vec<String> = inner.table.rows();
+        if lines.is_empty() {
+            lines.push("no dialog".to_string());
+        }
+        let judged_by = match inner.judging {
+            DialogJudging::Harness => "",
+            DialogJudging::Driver(_) | DialogJudging::Off => " (its driver answers for it)",
+        };
+        for v in &inner.recorded {
+            lines.push(format!("verdict [{}]{judged_by}: {v}", v.rule()));
+        }
+        lines
+    }
+
     /// Every verdict the harness gates: those recorded under harness judging.
     pub fn gated(&self) -> Vec<DialogVerdict> {
         let inner = self.inner.lock().unwrap();

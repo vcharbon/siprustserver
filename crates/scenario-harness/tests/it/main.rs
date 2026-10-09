@@ -14,6 +14,7 @@ mod callee_group;
 mod deviations;
 mod dialog_table;
 mod early_dialogs;
+mod failure_output;
 mod finish_settles;
 mod fluent_dialog;
 mod harness_log_capture;

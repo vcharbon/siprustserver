@@ -47,6 +47,23 @@ struct DialogId {
     remote: String,
 }
 
+impl std::fmt::Display for DialogId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Call-ID {} local {} remote {}", self.call_id, self.local, self.remote)
+    }
+}
+
+impl std::fmt::Display for DialogState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialogState::Early => f.write_str("early"),
+            DialogState::Confirmed => f.write_str("confirmed"),
+            DialogState::EndedByFinal(status) => write!(f, "ended by a {status} final"),
+            DialogState::EndedByBye => f.write_str("ended by a BYE"),
+        }
+    }
+}
+
 /// Which side of an initial INVITE the UA is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Role {
@@ -129,6 +146,37 @@ impl DialogTable {
             remote: remote.to_string(),
         };
         self.dialogs.get(&id).map(|d| d.state)
+    }
+
+    /// Every dialog the UA holds, one line each, ordered by dialog ID:
+    /// `Call-ID c local x remote y: confirmed, last remote CSeq 2`.
+    pub fn rows(&self) -> Vec<String> {
+        let mut ids: Vec<&DialogId> = self.dialogs.keys().collect();
+        ids.sort_by(|a, b| {
+            (&a.call_id, &a.local, &a.remote).cmp(&(&b.call_id, &b.local, &b.remote))
+        });
+        ids.into_iter()
+            .map(|id| {
+                let d = &self.dialogs[id];
+                let cseq = match d.remote_cseq {
+                    Some(c) => format!("last remote CSeq {c}"),
+                    None => "no remote CSeq yet".to_string(),
+                };
+                format!("{}: {}, {cseq}", id, d.state)
+            })
+            .collect()
+    }
+
+    /// The dialogs the UA holds early or confirmed, one ID each, ordered.
+    pub fn live(&self) -> Vec<String> {
+        let mut live: Vec<String> = self
+            .dialogs
+            .iter()
+            .filter(|(_, d)| matches!(d.state, DialogState::Early | DialogState::Confirmed))
+            .map(|(id, d)| format!("{id} ({})", d.state))
+            .collect();
+        live.sort();
+        live
     }
 
     /// Feed a request the UA sent.

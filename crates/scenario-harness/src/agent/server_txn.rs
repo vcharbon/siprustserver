@@ -3,6 +3,7 @@
 //! Record-Route echo folding, §17.1.1.3 ACK-obligation arming).
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 
 use sip_message::generators::{
     generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
@@ -14,9 +15,10 @@ use sip_message::{
 };
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
+use super::client_txn::request_label;
 use super::dialog::Dialog;
 use super::rr_fold::{fold_record_routes, RecordRouteFold};
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::ua::media_type;
 use super::Agent;
 
@@ -138,8 +140,10 @@ impl ServerTxn {
     /// `unacked-invite-non-2xx-final` wire rule settles the obligation at
     /// `finish()` — reach for this when the test asserts the ACK at a specific
     /// point in the flow.
-    pub async fn expect_ack(&self) {
-        unwrap_step(self.try_expect_ack().await)
+    #[track_caller]
+    pub fn expect_ack(&self) -> impl Future<Output = ()> + '_ {
+        let site = self.agent.step("expect_ack");
+        async move { unwrap_step_at(self.try_expect_ack().await, site) }
     }
 
     /// Fallible core of [`expect_ack`](Self::expect_ack).
@@ -157,7 +161,16 @@ impl ServerTxn {
             // Pull; the receive core sights (and thereby fulfils) a matching
             // ACK. Anything else arriving while the test explicitly awaits the
             // ACK is a deviation, exactly as `receive("ACK")` would treat it.
-            match self.agent.try_recv().await? {
+            let next = self.agent.try_recv().await.map_err(|e| {
+                e.awaiting(|| {
+                    let status = self.final_status.map(|s| format!(" {s}")).unwrap_or_default();
+                    format!(
+                        "the ACK of its{status} final to {}",
+                        request_label(None, &self.request)
+                    )
+                })
+            });
+            match next? {
                 SipMessage::Request(r) if r.method().as_str() == "ACK" => {
                     if self.agent.ack_obligation_claims(&r) {
                         continue; // ours (loop returns Ok) or another txn's obligation

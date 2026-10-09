@@ -393,7 +393,7 @@ impl scenario_harness::actor::ActorScenario for Broken {
         if self.panics {
             panic!("the load body's build panicked");
         }
-        Err(scenario_harness::StepError::Timeout { who: "alice".to_string() })
+        Err(scenario_harness::StepError::timeout("alice", None, "a datagram"))
     }
 }
 
@@ -512,7 +512,7 @@ impl scenario_harness::actor::ActorScenario for FailsOnce {
         env: &loadgen::CallEnv<'_>,
     ) -> Result<scenario_harness::actor::ActorCall, scenario_harness::StepError> {
         if !self.failed.swap(true, Relaxed) {
-            return Err(scenario_harness::StepError::Timeout { who: "alice".to_string() });
+            return Err(scenario_harness::StepError::timeout("alice", None, "a datagram"));
         }
         scenario_harness::actor::scenarios::BasicCall.build(env)
     }

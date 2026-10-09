@@ -97,7 +97,7 @@ pub fn verdict(
         CallVerdict::Failed(at, cause) => ScenarioVerdict::Failure { at, cause },
         CallVerdict::Settle(_open) => ScenarioVerdict::Failure {
             at: FailedAt::at_barrier("settle"),
-            cause: StepError::Timeout { who: "settle".to_string() },
+            cause: StepError::timeout("settle", None, "every call to settle"),
         },
         CallVerdict::Ok => obs.with_snapshot(|s| match expect.branch_of(s, caller) {
             Some(branch) => ScenarioVerdict::Success { branch },

@@ -655,7 +655,7 @@ where
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(StepError::Timeout { who: who.to_string() });
+            return Err(StepError::timeout(who, None, format!("the call state to reach {who}")));
         }
         tokio::select! {
             _ = &mut notified => {}

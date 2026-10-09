@@ -31,7 +31,7 @@ use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::Registry;
+use tracing_subscriber::registry::{LookupSpan, Registry};
 
 thread_local! {
     /// The buffers installed on this thread, oldest first; the last is the
@@ -54,6 +54,9 @@ pub struct CapturedEvent {
     pub message: String,
     /// Every other field as `(name, rendered value)`, in declaration order.
     pub fields: Vec<(String, String)>,
+    /// The `sip.call_id` of the per-call span the event was recorded under
+    /// (its own span or an ancestor), `None` outside one.
+    pub call: Option<String>,
 }
 
 impl CapturedEvent {
@@ -213,7 +216,16 @@ pub fn current_test_buffer() -> Option<TestLogHandle> {
 /// has installed, and nothing else.
 struct CaptureLayer;
 
-impl<S: Subscriber> Layer<S> for CaptureLayer {
+/// The span field naming the call a per-call span belongs to.
+const CALL_FIELD: &str = "sip.call_id";
+
+/// The call a captured span belongs to, kept on the span for its events.
+struct CallKey(String);
+
+impl<S> Layer<S> for CaptureLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
     /// `sometimes` and never `always`: the answer depends on the EMITTING
     /// thread, and an `always` would let `tracing` cache the first thread's
     /// answer for the whole process.
@@ -235,10 +247,14 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
         Some(LevelFilter::INFO)
     }
 
-    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let Some(handle) = current_test_buffer() else { return };
         let mut visitor = FieldVisitor::default();
         attrs.record(&mut visitor);
+        let call = visitor.fields.iter().find(|(k, _)| k == CALL_FIELD).map(|(_, v)| v.clone());
+        if let (Some(call), Some(span)) = (call, ctx.span(id)) {
+            span.extensions_mut().insert(CallKey(call));
+        }
         let meta = attrs.metadata();
         let captured = CapturedSpan {
             name: meta.name().to_string(),
@@ -248,16 +264,22 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
         handle.spans.lock().expect("capture buffer mutex").push(captured);
     }
 
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let Some(handle) = current_test_buffer() else { return };
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
         let meta = event.metadata();
+        let call = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .into_iter()
+                .find_map(|span| span.extensions().get::<CallKey>().map(|k| k.0.clone()))
+        });
         let captured = CapturedEvent {
             level: level_str(meta.level()).to_string(),
             target: meta.target().to_string(),
             message: visitor.message,
             fields: visitor.fields,
+            call,
         };
         handle.events.lock().expect("capture buffer mutex").push(captured);
     }
@@ -342,6 +364,19 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "sip.call");
         assert!(spans[0].contains("link.span_id=abc123"));
+    }
+
+    #[test]
+    fn an_event_under_a_per_call_span_names_its_call() {
+        let (_guard, log) = test_buffer();
+        let root = tracing::info_span!("sip.call", sip.call_id = "c@h");
+        let child = tracing::info_span!(parent: &root, "sip.call.http", http.route = "/new");
+        tracing::info!(parent: &child, kind = "http.request", "trace");
+        tracing::info!("lifecycle");
+
+        let events = log.snapshot();
+        assert_eq!(events[0].call.as_deref(), Some("c@h"), "an ancestor's call is the event's");
+        assert_eq!(events[1].call, None, "an event outside a per-call span names none");
     }
 
     #[test]

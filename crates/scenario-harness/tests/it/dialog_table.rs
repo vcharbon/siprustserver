@@ -107,7 +107,7 @@ async fn the_receive_names_the_ua_the_request_and_the_tags_held() {
 /// A request the body never pulls is still judged where it is sighted, and
 /// the run fails at `finish`.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "a simulated UA received request(s) its dialog table refuses")]
+#[should_panic(expected = "red because dialog rule")]
 async fn an_unpulled_request_on_no_dialog_fails_the_run_at_finish() {
     let h = Harness::new("dialog-table-finish");
     let alice = h.agent("alice", "127.0.0.1:5060").await;

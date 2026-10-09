@@ -323,6 +323,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 two_xx_acks: std::sync::Arc::default(),
                 holdback: std::sync::Arc::default(),
                 dialogs: self.harness.dialog_judge(name),
+                steps: self.harness.steps(),
             };
             agents.insert(name.clone(), agent);
         }

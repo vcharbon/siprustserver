@@ -37,16 +37,24 @@ pub(crate) fn surviving_verdicts(
     out
 }
 
-/// The panic text of a run whose UAs recorded dialog verdicts: one line per
-/// verdict, the UA first.
+/// The panic text of a run whose UAs recorded dialog verdicts: a first line
+/// naming the first rule that fired and its UA, then one line per verdict.
 pub(super) fn render_dialog_panic(name: &str, verdicts: &[GatedVerdict]) -> String {
+    let more = match verdicts.len() {
+        0 | 1 => String::new(),
+        n => format!(" (and {} more verdict(s))", n - 1),
+    };
+    let first = verdicts
+        .first()
+        .map(|g| format!("dialog rule {} fired on {}: {}", g.verdict.rule(), g.party, g.verdict))
+        .unwrap_or_default();
     let lines: Vec<String> = verdicts
         .iter()
         .map(|g| format!("  • {}: {} [{}]", g.party, g.verdict, g.verdict.rule()))
         .collect();
     format!(
-        "[{name}] a simulated UA received request(s) its dialog table refuses (RFC 3261 \
-         §12.2.2); a test that sends them on purpose opts in with \
+        "red because {first}{more}\n[{name}] a simulated UA received request(s) its dialog \
+         table refuses (RFC 3261 §12.2.2); a test that sends them on purpose opts in with \
          Harness::waive(WaiverScope::rule(\"<rule>\", why).on_party(\"<ua>\")):\n{}",
         lines.join("\n")
     )

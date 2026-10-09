@@ -225,17 +225,22 @@ fn survivors(
 
 /// Apply the waivers to the PRE-EVALUATED audit findings: drop every
 /// non-advisory finding a waiver covers (marking that waiver used), returning
-/// the remaining gating `(lane, detail)` pairs — the functional-lane
-/// (addr→name) attribution.
+/// each remaining gating finding with the party it charges — the
+/// functional-lane (addr→name) attribution.
 pub(super) fn apply_waivers(
     findings: &[RfcFinding],
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     addr_names: &HashMap<SocketAddr, String>,
-) -> Vec<(String, String)> {
-    survivors(findings, events, waivers, &Attribution::AddrNames(addr_names))
+) -> Vec<(RfcFinding, Option<String>)> {
+    let attr = Attribution::AddrNames(addr_names);
+    let entries = audit_wire_entries(events);
+    survivors(findings, events, waivers, &attr)
         .into_iter()
-        .map(|f| (f.lane, f.detail))
+        .map(|f| {
+            let party = finding_party(&f, &entries, &attr);
+            (f, party)
+        })
         .collect()
 }
 

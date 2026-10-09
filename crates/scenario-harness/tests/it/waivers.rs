@@ -69,7 +69,7 @@ async fn scoped_waiver_passes() {
 
 /// The SAME violation with the waiver ABSENT fails at finish().
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn unwaived_violation_fails() {
     let h = Harness::new("waiver-absent")
         .describe("the same cseq reuse with no waiver must fail the gate");
@@ -95,7 +95,7 @@ async fn coarse_allow_violation_still_waives() {
 /// rule attributed to bob. alice AND bob each commit the reuse; only alice's is
 /// waived, so finish() fails on bob's.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn peer_scoped_waiver_does_not_filter_other_party() {
     let h = Harness::new("waiver-side")
         .describe("alice-scoped waiver leaves bob's identical violation gated");
@@ -163,7 +163,7 @@ async fn message_position_scoping_covers_its_occurrence() {
 /// elsewhere: two calls each reuse, waive only the first's position → finish
 /// fails on the second.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn message_position_scoping_does_not_cover_second() {
     let h = Harness::new("waiver-pos-scope")
         .describe("a one-position waiver leaves a second occurrence gated");
@@ -281,7 +281,7 @@ async fn relay_findings_attributed_to_their_true_emitters() {
 /// alice-emitted finding; the copy mid relayed (emitted by mid) still GATES — a
 /// peer waiver never un-audits the relayer/SUT.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn relay_peer_waiver_leaves_relayed_copy_gated() {
     let h = Harness::new("waiver-relay-alice")
         .describe("alice-scoped waiver leaves the mid-relayed copy gated");
@@ -361,7 +361,7 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
 /// Relay lane, symmetric: a mid-scoped waiver leaves the alice-emitted finding
 /// gated.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn relay_mid_waiver_leaves_alice_finding_gated() {
     let h = Harness::new("waiver-relay-mid")
         .describe("mid-scoped waiver leaves the alice-emitted finding gated");
@@ -376,7 +376,7 @@ async fn relay_mid_waiver_leaves_alice_finding_gated() {
 /// at_position pins the OFFENDER: waiving the compliant INVITE's wire position
 /// does NOT cover the INFO's reuse (which carries a different `offending` index).
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
     let h = Harness::new("waiver-pos-offender")
         .describe("waiving the INVITE's position does not cover the reuse");
@@ -396,7 +396,7 @@ async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
 /// Two reuses in ONE dialog: a position-scoped waiver covers exactly its
 /// offender; the second reuse still gates.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "RFC audit violation")]
+#[should_panic(expected = "red because RFC audit rule")]
 async fn two_reuses_one_dialog_position_scopes_exactly_one() {
     let h = Harness::new("waiver-two-reuse")
         .describe("one position waiver covers one of two reuses in a dialog");

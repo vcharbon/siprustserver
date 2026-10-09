@@ -5,6 +5,7 @@
 //! [`release_failed_call`](Agent::release_failed_call). The plain asserting
 //! receive lives in [`super::ua`].
 
+use std::future::Future;
 use std::time::Duration;
 
 use sip_message::generators::{generate_response, GenerateResponseOpts};
@@ -13,7 +14,7 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 
 use super::addressing::top_via_addr;
 use super::server_txn::ServerTxn;
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError, StepSite};
 use super::Agent;
 
 /// The stateless answer a UA with **no remaining dialog state** owes an
@@ -215,7 +216,9 @@ impl Agent {
     ) -> Result<(ServerTxn, Vec<SipRequest>), StepError> {
         let mut absorbed = Vec::new();
         loop {
-            let r = match self.try_recv().await? {
+            let next =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            let r = match next? {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => {
                     return Err(StepError::UnexpectedKind {
@@ -270,12 +273,28 @@ impl Agent {
     /// the txn-layer retransmit, so several identical copies queue before the
     /// awaited message (CLAUDE.md: tolerate retransmits, don't relax the
     /// assertion). Returns the first request matching `method`.
-    pub async fn receive_tolerating(&self, method: &str, tolerate: &[&str]) -> ServerTxn {
+    #[track_caller]
+    pub fn receive_tolerating<'a>(
+        &'a self,
+        method: &'a str,
+        tolerate: &'a [&'a str],
+    ) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive_tolerating");
+        self.receive_tolerating_at(method, tolerate, site)
+    }
+
+    async fn receive_tolerating_at(
+        &self,
+        method: &str,
+        tolerate: &[&str],
+        site: StepSite,
+    ) -> ServerTxn {
         loop {
-            let msg = self.recv().await;
-            match msg {
+            let msg =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match unwrap_step_at(msg, site) {
                 SipMessage::Request(r) => {
-                    unwrap_step(self.dialog_check(&r));
+                    unwrap_step_at(self.dialog_check(&r), site);
                     if r.method() == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
@@ -291,13 +310,13 @@ impl Agent {
                         continue;
                     }
                     panic!(
-                        "{} expected a {method} request (tolerating {tolerate:?}), got {}",
+                        "{} expected a {method} request (tolerating {tolerate:?}), got {} at {site}",
                         self.name,
                         r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
-                    "{} expected a {method} request, got a {} {} response",
+                    "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,
                     r.status(),
                     r.reason()
@@ -326,12 +345,29 @@ impl Agent {
     /// callee's bare `100 Trying` (RFC 3261 §16.7) — so the UAC never stops its
     /// retransmit timer and the duplicates queue ahead of the message under test
     /// (the internally-originated CANCEL, the crossing-200's ACK, the reap BYE).
-    pub async fn receive_absorbing(&self, method: &str, absorb: &[&str]) -> ServerTxn {
+    #[track_caller]
+    pub fn receive_absorbing<'a>(
+        &'a self,
+        method: &'a str,
+        absorb: &'a [&'a str],
+    ) -> impl Future<Output = ServerTxn> + 'a {
+        let site = self.step("receive_absorbing");
+        self.receive_absorbing_at(method, absorb, site)
+    }
+
+    async fn receive_absorbing_at(
+        &self,
+        method: &str,
+        absorb: &[&str],
+        site: StepSite,
+    ) -> ServerTxn {
         loop {
-            match self.recv().await {
+            let msg =
+                self.try_recv().await.map_err(|e| e.awaiting(|| self.awaited_request(method)));
+            match unwrap_step_at(msg, site) {
                 SipMessage::Request(r) => {
                     if r.method() == method {
-                        unwrap_step(self.dialog_check(&r));
+                        unwrap_step_at(self.dialog_check(&r), site);
                         return ServerTxn::from_request(self.clone(), r);
                     }
                     if absorb.iter().any(|t| r.method() == *t) {
@@ -344,13 +380,13 @@ impl Agent {
                         continue; // txn-owned §17.1.1.3 hop ACK
                     }
                     panic!(
-                        "{} expected a {method} request (absorbing {absorb:?}), got {}",
+                        "{} expected a {method} request (absorbing {absorb:?}), got {} at {site}",
                         self.name,
                         r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
-                    "{} expected a {method} request, got a {} {} response",
+                    "{} expected a {method} request, got a {} {} response at {site}",
                     self.name,
                     r.status(),
                     r.reason()

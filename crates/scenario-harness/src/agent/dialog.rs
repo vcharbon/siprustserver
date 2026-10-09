@@ -3,6 +3,7 @@
 //! [`InDialogTxn`] client transaction, and the CANCELlable [`ClientReinvite`].
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -18,9 +19,10 @@ use sip_message::{
 
 use super::addressing::next_hop;
 use super::client_txn::{
-    try_expect_response, try_expect_response_tolerating, try_send_cancel, AckCtx,
+    awaited_response, request_label, try_expect_response, try_expect_response_tolerating,
+    try_send_cancel, AckCtx,
 };
-use super::step::{unwrap_step, StepError};
+use super::step::{unwrap_step, unwrap_step_at, StepError};
 use super::ua::media_type;
 use super::Agent;
 
@@ -312,14 +314,19 @@ impl ClientReinvite {
     /// re-INVITE, or the 200 to a CANCEL — whichever arrives next). A non-2xx
     /// final to the re-INVITE is auto-ACKed on its branch (RFC 3261
     /// §17.1.1.3), like [`ClientInvite::expect`](super::ClientInvite::expect).
-    /// Panicking veneer over [`try_expect`](ClientReinvite::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// Panicking veneer over [`try_expect`](ClientReinvite::try_expect): the
+    /// panic names the step and the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// Fallible [`expect`](ClientReinvite::expect).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status, Some(&self.ack_ctx())).await
+        try_expect_response(&self.agent, status, Some(&self.ack_ctx()))
+            .await
+            .map_err(|e| e.awaiting(|| awaited_response(status, &self.original_invite)))
     }
 
     /// CANCEL this still-pending re-INVITE (RFC 3261 §9.1) — the in-dialog
@@ -341,6 +348,7 @@ impl ClientReinvite {
             // [`ClientReinvite::expect`]; the CANCEL's own finals take no ACK.
             None,
             self.wire_dst,
+            request_label(Some("CANCEL"), &self.original_invite),
         )
     }
 }
@@ -613,6 +621,7 @@ impl<'a> InDialogRequest<'a> {
                 // (§17.1.1.3) — retain the request so the txn can build it.
                 matches!(self.method, InDialogMethod::Invite).then(|| request.clone()),
                 dst,
+                request_label(None, &request),
             ),
             request,
         ))
@@ -634,11 +643,19 @@ pub struct InDialogTxn {
     /// Where the request was sent (the next hop) — the non-2xx ACK is
     /// hop-by-hop and follows the SAME path.
     wire_dst: SocketAddr,
+    /// The request as a timed-out expect names it
+    /// ([`request_label`](super::client_txn::request_label)).
+    label: String,
 }
 
 impl InDialogTxn {
-    pub(super) fn new(agent: Agent, invite: Option<SipRequest>, wire_dst: SocketAddr) -> Self {
-        InDialogTxn { agent, invite, wire_dst }
+    pub(super) fn new(
+        agent: Agent,
+        invite: Option<SipRequest>,
+        wire_dst: SocketAddr,
+        label: String,
+    ) -> Self {
+        InDialogTxn { agent, invite, wire_dst, label }
     }
 
     /// The (re-)INVITE this transaction put on the wire — `None` for a
@@ -672,16 +689,26 @@ impl InDialogTxn {
     }
 
     /// Wait for and assert a response status. Panicking veneer over
-    /// [`try_expect`](InDialogTxn::try_expect).
-    pub async fn expect(&mut self, status: u16) -> SipResponse {
-        unwrap_step(self.try_expect(status).await)
+    /// [`try_expect`](InDialogTxn::try_expect): the panic names the step and
+    /// the test line that called it.
+    #[track_caller]
+    pub fn expect(&mut self, status: u16) -> impl Future<Output = SipResponse> + '_ {
+        let site = self.agent.step("expect");
+        async move { unwrap_step_at(self.try_expect(status).await, site) }
     }
 
     /// THE expect core for this transaction: a wrong status / timeout /
     /// unexpected request becomes a [`StepError`] (the functional lane panics
     /// on it via [`expect`](InDialogTxn::expect)).
     pub async fn try_expect(&mut self, status: u16) -> Result<SipResponse, StepError> {
-        try_expect_response(&self.agent, status, self.ack_ctx().as_ref()).await
+        try_expect_response(&self.agent, status, self.ack_ctx().as_ref())
+            .await
+            .map_err(|e| e.awaiting(|| self.awaited(status)))
+    }
+
+    /// What an expect of `status` on this transaction waits for.
+    fn awaited(&self, status: u16) -> String {
+        format!("a {status} to {}", self.label)
     }
 
     /// Fallible, tolerant [`try_expect`](InDialogTxn::try_expect): while waiting
@@ -695,7 +722,9 @@ impl InDialogTxn {
         status: u16,
         tolerate: &[&str],
     ) -> Result<SipResponse, StepError> {
-        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref()).await
+        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref())
+            .await
+            .map_err(|e| e.awaiting(|| self.awaited(status)))
     }
 
     /// Like [`expect`](InDialogTxn::expect), but first drains (and 200-OKs) any
@@ -704,7 +733,13 @@ impl InDialogTxn {
     /// retransmit can race the awaited response on the same socket; tolerate it
     /// rather than relax the assertion (CLAUDE.md retransmit hazard).
     /// Panicking veneer over [`try_expect_tolerating`](InDialogTxn::try_expect_tolerating).
-    pub async fn expect_tolerating(&mut self, status: u16, tolerate: &[&str]) -> SipResponse {
-        unwrap_step(self.try_expect_tolerating(status, tolerate).await)
+    #[track_caller]
+    pub fn expect_tolerating<'a>(
+        &'a mut self,
+        status: u16,
+        tolerate: &'a [&'a str],
+    ) -> impl Future<Output = SipResponse> + 'a {
+        let site = self.agent.step("expect_tolerating");
+        async move { unwrap_step_at(self.try_expect_tolerating(status, tolerate).await, site) }
     }
 }
