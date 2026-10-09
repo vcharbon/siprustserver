@@ -45,6 +45,9 @@ flamegraph-util = { path = "../flamegraph-util" }
 sip-clock = { path = "../sip-clock" }
 
 [dev-dependencies]
+# The counting global allocator of the allocations-per-call bench
+# (`tests/alloc_per_call.rs`, its own binary under ADR-0030 X2).
+alloc-counter = { path = "../alloc-counter" }
 # Fake-network smoke test: an in-process B2buaCore SUT on a shared simulated
 # network, driven by the load driver, asserting no call is leaked after teardown.
 b2bua-harness = { path = "../b2bua-harness" }

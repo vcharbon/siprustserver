@@ -2415,6 +2415,7 @@ version = "0.1.0"
 name = "loadgen"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
  "async-trait",
  "b2bua-harness",
  "b2bua-sdk",
