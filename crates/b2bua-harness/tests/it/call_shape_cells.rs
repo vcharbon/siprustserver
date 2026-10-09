@@ -18,10 +18,13 @@ use futures::FutureExt;
 use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
 
+/// Which cells a pending SUT defect fails.
+type CellsOf = fn(&Cell) -> bool;
+
 /// Cells a SUT defect fails, each with its FIXME, pending the decision on the
 /// defect: skipped and counted, never run green. Empty while every
 /// compatible cell passes.
-const PENDING_SUT_DEFECTS: &[(fn(&Cell) -> bool, &str)] = &[];
+const PENDING_SUT_DEFECTS: &[(CellsOf, &str)] = &[];
 
 /// Drive one cell to its end and run every net over it. A failure names the
 /// model invariant a SUT turn broke, when one did, before what the call met.
