@@ -36,14 +36,27 @@ pub struct RfcViolation {
     /// Who emitted it: an `actors` id, or `sut`. A scripted peer's entry is
     /// listed and gates nothing; it cancels the run's finding of the same rule
     /// against that actor on the transaction `step` names. The system under
-    /// test's gates.
+    /// test's gates, unless it `relays` one.
     pub emitter: String,
+    /// On a `sut` entry only: the step of a scripted party's entry of the same
+    /// rule that this one carries on — the captured platform relayed onward a
+    /// violation that party committed first. Such an entry gates nothing; with
+    /// the party's entry it cancels the run's finding of the rule against the
+    /// system under test on the transaction `step` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<String>,
 }
 
 impl RfcViolation {
     /// Whether the system under test is the emitter.
     pub fn sut_emitted(&self) -> bool {
         self.emitter == SUT_EMITTER
+    }
+
+    /// Whether the entry is the system under test's own claim, which gates: a
+    /// `sut` entry that relays no scripted party's.
+    pub fn gates(&self) -> bool {
+        self.sut_emitted() && self.relays.is_none()
     }
 }
 

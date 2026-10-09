@@ -43,11 +43,13 @@ mod cancel;
 mod census;
 #[cfg(test)]
 mod prack;
+mod relay;
 mod sut;
 #[cfg(test)]
 mod testkit;
 
 pub use census::{Census, LocatedHit, ReadFailure, RuleTally};
+pub use relay::{RelayOrigin, RELAYABLE};
 pub use sut::{Side, SutSet};
 
 /// The rule vocabulary and its evidence live ONCE, in `rfc-rules`;
@@ -119,6 +121,11 @@ pub struct Hit {
     /// already counted against that endpoint. A relayed hit is a weaker
     /// finding than an originated one.
     pub relayed: bool,
+    /// The originated hit this one carries on, where the emitter forwarded
+    /// onto its leg a violation another leg of the call shows committed first
+    /// (see `relay`); `relayed` is then set too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<RelayOrigin>,
     #[serde(flatten)]
     pub evidence: Evidence,
 }
@@ -175,11 +182,13 @@ pub fn scan_sut(doc: &FlowsDoc, candidates: &[RfcRule], sut: Option<&SutSet>) ->
     let span = Span::of(doc);
     for (gi, group) in doc.groups.iter().enumerate() {
         let roles = roles_of_group(doc, &group.legs);
+        let first = out.hits.len();
         for &li in &group.legs {
             let Some(leg) = doc.legs.get(li) else { continue };
             let at = Site { leg, leg_index: li, group: gi, roles: &roles, span: &span, sut };
             adapter::detect(&at, &mut out, candidates);
         }
+        relay::link(doc, &mut out.hits[first..]);
     }
     out
 }
@@ -257,6 +266,7 @@ impl Site<'_> {
             cseq,
             anchor_msg,
             relayed,
+            relays: None,
             evidence,
         }
     }

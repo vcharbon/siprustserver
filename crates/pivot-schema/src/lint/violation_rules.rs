@@ -3,7 +3,9 @@
 //!
 //! The anchor and the emitter are what make the list actionable — a reader
 //! lands on the datagram, and a driver knows whether the entry gates. An entry
-//! naming neither is a note, and notes live in `case.annotations`.
+//! naming neither is a note, and notes live in `case.annotations`. A `relays`
+//! names the scripted party's entry a `sut` entry carries on, so it rides a
+//! `sut` entry and lands on that party's entry of the same rule.
 
 use crate::lint::{at, Index, Report};
 use crate::violation::SUT_EMITTER;
@@ -28,6 +30,24 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
                     violation.emitter
                 ),
                 "name the actor that emits the violating message, or `sut` where the system under test does",
+            );
+        }
+        let Some(origin) = &violation.relays else { continue };
+        let stated = index
+            .pivot
+            .rfc_violations
+            .iter()
+            .any(|v| v.rule == violation.rule && &v.step == origin && v.emitter != SUT_EMITTER);
+        if violation.emitter != SUT_EMITTER || !stated {
+            report.error(
+                "ref/violation-relays-unstated",
+                &path,
+                format!(
+                    "`relays` names {origin:?}, which carries no scripted party's {} entry \
+                     this `{SUT_EMITTER}` entry could carry on",
+                    violation.rule
+                ),
+                "state the originating party's entry on that step, or drop `relays`",
             );
         }
     }

@@ -123,9 +123,19 @@ export type RfcRule = typeof RfcRule.Type
 export const RfcViolation = Schema.Struct({
   rule: RfcRule,
   step: Schema.String,
-  emitter: Schema.String
+  emitter: Schema.String,
+  /**
+   * On a `sut` entry only: the step of a scripted party's entry of the same rule
+   * this one carries on — the captured platform relayed onward a violation that
+   * party committed first. Such an entry gates nothing.
+   */
+  relays: Schema.optionalKey(Schema.String)
 })
 export interface RfcViolation extends Schema.Schema.Type<typeof RfcViolation> {}
 
-/** Whether the system under test is the emitter — the one case that gates. */
+/** Whether the system under test is the emitter. */
 export const violationSutEmitted = (violation: RfcViolation): boolean => violation.emitter === SUT_EMITTER
+
+/** Whether the entry is the system under test's own claim, which gates: a `sut` entry that relays no party's. */
+export const violationGates = (violation: RfcViolation): boolean =>
+  violationSutEmitted(violation) && violation.relays === undefined

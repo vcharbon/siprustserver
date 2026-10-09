@@ -2501,6 +2501,28 @@ fn an_rfc_violation_anchors_on_a_step_and_names_an_emitter() {
     }
 }
 
+/// §11.1: a `relays` rides a `sut` entry and names a step carrying a scripted
+/// party's entry of the same rule.
+#[test]
+fn a_relayed_rfc_violation_names_the_partys_entry_it_carries_on() {
+    let party = json!({ "rule": "no-200-after-cancel", "step": "s2", "emitter": "uas1" });
+    let relayed =
+        json!({ "rule": "no-200-after-cancel", "step": "s1", "emitter": "sut", "relays": "s2" });
+    assert_fires("ref/violation-relays-unstated", |d| {
+        d["rfc_violations"] = json!([relayed.clone()]);
+    });
+    assert_fires("ref/violation-relays-unstated", |d| {
+        let other_rule = json!({ "rule": "cseq-in-dialog-order", "step": "s2", "emitter": "uas1" });
+        d["rfc_violations"] = json!([other_rule, relayed.clone()]);
+    });
+    assert_fires("ref/violation-relays-unstated", |d| {
+        let on_a_party = json!({ "rule": "no-200-after-cancel", "step": "s1", "emitter": "uas1", "relays": "s2" });
+        d["rfc_violations"] = json!([party.clone(), on_a_party]);
+    });
+    let report = broken(|d| d["rfc_violations"] = json!([party.clone(), relayed.clone()]));
+    assert!(!report.has_errors(), "{}", report.render());
+}
+
 /// §11.1: the rule vocabulary is closed, so a document cannot name a rule no
 /// detector can decide.
 #[test]

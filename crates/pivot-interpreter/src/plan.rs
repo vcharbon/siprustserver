@@ -1279,10 +1279,11 @@ impl Compiler {
     }
 
     /// Every `rfc_violations` entry lands on a step of this flow and names an
-    /// emitter the document declares. The anchor and the emitter are what the
-    /// entry is FOR — one says which datagram breaks the rule, the other decides
-    /// whether the run gates on it — so an entry missing either is refused
-    /// rather than listed as a note.
+    /// emitter the document declares, and a `relays` names a scripted party's
+    /// entry of the same rule. The anchor and the emitter are what the entry is
+    /// FOR — one says which datagram breaks the rule, the other decides whether
+    /// the run gates on it — so an entry missing either is refused rather than
+    /// listed as a note.
     fn check_violations(&mut self, actors: &BTreeMap<String, Actor>) {
         for violation in self.document.rfc_violations.clone() {
             let site = format!("rfc violation {}", violation.rule);
@@ -1294,8 +1295,23 @@ impl Compiler {
             }
             if !violation.sut_emitted() && !actors.contains_key(&violation.emitter) {
                 self.errors.push(PlanError::UnknownReference {
-                    site,
+                    site: site.clone(),
                     reference: violation.emitter.clone(),
+                });
+            }
+            // A relayed entry is half a claim: the party's own entry is the
+            // other half, and without it the system under test's would pass
+            // as nobody's.
+            let Some(origin) = &violation.relays else { continue };
+            let stated = self
+                .document
+                .rfc_violations
+                .iter()
+                .any(|v| v.rule == violation.rule && &v.step == origin && !v.sut_emitted());
+            if !violation.sut_emitted() || !stated {
+                self.errors.push(PlanError::UnknownReference {
+                    site: format!("{site} relays"),
+                    reference: origin.clone(),
                 });
             }
         }

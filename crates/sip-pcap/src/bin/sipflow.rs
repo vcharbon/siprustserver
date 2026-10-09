@@ -604,13 +604,23 @@ fn hit_line(h: &LocatedHit, doc: &FlowsDoc) -> String {
         hit.emitter,
         hit.emitter_role.token(),
         side,
-        if hit.relayed { " relayed" } else { "" },
+        relayed_note(hit),
         hit.taker,
         hit.cseq,
         hit.call_id,
         anchor,
         serde_json::to_string(&hit.evidence).expect("evidence serializes"),
     )
+}
+
+/// ` relayed`, naming the origin's emitter and anchor where the census paired
+/// the hit with the one it carries on; empty on an originated hit.
+fn relayed_note(hit: &sip_pcap::rfc::Hit) -> String {
+    match (&hit.relays, hit.relayed) {
+        (Some(o), _) => format!(" relayed-from={}@leg{}/msg{}", o.emitter, o.leg, o.anchor_msg),
+        (None, true) => " relayed".to_string(),
+        (None, false) => String::new(),
+    }
 }
 
 fn summary_json(s: &sip_pcap::doc::Summary) -> String {

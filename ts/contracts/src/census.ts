@@ -47,6 +47,12 @@ const HitHead = {
   cseq: Schema.Int,
   relayed: Schema.Boolean,
   /**
+   * The originated hit this one carries on, where the emitter relayed onward a
+   * violation another leg of the same call shows committed first: that hit's
+   * leg, anchor message and charged endpoint. Absent on an originated hit.
+   */
+  relays: Schema.optionalKey(Schema.Struct({ leg: Schema.Int, anchor_msg: Schema.Int, emitter: Schema.String })),
+  /**
    * Index into the leg's messages of the message the decision rests on, the
    * same for every rule. Absent from a report taken before it was stated.
    */

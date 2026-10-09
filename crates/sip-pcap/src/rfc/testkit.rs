@@ -199,3 +199,12 @@ pub(super) fn doc_of(datagrams: Vec<Datagram>) -> FlowsDoc {
     crate::emit::flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default())
         .expect("the model enriches")
 }
+
+/// `msg` carrying `body` as its session description, the head's
+/// `Content-Length: 0` restated for it.
+pub(super) fn with_body(msg: String, body: &str) -> String {
+    msg.replace(
+        "Content-Length: 0\r\n\r\n",
+        &format!("Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len()),
+    )
+}
