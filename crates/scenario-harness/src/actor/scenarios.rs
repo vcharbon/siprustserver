@@ -206,7 +206,7 @@ impl ActorScenario for Refer {
 /// the transfer fails and A↔B stays up. The actor runner OWNS teardown (its own
 /// per-actor scopes), so **alice BYEs A↔B herself** once the decline is
 /// observed — the call tears down, settles, and succeeds under its
-/// [`TRANSFER_DECLINED`] branch.
+/// `transfer_declined` branch.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.10):
 /// NO phases, NO anchors, checkpoint `time_to_200` only, NO `mark_ringing`;

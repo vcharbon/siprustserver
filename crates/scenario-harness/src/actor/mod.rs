@@ -11,8 +11,8 @@
 //! late/reordered/retransmitted datagram is always consumed, and the settle
 //! barrier holds the verdict until the ledger closes (every in-dialog request
 //! acknowledged) or the 32 s ceiling elapses. The call then succeeds under one
-//! of the endings its scenario accepts ([`ending`]), or fails at a named place
-//! ([`verdict`]).
+//! of the endings its scenario accepts ([`Expect`]), or fails at a named place
+//! ([`FailedAt`]).
 //!
 //! # Concurrency model — joined futures on ONE task (no spawn)
 //!

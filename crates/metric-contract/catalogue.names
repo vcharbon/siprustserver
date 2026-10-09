@@ -305,6 +305,8 @@ call-limiter-runner limiter_fences gauge fixed {}
 call-limiter-runner limiter_change_markers gauge fixed {}
 call-limiter-runner limiter_admission_max gauge fixed {}
 loadgen loadgen_calls_total counter semi_open {scenario,class,chaos}
+loadgen loadgen_branch_total counter semi_open {scenario,branch}
+loadgen loadgen_failed_step_total counter semi_open {scenario,step}
 loadgen loadgen_shed_total counter semi_open {scenario}
 loadgen loadgen_inflight gauge fixed {}
 loadgen loadgen_started_total counter fixed {}

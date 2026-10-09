@@ -245,7 +245,7 @@ impl Reporter {
 
     /// The sampling-gate decision at call start: should this call record its
     /// trace? True while a bucket for the scenario is still under cap and has
-    /// chased its next sample for fewer than [`CHASE_CALLS`] calls (or none is
+    /// chased its next sample for fewer than `CHASE_CALLS` (64) calls (or none is
     /// recorded yet), plus a small background fraction so a late error class is
     /// eventually captured. Converges to (background-only) once full.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
