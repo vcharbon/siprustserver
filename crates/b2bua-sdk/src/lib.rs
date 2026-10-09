@@ -49,7 +49,7 @@ pub mod rules {
         SERVICE_LAYER,
     };
     pub use crate::provisional::{
-        absorbed_provisional_actions, originator_final_sent, reliable_rseq,
+        absorbed_provisional_actions, originator_final_sent, reliable_rseq, shown_to_no_one,
     };
     pub use crate::relayed_final::RelayedFinal;
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};

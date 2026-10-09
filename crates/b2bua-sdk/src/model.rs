@@ -1546,6 +1546,14 @@ impl<'a> RuleContext<'a> {
     pub fn peer_relay_ready(&self) -> bool {
         call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, self.request_tags())
     }
+    /// Whether a [`RuleAction::RelayToPeer`] of the current event reaches any
+    /// leg, by the resolver the executor's relay path reads
+    /// ([`call::helpers::resolve_relay_peer`]).
+    pub fn relay_peer_resolves(&self) -> bool {
+        call::helpers::resolve_relay_peer(self.call.0, self.source_leg_id, self.request_tags())
+            .0
+            .is_some()
+    }
 
     /// Whether the current INVITE meets glare (RFC 3261 §14.1), by the same
     /// predicate the exchange count reads ([`call::helpers::invite_glare`]):

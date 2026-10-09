@@ -43,7 +43,7 @@
 //! registry (`b2bua-runner::compose_services`) so `docs/sm/relayFirst18x.md` is
 //! generated from the same declared `active_states`/`transitions`/`effects`.
 
-use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
+use b2bua_sdk::provisional::{absorbed_provisional_actions, shown_to_no_one};
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
@@ -133,8 +133,9 @@ define_service! {
         // one cache per fork. Once alice's INVITE transaction sent its final
         // no 18x is shown to her at all, first or later, whatever the
         // policy (RFC 3261 §13.3.1.1 / §17.2.1): a leg ringing then is
-        // suppressed with what it is owed. A provisional on a leg that
-        // already took its final answers nothing and is no candidate here.
+        // suppressed with what it is owed, as is a leg with no relay peer
+        // (`shown_to_no_one`). A provisional on a leg that already took its
+        // final answers nothing and is no candidate here.
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -185,35 +186,30 @@ define_service! {
                     _ => None,
                 };
 
-                let caller_answered = originator_final_sent(&ctx.call);
-                if ctx.call.relay_first_18x_first_relayed() || caller_answered {
-                    // Subsequent 18x — the `Relay18xMessages` policy decides
-                    // whether it is relayed again (downgraded, under the stored
-                    // a-facing tag) or suppressed; an answered caller is shown
-                    // none. Either way it is PRACKed + cached (per-fork dialog
-                    // state is policy-independent).
-                    let relay_again = !caller_answered
-                        && match ctx.call.relay_first_18x_messages() {
+                // The first 18x is relayed; a later one as the
+                // `Relay18xMessages` policy decides — again (downgraded, under
+                // the stored a-facing tag) or not. One shown to no one (an
+                // answered caller, a leg with no relay peer) is never relayed
+                // and is not her first. Either way it is PRACKed + cached
+                // (per-fork dialog state is policy-independent).
+                let relayed = !shown_to_no_one(ctx)
+                    && (!ctx.call.relay_first_18x_first_relayed()
+                        || match ctx.call.relay_first_18x_messages() {
                             call::features::Relay18xMessages::All => true,
                             call::features::Relay18xMessages::First => false,
                             call::features::Relay18xMessages::OnePerValue => {
                                 !ctx.call.relay_first_18x_value_relayed(resp.status())
                             }
-                        };
-                    if !relay_again {
-                        // The suppressed provisional's due — Early, PRACK,
-                        // CDR — plus the fake-prack cache, which keys on the
-                        // early dialog the PRACK registers.
-                        let mut actions = absorbed_provisional_actions(ctx);
-                        if let Some(a) = cache_action {
-                            actions.push(a);
-                        }
-                        return ok(actions);
+                        });
+                if !relayed {
+                    // The suppressed provisional's due — Early, PRACK, CDR —
+                    // plus the fake-prack cache, which keys on the early
+                    // dialog the PRACK registers.
+                    let mut actions = absorbed_provisional_actions(ctx);
+                    if let Some(a) = cache_action {
+                        actions.push(a);
                     }
-                    // Relay-again falls through to the RelayFirstBare180 branch:
-                    // its executor reuses the stored a-facing tag (one stable
-                    // early dialog toward the caller) and records the upstream
-                    // status value for ONE_PER_VALUE dedupe.
+                    return ok(actions);
                 }
 
                 // First 18x (or a later one the messages policy relays again) —

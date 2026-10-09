@@ -26,6 +26,13 @@ pub fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
     Some(resp.header::<header::RSeq>()?.ok()?.value() as i64)
 }
 
+/// Whether the event's INVITE provisional is shown to no one: the
+/// originator's INVITE transaction sent its final, or the leg it came from
+/// has no relay peer (a service's unadopted leg).
+pub fn shown_to_no_one(ctx: &RuleContext) -> bool {
+    originator_final_sent(&ctx.call) || !ctx.relay_peer_resolves()
+}
+
 /// What the event's INVITE provisional is owed on the leg it came from when
 /// no one is shown it: the early dialog it establishes (RFC 3261 §12.1.2),
 /// the leg `Early` (a later teardown CANCELs it), its PRACK
