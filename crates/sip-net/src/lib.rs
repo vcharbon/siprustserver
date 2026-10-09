@@ -34,7 +34,8 @@ pub use net::{SignalingNetwork, UdpEndpoint};
 pub use real::RealSignalingNetwork;
 pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use rfc_audit::{
-    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, RfcFinding,
+    audit_wire_entries, bind_roles_of, evaluate_rfc_audit, evaluate_rfc_findings,
+    rfc_cross_message_rules, RfcAudit, RfcFinding,
 };
 pub use simulated::{SendFault, SimulatedSignalingNetwork};
 pub use types::{

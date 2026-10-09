@@ -147,7 +147,9 @@ fn observation(msgs: &[Msg]) -> Observation {
 }
 
 /// Run `rule` over every bind view and keep the violated, non-relayed findings
-/// the `vantage` predicate accepts for the bind the view belongs to.
+/// the `vantage` predicate accepts for the bind the view belongs to. Every
+/// non-relayed occasion at that vantage, violated or not, is noted for the
+/// run's rule population.
 fn at_vantage(
     events: &[Stamped<SignalingNetworkEvent>],
     rule: &dyn Obligation,
@@ -159,7 +161,11 @@ fn at_vantage(
     for view in bind_views(events) {
         let obs = observation(&view.msgs);
         for f in rule.eval(&WireView { msgs: &view.msgs, obs: &obs }) {
-            if !f.violated() || f.relayed || !vantage(&f, &view.bind) {
+            if f.relayed || !vantage(&f, &view.bind) {
+                continue;
+            }
+            crate::rfc_audit::occasions::note(&view.bind, &f);
+            if !f.violated() {
                 continue;
             }
             let (seq, cid) = &view.meta[f.anchor];

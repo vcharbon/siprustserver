@@ -30,6 +30,7 @@
 //!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc --rfc-rules all
 //!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
 //!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
+//!   sipflow --list-rules
 //!
 //! `--rfc` reviews the SELECTED calls: the same rules the census runs, on the
 //! document the selection would emit, with every hit placed on a side by
@@ -196,6 +197,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     schema: bool,
 
+    /// Print every RFC rule token (`rfc_rules::RuleId`), one per line, and exit.
+    #[arg(long, default_value_t = false)]
+    list_rules: bool,
+
     /// Encode an ALREADY EMITTED flows document as a classic pcap (Ethernet /
     /// IP / UDP, the document's own sockets and timestamps) at `--out` — an
     /// anonymized document back into a capture every reader takes. Reads no
@@ -284,6 +289,12 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    if args.list_rules {
+        for rule in rfc_rules::RuleId::ALL {
+            println!("{}", rule.token());
+        }
+        return;
+    }
     if args.schema {
         let schema = schemars::schema_for!(sip_pcap::doc::FlowsDoc);
         println!("{}", serde_json::to_string_pretty(&schema).expect("schema serializes"));

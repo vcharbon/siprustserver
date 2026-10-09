@@ -26,7 +26,7 @@
 //! SDP grammar is NOT here: a description is read as a document by
 //! [`sip_message::sdp_doc`], the one home for it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use layer_harness::Stamped;
@@ -55,6 +55,9 @@ pub mod relay_lanes;
 // The rfc-rules live adapter: merged rule bodies surfaced as cross-message
 // findings.
 pub mod wire_adapter;
+
+// The per-rule population an audit pass notes.
+mod occasions;
 
 /// The full default set of **cross-message** RFC rules every test harness
 /// installs by default. One pass over the whole recorded channel at layer
@@ -135,6 +138,23 @@ pub fn bind_roles_of(
 /// its `advisory` tags — so the gate and the report can never disagree on
 /// which endpoint a rule applies to.
 pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RfcFinding> {
+    evaluate_rfc_audit(events).findings
+}
+
+/// The RFC suite over one recorded trace: its findings and, per rule token,
+/// the population the trace gave the rule.
+#[derive(Debug, Clone, Default)]
+pub struct RfcAudit {
+    /// The findings, as [`evaluate_rfc_findings`] returns them.
+    pub findings: Vec<RfcFinding>,
+    /// Per rule token, the occasions met at the vantages the suite surfaces
+    /// findings at, on binds the rule's subject covers: how often the trace
+    /// exercised the rule, violated or not.
+    pub population: BTreeMap<&'static str, rfc_rules::Population>,
+}
+
+/// [`evaluate_rfc_findings`] with the rule population of the same pass.
+pub fn evaluate_rfc_audit(events: &[Stamped<SignalingNetworkEvent>]) -> RfcAudit {
     // Audit view: consumption markers and modeled-loss /
     // infra-absorbed arrivals are projection-only — filtered here so EVERY
     // caller (harness hard gate, e2e collector, report projection) hands the
@@ -153,11 +173,18 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
     };
 
     let mut findings = Vec::new();
+    let mut population: BTreeMap<&'static str, rfc_rules::Population> = BTreeMap::new();
 
     // Cross-message rules — one pass over the whole channel each.
     for rule in rfc_cross_message_rules() {
         let subject = rule.subject();
-        for (bind, detail, offending, charged) in rule.check_positioned(events) {
+        let (positioned, tally) = occasions::tallied(|| rule.check_positioned(events));
+        for ((token, bind), noted) in tally {
+            if subject_hits(&subject, &bind) {
+                population.entry(token).or_default().add(noted);
+            }
+        }
+        for (bind, detail, offending, charged) in positioned {
             if subject_hits(&subject, &bind) {
                 findings.push(RfcFinding {
                     rule: rule.name().to_string(),
@@ -171,5 +198,5 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
         }
     }
 
-    findings
+    RfcAudit { findings, population }
 }

@@ -749,11 +749,12 @@ impl Finding {
     }
 }
 
-/// One rule's denominators over a set of findings.
-#[derive(Debug, Clone, Copy, Default)]
+/// One rule's population over a set of findings: `hits ⊆ decided ⊆ occasions`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Population {
     pub occasions: u64,
     pub decided: u64,
+    pub hits: u64,
 }
 
 impl Population {
@@ -763,6 +764,16 @@ impl Population {
         if f.decided() {
             self.decided += 1;
         }
+        if f.violated() {
+            self.hits += 1;
+        }
+    }
+
+    /// Fold another population of the same rule in.
+    pub fn add(&mut self, other: Population) {
+        self.occasions += other.occasions;
+        self.decided += other.decided;
+        self.hits += other.hits;
     }
 }
 

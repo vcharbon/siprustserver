@@ -41,6 +41,8 @@
 //!   then `ladder` (the wire), `call_trace` (each sampled call's SUT trace),
 //!   the [`FailureView`] sections a SUT adds, the UAs' dialog tables, and
 //!   `log_dump` (the capture buffer and the SUT log tail).
+//! - `rule_coverage` — the per-test record of each RFC rule's occasions,
+//!   written at `finish()` under the cargo target dir.
 //! - `artifact_dump` — the Drop-time report-artifact writer
 //!   (`SCENARIO_ARTIFACT_DIR`-gated), so a run that never reaches `finish()`
 //!   still leaves its SVG/HTML/text ladders.
@@ -80,6 +82,7 @@ mod out_of_dialog;
 mod panic_note;
 mod proxy;
 mod rr_fold;
+mod rule_coverage;
 mod run_guards;
 mod server_txn;
 mod step;
