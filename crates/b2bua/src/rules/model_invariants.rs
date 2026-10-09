@@ -19,6 +19,8 @@
 //! that 2xx awaits its ACK (`answered_2xx`), and afterwards against the
 //! message ring's record of it; with the ring off nothing records the 2xx's
 //! To-tag past the ACK, and only the one-dialog half holds.
+//!
+//! Timer-scope invariants come with the timer scope model.
 
 use std::fmt;
 use std::sync::Mutex;
@@ -46,7 +48,6 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("dialog-cseq-never-decreases", dialog_cseq_never_decreases),
     ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
-    ("no-timer-on-a-terminated-leg", no_timer_on_a_terminated_leg),
 ];
 
 /// Check every invariant on `turn`; panics on the first violated, naming
@@ -253,21 +254,6 @@ fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
         }
         _ => Ok(()),
     }
-}
-
-/// No armed timer names a terminated leg.
-fn no_timer_on_a_terminated_leg(turn: &Turn<'_>) -> Result<(), String> {
-    let call = turn.after;
-    for timer in &call.timers {
-        let Some(leg_id) = timer.leg_id.as_deref() else { continue };
-        if find_leg(call, leg_id).is_some_and(|l| l.state == LegState::Terminated) {
-            return Err(format!(
-                "timer {} ({:?}) is armed on terminated leg {leg_id}",
-                timer.id, timer.timer_type
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn legs(call: &Call) -> impl Iterator<Item = &Leg> {

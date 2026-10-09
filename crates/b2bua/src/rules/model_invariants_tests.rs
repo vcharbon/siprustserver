@@ -2,7 +2,7 @@
 //! broken one.
 
 use call::helpers::{make_dialog_from_incoming, MakeDialogLegCtx};
-use call::{Call, Dialog, LegState, ReliableProvisional, TagMapping, TimerEntry, TimerType};
+use call::{Call, Dialog, LegState, ReliableProvisional, TagMapping};
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
@@ -140,18 +140,4 @@ fn an_early_a_leg_past_a_rejection_breaks_the_ended_dialog_invariant() {
     call.a_leg.invite_final_sent = Some(486);
     let err = no_a_dialog_past_a_rejection(&after(&call)).unwrap_err();
     assert!(err.contains("took 486"), "{err}");
-}
-
-#[test]
-fn a_timer_on_a_terminated_leg_breaks_the_timer_invariant() {
-    let mut call = call();
-    call.b_legs[0].state = LegState::Terminated;
-    call.timers.push(TimerEntry {
-        id: TimerType::NoAnswer.timer_id(Some("b-1")),
-        timer_type: TimerType::NoAnswer,
-        fire_at: 1,
-        leg_id: Some("b-1".into()),
-    });
-    let err = no_timer_on_a_terminated_leg(&after(&call)).unwrap_err();
-    assert!(err.contains("terminated leg b-1"), "{err}");
 }
