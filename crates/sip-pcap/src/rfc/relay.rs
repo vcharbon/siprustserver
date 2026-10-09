@@ -4,11 +4,20 @@
 //! The rules decide one leg at a time, so the forwarding box's copy of a
 //! violation on the next leg reads as a second, originated hit. This pass
 //! pairs that copy with the hit it forwards: a hit of a [`RELAYABLE`] rule is
-//! RELAYED ONWARD where an earlier hit of the same rule, on another leg of the
-//! same group, was emitted toward the host that emits this one, and the two
-//! anchor messages are one message carried on: the same kind, and the same
-//! session description — byte for byte, by its origin's session id and
-//! version, or absent from both. The hit keeps its charge and names its origin.
+//! RELAYED ONWARD where a hit of the same rule, on another leg of the same
+//! group, was emitted toward the host that emits this one INSIDE THE COPY'S
+//! TRANSACTION, and the two anchor messages are one message carried on: the
+//! same kind, the same session description — byte for byte, or by its origin's
+//! session id and version with the same violation judged in it — or absent
+//! from both. The hit keeps its charge and names its origin.
+//!
+//! **Inside the transaction.** A response copy answers the request its host
+//! took on the copy leg; its origin is a response to a request that host sent
+//! on the origin leg after taking that one. An ACK copy acknowledges the 2xx
+//! its host took; its origin is an ACK the host took after that 2xx. A request
+//! copy's origin arrived after the host's previous request of that method on
+//! the copy leg. Of several candidates the EARLIEST is the origin: the first
+//! answer is the one a forwarding box passes on.
 
 use std::collections::BTreeSet;
 
@@ -16,15 +25,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{FlowsDoc, MsgJson, Summary};
 
-use super::{endpoint_ip, Hit, RfcRule};
+use super::{endpoint_ip, Evidence, Hit, RfcRule};
 
-/// The rules whose offence the anchor message carries in its own content, so
-/// a hop that forwards the message unchanged forwards the violation with it.
-pub const RELAYABLE: [RfcRule; 3] = [
-    RfcRule::PayloadTypeMappingStable,
-    RfcRule::Final2xxAnswersTheOffer,
-    RfcRule::AckBodyAfterCompleteOfferAnswer,
-];
+/// The rules a copy can relay onward ([`RfcRule::RELAYABLE`]).
+pub const RELAYABLE: &[RfcRule] = RfcRule::RELAYABLE;
 
 /// The originated hit a relayed one forwards, located in the same document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +43,7 @@ pub struct RelayOrigin {
 
 /// Mark every hit of `hits` — one call group's — that relays another of them
 /// onward: `relayed` set, `relays` naming the origin. An origin is paired with
-/// one relayed copy at most, the latest unpaired origin before the copy, so a
-/// later exchange on the call never claims an earlier one's violation.
+/// one relayed copy at most.
 pub(super) fn link(doc: &FlowsDoc, hits: &mut [Hit]) {
     let mut paired: BTreeSet<usize> = BTreeSet::new();
     let mut order: Vec<usize> = (0..hits.len()).collect();
@@ -49,13 +52,12 @@ pub(super) fn link(doc: &FlowsDoc, hits: &mut [Hit]) {
         if !RELAYABLE.contains(&hits[copy].rule) || hits[copy].relays.is_some() {
             continue;
         }
-        let Some(copy_msg) = anchor(doc, &hits[copy]) else { continue };
+        let Some(window) = Window::of(doc, &hits[copy]) else { continue };
         let origin = order
             .iter()
             .copied()
             .filter(|&o| o != copy && !paired.contains(&o) && hits[o].relays.is_none())
-            .filter(|&o| forwards(doc, &hits[o], &hits[copy], copy_msg))
-            .max_by_key(|&o| at_us(doc, &hits[o]));
+            .find(|&o| forwards(doc, &hits[o], &hits[copy], &window));
         let Some(origin) = origin else { continue };
         paired.insert(origin);
         let relays = RelayOrigin {
@@ -68,22 +70,98 @@ pub(super) fn link(doc: &FlowsDoc, hits: &mut [Hit]) {
     }
 }
 
-/// Whether `copy` (anchored on `copy_msg`) forwards `origin`: same rule, on
-/// another leg, a different emitter, taken by the copy's emitting host before
-/// the copy went out, and one message carried on.
-fn forwards(doc: &FlowsDoc, origin: &Hit, copy: &Hit, copy_msg: &MsgJson) -> bool {
+/// Where a copy's origin may sit: the copy's own message and host, and the
+/// instant its transaction opened at the forwarding host.
+struct Window<'d> {
+    copy: &'d MsgJson,
+    /// When the host took what opened the copy's exchange: the request a
+    /// response copy answers, the 2xx an ACK copy acknowledges, or its own
+    /// previous request of the method; zero where it sent none before.
+    opened_us: u64,
+}
+
+impl<'d> Window<'d> {
+    /// The window of `hit`'s anchor; `None` where its leg does not carry what
+    /// opened its transaction, so nothing can be placed inside it.
+    fn of(doc: &'d FlowsDoc, hit: &Hit) -> Option<Window<'d>> {
+        let msgs = &doc.legs.get(hit.leg)?.msgs;
+        let copy = msgs.get(hit.anchor_msg)?;
+        let before = msgs[..hit.anchor_msg].iter().rev();
+        let opened_us = match &copy.summary {
+            Summary::Response { cseq, .. } => {
+                before
+                    .filter(|m| same_host(&m.dst, &copy.src))
+                    .find(|m| is_request(m, &cseq.method, Some(cseq.seq)))?
+                    .ts_us
+            }
+            Summary::Request { method, cseq, .. } if method.eq_ignore_ascii_case("ACK") => {
+                before
+                    .filter(|m| same_host(&m.dst, &copy.src))
+                    .find(|m| is_2xx_to_invite(m, cseq.seq))?
+                    .ts_us
+            }
+            Summary::Request { method, .. } => before
+                .filter(|m| same_host(&m.src, &copy.src))
+                .find(|m| is_request(m, method, None))
+                .map_or(0, |m| m.ts_us),
+        };
+        Some(Window { copy, opened_us })
+    }
+}
+
+/// Whether `copy` forwards `origin`: same rule, on another leg, a different
+/// emitter, taken by the copy's emitting host inside the copy's transaction
+/// and before the copy went out, and one message carried on.
+fn forwards(doc: &FlowsDoc, origin: &Hit, copy: &Hit, window: &Window<'_>) -> bool {
     if origin.rule != copy.rule || origin.leg == copy.leg || origin.emitter == copy.emitter {
         return false;
     }
     let Some(origin_msg) = anchor(doc, origin) else { return false };
-    let same_host = match (endpoint_ip(&origin_msg.dst), endpoint_ip(&copy_msg.src)) {
-        (Some(took), Some(sent)) => took == sent,
-        _ => origin_msg.dst == copy_msg.src,
-    };
-    same_host
-        && origin_msg.ts_us <= copy_msg.ts_us
-        && same_kind(origin_msg, copy_msg)
-        && same_description(origin_msg, copy_msg)
+    same_host(&origin_msg.dst, &window.copy.src)
+        && window.opened_us <= origin_msg.ts_us
+        && origin_msg.ts_us <= window.copy.ts_us
+        && answers_a_forwarded_request(doc, origin, origin_msg, window)
+        && same_kind(origin_msg, window.copy)
+        && same_description(origin_msg, window.copy, &origin.evidence, &copy.evidence)
+}
+
+/// A response origin answers a request the copy's host sent on the origin leg
+/// once its own transaction had opened; any other origin passes.
+fn answers_a_forwarded_request(
+    doc: &FlowsDoc,
+    origin: &Hit,
+    origin_msg: &MsgJson,
+    window: &Window<'_>,
+) -> bool {
+    let Summary::Response { cseq, .. } = &origin_msg.summary else { return true };
+    let Some(leg) = doc.legs.get(origin.leg) else { return false };
+    leg.msgs[..origin.anchor_msg]
+        .iter()
+        .rev()
+        .filter(|m| same_host(&m.src, &window.copy.src))
+        .find(|m| is_request(m, &cseq.method, Some(cseq.seq)))
+        .is_some_and(|m| window.opened_us <= m.ts_us)
+}
+
+/// Whether two endpoints sit on one host: the same IP, or the same token
+/// where either is no socket address.
+fn same_host(a: &str, b: &str) -> bool {
+    match (endpoint_ip(a), endpoint_ip(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// A request of `method`, under CSeq number `seq` where one is given.
+fn is_request(m: &MsgJson, method: &str, seq: Option<u32>) -> bool {
+    matches!(&m.summary, Summary::Request { method: x, cseq, .. }
+        if x.eq_ignore_ascii_case(method) && seq.is_none_or(|n| cseq.seq == n))
+}
+
+/// A 2xx to the INVITE numbered `seq`.
+fn is_2xx_to_invite(m: &MsgJson, seq: u32) -> bool {
+    matches!(&m.summary, Summary::Response { status, cseq, .. }
+        if (200..300).contains(status) && cseq.seq == seq && cseq.method.eq_ignore_ascii_case("INVITE"))
 }
 
 /// The message a hit rests on.
@@ -113,21 +191,46 @@ fn same_kind(a: &MsgJson, b: &MsgJson) -> bool {
 }
 
 /// Whether the two messages carry one session description: none on either,
-/// the same bytes, or the same origin session id and version (RFC 4566 §5.2),
-/// which names one version of one session whatever a forwarding hop rewrote
-/// around it.
-fn same_description(a: &MsgJson, b: &MsgJson) -> bool {
+/// the same bytes, or the same origin session id and version (RFC 4566 §5.2)
+/// under which the rule judged the same violation — a forwarding hop may
+/// rewrite the lines around a description, never what makes it the offence.
+fn same_description(a: &MsgJson, b: &MsgJson, judged_a: &Evidence, judged_b: &Evidence) -> bool {
     match (body_of(a), body_of(b)) {
         (None, None) => true,
         (Some(x), Some(y)) if x == y => true,
         (Some(x), Some(y)) => {
-            match (sip_message::sdp_doc::parse_origin(&x), sip_message::sdp_doc::parse_origin(&y)) {
+            let same_version = match (
+                sip_message::sdp_doc::parse_origin(&x),
+                sip_message::sdp_doc::parse_origin(&y),
+            ) {
                 (Some(ox), Some(oy)) => {
                     ox.session_id == oy.session_id && ox.session_version == oy.session_version
                 }
                 _ => false,
-            }
+            };
+            same_version && same_judgement(judged_a, judged_b)
         }
+        _ => false,
+    }
+}
+
+/// Whether the rule found the same thing wrong in both: the re-bound payload
+/// types and the encodings they were re-bound to, the stream table an ACK body
+/// carried, the status of a final that answered nothing.
+fn same_judgement(a: &Evidence, b: &Evidence) -> bool {
+    match (a, b) {
+        (
+            Evidence::PayloadTypeRemapped { payload_types: pa, encodings: ea, .. },
+            Evidence::PayloadTypeRemapped { payload_types: pb, encodings: eb, .. },
+        ) => pa == pb && ea == eb,
+        (
+            Evidence::AckBodyOnClosedRound { streams: sa, .. },
+            Evidence::AckBodyOnClosedRound { streams: sb, .. },
+        ) => sa == sb,
+        (
+            Evidence::OfferLeftUnanswered { status: sa, .. },
+            Evidence::OfferLeftUnanswered { status: sb, .. },
+        ) => sa == sb,
         _ => false,
     }
 }
@@ -274,5 +377,158 @@ mod tests {
         let copy = hits.iter().find(|h| h.emitter == P).expect("the platform's hit");
         assert_eq!(copy.relays.as_ref().map(|o| o.emitter.as_str()), Some(B));
         assert!(!hits.iter().find(|h| h.emitter == B).unwrap().relayed);
+    }
+
+    /// A description binding payload type 18 to `encoding`, under origin
+    /// `<id> <version>`.
+    fn sdp_pt(id: u32, version: u32, encoding: &str) -> String {
+        format!(
+            "v=0\r\no=- {id} {version} IN IP4 10.0.0.50\r\ns=-\r\nc=IN IP4 10.0.0.50\r\n\
+             t=0 0\r\nm=audio 4000 RTP/AVP 18\r\na=rtpmap:18 {encoding}\r\n"
+        )
+    }
+
+    /// The callee's 200 to the initial INVITE carries no answer and the
+    /// platform answers the caller itself; later the platform answers the
+    /// caller's re-INVITE with a 200 of its own carrying no answer, never
+    /// forwarding that re-INVITE. The two bodiless 200s ride different
+    /// transactions: the platform's violation is its own.
+    #[test]
+    fn probe_bodiless_2xx_of_another_transaction_is_not_a_relay() {
+        let offer = sdp(100, 1, 4000);
+        let own = sdp(300, 1, 6000);
+        let reoffer = sdp(100, 2, 4000);
+        let doc = doc_of(vec![
+            dg(1_000, A, P, with_body(request("INVITE", 1, "leg-a", "fa", None), &offer)),
+            dg(
+                1_200,
+                P,
+                B,
+                with_body(request_tok("INVITE", 1, "leg-b", "fp", None, "leg-a"), &offer),
+            ),
+            dg(2_000, B, P, response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb"))),
+            dg(2_050, P, B, request("ACK", 1, "leg-b", "fp", Some("tb"))),
+            dg(
+                2_100,
+                P,
+                A,
+                with_body(response(200, "OK", 1, "INVITE", "leg-a", "fa", Some("tp")), &own),
+            ),
+            dg(2_200, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
+            dg(5_000, A, P, with_body(request("INVITE", 2, "leg-a", "fa", Some("tp")), &reoffer)),
+            dg(5_100, P, A, response(200, "OK", 2, "INVITE", "leg-a", "fa", Some("tp"))),
+            dg(5_200, A, P, request("ACK", 2, "leg-a", "fa", Some("tp"))),
+        ]);
+        let hits = rule_hits(&doc, RfcRule::Final2xxAnswersTheOffer);
+        let own = hits.iter().find(|h| h.emitter == P).expect("the platform's own hit");
+        assert!(!own.relayed && own.relays.is_none(), "{hits:?}");
+    }
+
+    /// The caller re-binds payload type 18; the platform's re-offer keeps the
+    /// caller's origin line but binds 18 to yet another encoding — its own
+    /// re-binding, not the caller's carried on. The same bytes carried on are.
+    #[test]
+    fn probe_same_origin_version_different_rebinding_is_not_a_relay() {
+        let call = |relayed_reoffer: &str| {
+            let offer = sdp_pt(100, 1, "G729/8000");
+            let answer = sdp_pt(200, 1, "G729/8000");
+            let reoffer = sdp_pt(100, 2, "G729A/8000");
+            let reanswer = sdp_pt(200, 2, "G729/8000");
+            doc_of(vec![
+                dg(1_000, A, P, with_body(request("INVITE", 1, "leg-a", "fa", None), &offer)),
+                dg(
+                    1_200,
+                    P,
+                    B,
+                    with_body(request_tok("INVITE", 1, "leg-b", "fp", None, "leg-a"), &offer),
+                ),
+                dg(
+                    2_000,
+                    B,
+                    P,
+                    with_body(response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb")), &answer),
+                ),
+                dg(2_050, P, B, request("ACK", 1, "leg-b", "fp", Some("tb"))),
+                dg(
+                    2_100,
+                    P,
+                    A,
+                    with_body(response(200, "OK", 1, "INVITE", "leg-a", "fa", Some("tp")), &answer),
+                ),
+                dg(2_200, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
+                dg(
+                    5_000,
+                    A,
+                    P,
+                    with_body(request("INVITE", 2, "leg-a", "fa", Some("tp")), &reoffer),
+                ),
+                dg(
+                    5_100,
+                    P,
+                    B,
+                    with_body(request("INVITE", 2, "leg-b", "fp", Some("tb")), relayed_reoffer),
+                ),
+                dg(
+                    5_200,
+                    B,
+                    P,
+                    with_body(
+                        response(200, "OK", 2, "INVITE", "leg-b", "fp", Some("tb")),
+                        &reanswer,
+                    ),
+                ),
+                dg(5_250, P, B, request("ACK", 2, "leg-b", "fp", Some("tb"))),
+                dg(
+                    5_300,
+                    P,
+                    A,
+                    with_body(
+                        response(200, "OK", 2, "INVITE", "leg-a", "fa", Some("tp")),
+                        &reanswer,
+                    ),
+                ),
+                dg(5_400, A, P, request("ACK", 2, "leg-a", "fa", Some("tp"))),
+            ])
+        };
+        let platform = |doc: &FlowsDoc| {
+            rule_hits(doc, RfcRule::PayloadTypeMappingStable)
+                .into_iter()
+                .find(|h| h.emitter == P)
+                .expect("the platform's re-binding")
+        };
+        let rewritten = platform(&call(&sdp_pt(100, 2, "PCMU/8000")));
+        assert!(!rewritten.relayed && rewritten.relays.is_none(), "{rewritten:?}");
+        let carried = platform(&call(&sdp_pt(100, 2, "G729A/8000")));
+        assert_eq!(carried.relays.as_ref().map(|o| o.emitter.as_str()), Some(A), "{carried:?}");
+    }
+
+    /// Two forks behind the callee's address answer the platform's INVITE with
+    /// a 200 carrying no answer; the platform passes the first on to the caller
+    /// and releases the second. The origin is the fork whose 200 won (leg-b,
+    /// msg 1), not the latest one to arrive.
+    #[test]
+    fn the_origin_of_a_relayed_fork_answer_is_the_winning_fork() {
+        let offer = sdp(100, 1, 4000);
+        let doc = doc_of(vec![
+            dg(1_000, A, P, with_body(request("INVITE", 1, "leg-a", "fa", None), &offer)),
+            dg(
+                1_200,
+                P,
+                B,
+                with_body(request_tok("INVITE", 1, "leg-b", "fp", None, "leg-a"), &offer),
+            ),
+            dg(2_000, B, P, response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb1"))),
+            dg(2_050, B, P, response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb2"))),
+            dg(2_100, P, A, response(200, "OK", 1, "INVITE", "leg-a", "fa", Some("tp"))),
+            dg(2_200, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
+            dg(2_300, P, B, request("ACK", 1, "leg-b", "fp", Some("tb1"))),
+            dg(2_310, P, B, request("ACK", 1, "leg-b", "fp", Some("tb2"))),
+            dg(2_320, P, B, request("BYE", 2, "leg-b", "fp", Some("tb2"))),
+            dg(2_400, B, P, response(200, "OK", 2, "BYE", "leg-b", "fp", Some("tb2"))),
+        ]);
+        let hits = rule_hits(&doc, RfcRule::Final2xxAnswersTheOffer);
+        assert_eq!(hits.len(), 3, "both forks and the platform: {hits:?}");
+        let copy = hits.iter().find(|h| h.emitter == P).expect("the platform's hit");
+        assert_eq!(copy.relays.as_ref().map(|o| (o.emitter.as_str(), o.anchor_msg)), Some((B, 1)));
     }
 }

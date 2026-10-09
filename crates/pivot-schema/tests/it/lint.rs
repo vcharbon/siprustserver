@@ -2501,23 +2501,42 @@ fn an_rfc_violation_anchors_on_a_step_and_names_an_emitter() {
     }
 }
 
-/// §11.1: a `relays` rides a `sut` entry and names a step carrying a scripted
-/// party's entry of the same rule.
+/// §11.1: a `relays` rides a `sut` entry of a relayable rule and names an
+/// earlier step, on another leg of the call, carrying a scripted party's entry
+/// of the same rule; each defect is refused under its own code.
 #[test]
 fn a_relayed_rfc_violation_names_the_partys_entry_it_carries_on() {
-    let party = json!({ "rule": "no-200-after-cancel", "step": "s2", "emitter": "uas1" });
-    let relayed =
-        json!({ "rule": "no-200-after-cancel", "step": "s1", "emitter": "sut", "relays": "s2" });
+    let rule = "payload-type-mapping-stable";
+    let party = json!({ "rule": rule, "step": "s1", "emitter": "uac1" });
+    let relayed = json!({ "rule": rule, "step": "s2", "emitter": "sut", "relays": "s1" });
     assert_fires("ref/violation-relays-unstated", |d| {
         d["rfc_violations"] = json!([relayed.clone()]);
     });
     assert_fires("ref/violation-relays-unstated", |d| {
-        let other_rule = json!({ "rule": "cseq-in-dialog-order", "step": "s2", "emitter": "uas1" });
+        let other_rule =
+            json!({ "rule": "final-2xx-answers-the-offer", "step": "s1", "emitter": "uac1" });
         d["rfc_violations"] = json!([other_rule, relayed.clone()]);
     });
-    assert_fires("ref/violation-relays-unstated", |d| {
-        let on_a_party = json!({ "rule": "no-200-after-cancel", "step": "s1", "emitter": "uas1", "relays": "s2" });
+    assert_fires("ref/violation-relays-emitter", |d| {
+        let on_a_party = json!({ "rule": rule, "step": "s2", "emitter": "uas1", "relays": "s1" });
         d["rfc_violations"] = json!([party.clone(), on_a_party]);
+    });
+    assert_fires("ref/violation-relays-rule", |d| {
+        d["rfc_violations"] = json!([
+            { "rule": "no-200-after-cancel", "step": "s1", "emitter": "uac1" },
+            { "rule": "no-200-after-cancel", "step": "s2", "emitter": "sut", "relays": "s1" }
+        ]);
+    });
+    assert_fires("ref/violation-relays-order", |d| {
+        // The party's entry after the relaying one, on the other leg.
+        d["rfc_violations"] = json!([
+            { "rule": rule, "step": "s2", "emitter": "uas1" },
+            { "rule": rule, "step": "s1", "emitter": "sut", "relays": "s2" }
+        ]);
+    });
+    assert_fires("ref/violation-relays-order", |d| {
+        // Both on one leg.
+        d["rfc_violations"] = json!([party.clone(), { "rule": rule, "step": "s1", "emitter": "sut", "relays": "s1" }]);
     });
     let report = broken(|d| d["rfc_violations"] = json!([party.clone(), relayed.clone()]));
     assert!(!report.has_errors(), "{}", report.render());

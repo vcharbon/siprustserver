@@ -24,6 +24,7 @@ use pivot_schema::flow::{Anchor, CheckMode, Delay, FlowNode, Op, Step};
 use pivot_schema::msg::{MsgSpec, Ref};
 use pivot_schema::placement::{Actor, Endpoint, Leg};
 use pivot_schema::postcondition::CdrExpectation;
+use pivot_schema::violation::{RfcRule, RfcViolation};
 
 use crate::program::{Branch, Item, ItemKind, Program, StepLoc};
 
@@ -61,6 +62,9 @@ pub enum PlanError {
     UnknownReference { site: String, reference: String },
     /// A reference points forward: what it names has not run when it is read.
     ForwardReference { site: String, reference: String },
+    /// An `rfc_violations` entry's `relays` carries on no scripted party's
+    /// entry the way §11.1 states: `reason` says which condition failed.
+    ViolationRelays { site: String, relays: String, reason: String },
     /// A reference crosses an `alt` branch boundary (§6.5).
     CrossBranchReference { site: String, reference: String },
     /// A `${…}` that is not an accessor.
@@ -174,6 +178,9 @@ impl std::fmt::Display for PlanError {
             }
             PlanError::UnknownReference { site, reference } => {
                 write!(f, "{site} names {reference:?}, which nothing declares")
+            }
+            PlanError::ViolationRelays { site, relays, reason } => {
+                write!(f, "{site} relays {relays:?}: {reason}")
             }
             PlanError::ForwardReference { site, reference } => {
                 write!(f, "{site} names {reference:?}, which has not run when it is read")
@@ -1303,18 +1310,42 @@ impl Compiler {
             // other half, and without it the system under test's would pass
             // as nobody's.
             let Some(origin) = &violation.relays else { continue };
-            let stated = self
-                .document
-                .rfc_violations
-                .iter()
-                .any(|v| v.rule == violation.rule && &v.step == origin && !v.sut_emitted());
-            if !violation.sut_emitted() || !stated {
-                self.errors.push(PlanError::UnknownReference {
-                    site: format!("{site} relays"),
-                    reference: origin.clone(),
+            if let Some(reason) = self.relays_defect(&violation, origin) {
+                self.errors.push(PlanError::ViolationRelays {
+                    site,
+                    relays: origin.clone(),
+                    reason: reason.to_string(),
                 });
             }
         }
+    }
+
+    /// Why `violation`'s `relays` naming `origin` carries on no scripted
+    /// party's entry, or `None` where it does: a `sut` entry of a relayable
+    /// rule, naming a step that carries the party's entry of that rule, earlier
+    /// in the flow and on another leg.
+    fn relays_defect(&self, violation: &RfcViolation, origin: &str) -> Option<&'static str> {
+        if !violation.sut_emitted() {
+            return Some("only a `sut` entry relays");
+        }
+        if !RfcRule::RELAYABLE.contains(&violation.rule) {
+            return Some("the rule is not one a forwarded message carries on");
+        }
+        let stated = self
+            .document
+            .rfc_violations
+            .iter()
+            .any(|v| v.rule == violation.rule && v.step == origin && !v.sut_emitted());
+        if !stated {
+            return Some("that step carries no scripted party's entry of the rule");
+        }
+        let steps = self.document.steps();
+        let at = |id: &str| steps.iter().position(|s| s.id == id);
+        let (Some(from), Some(to)) = (at(origin), at(&violation.step)) else { return None };
+        if from >= to || steps[from].leg == steps[to].leg {
+            return Some("the party's entry must come earlier, on another leg");
+        }
+        None
     }
 
     /// Every `${…}` the document carries, wherever it carries it (§8.1): header

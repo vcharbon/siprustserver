@@ -521,31 +521,49 @@ fn an_rfc_violation_that_anchors_nowhere_or_names_no_emitter_is_refused() {
 }
 
 /// §11.1: a `relays` with no scripted party's entry of the same rule on the
-/// step it names is refused by site; with that entry it compiles.
+/// step it names, or one on the same leg or later, is refused by site with
+/// its reason; carrying on an earlier entry on the other leg it compiles.
 #[test]
 fn a_relayed_rfc_violation_without_the_partys_entry_is_refused() {
-    let flow =
-        format!(r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#);
-    let violations = |entries: &str| format!(r#""rfc_violations": [{entries}],"#);
-    let relayed = r#"{"rule":"no-200-after-cancel","step":"s1","emitter":"sut","relays":"s1"}"#;
-    let refused = refusals_with(
-        &flow,
-        r#""postconditions": { "cdr": { "absent": "unit test" } },"#,
-        &violations(relayed),
+    let flow = format!(
+        r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}},
+            {{"id":"s2","leg":"B","op":"expect","check":"assert","msg":{{"method":"INVITE"}},"delay":{D}}}]"#
     );
+    let compile = |entries: &str| {
+        refusals_with(
+            &flow,
+            r#""postconditions": { "cdr": { "absent": "unit test" } },"#,
+            &format!(r#""rfc_violations": [{entries}],"#),
+        )
+    };
+    let rule = "payload-type-mapping-stable";
+    let party = format!(r#"{{"rule":"{rule}","step":"s1","emitter":"uac1"}}"#);
+    let relayed = format!(r#"{{"rule":"{rule}","step":"s2","emitter":"sut","relays":"s1"}}"#);
+    let refused = |reason: &str| PlanError::ViolationRelays {
+        site: format!("rfc violation {rule}"),
+        relays: "s1".into(),
+        reason: reason.into(),
+    };
     assert_eq!(
-        refused,
-        [PlanError::UnknownReference {
-            site: "rfc violation no-200-after-cancel relays".into(),
-            reference: "s1".into(),
+        compile(&relayed),
+        [refused("that step carries no scripted party's entry of the rule")]
+    );
+    let same_leg = format!(r#"{{"rule":"{rule}","step":"s1","emitter":"sut","relays":"s1"}}"#);
+    assert_eq!(
+        compile(&format!("{party},{same_leg}")),
+        [refused("the party's entry must come earlier, on another leg")]
+    );
+    let unrelayable = r#"{"rule":"no-200-after-cancel","step":"s1","emitter":"uac1"},
+        {"rule":"no-200-after-cancel","step":"s2","emitter":"sut","relays":"s1"}"#;
+    assert_eq!(
+        compile(unrelayable),
+        [PlanError::ViolationRelays {
+            site: "rfc violation no-200-after-cancel".into(),
+            relays: "s1".into(),
+            reason: "the rule is not one a forwarded message carries on".into(),
         }]
     );
-    let party = r#"{"rule":"no-200-after-cancel","step":"s1","emitter":"uas1"}"#;
-    let ok = refusals_with(
-        &flow,
-        r#""postconditions": { "cdr": { "absent": "unit test" } },"#,
-        &violations(&format!("{party},{relayed}")),
-    );
+    let ok = compile(&format!("{party},{relayed}"));
     assert!(ok.is_empty(), "{ok:#?}");
 }
 

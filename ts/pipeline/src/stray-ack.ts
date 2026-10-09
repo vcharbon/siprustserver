@@ -7,9 +7,9 @@
  * every auto ACK step there. A peer that answers one final with several ACKs on
  * fresh branches sends requests no server transaction matches (§17.2.3); as
  * auto steps they would all leave on the INVITE's branch with different bytes.
- * So each final keeps the ACKs of ONE branch per hop — the final's own, else
- * the first ACK's — and the ACKs on other branches, with their repeats, are
- * dropped.
+ * So each final, its retransmissions read as the final they repeat, keeps the
+ * ACKs of ONE branch per hop (the final's own, else the first ACK's), and the
+ * ACKs on other branches, with their repeats, are dropped.
  */
 import { Flows } from "@sip/contracts"
 
@@ -20,8 +20,10 @@ export const offTransactionAcks = (flows: Flows.FlowsDoc): ReadonlySet<string> =
     const byFinal = new Map<number, Array<number>>()
     leg.msgs.forEach((msg, i) => {
       if (msg.repeat_of !== undefined || !Flows.isMethod(msg, "ACK")) return
-      const final = ackedFinal(leg.msgs, i)
-      if (final === undefined || finalStatus(leg.msgs[final]!) < 300) return
+      const copy = ackedFinal(leg.msgs, i)
+      if (copy === undefined) return
+      const final = originalOf(leg.msgs, copy)
+      if (finalStatus(leg.msgs[final]!) < 300) return
       byFinal.set(final, [...(byFinal.get(final) ?? []), i])
     })
     for (const [final, acks] of byFinal) {
@@ -52,6 +54,17 @@ const ackedFinal = (msgs: ReadonlyArray<Flows.Msg>, ack: number): number | undef
     return i
   }
   return undefined
+}
+
+/** The message a retransmission at `index` repeats, followed to the first copy. */
+const originalOf = (msgs: ReadonlyArray<Flows.Msg>, index: number): number => {
+  let at = index
+  for (let seen = 0; seen < msgs.length; seen++) {
+    const before = msgs[at]!.repeat_of
+    if (before === undefined || before >= at) return at
+    at = before
+  }
+  return at
 }
 
 const finalStatus = (msg: Flows.Msg): number => (msg.summary.kind === "response" ? msg.summary.status : 0)

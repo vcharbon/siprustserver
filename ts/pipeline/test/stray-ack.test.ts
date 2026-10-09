@@ -23,7 +23,8 @@ import {
   request,
   response,
   SOCKETS,
-  sutSet
+  sutSet,
+  withoutRepeatOf
 } from "./fixtures.js"
 
 const BOTH_VANTAGES: ReadonlyArray<Vantage> = [
@@ -107,5 +108,35 @@ describe("ACKs to a non-2xx final on fresh branches (RFC 3261 §17.1.1.3)", () =
     const { flow, acks } = callerAcks(cancelledWithStrayAcks(1, false))
     expect(acks).toHaveLength(1)
     expect(flow.flags.some((f) => f.kind === "ack-off-transaction-dropped")).toBe(false)
+  })
+
+  it("groups an ACK to a retransmitted final with the final it repeats", () => {
+    // The 487 is sent twice; the transaction's ACK answers the first copy and
+    // a stray on a fresh branch answers the second.
+    const flows = cancelledWithStrayAcks(1)
+    const msgs = [...flows.legs[0]!.msgs]
+    const final = msgs[5]!
+    const ack = msgs[7]!
+    const stray = msgs[6]!
+    msgs.splice(6, 2, ack, { ...final, ts_us: final.ts_us + 500_000, retx: true, repeat_of: 5 }, {
+      ...stray,
+      ts_us: final.ts_us + 501_000
+    })
+    const regrouped = { ...flows, legs: [{ ...flows.legs[0]!, msgs }, flows.legs[1]!] }
+    const { acks } = callerAcks(regrouped)
+    expect(acks).toHaveLength(1)
+    expect(regrouped.legs[0]!.msgs[acks[0]!.observed!.msg]!.via?.[0]?.branch).toBe(INVITE_BRANCH)
+  })
+
+  it("never counts a stray's retransmission as a rung of the kept ACK", () => {
+    // A legacy document (no repeat_of): the stray is sent twice on its branch.
+    const flows = cancelledWithStrayAcks(1)
+    const msgs = [...flows.legs[0]!.msgs]
+    const stray = msgs[6]!
+    msgs.push({ ...stray, ts_us: msgs[7]!.ts_us + 1_000, retx: true })
+    const legacy = withoutRepeatOf({ ...flows, legs: [{ ...flows.legs[0]!, msgs }, flows.legs[1]!] })
+    const { acks } = callerAcks(legacy)
+    expect(acks).toHaveLength(1)
+    expect(acks[0]!.retransmits ?? 0).toBe(0)
   })
 })

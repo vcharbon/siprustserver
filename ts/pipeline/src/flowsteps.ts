@@ -231,6 +231,12 @@ export const synthesize = (
     const msg = flows.legs[o.origLeg]!.msgs[o.msgIdx]!
     const emits = peerSide(o.actor, msg.src)
     const auto = isAutomatic(msg)
+    // Before any repeat collapse: a stray's own retransmission is no rung of
+    // the ACK the final keeps.
+    if (strayAcks.has(coord(o.origLeg, o.msgIdx))) {
+      strays.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)
+      continue
+    }
 
     const repeated = collapseOnRepeatOf
       ? msg.repeat_of === undefined
@@ -253,10 +259,6 @@ export const synthesize = (
         Math.max(0, Math.round((o.ts_us - previous) / 1000))
       ]
       rungAt.set(repeated, o.ts_us)
-      continue
-    }
-    if (strayAcks.has(coord(o.origLeg, o.msgIdx))) {
-      strays.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)
       continue
     }
     if (repeated >= 0) expanded.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)

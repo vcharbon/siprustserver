@@ -20,11 +20,13 @@
  *
  * A hit anchored on a hop the case does not carry is stated on the carried
  * hop's copy of its anchor message — the same message forwarded along the same
- * leg — charging the endpoint on the same side of that copy: the scripted party
- * playing the forwarding element reproduces what it forwarded.
+ * leg, with the same body — charging the endpoint on the same side of that
+ * copy: the scripted party playing the forwarding element reproduces what it
+ * forwarded. A copy that does not carry the same content states nothing.
  */
 import { Violation, type Case, type Census, type Flows } from "@sip/contracts"
 import type { DeclarationInput } from "./policy.js"
+import { body } from "./wire.js"
 
 /**
  * The index, in its leg's messages, of the message a hit's decision rests on:
@@ -200,8 +202,13 @@ const carriedCopy = (
   return best
 }
 
-/** Whether two captured messages are one SIP message on two hops: the same start line's kind, CSeq and dialog tags. */
+/**
+ * Whether two captured messages are one SIP message on two hops, carrying what
+ * a rule judges in it: the same start line's kind, CSeq and dialog tags, and
+ * the same body or none on both.
+ */
 const sameMessage = (a: Flows.Msg, b: Flows.Msg): boolean => {
+  if (!sameBody(a, b)) return false
   const x = a.summary
   const y = b.summary
   if (x.cseq.seq !== y.cseq.seq || x.cseq.method.toUpperCase() !== y.cseq.method.toUpperCase()) return false
@@ -210,3 +217,12 @@ const sameMessage = (a: Flows.Msg, b: Flows.Msg): boolean => {
   if (x.kind === "response" && y.kind === "response") return x.status === y.status
   return false
 }
+
+/** Whether the two messages carry byte-identical bodies, or none at all. */
+const sameBody = (a: Flows.Msg, b: Flows.Msg): boolean => {
+  const x = body(a)?.bytes
+  const y = body(b)?.bytes
+  if (x === undefined || y === undefined) return x === y
+  return x.length === y.length && x.every((byte, i) => byte === y[i])
+}
+

@@ -53,8 +53,9 @@ pub struct RfcFinding {
     pub cancelled_by: Option<String>,
     /// The scripted party whose violation the system under test relayed
     /// onward, where the document states both that party committing it and
-    /// the captured platform relaying it: the finding is the SUT's, caused by
-    /// that party, and `cancelled_by` names the two statements.
+    /// the captured platform relaying it, and the run shows that party
+    /// committing it: the finding is the SUT's, caused by that party, and
+    /// `cancelled_by` names the statements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<String>,
 }

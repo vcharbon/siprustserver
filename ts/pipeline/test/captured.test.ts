@@ -196,14 +196,14 @@ describe("captured violations (§11.1)", () => {
     const CALLEE = SOCKETS.callee
     const a = CALLER_CALL_ID
     const b = CALLEE_CALL_ID
-    const edgeFlows = () =>
+    const edgeFlows = (innerSdp?: string, outerSdp?: string) =>
       doc(
         [
           leg(a, [{ a: FAR, b: OUTER }, { a: INNER, b: SUT }], [
             request({ callId: a, seq: 1, method: "INVITE", src: FAR, dst: OUTER, ts_ms: 0, branch: "z9hG4bK-far" }),
             request({ callId: a, seq: 1, method: "INVITE", src: INNER, dst: SUT, ts_ms: 2, hop: 1, branch: "z9hG4bK-edge", below: [{ sentBy: FAR, branch: "z9hG4bK-far" }] }),
-            response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: INNER, ts_ms: 100, hop: 1, toTag: "sut-tag", branch: "z9hG4bK-edge", below: [{ sentBy: FAR, branch: "z9hG4bK-far" }] }),
-            response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: OUTER, dst: FAR, ts_ms: 102, toTag: "sut-tag", branch: "z9hG4bK-far" }),
+            response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: INNER, ts_ms: 100, hop: 1, toTag: "sut-tag", branch: "z9hG4bK-edge", below: [{ sentBy: FAR, branch: "z9hG4bK-far" }], ...(innerSdp === undefined ? {} : { sdp: innerSdp }) }),
+            response({ callId: a, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: OUTER, dst: FAR, ts_ms: 102, toTag: "sut-tag", branch: "z9hG4bK-far", ...(outerSdp === undefined ? {} : { sdp: outerSdp }) }),
             request({ callId: a, seq: 2, method: "BYE", src: SUT, dst: INNER, ts_ms: 40_000, hop: 1, toTag: "sut-tag" }),
             response({ callId: a, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: INNER, dst: SUT, ts_ms: 40_005, hop: 1, toTag: "sut-tag" })
           ]),
@@ -241,8 +241,8 @@ describe("captured violations (§11.1)", () => {
       window_us: 39_900_000,
       emitter_window_us: 39_900_000
     }
-    const cut = (hits: ReadonlyArray<Census.CensusHit>) =>
-      captured(hits, undefined, edgeFlows(), [{ leg: 0, hop: 1 }, { leg: 1, hop: 0 }])
+    const cut = (hits: ReadonlyArray<Census.CensusHit>, flows = edgeFlows()) =>
+      captured(hits, undefined, flows, [{ leg: 0, hop: 1 }, { leg: 1, hop: 0 }])
 
     it("is stated on the carried hop's copy of its anchor, charging the party on the same side", () => {
       const { out, flow, layout } = cut([unacked])
@@ -261,6 +261,14 @@ describe("captured violations (§11.1)", () => {
       // sender and the step's party there is the edge: charged on the same
       // side, a hit naming the INVITE's TAKER finds the platform, not a party.
       expect(cut([{ ...other, emitter: OUTER }]).out).toEqual([])
+    })
+
+    it("is not stated where the carried copy does not carry the same content", () => {
+      const sdp = "v=0\r\no=- 1 1 IN IP4 10.0.0.50\r\ns=-\r\nc=IN IP4 10.0.0.50\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n"
+      const other = "v=0\r\no=- 2 1 IN IP4 10.0.0.60\r\ns=-\r\nc=IN IP4 10.0.0.60\r\nt=0 0\r\nm=audio 5000 RTP/AVP 0\r\n"
+      expect(cut([unacked], edgeFlows(undefined, sdp)).out).toEqual([])
+      expect(cut([unacked], edgeFlows(other, sdp)).out).toEqual([])
+      expect(cut([unacked], edgeFlows(sdp, sdp)).out).toHaveLength(1)
     })
   })
 })

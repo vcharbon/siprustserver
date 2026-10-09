@@ -577,6 +577,15 @@ impl RuleId {
     /// in the captured trace.
     pub const WIRE: &'static [RuleId] = RuleId::ALL;
 
+    /// The rules whose offence the anchor message carries in its own content,
+    /// so a hop that forwards the message unchanged forwards the violation: a
+    /// copy of one can be RELAYED ONWARD rather than originated (pivot §11.1).
+    pub const RELAYABLE: &'static [RuleId] = &[
+        RuleId::PayloadTypeMappingStable,
+        RuleId::Final2xxAnswersTheOffer,
+        RuleId::AckBodyAfterCompleteOfferAnswer,
+    ];
+
     /// The rule's wire token — the same spelling serde uses.
     pub fn token(self) -> &'static str {
         match self {
