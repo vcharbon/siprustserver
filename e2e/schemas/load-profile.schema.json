@@ -50,10 +50,15 @@
         "$ref": "#/$defs/MixSpec"
       }
     },
-    "overloadExpected": {
-      "description": "The run drives the SUT into overload on purpose: a `503` to a\nnon-emergency call's initial INVITE before it connects is then an\naccepted ending (`refused_overload`), not a failure. Default `false`:\nevery `503` is a failure.",
-      "type": "boolean",
-      "default": false
+    "overloadReject": {
+      "description": "The final the system under test refuses a call with under overload\n(e.g. `503`). When set, that final to a non-emergency call's initial\nINVITE before it connects is an accepted ending (`refused_overload`).\nUnset (the default), it is a failure like any final the scenario does\nnot declare.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
     },
     "recvTimeoutMs": {
       "description": "Per-`recv` wall-clock wait bound (ms) handed to every agent.",

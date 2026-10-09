@@ -36,16 +36,30 @@ async fn early_media_then_the_final_is_its_own_branch() {
     assert_eq!(branch(expect, &caller_refused(486, true)), None, "another final");
 }
 
+/// The run's declared overload refusal joins a non-emergency call's set, last.
 #[tokio::test]
-async fn branches_are_tried_in_order_and_the_overload_refusal_last() {
-    let expect = Expect::answered().and(Branch::rejected(486));
-    let names: Vec<_> = expect.branches().map(|b| b.name).collect();
-    assert_eq!(names, ["answered", "rejected", "refused_overload"]);
+async fn branches_are_tried_in_order_and_the_run_s_overload_refusal_last() {
+    let h = crate::Harness::new("endings-overload");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let mut env =
+        crate::realcall::CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X", "t");
+    let declared = Expect::answered().and(Branch::rejected(486));
+    let names = |e: Expect| e.branches().map(|b| b.name).collect::<Vec<_>>();
+
+    assert_eq!(names(declared.in_context(&env)), ["answered", "rejected"], "none declared");
+    env.overload_reject = Some(503);
+    let expect = declared.in_context(&env);
+    assert_eq!(names(expect), ["answered", "rejected", "refused_overload"]);
     assert_eq!(branch(expect, &caller_refused(486, false)), Some("rejected"));
     assert_eq!(branch(expect, &caller_refused(503, false)), Some("refused_overload"));
-    let off = expect.without_overload_refusal();
+    assert!(!expect.accepts_final(480));
+    let off = declared.without_overload_refusal().in_context(&env);
     assert!(off.accepts_final(486) && !off.accepts_final(503));
     assert_eq!(branch(off, &caller_refused(503, false)), None);
+    env.emergency = true;
+    assert_eq!(names(declared.in_context(&env)), ["answered", "rejected"], "emergency");
+    h.finish().await;
 }
 
 #[tokio::test]

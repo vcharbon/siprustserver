@@ -264,7 +264,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
-        overload_expected: false,
+        overload_reject: None,
     }
 }
 

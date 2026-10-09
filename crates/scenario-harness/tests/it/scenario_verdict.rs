@@ -5,11 +5,12 @@
 //! straight to bob over the recording simulated network, paused clock) through
 //! `run_actor_scenario` / `run_built_actor_call` and asserts the verdict.
 //!
-//! The context-dependent ending: a 503 to the caller's initial INVITE before
-//! the call connects (RFC 3261 §21.5.4, server overloaded) is an accepted
-//! ending of a plain call only when the call is not an emergency call
-//! (RFC 4412 `Resource-Priority`) and the run drives overload on purpose
-//! (`CallEnv::overload_expected`).
+//! The context-dependent ending: a refusal of the caller's initial INVITE
+//! before the call connects is an accepted ending of a plain call only when
+//! the run declares that final as its system under test's overload refusal
+//! (`CallEnv::overload_reject`, here `Some(503)`, RFC 3261 §21.5.4) and the
+//! call is not an emergency call (RFC 4412 `Resource-Priority`). Undeclared,
+//! nothing is accepted.
 
 use scenario_harness::actor::scenarios::{AbandonRinging, BasicCall, InviteReject};
 use scenario_harness::actor::{
@@ -42,14 +43,14 @@ async fn basic_call_refused_with(
     name: &str,
     status: u16,
     emergency: bool,
-    overload_expected: bool,
+    overload_reject: Option<u16>,
 ) -> ScenarioVerdict {
     let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let mut env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", name);
     env.emergency = emergency;
-    env.overload_expected = overload_expected;
+    env.overload_reject = overload_reject;
     let mut call = BasicCall.build(&env).expect("the basic call builds");
     let bob_spec = call.actors.iter_mut().find(|a| a.role == "bob").expect("bob is declared");
     bob_spec.disposition = Disposition::Reject(status);
@@ -87,14 +88,14 @@ async fn a_declared_abandon_is_its_success_branch() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_503_before_connect_is_accepted_off_emergency_when_overload_is_expected() {
-    let v = basic_call_refused_with("verdict-503-overload", 503, false, true).await;
+async fn a_503_before_connect_is_accepted_off_emergency_when_the_run_declares_it() {
+    let v = basic_call_refused_with("verdict-503-overload", 503, false, Some(503)).await;
     assert_eq!(success_branch(&v), Some("refused_overload"), "got {v:?}");
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_503_to_an_emergency_call_is_a_failure_even_when_overload_is_expected() {
-    let v = basic_call_refused_with("verdict-503-emergency", 503, true, true).await;
+async fn a_503_to_an_emergency_call_is_a_failure_even_when_the_run_declares_it() {
+    let v = basic_call_refused_with("verdict-503-emergency", 503, true, Some(503)).await;
     match v {
         ScenarioVerdict::Failure { cause: StepError::WrongStatus { got: 503, .. }, .. } => {}
         other => panic!("an emergency call refused with 503 must fail, got {other:?}"),
@@ -102,11 +103,11 @@ async fn a_503_to_an_emergency_call_is_a_failure_even_when_overload_is_expected(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_503_is_a_failure_when_the_run_does_not_expect_overload() {
-    let v = basic_call_refused_with("verdict-503-unexpected", 503, false, false).await;
+async fn a_503_is_a_failure_when_the_run_declares_no_overload_refusal() {
+    let v = basic_call_refused_with("verdict-503-unexpected", 503, false, None).await;
     match v {
         ScenarioVerdict::Failure { cause: StepError::WrongStatus { got: 503, .. }, .. } => {}
-        other => panic!("a 503 without expected overload must fail, got {other:?}"),
+        other => panic!("a 503 without a declared overload refusal must fail, got {other:?}"),
     }
 }
 
@@ -115,7 +116,7 @@ async fn a_503_is_a_failure_when_the_run_does_not_expect_overload() {
 /// `established` barrier; the key reads `<who>:<goal kind>#<index>@<barrier>`.
 #[tokio::test(start_paused = true)]
 async fn a_failed_goal_names_the_agent_its_pending_goal_and_the_barrier() {
-    let v = basic_call_refused_with("verdict-failed-goal", 486, false, true).await;
+    let v = basic_call_refused_with("verdict-failed-goal", 486, false, Some(503)).await;
     let ScenarioVerdict::Failure { at, cause } = v else {
         panic!("an undeclared 486 must fail, got {v:?}");
     };

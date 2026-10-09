@@ -116,10 +116,11 @@ pub struct DriverCfg {
     /// Per-scenario-id overrides of [`Self::default_tuning`] (keyed by the
     /// scenario's stable id / CLI name).
     pub tuning: HashMap<String, CallTuning>,
-    /// The run drives the SUT into overload on purpose: a non-emergency call
-    /// refused `503` before it connects ends on its `refused_overload` branch
-    /// ([`CallEnv::overload_expected`]).
-    pub overload_expected: bool,
+    /// The final the run declares its SUT refuses a call with under overload:
+    /// a non-emergency call refused with it before it connects ends on its
+    /// `refused_overload` branch ([`CallEnv::overload_reject`]). `None`
+    /// accepts no undeclared refusal.
+    pub overload_reject: Option<u16>,
 }
 
 /// A load shape's per-call body: the declarative actor [`Scenario`] the runner
@@ -266,7 +267,7 @@ pub struct Driver {
     call: Arc<CallConfig>,
     default_tuning: CallTuning,
     tuning: HashMap<String, CallTuning>,
-    overload_expected: bool,
+    overload_reject: Option<u16>,
     /// Optional chaos-marker log: when set, each finished call is classified
     /// near/clear against the injected-fault markers (the chaos correlation).
     chaos: Option<Arc<ChaosLog>>,
@@ -327,7 +328,7 @@ impl Driver {
             call: Arc::new(cfg.call),
             default_tuning: cfg.default_tuning,
             tuning: cfg.tuning,
-            overload_expected: cfg.overload_expected,
+            overload_reject: cfg.overload_reject,
             chaos: None,
         }
     }
@@ -398,7 +399,7 @@ impl Driver {
                 self.call.clone(),
                 self.seed,
                 tuning,
-                self.overload_expected,
+                self.overload_reject,
                 self.chaos.clone(),
                 permit,
             ));
@@ -419,7 +420,7 @@ async fn run_one(
     call: Arc<CallConfig>,
     seed_base: u64,
     tuning: CallTuning,
-    overload_expected: bool,
+    overload_reject: Option<u16>,
     chaos: Option<Arc<ChaosLog>>,
     _permit: OwnedSemaphorePermit,
 ) {
@@ -517,7 +518,7 @@ async fn run_one(
         stamp: transport.correlation.stamp(&token),
         token,
         emergency,
-        overload_expected,
+        overload_reject,
         core,
         egress: call.egress.clone(),
         // Deferred-by-design auth adapter (default None): the mix entry's

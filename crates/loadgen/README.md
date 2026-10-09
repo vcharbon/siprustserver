@@ -84,7 +84,7 @@ data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
 for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
 + auto-retransmit* below), `--load-profile` (see *The run-spec axis* below),
-`--overload-expected` (see *Accepted endings*), `--udp-rcvbuf` / `--udp-sndbuf`
+`--overload-reject <code>` (see *Accepted endings*), `--udp-rcvbuf` / `--udp-sndbuf`
 (the kernel buffers each mux socket requests, default 4 MiB each; `0` keeps the
 kernel default; the granted sizes are printed at bind, with a warning when
 `net.core.rmem_max` / `wmem_max` clamped the request — one socket carries every
@@ -98,7 +98,7 @@ document** — a `LoadProfile` JSON (schema:
 `e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
 It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
 `backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
-`robustness` (`dropRate` + `retransmit`) defaults, `overloadExpected` (see
+`robustness` (`dropRate` + `retransmit`) defaults, `overloadReject` (see
 *Accepted endings* below), and the scenario **`mix`**
 (each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
 `dropRate`/`retransmit` overrides):
@@ -666,11 +666,14 @@ its branch in `loadgen_branch_total`; an accepted ending still runs the RFC
 audit and the case checks, so an RFC-dirty reject is `rfc_audit_fail`. Every
 other ending fails under its cause's class, keyed by the failed step.
 
-One branch is the harness default: `refused_overload`, a `503` to a
-non-emergency call's INVITE before it connects, accepted only in a run that
-drives overload on purpose (`--overload-expected`, or `overloadExpected` in the
-load profile; default off, so every `503` is a failure). A scenario opts out
-with `Expect::without_overload_refusal()`.
+Nothing else is accepted by default. One branch comes from the run instead of
+the scenario: how a system under test refuses a call under overload is its own
+convention, so a run that drives overload on purpose declares that final
+(`--overload-reject 503`, or `"overloadReject": 503` in the load profile). That
+final to a non-emergency call's INVITE before it connects is then the
+`refused_overload` branch. Unset (the default), it fails like any final the
+scenario does not declare. A scenario opts out with
+`Expect::without_overload_refusal()`.
 
 ### Add an *abnormal-end* scenario (post-call-cleanup coverage)
 

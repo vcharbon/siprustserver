@@ -221,7 +221,7 @@
       "id": 4,
       "type": "stat",
       "title": "Success ratio (5m)",
-      "description": "ok over every completed call: ok is every ending a scenario accepts (loadgen_branch_total names them); any other class is a failure, a 503 included unless the run expects overload. No completed call in the window reads as no data.",
+      "description": "ok over every completed call: ok is every ending a scenario accepts (loadgen_branch_total names them); any other class is a failure, a 503 included unless the run declares it as its overload refusal (overloadReject). No completed call in the window reads as no data.",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -274,7 +274,7 @@
       "id": 8,
       "type": "stat",
       "title": "Refused 503 ratio (5m)",
-      "description": "Completed calls refused with 503 over all completed calls: the status_503 failures plus, in a run that expects overload, the accepted refused_overload branch. A ramp past capacity refuses on purpose; a 503 below capacity is a defect. No completed call in the window reads as no data.",
+      "description": "Completed calls refused with 503 over all completed calls: the status_503 failures plus, in a run that declares 503 as its overload refusal, the accepted refused_overload branch. A ramp past capacity refuses on purpose; a 503 below capacity is a defect. No completed call in the window reads as no data.",
       "gridPos": {
         "h": 4,
         "w": 3,

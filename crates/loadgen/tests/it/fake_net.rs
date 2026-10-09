@@ -143,7 +143,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
-        overload_expected: false,
+        overload_reject: None,
     }
 }
 
@@ -319,9 +319,10 @@ async fn loadgen_fake_net_counts_failures_by_failed_step() {
     b2bua.assert_fully_reaped();
 }
 
-/// The same refusals in a run that drives overload on purpose: a 503 to a
-/// non-emergency call before it connects is that call's `refused_overload`
-/// branch, so every call classes `ok` and the SUT still reaps each one.
+/// The same refusals in a run that declares 503 as its SUT's overload refusal:
+/// a 503 to a non-emergency call before it connects is that call's
+/// `refused_overload` branch, so every call classes `ok` and the SUT still
+/// reaps each one.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_overload_refusal_is_ok_when_expected() {
@@ -333,7 +334,7 @@ async fn loadgen_fake_net_overload_refusal_is_ok_when_expected() {
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
     let mut c = cfg(b2bua.addr, 20.0, 1, 16, 0x503E);
-    c.overload_expected = true;
+    c.overload_reject = Some(503);
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     driver.run().await;
 

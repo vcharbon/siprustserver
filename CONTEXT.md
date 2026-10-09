@@ -968,9 +968,10 @@ it with the **egress rewrite** (identity vs addressing — orthogonal halves of
 **Load profile**:
 The authored JSON run spec for the load fleet (`--load-profile`, schema
 `load-profile.schema.json`): rate/duration/concurrency, sampling + report
-cadence, global loss/retransmit robustness, whether the run expects overload
-(`overloadExpected`), and the shape **mix** (id, weight, attached case,
-per-entry overrides). The load analogue of a **Campaign**: a
+cadence, global loss/retransmit robustness, the overload refusal it accepts
+(`overloadReject`: the final the system under test refuses overload with;
+unset, none), and the shape **mix** (id, weight, attached case, per-entry
+overrides). The load analogue of a **Campaign**: a
 Campaign expands a functional {case × shape × infra} matrix; a Load profile
 parameterizes one sustained run. Profile supplies defaults; an explicit CLI flag
 overrides. The rate is live-retargetable (`POST /rate`, re-anchoring governor).
@@ -982,9 +983,11 @@ One named way a scenario's call may end and still be a success (`answered`,
 `rejected`, `early_media_rejected`, `abandoned`, `transfer_declined`, or a
 scenario-named predicate over the observed state). A call that tears down and
 settles on one of them is `ScenarioVerdict::Success { branch }`, classed `ok`
-and counted under `loadgen_branch_total{scenario,branch}`. The harness adds
-`refused_overload` (a 503 to a non-emergency call before it connects) only in a
-run whose **Load profile** sets `overloadExpected`.
+and counted under `loadgen_branch_total{scenario,branch}`. Nothing else is
+accepted by default. The run, not the scenario, may add `refused_overload`: the
+final its **Load profile** declares as the system under test's overload refusal
+(`overloadReject`, e.g. 503), received by a non-emergency call before it
+connects.
 _Avoid_: excusing a non-200 ending outside the scenario (a consumer-side class
 filter, a per-descriptor reject status): the scenario states it, and `ok` means
 ok everywhere.

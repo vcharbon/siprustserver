@@ -6,8 +6,9 @@
 //! The set is `'static` and `Copy`, so declaring it costs nothing per call. A
 //! scenario whose accepted endings depend on the call's context (emergency,
 //! overload) picks its set in [`ActorScenario::build`](super::ActorScenario::build),
-//! which sees the [`CallEnv`]. One context-dependent branch is the harness
-//! default: [`Branch::REFUSED_OVERLOAD`].
+//! which sees the [`CallEnv`]. One context-dependent branch comes from the run,
+//! not the scenario: [`Branch::refused_overload`], present only when the run
+//! declares the final its system under test refuses overload with.
 
 use super::state::StateInner;
 use crate::realcall::CallEnv;
@@ -42,13 +43,6 @@ impl Branch {
     /// The caller CANCELled its pending INVITE (RFC 3261 §9.1), which drew
     /// `487 Request Terminated`.
     pub const ABANDONED: Branch = Branch::new("abandoned", Ending::Refused(487));
-    /// A `503 Service Unavailable` to the caller's establishing INVITE (RFC 3261
-    /// §21.5.4, the server is overloaded). The harness adds it to every call
-    /// that is no emergency call (RFC 4412 `Resource-Priority`) in a run that
-    /// drives overload on purpose ([`CallEnv::overload_expected`]), unless the
-    /// call opts out ([`Expect::without_overload_refusal`]).
-    pub const REFUSED_OVERLOAD: Branch = Branch::new("refused_overload", Ending::Refused(503));
-
     pub const fn new(name: &'static str, ending: Ending) -> Self {
         Branch { name, ending }
     }
@@ -56,6 +50,15 @@ impl Branch {
     /// The callee (or the server) refused the call with `code`.
     pub const fn rejected(code: u16) -> Self {
         Branch::new("rejected", Ending::Refused(code))
+    }
+
+    /// The server refused the call with `code`, the final the run declares its
+    /// system under test answers overload with ([`CallEnv::overload_reject`]).
+    /// Added to every call that is no emergency call (RFC 4412
+    /// `Resource-Priority`) of such a run, unless the call opts out
+    /// ([`Expect::without_overload_refusal`]).
+    pub const fn refused_overload(code: u16) -> Self {
+        Branch::new("refused_overload", Ending::Refused(code))
     }
 
     /// The caller heard early media, then the call was refused with `code`.
@@ -86,32 +89,39 @@ impl Branch {
 
 /// The set of endings a call accepts: the scenario's declared branches (a
 /// `'static` list plus at most one built at run time, for a status known only
-/// then), plus the harness's [`Branch::REFUSED_OVERLOAD`] unless the call opted
-/// out or its context rules it out ([`in_context`](Self::in_context)).
+/// then), plus [`Branch::refused_overload`] when the run declares an overload
+/// refusal, the call is no emergency call and has not opted out
+/// ([`in_context`](Self::in_context)). Nothing else is accepted.
 #[derive(Debug, Clone, Copy)]
 pub struct Expect {
     declared: &'static [Branch],
     built: Option<Branch>,
+    /// Whether the call takes the run's overload refusal (the opt-out clears it).
     overload_refusal: bool,
+    /// The run's overload-refusal final, once [`in_context`](Self::in_context)
+    /// resolved it for this call.
+    overload_reject: Option<u16>,
 }
 
 impl Expect {
     /// No accepted ending: the runner of a bare [`CallPlan`](super::CallPlan).
-    pub const NONE: Expect = Expect { declared: &[], built: None, overload_refusal: false };
+    pub const NONE: Expect =
+        Expect { declared: &[], built: None, overload_refusal: false, overload_reject: None };
 
     /// The happy path alone: the call connects and tears down.
     pub const fn answered() -> Self {
         Expect::of(&[Branch::ANSWERED])
     }
 
-    /// This one branch, plus the harness's overload refusal.
+    /// This one branch, plus the run's overload refusal if it declares one.
     pub const fn one(branch: Branch) -> Self {
-        Expect { declared: &[], built: Some(branch), overload_refusal: true }
+        Expect { declared: &[], built: Some(branch), overload_refusal: true, overload_reject: None }
     }
 
-    /// These branches, tried in order, plus the harness's overload refusal.
+    /// These branches, tried in order, plus the run's overload refusal if it
+    /// declares one.
     pub const fn of(declared: &'static [Branch]) -> Self {
-        Expect { declared, built: None, overload_refusal: true }
+        Expect { declared, built: None, overload_refusal: true, overload_reject: None }
     }
 
     /// Also accept `branch`, tried after the declared list. One such branch per
@@ -121,25 +131,24 @@ impl Expect {
         Expect { built: Some(branch), ..self }
     }
 
-    /// Opt out of the harness's [`Branch::REFUSED_OVERLOAD`]: a 503 fails this
-    /// call even in a run that expects overload.
+    /// Opt out of the run's [`Branch::refused_overload`]: the run's overload
+    /// refusal fails this call like any undeclared final.
     pub const fn without_overload_refusal(self) -> Self {
-        Expect { overload_refusal: false, ..self }
+        Expect { overload_refusal: false, overload_reject: None, ..self }
     }
 
-    /// This set as it applies to one call: the overload refusal stays only for a
-    /// call that is no emergency call in a run that expects overload.
+    /// This set as it applies to one call: the run's overload refusal
+    /// ([`CallEnv::overload_reject`]) joins it only for a call that is no
+    /// emergency call and has not opted out.
     pub fn in_context(self, env: &CallEnv<'_>) -> Self {
-        Expect {
-            overload_refusal: self.overload_refusal && !env.emergency && env.overload_expected,
-            ..self
-        }
+        let takes_it = self.overload_refusal && !env.emergency;
+        Expect { overload_reject: env.overload_reject.filter(|_| takes_it), ..self }
     }
 
     /// Every branch this set accepts, in the order they are tried.
-    pub fn branches(&self) -> impl Iterator<Item = &Branch> {
-        let overload = self.overload_refusal.then_some(&Branch::REFUSED_OVERLOAD);
-        self.declared.iter().chain(self.built.as_ref()).chain(overload)
+    pub fn branches(&self) -> impl Iterator<Item = Branch> + '_ {
+        let overload = self.overload_reject.map(Branch::refused_overload);
+        self.declared.iter().copied().chain(self.built).chain(overload)
     }
 
     /// Whether a non-2xx final `code` on the caller's establishing INVITE is an
