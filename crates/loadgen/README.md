@@ -664,6 +664,8 @@ A scenario declares the endings it accepts as named branches
 (`scenario_harness::actor::{Expect, Branch}` on its `ActorCall`): `answered`
 (connected, then torn down), `rejected` (a final to the caller's INVITE before
 it connects), `early_media_rejected`, `abandoned` (the caller CANCELled),
+`answered_despite_cancel` / `answered_before_cancel` (the callee's 200 crossed
+the CANCEL, or reached the caller before it left: she ACKs and BYEs),
 `transfer_declined`, or any scenario-named predicate over the observed state. A
 call that tears down and settles on one of them classes `ok` and counts under
 its branch in `loadgen_branch_total`; an accepted ending still runs the RFC

@@ -72,14 +72,17 @@ pub enum Establishment {
     /// dialog, no teardown (the `rejected` branch).
     RejectTerminal { code: u16 },
     /// TERMINAL: the caller CANCELs once ringing (RFC 3261 §9.1) — no dialog,
-    /// no teardown ([`Branch::ABANDONED`]); a 200 that crosses the CANCEL is
-    /// ACKed and BYEd ([`Branch::ANSWERED_DESPITE_CANCEL`]).
+    /// no teardown ([`Branch::ABANDONED`]); a 200 that crosses the CANCEL, or
+    /// reaches the caller before it leaves, is ACKed and BYEd
+    /// ([`Branch::ANSWERED_DESPITE_CANCEL`], [`Branch::ANSWERED_BEFORE_CANCEL`]).
     AbandonAfterRinging,
     /// CANCEL×200 CROSSING (C2/E5): the caller CANCELs while the callee answers,
     /// so the terminal outcome is EITHER confirmed (the 200 crossed the CANCEL,
-    /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). Both are
-    /// accepted endings ([`Branch::ANSWERED_DESPITE_CANCEL`] /
-    /// [`Branch::ABANDONED`]); the verdict names whichever occurred. Terminal-style (no stages, no separate
+    /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). Each is
+    /// an accepted ending ([`Branch::ANSWERED_DESPITE_CANCEL`] /
+    /// [`Branch::ABANDONED`], and [`Branch::ANSWERED_BEFORE_CANCEL`] when the 200
+    /// reached the caller before her CANCEL left); the verdict names whichever
+    /// occurred. Terminal-style (no stages, no separate
     /// teardown): the branch-conditional teardown rides the callee.
     CancelAnswerCrossing,
 }
@@ -636,8 +639,11 @@ impl ShapePlan {
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
-                const ABANDON_ENDINGS: &[Branch] =
-                    &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
+                const ABANDON_ENDINGS: &[Branch] = &[
+                    Branch::ABANDONED,
+                    Branch::ANSWERED_DESPITE_CANCEL,
+                    Branch::ANSWERED_BEFORE_CANCEL,
+                ];
                 b.expect = Expect::of(ABANDON_ENDINGS);
             }
             Establishment::CancelAnswerCrossing => {
@@ -648,8 +654,11 @@ impl ShapePlan {
                 // branch-conditional teardown rides bob (ByeIfConfirmed), so a
                 // 487 never trips alice's incidental-failure path — she keeps
                 // only [Invite, Cancel].
-                const E5_BRANCHES: &[Branch] =
-                    &[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED];
+                const E5_BRANCHES: &[Branch] = &[
+                    Branch::ANSWERED_DESPITE_CANCEL,
+                    Branch::ANSWERED_BEFORE_CANCEL,
+                    Branch::ABANDONED,
+                ];
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
                 let ringing = |s: &StateInner| s.leg_rang("alice");
                 b.caller_goals.push(Goal::new(

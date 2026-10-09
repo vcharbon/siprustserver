@@ -274,6 +274,25 @@ async fn either_branch_of_the_race_is_its_accepted_ending() {
     assert_eq!(v.branch(), Some("answered_despite_cancel"), "answer-wins, got {v:?}");
 }
 
+/// The 2xx reached the caller before her CANCEL left: she sent none, was
+/// answered, and hung up. That is the `answered_before_cancel` ending; the
+/// same log with a CANCEL sent and never answered is no accepted ending.
+#[tokio::test]
+async fn an_answer_before_the_cancel_left_is_answered_before_cancel() {
+    let expect = Expect::of(&[
+        Branch::ANSWERED_DESPITE_CANCEL,
+        Branch::ANSWERED_BEFORE_CANCEL,
+        Branch::ABANDONED,
+    ]);
+    let answered = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    let v = verdict(expect, CallVerdict::Ok, &answered, "alice");
+    assert_eq!(v.branch(), Some("answered_before_cancel"), "got {v:?}");
+    let sent = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    sent.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
+    let v = verdict(expect, CallVerdict::Ok, &sent, "alice");
+    assert!(!v.is_success(), "a CANCEL that drew no final, got {v:?}");
+}
+
 /// A server that ignores the CANCEL is no crossing: the caller's CANCEL drew
 /// no final at all, or drew its 200 and the INVITE still drew a 2xx after it
 /// (RFC 3261 §9.2). Neither is an accepted ending.
@@ -281,6 +300,7 @@ async fn either_branch_of_the_race_is_its_accepted_ending() {
 async fn a_server_ignoring_the_cancel_is_no_accepted_ending() {
     let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
     let dropped = caller_saw(&[(180, "INVITE"), (200, "INVITE")], None);
+    dropped.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
     let v = verdict(expect, CallVerdict::Ok, &dropped, "alice");
     assert!(!v.is_success(), "a CANCEL that drew no final, got {v:?}");
     let ignored = caller_saw(&[(180, "INVITE"), (200, "CANCEL"), (200, "INVITE")], None);

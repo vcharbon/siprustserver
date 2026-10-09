@@ -31,6 +31,9 @@ pub enum Ending {
     /// A server that ignores the CANCEL — no final to it, or a 2xx after its
     /// 200 — shows neither order and is no crossing.
     AnsweredAcrossCancel,
+    /// The callee's 2xx reached the caller before her CANCEL left: she sent
+    /// none, her INVITE drew a 2xx and no non-2xx final.
+    AnsweredBeforeCancel,
     /// A scenario-specific predicate over the final observed state.
     Observed(fn(&StateInner) -> bool),
 }
@@ -53,6 +56,10 @@ impl Branch {
     /// (§15).
     pub const ANSWERED_DESPITE_CANCEL: Branch =
         Branch::new("answered_despite_cancel", Ending::AnsweredAcrossCancel);
+    /// The callee's 2xx reached the caller before she abandoned: she sent no
+    /// CANCEL and hung up with a BYE (§15).
+    pub const ANSWERED_BEFORE_CANCEL: Branch =
+        Branch::new("answered_before_cancel", Ending::AnsweredBeforeCancel);
     pub const fn new(name: &'static str, ending: Ending) -> Self {
         Branch { name, ending }
     }
@@ -96,6 +103,13 @@ impl Branch {
                 l.first_final().is_none()
                     && matches!((answered, cancel_final), (Some(a), Some(c))
                         if a < c && facts[c].status == 200)
+            }),
+            Ending::AnsweredBeforeCancel => leg.is_some_and(|l| {
+                !l.cancel_sent()
+                    && l.first_final().is_none()
+                    && l.responses()
+                        .iter()
+                        .any(|f| (200..300).contains(&f.status) && f.cseq_method == "INVITE")
             }),
             Ending::Observed(pred) => pred(s),
         }

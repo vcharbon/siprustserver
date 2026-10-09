@@ -441,9 +441,10 @@ async fn loadgen_fake_net_crossing_bye() {
     b2bua.assert_fully_reaped();
 }
 
-/// C2/E5: CANCEL×200 crossing through the SUT. Each call ends on one of its two
-/// RFC-legal endings, both accepted and classed `ok`: `answered_despite_cancel`
-/// (the 200 left before the CANCEL arrived, §9.2: the caller ACKs and BYEs) or
+/// C2/E5: CANCEL×200 crossing through the SUT. Each call ends on one of its
+/// RFC-legal endings, all accepted and classed `ok`: `answered_despite_cancel`
+/// (the 200 left before the CANCEL arrived, §9.2: the caller ACKs and BYEs),
+/// `answered_before_cancel` (the 200 reached her before her CANCEL left) or
 /// `abandoned` (the CANCEL won, 487). On this paused fake net the timing is
 /// fixed: the caller CANCELs one ring after her 180, the callee answers one
 /// ring after sending it, so the 200 always leaves first and every call is the

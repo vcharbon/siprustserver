@@ -183,12 +183,14 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                     stated.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
                 let cseq = inv.invite_cseq();
                 let _cxl = inv.cancel_stating(&stated).await;
+                let now = Instant::now();
+                st.obs.record(Observation::CancelSent { leg: st.role }, now);
                 st.obs.record(
                     Observation::RequestSent {
                         key: ObligationKey::new(st.role, ObligationKind::Cancel, cseq),
                         detail: "CANCEL awaiting its final".to_string(),
                     },
-                    Instant::now(),
+                    now,
                 );
             }
         }

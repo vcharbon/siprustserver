@@ -980,7 +980,8 @@ environment axis — **Endpoint config**).
 
 **Accepted ending** (`scenario_harness::actor::{Branch, Expect}`):
 One named way a scenario's call may end and still be a success (`answered`,
-`rejected`, `early_media_rejected`, `abandoned`, `transfer_declined`, or a
+`rejected`, `early_media_rejected`, `abandoned`, `answered_despite_cancel`,
+`answered_before_cancel`, `transfer_declined`, or a
 scenario-named predicate over the observed state). A call that tears down and
 settles on one of them is `ScenarioVerdict::Success { branch }`, classed `ok`
 and counted under `loadgen_branch_total{scenario,branch}`. Nothing else is

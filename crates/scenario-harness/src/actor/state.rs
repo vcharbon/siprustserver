@@ -170,6 +170,8 @@ pub struct LegObservation {
     /// ever in flight (which would glare into a 491). Distinct from the monotone
     /// SUBFLOW_RENEG latch, which cannot count.
     reneg_cseqs: std::collections::BTreeSet<u32>,
+    /// Whether this leg sent a CANCEL for its establishing INVITE.
+    cancel_sent: bool,
     /// Every inbound response this leg's reactor observed, in arrival order — an
     /// append-only per-leg log with ONE writer (the leg's own reactor), so its
     /// order is deterministic; reception goals consume it through a per-actor
@@ -202,6 +204,11 @@ impl LegObservation {
     /// reason phrase.
     pub fn first_final(&self) -> Option<(u16, &str)> {
         self.finals.iter().next().map(|(s, r)| (*s, r.as_str()))
+    }
+
+    /// Whether this leg sent a CANCEL for its establishing INVITE.
+    pub fn cancel_sent(&self) -> bool {
+        self.cancel_sent
     }
 
     /// Whether this leg received a provisional above 100 to an INVITE — the
@@ -406,6 +413,8 @@ pub enum Observation {
     /// The caller's establishing INVITE drew a final its call accepts: the call
     /// ended before its remaining phase barriers could hold.
     AcceptedEnding,
+    /// `leg` sent a CANCEL for its establishing INVITE.
+    CancelSent { leg: &'static str },
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
     /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
@@ -475,6 +484,7 @@ impl StateInner {
                 self.leg_mut(leg).finals.insert((status, reason));
             }
             Observation::AcceptedEnding => self.accepted_ending = true,
+            Observation::CancelSent { leg } => self.leg_mut(leg).cancel_sent = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
             Observation::RenegCompleted { leg, cseq } => {
                 self.leg_mut(leg).reneg_cseqs.insert(cseq);

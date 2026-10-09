@@ -911,14 +911,17 @@ impl ActorScenario for InviteReject {
 /// relays the CANCEL to bob, who 200s it and 487s his held INVITE, and both legs
 /// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`]. When
 /// bob's 200 crosses the CANCEL, alice ACKs it and BYEs, and the call succeeds
-/// under [`Branch::ANSWERED_DESPITE_CANCEL`].
+/// under [`Branch::ANSWERED_DESPITE_CANCEL`]; when it reaches her before her
+/// CANCEL leaves, under [`Branch::ANSWERED_BEFORE_CANCEL`].
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
 /// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`.
 pub struct AbandonRinging;
 
-/// The abandon's accepted endings: the CANCEL won (487), or the 200 crossed it.
-const ABANDON_ENDINGS: &[Branch] = &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
+/// The abandon's accepted endings: the CANCEL won (487), the 200 crossed it,
+/// or the 200 reached alice before her CANCEL left.
+const ABANDON_ENDINGS: &[Branch] =
+    &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL, Branch::ANSWERED_BEFORE_CANCEL];
 
 /// Alice's call confirmed (a 2xx answered her INVITE).
 fn alice_confirmed(s: &StateInner) -> bool {

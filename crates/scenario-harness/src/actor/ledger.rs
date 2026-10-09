@@ -241,13 +241,19 @@ impl ObligationLedger {
     /// [`ForkBye`](ObligationKind::ForkBye): a losing FORK's teardown rides its
     /// own dialog, independent of the main dialog being torn down here — its
     /// 200 can still arrive (and a lost fork BYE is Timer-E-recoverable), so
-    /// settle must keep holding for it. The CSeq gap
+    /// settle must keep holding for it — and [`Cancel`](ObligationKind::Cancel):
+    /// a CANCEL is hop-by-hop, answered by the server whatever becomes of the
+    /// dialog (§9.2). The CSeq gap
     /// detector is deliberately untouched: a genuinely-lost fire-and-forget
     /// in-dialog request (a dropped NOTIFY the SUT never retransmits) is a REAL
     /// hole the terminal state does not fill.
     pub fn discharge_leg(&mut self, leg: &'static str) {
-        let preserved =
-            |k: &ObligationKind| matches!(k, ObligationKind::RejectFinal | ObligationKind::ForkBye);
+        let preserved = |k: &ObligationKind| {
+            matches!(
+                k,
+                ObligationKind::RejectFinal | ObligationKind::ForkBye | ObligationKind::Cancel
+            )
+        };
         let stranded: Vec<ObligationKey> = self
             .opened
             .keys()
@@ -328,6 +334,19 @@ mod tests {
         assert!(!led.is_closed(), "an unacked obligation keeps it open");
         led.close(k);
         assert!(led.is_closed(), "closing the obligation satisfies the ledger");
+    }
+
+    /// A CANCEL's transaction is the server's to answer whatever becomes of
+    /// the dialog (RFC 3261 §9.2): the caller's BYE does not make its final moot.
+    #[test]
+    fn a_dialog_teardown_does_not_discharge_a_pending_cancel() {
+        let mut led = ObligationLedger::default();
+        let k = ObligationKey::new("alice", ObligationKind::Cancel, 1);
+        led.open(k, t0(), "CANCEL awaiting its final");
+        led.discharge_leg("alice");
+        assert!(!led.is_closed(), "the CANCEL still awaits its final");
+        led.close(k);
+        assert!(led.is_closed());
     }
 
     #[test]
