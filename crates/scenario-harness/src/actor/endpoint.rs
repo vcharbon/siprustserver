@@ -88,11 +88,14 @@ pub enum Disposition {
     /// the `200` waits for the WINNER fork's PRACK (`ring` is unused).
     /// `loser_late_200: Some(tag)` additionally emits a LATE `200` under that
     /// losing tag right after the winner's — the §13.2.2.4 loser the caller
-    /// must ACK then BYE. `winner` (and the late-200 loser, distinct from the
-    /// winner) must be members of `tags` — enforced at INVITE time.
+    /// must ACK then BYE. A [`ForkWinner::Tag`] winner (and the late-200 loser,
+    /// distinct from the winner) must be members of `tags` — enforced at INVITE
+    /// time. A [`ForkWinner::Unrung`] winner answers under a fresh To-tag after
+    /// every declared fork rang; reliable, its `200` waits for every fork's
+    /// PRACK.
     ForkingRing {
         tags: &'static [&'static str],
-        winner: &'static str,
+        winner: ForkWinner,
         ring: Duration,
         reliable: bool,
         loser_late_200: Option<&'static str>,
@@ -103,6 +106,16 @@ pub enum Disposition {
     /// as a serviced stray) — peers stay RFC-compliant when the SUT relays
     /// traffic the script never modeled.
     Scripted,
+}
+
+/// The fork a [`Disposition::ForkingRing`] callee answers `200` under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkWinner {
+    /// The declared fork tag that rang (one of `tags`).
+    Tag(&'static str),
+    /// A fork that sent no provisional: its `200` carries a fresh To-tag no
+    /// 18x announced (RFC 3261 §12.1.2, §13.2.2.4).
+    Unrung,
 }
 
 /// Per-plan (lane-chosen) stack automatics for scripted endpoints. When set, an

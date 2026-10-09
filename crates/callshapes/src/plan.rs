@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
     Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
@@ -55,7 +56,8 @@ pub enum Establishment {
     /// TRUE forking (RFC 3261 §12.1.2): the callee `bob` emits one 18x per
     /// DISTINCT explicit To-tag in `tags` on its ONE INVITE server transaction
     /// (as if a downstream proxy had forked), then answers `200` under
-    /// `winner`; `loser_late_200` optionally emits a late `200` under a losing
+    /// `winner`: a declared tag, or [`ForkWinner::Unrung`] for a fork that sent
+    /// no provisional (a fresh tag, §13.2.2.4); `loser_late_200` optionally emits a late `200` under a losing
     /// tag (§13.2.2.4 — the caller ACKs then BYEs it). `reliable` makes each
     /// fork's 18x a `183` (`Require:100rel`) the caller PRACKs per early dialog.
     /// **Only valid under the SUT's transparent CORE relay**
@@ -64,7 +66,7 @@ pub enum Establishment {
     /// distinct-early-dialog behavior cannot be exercised.
     Forked {
         tags: &'static [&'static str],
-        winner: &'static str,
+        winner: ForkWinner,
         reliable: bool,
         loser_late_200: Option<&'static str>,
     },
@@ -290,11 +292,13 @@ impl ShapePlan {
             if tags.len() < 2 {
                 return Err(err("Forked needs >= 2 distinct fork tags"));
             }
-            if !tags.contains(&winner) {
-                return Err(err("Forked winner must be one of the declared tags"));
+            if let ForkWinner::Tag(w) = winner {
+                if !tags.contains(&w) {
+                    return Err(err("Forked winner must be one of the declared tags"));
+                }
             }
             if let Some(loser) = loser_late_200 {
-                if loser == winner || !tags.contains(&loser) {
+                if winner == ForkWinner::Tag(loser) || !tags.contains(&loser) {
                     return Err(err("Forked loser_late_200 must be a declared tag != winner"));
                 }
             }
@@ -554,7 +558,8 @@ impl ShapePlan {
                         Feed::new(Some("time_to_prack_200"), Some("pracked"));
                 }
                 // bob is the forking UAS: one 18x per distinct To-tag on its one
-                // INVITE server txn, then 200 under `winner` (+ optional
+                // INVITE server txn, then 200 under `winner` (a fresh tag when
+                // unrung) (+ optional
                 // losing-tag late 200). The fork-aware caller reactor (C1b) tracks
                 // the early-dialog set and ACK+BYEs a loser's late 200 itself.
                 b.callees.push(ActorSpec {
@@ -877,6 +882,7 @@ mod tests {
             shapes::crossing_bye(b()),
             shapes::forked(b()),
             shapes::forked_loser_late_200(b()),
+            shapes::forked_unrung(b()),
             shapes::forked_reliable(b()),
             shapes::prack_update(b()),
             shapes::rerouting_prack(b()),
@@ -926,8 +932,9 @@ mod tests {
         );
     }
 
-    /// C1/E3: Forked validation — winner and loser must be declared tags,
-    /// loser distinct from winner, ≥2 tags.
+    /// C1/E3: Forked validation — a tagged winner and the loser must be
+    /// declared tags, loser distinct from winner, ≥2 tags; an unrung winner is
+    /// valid.
     #[test]
     fn forked_validates_tags() {
         let mk = |tags, winner, loser| ShapePlan {
@@ -947,17 +954,21 @@ mod tests {
             ringing_gate: true,
             stamp_connected: true,
         };
-        mk(&["a", "b"], "a", None).validate().expect("valid fork");
+        mk(&["a", "b"], ForkWinner::Tag("a"), None).validate().expect("valid fork");
+        mk(&["a", "b"], ForkWinner::Unrung, None).validate().expect("an unrung winner is valid");
+        mk(&["a", "b"], ForkWinner::Unrung, Some("a"))
+            .validate()
+            .expect("an unrung winner leaves every declared tag a loser");
         assert_eq!(
-            detail(mk(&["a"], "a", None).validate().unwrap_err()),
+            detail(mk(&["a"], ForkWinner::Tag("a"), None).validate().unwrap_err()),
             "Forked needs >= 2 distinct fork tags"
         );
         assert_eq!(
-            detail(mk(&["a", "b"], "c", None).validate().unwrap_err()),
+            detail(mk(&["a", "b"], ForkWinner::Tag("c"), None).validate().unwrap_err()),
             "Forked winner must be one of the declared tags"
         );
         assert_eq!(
-            detail(mk(&["a", "b"], "a", Some("a")).validate().unwrap_err()),
+            detail(mk(&["a", "b"], ForkWinner::Tag("a"), Some("a")).validate().unwrap_err()),
             "Forked loser_late_200 must be a declared tag != winner"
         );
     }

@@ -28,4 +28,6 @@ pub mod plan;
 pub mod shapes;
 
 pub use binder::{EgressBinder, RouteBinder, RouteIntent};
-pub use plan::{ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown, Transfer};
+pub use plan::{
+    ByeFeed, DwellKnob, Establishment, ForkWinner, Script, ShapePlan, Stage, Teardown, Transfer,
+};

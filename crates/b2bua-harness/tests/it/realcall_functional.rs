@@ -76,6 +76,22 @@ async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
     assert!(report.passed(), "RFC audit failed for `{name}`");
 }
 
+/// A forked establishment through the SUT's transparent relay: three forks
+/// ring under distinct tags, the middle one answers.
+#[tokio::test(start_paused = true)]
+async fn realcall_forked_no_leak() {
+    let shape = callshapes::shapes::forked(callshapes::shapes::default_binder());
+    assert_no_leak_actor("realcall-forked", &shape).await;
+}
+
+/// A forked establishment answered by a fork that sent no provisional
+/// (RFC 3261 §12.1.2, §13.2.2.4): the 2xx carries a To-tag no 18x announced.
+#[tokio::test(start_paused = true)]
+async fn realcall_forked_unrung_no_leak() {
+    let shape = callshapes::shapes::forked_unrung(callshapes::shapes::default_binder());
+    assert_no_leak_actor("realcall-forked-unrung", &shape).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn realcall_basic_call_no_leak() {
     // Since P3 the basic_call load body is the ACTOR-declared port.

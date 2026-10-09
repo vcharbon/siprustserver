@@ -7,7 +7,7 @@
 
 use tokio::time::Instant;
 
-use super::endpoint::Disposition;
+use super::endpoint::{Disposition, ForkWinner};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::runner::{ActorState, ForkAnswer, ParkedRequest, PendingRejectAck, TimedAnswer};
 use super::script::scripted_wants_initial;
@@ -64,9 +64,9 @@ pub(super) async fn respond_200_sdp(uas: &mut ServerTxn, sdp: &str) -> Result<()
 /// barrier holds the verdict until it does), and stamp the declared
 /// answer-sent feed. Shared by the timed answer and the immediate disposition.
 ///
-/// A forking callee (`fork: Some`) answers under the WINNER fork's tag (adopted
-/// as the txn's dialog tag, so `uas.dialog()` keys the confirmed dialog under
-/// it), then optionally emits a losing fork's LATE `200` (distinct tag on the
+/// A forking callee (`fork: Some`) answers under the WINNER fork's tag, or a
+/// fresh tag for an unrung winner (adopted as the txn's dialog tag, so
+/// `uas.dialog()` keys the confirmed dialog under it), then optionally emits a losing fork's LATE `200` (distinct tag on the
 /// same transaction — §13.2.2.4: the caller ACKs then BYEs it). Both 200s share
 /// the INVITE's CSeq, so the ONE answered-awaiting-ACK obligation covers them
 /// (the wire-level per-fork ACK completeness is the RFC audit's to judge).
@@ -76,8 +76,12 @@ pub(super) async fn answer_initial_invite(
     fork: Option<ForkAnswer>,
 ) -> Result<(), StepError> {
     let sdp = st.answer_body();
-    if let Some(f) = &fork {
-        uas.adopt_to_tag(f.winner_tag);
+    match fork.as_ref().map(|f| f.winner) {
+        Some(ForkWinner::Tag(tag)) => uas.adopt_to_tag(tag),
+        Some(ForkWinner::Unrung) => {
+            uas.answer_unrung();
+        }
+        None => {}
     }
     respond_200_sdp(&mut uas, sdp).await?;
     note_uas_answered(st, &uas);
@@ -167,8 +171,12 @@ pub(super) async fn apply_disposition(
         // 200 under the winner's tag — timed (plain 180s) or on the winner's
         // PRACK (reliable 183s, MUST-014).
         Disposition::ForkingRing { tags, winner, ring, reliable, loser_late_200 } => {
-            let wired_ok = tags.contains(&winner)
-                && loser_late_200.is_none_or(|l| l != winner && tags.contains(&l));
+            let wired_ok = match winner {
+                ForkWinner::Tag(w) => {
+                    tags.contains(&w) && loser_late_200.is_none_or(|l| l != w && tags.contains(&l))
+                }
+                ForkWinner::Unrung => loser_late_200.is_none_or(|l| tags.contains(&l)),
+            };
             if !wired_ok {
                 return Err(StepError::UnexpectedKind {
                     who: st.role.to_string(),
@@ -196,7 +204,15 @@ pub(super) async fn apply_disposition(
                 st.fork_loser_tags.insert(loser.to_string());
             }
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
-            let fork = ForkAnswer { winner_tag: winner, loser_late_200 };
+            let fork = ForkAnswer {
+                winner,
+                loser_late_200,
+                unpracked: if reliable {
+                    tags.iter().copied().collect()
+                } else {
+                    Default::default()
+                },
+            };
             if reliable {
                 // The 200 waits for the WINNER fork's PRACK (see the PRACK arm).
                 st.fork_answer = Some(fork);

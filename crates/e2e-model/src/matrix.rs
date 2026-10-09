@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock};
 
 use callshapes::plan::{ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown};
 use callshapes::shapes::default_binder;
-use scenario_harness::actor::ActorScenario;
+use scenario_harness::actor::{ActorScenario, ForkWinner};
 
 use crate::registry::ShapeDescriptor;
 use crate::shape::Anchor;
@@ -68,7 +68,7 @@ const ESTS: &[Est] = &[
         frag: "forked",
         make: Establishment::Forked {
             tags: FORK_TAGS,
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
             reliable: false,
             loser_late_200: None,
         },

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::binder::RouteBinder;
 use crate::plan::{
-    ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown, Transfer,
+    ByeFeed, DwellKnob, Establishment, ForkWinner, Script, ShapePlan, Stage, Teardown, Transfer,
 };
 use crate::EgressBinder;
 
@@ -89,7 +89,31 @@ pub fn forked(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
+            reliable: false,
+            loser_late_200: None,
+        },
+        stages: vec![],
+        teardown: Teardown::CallerBye {
+            after: DwellKnob::TalkTime,
+            feed: ByeFeed::CheckpointAndPhase,
+        },
+        ringing_gate: true,
+        stamp_connected: true,
+    }
+}
+
+/// `forked_unrung` — forking where the answering fork sent no provisional
+/// (RFC 3261 §12.1.2, §13.2.2.4): bob rings under three distinct tags, then
+/// answers 200 under a fresh tag none of the 18x carried; talk, BYE. Only
+/// valid under the SUT's transparent CORE relay, like [`forked`].
+pub fn forked_unrung(binder: Arc<dyn RouteBinder>) -> ShapePlan {
+    ShapePlan {
+        id: "forked_unrung",
+        binder,
+        establish: Establishment::Forked {
+            tags: &["fk1", "fk2", "fk3"],
+            winner: ForkWinner::Unrung,
             reliable: false,
             loser_late_200: None,
         },
@@ -123,7 +147,7 @@ pub fn forked_loser_late_200(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
             reliable: false,
             loser_late_200: Some("fk3"),
         },
@@ -146,7 +170,7 @@ pub fn forked_reliable(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Forked {
             tags: &["fk1", "fk2", "fk3"],
-            winner: "fk2",
+            winner: ForkWinner::Tag("fk2"),
             reliable: true,
             loser_late_200: None,
         },

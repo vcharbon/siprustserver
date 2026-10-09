@@ -74,8 +74,8 @@ use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
 use crate::StepError;
 
 pub use endpoint::{
-    ActorSpec, Automatics, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_EARLY, SUBFLOW_REALIGN,
-    SUBFLOW_REFER, SUBFLOW_RENEG,
+    ActorSpec, Automatics, CtxFeed, Disposition, Feed, ForkWinner, MediaState, SUBFLOW_EARLY,
+    SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 pub use runner::{run_actor, ActorFailure, ActorState};
 pub use shared_endpoint::{EndpointHandle, EndpointPump, Inbox};

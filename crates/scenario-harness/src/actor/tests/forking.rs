@@ -70,7 +70,7 @@ async fn forking_ring_emits_distinct_tag_18x_and_answers_winner() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::from_millis(200),
             reliable: false,
             loser_late_200: None,
@@ -128,7 +128,7 @@ async fn forking_ring_loser_late_200_is_acked_and_byed() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::from_millis(200),
             reliable: false,
             loser_late_200: Some("f1"),
@@ -202,7 +202,7 @@ async fn forking_ring_reliable_answers_on_winner_prack_only() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::ZERO,
             reliable: true,
             loser_late_200: None,
@@ -287,7 +287,7 @@ async fn actor_caller_confirms_forked_winner() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::from_millis(200),
             reliable: false,
             loser_late_200: None,
@@ -321,7 +321,7 @@ async fn actor_caller_acks_and_byes_losing_fork_late_200() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::from_millis(200),
             reliable: false,
             loser_late_200: Some("f1"),
@@ -368,7 +368,7 @@ async fn actor_caller_pracks_each_reliable_fork() {
         &bob,
         Disposition::ForkingRing {
             tags: &["f1", "f2"],
-            winner: "f2",
+            winner: ForkWinner::Tag("f2"),
             ring: Duration::ZERO,
             reliable: true,
             loser_late_200: None,
@@ -377,5 +377,69 @@ async fn actor_caller_pracks_each_reliable_fork() {
     );
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the reliable forked call must settle OK, got {verdict:?}");
+    h.finish().await;
+}
+
+/// An unrung winner (RFC 3261 §12.1.2, §13.2.2.4): two forks ring, then a fork
+/// that sent no provisional answers under a fresh To-tag. The actor caller
+/// confirms that dialog, and the teardown BYE addresses it.
+#[tokio::test(start_paused = true)]
+async fn actor_caller_confirms_unrung_winner() {
+    let h = Harness::new("actor-caller-unrung-winner").describe(
+        "the actor caller sees 180(f1)+180(f2) then a 200 under a tag no 18x \
+         announced; it confirms that dialog, tears down and settles OK",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let call = forked_pair_plan(
+        &alice,
+        &bob,
+        Disposition::ForkingRing {
+            tags: &["f1", "f2"],
+            winner: ForkWinner::Unrung,
+            ring: Duration::from_millis(200),
+            reliable: false,
+            loser_late_200: None,
+        },
+        None,
+    );
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the unrung-winner call must settle OK, got {verdict:?}");
+    h.finish().await;
+}
+
+/// A reliable unrung winner: each rung fork's reliable 183 is PRACKed on its
+/// own early dialog, and the last PRACK releases the 200 under a fresh tag.
+#[tokio::test(start_paused = true)]
+async fn actor_caller_confirms_reliable_unrung_winner() {
+    let h = Harness::new("actor-caller-reliable-unrung").describe(
+        "reliable 183(f1)+183(f2), both PRACKed; the 200 then comes under a \
+         tag no 18x announced and the call completes",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let plan = crate::realcall::InvitePlan {
+        via: bob.addr(),
+        from: None,
+        to: None,
+        ruri: None,
+        headers: vec![("Supported".to_string(), "100rel".to_string())],
+        rewrite: Default::default(),
+    };
+    let call = forked_pair_plan(
+        &alice,
+        &bob,
+        Disposition::ForkingRing {
+            tags: &["f1", "f2"],
+            winner: ForkWinner::Unrung,
+            ring: Duration::ZERO,
+            reliable: true,
+            loser_late_200: None,
+        },
+        Some(plan),
+    );
+    let verdict = run_call(call, Duration::from_secs(5)).await;
+    assert!(verdict.is_ok(), "the reliable unrung call must settle OK, got {verdict:?}");
     h.finish().await;
 }

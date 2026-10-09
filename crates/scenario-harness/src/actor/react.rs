@@ -410,9 +410,10 @@ pub(super) async fn react_in_dialog_request(
                 maybe_answer_held_invite(st).await?;
                 return Ok(());
             }
-            let releases_answer = match (&st.fork_answer, prack_tag.as_deref()) {
-                // Forking: only the winner fork's PRACK releases the 200.
-                (Some(f), Some(tag)) => tag == f.winner_tag,
+            let releases_answer = match (&mut st.fork_answer, prack_tag.as_deref()) {
+                // Forking: the winner fork's PRACK (or, for an unrung winner,
+                // the last fork's PRACK) releases the 200.
+                (Some(f), Some(tag)) => f.releases_on_prack(tag),
                 (Some(_), None) => false,
                 // Non-forking reliable answer: any PRACK releases (as before).
                 (None, _) => true,

@@ -23,7 +23,7 @@ use super::answer::fire_timed_answer;
 use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
 use super::ending::Expect;
-use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
+use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, ForkWinner, MediaState};
 use super::goals::{GoalCursor, GoalStep, RequestKind};
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
@@ -46,13 +46,28 @@ pub(super) struct ParkedRequest {
 }
 
 /// The forking-UAS answer plan carried from the 18x emission to the moment the
-/// INVITE is answered (the timed-answer arm, or the winner fork's PRACK): the
-/// `200` goes out under `winner_tag` (adopted as the transaction's dialog tag),
-/// then optionally a LATE `200` under `loser_late_200`.
-#[derive(Debug, Clone, Copy)]
+/// INVITE is answered (the timed-answer arm, or the releasing PRACK): the `200`
+/// goes out under the `winner` (adopted as the transaction's dialog tag), then
+/// optionally a LATE `200` under `loser_late_200`.
+#[derive(Debug, Clone)]
 pub(super) struct ForkAnswer {
-    pub(super) winner_tag: &'static str,
+    pub(super) winner: ForkWinner,
     pub(super) loser_late_200: Option<&'static str>,
+    /// Reliable forks whose PRACK has not arrived; an unrung winner's `200`
+    /// waits until it is empty.
+    pub(super) unpracked: HashSet<&'static str>,
+}
+
+impl ForkAnswer {
+    /// Note the PRACK of fork `tag`; true when it releases the held `200`
+    /// (the winner's own PRACK, or the last fork's PRACK for an unrung winner).
+    pub(super) fn releases_on_prack(&mut self, tag: &str) -> bool {
+        self.unpracked.remove(tag);
+        match self.winner {
+            ForkWinner::Tag(w) => tag == w,
+            ForkWinner::Unrung => self.unpracked.is_empty(),
+        }
+    }
 }
 
 /// A ring/answer scheduled for `at` — held as its own interruptible arm so a

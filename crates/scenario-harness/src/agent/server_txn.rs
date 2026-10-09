@@ -31,13 +31,14 @@ pub struct ServerTxn {
     /// UAS drives several early dialogs (a simulated downstream fork), each an
     /// id mapped to a distinct To-tag (RFC 3261 §12.1.2).
     early_tags: HashMap<String, String>,
-    /// Early-dialog ids that have emitted at least one provisional. A winner may
-    /// only be one the caller actually saw an early dialog for; guards `win`.
+    /// Early-dialog ids that have emitted at least one provisional. A winner
+    /// declared by [`win`](Self::win) is one the caller saw an early dialog for.
     emitted_early: HashSet<String>,
-    /// The declared winning early-dialog id, once `win` is called. A second,
-    /// different winner or a forked 2xx with none declared is a silent misuse
-    /// the wire audit cannot catch (both are wire-legal) — the surface rejects it.
-    winner: Option<String>,
+    /// The declared winner, once [`win`](Self::win) or
+    /// [`answer_unrung`](Self::answer_unrung) is called. A second, different
+    /// winner or a forked 2xx with none declared is a silent misuse the wire
+    /// audit cannot catch (both are wire-legal) — the surface rejects it.
+    winner: Option<Winner>,
     /// This transaction's final response status, once one is sent. A new 1xx or a
     /// different final after it is rejected here; a same-status retransmission
     /// (RFC 3261 §13.3.1.4) is allowed through.
@@ -251,18 +252,38 @@ impl ServerTxn {
     pub fn win(&mut self, early_id: &str) {
         assert!(
             self.emitted_early.contains(early_id),
-            "win({early_id:?}): no provisional was emitted on that early dialog — known early dialogs: {:?}",
+            "win({early_id:?}): no provisional was emitted on that early dialog (known early dialogs: {:?}) — {DECLARE_WINNER}",
             self.emitted_early
         );
-        if let Some(w) = &self.winner {
-            assert!(
-                w == early_id,
-                "win({early_id:?}): early dialog {w:?} already won this transaction — a transaction has one winner"
-            );
-        }
-        self.winner = Some(early_id.to_string());
+        self.declare_winner(Winner::Early(early_id.to_string()));
         let tag = self.early_tag(early_id);
         self.adopt_to_tag(&tag);
+    }
+
+    /// Declare the WINNER a fork that sent no provisional: mint a fresh To-tag,
+    /// distinct from every early dialog's, as the sticky dialog tag, so the 2xx
+    /// carries it and [`dialog`](Self::dialog) is keyed under it (RFC 3261
+    /// §12.1.2, §13.2.2.4: a 2xx may create a dialog no 1xx announced). The
+    /// rung early dialogs settle by the stack's automatics. Returns the tag.
+    /// Call before responding the 2xx; a repeat call returns the same tag.
+    pub fn answer_unrung(&mut self) -> String {
+        if self.winner == Some(Winner::Unrung) {
+            return self.to_tag.clone().expect("an unrung winner holds its minted tag");
+        }
+        self.declare_winner(Winner::Unrung);
+        let tag = self.agent.tag();
+        self.adopt_to_tag(&tag);
+        tag
+    }
+
+    fn declare_winner(&mut self, winner: Winner) {
+        if let Some(w) = &self.winner {
+            assert!(
+                *w == winner,
+                "{winner:?}: {w:?} already won this transaction — a transaction has one winner"
+            );
+        }
+        self.winner = Some(winner);
     }
 
     /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
@@ -300,6 +321,20 @@ impl ServerTxn {
         Dialog::new(self.agent.clone(), fallback, dialog)
     }
 }
+
+/// The fork a forked INVITE server transaction answers with its 2xx.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Winner {
+    /// An early dialog that emitted a provisional, by its id.
+    Early(String),
+    /// A fork that sent no provisional: its 2xx carries a fresh To-tag
+    /// (RFC 3261 §12.1.2, §13.2.2.4).
+    Unrung,
+}
+
+/// The panic text of a 2xx or `win` that names no declared winner.
+const DECLARE_WINNER: &str =
+    "declare the winner with win(id) for a rung early dialog or answer_unrung() for a fork that sent no provisional";
 
 /// Builder for a UAS response (lets an SDP answer and custom headers be
 /// attached fluently).
@@ -412,7 +447,7 @@ impl<'a> Respond<'a> {
                 !((200..300).contains(&self.status)
                     && !txn.early_tags.is_empty()
                     && txn.winner.is_none()),
-                "{} early dialog(s) open — declare the winner with win(id) before the 2xx",
+                "{} early dialog(s) open and no winner declared before the 2xx — {DECLARE_WINNER}",
                 txn.early_tags.len()
             );
             if self.status >= 200 {

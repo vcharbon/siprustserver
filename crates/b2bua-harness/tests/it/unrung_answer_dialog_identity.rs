@@ -12,8 +12,8 @@
 //! ```text
 //!   alice                     b2bua                      bob (forking)
 //!     INVITE ──────────────────▶ INVITE ────────────────▶
-//!     ◀── 180 (To-tag A1) ────── ◀── 180 (bobfork1)
-//!     ◀── 200 (To-tag A2) ────── ◀── 200 (bobfork2, never rang)
+//!     ◀── 180 (To-tag A1) ────── ◀── 180 (fork 1)
+//!     ◀── 200 (To-tag A2) ────── ◀── 200 (fork 2, never rang)
 //!     ACK ─────────────────────▶ ACK ───────────────────▶
 //!     ◀── OPTIONS (From-tag A2)                         keepalive
 //!     ◀── UPDATE / re-INVITE / BYE (From-tag A2) ◀───── from bob
@@ -42,18 +42,18 @@ struct Answered {
     answer_tag: String,
 }
 
-/// alice calls; bob rings on `bobfork1`, then answers on `bobfork2`, which
-/// never rang. Returns once alice has ACKed the 2xx and bob has the ACK.
+/// alice calls; bob rings on one fork, then answers on another, which never
+/// rang. Returns once alice has ACKed the 2xx and bob has the ACK.
 async fn answer_on_an_unrung_branch(s: &B2buaScene) -> Answered {
     let mut call: ClientInvite =
         s.alice.invite(&s.bob).with_sdp(OFFER_SDP).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
 
-    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    uas.respond_early("fork1", 180, "Ringing").await;
     let ringing = call.expect(180).await;
     let rung_tag = ringing.to().tag().expect("the 180 carries an a-facing tag").to_string();
 
-    uas.adopt_to_tag("bobfork2");
+    let unrung = uas.answer_unrung();
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
     let ok = call.expect(200).await;
     let answer_tag = ok.to().tag().expect("the 2xx carries an a-facing tag").to_string();
@@ -63,7 +63,11 @@ async fn answer_on_an_unrung_branch(s: &B2buaScene) -> Answered {
     );
     let dialog = call.ack().await;
     let ack = s.bob.receive("ACK").await;
-    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides the answering branch");
+    assert_eq!(
+        ack.request().to().tag(),
+        Some(unrung.as_str()),
+        "the ACK rides the answering branch"
+    );
     Answered { dialog, uas, rung_tag, answer_tag }
 }
 
@@ -152,8 +156,9 @@ async fn a_bye_on_the_abandoned_early_tag_draws_481() {
 }
 
 /// alice calls; bob rings on each of `rung` in turn, then answers on `winner`
-/// (rung or not). Returns alice's confirmed dialog, the a-facing tag of every
-/// branch she was shown, and the 2xx's To-tag, once the ACK reached bob.
+/// (a rung fork, or one that never rang). Returns alice's confirmed dialog, the
+/// a-facing tag of every branch she was shown, and the 2xx's To-tag, once the
+/// ACK reached bob.
 async fn ring_then_answer(
     s: &B2buaScene,
     rung: &[&str],
@@ -164,16 +169,26 @@ async fn ring_then_answer(
     let mut uas = s.bob.receive("INVITE").await;
     let mut shown = Vec::new();
     for fork in rung {
-        uas.respond(180, "Ringing").with_to_tag(fork).await;
+        uas.respond_early(fork, 180, "Ringing").await;
         let ringing = call.expect(180).await;
         shown.push(ringing.to().tag().expect("the 180 carries an a-facing tag").to_string());
     }
-    uas.respond(200, "OK").with_to_tag(winner).with_sdp(ANSWER_SDP).await;
+    let winner = if rung.contains(&winner) {
+        uas.win(winner);
+        uas.early_tag(winner)
+    } else {
+        uas.answer_unrung()
+    };
+    uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
     let ok = call.expect(200).await;
     let answer_tag = ok.to().tag().expect("the 2xx carries an a-facing tag").to_string();
     let dialog = call.ack().await;
     let ack = s.bob.receive("ACK").await;
-    assert_eq!(ack.request().to().tag(), Some(winner), "the ACK rides the answering branch");
+    assert_eq!(
+        ack.request().to().tag(),
+        Some(winner.as_str()),
+        "the ACK rides the answering branch"
+    );
     (dialog, shown, answer_tag)
 }
 
@@ -213,8 +228,8 @@ async fn every_other_shown_tag_draws_481(
     let _report = s.finish().await;
 }
 
-const TWO_SHOWN: &[&str] = &["bobfork1", "bobfork2"];
-const THREE_SHOWN: &[&str] = &["bobfork1", "bobfork2", "bobfork3"];
+const TWO_SHOWN: &[&str] = &["fork1", "fork2"];
+const THREE_SHOWN: &[&str] = &["fork1", "fork2", "fork3"];
 
 /// Two branches shown, a third that never rang answers.
 #[tokio::test(start_paused = true)]
@@ -222,7 +237,7 @@ async fn an_unrung_answer_abandons_every_shown_branch_bye() {
     every_other_shown_tag_draws_481(
         "b2bua-unrung-two-shown-bye",
         TWO_SHOWN,
-        "bobfork3",
+        "fork3",
         InDialogMethod::Bye,
     )
     .await;
@@ -233,7 +248,7 @@ async fn an_unrung_answer_abandons_every_shown_branch_update() {
     every_other_shown_tag_draws_481(
         "b2bua-unrung-two-shown-update",
         TWO_SHOWN,
-        "bobfork3",
+        "fork3",
         InDialogMethod::Update,
     )
     .await;
@@ -246,7 +261,7 @@ async fn a_rung_later_answer_abandons_every_other_shown_branch_bye() {
     every_other_shown_tag_draws_481(
         "b2bua-rung-later-bye",
         THREE_SHOWN,
-        "bobfork2",
+        "fork2",
         InDialogMethod::Bye,
     )
     .await;
@@ -257,7 +272,7 @@ async fn a_rung_later_answer_abandons_every_other_shown_branch_update() {
     every_other_shown_tag_draws_481(
         "b2bua-rung-later-update",
         THREE_SHOWN,
-        "bobfork2",
+        "fork2",
         InDialogMethod::Update,
     )
     .await;
@@ -269,7 +284,7 @@ async fn a_rung_first_answer_abandons_the_other_shown_branch_bye() {
     every_other_shown_tag_draws_481(
         "b2bua-rung-first-bye",
         TWO_SHOWN,
-        "bobfork1",
+        "fork1",
         InDialogMethod::Bye,
     )
     .await;
@@ -280,7 +295,7 @@ async fn a_rung_first_answer_abandons_the_other_shown_branch_update() {
     every_other_shown_tag_draws_481(
         "b2bua-rung-first-update",
         TWO_SHOWN,
-        "bobfork1",
+        "fork1",
         InDialogMethod::Update,
     )
     .await;

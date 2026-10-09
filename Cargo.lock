@@ -528,6 +528,7 @@ dependencies = [
  "b2bua-sdk",
  "call",
  "call-limiter",
+ "callshapes",
  "http-net",
  "layer-harness",
  "load-shed",

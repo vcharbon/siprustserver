@@ -469,6 +469,11 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::forked_reliable(cs::default_binder()))),
+        // A forked establishment answered by a fork that never rang (a fresh
+        // To-tag on the 2xx, RFC 3261 §13.2.2.4). Id-addressable.
+        ShapeDescriptor::new("forked_unrung")
+            .anchors(LOAD_CALL_ANCHORS)
+            .load_actor_with(|_| Arc::new(cs::forked_unrung(cs::default_binder()))),
         // C2/E5: CANCEL×200 crossing — a branch-aware race (Ok OR abandoned
         // timeout, both legal). A light share of the mix.
         ShapeDescriptor::new("cancel_answer_crossing")

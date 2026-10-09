@@ -163,10 +163,10 @@ async fn early_dialog_update_before_final() {
 // These misuses are all wire-legal, so the audit cannot catch them; the send
 // surface must reject them at the point of misuse.
 
-/// Declaring a winner that never opened an early dialog (no provisional emitted)
-/// would silently mint a fresh tag and answer a fork the UAC never saw.
+/// `win` names a rung early dialog: an id that emitted no provisional is a
+/// misuse, and the message points at `answer_unrung` for a fork that never rang.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "no provisional was emitted")]
+#[should_panic(expected = "or answer_unrung() for a fork that sent no provisional")]
 async fn win_without_provisional_panics() {
     let h = Harness::new("win-no-provisional");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -193,10 +193,13 @@ async fn second_different_winner_panics() {
     uas.win("e2"); // a second, different winner
 }
 
-/// Sending the final 2xx with early dialogs open and no winner declared would
-/// answer on a phantom fresh mint — a fork the UAC never saw.
+/// Sending the final 2xx with early dialogs open and no winner declared leaves
+/// unsaid whether it answers a rung fork or one that never rang; the message
+/// names both verbs.
 #[tokio::test(start_paused = true)]
-#[should_panic(expected = "declare the winner with win(id)")]
+#[should_panic(
+    expected = "no winner declared before the 2xx — declare the winner with win(id) for a rung early dialog or answer_unrung()"
+)]
 async fn forked_final_without_winner_panics() {
     let h = Harness::new("final-no-winner");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -206,6 +209,20 @@ async fn forked_final_without_winner_panics() {
     uas.respond_early("e1", 180, "Ringing").send().await;
     uas.respond_early("e2", 180, "Ringing").send().await;
     uas.respond(200, "OK").with_sdp(ANSWER).send().await; // no win() first
+}
+
+/// A rung winner and an unrung winner on one transaction are two winners.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "already won this transaction")]
+async fn unrung_after_rung_winner_panics() {
+    let h = Harness::new("rung-then-unrung");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let _call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.win("e1");
+    uas.answer_unrung();
 }
 
 /// `respond_early` is for provisionals; a final under an early tag never adopts
@@ -235,6 +252,72 @@ async fn provisional_after_final_panics() {
     uas.win("e1");
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     uas.respond(181, "Queued").send().await; // a new 1xx after the final
+}
+
+/// A fork that never rang answers (RFC 3261 §12.1.2, §13.2.2.4): two early
+/// dialogs ring, then `answer_unrung` sends the 2xx under a fresh To-tag that
+/// matches neither early tag. The UAC confirms that dialog, and the callee's
+/// dialog handle is keyed under it: its BYE carries the unrung tag as From-tag.
+#[tokio::test(start_paused = true)]
+async fn unrung_fork_answers_with_fresh_tag() {
+    let h = Harness::new("early-unrung-winner").describe(
+        "e1 and e2 ring (180 each); a third fork that sent no provisional answers \
+         the 200 under a fresh To-tag; the callee's BYE uses that tag",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond_early("e1", 180, "Ringing").send().await;
+    uas.respond_early("e2", 180, "Ringing").send().await;
+    let t1 = call.expect(180).await.to().tag().map(str::to_owned).expect("e1");
+    let t2 = call.expect(180).await.to().tag().map(str::to_owned).expect("e2");
+
+    let unrung = uas.answer_unrung();
+    assert_eq!(uas.answer_unrung(), unrung, "a repeat call keeps the minted tag");
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    let ok = call.expect(200).await;
+    let t_ok = ok.to().tag().map(str::to_owned).expect("2xx To-tag");
+    assert_eq!(t_ok, unrung, "the 2xx carries the unrung winner's tag");
+    assert!(t_ok != t1 && t_ok != t2, "the unrung tag differs from every early tag");
+
+    let caller = call.ack().await;
+    assert_eq!(caller.remote_tag(), unrung, "the caller confirms the unrung dialog");
+    bob.receive("ACK").await;
+    let mut callee = uas.dialog();
+    assert_eq!(callee.local_tag(), unrung, "the callee's dialog is keyed under the unrung tag");
+    let mut bye = callee.bye().await;
+    let mut got = alice.receive("BYE").await;
+    assert_eq!(got.request().from().tag(), Some(unrung.as_str()), "the BYE uses the unrung tag");
+    assert_eq!(got.request().to().tag(), Some(caller.local_tag()), "addressed to the caller");
+    got.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// `answer_unrung` with no early dialog open is an ordinary 2xx under its
+/// minted tag.
+#[tokio::test(start_paused = true)]
+async fn unrung_answer_without_forks() {
+    let h = Harness::new("unrung-no-forks")
+        .describe("answer_unrung on a transaction with no early dialog answers plainly");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let tag = uas.answer_unrung();
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
+    assert_eq!(call.expect(200).await.to().tag(), Some(tag.as_str()));
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
 }
 
 /// A TEMPLATE-driven provisional targeting a specific early dialog: e2's 180 is

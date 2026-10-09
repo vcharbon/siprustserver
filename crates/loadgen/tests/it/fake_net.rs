@@ -784,6 +784,14 @@ async fn loadgen_fake_net_forked_reliable() {
     fork_e2e(7090, "forked_reliable", 0xF06A).await;
 }
 
+/// A forked call answered by a fork that never rang (a 2xx To-tag no 18x
+/// carried, RFC 3261 §13.2.2.4), relayed through the SUT.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_forked_unrung() {
+    fork_e2e(7160, "forked_unrung", 0xF07B).await;
+}
+
 /// C1/E3 loss resilience: the forked establishment (three distinct-tag 18x +
 /// the winner's 2xx, all relayed through the SUT) under ~8%/datagram loss +
 /// auto-retransmit. A dropped best-effort 18x just means the caller observes
