@@ -74,7 +74,8 @@ pub use driver::{
 };
 pub use mux::{
     labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
-    EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, TargetedDrop,
+    EndpointSpec, Exchange, LegInfo, LegPicker, MuxCore, Role, RttSink, SocketBufferRequest,
+    TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};

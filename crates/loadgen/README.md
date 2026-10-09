@@ -83,8 +83,13 @@ three on `base`; see *Shared socket*), `--correlate` /
 data fed into the refer scenarios), `--scenario name=weight` (repeatable; omit
 for the default mix), `--out-dir`, `--metrics-addr` (default `0.0.0.0:9300`),
 `--sample-cap`, `--drop-rate` / `--drop` / `--auto-retransmit` (see *Packet loss
-+ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below). Run
-`--help` for the full list.
++ auto-retransmit* below), `--load-profile` (see *The run-spec axis* below),
+`--overload-expected` (see *Accepted endings*), `--udp-rcvbuf` / `--udp-sndbuf`
+(the kernel buffers each mux socket requests, default 4 MiB each; `0` keeps the
+kernel default; the granted sizes are printed at bind, with a warning when
+`net.core.rmem_max` / `wmem_max` clamped the request — one socket carries every
+concurrent call, so an overflowing buffer drops datagrams before the loadgen
+sees them and fails their calls on a timeout). Run `--help` for the full list.
 
 ### The run-spec axis: `--load-profile`
 

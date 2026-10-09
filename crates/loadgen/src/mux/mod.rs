@@ -59,6 +59,7 @@
 //! `AgentBinder::with_network(mux, …, record)` wraps a per-call endpoint with
 //! the recording fake layer — free when off.
 
+mod buffers;
 mod correlation;
 mod demux;
 mod endpoint;
@@ -67,6 +68,7 @@ mod retransmit;
 mod rtt;
 mod stats;
 
+pub use buffers::SocketBufferRequest;
 pub use correlation::Correlation;
 pub use endpoint::{CallRouting, MuxNetwork};
 // The data-driven claim rules live in their shared home, `scenario-harness`
@@ -299,7 +301,9 @@ const DISPATCH_QUEUE_MAX: usize = 4096;
 impl MuxCore {
     /// Open every endpoint on the REAL network + dispatcher and start the
     /// reaper — the production/bin path. `queue_max` bounds each call's inbox;
-    /// `orphan_sample_cap` bounds stored orphan samples.
+    /// `orphan_sample_cap` bounds stored orphan samples; `buffers` are the
+    /// kernel socket buffers each endpoint requests (the granted sizes are
+    /// reported on stderr).
     pub async fn bind(
         specs: Vec<EndpointSpec>,
         correlation: Correlation,
@@ -307,8 +311,9 @@ impl MuxCore {
         orphan_sample_cap: usize,
         pending_ttl: Duration,
         clock: Clock,
+        buffers: SocketBufferRequest,
     ) -> std::io::Result<Arc<Self>> {
-        Self::bind_on(
+        Self::bind_endpoints(
             &RealSignalingNetwork::new(),
             specs,
             correlation,
@@ -316,6 +321,7 @@ impl MuxCore {
             orphan_sample_cap,
             pending_ttl,
             clock,
+            buffers,
         )
         .await
     }
@@ -340,6 +346,31 @@ impl MuxCore {
         pending_ttl: Duration,
         clock: Clock,
     ) -> std::io::Result<Arc<Self>> {
+        Self::bind_endpoints(
+            fabric,
+            specs,
+            correlation,
+            queue_max,
+            orphan_sample_cap,
+            pending_ttl,
+            clock,
+            SocketBufferRequest::KERNEL_DEFAULT,
+        )
+        .await
+    }
+
+    /// [`bind_on`](Self::bind_on) with each endpoint requesting `buffers`.
+    #[allow(clippy::too_many_arguments)] // `bind_on`'s knobs plus the buffers
+    async fn bind_endpoints(
+        fabric: &dyn SignalingNetwork,
+        specs: Vec<EndpointSpec>,
+        correlation: Correlation,
+        queue_max: usize,
+        orphan_sample_cap: usize,
+        pending_ttl: Duration,
+        clock: Clock,
+        buffers: SocketBufferRequest,
+    ) -> std::io::Result<Arc<Self>> {
         let stats = Arc::new(MuxStats::new(orphan_sample_cap));
         let mut endpoints = HashMap::new();
         let mut bound = HashMap::new();
@@ -347,11 +378,12 @@ impl MuxCore {
             if bound.contains_key(&spec.addr) {
                 continue;
             }
-            let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
-                fabric.bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX)).await.map_err(
-                    |e| std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message)),
-                )?,
-            );
+            let opts = buffers.apply(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX));
+            let endpoint: Arc<dyn UdpEndpoint> =
+                Arc::from(fabric.bind_udp(opts).await.map_err(|e| {
+                    std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message))
+                })?);
+            buffers.report(endpoint.as_ref());
             let local = endpoint.local_addr();
             let clock = clock.clone();
             let mux = Arc::new_cyclic(|weak: &std::sync::Weak<MuxSocket>| {
