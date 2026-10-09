@@ -18,6 +18,7 @@ mod fluent_dialog;
 mod harness_log_capture;
 mod http_exchanges;
 mod proxy_record_route;
+mod scenario_verdict;
 mod shared_endpoint;
 mod snapshot_report;
 mod template_emission;

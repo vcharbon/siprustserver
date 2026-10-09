@@ -48,7 +48,17 @@ fn mix(id: &str, weight: f64) -> MixEntry {
 /// shows the SUT-side wire on failure) and the mux endpoints (bound raw via
 /// `bind_on`; the loadgen runs its own per-call recording/audit above the mux).
 async fn setup_fake(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    setup_fake_shaped(base, B2buaSut::route_all_with_refer).await
+    setup_fake_shaped(base, B2buaSut::route_all_with_refer, |_| {}).await
+}
+
+/// [`setup_fake`] with an extra `B2buaConfig` mutator applied after the
+/// relay-header tune (e.g. an empty admission bucket that refuses every
+/// non-emergency INVITE with 503).
+async fn setup_fake_tuned(
+    base: u16,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
+) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+    setup_fake_shaped(base, B2buaSut::route_all_with_refer, extra_tune).await
 }
 
 /// [`setup_fake`] whose SUT honors the full inbound `X-Api-Call` control
@@ -57,12 +67,13 @@ async fn setup_fake(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTrans
 /// paused-clock reroute tests run over this (the fake-net mirror of the
 /// smoke lane's `setup_api_call`).
 async fn setup_fake_api_call(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
-    setup_fake_shaped(base, B2buaSut::route_api_call).await
+    setup_fake_shaped(base, B2buaSut::route_api_call, |_| {}).await
 }
 
 async fn setup_fake_shaped(
     base: u16,
     make_sut: fn(&str, u16) -> b2bua_harness::B2buaSutBuilder,
+    extra_tune: impl FnOnce(&mut b2bua_sdk::B2buaConfig) + 'static,
 ) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     let sim = Arc::new(SimulatedSignalingNetwork::new(1));
     let clock = Clock::test_at(0);
@@ -77,7 +88,10 @@ async fn setup_fake_shaped(
 
     let (uac, uas, refer) = (base, base + 1, base + 2);
     let b2bua = make_sut("127.0.0.1", uas)
-        .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
+        .tune(move |c| {
+            c.relay_headers = vec!["X-Loadgen-Id".to_string()];
+            extra_tune(c);
+        })
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
         .await;
 
@@ -203,6 +217,100 @@ async fn loadgen_fake_net_expected_reject_is_audited_clean() {
         ),
         "{prom}"
     );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The sum of `metric`'s samples whose first label is `scenario="<scenario>"`
+/// in a Prometheus text dump.
+fn scenario_sum(prom: &str, metric: &str, scenario: &str) -> u64 {
+    let prefix = format!("{metric}{{scenario=\"{scenario}\",");
+    prom.lines()
+        .filter(|l| l.starts_with(&prefix))
+        .filter_map(|l| l.rsplit(' ').next()?.parse::<u64>().ok())
+        .sum()
+}
+
+/// The cleanup-coverage mix ends each call on the ending its shape declares:
+/// the callee's 486, the caller's CANCEL after ringing, the transfer target's
+/// decline, and the answered call. Every one of them classes `ok`, and
+/// `loadgen_branch_total{scenario,branch}` counts each call under its
+/// scenario's accepted branch.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_abnormal_end_mix_classes_ok_by_branch() {
+    let (h, b2bua, core, transport) = setup_fake(7400).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let shapes = ["invite_reject", "abandon_ringing", "refer_charlie_reject", "basic_call"];
+    let mut c = cfg(b2bua.addr, 20.0, 2, 16, 0xAB0E);
+    // A ring long enough that the caller's CANCEL always precedes the answer.
+    c.call.ring_delay = Duration::from_millis(500);
+    let driver =
+        Driver::new(c, shapes.iter().map(|s| mix(s, 1.0)).collect(), reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 20, "governor under-delivered on virtual time: {total}");
+    for s in shapes {
+        let ok = reporter.count(s, &ResultClass::Ok);
+        assert!(ok > 0, "no {s} call classed ok:\n{prom}");
+        assert_eq!(
+            scenario_sum(&prom, "loadgen_branch_total", s),
+            ok,
+            "loadgen_branch_total counts every ok {s} call under its branch:\n{prom}"
+        );
+    }
+    let ok: u64 = shapes.iter().map(|s| reporter.count(s, &ResultClass::Ok)).sum();
+    assert_eq!(ok, total, "every declared ending classes ok:\n{prom}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    h.advance(Duration::from_secs(40)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// A failed call is counted by the step it failed at. An SUT whose admission
+/// bucket is empty refuses every non-emergency INVITE with 503, which a run
+/// that does not expect overload counts as a failure: alice's 503 arrives
+/// while her BYE (goal #1) waits on its guard and the controller waits on the
+/// `established` barrier, so `loadgen_failed_step_total` counts every call
+/// under `alice:bye#1@established`.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_counts_failures_by_failed_step() {
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7410, |c| {
+        c.cps_bucket_size = 0;
+        c.cps_bucket_rate = 0;
+    })
+    .await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let driver = Driver::new(
+        cfg(b2bua.addr, 20.0, 1, 16, 0x503),
+        vec![mix("basic_call", 1.0)],
+        reporter.clone(),
+        transport,
+    );
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::WrongStatus(503)),
+        total,
+        "every refused call is a status_503 failure:\n{prom}"
+    );
+    let line = format!(
+        "loadgen_failed_step_total{{scenario=\"basic_call\",step=\"alice:bye#1@established\"}} {total}"
+    );
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
