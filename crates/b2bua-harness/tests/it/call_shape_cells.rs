@@ -10,7 +10,7 @@
 
 use std::panic::AssertUnwindSafe;
 
-use b2bua_harness::B2buaScene;
+use b2bua_harness::{model_gate, B2buaScene};
 use callshapes::generator::{self, Cell, Ending, Winner};
 use callshapes::shapes::default_binder;
 use callshapes::CancelAt;
@@ -19,13 +19,14 @@ use scenario_harness::actor::ScenarioVerdict;
 use scenario_harness::realcall::{run_actor_collecting, CallEnv};
 
 /// Cells a SUT defect fails, each with its FIXME, pending the decision on the
-/// defect. A listed cell is skipped and counted, never run green.
-fn pending_sut_defect(_cell: &Cell) -> Option<&'static str> {
-    None
-}
+/// defect: skipped and counted, never run green. Empty while every
+/// compatible cell passes.
+const PENDING_SUT_DEFECTS: &[(fn(&Cell) -> bool, &str)] = &[];
 
-/// Drive one cell to its end and run every net over it.
+/// Drive one cell to its end and run every net over it. A failure names the
+/// model invariant a SUT turn broke, when one did, before what the call met.
 async fn run_cell(cell: Cell) {
+    let since = model_gate::Mark::now();
     let scene = B2buaScene::new(&format!("cell {cell}")).await;
     let env = CallEnv::for_functional(
         &scene.alice,
@@ -37,7 +38,13 @@ async fn run_cell(cell: Cell) {
     );
     let plan = generator::plan(&cell, default_binder());
     if let ScenarioVerdict::Failure { at, cause } = run_actor_collecting(&plan, &env).await {
-        panic!("cell {cell}: failed at {at}: {cause:?}");
+        match model_gate::first_violation(since) {
+            Some(broken) => {
+                let broken = broken.lines().next().unwrap_or_default().to_string();
+                panic!("cell {cell}: red because {broken}; then failed at {at}: {cause:?}")
+            }
+            None => panic!("cell {cell}: failed at {at}: {cause:?}"),
+        }
     }
     let report = scene.finish().await;
     assert!(report.passed(), "cell {cell}: the RFC audit failed");
@@ -48,7 +55,7 @@ async fn run_cell(cell: Cell) {
 async fn run_cells(cells: Vec<Cell>) {
     let (mut ran, mut skipped, mut failed) = (0, 0, Vec::new());
     for cell in cells {
-        if pending_sut_defect(&cell).is_some() {
+        if PENDING_SUT_DEFECTS.iter().any(|(holds, _)| holds(&cell)) {
             skipped += 1;
             continue;
         }

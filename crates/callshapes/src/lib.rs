@@ -22,6 +22,12 @@
 //! (`docs/todos/actor-harness-p1-contract-table.md`), byte-for-byte on the
 //! wire — proving the algebra before new establishment/script capabilities
 //! land on it (program phases C/D).
+//!
+//! The [`generator`] composes shapes instead of listing them: it crosses the
+//! dimensions of a call (who sends the in-dialog requests, the early
+//! requests, the request after the answer, the answering fork, reliable
+//! provisionals, the ending, the talk time) into cells, refuses the
+//! RFC-illegal ones, and turns each into a [`ShapePlan`].
 
 pub mod binder;
 pub mod generator;
