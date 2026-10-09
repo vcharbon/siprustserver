@@ -420,7 +420,6 @@ async fn port_zero_specs_on_one_requested_address_open_one_socket() {
         8,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();

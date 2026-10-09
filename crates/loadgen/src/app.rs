@@ -36,7 +36,7 @@ use crate::case::CaseLoader;
 use crate::{
     serve_metrics, CallConfig, CallTuning, Canaries, ChaosLog, Correlation, Driver, DriverCfg,
     EndpointSpec, LoadCase, LoadRunMeta, MixEntry, MuxCore, MuxTransport, RateHandle, Reporter,
-    ReporterCfg, Role, ScenarioInputs, ShapeRegistry, SocketBufferRequest,
+    ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
 
 /// The `loadgen` CLI surface. Parse with [`Args::parse`] (NOT
@@ -68,16 +68,6 @@ pub struct Args {
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
     #[arg(long, default_value_t = 2000)]
     pub max_in_flight: usize,
-    /// `SO_RCVBUF` each mux socket requests, bytes (`0` = the kernel's
-    /// `rmem_default`; the kernel clamps it at `rmem_max`). One socket carries
-    /// every concurrent call, so a full buffer drops datagrams before the
-    /// loadgen sees them and fails their calls on a timeout.
-    #[arg(long, default_value_t = 4 << 20)]
-    pub udp_rcvbuf: usize,
-    /// `SO_SNDBUF` each mux socket requests, bytes (`0` = the kernel's
-    /// `wmem_default`; clamped at `wmem_max`).
-    #[arg(long, default_value_t = 4 << 20)]
-    pub udp_sndbuf: usize,
     /// The final the SUT refuses a call with under overload (e.g. `503`): that
     /// final to a non-emergency call's initial INVITE before it connects is an
     /// accepted ending (`refused_overload`). Unset, it is a failure like any
@@ -273,13 +263,6 @@ impl Args {
             .map(|id| id.as_str().to_string())
             .collect();
         args
-    }
-
-    /// The socket buffers `--udp-rcvbuf` / `--udp-sndbuf` request (`0` keeps
-    /// the kernel default).
-    pub fn socket_buffers(&self) -> SocketBufferRequest {
-        let stated = |bytes: usize| (bytes > 0).then_some(bytes);
-        SocketBufferRequest { recv: stated(self.udp_rcvbuf), send: stated(self.udp_sndbuf) }
     }
 
     /// Whether a flag was passed on the command line (vs. left at its clap
@@ -636,7 +619,6 @@ pub async fn run_with_inputs(
         sample_cap as usize,
         recv_timeout,
         clock.clone(),
-        args.socket_buffers(),
     )
     .await?;
     // The transport addresses the bound endpoints (a port-0 request resolves).
@@ -855,17 +837,6 @@ mod tests {
         assert!(!args.explicit("drop_rate"));
         assert_eq!(args.cps, 30.0);
         assert!(args.drop);
-    }
-
-    /// The mux sockets request 4 MiB each way by default; `0` keeps the kernel
-    /// default for that buffer.
-    #[test]
-    #[ignore = "slow lane: loadgen"]
-    fn socket_buffers_default_large_and_zero_keeps_the_kernel_default() {
-        let args = Args::parse_from(["loadgen"]);
-        assert_eq!(args.socket_buffers(), SocketBufferRequest::LOADGEN_DEFAULT);
-        let args = Args::parse_from(["loadgen", "--udp-rcvbuf", "0", "--udp-sndbuf", "65536"]);
-        assert_eq!(args.socket_buffers(), SocketBufferRequest { recv: None, send: Some(65536) });
     }
 
     /// `--shared-socket` synthesizes one address for alice, bob and charlie:

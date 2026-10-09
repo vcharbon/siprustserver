@@ -216,7 +216,6 @@ async fn setup_shaped(
         sample_cap as usize,
         recv,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -568,7 +567,6 @@ async fn loadgen_mux_orphan_observability() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -691,7 +689,6 @@ async fn loadgen_mux_picker_disambiguates_shared_socket() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -760,7 +757,6 @@ async fn loadgen_mux_prefix_picker_shares_callee_port() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -833,7 +829,6 @@ async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -900,7 +895,6 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
@@ -1007,7 +1001,6 @@ async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
         10,
         RECV,
         Clock::system(),
-        loadgen::SocketBufferRequest::LOADGEN_DEFAULT,
     )
     .await
     .unwrap();
