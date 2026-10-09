@@ -45,6 +45,11 @@ fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindView> {
     let mut order: Vec<LaneKey> = Vec::new();
     let mut views: HashMap<LaneKey, BindView> = HashMap::new();
     let mut send_tables: HashMap<LaneKey, crate::repeat::RepeatTables> = HashMap::new();
+    // The repeat chains (keyed by their first sighting's seq) whose first
+    // copy this view holds. A chain whose first sighting is not in the view
+    // (modeled loss) starts at the first copy that is: the endpoint took it
+    // as new.
+    let mut held_chains: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let parser = crate::rfc_audit::lenient_parser();
 
     for s in events {
@@ -60,10 +65,11 @@ fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindView> {
                 // Parsed once at event production; a datagram even the lenient
                 // parser rejects can key no obligation.
                 let Some(parsed) = wire.parsed.as_deref() else { continue };
+                let chain = wire.repeat_of.unwrap_or(s.seq);
                 (
                     bind_key,
                     parsed.clone(),
-                    wire.repeat_of.is_some(),
+                    !held_chains.insert(chain),
                     packet.src.to_string(),
                     bind_key.clone(),
                     packet.raw.clone(),
@@ -6684,6 +6690,62 @@ m=audio 20000 RTP/AVP 0\r\n";
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, BOB, "reported where the answer had to arrive");
         assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the ACK's sender");
+    }
+
+    /// An arrival of `raw` at `bind` with the given disposition and §17.2
+    /// repeat mark, as the recording stamps it at production.
+    fn arrival(
+        bind: &str,
+        raw: Vec<u8>,
+        src: &str,
+        seq: u64,
+        disposition: crate::types::RecvDisposition,
+        repeat_of: Option<u64>,
+    ) -> Stamped<SignalingNetworkEvent> {
+        let mut wire = crate::contracts::WireStamp::of_bytes(&raw);
+        wire.repeat_of = repeat_of;
+        Stamped {
+            event: SignalingNetworkEvent::RecvItem {
+                bind_key: bind.to_string(),
+                disposition,
+                wire,
+                packet: UdpPacket { raw, src: src.parse().unwrap(), arrival_ms: seq },
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    /// The audit view's repeat mark is relative to what the view holds: when
+    /// the loss model dropped the first copy of an offer, the retransmission is
+    /// the first copy the endpoint took, so its offer stands and a bodyless ACK
+    /// to the answering 2xx is clean. A later copy is still a repeat.
+    #[test]
+    fn a_retransmission_of_a_lost_arrival_is_the_first_copy_the_view_holds() {
+        use crate::types::RecvDisposition::{Delivered, LossModel};
+        let invite = req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(AUDIO_OFFER));
+        let evs = vec![
+            arrival(BOB, invite.clone(), ALICE, 0, LossModel, None),
+            arrival(BOB, invite.clone(), ALICE, 1, Delivered, Some(0)),
+            arrival(BOB, invite, ALICE, 2, Delivered, Some(0)),
+            sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), ALICE, 3),
+            recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 4),
+        ];
+        let visible: Vec<_> = evs
+            .iter()
+            .filter(|s| crate::contracts::audit_visible_event(&s.event))
+            .cloned()
+            .collect();
+        let views = bind_views(&visible);
+        let repeats: Vec<bool> = views[0].msgs.iter().map(|m| m.repeat).collect();
+        assert_eq!(repeats, vec![false, true, false, false], "only the second copy repeats");
+        let findings = evaluate_rfc_findings(&evs);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == rfc_rules::RuleId::DelayedOfferAnsweredInAck.token()),
+            "{findings:?}",
+        );
     }
 
     #[test]

@@ -40,10 +40,11 @@ test filter='':
     cargo test --doc --workspace {{ filter }}
 
 # Slow lane: the real-clock >= 1 s and loadgen tests `#[ignore]`d out of `test`,
-# under nextest's `slow` profile in a release build.
-test-slow:
+# under nextest's `slow` profile in a release build. Optional nextest filterset:
+# `just test-slow 'package(=loadgen)'` runs one crate's slow lane.
+test-slow *filter:
     scripts/check-test-layout.sh
-    cargo nextest run --workspace --release -P slow --run-ignored only
+    cargo nextest run --workspace --release -P slow --run-ignored only {{ if filter == "" { "" } else { "-E " + quote(filter) } }}
 
 # Both lanes.
 test-all: test test-slow

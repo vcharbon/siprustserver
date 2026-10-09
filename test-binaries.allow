@@ -3,6 +3,7 @@
 # `<path> <reason>`, checked by scripts/check-test-layout.sh in `just test`.
 crates/b2bua/tests/hydration_trace_adoption.rs installs the process trace registry
 crates/b2bua/tests/trace_alloc_budget.rs installs the global allocation counter
+crates/b2bua/tests/trace_observed_transition.rs installs the process trace registry
 crates/b2bua-harness/tests/per_call_trace.rs installs the process trace registry
 crates/b2bua-harness/tests/trace_enforced_transition.rs installs the process trace registry
 crates/b2bua-harness/tests/trace_failover_force_enable.rs installs the process trace registry

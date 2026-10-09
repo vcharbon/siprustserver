@@ -4678,6 +4678,7 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         timer_type: TimerType::Keepalive,
         call_ref: call.call_ref.clone(),
         leg_id: None,
+        incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let id_gen = IdGen::seeded(0x65);
