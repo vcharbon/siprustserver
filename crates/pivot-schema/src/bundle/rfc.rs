@@ -51,6 +51,13 @@ pub struct RfcFinding {
     /// message the finding misses — named so a reader sees both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_by: Option<String>,
+    /// The scripted party whose violation the system under test relayed
+    /// onward, where the document states both that party committing it and
+    /// the captured platform relaying it, and the run shows that party
+    /// committing it: the finding is the SUT's, caused by that party, and
+    /// `cancelled_by` names the statements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<String>,
 }
 
 /// What the post-run audit came to.
@@ -98,6 +105,7 @@ mod tests {
             charged: Some("127.0.0.1:5080".into()),
             actor: None,
             cancelled_by: None,
+            caused_by: None,
         }
     }
 

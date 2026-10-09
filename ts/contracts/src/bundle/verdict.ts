@@ -277,8 +277,10 @@ export const ViolationNote = Schema.Struct({
   rule: RfcRule,
   step: Schema.String,
   emitter: Schema.String,
-  /** Whether the run's status turns on it. False for every scripted peer. */
-  gating: Schema.Boolean
+  /** Whether the run's status turns on it. False for every scripted peer, and for a `sut` entry that relays one. */
+  gating: Schema.Boolean,
+  /** The step of the scripted party's entry a `sut` entry carries on. */
+  relays: Schema.optionalKey(Schema.String)
 })
 export interface ViolationNote extends Schema.Schema.Type<typeof ViolationNote> {}
 

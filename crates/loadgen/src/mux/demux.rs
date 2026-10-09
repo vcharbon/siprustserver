@@ -152,6 +152,7 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
                 queue: recv.queue.clone(),
                 drop: recv.drop.clone(),
                 txns: recv.txns.clone(),
+                rtt: recv.rtt.clone(),
             }
         };
         if let Some(cid) = &cid {
@@ -168,9 +169,9 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
 
 /// Hand one resolved-to-a-call datagram to the app: apply simulated inbound loss
 /// (above the retransmit engine, so a lost datagram is truly gone and the peer's
-/// retransmit re-delivers it fresh), then let the retransmit engine dedup /
-/// stop-resenders / re-answer; a datagram the engine ABSORBS (a duplicate the app
-/// must not see) is not enqueued.
+/// retransmit re-delivers it fresh), time it against the call's open exchanges,
+/// then let the retransmit engine dedup / stop-resenders / re-answer; a datagram
+/// the engine ABSORBS (a duplicate the app must not see) is not enqueued.
 fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
     if d.drop.drops_inbound(raw) {
         mux.stats.dropped_in.fetch_add(1, Ordering::Relaxed);
@@ -178,6 +179,9 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
         // tagged as modeled loss — the RFC audit filters it out.
         tap_discard(mux, d, raw, src, sip_net::RecvDisposition::LossModel);
         return;
+    }
+    if let Some(rtt) = &d.rtt {
+        rtt.on_inbound(raw, Instant::now());
     }
     if let Some(txns) = &d.txns {
         if !txns.on_inbound(raw, src) {

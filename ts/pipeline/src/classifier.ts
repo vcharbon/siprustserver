@@ -159,6 +159,30 @@ export interface RunShape {
    * repeat. A leg that recorded none has no entry.
    */
   readonly openers: ReadonlyMap<string, ReadonlyArray<{ readonly name: string; readonly value: string }>>
+  /**
+   * By leg, every datagram the leg's scripted actor RECEIVED, retransmissions
+   * left out, in wire order (`./receptions.ts`). A leg that received none has
+   * no entry.
+   */
+  readonly receptions: ReadonlyMap<string, ReadonlyArray<Reception>>
+}
+
+/** One datagram a leg's scripted actor received, as a rule reads it. */
+export interface Reception {
+  /** The flow step the run attributed it to; absent where no step claimed it. */
+  readonly step?: string
+  /** The request method, uppercased; absent on a response. */
+  readonly method?: string
+  /** The response status; absent on a request. */
+  readonly status?: number
+  /** The CSeq method, uppercased; empty where the datagram states none. */
+  readonly cseqMethod: string
+  /** The Subscription-State's state token, lowercased (RFC 6665 §8.2.3), where it carries one. */
+  readonly subscriptionState?: string
+  /** The status line a `message/sipfrag` body states (RFC 3420), where it carries one. */
+  readonly fragStatus?: number
+  /** The first `o=` line of a session description it carries (RFC 4566 §5.2), as written. */
+  readonly origin?: string
 }
 
 /** What one lane's rule lists say about one probe. */

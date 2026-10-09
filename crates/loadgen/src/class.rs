@@ -3,8 +3,10 @@
 //!
 //! Three layers: [`CallOutcome`] is the raw result of one call (Ok, a
 //! structured [`StepError`], or a caught panic). [`ResultClass`] collapses it
-//! to a low-cardinality bucket key (e.g. `status_486`, `timeout`, `panic`) so
-//! the Prometheus `class` label stays small. [`CallOutcome::case`] refines the
+//! to a low-cardinality bucket key (e.g. `status_503`, `timeout`, `panic`) so
+//! the Prometheus `class` label stays small. A reject the call's shape
+//! expects ([`CallOutcome::expecting`]) is its own non-failure class,
+//! `expected_reject`. [`CallOutcome::case`] refines the
 //! class into a still-bounded *case* discriminator (which RFC rule fired, which
 //! check failed, which agent/phase a step died at) so the first-N sample
 //! capture keeps distinct failure modes apart instead of filling one
@@ -17,6 +19,9 @@ use scenario_harness::StepError;
 pub enum CallOutcome {
     /// The scenario completed its happy path.
     Ok,
+    /// The call ended on the reject status its shape declares as an expected
+    /// outcome (carries the status).
+    ExpectedReject(u16),
     /// A `try_*` step returned a structured failure.
     Step(StepError),
     /// The scenario future panicked (caught at the per-call `catch_unwind`
@@ -43,6 +48,8 @@ pub enum CallOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ResultClass {
     Ok,
+    /// The shape's expected reject: an outcome, not a failure.
+    ExpectedReject,
     Timeout,
     /// Wrong response status — carries the code so e.g. a 486 and a 503 are
     /// distinct buckets (bounded cardinality: SIP status codes).
@@ -65,6 +72,7 @@ impl ResultClass {
     pub fn label(&self) -> String {
         match self {
             ResultClass::Ok => "ok".to_string(),
+            ResultClass::ExpectedReject => "expected_reject".to_string(),
             ResultClass::Timeout => "timeout".to_string(),
             ResultClass::WrongStatus(c) => format!("status_{c}"),
             ResultClass::WrongMethod => "wrong_method".to_string(),
@@ -78,9 +86,17 @@ impl ResultClass {
         }
     }
 
-    /// Whether this class is a success (drives the OK/NOK split in the report).
+    /// Whether this class is not a failure: the happy path or the shape's
+    /// expected reject. Drives the OK/NOK split of the report and index and
+    /// the clean release of a from-user key.
     pub fn is_ok(&self) -> bool {
-        matches!(self, ResultClass::Ok)
+        matches!(self, ResultClass::Ok | ResultClass::ExpectedReject)
+    }
+
+    /// [`is_ok`](Self::is_ok) of the class whose [`label`](Self::label) is
+    /// `label`.
+    pub fn label_is_ok(label: &str) -> bool {
+        label == ResultClass::Ok.label() || label == ResultClass::ExpectedReject.label()
     }
 
     /// Whether a failure of this class may be auto-excused as `chaos="near"`
@@ -119,6 +135,7 @@ impl From<&CallOutcome> for ResultClass {
     fn from(o: &CallOutcome) -> Self {
         match o {
             CallOutcome::Ok => ResultClass::Ok,
+            CallOutcome::ExpectedReject(_) => ResultClass::ExpectedReject,
             CallOutcome::RfcAuditFail(_) => ResultClass::RfcAuditFail,
             CallOutcome::CheckFail(_) => ResultClass::CheckFail,
             CallOutcome::Panic(_) => ResultClass::Panic,
@@ -136,6 +153,44 @@ impl From<&CallOutcome> for ResultClass {
 }
 
 impl CallOutcome {
+    /// This outcome after the sampled RFC audit: `audit` runs on an outcome
+    /// that is no failure, and any finding it returns makes the call
+    /// [`CallOutcome::RfcAuditFail`] (carried structured, so the report
+    /// buckets samples by rule id).
+    pub fn audited(self, audit: impl FnOnce() -> Vec<sip_net::RfcFinding>) -> Self {
+        if !self.is_checkable() {
+            return self;
+        }
+        let findings = audit();
+        if findings.is_empty() {
+            self
+        } else {
+            CallOutcome::RfcAuditFail(findings)
+        }
+    }
+
+    /// Whether an attached case's checks judge this outcome: one that is no
+    /// failure (a failed or RFC-dirty call already explains itself).
+    pub fn is_checkable(&self) -> bool {
+        matches!(self, CallOutcome::Ok | CallOutcome::ExpectedReject(_))
+    }
+
+    /// This outcome under the call's declared expected reject status: the
+    /// `caller` agent receiving exactly that status on its initial INVITE —
+    /// before the call reached `connected` — becomes
+    /// [`CallOutcome::ExpectedReject`]. Any other outcome, or that status on
+    /// another agent or after connect (a re-INVITE, BYE, REFER), is unchanged.
+    pub fn expecting(self, expected_reject: Option<u16>, caller: &str, connected: bool) -> Self {
+        match (&self, expected_reject) {
+            (CallOutcome::Step(StepError::WrongStatus { who, got, .. }), Some(code))
+                if *got == code && who == caller && !connected =>
+            {
+                CallOutcome::ExpectedReject(code)
+            }
+            _ => self,
+        }
+    }
+
     /// Whether this outcome may be excused as chaos collateral:
     /// [`ResultClass::chaos_excusable`], except that a key-contention rejection
     /// is excusable — `key_in_flight` (the holder may be a call a fault keeps
@@ -152,6 +207,7 @@ impl CallOutcome {
     pub fn detail(&self) -> Option<String> {
         match self {
             CallOutcome::Ok => None,
+            CallOutcome::ExpectedReject(code) => Some(format!("expected reject {code}")),
             CallOutcome::Step(e) => Some(e.to_string()),
             CallOutcome::Panic(m) => Some(format!("panic: {m}")),
             CallOutcome::Rejected(reason) => {
@@ -175,7 +231,8 @@ impl CallOutcome {
     /// The bounded **case** discriminator refining [`ResultClass`] for the
     /// first-N sample capture: same scenario + same class but a different case
     /// (a different RFC rule, a different failed check, a different agent/phase)
-    /// gets its own sample bucket. Empty for Ok (and any un-refined outcome).
+    /// gets its own sample bucket. Empty for Ok; the status for an expected
+    /// reject.
     ///
     /// Cardinality stays structural: RFC rule ids and check `<on>.<field>`
     /// selectors are finite authored sets; agent names and lifecycle phase
@@ -188,6 +245,7 @@ impl CallOutcome {
     pub fn case(&self, last_phase: Option<&'static str>) -> String {
         let case = match self {
             CallOutcome::Ok => String::new(),
+            CallOutcome::ExpectedReject(code) => code.to_string(),
             CallOutcome::Step(e) => {
                 format!("{}@{}", step_who(e), last_phase.unwrap_or("start"))
             }
@@ -263,5 +321,81 @@ mod tests {
         }
         assert!(!CallOutcome::Panic("p".into()).chaos_excusable());
         assert!(CallOutcome::Step(StepError::Timeout { who: "alice".into() }).chaos_excusable());
+    }
+
+    fn wrong_status(got: u16) -> CallOutcome {
+        CallOutcome::Step(StepError::WrongStatus {
+            who: "alice".into(),
+            expected: 200,
+            got,
+            reason: "Busy Here".into(),
+        })
+    }
+
+    /// The shape's expected reject status classes `expected_reject`, a
+    /// non-failure keyed by its status; another status, or the same one with
+    /// no reject declared, stays a `status_<code>` failure.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn the_expected_reject_is_its_own_non_failure_class() {
+        let expected = wrong_status(486).expecting(Some(486), "alice", false);
+        let class = ResultClass::from(&expected);
+        assert_eq!(class.label(), "expected_reject");
+        assert!(class.is_ok());
+        assert!(ResultClass::label_is_ok("expected_reject"));
+        assert!(expected.chaos_excusable());
+        assert_eq!(expected.case(Some("start")), "486");
+
+        let refused = ResultClass::from(&wrong_status(503).expecting(Some(486), "alice", false));
+        assert_eq!(refused.label(), "status_503");
+        assert!(!refused.is_ok());
+        assert!(!ResultClass::label_is_ok("status_503"));
+
+        let undeclared = ResultClass::from(&wrong_status(486).expecting(None, "alice", false));
+        assert_eq!(undeclared.label(), "status_486");
+        assert!(!undeclared.is_ok());
+        assert!(matches!(CallOutcome::Ok.expecting(Some(486), "alice", false), CallOutcome::Ok));
+    }
+
+    /// A reject status seen by another agent than the caller (a callee's
+    /// answer to its own BYE or REFER), or by the caller once the call
+    /// connected (a re-INVITE, a BYE), is no expected reject.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn only_the_callers_reject_is_expected() {
+        let busy = |who: &str| {
+            CallOutcome::Step(StepError::WrongStatus {
+                who: who.into(),
+                expected: 200,
+                got: 486,
+                reason: "Busy Here".into(),
+            })
+        };
+        let class = |o: CallOutcome| ResultClass::from(&o).label();
+        assert_eq!(class(busy("bob").expecting(Some(486), "alice", false)), "status_486");
+        assert_eq!(class(busy("alice").expecting(Some(486), "alice", true)), "status_486");
+        assert_eq!(class(busy("alice").expecting(Some(486), "alice", false)), "expected_reject");
+    }
+
+    /// An expected reject is no failure, so the sampled RFC audit and the
+    /// case's checks judge it like an ok call; a failure is not audited.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn an_expected_reject_is_audited_and_checked_like_ok() {
+        let finding = sip_net::RfcFinding {
+            rule: "unacked-invite-non-2xx-final".to_string(),
+            lane: "10.0.0.1:5060".to_string(),
+            detail: "reject never ACKed".to_string(),
+            advisory: false,
+            offending: None,
+            charged: None,
+        };
+        let dirty = CallOutcome::ExpectedReject(486).audited(|| vec![finding.clone()]);
+        assert_eq!(ResultClass::from(&dirty), ResultClass::RfcAuditFail);
+        let clean = CallOutcome::ExpectedReject(486).audited(Vec::new);
+        assert!(matches!(clean, CallOutcome::ExpectedReject(486)));
+        assert!(clean.is_checkable());
+        let failed = wrong_status(503).audited(|| panic!("a failure is not audited"));
+        assert!(!failed.is_checkable());
     }
 }

@@ -25,6 +25,7 @@ use scenario_harness::{Agent, AgentBinder, EgressPolicy, WaiverScope};
 use sip_clock::Clock;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::call_rtt::CallRtts;
 use crate::case::LoadCase;
 use crate::chaos::{ChaosLog, ChaosTag};
 use crate::class::{CallOutcome, ResultClass};
@@ -151,6 +152,9 @@ pub struct MixEntry {
     pub legs: &'static [LegSpec],
     /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
     pub emergency: bool,
+    /// The reject status the shape expects ([`ShapeDescriptor::expected_reject`]):
+    /// a call ending on it classes `expected_reject`, a non-failure.
+    pub expected_reject: Option<u16>,
     /// **Deferred-by-design auth adapter** (see
     /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
     /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
@@ -168,6 +172,7 @@ impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
             case: None,
             legs: LegSpec::historic(false, false),
             emergency: false,
+            expected_reject: None,
             challenge_responder: None,
         }
     }
@@ -191,6 +196,7 @@ impl MixEntry {
             case: None,
             legs: shape.callee_legs(),
             emergency: shape.emergency,
+            expected_reject: shape.expected_reject,
             challenge_responder: None,
         })
     }
@@ -413,7 +419,16 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
+    let MixEntry {
+        id,
+        body,
+        case,
+        legs,
+        emergency,
+        expected_reject,
+        challenge_responder,
+        weight: _,
+    } = entry;
 
     let from_user = transport.correlation.is_from_user();
     let record = reporter.should_record(id);
@@ -422,6 +437,7 @@ async fn run_one(
     // number's contention never fails a call a free number could carry.
     let draws = if from_user && case.is_some() { KEY_DRAWS } else { 1 };
     let mut draw = 0;
+    let rtts = CallRtts::new(reporter.clone(), id);
     let (core, dwells, banner, resolved_input, token, binder, alice, callee_agents) = loop {
         draw += 1;
         // Resolve THIS call's binding from the attached Test case (pool walk +
@@ -451,13 +467,16 @@ async fn run_one(
         // datagrams). The loss RNG is seeded off the call seed so a run is
         // reproducible; 0 rate is a no-op, and retransmit off leaves the
         // transport untouched.
-        let mux_net = transport.core.network_tuned(
-            call_routing(&transport, legs, &token),
-            tuning.drop_rate,
-            tuning.retransmit,
-            next_seed(seed_base),
-            tuning.drop_nth,
-        );
+        let mux_net = transport
+            .core
+            .network_tuned(
+                call_routing(&transport, legs, &token),
+                tuning.drop_rate,
+                tuning.retransmit,
+                next_seed(seed_base),
+                tuning.drop_nth,
+            )
+            .with_rtt_sink(rtts.sink());
         let binder = AgentBinder::mux(
             Arc::new(mux_net),
             transport.clock.clone(),
@@ -562,30 +581,30 @@ async fn run_one(
     merged_waivers.extend(plan_waivers);
 
     let outcome = match result {
-        Ok(Ok(())) => {
-            let wo = binder.rfc_findings(&merged_waivers);
-            // Fold this sampled call's per-waiver use into the CAMPAIGN tally
-            // (never per call — a call exercises only its own branch).
-            reporter.record_waiver_use(id, &merged_waivers, &wo.used);
-            if wo.findings.is_empty() {
-                CallOutcome::Ok
-            } else {
-                // Carried structured (not pre-joined) so the report can bucket
-                // the first-N samples by rule id, not by "first rfc error seen".
-                CallOutcome::RfcAuditFail(wo.findings)
-            }
-        }
-        Ok(Err(e)) => CallOutcome::Step(e),
+        Ok(Ok(())) => CallOutcome::Ok,
+        Ok(Err(e)) => CallOutcome::Step(e).expecting(
+            expected_reject,
+            CALLER,
+            ctx.phases().iter().any(|(phase, _)| *phase == CONNECTED),
+        ),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
+    let outcome = outcome.audited(|| {
+        let wo = binder.rfc_findings(&merged_waivers);
+        // Fold this sampled call's per-waiver use into the CAMPAIGN tally
+        // (never per call — a call exercises only its own branch).
+        reporter.record_waiver_use(id, &merged_waivers, &wo.used);
+        wo.findings
+    });
 
-    // Test-case CHECKS — evaluated on SAMPLED, otherwise-OK calls only (the
-    // per-sample oracle; a non-sampled call has no recording to check, and a
-    // failed/RFC-dirty call already explains itself). The verdicts (pass AND
+    // Test-case CHECKS — evaluated on SAMPLED calls that are no failure (ok or
+    // the expected reject) only (the per-sample oracle; a non-sampled call has
+    // no recording to check, and a failed/RFC-dirty call already explains
+    // itself). The verdicts (pass AND
     // fail) render on the sampled callflow page; any failed check reclassifies
     // the call to `check_fail`.
     let verdicts: Vec<e2e_model::CheckVerdict> = match (&outcome, case.as_ref(), &resolved_input) {
-        (CallOutcome::Ok, Some(c), Some(input)) if record && c.has_checks() => {
+        (o, Some(c), Some(input)) if o.is_checkable() && record && c.has_checks() => {
             c.evaluate(&binder.recorded_entries(), &ctx.take_anchors(), input, call.via)
         }
         _ => Vec::new(),
@@ -671,7 +690,11 @@ async fn run_one(
             None
         };
         if html.is_some() || !class.is_ok() {
-            Some(RenderedSample { html, detail, e2e_ms: e2e.as_secs_f64() * 1000.0 })
+            Some(RenderedSample {
+                html: html.map(Arc::from),
+                detail,
+                e2e_ms: e2e.as_secs_f64() * 1000.0,
+            })
         } else {
             None
         }
@@ -680,8 +703,15 @@ async fn run_one(
     };
 
     reporter.record(id, &outcome, &case, e2e, &checkpoints, sample, chaos_tag);
+    rtts.finish();
     reporter.dec_inflight();
 }
+
+/// The caller agent's name: the agent that originates every call.
+const CALLER: &str = "alice";
+
+/// The lifecycle phase a call reaches once its dialog is confirmed.
+const CONNECTED: &str = "connected";
 
 /// How many numbers a from-user call draws from its case's pool before it is
 /// rejected for contention (every draw held or cooling).
@@ -740,7 +770,7 @@ async fn bind_agents(
     transport: &MuxTransport,
     legs: &[LegSpec],
 ) -> Result<(Agent, Vec<(&'static str, Agent)>), sip_net::BindError> {
-    let alice = binder.try_agent("alice", transport.uac_addr).await?;
+    let alice = binder.try_agent(CALLER, transport.uac_addr).await?;
     let mut callees = Vec::with_capacity(legs.len());
     for leg in legs {
         callees.push((leg.role, binder.try_agent(leg.role, transport.uas_addr).await?));

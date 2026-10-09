@@ -32,6 +32,7 @@ use clap::Parser;
 use e2e_model::{load_endpoint_config, EndpointConfig};
 use sip_clock::Clock;
 
+use crate::case::CaseLoader;
 use crate::{
     serve_metrics, CallConfig, CallTuning, Canaries, ChaosLog, Correlation, Driver, DriverCfg,
     EndpointSpec, LoadCase, LoadRunMeta, MixEntry, MuxCore, MuxTransport, RateHandle, Reporter,
@@ -362,15 +363,13 @@ pub fn check_from_user_mix(correlation: &Correlation, mix: &[MixEntry]) -> Resul
 /// into its resolved [`MixEntry`] (the shape looked up in the unified
 /// `registry`, its load body constructed from the per-run `inputs`) plus the
 /// per-scenario [`CallTuning`] (starting from `base` and overridden by the
-/// trailing tokens); the Test case attached with `case=` is loaded with
-/// `case_seed`.
+/// trailing tokens); the Test case attached with `case=` comes from `cases`.
 fn parse_scenario_spec(
     spec: &str,
     base: CallTuning,
     registry: &ShapeRegistry,
     inputs: &ScenarioInputs,
-    check_sets: &std::collections::BTreeMap<String, e2e_model::CheckSet>,
-    case_seed: u64,
+    cases: &mut CaseLoader<'_>,
 ) -> (MixEntry, CallTuning) {
     let mut parts = spec.split(',');
     let head = parts.next().unwrap_or(spec);
@@ -399,7 +398,7 @@ fn parse_scenario_spec(
                     v.parse().unwrap_or_else(|_| panic!("bad retransmit bool in {spec:?}"))
             }
             Some(("case", path)) => {
-                entry.case = Some(Arc::new(LoadCase::load(Path::new(path), check_sets, case_seed)));
+                entry.case = Some(cases.load(Path::new(path)));
             }
             None if tok == "retransmit" => t.retransmit = true,
             None if tok == "drop" => {
@@ -423,8 +422,7 @@ fn resolve_profile_mix(
     base: CallTuning,
     registry: &ShapeRegistry,
     inputs: &ScenarioInputs,
-    check_sets: &std::collections::BTreeMap<String, e2e_model::CheckSet>,
-    case_seed: u64,
+    cases: &mut CaseLoader<'_>,
 ) -> (MixEntry, CallTuning) {
     let mut entry = MixEntry::by_id(registry, &m.shape, inputs, m.weight).unwrap_or_else(|| {
         panic!(
@@ -434,7 +432,7 @@ fn resolve_profile_mix(
         )
     });
     if let Some(path) = &m.case {
-        entry.case = Some(Arc::new(LoadCase::load(path, check_sets, case_seed)));
+        entry.case = Some(cases.load(path));
     }
     let t = CallTuning {
         drop_rate: m.drop_rate.unwrap_or(base.drop_rate),
@@ -543,8 +541,8 @@ pub async fn run_with_inputs(
     // The global default Test case (`--case`): ONE shared resolver — so its
     // `${seq}` counter is monotone across the whole run — attached to every mix
     // entry without its own `case=` override.
-    let global_case: Option<Arc<LoadCase>> =
-        args.case.as_deref().map(|p| Arc::new(LoadCase::load(p, &check_sets, seed)));
+    let mut cases = CaseLoader::new(&check_sets, seed);
+    let global_case: Option<Arc<LoadCase>> = args.case.as_deref().map(|p| cases.load(p));
     let mut tuning: std::collections::HashMap<String, CallTuning> =
         std::collections::HashMap::new();
     let scenarios: Vec<MixEntry> = if !args.scenarios.is_empty() {
@@ -553,7 +551,7 @@ pub async fn run_with_inputs(
             .iter()
             .map(|spec| {
                 let (entry, t) =
-                    parse_scenario_spec(spec, base_tuning, &registry, &inputs, &check_sets, seed);
+                    parse_scenario_spec(spec, base_tuning, &registry, &inputs, &mut cases);
                 tuning.insert(entry.id.to_string(), t);
                 match entry.case.is_some() {
                     true => entry,
@@ -570,7 +568,7 @@ pub async fn run_with_inputs(
             .iter()
             .map(|m| {
                 let (entry, t) =
-                    resolve_profile_mix(m, base_tuning, &registry, &inputs, &check_sets, seed);
+                    resolve_profile_mix(m, base_tuning, &registry, &inputs, &mut cases);
                 tuning.insert(entry.id.to_string(), t);
                 match entry.case.is_some() {
                     true => entry,
@@ -874,5 +872,40 @@ mod tests {
         assert!(err.contains("reinvite") && !err.contains("basic_call"), "{err}");
         assert!(check_from_user_mix(&Correlation::from_user(), &mix[..1]).is_ok());
         assert!(check_from_user_mix(&Correlation::to_user(), &mix).is_ok());
+    }
+
+    /// Two mix entries attaching one case file draw distinct identities: the
+    /// case's `${seq}` walk is shared, never replayed in lockstep per entry.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn two_entries_on_one_case_draw_distinct_identities() {
+        let dir = std::env::temp_dir().join(format!("loadgen-shared-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("case.json");
+        std::fs::write(
+            &path,
+            r#"{ "id": "c", "compatibleShapes": ["basic_call"],
+                 "input": { "core": { "from": "sip:+1555${seq:4}@pool.example" } } }"#,
+        )
+        .unwrap();
+        let registry = ShapeRegistry::with_defaults();
+        let inputs = ScenarioInputs::default();
+        let check_sets = Default::default();
+        let mut cases = CaseLoader::new(&check_sets, 7);
+        let spec = |shape: &str| e2e_model::MixSpec {
+            shape: shape.to_string(),
+            weight: 1.0,
+            case: Some(path.clone()),
+            drop_rate: None,
+            retransmit: None,
+        };
+        let base = CallTuning::default();
+        let (a, _) = resolve_profile_mix(&spec("basic_call"), base, &registry, &inputs, &mut cases);
+        let (b, _) =
+            resolve_profile_mix(&spec("basic_call_em"), base, &registry, &inputs, &mut cases);
+        let from = |e: &MixEntry| e.case.as_ref().unwrap().resolve().core.from.unwrap();
+        let (fa, fb) = (from(&a), from(&b));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_ne!(fa, fb, "both entries drew the same identity");
     }
 }

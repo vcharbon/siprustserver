@@ -132,12 +132,33 @@ fn finding_party(
     entries: &[RecordedSipEntry],
     attr: &Attribution,
 ) -> Option<String> {
+    let entry = f.offending.and_then(|idx| entries.get(idx.checked_sub(1)?));
     if let Some(charged) = &f.charged {
-        return party_of(&Some(charged.clone()), attr);
+        return party_of(&Some(charged_lane(charged, entry)?), attr);
     }
-    let idx = f.offending?;
-    let entry = entries.get(idx.checked_sub(1)?)?;
-    party_of(&entry.from_lane, attr)
+    party_of(&entry?.from_lane, attr)
+}
+
+/// The bind key a `charged` value names. A rule judged at the taker charges
+/// the sender by the bare source address it saw; that address is the
+/// offending entry's sender or taker, whose lane carries the sub-lane a mux
+/// socket shares between legs. An address naming two different legs at the
+/// entry's two ends (legs on one socket talking to each other) names no lane:
+/// `None`, so the finding stays unattributed.
+fn charged_lane(charged: &str, entry: Option<&RecordedSipEntry>) -> Option<String> {
+    if charged.contains('#') {
+        return Some(charged.to_string());
+    }
+    let mut ends = entry
+        .into_iter()
+        .flat_map(|e| [&e.from_lane, &e.to_lane])
+        .flatten()
+        .filter(|lane| lane.split('#').next() == Some(charged));
+    match (ends.next(), ends.next()) {
+        (Some(a), Some(b)) if a != b => None,
+        (Some(a), _) => Some(a.clone()),
+        (None, _) => Some(charged.to_string()),
+    }
 }
 
 /// Whether `w` covers `finding`, referencing the offending message directly.
@@ -335,6 +356,49 @@ mod tests {
         let b2bua = WaiverScope::rule(RULE, "wrong party").on_party("b2bua");
         assert!(covers(&alice, &owed, &entries, &attr), "the owing party's waiver covers it");
         assert!(!covers(&b2bua, &owed, &entries, &attr), "the anchor's sender owed nothing");
+    }
+
+    /// A rule judged at the taker charges the sender by the bare source
+    /// address it saw: on the load lane that address resolves through the
+    /// offending entry's sub-lane at either end, so the sender's waiver
+    /// covers it, an omission owed by the entry's taker is the taker's, and a
+    /// co-socketed sibling's waiver covers neither.
+    #[test]
+    fn sublane_bare_charged_address_resolves_through_the_offending_entry() {
+        let mut to_bob = entry("10.0.0.1:5060#alice");
+        to_bob.to_lane = Some("10.0.0.9:5070#bob".into());
+        let mut from_bob2 = entry("10.0.0.9:5070#bob2");
+        from_bob2.to_lane = Some("10.0.0.1:5060#alice".into());
+        let entries = vec![to_bob, from_bob2];
+        let attr = Attribution::SubLane;
+        let by_sender = RfcFinding { charged: Some("10.0.0.1:5060".into()), ..finding(RULE, 1) };
+        let by_taker = RfcFinding { charged: Some("10.0.0.9:5070".into()), ..finding(RULE, 1) };
+        let by_bob2 = RfcFinding { charged: Some("10.0.0.9:5070".into()), ..finding(RULE, 2) };
+        let alice = WaiverScope::rule(RULE, "alice").on_party("alice");
+        let bob = WaiverScope::rule(RULE, "bob").on_party("bob");
+        let bob2 = WaiverScope::rule(RULE, "bob2").on_party("bob2");
+        assert!(covers(&alice, &by_sender, &entries, &attr), "the sender's waiver covers it");
+        assert!(!covers(&bob, &by_sender, &entries, &attr), "the taker owed nothing");
+        assert!(covers(&bob, &by_taker, &entries, &attr), "the owing taker's waiver covers it");
+        assert!(!covers(&bob2, &by_taker, &entries, &attr), "a co-socketed sibling never does");
+        assert!(covers(&bob2, &by_bob2, &entries, &attr), "the sibling's own entry is its own");
+        assert!(!covers(&bob, &by_bob2, &entries, &attr), "and never bob's");
+    }
+
+    /// Two legs on one socket talking to each other: a bare charged address
+    /// names both ends of the offending entry, so it resolves to no party and
+    /// no party-scoped waiver covers the finding.
+    #[test]
+    fn sublane_bare_charged_address_naming_both_ends_stays_gated() {
+        let mut ok = entry("127.0.0.1:5060#bob"); // bob's 200, alice never ACKs it
+        ok.to_lane = Some("127.0.0.1:5060#alice".into());
+        let entries = vec![ok];
+        let attr = Attribution::SubLane;
+        let unacked = RfcFinding { charged: Some("127.0.0.1:5060".into()), ..finding(RULE, 1) };
+        let alice = WaiverScope::rule(RULE, "alice").on_party("alice");
+        let bob = WaiverScope::rule(RULE, "bob").on_party("bob");
+        assert!(!covers(&bob, &unacked, &entries, &attr), "the sender is not the charged party");
+        assert!(!covers(&alice, &unacked, &entries, &attr), "nor is it known to be the taker");
     }
 
     /// A rule-only waiver covers by rule alone (a plain rule-name filter)

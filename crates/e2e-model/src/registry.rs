@@ -146,6 +146,10 @@ pub struct ShapeDescriptor {
     /// Load: this call is an emergency (`Resource-Priority: esnet.0`) — the SUT
     /// force-admits it under overload, so it must never be shed.
     pub emergency: bool,
+    /// Load: the reject status this shape expects as one of its outcomes; a
+    /// call ending on it classes `expected_reject`, not a failure. `None` =
+    /// every reject is a failure.
+    pub expected_reject: Option<u16>,
     /// Load: weight in the shipped DEFAULT mix (`None` = not in the default mix).
     pub default_weight: Option<f64>,
     /// Load: weight in the shipped voluntarily-FAILING mix (the post-call
@@ -165,6 +169,7 @@ impl std::fmt::Debug for ShapeDescriptor {
             .field("needs_charlie", &self.needs_charlie)
             .field("needs_bob2", &self.needs_bob2)
             .field("emergency", &self.emergency)
+            .field("expected_reject", &self.expected_reject)
             .field("default_weight", &self.default_weight)
             .field("failure_weight", &self.failure_weight)
             .field("has_load_body", &self.load.is_some())
@@ -185,6 +190,7 @@ impl ShapeDescriptor {
             needs_charlie: false,
             needs_bob2: false,
             emergency: false,
+            expected_reject: None,
             default_weight: None,
             failure_weight: None,
             load: None,
@@ -238,6 +244,13 @@ impl ShapeDescriptor {
 
     pub fn emergency(mut self) -> Self {
         self.emergency = true;
+        self
+    }
+
+    /// Declare `status` the reject this shape expects (see
+    /// [`expected_reject`](Self::expected_reject)).
+    pub fn expected_reject(mut self, status: u16) -> Self {
+        self.expected_reject = Some(status);
         self
     }
 

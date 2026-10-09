@@ -109,6 +109,33 @@ pub struct LoadCase {
     resolver: BindingResolver,
 }
 
+/// Loads a run's attached Test cases, each file once: every mix entry
+/// attaching one file shares its resolver, so their `${seq}` walk is one
+/// monotone counter and two entries never draw the same identity in lockstep.
+pub struct CaseLoader<'a> {
+    check_sets: &'a BTreeMap<String, CheckSet>,
+    seed: u64,
+    loaded: std::collections::HashMap<std::path::PathBuf, std::sync::Arc<LoadCase>>,
+}
+
+impl<'a> CaseLoader<'a> {
+    /// A loader validating against `check_sets`, seeding each resolver with
+    /// `seed`.
+    pub fn new(check_sets: &'a BTreeMap<String, CheckSet>, seed: u64) -> Self {
+        Self { check_sets, seed, loaded: Default::default() }
+    }
+
+    /// The case at `path` ([`LoadCase::load`]: panics on a bad case), loaded
+    /// on its first request and shared after.
+    pub fn load(&mut self, path: &Path) -> std::sync::Arc<LoadCase> {
+        let (check_sets, seed) = (self.check_sets, self.seed);
+        self.loaded
+            .entry(path.to_path_buf())
+            .or_insert_with(|| std::sync::Arc::new(LoadCase::load(path, check_sets, seed)))
+            .clone()
+    }
+}
+
 impl LoadCase {
     /// Load an authored Test-case JSON and build its per-run resolver. The
     /// binding pool + expansion tokens AND the check surface (referenced

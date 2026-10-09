@@ -31,7 +31,9 @@ export const RfcFinding = Schema.Struct({
   /** The document actor `charged` names (through the leg the offending call rides), when it is a document endpoint: the violation is the scripted peer's. */
   actor: Schema.optionalKey(Schema.String),
   /** What cancels an actor's finding: the document's statement of the same violation on the same transaction. */
-  cancelled_by: Schema.optionalKey(Schema.String)
+  cancelled_by: Schema.optionalKey(Schema.String),
+  /** The scripted party whose violation the system under test relayed onward, where the document states both: the finding is the SUT's, caused by that party. */
+  caused_by: Schema.optionalKey(Schema.String)
 })
 export interface RfcFinding extends Schema.Schema.Type<typeof RfcFinding> {}
 

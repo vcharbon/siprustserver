@@ -10,13 +10,23 @@
  * read off the wire the capture carried (`sipflow --rfc-census`, the rule bodies
  * the live audit runs too), never off the shape of the flow.
  *
- * Only a SCRIPTED party is stated. A hit charging the system under test's side
- * says what the source platform broke; the replay's own system answers for
- * itself in the live audit, and a stated SUT entry would refuse the run as a
- * claim nothing verifies.
+ * A SCRIPTED party is stated. A hit charging the system under test's side says
+ * what the source platform broke; the replay's own system answers for itself in
+ * the live audit, and a stated SUT entry would refuse the run as a claim
+ * nothing verifies — except where the census reads the platform's hit as
+ * relayed onward from a party's hit this case states: that copy is stated as a
+ * `sut` entry that `relays` the party's, which gates nothing and, beside the
+ * party's entry, is what cancels the system under test's own relayed copy.
+ *
+ * A hit anchored on a hop the case does not carry is stated on the carried
+ * hop's copy of its anchor message — the same message forwarded along the same
+ * leg, with the same body — charging the endpoint on the same side of that
+ * copy: the scripted party playing the forwarding element reproduces what it
+ * forwarded. A copy that does not carry the same content states nothing.
  */
 import { Violation, type Case, type Census, type Flows } from "@sip/contracts"
 import type { DeclarationInput } from "./policy.js"
+import { body } from "./wire.js"
 
 /**
  * The index, in its leg's messages, of the message a hit's decision rests on:
@@ -80,28 +90,139 @@ export const capturedWith =
             }
           ]
     const wanted = new Set(input.callIds)
-    const stepById = new Map(input.steps.map((s) => [s.id, s]))
-    const actorOfLeg = new Map(input.layout.legs.map((l) => [l.id, l.actor]))
+    const mine = hits.filter((hit) => hit.capture === input.capture && wanted.has(hit.call_id))
     const violations: Array<Violation.RfcViolation> = []
-    for (const hit of hits) {
-      if (hit.capture !== input.capture || !wanted.has(hit.call_id)) continue
-      const anchor = anchorOf(hit)
-      if (anchor === undefined) continue
-      const msg: Flows.Msg | undefined = input.flows.legs[hit.leg]?.msgs[anchor]
-      if (msg === undefined) continue
-      for (const src of input.sources) {
-        if (src.mirrored === true || src.origLeg !== hit.leg || src.msgIdx !== anchor) continue
-        const step = stepById.get(src.id)
-        if (step === undefined) continue
-        const charged =
-          (step.op === "send" && msg.src === hit.emitter) ||
-          (step.op === "expect" && msg.dst === hit.emitter)
-        const actor = actorOfLeg.get(step.leg)
-        if (!charged || actor === undefined) continue
-        if (!violations.some((v) => v.rule === hit.rule && v.step === step.id)) {
-          violations.push({ rule: hit.rule, step: step.id, emitter: actor })
-        }
+    const state = (v: Violation.RfcViolation): void => {
+      if (!violations.some((w) => w.rule === v.rule && w.step === v.step && w.emitter === v.emitter)) {
+        violations.push(v)
+      }
+    }
+    // The party's statement each origin coordinate became, for the copies.
+    const statedAt = new Map<string, string>()
+    for (const hit of mine) {
+      for (const at of placed(input, hit)) {
+        if (at.actor === undefined) continue
+        state({ rule: hit.rule, step: at.step, emitter: at.actor })
+        const anchor = anchorOf(hit)
+        if (anchor !== undefined) statedAt.set(originKey(hit.rule, hit.leg, anchor), at.step)
+      }
+    }
+    for (const hit of mine) {
+      if (hit.relays === undefined) continue
+      const origin = statedAt.get(originKey(hit.rule, hit.relays.leg, hit.relays.anchor_msg))
+      if (origin === undefined) continue
+      for (const at of placed(input, hit)) {
+        if (at.actor !== undefined) continue
+        state({ rule: hit.rule, step: at.step, emitter: Violation.SUT_EMITTER, relays: origin })
       }
     }
     return { violations, flags }
   }
+
+/** A step a hit lands on, and the actor it charges there — `undefined` where the charged endpoint is the platform's side. */
+interface Placed {
+  readonly step: string
+  readonly actor: string | undefined
+}
+
+const originKey = (rule: string, leg: number, msg: number): string => `${rule} ${leg}:${msg}`
+
+/**
+ * Where `hit` lands in this case: the steps whose own coordinate is its anchor
+ * message — or, where no step carries that message, the carried hop's copy of
+ * it — and who it charges at each. A party is charged where the step's party
+ * is the charged endpoint: the message's sender on a `send`, its receiver on
+ * an `expect`. The platform's side is charged where the step's actor is the
+ * other end of the message. Empty where no step carries it.
+ */
+const placed = (input: DeclarationInput, hit: Census.CensusHit): ReadonlyArray<Placed> => {
+  const anchor = anchorOf(hit)
+  if (anchor === undefined) return []
+  const msg: Flows.Msg | undefined = input.flows.legs[hit.leg]?.msgs[anchor]
+  if (msg === undefined) return []
+  const own = at(input, hit.leg, anchor, msg, hit.emitter)
+  if (own.length > 0) return own
+  const copy = carriedCopy(input, hit.leg, anchor, msg)
+  if (copy === undefined) return []
+  const sameSide = hit.emitter === msg.src ? copy.msg.src : hit.emitter === msg.dst ? copy.msg.dst : undefined
+  return sameSide === undefined ? [] : at(input, hit.leg, copy.index, copy.msg, sameSide)
+}
+
+/** The steps carrying `legs[leg].msgs[index]`, and whom a hit charging `charged` names at each. */
+const at = (
+  input: DeclarationInput,
+  leg: number,
+  index: number,
+  msg: Flows.Msg,
+  charged: string
+): ReadonlyArray<Placed> => {
+  const stepById = new Map(input.steps.map((s) => [s.id, s]))
+  const actorOfLeg = new Map(input.layout.legs.map((l) => [l.id, l.actor]))
+  const out: Array<Placed> = []
+  for (const src of input.sources) {
+    if (src.mirrored === true || src.origLeg !== leg || src.msgIdx !== index) continue
+    const step = stepById.get(src.id)
+    if (step === undefined) continue
+    const sent = msg.src === charged
+    const taken = msg.dst === charged
+    if ((step.op === "send" && sent) || (step.op === "expect" && taken)) {
+      const actor = actorOfLeg.get(step.leg)
+      if (actor !== undefined) out.push({ step: step.id, actor })
+    } else if ((step.op === "expect" && sent) || (step.op === "send" && taken)) {
+      out.push({ step: step.id, actor: undefined })
+    }
+  }
+  return out
+}
+
+/**
+ * The copy of `msg` a step of this case carries on another hop of the same
+ * leg: the same message forwarded — the same request method or status, CSeq,
+ * and dialog tags — never a retransmission, the nearest in time where several
+ * qualify. `undefined` where no step carries one.
+ */
+const carriedCopy = (
+  input: DeclarationInput,
+  leg: number,
+  index: number,
+  msg: Flows.Msg
+): { readonly index: number; readonly msg: Flows.Msg } | undefined => {
+  const msgs = input.flows.legs[leg]?.msgs ?? []
+  const carried = new Set(
+    input.sources.filter((s) => s.mirrored !== true && s.origLeg === leg).map((s) => s.msgIdx)
+  )
+  let best: { readonly index: number; readonly msg: Flows.Msg } | undefined
+  msgs.forEach((other, i) => {
+    if (i === index || !carried.has(i) || other.hop === msg.hop || other.repeat_of !== undefined) return
+    if (!sameMessage(msg, other)) return
+    if (best === undefined || Math.abs(other.ts_us - msg.ts_us) < Math.abs(best.msg.ts_us - msg.ts_us)) {
+      best = { index: i, msg: other }
+    }
+  })
+  return best
+}
+
+/**
+ * Whether two captured messages are one SIP message on two hops, carrying what
+ * a rule judges in it: the same start line's kind, CSeq and dialog tags, and
+ * the same body or none on both.
+ */
+const sameMessage = (a: Flows.Msg, b: Flows.Msg): boolean => {
+  if (!sameBody(a, b)) return false
+  const x = a.summary
+  const y = b.summary
+  if (x.cseq.seq !== y.cseq.seq || x.cseq.method.toUpperCase() !== y.cseq.method.toUpperCase()) return false
+  if (x.from.tag !== y.from.tag || x.to.tag !== y.to.tag) return false
+  if (x.kind === "request" && y.kind === "request") return x.method.toUpperCase() === y.method.toUpperCase()
+  if (x.kind === "response" && y.kind === "response") return x.status === y.status
+  return false
+}
+
+/** Whether the two messages carry byte-identical bodies, or none at all. */
+const sameBody = (a: Flows.Msg, b: Flows.Msg): boolean => {
+  const x = body(a)?.bytes
+  const y = body(b)?.bytes
+  if (x === undefined || y === undefined) return x === y
+  return x.length === y.length && x.every((byte, i) => byte === y[i])
+}
+

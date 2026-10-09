@@ -352,8 +352,12 @@ pub struct ViolationNote {
     pub step: String,
     /// Who emits it: an actor, or `sut`.
     pub emitter: String,
-    /// Whether the run's status turns on it. False for every scripted peer.
+    /// Whether the run's status turns on it. False for every scripted peer,
+    /// and for a `sut` entry that relays one.
     pub gating: bool,
+    /// The step of the scripted party's entry a `sut` entry carries on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<String>,
 }
 
 /// One `must_fail` declaration, against what the run produced (§11.2).
@@ -629,16 +633,18 @@ impl RunVerdict {
         }
     }
 
-    /// List a declared violation. A scripted peer's is recorded and nothing
-    /// else here — the RFC audit reads it as a cancellation; the system under
-    /// test's also fails the run, because it gates.
+    /// List a declared violation. A scripted peer's, and the system under
+    /// test's relaying one, are recorded and nothing else here — the RFC audit
+    /// reads them as cancellations; the system under test's own also fails the
+    /// run, because it gates.
     pub fn note_violation(&mut self, violation: &crate::violation::RfcViolation) {
-        let gating = violation.sut_emitted();
+        let gating = violation.gates();
         self.rfc_violations.push(ViolationNote {
             rule: violation.rule,
             step: violation.step.clone(),
             emitter: violation.emitter.clone(),
             gating,
+            relays: violation.relays.clone(),
         });
         if gating {
             self.fail(Failure::RfcViolationUnverified {
@@ -730,6 +736,7 @@ mod tests {
             rule: RfcRule::No200AfterCancel,
             step: "s11".into(),
             emitter: emitter.into(),
+            relays: None,
         }
     }
 
@@ -752,5 +759,21 @@ mod tests {
         assert!(verdict.rfc_violations[0].gating);
         assert!(!verdict.passed());
         assert!(matches!(verdict.failures.first(), Some(Failure::RfcViolationUnverified { .. })));
+    }
+
+    /// A `sut` entry carrying on a scripted party's is listed with what it
+    /// relays and gates nothing: the claim is the party's, stated beside it.
+    #[test]
+    fn a_relayed_violation_the_system_under_test_carries_on_gates_nothing() {
+        let mut verdict = RunVerdict::ok("relayed", "upstream-fake");
+        verdict.note_violation(&crate::violation::RfcViolation {
+            relays: Some("s4".into()),
+            ..violation("sut")
+        });
+        assert!(!verdict.rfc_violations[0].gating);
+        assert_eq!(verdict.rfc_violations[0].relays.as_deref(), Some("s4"));
+        assert!(verdict.passed(), "{:#?}", verdict.failures);
+        let text = serde_json::to_string(&verdict).unwrap();
+        assert!(text.contains(r#""relays":"s4""#), "{text}");
     }
 }

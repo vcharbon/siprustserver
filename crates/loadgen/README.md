@@ -487,8 +487,10 @@ scraped via the same pod annotations. It is wired in `deploy/k8s`:
   and its HTML report is copied out at the end (and anytime via
   `./endurance.sh fetch-loadgen`) into `results/endurance-*/loadgen-report/`.
 - `deploy/observability/.../dashboards/loadgen.json` — the Grafana panels
-  (completion rate by class/scenario, e2e + checkpoint latency, RSS + leak
-  canaries), aligned to the chaos-window annotations.
+  (in-flight summed over every loadgen next to the offered rate and the mean
+  call hold, the success ratio over admitted calls next to the 503 refusal
+  ratio, completion rate by class/scenario, SIP round-trip quantiles, RSS +
+  leak canaries), aligned to the chaos-window annotations.
 
 Disable it for a SIPp-only run with `LOADGEN_ENABLE=0`. REFER is off by default in
 the endurance mix (`LOADGEN_W_REFER=0`) because it needs cluster REFER auth; raise
@@ -511,9 +513,16 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
   `rfc_audit_fail`, `check_fail`, `panic`, `transport`, `unparseable`. A call
   with an attached Test case also lists its check verdicts (PASS and FAIL).
+  A shape that declares an expected reject (`ShapeDescriptor::expected_reject`)
+  classes a call ending on that status `expected_reject` (case = the status),
+  counted with `ok` as no failure.
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
-  class, chaos)` counters plus the `loadgen_mux_orphan_total` /
+  class, chaos)` counters, the call and checkpoint latency histograms, the SIP
+  round trips `loadgen_rtt_seconds{scenario,exchange}` (request first sent →
+  first `100` / first `18x` for INVITE, → final for every other method; a 2xx
+  to an INVITE first sent → its ACK; none of them holds a scripted timer), plus
+  the `loadgen_mux_orphan_total` /
   `loadgen_mux_registry_size` canaries, `loadgen_chaos_markers_total`, and
   `loadgen_target_cps` (the current offered-rate target). The same socket serves
   `POST /rate?cps=<float>` / `GET /rate` (live rate control — see *Live rate

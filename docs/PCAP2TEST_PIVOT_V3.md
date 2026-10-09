@@ -2669,6 +2669,7 @@ differently.
 | `rule` | which rule is broken: any rule of the RFC validator, by its token |
 | `step` | the flow step whose message breaks it — the anchor, so a reader lands on the datagram |
 | `emitter` | who emits it: an `actors` id, or `sut` |
+| `relays` | on a `sut` entry only: the `step` of a scripted party's entry of the same rule that this one carries on |
 
 `rule` is closed over the rules the validator has a body for (`rfc-rules`,
 `RuleId`), where a deviation `kind` is open: a kind an interpreter cannot
@@ -2719,10 +2720,35 @@ claim nothing verified.
 metadata. A race with no violation is still a fact worth keeping, and nothing
 that gates reads it.
 
+**Relayed onward.** A box that forwards a message unchanged forwards a
+violation its content carries (`payload-type-mapping-stable`,
+`final-2xx-answers-the-offer`, `ack-body-after-complete-offer-answer`: the
+`RuleId::RELAYABLE` rules), so the census reads the platform's copy on the
+next leg as relayed onward from the hit it carries on — inside the copy's own
+transaction, with the same description and the same violation judged in it —
+and names that hit (`relays` on the census hit). A captured document states
+such a copy as a `sut` entry that `relays` the party's entry it carries on, an
+earlier step on another leg of the same call. That entry gates nothing: with
+the party's entry beside it, it CANCELS the run's finding of the rule against
+the system under test on the transaction its `step` names, where the run also
+holds that party's finding of the rule cancelled by its own entry, and the
+finding is reported as caused by that party (`caused_by` in `rfc.json`). Less
+than all of that cancels nothing of the system under test's.
+
+**A hit on a hop the case does not carry.** A census hit whose anchor message
+crossed a hop the case was not cut at is stated on the carried hop's copy of
+that message — the same message forwarded along the same leg, with the same
+body — charging the endpoint on the same side of the copy.
+
 An entry that lands on no step, or names an emitter the document does not
 declare, is refused (`ref/violation-step-unknown`,
 `ref/violation-emitter-unknown`): a violation nothing can be attributed to
-gates nothing and points nowhere.
+gates nothing and points nowhere. A bad `relays` is refused under the
+condition it breaks: on another emitter's entry (`ref/violation-relays-emitter`),
+on a rule that is not relayable (`ref/violation-relays-rule`), naming a step
+with no party's entry of the rule (`ref/violation-relays-unstated`), or one
+that is not earlier, on another leg of the same call
+(`ref/violation-relays-order`).
 
 ### 11.2 must_fail
 

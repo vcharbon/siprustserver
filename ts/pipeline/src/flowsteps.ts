@@ -39,6 +39,7 @@
  */
 import { Flows, Tokens, type Case, type Check } from "@sip/contracts"
 import { claimedByBackground, type BackgroundMap } from "./background.js"
+import { offTransactionAcks } from "./stray-ack.js"
 import type { ResourceFile } from "./bodies.js"
 import { classify as classifyDelays, type DelayCausality, type StepTiming } from "./delay.js"
 import type { MsgSpecDraft, StepDraft } from "./draft.js"
@@ -212,6 +213,9 @@ export const synthesize = (
     })
   }
 
+  const strayAcks = offTransactionAcks(flows)
+  const strays: Array<string> = []
+
   if (claimed.size > 0) {
     flags.push({
       kind: "background-claimed",
@@ -227,6 +231,12 @@ export const synthesize = (
     const msg = flows.legs[o.origLeg]!.msgs[o.msgIdx]!
     const emits = peerSide(o.actor, msg.src)
     const auto = isAutomatic(msg)
+    // Before any repeat collapse: a stray's own retransmission is no rung of
+    // the ACK the final keeps.
+    if (strayAcks.has(coord(o.origLeg, o.msgIdx))) {
+      strays.push(`${o.actor.pivotLeg} leg${o.origLeg}/msg${o.msgIdx}`)
+      continue
+    }
 
     const repeated = collapseOnRepeatOf
       ? msg.repeat_of === undefined
@@ -300,6 +310,15 @@ export const synthesize = (
       msg: spec,
       delay: { ms: 0, from: TRIGGER, compressible: true, timer_linked: false },
       observed: { leg: o.origLeg, msg: o.msgIdx, at_us: o.ts_us - t0 }
+    })
+  }
+
+  if (strays.length > 0) {
+    flags.push({
+      kind: "ack-off-transaction-dropped",
+      detail:
+        `${strays.length} captured ACK(s) to a non-2xx final rode no transaction the stack ` +
+        `composes (RFC 3261 §17.1.1.3) and are not scripted: ${strays.join(", ")}`
     })
   }
 

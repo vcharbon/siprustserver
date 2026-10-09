@@ -110,8 +110,9 @@ any other test, synchronous ones included, is real-clock. A real-clock test of
 integration alike, is `#[ignore = "slow lane: loadgen"]`. Lanes live in the
 `justfile` and run under cargo-nextest (`.config/nextest.toml`: one process per
 test, 16 at once across every binary; doc tests through `cargo test --doc`):
-`just test` (default), `just test-slow` (`cargo nextest run --release -P slow
---run-ignored only`). One crate's tests:
+`just test` (default), `just test-slow [filterset]` (`cargo nextest run --release
+-P slow --run-ignored only [-E filterset]`; `just test-slow 'package(=loadgen)'`
+runs one crate's slow lane). One crate's tests:
 `cargo nextest run --workspace -E 'package(=<crate>)' <filter>`, which reuses
 the workspace build (a `-p` build resolves other features and recompiles). A
 filtered run skips an ignored test without a word: add `--run-ignored all`
@@ -123,7 +124,7 @@ paused-clock test stays in the default lane: cut its timer churn at the source
 ## Compiling ([ADR-0029](docs/adr/0029-dev-build-cost.md))
 
 `just` is the entry point — run it bare to list the lanes. `just check` for the
-fast signal (no codegen), `just test [filter]` / `just test-slow`, `just lint`,
+fast signal (no codegen), `just test [filter]` / `just test-slow [filterset]`, `just lint`,
 `just image` for the k8s image, `just doctor` when a machine looks broken,
 `just disk` / `just clean-incremental` under disk pressure. Every recipe is a
 plain cargo call, so a hand-typed `cargo nextest run` or `cargo test` builds

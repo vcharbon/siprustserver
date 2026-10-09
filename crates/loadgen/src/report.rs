@@ -1,5 +1,6 @@
 //! Bounded-memory reporting: per-`(scenario, class)` counters, end-to-end and
-//! named-checkpoint latency histograms, a bounded sample store (the first N
+//! named-checkpoint latency histograms, per-`(scenario, exchange)` SIP
+//! round-trip histograms, a bounded sample store (the first N
 //! callflows per `(scenario, class)` — **including OK**, so OK vs failing flows
 //! are comparable), a live Prometheus `/metrics` surface, and a final on-disk
 //! HTML/markdown report.
@@ -13,7 +14,6 @@
 //! drops), so nothing accumulates across calls.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,103 +24,30 @@ use e2e_model::{
     SampleGroup,
 };
 
-use metric_catalogue::HistogramValue;
-
 use crate::chaos::ChaosTag;
 use crate::class::{CallOutcome, ResultClass};
+use crate::hist::Hist;
+use crate::mux::Exchange;
 use crate::scenarios::ScenarioId;
-
-// ---------------------------------------------------------------------------
-// Fixed-bucket latency histogram (no external dep)
-// ---------------------------------------------------------------------------
-
-/// A small fixed log-bucket histogram (≈0.1 ms … ~700 s, 48 buckets). Bounded
-/// memory, O(1) record, approximate quantiles (bucket upper bound). Good enough
-/// for load-test p50/p90/p99; avoids a new crate dependency.
-#[derive(Clone)]
-pub struct Hist {
-    bounds: Vec<f64>,
-    counts: Vec<u64>,
-    total: u64,
-    sum: f64,
-    max: f64,
-}
-
-impl Hist {
-    fn new() -> Self {
-        let bounds: Vec<f64> = (0..48).map(|i| 0.1 * 1.4f64.powi(i)).collect();
-        let counts = vec![0u64; bounds.len() + 1];
-        Self { bounds, counts, total: 0, sum: 0.0, max: 0.0 }
-    }
-
-    fn record(&mut self, ms: f64) {
-        let idx = self.bounds.partition_point(|b| *b < ms);
-        self.counts[idx] += 1;
-        self.total += 1;
-        self.sum += ms;
-        if ms > self.max {
-            self.max = ms;
-        }
-    }
-
-    /// Approximate quantile in milliseconds (the upper bound of the bucket the
-    /// q-th value falls in; `max` for the overflow bucket).
-    fn quantile_ms(&self, q: f64) -> f64 {
-        if self.total == 0 {
-            return 0.0;
-        }
-        let target = (q * self.total as f64).ceil() as u64;
-        let mut cum = 0u64;
-        for (i, &c) in self.counts.iter().enumerate() {
-            cum += c;
-            if cum >= target {
-                return self
-                    .bounds
-                    .get(i)
-                    .copied()
-                    .unwrap_or(self.max)
-                    .min(self.max.max(0.0))
-                    .max(0.0);
-            }
-        }
-        self.max
-    }
-
-    /// This histogram as one Prometheus histogram series: cumulative counts
-    /// at every bound (seconds), the sum (seconds) and the count. A bound's
-    /// bucket holds the values at or under it, as `record` files them.
-    fn histogram_value(&self) -> HistogramValue {
-        let mut cum = 0u64;
-        let buckets = self
-            .bounds
-            .iter()
-            .zip(&self.counts)
-            .map(|(bound_ms, n)| {
-                cum += n;
-                ((bound_ms * 1e6).round() / 1e9, cum)
-            })
-            .collect();
-        HistogramValue { buckets, sum: (self.sum * 1e6).round() / 1e9, count: self.total }
-    }
-
-    fn mean_ms(&self) -> f64 {
-        if self.total == 0 {
-            0.0
-        } else {
-            self.sum / self.total as f64
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // A rendered sample (a captured callflow for one (scenario, class) bucket)
 // ---------------------------------------------------------------------------
 
+/// The on-disk report rendered under the reporter's lock, written after it.
+struct ReportFiles {
+    /// Every sample page, by run-dir-relative path.
+    pages: Vec<(String, Arc<str>)>,
+    index: String,
+    summary: String,
+}
+
 /// One captured call: the rendered callflow HTML (if the call was sampled and
 /// rendered) plus a one-line detail and its end-to-end time. Stored bounded
-/// per `(scenario, class)`.
+/// per `(scenario, class)`; the page is shared, so a report snapshot takes it
+/// without copying.
 pub struct RenderedSample {
-    pub html: Option<String>,
+    pub html: Option<Arc<str>>,
     pub detail: Option<String>,
     pub e2e_ms: f64,
 }
@@ -174,6 +101,8 @@ struct Inner {
     shed: BTreeMap<ScenarioId, u64>,
     e2e: BTreeMap<ScenarioId, Hist>,
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
+    /// SIP round trips per scenario and exchange (`Hist::round_trip` bounds).
+    rtt: BTreeMap<(ScenarioId, Exchange), Hist>,
     sample_taken: BTreeMap<Bucket, u32>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
@@ -356,12 +285,12 @@ impl Reporter {
         *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
         // A rejected call never ran: it has no end-to-end time to fold in.
         if class != ResultClass::Rejected {
-            g.e2e.entry(scenario).or_insert_with(Hist::new).record(e2e.as_secs_f64() * 1000.0);
+            g.e2e.entry(scenario).or_insert_with(Hist::call).record(e2e.as_secs_f64() * 1000.0);
         }
         for (name, d) in checkpoints {
             g.checkpoints
                 .entry((scenario, name))
-                .or_insert_with(Hist::new)
+                .or_insert_with(Hist::call)
                 .record(d.as_secs_f64() * 1000.0);
         }
         if let Some(sample) = sample {
@@ -372,6 +301,28 @@ impl Reporter {
                 g.samples.entry(key).or_default().push(sample);
             }
         }
+    }
+
+    /// Fold the measured SIP round trips of one finished `scenario` call into
+    /// their `(scenario, exchange)` histograms.
+    pub fn record_rtts(&self, scenario: ScenarioId, rtts: &[(Exchange, Duration)]) {
+        if rtts.is_empty() {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap();
+        for (exchange, rtt) in rtts {
+            g.rtt
+                .entry((scenario, *exchange))
+                .or_insert_with(Hist::round_trip)
+                .record(rtt.as_secs_f64() * 1000.0);
+        }
+    }
+
+    /// Hold the reporter's lock until the returned guard drops (a test
+    /// stands in for a report snapshot).
+    #[cfg(test)]
+    pub(crate) fn hold_lock_for_test(&self) -> impl Sized + '_ {
+        self.inner.lock().unwrap()
     }
 
     // -- Prometheus ---------------------------------------------------------
@@ -419,41 +370,19 @@ impl Reporter {
         // regression drops it well below and IS a bug (unlike one dropped 18x).
         c::RINGING_EXPECTED.render_value(&mut out, self.ringing_expected.load(Ordering::Relaxed));
         c::RINGING_RECEIVED.render_value(&mut out, self.ringing_received.load(Ordering::Relaxed));
-        let empty = Hist::new();
+        let empty = Hist::call();
         let mut e2e: BTreeMap<ScenarioId, &Hist> =
             g.declared.iter().map(|s| (*s, &empty)).collect();
         e2e.extend(g.e2e.iter().map(|(s, h)| (*s, h)));
-        let quantiles = |h: &Hist| {
-            c::QUANTILE
-                .values
-                .iter()
-                .map(|q| match h.total {
-                    0 => "NaN".to_string(),
-                    _ => format!("{:.6}", h.quantile_ms(q.parse().unwrap_or(0.0)) / 1000.0),
-                })
-                .collect::<Vec<_>>()
-        };
-        let e2e_q = e2e.iter().flat_map(|(s, h)| {
-            c::QUANTILE
-                .values
-                .iter()
-                .zip(quantiles(h))
-                .map(move |(q, v)| ([s.to_string(), q.to_string()], v))
-        });
-        c::E2E_SECONDS.render_rows(&mut out, e2e_q.collect::<Vec<_>>());
-        let checkpoint_q = g.checkpoints.iter().flat_map(|((s, name), h)| {
-            c::QUANTILE
-                .values
-                .iter()
-                .zip(quantiles(h))
-                .map(move |(q, v)| ([s.to_string(), name.to_string(), q.to_string()], v))
-        });
-        c::CHECKPOINT_SECONDS.render_rows(&mut out, checkpoint_q.collect::<Vec<_>>());
         c::E2E_LATENCY_SECONDS
             .render_histogram_rows(&mut out, e2e.iter().map(|(s, h)| ([*s], h.histogram_value())));
         c::CHECKPOINT_LATENCY_SECONDS.render_histogram_rows(
             &mut out,
             g.checkpoints.iter().map(|((s, name), h)| ([*s, *name], h.histogram_value())),
+        );
+        c::RTT_SECONDS.render_histogram_rows(
+            &mut out,
+            g.rtt.iter().map(|((s, exchange), h)| ([*s, exchange.label()], h.histogram_value())),
         );
         out
     }
@@ -461,36 +390,50 @@ impl Reporter {
     // -- Final on-disk report ----------------------------------------------
 
     /// Write the on-disk report under `out_dir`: per-`(scenario, class)`
-    /// callflow HTML pages, an `index.html` (counts table + latency percentiles
-    /// + links), and a `summary.md`.
+    /// callflow HTML pages, an `index.html` (counts table, latency percentiles,
+    /// links), and a `summary.md`. The report is rendered under the reporter's
+    /// lock and written after it is released, so recording calls never wait on
+    /// the disk.
     pub fn finalize(&self, out_dir: &Path) -> std::io::Result<()> {
-        let g = self.inner.lock().unwrap();
+        let ReportFiles { pages, index, summary } = self.render_report();
         std::fs::create_dir_all(out_dir)?;
+        for (rel, html) in pages {
+            let page = out_dir.join(&rel);
+            if let Some(parent) = page.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&page, html.as_bytes())?;
+        }
+        std::fs::write(out_dir.join("index.html"), index)?;
+        std::fs::write(out_dir.join("summary.md"), summary)
+    }
 
-        // Write each sample's callflow HTML, split by case (which failure mode)
-        // and chaos sub-bucket (kill-collateral `near` apart from genuine `clear`).
+    /// The on-disk report as text: every sample page (by run-dir-relative
+    /// path), `index.html` and `summary.md`.
+    fn render_report(&self) -> ReportFiles {
+        use std::fmt::Write as _;
+        let g = self.inner.lock().unwrap();
+
+        // Each sample's callflow HTML, split by case (which failure mode) and
+        // chaos sub-bucket (kill-collateral `near` apart from genuine `clear`).
+        let mut pages: Vec<(String, Arc<str>)> = Vec::new();
         let mut links: BTreeMap<Bucket, Vec<String>> = BTreeMap::new();
         for ((scenario, class, case, chaos), samples) in &g.samples {
             let chaos_label = chaos.label();
             for (i, s) in samples.iter().enumerate() {
                 let rel = sample_rel(scenario, class, case, chaos_label, i);
-                let page = out_dir.join(&rel);
-                if let Some(parent) = page.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                if let Some(html) = &s.html {
-                    std::fs::write(&page, html)?;
-                } else {
+                let html = match &s.html {
+                    Some(html) => html.clone(),
                     // No rendered flow (sample taken on a non-recording call) —
-                    // emit a stub so the detail is still linked.
-                    let stub = format!(
+                    // a stub so the detail is still linked.
+                    None => Arc::from(format!(
                         "<html><body><h3>{scenario} / {class} / {case} / {chaos_label} #{i}</h3><p>{}</p>\
                          <p>e2e: {:.1} ms</p></body></html>",
                         s.detail.as_deref().unwrap_or("(no detail)"),
                         s.e2e_ms
-                    );
-                    std::fs::write(&page, stub)?;
-                }
+                    )),
+                };
+                pages.push((rel.clone(), html));
                 links.entry((scenario, class.clone(), case.clone(), *chaos)).or_default().push(rel);
             }
         }
@@ -512,7 +455,7 @@ impl Reporter {
             <table>\
             <tr><th>scenario</th><th>class</th><th>case</th><th>chaos</th><th>count</th><th>samples</th></tr>");
         for ((scenario, class, case, chaos), n) in &g.counts {
-            let cls = if class == "ok" { "ok" } else { "nok" };
+            let cls = if ResultClass::label_is_ok(class) { "ok" } else { "nok" };
             let chaos_label = chaos.label();
             let chaos_cls = if chaos_label == "near" { "near" } else { "" };
             let sample_links = links
@@ -551,23 +494,22 @@ impl Reporter {
             idx.push_str("</table>");
         }
         idx.push_str("</body></html>");
-        std::fs::write(out_dir.join("index.html"), idx)?;
 
-        // summary.md
-        let mut md = std::fs::File::create(out_dir.join("summary.md"))?;
-        writeln!(md, "# loadgen summary\n")?;
-        writeln!(md, "## Results by scenario × class × case × chaos\n")?;
-        writeln!(md, "(chaos=clear → genuine results to triage; chaos=near → within tolerance of an injected fault; case = the class's distinct failure mode)\n")?;
-        writeln!(md, "| scenario | class | case | chaos | count |")?;
-        writeln!(md, "|---|---|---|---|---|")?;
+        // summary.md (writing into a String cannot fail).
+        let mut md = String::new();
+        let _ = writeln!(md, "# loadgen summary\n");
+        let _ = writeln!(md, "## Results by scenario × class × case × chaos\n");
+        let _ = writeln!(md, "(chaos=clear → genuine results to triage; chaos=near → within tolerance of an injected fault; case = the class's distinct failure mode)\n");
+        let _ = writeln!(md, "| scenario | class | case | chaos | count |");
+        let _ = writeln!(md, "|---|---|---|---|---|");
         for ((scenario, class, case, chaos), n) in &g.counts {
-            writeln!(md, "| {scenario} | {class} | {case} | {} | {n} |", chaos.label())?;
+            let _ = writeln!(md, "| {scenario} | {class} | {case} | {} | {n} |", chaos.label());
         }
-        writeln!(md, "\n## Latency (ms)\n")?;
-        writeln!(md, "| scenario | n | mean | p50 | p90 | p99 | max |")?;
-        writeln!(md, "|---|---|---|---|---|---|---|")?;
+        let _ = writeln!(md, "\n## Latency (ms)\n");
+        let _ = writeln!(md, "| scenario | n | mean | p50 | p90 | p99 | max |");
+        let _ = writeln!(md, "|---|---|---|---|---|---|---|");
         for (scenario, h) in &g.e2e {
-            writeln!(
+            let _ = writeln!(
                 md,
                 "| {scenario} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} |",
                 h.total,
@@ -576,9 +518,9 @@ impl Reporter {
                 h.quantile_ms(0.9),
                 h.quantile_ms(0.99),
                 h.max
-            )?;
+            );
         }
-        Ok(())
+        ReportFiles { pages, index: idx, summary: md }
     }
 
     // -- Machine-readable index (load-result.json) -------------------------
@@ -601,7 +543,7 @@ impl Reporter {
                 case: case.clone(),
                 chaos: chaos.label().to_string(),
                 count: *n,
-                ok: class == "ok",
+                ok: ResultClass::label_is_ok(class),
             })
             .collect();
 
@@ -853,9 +795,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// The latency histograms are also exported as Prometheus histograms, so a
+    /// The latency histograms are exported as Prometheus histograms, so a
     /// scrape series gives the latency of any time window (histogram_quantile
-    /// over an increase), which the cumulative quantile gauges cannot.
+    /// over an increase).
     #[test]
     #[ignore = "slow lane: loadgen"]
     fn latency_histograms_are_exported_as_prometheus_histograms() {
@@ -898,6 +840,118 @@ mod tests {
             prom.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 3\n"),
             "{prom}"
         );
+    }
+
+    /// A scrape writes no lifetime quantile gauge (a window's latency is a
+    /// `histogram_quantile` over the histograms), and every declared scenario
+    /// carries its `expected_reject` series from the first scrape.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn a_scrape_holds_no_quantile_gauge_and_declares_expected_reject() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+        r.declare_scenarios(["basic_call"]);
+        r.record(
+            "basic_call",
+            &CallOutcome::Ok,
+            "",
+            Duration::from_millis(9_000),
+            &[("time_to_200", Duration::from_millis(5))],
+            None,
+            ChaosTag::Clear,
+        );
+        let prom = r.render_prometheus();
+        assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
+        assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
+        assert!(!prom.contains("quantile=\""), "{prom}");
+        assert!(
+            prom.contains(
+                "loadgen_calls_total{scenario=\"basic_call\",class=\"expected_reject\",chaos=\"clear\"} 0\n"
+            ),
+            "{prom}"
+        );
+    }
+
+    /// A SIP round trip renders on `loadgen_rtt_seconds{scenario,exchange}`,
+    /// bounds from 0.1 ms in ×1.25 steps: a 2.5 ms and a 3.5 ms exchange land
+    /// in different buckets, and only observed exchanges are written.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn round_trips_render_as_a_fine_histogram_per_exchange() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+        r.declare_scenarios(["basic_call"]);
+        r.record_rtts(
+            "basic_call",
+            &[
+                (Exchange::Invite18x, Duration::from_micros(2_500)),
+                (Exchange::Invite18x, Duration::from_micros(3_500)),
+                (Exchange::ByeFinal, Duration::from_millis(40)),
+            ],
+        );
+        let prom = r.render_prometheus();
+        assert!(prom.contains("# TYPE loadgen_rtt_seconds histogram"), "{prom}");
+        let labels = "scenario=\"basic_call\",exchange=\"invite_18x\"";
+        let buckets: Vec<(f64, u64)> = prom
+            .lines()
+            .filter_map(|l| l.strip_prefix(&format!("loadgen_rtt_seconds_bucket{{{labels},le=\"")))
+            .map(|rest| {
+                let (le, n) = rest.split_once("\"} ").unwrap();
+                let le = if le == "+Inf" { f64::INFINITY } else { le.parse().unwrap() };
+                (le, n.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(buckets.len(), 61, "60 bounds and +Inf: {prom}");
+        assert_eq!(buckets[0].0, 0.0001, "the first bound is 0.1 ms");
+        assert!(buckets[59].0 > 50.0, "the last bound reaches past 50 s: {buckets:?}");
+        assert!(
+            buckets[..60].windows(2).all(|w| w[1].0 / w[0].0 < 1.26),
+            "bounds at most 25 % apart: {buckets:?}"
+        );
+        let at = |secs: f64| buckets.iter().find(|(le, _)| *le >= secs).unwrap().1;
+        assert_eq!(at(0.0025), 1, "2.5 ms alone at its bucket");
+        assert_eq!(at(0.0035), 2);
+        assert!(prom.contains(&format!("loadgen_rtt_seconds_count{{{labels}}} 2\n")), "{prom}");
+        assert!(prom.contains(&format!("loadgen_rtt_seconds_sum{{{labels}}} 0.006\n")), "{prom}");
+        assert!(
+            prom.contains(
+                "loadgen_rtt_seconds_count{scenario=\"basic_call\",exchange=\"bye_final\"} 1\n"
+            ),
+            "{prom}"
+        );
+        assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
+    }
+
+    /// The index counts the expected reject as ok: it is no failed call.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn the_index_counts_the_expected_reject_as_ok() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+        let reject = CallOutcome::ExpectedReject(486);
+        r.record(
+            "limited",
+            &reject,
+            &reject.case(None),
+            Duration::from_millis(3),
+            &[],
+            None,
+            ChaosTag::Clear,
+        );
+        let idx = r.build_index(
+            LoadRunMeta {
+                started_ms: 0,
+                finished_ms: 0,
+                finished: true,
+                target: "t".into(),
+                cps: 1.0,
+                duration_secs: 1,
+                max_in_flight: 1,
+                egress: None,
+                profile: None,
+            },
+            Canaries::default(),
+        );
+        let row = idx.counts.iter().find(|c| c.class == "expected_reject").expect("a row");
+        assert!(row.ok, "{row:?}");
+        assert_eq!((idx.total_calls(), idx.failed_calls()), (1, 0));
     }
 
     /// The case dimension splits ONE class into per-failure-mode sample buckets:

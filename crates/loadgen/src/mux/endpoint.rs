@@ -22,6 +22,7 @@ use tokio::time::Instant;
 
 use super::loss::{DropDir, DropModel, TargetedDrop};
 use super::retransmit::CallTxns;
+use super::rtt::{RttSink, RttTracker};
 use super::{
     CallGate, CallSlot, Delivery, Key, MuxCore, MuxSocket, ReceiverEntry, Role, RELEASE_HOLD,
 };
@@ -116,9 +117,19 @@ pub struct MuxNetwork {
     /// Optional deterministic targeted drop, applied per endpoint (each bound
     /// endpoint tracks its own matching-request arrivals).
     pub(super) drop_nth: Option<TargetedDrop>,
+    /// Where each bound endpoint's measured SIP round trips go; `None` = not
+    /// measured.
+    pub(super) rtt_sink: Option<RttSink>,
 }
 
 impl MuxNetwork {
+    /// Measure the SIP round trips of every endpoint bound on this network
+    /// into `sink`.
+    pub fn with_rtt_sink(mut self, sink: RttSink) -> Self {
+        self.rtt_sink = Some(sink);
+        self
+    }
+
     /// The next per-endpoint loss RNG seed (golden-ratio stride so alice/bob/
     /// charlie of the same call get well-separated, non-zero seeds).
     fn next_drop_seed(&self) -> u64 {
@@ -190,6 +201,7 @@ impl SignalingNetwork for MuxNetwork {
         let txns = self.retransmit.then(|| {
             Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
         });
+        let rtt = self.rtt_sink.clone().map(|sink| Arc::new(RttTracker::new(sink)));
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();
@@ -272,6 +284,7 @@ impl SignalingNetwork for MuxNetwork {
                 keyset: keyset.clone(),
                 drop: drop.clone(),
                 txns: txns.clone(),
+                rtt: rtt.clone(),
                 claim,
                 claimed: false,
             });
@@ -293,6 +306,7 @@ impl SignalingNetwork for MuxNetwork {
             queue_max: mux.queue_max,
             drop,
             txns,
+            rtt,
         }))
     }
 
@@ -337,6 +351,9 @@ struct MuxEndpoint {
     /// Per-call SIP retransmit engine (present only when `--auto-retransmit` is on
     /// for this call). Records outbound requests/answers and drives their timers.
     txns: Option<Arc<CallTxns>>,
+    /// This endpoint's SIP round-trip tracker (present iff the call has an
+    /// [`RttSink`]), shared with the inbound `route` path.
+    rtt: Option<Arc<RttTracker>>,
 }
 
 #[async_trait]
@@ -375,6 +392,7 @@ impl UdpEndpoint for MuxEndpoint {
                             queue: self.queue.clone(),
                             drop: self.drop.clone(),
                             txns: self.txns.clone(),
+                            rtt: self.rtt.clone(),
                         },
                     );
                     keys.push(Key::CallId(cid));
@@ -392,6 +410,10 @@ impl UdpEndpoint for MuxEndpoint {
         // the resender re-applies the same loss model on every retry.
         if let Some(txns) = &self.txns {
             txns.on_outbound(buf, dst);
+        }
+        // A round trip runs from the first transmission attempt, lost or not.
+        if let Some(rtt) = &self.rtt {
+            rtt.on_outbound(buf, Instant::now());
         }
         // Simulated loss: report success (the txn believes it sent) but never put
         // the datagram on the wire — the SUT never sees it, so only auto-retransmit

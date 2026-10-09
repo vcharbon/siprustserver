@@ -171,6 +171,45 @@ async fn loadgen_driver_basic_calls_on_fake_net() {
     b2bua.assert_fully_reaped();
 }
 
+/// A shape's expected reject end to end: every rejected call classes
+/// `expected_reject` after the sampled RFC audit (the caller ACKed the 486
+/// before the body ended, so the recorded flow is complete), and the round
+/// trips the mux measured reach `loadgen_rtt_seconds` once each call ends.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_expected_reject_is_audited_clean() {
+    let (_h, b2bua, core, transport) = setup_fake(7300).await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 50, background_record_every: 1 }));
+    let mut entry = mix("invite_reject", 1.0);
+    entry.expected_reject = Some(486);
+    let driver =
+        Driver::new(cfg(b2bua.addr, 20.0, 1, 16, 0x486), vec![entry], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    let expected = reporter.count("invite_reject", &ResultClass::ExpectedReject);
+    assert_eq!(
+        expected,
+        total,
+        "every reject is the expected one:\n{}",
+        reporter.render_prometheus()
+    );
+    let prom = reporter.render_prometheus();
+    assert!(
+        prom.contains(
+            "loadgen_rtt_seconds_count{scenario=\"invite_reject\",exchange=\"invite_100\"}"
+        ),
+        "{prom}"
+    );
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
 /// (b) Deterministic targeted loss + recovery on the fake net — the
 /// paused-clock equivalent of `loadgen_settle_gate_recovers_dropped_bye`: each
 /// refer call's FIRST outbound BYE is discarded before the wire; the

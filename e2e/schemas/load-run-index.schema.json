@@ -23,7 +23,7 @@
       }
     },
     "counts": {
-      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). `class == \"ok\"` is the success bucket; `chaos == \"near\"` is\naccepted kill collateral, `chaos == \"clear\"` is a genuine result.",
+      "description": "Per-`(scenario, class, chaos)` completed-call counts (the report's main\ntable). A row's `ok` marks its class as no failure (`ok`, or the shape's\n`expected_reject`); `chaos == \"near\"` is accepted kill collateral,\n`chaos == \"clear\"` is a genuine result.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/CountRow"
@@ -175,7 +175,7 @@
           "type": "string"
         },
         "class": {
-          "description": "The result class label (`ok`, `timeout`, `status_486`, `check_fail`, …).",
+          "description": "The result class label (`ok`, `expected_reject`, `timeout`, `status_503`,\n`check_fail`, …).",
           "type": "string"
         },
         "count": {
@@ -184,7 +184,7 @@
           "minimum": 0
         },
         "ok": {
-          "description": "`true` iff `class == \"ok\"` (drives the OK-green / NOK-red split).",
+          "description": "`true` iff the class is no failure: `ok`, or `expected_reject` (the\nshape's declared reject). Drives the OK-green / NOK-red split.",
           "type": "boolean"
         },
         "scenario": {
