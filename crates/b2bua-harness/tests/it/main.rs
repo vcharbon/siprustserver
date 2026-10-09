@@ -163,6 +163,7 @@ mod retransmission_turn_and_message_cap;
 mod retry_on_an_ending_identity;
 mod route_fold_limiter_holds;
 mod router_admission;
+mod scene_addresses;
 mod sdp_form_policy;
 mod sdp_session_continuity;
 mod second_final_refused;

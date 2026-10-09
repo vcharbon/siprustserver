@@ -63,9 +63,11 @@
 //!   CANCEL build+send.
 //! - `proxy` — the minimal scripted loose-routing [`Proxy`].
 //! - `rr_fold` — the per-UA Record-Route folding coin flip.
+//! - `addr_alloc` — the loopback addresses [`Harness::next_addr`] hands out.
 //! - `addressing` — wire-address resolution (next hop, Via sent-by); SIP
 //!   parsing does NOT live here — the values come from `sip_message::header`.
 
+mod addr_alloc;
 mod addressing;
 mod artifact_dump;
 mod call_trace;

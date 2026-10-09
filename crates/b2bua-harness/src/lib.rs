@@ -1180,11 +1180,13 @@ impl B2buaSut {
     }
 }
 
-/// Canonical default port for `alice` in a [`B2buaScene`].
+/// The port of `alice` in a [`B2buaScene`]: the first address a fresh
+/// harness allocates ([`Harness::next_addr`]).
 pub const ALICE_PORT: u16 = 5060;
-/// Canonical default port for `bob` in a [`B2buaScene`].
+/// The port of `bob` in a [`B2buaScene`]: the second address allocated.
 pub const BOB_PORT: u16 = 5070;
-/// Canonical default port for the `b2bua` SUT in a [`B2buaScene`].
+/// The port of the `b2bua` SUT in a [`B2buaScene`]: the third address
+/// allocated.
 pub const B2BUA_PORT: u16 = 5080;
 
 /// The standard alice ↔ b2bua ↔ bob fixture with canonical default ports and a
@@ -1212,8 +1214,10 @@ pub const B2BUA_PORT: u16 = 5080;
 /// limiter holds behind on purpose declares them with
 /// [`finish_leaving`](Self::finish_leaving).
 ///
-/// Each `Harness` has its own simulated network namespace, so the fixed ports
-/// never collide between tests. For a non-default b2bua decision (refer, limiter,
+/// The scene's addresses come from its harness's allocator
+/// ([`Harness::next_addr`]); a further party takes the next one with
+/// [`Harness::agent_auto`]. Each `Harness` has its own simulated network
+/// namespace, so addresses never collide between tests. For a non-default b2bua decision (refer, limiter,
 /// services, config tune) build it via [`with_b2bua`](Self::with_b2bua), which
 /// hands you bob's port and the full [`B2buaSutBuilder`]:
 ///
@@ -1230,7 +1234,7 @@ pub struct B2buaScene {
 }
 
 impl B2buaScene {
-    /// alice/bob/b2bua bound at the canonical default ports
+    /// alice/bob/b2bua bound on the harness's first three addresses
     /// ([`ALICE_PORT`]/[`BOB_PORT`]/[`B2BUA_PORT`]); the b2bua routes every call
     /// to bob. The 90%-case fixture — one line for a new test.
     pub async fn new(name: &str) -> Self {
@@ -1238,8 +1242,8 @@ impl B2buaScene {
     }
 
     /// Like [`new`](Self::new) but customise the b2bua: `build` is handed bob's
-    /// canonical port and must return the [`B2buaSutBuilder`] to start (start is
-    /// done for you at [`B2BUA_PORT`]). This composes cleanly with every existing
+    /// port and must return the [`B2buaSutBuilder`] to start (start is done for
+    /// you on the scene's third address). This composes cleanly with every existing
     /// `B2buaSut::route_all*` entry point and the builder's chain methods
     /// (`outbound_proxy`, `limiter`, `services`, `tune`), so a test needing a
     /// non-default decision still gets the canonical alice/bob/ports wiring for
@@ -1248,9 +1252,10 @@ impl B2buaScene {
         // Match the common b2bua-test convention: the harness's default
         // SIMULATED_TRANSIT_DELAY_MS (1 ms floor enforced by the fabric).
         let h = Harness::new(name);
-        let alice = h.agent("alice", &format!("127.0.0.1:{ALICE_PORT}")).await;
-        let bob = h.agent("bob", &format!("127.0.0.1:{BOB_PORT}")).await;
-        let b2bua = build(BOB_PORT).start(&h, "b2bua", &format!("127.0.0.1:{B2BUA_PORT}")).await;
+        let alice = h.agent_auto("alice").await;
+        let bob = h.agent_auto("bob").await;
+        let at = h.next_addr().to_string();
+        let b2bua = build(bob.addr().port()).start(&h, "b2bua", &at).await;
         Self { h, alice, bob, b2bua }
     }
 

@@ -19,6 +19,7 @@ use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint};
 
+use super::addr_alloc::AddrAlloc;
 use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
@@ -109,6 +110,8 @@ pub struct Harness {
     /// The `dialog-…` waivers, shared with every UA so a scripted receive
     /// honours them.
     dialog_opt_ins: DialogOptIns,
+    /// The loopback addresses [`next_addr`](Self::next_addr) hands out.
+    addrs: AddrAlloc,
 }
 
 impl Harness {
@@ -238,6 +241,7 @@ impl Harness {
             views,
             steps: StepCounter::default(),
             dialog_opt_ins: DialogOptIns::default(),
+            addrs: AddrAlloc::default(),
         }
     }
 
@@ -385,6 +389,20 @@ impl Harness {
         self.cseq_gate.disarm();
     }
 
+    /// A fresh loopback address on this harness's simulated network: unique
+    /// within the harness, never one it already bound. Ports run 5060, 5070,
+    /// 5080, … so a fresh harness's first three are the canonical ones.
+    pub fn next_addr(&self) -> SocketAddr {
+        self.addrs.next()
+    }
+
+    /// [`agent`](Self::agent) on [`next_addr`](Self::next_addr): a UA whose
+    /// address the test reads back with [`Agent::addr`] instead of picking it.
+    pub async fn agent_auto(&self, name: impl Into<String>) -> Agent {
+        let addr = self.next_addr().to_string();
+        self.agent(name, &addr).await
+    }
+
     /// Declare and bind a named UA at `addr` (e.g. `"127.0.0.1:5060"`). The
     /// bind is role-tagged `{Uac, Uas}` — a test UA originates and answers but
     /// is never a proxy, so proxy-subject RFC rules (no-target-404,
@@ -441,6 +459,7 @@ impl Harness {
     ) -> Agent {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
         // A proxy relays requests it is not a party to: it holds no dialogs.
         let holds_dialogs =
@@ -498,6 +517,7 @@ impl Harness {
     /// [`agent_with_roles`](Self::agent_with_roles) and the `callee_group`
     /// builder, which registers a single lane for the shared callee socket.
     pub(crate) fn register_lane(&self, addr: SocketAddr, name: String, tag: NetworkTag) {
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name, tag);
     }
 
@@ -564,6 +584,7 @@ impl Harness {
     ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name, NetworkTag::Core);
         let mut opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
         if let Some(hook) = pre_ingress {
@@ -585,6 +606,7 @@ impl Harness {
         addr: &str,
     ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        self.addrs.note_bound(addr);
         self.recorder.register_lane(addr, name.into(), NetworkTag::Ext);
         let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
         let opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
