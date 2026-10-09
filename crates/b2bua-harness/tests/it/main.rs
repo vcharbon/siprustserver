@@ -40,6 +40,7 @@ mod cancel_while_waiting_for_a_permit;
 mod capacity_admission;
 mod cdr_write_before_remove;
 mod charging_in_dialog_invites;
+mod coverage_doc;
 mod crossing_2xx_repeat_is_a_write;
 mod decision_context;
 mod decision_deadline;

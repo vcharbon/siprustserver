@@ -35,6 +35,8 @@ http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 
 [dev-dependencies]
+# The closed rule-token list the coverage doc's rows are checked against.
+rfc-rules = { path = "../rfc-rules" }
 # The call-shape catalog (forked establishments) driven through the SUT.
 callshapes = { path = "../callshapes" }
 # `catch_unwind` on a future: a cell's failure is collected, the next cell runs.

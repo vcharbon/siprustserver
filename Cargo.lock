@@ -536,6 +536,7 @@ dependencies = [
  "media",
  "media-harness",
  "observe",
+ "rfc-rules",
  "scenario-harness",
  "serde_json",
  "sip-clock",
