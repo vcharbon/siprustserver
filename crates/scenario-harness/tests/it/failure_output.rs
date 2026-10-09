@@ -4,7 +4,11 @@
 //! says it is one, with the rule and the party. The failure dump that follows
 //! opens with the same digest and keeps the wire ladder and the UAs' tables.
 
-use scenario_harness::{expect_failure, Agent, CseqOp, CseqOpAt, CseqPattern, Dialog, Harness};
+use std::rc::Rc;
+
+use scenario_harness::{
+    expect_failure, Agent, CseqOp, CseqOpAt, CseqPattern, Dialog, DumpSection, FailureView, Harness,
+};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
@@ -192,4 +196,58 @@ async fn a_dialog_table_failure_names_the_rule_and_the_ua() {
         dump.contains("  alice:\n") && dump.contains("verdict [dialog-unknown]: OPTIONS"),
         "{dump}"
     );
+}
+
+/// A SUT whose task met a failure the scenario could not see, and the
+/// section it adds to the dump.
+struct BrokenSut;
+
+impl FailureView for BrokenSut {
+    fn cause(&self) -> Option<String> {
+        Some("model invariant one-dialog violated after a turn: two dialogs\nCall { .. }".into())
+    }
+
+    fn sections(&self) -> Vec<DumpSection> {
+        vec![DumpSection { title: "sut ledger".into(), lines: vec!["timer T1".into()] }]
+    }
+}
+
+/// A failure a SUT met out of the scenario's sight leads the dump's digest,
+/// the scenario's own failure following it; the SUT's section is in the dump.
+#[tokio::test(start_paused = true)]
+async fn a_suts_hidden_failure_leads_the_digest() {
+    let failed = expect_failure(async {
+        let h = Harness::new("digest-hidden-cause");
+        h.add_failure_view(Rc::new(BrokenSut));
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+        bob.receive("INVITE").await;
+    })
+    .await;
+    let [dump] = failed.dumps.as_slice() else { panic!("one dump: {:?}", failed.dumps) };
+    let mut lines = dump.trim_start().lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "══ FAILED 'digest-hidden-cause': red because model invariant one-dialog violated \
+             after a turn: two dialogs ══"
+        ),
+        "{dump}"
+    );
+    let then = lines.next().unwrap_or_default();
+    assert!(then.starts_with("   then: bob timed out after 5s waiting for a INVITE"), "{dump}");
+    assert!(dump.contains("── sut ledger ──\n  timer T1\n"), "{dump}");
+}
+
+/// `finish` fails on a SUT's hidden failure, its message first.
+#[tokio::test(start_paused = true)]
+async fn finish_fails_on_a_suts_hidden_failure() {
+    let failed = expect_failure(async {
+        let h = Harness::new("finish-hidden-cause");
+        h.add_failure_view(Rc::new(BrokenSut));
+        h.finish().await;
+    })
+    .await;
+    assert_eq!(failed.digest(), "model invariant one-dialog violated after a turn: two dialogs");
+    let [dump] = failed.dumps.as_slice() else { panic!("one dump: {:?}", failed.dumps) };
+    assert!(dump.contains("── wire ladder ──"), "{dump}");
 }

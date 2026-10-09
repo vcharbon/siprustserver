@@ -35,6 +35,7 @@ use sip_proxy::{
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 
+pub mod failure_view;
 pub mod limiter;
 pub mod model_gate;
 pub mod terminated;
@@ -431,9 +432,19 @@ pub struct B2buaSutBuilder {
     deferred_ceilings: Option<sip_txn::DeferredBound>,
     keep_terminated_calls: bool,
     cdr_tap: Option<Arc<dyn CdrWriter>>,
+    untraced: bool,
 }
 
 impl B2buaSutBuilder {
+    /// Trace no call: the process keeps the production trace gate, so a run
+    /// measuring the per-call cost pays exactly what production pays. By
+    /// default [`start`](Self::start) traces every call
+    /// ([`failure_view::trace_every_call`]) for the failure dump.
+    pub fn untraced(mut self) -> Self {
+        self.untraced = true;
+        self
+    }
+
     /// Keep every terminated `Call` whole for [`B2buaSut::terminated_calls`].
     /// Off by default: a long-running SUT keeps the records only.
     pub fn keep_terminated_calls(mut self) -> Self {
@@ -600,7 +611,11 @@ impl B2buaSutBuilder {
             deferred_ceilings,
             keep_terminated_calls,
             cdr_tap,
+            untraced,
         } = self;
+        if !untraced {
+            failure_view::trace_every_call();
+        }
         let (decision, limiter, sut_limiter) = match limiter {
             Some(own) => (decision, own, limiter::SutLimiter::own(limiter_store)),
             None => {
@@ -699,6 +714,11 @@ impl B2buaSutBuilder {
             assert!(slot.set(hook).is_ok(), "the brake is installed once");
             (counters, forced)
         });
+        h.add_failure_view(std::rc::Rc::new(failure_view::B2buaFailureView {
+            name: name.to_string(),
+            calls: core.live_calls_probe(),
+            clock: clock.clone(),
+        }));
         B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, clock, brake, _core: core }
     }
 }
@@ -733,6 +753,7 @@ impl B2buaSut {
             deferred_ceilings: None,
             keep_terminated_calls: false,
             cdr_tap: None,
+            untraced: false,
         }
     }
 

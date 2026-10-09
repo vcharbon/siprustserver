@@ -4,10 +4,15 @@
 //! violations ([`b2bua::rules::model_invariants::violations`]) so the run
 //! fails on the first one, whatever the scenario did next.
 
+/// The first model-invariant violation this process met, if any.
+pub fn first_violation() -> Option<String> {
+    b2bua::rules::model_invariants::violations().into_iter().next()
+}
+
 /// Panic with the first model-invariant violation this process met, if any.
 #[track_caller]
 pub fn assert_no_model_violation() {
-    if let Some(first) = b2bua::rules::model_invariants::violations().into_iter().next() {
+    if let Some(first) = first_violation() {
         panic!("{first}");
     }
 }
@@ -16,7 +21,7 @@ pub fn assert_no_model_violation() {
 /// already unwinds, and names the violation on stderr instead.
 pub fn gate_on_drop() {
     if std::thread::panicking() {
-        if let Some(first) = b2bua::rules::model_invariants::violations().into_iter().next() {
+        if let Some(first) = first_violation() {
             let line = first.lines().next().unwrap_or_default();
             eprintln!("an earlier B2BUA turn broke a model invariant: {line}");
         }

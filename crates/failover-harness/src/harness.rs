@@ -1109,6 +1109,8 @@ impl FailoverHarness {
     /// repl listen addr is assigned by declaration order and is stable across
     /// reboots).
     pub fn new(name: &str, worker_ordinals: &[&str]) -> Self {
+        // Every call's rule trace reaches a failing cell's dump.
+        b2bua_harness::failure_view::trace_every_call();
         let clock = Clock::test_at(0);
         // SIP plane: a recording harness with 1 ms transit (0 is coerced anyway).
         let sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>> =

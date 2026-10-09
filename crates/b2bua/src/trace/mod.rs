@@ -16,4 +16,7 @@ pub(crate) mod intake;
 pub mod registry;
 
 pub use emit::sampled;
-pub use registry::{adopt_into, adopt_replicated, install_process_traces, traces, CallTraces};
+pub use registry::{
+    adopt_into, adopt_replicated, install_process_traces, install_process_traces_unless_installed,
+    traces, CallTraces,
+};

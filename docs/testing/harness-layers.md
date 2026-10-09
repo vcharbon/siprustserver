@@ -15,8 +15,8 @@ no real sockets, no real wall-clock dependence.
 | 1 | `sip-clock` | The one clock seam. `Clock::system()` / `Clock::test_at(0)`; `testkit::{advance_settled, settle, pump}` — the primitives behind every harness `advance()` (`advance_settled` behind the scenario harness's, `pump` behind the replication and failover harnesses'). |
 | 2 | `layer-harness` | SIP-agnostic recording substrate: `Recorder`, `RunContext`, `EventSequencer`, `RecordedAnomaly`. Tests record first, assert on the recording (ADR-0004/0006). |
 | 3 | `sip-net` | `SimulatedSignalingNetwork` — in-process datagram fabric keyed by `SocketAddr`, per-hop transit delay (0 is coerced to 1 ms — see the clock guide), `SendFault` + per-bind `PreIngress` hooks for drop/synthetic-reply injection. Plus `rfc_audit`: the RFC 3261/3262/3264 post-call rule suite (~77 rules, subject-dispatched per bind role, advisory/gating lanes) behind the single evaluator `evaluate_rfc_findings`. |
-| 4 | `scenario-harness` | The fluent dialog DSL. `Harness` owns the recording-wrapped sim net, `Clock::test_at(0)`, and three RAII guards (`PanicDump`: wire-trace dump on panic; `CseqGate`: RFC hard gate even if you forget `finish()`; `ArtifactDump`: full report artifacts on any drop without `finish()`, gated by `SCENARIO_ARTIFACT_DIR`). `Agent` is a fake UA that auto-fills Via/tags/CSeq/Contact per RFC 3261. `callflow` is the canonical INVITE/180/200/ACK choreography (`establish`, `hangup`, `Call::new(..).no_ring()`). Default transit is **100 ms** (`Harness::new`), so traces show `received = sent + 100`. |
-| 5 | `b2bua-harness` | Binds a **real `B2buaCore`** as the SUT. `B2buaSut` (`route_all_to`, metrics, `cdr_records`), `B2buaScene` (alice :5060 / bob :5070 / b2bua :5080; `establish`/`hangup`/`finish`, which runs the leak oracle), `settle_until` (bounded yield-poll to drain async teardown), and the **`assert_fully_reaped` leak oracle**: creations == removals, `active_calls == 0`, `lock_count == 0`, reaper touched-ledger empty, no setup-CANCEL mark, every limiter hold released once and the limiter store empty. |
+| 4 | `scenario-harness` | The fluent dialog DSL. `Harness` owns the recording-wrapped sim net, `Clock::test_at(0)`, and three RAII guards (`CseqGate`: RFC hard gate even if you forget `finish()`; `FailureDump`: the failure dump on panic, see [Reading a failure](#reading-a-failure); `ArtifactDump`: full report artifacts on any drop without `finish()`, gated by `SCENARIO_ARTIFACT_DIR`). `Agent` is a fake UA that auto-fills Via/tags/CSeq/Contact per RFC 3261. `callflow` is the canonical INVITE/180/200/ACK choreography (`establish`, `hangup`, `Call::new(..).no_ring()`). Default transit is **100 ms** (`Harness::new`), so traces show `received = sent + 100`. |
+| 5 | `b2bua-harness` | Binds a **real `B2buaCore`** as the SUT. `B2buaSut` (`route_all_to`, metrics, `cdr_records`), `B2buaScene` (alice :5060 / bob :5070 / b2bua :5080; `establish`/`hangup`/`finish`, which runs the leak oracle), `settle_until` (bounded yield-poll to drain async teardown), and the **`assert_fully_reaped` leak oracle**: creations == removals, `active_calls == 0`, `lock_count == 0`, reaper touched-ledger empty, no setup-CANCEL mark, every limiter hold released once and the limiter store empty. Every `B2buaSut` traces every call (`failure_view::trace_every_call`; `B2buaSutBuilder::untraced` for a cost measurement) and adds its timer ledger and model-invariant record to the failure dump. |
 | 6 | `failover-harness` | The full HA stack under ONE paused clock: a **real LB `ProxyCore`** + N replicating `b2bua` workers over a simulated replication fabric, one shared `EventSequencer` across the SIP + repl planes. Fault primitives: `crash()`, `reboot()` (fresh SIP IP, **hard-asserts pristine**), repl `partition`/`heal`/`delay` (named on two workers, they reach every replication stream between the two nodes, present and future — the fabric attributes a puller's ephemeral local to its node), SIP-plane `cut_signalling`/`restore_signalling`, `set_health`, `with_worker_clock_offset` (deterministic inter-node wall skew — see the clock guide), and `with_worker_tune` (a `B2buaConfig` mutator re-applied on every worker spawn AND reboot). Membership primitives: `withdraw(ord)`/`readmit(ord, addr)` (the orchestrator takes an endpoint out of the proxy's registry AND every peer's membership while the process keeps running), `spawn_replacement(ord)` (a second live incarnation of one ordinal, gen+1, fresh SIP + repl addresses, peers re-pointed at it), `begin_drain` / `begin_drain_pending` (the drain left in flight, so the timeline runs inside the shutdown window). The **views ledger** records what the orchestrator, the proxy and each incarnation believed about each worker — written by those primitives and by a sampler that reads the live components after every advance chunk — and the report renders it as a views table plus the disagreements it found. Cluster invariants: `assert_single_owner`, `assert_call_fully_over`, `assert_call_fully_released`, the `transparent_matrix!` differential oracle. Transit is 1 ms; its `advance` is `testkit::pump_sampled` (settled 100 ms chunks). |
 | 7 | `ha-harness` | The replication engine alone — **no SIP, no router, no rules**. `HaCluster`/`HaNode` with put/delete/crash/reboot/partition, convergence assertions, `ReplReport`. |
 
@@ -79,8 +79,10 @@ Automatic (you cannot opt out, only waive per-rule):
   on by default in debug builds) checks the call record at the end of each
   turn against the list in `b2bua::rules::model_invariants` and panics with
   the invariant's name, the turn and the call's dump on a violation.
-- **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
-  compact wire trace to stderr. Read it before adding instrumentation.
+- **Failure dump** — on any panic before `finish()` returns, gate failures
+  included, the harness prints the failure dump to stderr
+  ([Reading a failure](#reading-a-failure)). Read it before adding
+  instrumentation.
 - **Failure artifacts** (env-gated) — with `SCENARIO_ARTIFACT_DIR=<dir>` set, a
   harness dropped without `finish()` (panic unwind, a finish-time gate failure,
   or a forgotten `finish`) writes the full SVG/HTML/text ladders under
@@ -99,6 +101,53 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
   `assert_call_fully_released` in failover tests. Drain async teardown first
   with `settle_until`.
 
+## Reading a failure
+
+A failing harness test says why in the first line of its panic message, and
+the failure dump on stderr opens with the same line:
+
+- **A step** names the party, what it expected and what it got, then the
+  step's ordinal among the run's waits and the test line that awaited it:
+  `alice expected 481, got 200 OK at step 7 (expect at tests/it/foo.rs:42)`.
+- **A timeout** names the awaited message and its dialog: a response by its
+  status and request (`alice timed out after 5s waiting for a 200 to BYE
+  CSeq 3 (Call-ID c, From-tag a1, To-tag b1)`), a request by its method and
+  the dialogs the UA holds, the ones it should name.
+- **The RFC audit gate** says so apart from an assertion: `red because RFC
+  audit rule <id> fired (charged to <party>) at message #<n> (<sender> →
+  <receiver>  <first line>)`, then one line per finding. The `#n` is the
+  message's position in the audit's view, the index a
+  `WaiverScope::at_position` takes. Do not flip an `expect` to see what the SUT
+  did: the dump's ladder and trace already show it.
+- **A dialog-table verdict** reads `red because dialog rule <rule> fired on
+  <ua>: <request> …`.
+- **A model invariant** a B2BUA turn broke reads `model invariant <name>
+  violated after <turn>: <detail>`, the call's record following. The
+  dispatcher isolates that turn's panic, so the scenario may fail later on
+  something else (a timeout): the dump then leads with `red because model
+  invariant …` and puts the scenario's own failure on a `then:` line.
+  `finish()` fails on it too.
+
+The dump follows, in this order:
+
+1. `══ FAILED '<name>': <digest> ══` — the line above.
+2. **wire ladder** — every recorded message, sender → receiver, relative time.
+3. **SUT trace per call** — each sampled call's trace-plane facts (ADR-0026),
+   grouped per call, one line each: `sip.in`/`sip.out` with the message's
+   first line, `rule.fired`, `rule.observed`, `rule.transition`,
+   `call.transition`, `limiter`, `http.*`. Any trace kind a SUT adds (timer
+   arm/cancel/fire facts) appears here with no harness change. Bounded: the
+   last 8 calls, the last 80 facts of each.
+4. **What each SUT adds** (`FailureView`): for a B2BUA, the timer ledger of
+   every live call — id, deadline relative to now, leg.
+5. **UA dialog tables** — each simulated UA's dialogs (Call-ID, local and
+   remote tag, state, last remote CSeq) and the verdicts it recorded.
+6. **SUT log** — the tail of the lifecycle log lines (the last 200).
+
+`scenario_harness::expect_failure` runs a scenario expected to fail and
+returns its panic message and dump: the seam a test of the failure output
+uses.
+
 ## Module-doc pointers (the manual)
 
 | Where | What it explains |
@@ -106,7 +155,8 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
 | `crates/sip-clock/src/lib.rs` module doc | The clock-seam rationale: behaviour on `tokio::time`, `now_ms()` timestamps only, HA absolute-deadline + skew re-anchor |
 | `crates/sip-net/src/simulated.rs` — `SimulatedSignalingNetwork::new` doc | The definitive ≥1 ms transit-coercion rationale |
 | `crates/sip-net/src/rfc_audit/mod.rs` module doc | The RFC audit suite: rule layout, subject dispatch, advisory lanes |
-| `crates/scenario-harness/src/agent.rs` module doc + `finish()` doc | What the DSL auto-fills; exactly what gates at `finish()` and what doesn't |
+| `crates/scenario-harness/src/agent/mod.rs` module doc + `finish()` doc | What the DSL auto-fills; exactly what gates at `finish()` and what doesn't |
+| `crates/scenario-harness/src/agent/failure_dump.rs` module doc | The failure dump: the digest, its sections, `FailureView` |
 | `crates/scenario-harness/src/callflow.rs` module doc | The reusable choreography — "use these; don't re-type the dance" |
 | `crates/b2bua-harness/src/lib.rs` — `B2buaScene` + `assert_fully_reaped` docs | Canonical ports, the six-check leak oracle |
 | `crates/failover-harness/src/lib.rs` + `src/harness.rs` | Cluster invariants, `transparent_matrix!`, `worker_clock_offsets` design |

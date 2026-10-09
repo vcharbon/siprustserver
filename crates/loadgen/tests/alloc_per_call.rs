@@ -48,6 +48,7 @@ async fn setup(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>
     let (uac, uas, refer) = (base, base + 1, base + 2);
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", uas)
         .tune(|c| c.relay_headers = vec!["X-Loadgen-Id".to_string()])
+        .untraced()
         .start(&h, "b2bua", &format!("127.0.0.1:{}", base + 3))
         .await;
     let correlation = Correlation::header("X-Loadgen-Id");

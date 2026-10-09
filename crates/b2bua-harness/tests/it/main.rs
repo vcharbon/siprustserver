@@ -53,6 +53,7 @@ mod early_dialog_bye;
 mod ended_leg_txn_timeout;
 mod failure;
 mod failure_consult_bounds;
+mod failure_dump;
 mod failure_header_relay;
 mod fake_prack;
 mod fake_prack_answer;

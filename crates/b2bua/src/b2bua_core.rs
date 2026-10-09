@@ -825,6 +825,19 @@ impl B2buaCore {
         self.ctx.state.peek(call_ref)
     }
 
+    /// Every call this worker serves, read through a probe that outlives a
+    /// borrow of the core and reads `None` once the worker's state is gone
+    /// (introspection: a failure dump's view of the live calls).
+    pub fn live_calls_probe(&self) -> Arc<dyn Fn() -> Option<Vec<call::Call>> + Send + Sync> {
+        let ctx = Arc::downgrade(&self.ctx);
+        Arc::new(move || {
+            let ctx = ctx.upgrade()?;
+            let mut refs = ctx.state.live_call_refs();
+            refs.sort();
+            Some(refs.iter().filter_map(|r| ctx.state.peek(r)).collect())
+        })
+    }
+
     /// New calls admitted at ingress whose turn has not created their call
     /// yet; 0 once every admitted turn has run or been dropped.
     pub fn unborn_calls(&self) -> u64 {

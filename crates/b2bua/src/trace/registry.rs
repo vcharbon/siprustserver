@@ -10,9 +10,11 @@
 //! what a takeover backup needs to open its own linked root.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use observe::{CallIdentity, CallSpan, SampleAdmission, TraceEvent};
+use load_shed::{at_ms, TokenBucket};
+use observe::{CallIdentity, CallSpan, RateDraw, SampleAdmission, TraceEvent};
 
 /// The correlation triple stamped on a `Call` when a trace activates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +219,9 @@ pub fn adopt_into(traces: &CallTraces, call: &mut call::Call, now_ms: i64) {
 
 static PROCESS_TRACES: OnceLock<RwLock<Arc<CallTraces>>> = OnceLock::new();
 
+/// Whether anything installed the process's registry.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
 fn cell() -> &'static RwLock<Arc<CallTraces>> {
     PROCESS_TRACES.get_or_init(|| RwLock::new(Arc::new(CallTraces::from_env(0))))
 }
@@ -233,6 +238,32 @@ pub fn traces() -> Arc<CallTraces> {
 /// process, so there is one registry.
 pub fn install_process_traces(registry: Arc<CallTraces>) {
     *cell().write().expect("process trace registry lock") = registry;
+    INSTALLED.store(true, Ordering::SeqCst);
+}
+
+/// [`install_process_traces`] unless a registry was installed already, so a
+/// default never displaces one a runner or a test chose. Returns whether it
+/// installed.
+pub fn install_process_traces_unless_installed(registry: Arc<CallTraces>) -> bool {
+    let mut slot = cell().write().expect("process trace registry lock");
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    *slot = registry;
+    true
+}
+
+impl CallTraces {
+    /// A gate that traces every call up to `max_active` at once, with no
+    /// activation rate limit and no header: a test harness, whose failure
+    /// output reads each call's story.
+    pub fn sample_every_call(max_active: usize) -> Arc<Self> {
+        let unlimited = TokenBucket::full(1e12, 1e12, at_ms(0));
+        Arc::new(Self::new(
+            SampleAdmission::new(true, 1.0, max_active, RateDraw::seeded(1), unlimited),
+            false,
+        ))
+    }
 }
 
 #[cfg(test)]
