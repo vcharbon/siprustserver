@@ -8,10 +8,11 @@ use sip_message::generators::InDialogMethod;
 
 use super::answer::discharge_on_teardown;
 use super::goals::{FinalAssert, GoalStep};
+use super::held::{answer_held, callee_early_request, ring};
 use super::ledger::{ObligationKey, ObligationKind};
 use super::originate::{
-    originate_in_dialog, originate_initial_invite, originate_reinvite, originate_update,
-    ping_options_once, send_request_template,
+    originate_early, originate_in_dialog, originate_initial_invite, originate_reinvite,
+    originate_update, ping_options_once, send_request_template,
 };
 use super::runner::ActorState;
 use super::script::{consume_final_fact, drive_respond, expect_request, expect_response};
@@ -125,39 +126,22 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             originate_update(st).await?;
         }
         // C5 (RFC 3311 §5.1): an EARLY UPDATE on the still-pending INVITE's
-        // EARLY dialog (its reliable provisional already PRACKed). Sent through
-        // the pending `ClientInvite` (which learned the early To-tag from the
-        // 183), so it addresses the early dialog and rides its CSeq. Opens an
-        // `Update` obligation + marks the offer outstanding (`sent_updates`);
-        // its 200 closes it and releases the callee's held INVITE 200.
+        // EARLY dialog (its reliable provisional already PRACKed); its 200
+        // releases the callee's held INVITE 200.
         GoalStep::UpdateEarly => {
-            let now = Instant::now();
-            let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
-            let (key, req) = {
-                let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
-                        who: st.role.to_string(),
-                        detail: "UpdateEarly with no pending early dialog".to_string(),
-                    }
-                })?;
-                // Address the early dialog's learned To-tag so the UPDATE rides
-                // that early dialog's OWN CSeq sequence (the same the PRACK used,
-                // §12.2.1.1) — else it reuses the shared counter's value and
-                // collides with the PRACK's CSeq on a SUT-less peer.
-                let tag = inv.early_remote_tag().to_string();
-                let mut req_builder = inv.send_request(InDialogMethod::Update).with_sdp(offer);
-                if !tag.is_empty() {
-                    req_builder = req_builder.with_to_tag(&tag);
-                }
-                let (_txn, req) = req_builder.try_send_with_request().await?;
-                (ObligationKey::new(st.role, ObligationKind::Update, req.cseq().seq()), req)
-            };
-            st.sent_updates.insert(req.cseq().seq());
-            st.obs.record(
-                Observation::RequestSent { key, detail: "early update awaiting 200".to_string() },
-                now,
-            );
+            originate_early(st, InDialogMethod::Update).await?;
         }
+        // A request on an early dialog: the caller's pending INVITE's, or a
+        // held callee's own.
+        GoalStep::EarlyRequest { method, fork } => {
+            if st.dialogs.pending_invite.is_some() {
+                originate_early(st, method).await?;
+            } else {
+                callee_early_request(st, method, fork).await?;
+            }
+        }
+        GoalStep::Ring { forks, reliable } => ring(st, forks, reliable).await?,
+        GoalStep::Answer { winner } => answer_held(st, winner).await?,
         // One in-dialog OPTIONS keepalive ping, its 200 read inline (the reactor
         // has nothing else to do for this leg during the ping).
         GoalStep::Options => {

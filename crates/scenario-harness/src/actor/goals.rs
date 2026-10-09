@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use sip_message::generators::InDialogMethod;
 use sip_message::{EmitOpts, MessageTemplate};
 
+use super::endpoint::ForkWinner;
 use super::state::{await_pred, LegPhase, ObservedState, StateInner};
 use crate::realcall::InvitePlan;
 use crate::StepError;
@@ -187,6 +188,24 @@ pub enum GoalStep {
     /// (`ReliableAnswerEarlyUpdate`) answers it 200 and only THEN sends the final
     /// 200 INVITE. Opens an `Update` obligation on the early dialog's CSeq.
     UpdateEarly,
+    /// Send `method` on an EARLY dialog, before the INVITE's final: a caller on
+    /// its pending INVITE's early dialog, a [`Disposition::Held`](super::Disposition::Held) callee on the
+    /// early dialog of `fork` (`None`: its own tag) once that dialog's
+    /// reliable provisional is PRACKed. An UPDATE carries this endpoint's
+    /// session description as an offer (RFC 3311 §5.1). Opens the method's
+    /// obligation, which its 2xx closes.
+    EarlyRequest { method: InDialogMethod, fork: Option<&'static str> },
+    /// Send the provisionals of a [`Disposition::Held`](super::Disposition::Held) callee's INVITE: one
+    /// per tag in `forks` (distinct early dialogs on the one transaction, RFC
+    /// 3261 §12.1.2), or one under the transaction's own tag when `forks` is
+    /// empty. `reliable` makes each a `183` with `Require: 100rel`, an `RSeq`
+    /// and the answer SDP (RFC 3262), else a plain `180`.
+    Ring { forks: &'static [&'static str], reliable: bool },
+    /// Answer a [`Disposition::Held`](super::Disposition::Held) callee's INVITE `200` + SDP under
+    /// `winner` (`None`: the transaction's own tag). The goal waits until the
+    /// answering early dialog's reliable provisional is PRACKed, and every
+    /// fork's for an unrung winner (RFC 3262 §3).
+    Answer { winner: Option<ForkWinner> },
     /// Send ONE in-dialog OPTIONS keepalive ping on the confirmed dialog and
     /// read its 200 inline — the `long_call` single ping. The first ping stamps
     /// the `keepalive_ack` feed.
@@ -323,6 +342,9 @@ impl GoalStep {
             GoalStep::Reinvite => "reinvite",
             GoalStep::Update => "update",
             GoalStep::UpdateEarly => "update_early",
+            GoalStep::EarlyRequest { .. } => "early_request",
+            GoalStep::Ring { .. } => "ring",
+            GoalStep::Answer { .. } => "answer",
             GoalStep::Options => "options",
             GoalStep::EveryOptions { .. } => "every_options",
             GoalStep::Cancel { .. } => "cancel",

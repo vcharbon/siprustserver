@@ -215,6 +215,46 @@ pub(super) async fn send_request_template(
     Ok(())
 }
 
+/// Originate `method` on the caller's EARLY dialog — the still-pending
+/// INVITE's, addressed by the To-tag its provisional taught, so the request
+/// rides that early dialog's own CSeq sequence (RFC 3261 §12.2.1.1). An
+/// UPDATE carries this leg's offer and marks it outstanding (RFC 3311 §5.1).
+/// Opens the method's obligation, closed by its 2xx.
+pub(super) async fn originate_early(
+    st: &mut ActorState<'_>,
+    method: InDialogMethod,
+) -> Result<(), StepError> {
+    let now = Instant::now();
+    let offer = st.media.reoffer_sdp().unwrap_or(crate::OFFER_SDP);
+    let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+        who: st.role.to_string(),
+        detail: format!("early {} with no pending early dialog", method.as_str()),
+    })?;
+    let tag = inv.early_remote_tag().to_string();
+    let mut req = inv.send_request(method);
+    if method == InDialogMethod::Update {
+        req = req.with_sdp(offer);
+    }
+    if !tag.is_empty() {
+        req = req.with_to_tag(&tag);
+    }
+    let (_txn, req) = req.try_send_with_request().await?;
+    let cseq = req.cseq().seq();
+    let kind =
+        ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
+    if method == InDialogMethod::Update {
+        st.sent_updates.insert(cseq);
+    }
+    st.obs.record(
+        Observation::RequestSent {
+            key: ObligationKey::new(st.role, kind, cseq),
+            detail: format!("early {} awaiting 2xx", method.as_str()),
+        },
+        now,
+    );
+    Ok(())
+}
+
 /// Originate ONE delayed-offer (bodyless) re-INVITE on the confirmed dialog and
 /// register its bookkeeping: open the `ReInvite` obligation keyed on its CSeq,
 /// track the CSeq in `sent_reinvites` (the 2xx-ACK / completion path) and retain
@@ -260,7 +300,7 @@ pub(super) async fn wait_reinvite_retry(retry: &Option<Instant>) {
 /// Shared by [`GoalStep::Update`] and the S6 collision RETRY arm.
 pub(super) async fn originate_update(st: &mut ActorState<'_>) -> Result<(), StepError> {
     let now = Instant::now();
-    let offer = st.media.offer_sdp().unwrap_or(crate::OFFER_SDP);
+    let offer = st.media.reoffer_sdp().unwrap_or(crate::OFFER_SDP);
     let (key, dialog_clone) = {
         let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
             who: st.role.to_string(),

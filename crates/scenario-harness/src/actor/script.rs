@@ -26,6 +26,8 @@ use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipRequest};
 /// binding-consuming) goal additionally requires its consumable — a new
 /// response fact, a matching parked request, or a bound/parked transaction
 /// (a tombstoned binding enables the arm so it FAILS fast, never by timeout).
+/// A held callee's ring, answer and early request wait for its held INVITE
+/// and the PRACKs RFC 3262 requires first (`super::held`).
 pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
     match st.goals.next_step() {
         Some(GoalStep::ExpectRequest { kind, .. }) => {
@@ -41,6 +43,11 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             let need_final = *status >= 200;
             let pin = cseq_method.as_deref();
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
+        }
+        Some(GoalStep::Ring { .. }) => super::held::ring_ready(st),
+        Some(GoalStep::Answer { winner }) => super::held::answer_ready(st, *winner),
+        Some(GoalStep::EarlyRequest { fork, .. }) if st.dialogs.pending_invite.is_none() => {
+            super::held::early_request_ready(st, *fork)
         }
         Some(
             GoalStep::ObserveFinal { cseq_method, .. } | GoalStep::ExpectFinal { cseq_method, .. },

@@ -171,6 +171,16 @@ pub struct ActorState<'c> {
     /// (180 sent, no final EVER originated by this leg): released only by an
     /// inbound CANCEL — the SUT's no-answer timer firing — which 487s it.
     pub(super) held_silent: Option<ServerTxn>,
+    /// A [`Disposition::Held`] callee's initial INVITE server transaction,
+    /// rung, used for early-dialog requests and answered by its goals.
+    pub(super) held: Option<ServerTxn>,
+    /// The To-tags of reliable provisionals this callee sent that no PRACK
+    /// has acknowledged yet (RFC 3262 §3).
+    pub(super) unpracked: HashSet<String>,
+    /// The early dialogs this callee sent requests on, by local tag: the
+    /// dialog its 2xx confirms continues that dialog's CSeq (RFC 3261
+    /// §12.2.1.1).
+    pub(super) early_dialogs: HashMap<String, Dialog>,
     /// `(fork To-tag, RSeq)` pairs of reliable provisionals this caller has
     /// already PRACKed — so a retransmitted 183 is not double-PRACKed, while
     /// a FORKED reliable 183 (distinct tag, same RSeq space per §12.1.2 — each
@@ -365,6 +375,9 @@ impl<'c> ActorState<'c> {
             answered_reinvites: HashSet::new(),
             pending_prack_answer: None,
             held_silent: None,
+            held: None,
+            unpracked: HashSet::new(),
+            early_dialogs: HashMap::new(),
             pracked_rseqs: HashSet::new(),
             fork_answer: None,
             sent_reinvites: HashSet::new(),

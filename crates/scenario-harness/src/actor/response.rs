@@ -436,7 +436,14 @@ pub(super) async fn react_response(
                     // re-INVITE (C6/S6), so a glare barrier can gate on
                     // `reneg_count` regardless of the offer's method.
                     st.obs.record(
-                        Observation::RenegCompleted { leg: st.role, cseq: resp.cseq().seq() },
+                        Observation::RenegCompleted {
+                            leg: st.role,
+                            dialog: (
+                                resp.from().tag().unwrap_or_default().to_string(),
+                                resp.to().tag().unwrap_or_default().to_string(),
+                            ),
+                            cseq: resp.cseq().seq(),
+                        },
                         now,
                     );
                     st.feed.on_update_ok.stamp(st.ctx);
@@ -462,7 +469,13 @@ fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant
             Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
             now,
         );
-        st.obs.record(Observation::RenegCompleted { leg: st.role, cseq }, now);
+        let dialog = st
+            .dialogs
+            .confirmed
+            .as_ref()
+            .map(|d| (d.local_tag().to_string(), d.remote_tag().to_string()))
+            .unwrap_or_default();
+        st.obs.record(Observation::RenegCompleted { leg: st.role, dialog, cseq }, now);
         st.feed.on_reinvite_ok.stamp(st.ctx);
     }
 }

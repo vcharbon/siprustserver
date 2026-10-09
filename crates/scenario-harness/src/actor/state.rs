@@ -163,13 +163,15 @@ pub struct LegObservation {
     /// origination can gate on an *observed* inbound request rather than a timed
     /// dwell (the MRF `INFO(EOF)` that must follow the worker's `INFO(play)`).
     received_methods: std::collections::BTreeSet<String>,
-    /// The CSeq numbers of caller-originated renegotiations (re-INVITEs) this
-    /// leg has COMPLETED (2xx received AND ACKed) — a grow-only set (commutative
+    /// The renegotiations (re-INVITEs, UPDATEs) this leg ORIGINATED and
+    /// COMPLETED, as `((local tag, remote tag), CSeq)` — a grow-only set (commutative
     /// fold) whose *cardinality* serializes an N-cycle re-INVITE script: cycle
     /// `i` (0-based) waits until `reneg_count() >= i`, so no two re-INVITEs are
-    /// ever in flight (which would glare into a 491). Distinct from the monotone
-    /// SUBFLOW_RENEG latch, which cannot count.
-    reneg_cseqs: std::collections::BTreeSet<u32>,
+    /// ever in flight (which would glare into a 491). The tags keep apart the
+    /// equal CSeqs of distinct dialogs (an early fork's and the confirmed
+    /// one's). Distinct from the monotone SUBFLOW_RENEG latch, which cannot
+    /// count.
+    reneg_cseqs: std::collections::BTreeSet<((String, String), u32)>,
     /// Whether this leg sent a CANCEL for its establishing INVITE.
     cancel_sent: bool,
     /// Every inbound response this leg's reactor observed, in arrival order — an
@@ -231,7 +233,7 @@ impl LegObservation {
         self.received_methods.contains(method)
     }
 
-    /// How many caller-originated renegotiation cycles (re-INVITEs) this leg has
+    /// How many renegotiations (re-INVITEs, UPDATEs) this leg originated and
     /// COMPLETED — the count an N-cycle re-INVITE script's per-cycle barrier
     /// compares against to serialize the chain.
     pub fn reneg_count(&self) -> u32 {
@@ -417,11 +419,12 @@ pub enum Observation {
     CancelSent { leg: &'static str },
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
-    /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
-    /// completed — its 2xx was received and ACKed. Folds into the leg's
-    /// grow-only completed-reneg set (keyed by CSeq, so a re-emitted 2xx cannot
-    /// double-count), whose cardinality serializes an N-cycle re-INVITE script.
-    RenegCompleted { leg: &'static str, cseq: u32 },
+    /// A renegotiation this leg ORIGINATED on `dialog` (its local and remote
+    /// tags) completed — a re-INVITE's 2xx received and ACKed, an UPDATE's
+    /// 2xx received. Folds into the leg's grow-only completed-reneg set (keyed
+    /// by dialog and CSeq, so a re-emitted 2xx cannot double-count), whose
+    /// cardinality serializes an N-cycle re-INVITE script.
+    RenegCompleted { leg: &'static str, dialog: (String, String), cseq: u32 },
     /// An inbound response observed on `leg` — appended to the leg's ordered
     /// response log (one writer: the leg's own reactor), which reception goals
     /// consume through a per-actor cursor.
@@ -486,8 +489,8 @@ impl StateInner {
             Observation::AcceptedEnding => self.accepted_ending = true,
             Observation::CancelSent { leg } => self.leg_mut(leg).cancel_sent = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
-            Observation::RenegCompleted { leg, cseq } => {
-                self.leg_mut(leg).reneg_cseqs.insert(cseq);
+            Observation::RenegCompleted { leg, dialog, cseq } => {
+                self.leg_mut(leg).reneg_cseqs.insert((dialog, cseq));
             }
             Observation::LegResponse { leg, fact } => {
                 self.leg_mut(leg).responses.push(fact);

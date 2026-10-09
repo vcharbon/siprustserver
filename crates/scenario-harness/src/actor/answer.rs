@@ -103,6 +103,11 @@ pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     let cseq = uas.request().cseq().seq();
     let now = Instant::now();
     let mut dialog = uas.dialog();
+    // The dialog this 2xx confirms continues the CSeq its early requests
+    // spent (RFC 3261 §12.2.1.1).
+    if let Some(early) = st.early_dialogs.get(dialog.local_tag()) {
+        dialog.set_local_cseq(early.local_cseq());
+    }
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
     dialog.set_shared_cseq_dev(st.cseq_dev.clone());
     st.dialogs.confirmed = Some(dialog);
@@ -239,6 +244,8 @@ pub(super) async fn apply_disposition(
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             st.pending_prack_answer = Some(uas);
         }
+        // The goals ring and answer the held INVITE (`super::held`).
+        Disposition::Held => super::held::hold_initial(st, uas).await?,
         // Scripted park-or-react for the initial INVITE: park when a remaining
         // goal will consume/answer it, else auto-answer 200 (the RFC-compliant
         // react default) and record the stray. The ADR-0024 §5 automatic answers `100

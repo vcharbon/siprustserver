@@ -106,6 +106,13 @@ pub enum Disposition {
     /// as a serviced stray) — peers stay RFC-compliant when the SUT relays
     /// traffic the script never modeled.
     Scripted,
+    /// Holds the initial INVITE with no automatic response: the actor's goals
+    /// ring it ([`GoalStep::Ring`](super::GoalStep::Ring)), may send requests
+    /// on its early dialogs ([`GoalStep::EarlyRequest`](super::GoalStep::EarlyRequest)),
+    /// and answer it ([`GoalStep::Answer`](super::GoalStep::Answer)). A CANCEL
+    /// 487s the held INVITE and drops the remaining goals: no dialog is left
+    /// for them to act on.
+    Held,
 }
 
 /// The fork a [`Disposition::ForkingRing`] callee answers `200` under.
@@ -171,6 +178,13 @@ impl MediaState {
     /// The SDP to offer on an originated INVITE.
     pub(super) fn offer_sdp(&self) -> Option<&'static str> {
         self.offer
+    }
+
+    /// The SDP this endpoint offers on a renegotiation: its own session
+    /// description, the offer an offerer made or the answer an answerer gave,
+    /// so the session's origin stays one across the call (RFC 3264 §8).
+    pub(super) fn reoffer_sdp(&self) -> Option<&'static str> {
+        self.offer.or(self.answer)
     }
 }
 

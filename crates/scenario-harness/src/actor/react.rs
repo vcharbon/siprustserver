@@ -42,6 +42,7 @@ pub(super) async fn cancel_pending_initial(
         .map(|ta| ta.uas)
         .or_else(|| st.pending_prack_answer.take())
         .or_else(|| st.held_silent.take())
+        .or_else(|| st.held.take())
         // A script-BOUND initial INVITE (claimed by `ExpectRequest{Initial}`,
         // provisionals already sent on the bound txn) with no scripted CANCEL
         // claim: the automatic mirrors the parked path so the peer never
@@ -80,6 +81,10 @@ pub(super) async fn cancel_pending_initial(
         }
         st.obs.record(Observation::LegTerminated { leg: st.role }, now);
         st.scope.mark_terminated();
+        // A held INVITE's goals act on the dialog the CANCEL just prevented.
+        if matches!(st.disposition, Disposition::Held) {
+            st.goals.abandon();
+        }
     }
     Ok(())
 }
@@ -422,6 +427,9 @@ pub(super) async fn react_in_dialog_request(
             st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to().tag().map(str::to_owned);
             uas.respond(200, "OK").try_send().await?;
+            if let Some(tag) = &prack_tag {
+                st.unpracked.remove(tag);
+            }
             st.obs.record(
                 Observation::InDialogRequest {
                     leg: st.role,
