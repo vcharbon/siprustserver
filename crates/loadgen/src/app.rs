@@ -68,6 +68,11 @@ pub struct Args {
     /// Max concurrent in-flight calls (offered load above this is dropped+counted).
     #[arg(long, default_value_t = 2000)]
     pub max_in_flight: usize,
+    /// The run drives the SUT into overload on purpose: a `503` to a
+    /// non-emergency call's initial INVITE before it connects is an accepted
+    /// ending (`refused_overload`) rather than a failure.
+    #[arg(long)]
+    pub overload_expected: bool,
     /// Path to an authored `EndpointConfig` JSON (the shared e2e-model
     /// environment axis): roles `alice` (UAC bind), `bob` (UAS bind), `charlie`
     /// (REFER-target bind), `lb` (the SUT ingress the INVITE routes through),
@@ -479,6 +484,11 @@ pub async fn run_with_inputs(
     let duration = if args.explicit("duration") { args.duration } else { profile.duration_secs };
     let max_in_flight =
         if args.explicit("max_in_flight") { args.max_in_flight } else { profile.max_in_flight };
+    let overload_expected = if args.explicit("overload_expected") {
+        args.overload_expected
+    } else {
+        profile.overload_expected
+    };
     let sample_cap = if args.explicit("sample_cap") { args.sample_cap } else { profile.sample_cap };
     let background_record_every = if args.explicit("background_record_every") {
         args.background_record_every
@@ -649,6 +659,7 @@ pub async fn run_with_inputs(
         },
         default_tuning: base_tuning,
         tuning,
+        overload_expected,
     };
 
     // Chaos correlation: the marker log the `POST /chaos` endpoint feeds and the

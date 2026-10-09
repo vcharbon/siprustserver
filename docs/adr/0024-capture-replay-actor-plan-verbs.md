@@ -143,7 +143,7 @@ provisionals, ACK-to-2xx on originated INVITEs, and the non-2xx hop-ACK
 stay reactor-owned.
 
 `Scripted` is orthogonal to origination. The caller attribution used by
-`into_result` (and the glare owner-dwell) keys on **which actor's first
+the scenario verdict (and the glare owner-dwell) keys on **which actor's first
 goal originates the dialog** (`Invite`/`InviteTemplate`), not on
 `Disposition::Caller`.
 
@@ -227,9 +227,9 @@ their anchor.
 
 The replay record (`Vec<RecordedFinal { key, expected, observed }>` plus
 the §2 serviced-stray entries) is queryable from `ObservedState` after the
-run; the verdict is NOT gated on agreement. `into_result`/`Expect` are
-unchanged: a replayed call declares `Expect::HappyBye` (or an existing
-terminal) and the strict goals carry the per-step fidelity.
+run; the verdict is NOT gated on agreement. The verdict and its accepted
+endings are unchanged: a replayed call declares `Expect::answered()` (or
+another accepted branch) and the strict goals carry the per-step fidelity.
 
 A goal's deadline is the standard bounded wait; a capture-declared tighter
 bound lowers onto a per-goal deadline override.

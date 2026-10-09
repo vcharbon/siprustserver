@@ -1,5 +1,6 @@
 //! The load generator's catalogued metric families: completed calls and
-//! their latency per scenario, the SIP round trips per scenario and exchange,
+//! their latency per scenario, the accepted branch or failed step of each,
+//! the SIP round trips per scenario and exchange,
 //! the demux's canaries, the simulated loss, the
 //! chaos markers, the offered rate and the process's RSS. [`CATALOGUE`] lists
 //! them in `/metrics` order.
@@ -14,12 +15,11 @@ use crate::mux::{Exchange, OrphanReason};
 pub const SCENARIO: Dim = Dim::new("scenario", &[]);
 
 /// A call's result class; a wrong status is `status_<code>`, under its own
-/// series; the shape's expected reject is `expected_reject`.
+/// series. Every accepted branch is `ok`.
 pub const CLASS: Dim = Dim::new(
     "class",
     &[
         "ok",
-        "expected_reject",
         "timeout",
         "wrong_method",
         "unexpected",
@@ -31,6 +31,14 @@ pub const CLASS: Dim = Dim::new(
         "panic",
     ],
 );
+
+/// The accepted ending a call ended on: a scenario's declared branch name;
+/// each one observed gets its own series.
+pub const BRANCH: Dim = Dim::new("branch", &[]);
+
+/// The step a call failed at (`<who>[:<kind>#<index>]@<barrier>`); each one
+/// observed gets its own series.
+pub const STEP: Dim = Dim::new("step", &[]);
 
 /// Whether a chaos marker fell within the call's lifetime.
 pub const CHAOS: Dim = Dim::new("chaos", &["clear", "near"]);
@@ -65,6 +73,20 @@ pub const CALLS: Family = Family::counter(
     "loadgen_calls_total",
     Labels::Product(&[SCENARIO, CLASS, CHAOS]),
     "Completed load calls by scenario, result class, and chaos proximity.",
+)
+.semi_open();
+
+pub const BRANCHES: Family = Family::counter(
+    "loadgen_branch_total",
+    Labels::Product(&[SCENARIO, BRANCH]),
+    "Calls classed ok, by scenario and the accepted branch they ended on.",
+)
+.semi_open();
+
+pub const FAILED_STEPS: Family = Family::counter(
+    "loadgen_failed_step_total",
+    Labels::Product(&[SCENARIO, STEP]),
+    "Calls whose scenario failed, by scenario and the step they failed at.",
 )
 .semi_open();
 
@@ -211,6 +233,8 @@ pub const CATALOGUE: Catalogue = Catalogue {
     binary: "loadgen",
     sections: &[&[
         CALLS,
+        BRANCHES,
+        FAILED_STEPS,
         SHED,
         INFLIGHT,
         STARTED,

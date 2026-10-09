@@ -5,11 +5,12 @@
 
 use std::time::Duration;
 
+use super::ending::{Branch, Ending, Expect};
 use super::endpoint::{
     CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use super::goals::{Barrier, Goal, GoalStep};
-use super::spec::{ActorCall, ActorScenario, Expect};
+use super::spec::{ActorCall, ActorScenario};
 use super::state::{LegPhase, StateInner, SubflowState};
 use super::{phase, ActorSpec, SettleBarrier};
 use crate::realcall::{CallEnv, ScenarioId};
@@ -189,7 +190,7 @@ impl ActorScenario for Refer {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -200,21 +201,16 @@ impl ActorScenario for Refer {
     }
 }
 
-/// A blind transfer whose target DECLINES (`603`), actor-declared — the port of
-/// `ReferCharlieReject`. A↔B establish, bob REFERs
-/// to charlie, charlie 603-declines the transfer INVITE; the transfer fails and
-/// A↔B stays up. The linear body returns its NOK terminal and leaves the scope
-/// Confirmed so the *driver's* teardown BYEs A↔B; the actor runner OWNS teardown
-/// (its own per-actor scopes), so here **alice BYEs A↔B herself** once the
-/// decline is observed — the call reaches a clean torn-down + settled
-/// [`CallVerdict::Ok`](super::CallVerdict::Ok), which [`Expect::TransferDeclined`]
-/// then maps onto the EXACT contract Err (`UnexpectedKind { who: "refer_charlie_reject", detail:
-/// "transfer declined by charlie (603)" }`). Same net SUT effect (A↔B BYE'd,
-/// fully reaped), same downstream `Result`.
+/// A blind transfer whose target DECLINES (`603`), actor-declared. A↔B
+/// establish, bob REFERs to charlie, charlie 603-declines the transfer INVITE;
+/// the transfer fails and A↔B stays up. The actor runner OWNS teardown (its own
+/// per-actor scopes), so **alice BYEs A↔B herself** once the decline is
+/// observed — the call tears down, settles, and succeeds under its
+/// [`TRANSFER_DECLINED`] branch.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.10):
 /// NO phases, NO anchors, checkpoint `time_to_200` only, NO `mark_ringing`;
-/// guard errors + the terminal all under `who: "refer_charlie_reject"`.
+/// guard errors under `who: "refer_charlie_reject"`.
 pub struct ReferCharlieReject {
     /// The `X-Api-Call.refer_key` the SUT's REFER backend authorizes.
     pub refer_key: String,
@@ -231,6 +227,10 @@ impl ReferCharlieReject {
 fn declined(s: &StateInner) -> bool {
     s.leg_at_least("charlie", LegPhase::Terminated)
 }
+
+/// The declined transfer's accepted ending: the transfer target refused, and
+/// the original call tore down.
+const TRANSFER_DECLINED: Branch = Branch::new("transfer_declined", Ending::Observed(declined));
 
 impl ActorScenario for ReferCharlieReject {
     fn id(&self) -> ScenarioId {
@@ -331,7 +331,7 @@ impl ActorScenario for ReferCharlieReject {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::TransferDeclined,
+            expect: Expect::one(TRANSFER_DECLINED),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -457,7 +457,7 @@ impl ActorScenario for ReroutingPrack {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -556,7 +556,7 @@ impl ActorScenario for PrackUpdate {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -646,7 +646,7 @@ impl ActorScenario for Reinvite {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -733,7 +733,7 @@ impl ActorScenario for OptionsHold {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -822,7 +822,7 @@ impl ActorScenario for LongCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -833,17 +833,14 @@ impl ActorScenario for LongCall {
     }
 }
 
-/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared — the port
-/// of `InviteReject`. Alice INVITEs, bob 486s (the
-/// final auto-ACKed on both legs), and the transaction completes with nothing to
-/// CANCEL/BYE; the SUT must still reap the rejected call. Alice has ONLY the
-/// INVITE goal (her INVITE is rejected — no dialog, no BYE); the clean torn-down
-/// verdict is re-interpreted by [`Expect::Reject`] into the contract terminal.
+/// The callee REJECTS the INVITE with `486 Busy Here`, actor-declared. Alice
+/// INVITEs, bob 486s (the final auto-ACKed on both legs), and the transaction
+/// completes with nothing to CANCEL/BYE; the SUT must still reap the rejected
+/// call. Alice has ONLY the INVITE goal (her INVITE is rejected — no dialog, no
+/// BYE); the torn-down, settled call succeeds under its `rejected` branch.
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.8):
-/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`; terminal
-/// `WrongStatus { who: "alice", expected: 200, got: 486, reason: "Busy Here" }`
-/// → class `status_486`, case `alice@start`.
+/// NO phases, NO anchors, NO checkpoints, NO `mark_ringing`.
 pub struct InviteReject;
 
 impl ActorScenario for InviteReject {
@@ -898,7 +895,7 @@ impl ActorScenario for InviteReject {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::Reject(486),
+            expect: Expect::one(Branch::rejected(486)),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -909,17 +906,13 @@ impl ActorScenario for InviteReject {
     }
 }
 
-/// The caller ABANDONS after ringing (CANCEL), actor-declared — the port of
-/// `AbandonRinging`. Alice INVITEs, sees the 180,
-/// then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT relays the
-/// CANCEL to bob, who 200s it and 487s his held INVITE, and both legs reap. The
-/// clean torn-down verdict is re-interpreted by [`Expect::AbandonedEarly`] into
-/// the synthetic terminal.
+/// The caller ABANDONS after ringing (CANCEL), actor-declared. Alice INVITEs,
+/// sees the 180, then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT
+/// relays the CANCEL to bob, who 200s it and 487s his held INVITE, and both legs
+/// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`].
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
-/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`;
-/// terminal `Timeout { who: "alice-abandoned-after-ringing" }` → class `timeout`,
-/// case `alice-abandoned-after-ringing@start`.
+/// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`.
 pub struct AbandonRinging;
 
 impl ActorScenario for AbandonRinging {
@@ -984,7 +977,7 @@ impl ActorScenario for AbandonRinging {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::AbandonedEarly,
+            expect: Expect::one(Branch::ABANDONED),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -1065,7 +1058,7 @@ impl ActorScenario for BasicCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),

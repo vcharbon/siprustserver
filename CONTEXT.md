@@ -921,7 +921,7 @@ load report directory, metrics label, and functional-body attachment key are the
 same string; a duplicate id panics at registration), its published **Message
 anchors** and required input, an optional authoring params schema, the load
 attributes the driver consults per call (`needs_charlie`/`needs_bob2`/
-`emergency`, default/failure mix weights), and the optional **load body**
+`emergency`, default/abnormal-end mix weights), and the optional **load body**
 factory. Third-party crates `register()` their own on top of `with_defaults()`.
 _Avoid_: "scenario" for a registered shape (say **shape**; `--scenario name=w`
 selects one by id but does not name the concept); declaring a shape's
@@ -968,13 +968,34 @@ it with the **egress rewrite** (identity vs addressing — orthogonal halves of
 **Load profile**:
 The authored JSON run spec for the load fleet (`--load-profile`, schema
 `load-profile.schema.json`): rate/duration/concurrency, sampling + report
-cadence, global loss/retransmit robustness, and the shape **mix** (id, weight,
-attached case, per-entry overrides). The load analogue of a **Campaign**: a
+cadence, global loss/retransmit robustness, whether the run expects overload
+(`overloadExpected`), and the shape **mix** (id, weight, attached case,
+per-entry overrides). The load analogue of a **Campaign**: a
 Campaign expands a functional {case × shape × infra} matrix; a Load profile
 parameterizes one sustained run. Profile supplies defaults; an explicit CLI flag
 overrides. The rate is live-retargetable (`POST /rate`, re-anchoring governor).
 _Avoid_: "campaign" for a load run; putting addressing/egress in it (that is the
 environment axis — **Endpoint config**).
+
+**Accepted ending** (`scenario_harness::actor::{Branch, Expect}`):
+One named way a scenario's call may end and still be a success (`answered`,
+`rejected`, `early_media_rejected`, `abandoned`, `transfer_declined`, or a
+scenario-named predicate over the observed state). A call that tears down and
+settles on one of them is `ScenarioVerdict::Success { branch }`, classed `ok`
+and counted under `loadgen_branch_total{scenario,branch}`. The harness adds
+`refused_overload` (a 503 to a non-emergency call before it connects) only in a
+run whose **Load profile** sets `overloadExpected`.
+_Avoid_: excusing a non-200 ending outside the scenario (a consumer-side class
+filter, a per-descriptor reject status): the scenario states it, and `ok` means
+ok everywhere.
+
+**Failed step** (`scenario_harness::actor::FailedAt`):
+Where a call failed: the agent, its pending goal (kind and index) and the
+controller barrier pending, keyed `<who>[:<kind>#<index>]@<barrier>` (a barrier
+that never held reads as its bare name, e.g. `settle`). It is the failed call's
+sample case and the `step` label of `loadgen_failed_step_total`.
+_Avoid_: the last lifecycle phase reached as the failure's location (it names
+where the call got to, not what failed).
 
 **check_fail** (result class):
 The load report/metrics class an otherwise-OK **sampled** call reclassifies to

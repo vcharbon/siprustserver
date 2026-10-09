@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use scenario_harness::actor::{
-    phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, CtxFeed, Disposition,
-    Expect, ExpectBranch, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier, StateInner,
-    SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
+    phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
+    Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
+    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
@@ -69,16 +69,16 @@ pub enum Establishment {
         loser_late_200: Option<&'static str>,
     },
     /// TERMINAL: the callee rejects with `code` and that IS the call — no
-    /// dialog, no teardown ([`Expect::Reject`]).
+    /// dialog, no teardown (the `rejected` branch).
     RejectTerminal { code: u16 },
     /// TERMINAL: the caller CANCELs once ringing (RFC 3261 §9.1) — no dialog,
-    /// no teardown ([`Expect::AbandonedEarly`]).
+    /// no teardown ([`Branch::ABANDONED`]).
     AbandonAfterRinging,
     /// CANCEL×200 CROSSING (C2/E5): the caller CANCELs while the callee answers,
     /// so the terminal outcome is EITHER confirmed (the 200 crossed the CANCEL,
-    /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). A
-    /// branch-aware race oracle ([`Expect::EitherOf`]); the load lane accepts
-    /// whichever legal branch occurred. Terminal-style (no stages, no separate
+    /// §9.2 — the call tears down) OR cancelled (the CANCEL won — 487). Both are
+    /// accepted endings ([`Branch::ANSWERED`] / [`Branch::ABANDONED`]); the
+    /// verdict names whichever occurred. Terminal-style (no stages, no separate
     /// teardown): the branch-conditional teardown rides the callee.
     CancelAnswerCrossing,
 }
@@ -125,8 +125,8 @@ pub enum Transfer {
     /// `merged` (the conjunction of both realigns).
     Blind { refer_key: String },
     /// The target DECLINES with `code` (603); the transfer fails, the original
-    /// dialog stays up. Replaces the gate with `declined`;
-    /// [`Expect::TransferDeclined`].
+    /// dialog stays up. Replaces the gate with `declined`; the call ends on its
+    /// `transfer_declined` branch.
     BlindDeclined { refer_key: String, code: u16 },
 }
 
@@ -248,6 +248,10 @@ fn declined(s: &StateInner) -> bool {
     s.leg_at_least("charlie", LegPhase::Terminated)
 }
 
+/// The declined transfer's accepted ending: the target refused, and the
+/// original call tore down.
+const TRANSFER_DECLINED: Branch = Branch::new("transfer_declined", Ending::Observed(declined));
+
 impl ShapePlan {
     /// Whether the establishment terminates the call by itself (no dialog to
     /// script or tear down).
@@ -316,7 +320,7 @@ impl ShapePlan {
             caller_needs_answer_sdp: false,
             callees: Vec::new(),
             phases: Vec::new(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
             gate: Barrier::None,
             winner: "bob",
         };
@@ -594,7 +598,7 @@ impl ShapePlan {
                     claim: None,
                 });
                 b.phases.push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
-                b.expect = Expect::Reject(code);
+                b.expect = Expect::one(Branch::rejected(code));
             }
             Establishment::AbandonAfterRinging => {
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
@@ -623,7 +627,7 @@ impl ShapePlan {
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
-                b.expect = Expect::AbandonedEarly;
+                b.expect = Expect::one(Branch::ABANDONED);
             }
             Establishment::CancelAnswerCrossing => {
                 // C2/E5: alice INVITEs then CANCELs (gated on ringing, after a
@@ -633,8 +637,7 @@ impl ShapePlan {
                 // branch-conditional teardown rides bob (ByeIfConfirmed), so a
                 // 487 never trips alice's incidental-failure path — she keeps
                 // only [Invite, Cancel].
-                const E5_BRANCHES: &[ExpectBranch] =
-                    &[ExpectBranch::Answered, ExpectBranch::Cancelled { code: 487 }];
+                const E5_BRANCHES: &[Branch] = &[Branch::ANSWERED, Branch::ABANDONED];
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
                 let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
                 b.caller_goals.push(Goal::new(
@@ -672,7 +675,7 @@ impl ShapePlan {
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
-                b.expect = Expect::EitherOf(E5_BRANCHES);
+                b.expect = Expect::of(E5_BRANCHES);
             }
         }
         Ok(())
@@ -814,7 +817,7 @@ impl ShapePlan {
         } else {
             b.phases.push(phase("declined", declined));
             b.gate = Barrier::pred("declined", declined);
-            b.expect = Expect::TransferDeclined;
+            b.expect = Expect::one(TRANSFER_DECLINED);
         }
         Ok(())
     }

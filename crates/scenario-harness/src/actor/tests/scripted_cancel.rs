@@ -56,7 +56,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");
             assert!(
                 detail.contains("consumed by an automatic"),

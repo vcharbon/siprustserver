@@ -1461,9 +1461,9 @@ fetch_loadgen_report() {
     warn "fetch-loadgen: $dest/index.html not present yet (report may not be snapshotted yet)"
   fi
   # Live OK ratio from the loadgen series (best-effort; 0 if VM unreachable).
-  # A shape's expected reject is no failure: it counts with ok.
+  # ok is every ending a scenario accepts.
   local ok_n tot_n
-  ok_n="$(vmq 'sum(loadgen_calls_total{class=~"ok|expected_reject"})')"
+  ok_n="$(vmq 'sum(loadgen_calls_total{class="ok"})')"
   tot_n="$(vmq 'sum(loadgen_calls_total)')"
   log "loadgen totals: ok=${ok_n%.*} total=${tot_n%.*} rss=$(vmq 'max(loadgen_process_resident_memory_bytes)') inflight=$(vmq 'sum(loadgen_inflight)')"
 

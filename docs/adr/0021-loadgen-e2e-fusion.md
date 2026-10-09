@@ -69,7 +69,7 @@ id** onto the same descriptors. A shape may carry one body, the other, or
 an open builder: `with_defaults()` (or `empty()`) then `register()` — a
 third-party crate adds shapes without touching any workspace table; loadgen's
 match tables are deleted and the driver's `MixEntry` is built from descriptors
-(`MixEntry::by_id` / `default_mix` / `failure_mix`).
+(`MixEntry::by_id` / `default_mix` / `abnormal_end_mix`).
 
 **(c) Pluggable correlation strategies.** How the per-call token travels through
 the SUT is a per-run strategy (`loadgen::Correlation`) with two halves — *stamp*

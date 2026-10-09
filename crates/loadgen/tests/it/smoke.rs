@@ -263,6 +263,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_expected: false,
     }
 }
 
@@ -1110,11 +1111,11 @@ async fn loadgen_mux_emergency_split_under_overload() {
     b2bua.assert_fully_reaped();
 }
 
-/// Post-call cleanup across EVERY failure-teardown path, without an endurance
-/// run. A mix of voluntarily-failing scenarios — callee 486 (final reject, no
+/// Post-call cleanup across EVERY abnormal-end teardown path, without an
+/// endurance run. The abnormal-end mix — callee 486 (final reject, no
 /// teardown), abandon-on-180 (CANCEL an early dialog), and a declined REFER
 /// (BYE a still-confirmed call whose transfer leg was rejected) — interleaved
-/// with happy calls. Each failure mode is reported under its NOK class, and the
+/// with happy calls. Each one ends on its accepted branch (class `ok`), and the
 /// SUT must FULLY reap afterwards: no live call, no stranded per-call lock, no
 /// stamp residue (`assert_fully_reaped`), and no mux registry leak. A regression
 /// here is a real post-call-cleanup gap (the leak class endurance otherwise
@@ -1126,27 +1127,24 @@ async fn loadgen_post_call_cleanup_no_leak() {
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
 
-    let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
+    let mut scenarios = MixEntry::abnormal_end_mix(&ShapeRegistry::with_defaults(), &inputs());
     scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
     let driver =
         Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
     run_throttled(&driver).await;
 
-    // Each failure mode produced its NOK bucket, and the happy path its OK.
-    assert!(
-        reporter.count("invite_reject", &ResultClass::WrongStatus(486)) > 0,
-        "no 486 final-reject recorded:\n{}",
-        reporter.render_prometheus()
-    );
-    assert!(
-        reporter.count("abandon_ringing", &ResultClass::Timeout) > 0,
-        "no abandoned-early call recorded"
-    );
-    assert!(
-        reporter.count("refer_charlie_reject", &ResultClass::Unexpected) > 0,
-        "no declined-transfer recorded"
-    );
-    assert!(reporter.count("basic_call", &ResultClass::Ok) > 0, "no happy call completed");
+    // Each abnormal end completed on its own branch, and the happy path too.
+    let prom = reporter.render_prometheus();
+    for (scenario, branch) in [
+        ("invite_reject", "rejected"),
+        ("abandon_ringing", "abandoned"),
+        ("refer_charlie_reject", "transfer_declined"),
+        ("basic_call", "answered"),
+    ] {
+        assert!(reporter.count(scenario, &ResultClass::Ok) > 0, "no ok {scenario}:\n{prom}");
+        let series = format!("loadgen_branch_total{{scenario=\"{scenario}\",branch=\"{branch}\"}}");
+        assert!(prom.contains(&series), "no {series}:\n{prom}");
+    }
 
     // Post-call cleanup is COMPLETE across every failure-teardown path.
     settle_until(|| core.registry_size() == 0).await;
@@ -1719,7 +1717,8 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
 /// unrecoverable loss. The contract (table §2): the call's teardown still
 /// completes, the settle barrier's 32 s ceiling elapses with the CSeq gap open
 /// (the later BYE reveals the hole), and the verdict maps to the FIXED
-/// `Timeout { who: "settle" }` — class `timeout`, case `settle@transferred` —
+/// `Timeout { who: "settle" }` — class `timeout`, case `settle` (the failed
+/// barrier) —
 /// with the sample DETAIL naming the open obligation. Never a protocol-defect
 /// class: `rfc_audit_fail` stays 0. Real-clock ~35 s (the genuine 64·T1 settle
 /// ceiling — deliberately not a knob).
@@ -1765,16 +1764,16 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
         reporter.render_prometheus()
     );
 
-    // The report names the failure mode: the case bucket is the FIXED
-    // `settle@transferred` (who="settle", last phase `transferred`), and the
-    // sampled page's detail names the open obligation (the never-observed CSeq).
+    // The report names the failure mode: the case bucket is the FIXED `settle`
+    // barrier, and the sampled page's detail names the open obligation (the
+    // never-observed CSeq).
     let out = std::env::temp_dir().join(format!("loadgen-settle-gate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).expect("finalize report");
-    let case_dir = out.join("callflows/refer/timeout/settle@transferred");
+    let case_dir = out.join("callflows/refer/timeout/settle");
     assert!(
         case_dir.is_dir(),
-        "expected the settle@transferred case bucket; report tree: {:?}",
+        "expected the settle case bucket; report tree: {:?}",
         list_dirs(&out)
     );
     let mut named = false;
@@ -2265,7 +2264,7 @@ impl ActorScenario for ByeWithContact {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -2466,7 +2465,7 @@ impl ActorScenario for NumberPlanRefer {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::HappyBye,
+            expect: Expect::answered(),
 
             waivers: Vec::new(),
             automatics: Default::default(),
@@ -2569,10 +2568,10 @@ async fn settle_secs(secs: u64, cond: impl Fn() -> bool) {
 /// Plus, once over the whole soak: the loss model actually bit (`drops > 0`, so
 /// the run is not vacuous) and there is NO mux/SUT leak.
 ///
-/// The voluntarily-failing bodies (`invite_reject` / `abandon_ringing` /
-/// `refer_charlie_reject`) are EXCLUDED — they are expected-NOK by design, so
-/// "0 failed calls" does not apply to them (their loss behaviour is a separate
-/// concern; the refer-decline path is exercised by the functional gate).
+/// The abnormal-end bodies (`invite_reject` / `abandon_ringing` /
+/// `refer_charlie_reject`) are EXCLUDED — their loss behaviour is a separate
+/// concern (their no-leak coverage is `loadgen_post_call_cleanup_no_leak` and
+/// the functional gate).
 ///
 /// Real loopback UDP on the REAL clock (the retransmit ladder is wall-clock), so
 /// this is a slow-lane `#[ignore]` test — its paused-clock equivalents are the
@@ -2592,9 +2591,9 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     //    `[bob, bob2]` failover plan walked on b-leg rejection) under the
     //    `ApiCallPin` egress: rerouting_prack. This body's whole point is the
     //    failover, which only the api-call engine registers.
-    // The voluntarily-failing bodies (invite_reject / abandon_ringing /
-    // refer_charlie_reject) are EXCLUDED — expected-NOK by design, so "0 failed"
-    // does not apply (their loss behaviour is a separate concern).
+    // The abnormal-end bodies (invite_reject / abandon_ringing /
+    // refer_charlie_reject) are EXCLUDED — their loss behaviour is a separate
+    // concern.
     const GROUP_A: &[&str] = &[
         "basic_call",
         "basic_call_em",

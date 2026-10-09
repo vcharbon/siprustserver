@@ -143,6 +143,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_expected: false,
     }
 }
 
@@ -185,32 +186,32 @@ async fn loadgen_driver_basic_calls_on_fake_net() {
     b2bua.assert_fully_reaped();
 }
 
-/// A shape's expected reject end to end: every rejected call classes
-/// `expected_reject` after the sampled RFC audit (the caller ACKed the 486
-/// before the body ended, so the recorded flow is complete), and the round
-/// trips the mux measured reach `loadgen_rtt_seconds` once each call ends.
+/// A declared reject end to end: every `invite_reject` call ends on its
+/// `rejected` branch and classes `ok` after the sampled RFC audit (an accepted
+/// branch is still audited: the caller ACKed the 486 before the call settled,
+/// so the recorded flow is complete), and the round trips the mux measured
+/// reach `loadgen_rtt_seconds` once each call ends.
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
-async fn loadgen_fake_net_expected_reject_is_audited_clean() {
+async fn loadgen_fake_net_accepted_reject_is_audited_clean() {
     let (_h, b2bua, core, transport) = setup_fake(7300).await;
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 50, background_record_every: 1 }));
-    let mut entry = mix("invite_reject", 1.0);
-    entry.expected_reject = Some(486);
-    let driver =
-        Driver::new(cfg(b2bua.addr, 20.0, 1, 16, 0x486), vec![entry], reporter.clone(), transport);
+    let driver = Driver::new(
+        cfg(b2bua.addr, 20.0, 1, 16, 0x486),
+        vec![mix("invite_reject", 1.0)],
+        reporter.clone(),
+        transport,
+    );
     driver.run().await;
 
     let total = reporter.total_calls();
-    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
-    let expected = reporter.count("invite_reject", &ResultClass::ExpectedReject);
-    assert_eq!(
-        expected,
-        total,
-        "every reject is the expected one:\n{}",
-        reporter.render_prometheus()
-    );
     let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(reporter.count("invite_reject", &ResultClass::Ok), total, "{prom}");
+    let line =
+        format!("loadgen_branch_total{{scenario=\"invite_reject\",branch=\"rejected\"}} {total}");
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
     assert!(
         prom.contains(
             "loadgen_rtt_seconds_count{scenario=\"invite_reject\",exchange=\"invite_100\"}"
@@ -309,6 +310,39 @@ async fn loadgen_fake_net_counts_failures_by_failed_step() {
     );
     let line = format!(
         "loadgen_failed_step_total{{scenario=\"basic_call\",step=\"alice:bye#1@established\"}} {total}"
+    );
+    assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
+
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// The same refusals in a run that drives overload on purpose: a 503 to a
+/// non-emergency call before it connects is that call's `refused_overload`
+/// branch, so every call classes `ok` and the SUT still reaps each one.
+#[tokio::test(start_paused = true)]
+#[ignore = "slow lane: loadgen"]
+async fn loadgen_fake_net_overload_refusal_is_ok_when_expected() {
+    let (_h, b2bua, core, transport) = setup_fake_tuned(7420, |c| {
+        c.cps_bucket_size = 0;
+        c.cps_bucket_rate = 0;
+    })
+    .await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let mut c = cfg(b2bua.addr, 20.0, 1, 16, 0x503E);
+    c.overload_expected = true;
+    let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
+    driver.run().await;
+
+    let total = reporter.total_calls();
+    let prom = reporter.render_prometheus();
+    assert!(total >= 10, "governor under-delivered on virtual time: {total}");
+    assert_eq!(reporter.count("basic_call", &ResultClass::Ok), total, "{prom}");
+    let line = format!(
+        "loadgen_branch_total{{scenario=\"basic_call\",branch=\"refused_overload\"}} {total}"
     );
     assert!(prom.lines().any(|l| l == line), "expected `{line}` in:\n{prom}");
 

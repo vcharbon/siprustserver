@@ -188,15 +188,12 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
     h.finish().await;
 }
 
-/// The `into_result` branch oracle maps each observed race outcome to its
-/// bounded downstream class: a caller that saw the 487 → the abandoned
-/// `Timeout` (the `timeout` load class); a caller that confirmed (no non-2xx
-/// final) → `Ok`.
+/// The race's accepted endings read the observed outcome: a caller that saw
+/// the 487 ended `abandoned`; a caller that confirmed (no non-2xx final) ended
+/// `answered`.
 #[tokio::test]
-async fn either_of_oracle_maps_each_branch() {
-    use crate::actor::ExpectBranch;
-    let branches: &[ExpectBranch] =
-        &[ExpectBranch::Answered, ExpectBranch::Cancelled { code: 487 }];
+async fn either_branch_of_the_race_is_its_accepted_ending() {
+    let expect = Expect::of(&[Branch::ANSWERED, Branch::ABANDONED]);
 
     // Cancel-wins: alice saw a 487 final.
     let obs = ObservedState::new();
@@ -207,19 +204,13 @@ async fn either_of_oracle_maps_each_branch() {
         now,
     );
     obs.record(Observation::LegTerminated { leg: "alice" }, now);
-    match into_result(Expect::EitherOf(branches), CallVerdict::Ok, &obs, "alice") {
-        Err(StepError::Timeout { who }) => {
-            assert_eq!(who, "alice-abandoned-after-ringing")
-        }
-        other => panic!("cancel-wins must map to the abandoned Timeout, got {other:?}"),
-    }
+    let v = verdict(expect, CallVerdict::Ok, &obs, "alice");
+    assert_eq!(v.branch(), Some("abandoned"), "cancel-wins, got {v:?}");
 
     // Answer-wins: alice confirmed, no non-2xx final.
     let obs = ObservedState::new();
     obs.record(Observation::LegConfirmed { leg: "alice" }, now);
     obs.record(Observation::LegTerminated { leg: "alice" }, now);
-    assert!(
-        into_result(Expect::EitherOf(branches), CallVerdict::Ok, &obs, "alice").is_ok(),
-        "answer-wins (no 487) must map to Ok",
-    );
+    let v = verdict(expect, CallVerdict::Ok, &obs, "alice");
+    assert_eq!(v.branch(), Some("answered"), "answer-wins, got {v:?}");
 }

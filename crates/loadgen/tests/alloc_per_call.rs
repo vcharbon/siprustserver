@@ -97,6 +97,7 @@ fn cfg(via: SocketAddr, secs: u64) -> DriverCfg {
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_expected: false,
     }
 }
 

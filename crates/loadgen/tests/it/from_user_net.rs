@@ -138,6 +138,7 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, talk_ms: u64, seed: u64) -> DriverC
         },
         default_tuning: CallTuning::default(),
         tuning: std::collections::HashMap::new(),
+        overload_expected: false,
     }
 }
 

@@ -5,7 +5,8 @@
 //! binds its agents on the **mux** (one socket per defined endpoint address,
 //! many dialogs demuxed), runs the scenario inside a `catch_unwind` boundary (a
 //! panic is a *counted* failure, never a worker abort), tears the call down
-//! (CANCEL/BYE) however it ended, classifies the result, and records it —
+//! (CANCEL/BYE) however it ended, classifies the scenario's verdict, and
+//! records it —
 //! optionally projecting a sampled callflow (recording layered on the mux). A
 //! call whose key is missing or unusable is recorded `rejected` before any
 //! datagram; one whose number is held by a concurrent call or cooling after a
@@ -34,7 +35,7 @@ use crate::mux::{labelled_prefix_leg_picker_defaulting, CallRouting, Correlation
 use crate::rate::{Governor, RateHandle};
 use crate::report::{RenderedSample, Reporter};
 use crate::scenarios::ScenarioId;
-use scenario_harness::actor::ActorScenario;
+use scenario_harness::actor::{ActorScenario, ScenarioVerdict};
 
 /// The mux transport the driver binds calls on.
 pub struct MuxTransport {
@@ -115,6 +116,10 @@ pub struct DriverCfg {
     /// Per-scenario-id overrides of [`Self::default_tuning`] (keyed by the
     /// scenario's stable id / CLI name).
     pub tuning: HashMap<String, CallTuning>,
+    /// The run drives the SUT into overload on purpose: a non-emergency call
+    /// refused `503` before it connects ends on its `refused_overload` branch
+    /// ([`CallEnv::overload_expected`]).
+    pub overload_expected: bool,
 }
 
 /// A load shape's per-call body: the declarative actor [`Scenario`] the runner
@@ -131,7 +136,7 @@ enum LoadBody {
 /// pool drives per-call identities and dwells.
 ///
 /// Build from the unified registry ([`MixEntry::by_id`] /
-/// [`MixEntry::default_mix`] / [`MixEntry::failure_mix`]); plain
+/// [`MixEntry::default_mix`] / [`MixEntry::abnormal_end_mix`]); plain
 /// `(scenario, weight)` tuples still convert for hand-rolled test bodies
 /// (attributes default off, id from the body).
 #[derive(Clone)]
@@ -152,9 +157,6 @@ pub struct MixEntry {
     pub legs: &'static [LegSpec],
     /// Stamp `Resource-Priority: esnet.0` (the SUT force-admits under overload).
     pub emergency: bool,
-    /// The reject status the shape expects ([`ShapeDescriptor::expected_reject`]):
-    /// a call ending on it classes `expected_reject`, a non-failure.
-    pub expected_reject: Option<u16>,
     /// **Deferred-by-design auth adapter** (see
     /// `scenario_harness::realcall::auth`). `None` (the default) = no RFC 3261
     /// §22.2 retry; a `401`/`407` classifies as `status_401`/`status_407`. Set it
@@ -172,7 +174,6 @@ impl From<(Arc<dyn ActorScenario>, f64)> for MixEntry {
             case: None,
             legs: LegSpec::historic(false, false),
             emergency: false,
-            expected_reject: None,
             challenge_responder: None,
         }
     }
@@ -196,7 +197,6 @@ impl MixEntry {
             case: None,
             legs: shape.callee_legs(),
             emergency: shape.emergency,
-            expected_reject: shape.expected_reject,
             challenge_responder: None,
         })
     }
@@ -222,13 +222,14 @@ impl MixEntry {
             .collect()
     }
 
-    /// The voluntarily-failing mix (one shape per post-call-cleanup teardown
-    /// path), for the no-leak cleanup-coverage test.
-    pub fn failure_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
+    /// The abnormal-end mix (one shape per post-call-cleanup teardown path, each
+    /// ending on its own accepted branch), for the no-leak cleanup-coverage
+    /// test.
+    pub fn abnormal_end_mix(registry: &ShapeRegistry, inputs: &ScenarioInputs) -> Vec<Self> {
         registry
-            .failure_mix()
+            .abnormal_end_mix()
             .into_iter()
-            .filter_map(|d| Self::from_shape(d, inputs, d.failure_weight.unwrap_or(1.0)))
+            .filter_map(|d| Self::from_shape(d, inputs, d.abnormal_end_weight.unwrap_or(1.0)))
             .collect()
     }
 
@@ -265,6 +266,7 @@ pub struct Driver {
     call: Arc<CallConfig>,
     default_tuning: CallTuning,
     tuning: HashMap<String, CallTuning>,
+    overload_expected: bool,
     /// Optional chaos-marker log: when set, each finished call is classified
     /// near/clear against the injected-fault markers (the chaos correlation).
     chaos: Option<Arc<ChaosLog>>,
@@ -325,6 +327,7 @@ impl Driver {
             call: Arc::new(cfg.call),
             default_tuning: cfg.default_tuning,
             tuning: cfg.tuning,
+            overload_expected: cfg.overload_expected,
             chaos: None,
         }
     }
@@ -395,6 +398,7 @@ impl Driver {
                 self.call.clone(),
                 self.seed,
                 tuning,
+                self.overload_expected,
                 self.chaos.clone(),
                 permit,
             ));
@@ -415,20 +419,12 @@ async fn run_one(
     call: Arc<CallConfig>,
     seed_base: u64,
     tuning: CallTuning,
+    overload_expected: bool,
     chaos: Option<Arc<ChaosLog>>,
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let MixEntry {
-        id,
-        body,
-        case,
-        legs,
-        emergency,
-        expected_reject,
-        challenge_responder,
-        weight: _,
-    } = entry;
+    let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
 
     let from_user = transport.correlation.is_from_user();
     let record = reporter.should_record(id);
@@ -521,6 +517,7 @@ async fn run_one(
         stamp: transport.correlation.stamp(&token),
         token,
         emergency,
+        overload_expected,
         core,
         egress: call.egress.clone(),
         // Deferred-by-design auth adapter (default None): the mix entry's
@@ -538,14 +535,14 @@ async fn run_one(
     };
     // The single body-invocation site: an actor scenario rides the per-endpoint
     // reactor runner (each runner owns its per-actor teardown scopes, so no
-    // outer `CallScope` is needed), yielding the `Result<(), StepError>`
-    // contract everything downstream — classification, sampling, phases, the
-    // ringing gate — buckets on, inside a `catch_unwind` boundary (a panic is a
-    // counted failure, never a worker abort). The body is built ONCE here so
-    // its declared waivers (ADR-0024 §6) can be read for the audit, then the
-    // BUILT call is run — never built twice. A build guard error is part of the
-    // downstream contract, surfaced as the call's Result; a build panic is
-    // caught at the same boundary as a run panic.
+    // outer `CallScope` is needed), yielding the `ScenarioVerdict` everything
+    // downstream — classification, sampling, phases, the ringing gate —
+    // buckets on, inside a `catch_unwind` boundary (a panic is a counted
+    // failure, never a worker abort). The body is built ONCE here so its
+    // declared waivers (ADR-0024 §6) can be read for the audit, then the BUILT
+    // call is run — never built twice. A build guard error is the call's
+    // `build` failure; a build panic is caught at the same boundary as a run
+    // panic.
     let mut plan_waivers: Vec<WaiverScope> = Vec::new();
     let result = match &body {
         LoadBody::Actor(scenario) => {
@@ -558,13 +555,13 @@ async fn run_one(
                     .catch_unwind()
                     .await
                 }
-                Ok(Err(e)) => Ok(Err(e)),
+                Ok(Err(e)) => Ok(ScenarioVerdict::build_failure(e)),
                 Err(payload) => Err(payload),
             }
         }
     };
 
-    let failed = !matches!(result, Ok(Ok(())));
+    let failed = !matches!(result, Ok(ScenarioVerdict::Success { .. }));
     if failed && !call.teardown_quiesce.is_zero() {
         for (_, agent) in &callee_agents {
             agent.release_failed_call(call.teardown_quiesce).await;
@@ -581,12 +578,7 @@ async fn run_one(
     merged_waivers.extend(plan_waivers);
 
     let outcome = match result {
-        Ok(Ok(())) => CallOutcome::Ok,
-        Ok(Err(e)) => CallOutcome::Step(e).expecting(
-            expected_reject,
-            CALLER,
-            ctx.phases().iter().any(|(phase, _)| *phase == CONNECTED),
-        ),
+        Ok(verdict) => CallOutcome::from(verdict),
         Err(payload) => CallOutcome::Panic(panic_msg(payload)),
     };
     let outcome = outcome.audited(|| {
@@ -597,8 +589,8 @@ async fn run_one(
         wo.findings
     });
 
-    // Test-case CHECKS — evaluated on SAMPLED calls that are no failure (ok or
-    // the expected reject) only (the per-sample oracle; a non-sampled call has
+    // Test-case CHECKS — evaluated on SAMPLED calls that ended on an accepted
+    // branch only (the per-sample oracle; a non-sampled call has
     // no recording to check, and a failed/RFC-dirty call already explains
     // itself). The verdicts (pass AND
     // fail) render on the sampled callflow page; any failed check reclassifies
@@ -661,8 +653,9 @@ async fn run_one(
         _ => ChaosTag::Clear,
     };
 
-    // The bounded case discriminator (which RFC rule / failed check / agent@phase)
-    // — computed once; keys the first-N sample buckets AND the counts split.
+    // The bounded case discriminator (which RFC rule / failed check / failed
+    // step) — computed once; keys the first-N sample buckets AND the counts
+    // split.
     let case = outcome.case(ctx.phases().last().map(|(name, _)| *name));
 
     let sample = if reporter.wants_sample(id, &class, &case, chaos_tag) {
@@ -709,9 +702,6 @@ async fn run_one(
 
 /// The caller agent's name: the agent that originates every call.
 const CALLER: &str = "alice";
-
-/// The lifecycle phase a call reaches once its dialog is confirmed.
-const CONNECTED: &str = "connected";
 
 /// How many numbers a from-user call draws from its case's pool before it is
 /// rejected for contention (every draw held or cooling).

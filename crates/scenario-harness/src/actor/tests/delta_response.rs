@@ -117,7 +117,7 @@ async fn not_accepted_response_delta_pins_wrong_status() {
     let obs = ObservedState::new();
     let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     match &verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, reason }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, reason }) => {
             assert_eq!(who, "alice");
             assert_eq!(*expected, 486);
             assert_eq!(*got, 603);
@@ -159,7 +159,7 @@ async fn satisfies_steps_overrun_fails_fast_bounded() {
     let obs = ObservedState::new();
     let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     match &verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "alice");
             assert!(
                 detail.contains("must satisfy 1..=1") && detail.contains("got 20"),
@@ -201,7 +201,7 @@ async fn response_delta_rejects_terminate_reaction() {
     let obs = ObservedState::new();
     let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     match &verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "alice");
             assert!(
                 detail.contains("DeltaReaction::Default"),

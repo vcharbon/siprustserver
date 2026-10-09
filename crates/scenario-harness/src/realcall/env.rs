@@ -108,6 +108,11 @@ pub struct CallEnv<'a> {
     /// Emergency call: stamps `Resource-Priority: esnet.0` on the INVITE so the
     /// SUT's panic-ELU and CPS bucket rungs admit it.
     pub emergency: bool,
+    /// The run drives the SUT into overload on purpose: a `503` to a
+    /// non-emergency call's establishing INVITE (RFC 3261 §21.5.4) is then an
+    /// accepted ending ([`Branch::REFUSED_OVERLOAD`](crate::actor::Branch)),
+    /// and a failure otherwise.
+    pub overload_expected: bool,
     /// The per-call **core identity** (the resolved binding's From/To/R-URI
     /// overrides — the e2e Test case's `core` on the load surface). Defaults
     /// keep the agent-derived identities; see [`Self::outgoing_invite`] for
@@ -186,6 +191,7 @@ impl<'a> CallEnv<'a> {
             },
             token,
             emergency: false,
+            overload_expected: false,
             core: CoreIdentity::default(),
             egress: EgressPolicy::Transparent,
             // Auth is deferred: no responder → no §22.2 retry (a 401/407 is a
@@ -450,7 +456,7 @@ pub struct CallCtx {
     anchors: Mutex<Vec<AnchorTag>>,
     /// Free-form per-call diagnostic notes for the SAMPLE DETAIL channel only —
     /// e.g. the settle barrier's still-open obligation names. NEVER keyed (the
-    /// case discriminator stays `who@phase`); the driver appends them to a NOK
+    /// case discriminator stays the failed step); the driver appends them to a NOK
     /// sample's failure detail so the rendered page explains WHY.
     notes: Mutex<Vec<String>>,
 }

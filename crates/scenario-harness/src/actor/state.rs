@@ -153,8 +153,9 @@ pub struct LegObservation {
     phase: Option<LegPhase>,
     subflows: HashMap<&'static str, SubflowState>,
     /// Every non-2xx final observed on this leg's establishing INVITE, as
-    /// `(status, reason)` — a grow-only set (commutative fold), read by
-    /// `Expect::Reject`'s verdict mapping. Almost always 0 or 1 entries.
+    /// `(status, reason)` — a grow-only set (commutative fold), read by the
+    /// accepted-ending verdict ([`super::Ending`]). Almost always 0 or 1
+    /// entries.
     finals: std::collections::BTreeSet<(u16, String)>,
     /// The RFC method names of the inbound in-dialog requests this leg has
     /// received (`INFO`, `MESSAGE`, `NOTIFY`, …) — a grow-only set (commutative
@@ -195,6 +196,18 @@ impl LegObservation {
     /// The reason phrase of the given observed non-2xx final, if any.
     pub fn final_reason(&self, status: u16) -> Option<String> {
         self.finals.iter().find(|(s, _)| *s == status).map(|(_, r)| r.clone())
+    }
+
+    /// The lowest non-2xx final this leg's establishing INVITE drew, with its
+    /// reason phrase.
+    pub fn first_final(&self) -> Option<(u16, &str)> {
+        self.finals.iter().next().map(|(s, r)| (*s, r.as_str()))
+    }
+
+    /// Whether this leg received a provisional carrying SDP — early media
+    /// (RFC 3261 §13.2.1, RFC 3262).
+    pub fn saw_early_media(&self) -> bool {
+        self.responses.iter().any(|f| (101..200).contains(&f.status) && f.body_is_sdp)
     }
 
     /// Whether this leg has received an inbound in-dialog request of `method`
@@ -244,6 +257,9 @@ impl LegObservation {
 pub struct StateInner {
     legs: HashMap<&'static str, LegObservation>,
     ledger: ObligationLedger,
+    /// The caller's establishing INVITE ended on a final the call accepts
+    /// ([`Observation::AcceptedEnding`]): the remaining phase barriers are moot.
+    accepted_ending: bool,
     /// The replay record: observed-vs-expected finals + reactor-serviced strays
     /// (append-only, diagnostic — never gates the verdict).
     replay: Vec<ReplayEntry>,
@@ -251,12 +267,29 @@ pub struct StateInner {
 
 impl StateInner {
     fn new() -> Self {
-        Self { legs: HashMap::new(), ledger: ObligationLedger::default(), replay: Vec::new() }
+        Self {
+            legs: HashMap::new(),
+            ledger: ObligationLedger::default(),
+            accepted_ending: false,
+            replay: Vec::new(),
+        }
     }
 
     /// A leg's observation (an `Absent` default view if it has never been seen).
     pub fn leg(&self, role: &str) -> LegObservation {
         self.legs.get(role).cloned().unwrap_or_default()
+    }
+
+    /// A leg's observation by reference (`None` before the leg appears) — the
+    /// allocation-free read the call's verdict takes.
+    pub fn leg_ref(&self, role: &str) -> Option<&LegObservation> {
+        self.legs.get(role)
+    }
+
+    /// Whether the caller's establishing INVITE ended on a final the call
+    /// accepts — every remaining phase barrier is then moot.
+    pub fn accepted_ending(&self) -> bool {
+        self.accepted_ending
     }
 
     /// Whether a leg has reached (at least) a given phase.
@@ -355,8 +388,11 @@ pub enum Observation {
     /// (so an origination can gate on "leg X received an inbound `<method>`").
     InDialogRequest { leg: &'static str, call_id: String, cseq: u32, method: String },
     /// `leg`'s establishing INVITE drew a non-2xx final (the reject path) —
-    /// grow-only, read by the `Expect::Reject` verdict mapping.
+    /// grow-only, read by the accepted-ending verdict.
     LegFinal { leg: &'static str, status: u16, reason: String },
+    /// The caller's establishing INVITE drew a final its call accepts: the call
+    /// ended before its remaining phase barriers could hold.
+    AcceptedEnding,
     /// A named sub-flow advanced (re-INVITE realign / refer / early-PRACK tracking).
     Subflow { leg: &'static str, name: &'static str, to: SubflowState },
     /// A caller-originated renegotiation (re-INVITE) this leg ORIGINATED
@@ -425,6 +461,7 @@ impl StateInner {
             Observation::LegFinal { leg, status, reason } => {
                 self.leg_mut(leg).finals.insert((status, reason));
             }
+            Observation::AcceptedEnding => self.accepted_ending = true,
             Observation::Subflow { leg, name, to } => self.leg_mut(leg).advance_subflow(name, to),
             Observation::RenegCompleted { leg, cseq } => {
                 self.leg_mut(leg).reneg_cseqs.insert(cseq);

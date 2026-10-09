@@ -11,6 +11,7 @@ mod body_expect;
 mod cancel_race;
 mod delta_request;
 mod delta_response;
+mod endings;
 mod forking;
 mod reception_observer;
 mod reinvite_ack_body;

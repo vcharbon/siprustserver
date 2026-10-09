@@ -1,4 +1,5 @@
-//! Bounded-memory reporting: per-`(scenario, class)` counters, end-to-end and
+//! Bounded-memory reporting: per-`(scenario, class)` counters, per-scenario
+//! accepted-branch and failed-step counters, end-to-end and
 //! named-checkpoint latency histograms, per-`(scenario, exchange)` SIP
 //! round-trip histograms, a bounded sample store (the first N
 //! callflows per `(scenario, class)` — **including OK**, so OK vs failing flows
@@ -29,6 +30,7 @@ use crate::class::{CallOutcome, ResultClass};
 use crate::hist::Hist;
 use crate::mux::Exchange;
 use crate::scenarios::ScenarioId;
+use scenario_harness::actor::FailedAt;
 
 // ---------------------------------------------------------------------------
 // A rendered sample (a captured callflow for one (scenario, class) bucket)
@@ -98,6 +100,10 @@ struct Inner {
     /// The run's mix, written from the first scrape.
     declared: std::collections::BTreeSet<ScenarioId>,
     counts: BTreeMap<Bucket, u64>,
+    /// Calls classed ok, by the accepted branch they ended on.
+    branches: BTreeMap<(ScenarioId, &'static str), u64>,
+    /// Failed calls, by the step they failed at.
+    failed_steps: BTreeMap<(ScenarioId, FailedAt), u64>,
     shed: BTreeMap<ScenarioId, u64>,
     e2e: BTreeMap<ScenarioId, Hist>,
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
@@ -264,9 +270,10 @@ impl Reporter {
         g.sample_taken.get(&key).copied().unwrap_or(0) < self.cfg.sample_cap
     }
 
-    /// Record one completed call: bump its `(scenario, class, case)` count, fold
-    /// its end-to-end time and checkpoints into the histograms, and store its
-    /// sample if the bucket still has room. `case` is the outcome's bounded
+    /// Record one completed call: bump its `(scenario, class, case)` count and
+    /// its accepted-branch or failed-step count, fold its end-to-end time and
+    /// checkpoints into the histograms, and store its sample if the bucket
+    /// still has room. `case` is the outcome's bounded
     /// discriminator ([`CallOutcome::case`] — the driver computes it once, with
     /// the call's phase trail).
     pub fn record(
@@ -283,6 +290,13 @@ impl Reporter {
         let label = class.label();
         let mut g = self.inner.lock().unwrap();
         *g.counts.entry((scenario, label.clone(), case.to_string(), chaos)).or_default() += 1;
+        match outcome {
+            CallOutcome::Ok { branch } => *g.branches.entry((scenario, branch)).or_default() += 1,
+            CallOutcome::Step { at, .. } => {
+                *g.failed_steps.entry((scenario, *at)).or_default() += 1
+            }
+            _ => {}
+        }
         // A rejected call never ran: it has no end-to-end time to fold in.
         if class != ResultClass::Rejected {
             g.e2e.entry(scenario).or_insert_with(Hist::call).record(e2e.as_secs_f64() * 1000.0);
@@ -359,6 +373,12 @@ impl Reporter {
             calls
                 .into_iter()
                 .map(|((s, class, chaos), n)| ([s.to_string(), class, chaos.to_string()], n)),
+        );
+        c::BRANCHES
+            .render_rows(&mut out, g.branches.iter().map(|((s, branch), n)| ([*s, *branch], *n)));
+        c::FAILED_STEPS.render_rows(
+            &mut out,
+            g.failed_steps.iter().map(|((s, at), n)| ([s.to_string(), at.to_string()], *n)),
         );
         let mut shed: BTreeMap<ScenarioId, u64> = g.declared.iter().map(|s| (*s, 0)).collect();
         shed.extend(g.shed.iter().map(|(s, n)| (*s, *n)));
@@ -451,7 +471,7 @@ impl Reporter {
             <p>chaos=<b>clear</b> are the genuine results to triage; chaos=<b>near</b> are \
             within the chaos tolerance of an injected fault (likely acceptable kill collateral). \
             The <b>case</b> column splits a class into its distinct failure modes (RFC rule id, \
-            failed check, agent@phase) — each keeps its own first-N samples.</p>\
+            failed check, failed step) — each keeps its own first-N samples.</p>\
             <table>\
             <tr><th>scenario</th><th>class</th><th>case</th><th>chaos</th><th>count</th><th>samples</th></tr>");
         for ((scenario, class, case, chaos), n) in &g.counts {
@@ -805,7 +825,7 @@ mod tests {
         for (setup, e2e) in [(5, 9_000), (50, 9_500), (900_000, 950_000)] {
             r.record(
                 "basic_call",
-                &CallOutcome::Ok,
+                &CallOutcome::Ok { branch: "answered" },
                 "",
                 Duration::from_millis(e2e),
                 &[("time_to_200", Duration::from_millis(setup))],
@@ -843,19 +863,32 @@ mod tests {
     }
 
     /// A scrape writes no lifetime quantile gauge (a window's latency is a
-    /// `histogram_quantile` over the histograms), and every declared scenario
-    /// carries its `expected_reject` series from the first scrape.
+    /// `histogram_quantile` over the histograms); it counts each ok call under
+    /// its accepted branch and each failed call under its failed step.
     #[test]
     #[ignore = "slow lane: loadgen"]
-    fn a_scrape_holds_no_quantile_gauge_and_declares_expected_reject() {
+    fn a_scrape_holds_no_quantile_gauge_and_counts_branches_and_steps() {
         let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
         r.declare_scenarios(["basic_call"]);
         r.record(
             "basic_call",
-            &CallOutcome::Ok,
+            &CallOutcome::Ok { branch: "answered" },
             "",
             Duration::from_millis(9_000),
             &[("time_to_200", Duration::from_millis(5))],
+            None,
+            ChaosTag::Clear,
+        );
+        let failed = CallOutcome::Step {
+            at: FailedAt { who: "alice", goal: Some(("bye", 1)), barrier: "established" },
+            cause: scenario_harness::StepError::Timeout { who: "alice".into() },
+        };
+        r.record(
+            "basic_call",
+            &failed,
+            &failed.case(None),
+            Duration::from_millis(9_000),
+            &[],
             None,
             ChaosTag::Clear,
         );
@@ -863,12 +896,14 @@ mod tests {
         assert!(!prom.contains("loadgen_e2e_seconds"), "{prom}");
         assert!(!prom.contains("loadgen_checkpoint_seconds"), "{prom}");
         assert!(!prom.contains("quantile=\""), "{prom}");
+        assert!(!prom.contains("expected_reject"), "{prom}");
         assert!(
-            prom.contains(
-                "loadgen_calls_total{scenario=\"basic_call\",class=\"expected_reject\",chaos=\"clear\"} 0\n"
-            ),
+            prom.contains("loadgen_branch_total{scenario=\"basic_call\",branch=\"answered\"} 1\n"),
             "{prom}"
         );
+        assert!(prom.contains(
+            "loadgen_failed_step_total{scenario=\"basic_call\",step=\"alice:bye#1@established\"} 1\n"
+        ));
     }
 
     /// A SIP round trip renders on `loadgen_rtt_seconds{scenario,exchange}`,
@@ -920,12 +955,12 @@ mod tests {
         assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
     }
 
-    /// The index counts the expected reject as ok: it is no failed call.
+    /// The index counts an accepted reject as ok: it is no failed call.
     #[test]
     #[ignore = "slow lane: loadgen"]
-    fn the_index_counts_the_expected_reject_as_ok() {
+    fn the_index_counts_an_accepted_reject_as_ok() {
         let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
-        let reject = CallOutcome::ExpectedReject(486);
+        let reject = CallOutcome::Ok { branch: "rejected" };
         r.record(
             "limited",
             &reject,
@@ -949,7 +984,7 @@ mod tests {
             },
             Canaries::default(),
         );
-        let row = idx.counts.iter().find(|c| c.class == "expected_reject").expect("a row");
+        let row = idx.counts.iter().find(|c| c.class == "ok").expect("a row");
         assert!(row.ok, "{row:?}");
         assert_eq!((idx.total_calls(), idx.failed_calls()), (1, 0));
     }
@@ -1043,7 +1078,7 @@ mod tests {
         // cross-call ringing gate + a sampled check tally.
         r.record(
             "basic_call",
-            &CallOutcome::Ok,
+            &CallOutcome::Ok { branch: "answered" },
             "",
             Duration::from_millis(3),
             &[("ringing", Duration::from_millis(1))],
@@ -1136,7 +1171,7 @@ mod tests {
         let r = Arc::new(Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 }));
         r.record(
             "basic_call",
-            &CallOutcome::Ok,
+            &CallOutcome::Ok { branch: "answered" },
             "",
             Duration::from_millis(3),
             &[],

@@ -335,8 +335,8 @@ pub fn abandon_ringing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
 /// `cancel_answer_crossing` — the caller CANCELs while the callee answers (C2/E5,
 /// RFC 3261 §9.2): a branch-aware race whose terminal is EITHER a confirmed +
 /// torn-down call (the 200 crossed the CANCEL) OR the abandoned terminal (the
-/// CANCEL won). Terminal-style; the load lane accepts whichever legal branch
-/// occurred ([`Expect::EitherOf`](scenario_harness::actor::Expect::EitherOf)).
+/// CANCEL won). Terminal-style; both are accepted endings, and the verdict names
+/// whichever occurred (`answered` / `abandoned`).
 pub fn cancel_answer_crossing(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     ShapePlan {
         id: "cancel_answer_crossing",

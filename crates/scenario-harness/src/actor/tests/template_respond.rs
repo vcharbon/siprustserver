@@ -355,7 +355,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
     let verdict = run_call(call, Duration::from_secs(32)).await;
     let elapsed = started.elapsed();
     match verdict {
-        CallVerdict::Failed(StepError::Timeout { who }) => assert_eq!(who, "never"),
+        CallVerdict::Failed(_, StepError::Timeout { who }) => assert_eq!(who, "never"),
         other => panic!("expected the bounded guard Timeout, got {other:?}"),
     }
     assert!(
@@ -439,7 +439,7 @@ async fn content_matcher_fails_fast_on_changed_value() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");
             assert!(
                 detail.contains("x-cap") && detail.contains("v2") && detail.contains("v1"),

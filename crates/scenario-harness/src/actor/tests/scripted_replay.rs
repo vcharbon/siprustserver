@@ -227,7 +227,7 @@ async fn truncated_class_assert_fails_fast_on_wrong_class() {
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
     match verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!(
                 (who.as_str(), expected, got),
                 ("alice", 200, 486),

@@ -147,11 +147,15 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
     let call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-cseq");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "the deviated call settled clean, got {res:?} notes={:?}", ctx.notes());
+    assert!(
+        res.is_success(),
+        "the deviated call settled clean, got {res:?} notes={:?}",
+        ctx.notes()
+    );
 
     let entries = h.wire_entries();
     assert_eq!(req_cseq(&entries, "OPTIONS"), Some(2), "OPTIONS carries the natural CSeq 2");
@@ -192,11 +196,11 @@ async fn delayed_automatic_via_actorspec_holds_the_ack() {
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
     let call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-delay");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "the delayed-ACK call settled clean, got {res:?}");
+    assert!(res.is_success(), "the delayed-ACK call settled clean, got {res:?}");
 
     let entries = h.wire_entries();
     let ack = req_sent_ms(&entries, "ACK").expect("an ACK was recorded");
@@ -248,7 +252,7 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
         a.delayed = vec![DelayedAutomatic::ack_after(1000).on_invite(1)];
         a
     }];
-    let call = ActorCall::new(actors, vec![], SettleBarrier::default_ceiling(), Expect::HappyBye);
+    let call = ActorCall::new(actors, vec![], SettleBarrier::default_ceiling(), Expect::answered());
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-scoped");
     let ctx = CallCtx::new();
 
@@ -273,7 +277,11 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
         bob.receive("BYE").await.respond(200, "OK").await;
     };
     let (res, ()) = tokio::join!(run_built_actor_call(call, &env, &ctx), bob_side);
-    assert!(res.is_ok(), "the scoped-hold call settled clean, got {res:?} notes={:?}", ctx.notes());
+    assert!(
+        res.is_success(),
+        "the scoped-hold call settled clean, got {res:?} notes={:?}",
+        ctx.notes()
+    );
 
     let entries = h.wire_entries();
     // Per-transaction reads: the ACK reuses its INVITE's CSeq (§13.2.2.4).
@@ -451,14 +459,14 @@ async fn run_100_case(name: &'static str, on: bool) -> bool {
         ),
     ];
     let mut call =
-        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::answered());
     if on {
         call = call.with_automatics(Automatics { answer_100_trying: true, ..Default::default() });
     }
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-100");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
-    assert!(res.is_ok(), "[{name}] the scripted call settled clean, got {res:?}");
+    assert!(res.is_success(), "[{name}] the scripted call settled clean, got {res:?}");
 
     let saw = has_status(&h.wire_entries(), 100);
     h.finish().await;

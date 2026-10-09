@@ -66,6 +66,13 @@ pub struct LoadProfile {
     #[serde(default)]
     pub robustness: Robustness,
 
+    /// The run drives the SUT into overload on purpose: a `503` to a
+    /// non-emergency call's initial INVITE before it connects is then an
+    /// accepted ending (`refused_overload`), not a failure. Default `false`:
+    /// every `503` is a failure.
+    #[serde(default)]
+    pub overload_expected: bool,
+
     /// The scenario MIX: which shapes run, their pick weights, and per-scenario
     /// attachments/overrides. Empty = the registry's shipped default mix.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +154,7 @@ impl Default for LoadProfile {
             report_interval_secs: 0,
             recv_timeout_ms: default_recv_timeout_ms(),
             robustness: Robustness::default(),
+            overload_expected: false,
             mix: Vec::new(),
         }
     }

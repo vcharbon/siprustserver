@@ -30,7 +30,7 @@ and drive the load driver against it:
 
 ```bash
 # all loadgen smoke tests (correlation/demux, no-leak, orphans, picker,
-# emergency-under-overload, post-call cleanup across failure modes)
+# emergency-under-overload, post-call cleanup across abnormal ends)
 cargo test -p loadgen --test it smoke::
 
 # one test, with its full SIP trace printed:
@@ -93,7 +93,8 @@ document** — a `LoadProfile` JSON (schema:
 `e2e/schemas/load-profile.schema.json`) — the load analogue of an e2e *Campaign*.
 It carries every run knob (`cps`, `durationSecs`, `maxInFlight`, `sampleCap`,
 `backgroundRecordEvery`, `reportIntervalSecs`, `recvTimeoutMs`), the global
-`robustness` (`dropRate` + `retransmit`) defaults, and the scenario **`mix`**
+`robustness` (`dropRate` + `retransmit`) defaults, `overloadExpected` (see
+*Accepted endings* below), and the scenario **`mix`**
 (each entry: `shape` id, `weight`, an optional attached `case`, and per-scenario
 `dropRate`/`retransmit` overrides):
 
@@ -513,12 +514,15 @@ The report is written to `--out-dir`, bucketed per `(scenario × result-class ×
   directory name: `status_503`, `status_486`, `timeout`, `unexpected`,
   `rfc_audit_fail`, `check_fail`, `panic`, `transport`, `unparseable`. A call
   with an attached Test case also lists its check verdicts (PASS and FAIL).
-  A shape that declares an expected reject (`ShapeDescriptor::expected_reject`)
-  classes a call ending on that status `expected_reject` (case = the status),
-  counted with `ok` as no failure.
+  A failed call's sample bucket (its *case*) is the step it failed at,
+  `<who>[:<goal kind>#<goal index>]@<barrier>` (e.g. `alice:bye#1@established`,
+  or `settle` for an unmet settle barrier), in a filesystem-safe spelling.
 - **`summary.md`** — the same counts in markdown.
 - **Live:** `curl <metrics-addr>/metrics` during a run for the per-`(scenario,
-  class, chaos)` counters, the call and checkpoint latency histograms, the SIP
+  class, chaos)` counters, `loadgen_branch_total{scenario,branch}` (ok calls by
+  the accepted ending they took) and `loadgen_failed_step_total{scenario,step}`
+  (failed calls by the step they failed at), the call and checkpoint latency
+  histograms, the SIP
   round trips `loadgen_rtt_seconds{scenario,exchange}` (request first sent →
   first `100` / first `18x` for INVITE, → final for every other method; a 2xx
   to an INVITE first sent → its ACK; none of them holds a scripted timer), plus
@@ -636,7 +640,7 @@ page with its one-line reason.
    `.load_shared(Arc::new(MyFlow))`, or `.load_with(|inputs| …)` when it needs
    per-run SUT auth data (`ScenarioInputs`). That is the whole wiring: the
    driver resolves the descriptor from the registry (`MixEntry::by_id` /
-   `--scenario my_flow=…`, `MixEntry::default_mix` / `failure_mix` for the
+   `--scenario my_flow=…`, `MixEntry::default_mix` / `abnormal_end_mix` for the
    shipped tables) — there is no `match` table left to extend, and a duplicate
    id panics at registration. An **emergency variant** is free: a second
    descriptor (`"my_flow_em"`) with `.emergency()` reusing the same body — the
@@ -645,26 +649,39 @@ page with its one-line reason.
    `e2e-core/src/shapes/mod.rs::default_bodies` (see `rerouting_prack`, the
    first dual-body shape; ADR-0021).
 
-### Add a *voluntarily-failing* scenario (post-call-cleanup coverage)
+### Accepted endings
 
-Failure scenario bodies live in
-`crates/scenario-harness/src/realcall/scenarios/failures.rs`, one per teardown
-path, and are registered like any other shape but with `.failure_weight(w)`
-instead of `.default_weight(w)` — that flag is what puts them in the registry's
-`failure_mix`, which the no-leak coverage test runs so every reclamation branch
-is exercised **without an endurance run**:
+A scenario declares the endings it accepts as named branches
+(`scenario_harness::actor::{Expect, Branch}` on its `ActorCall`): `answered`
+(connected, then torn down), `rejected` (a final to the caller's INVITE before
+it connects), `early_media_rejected`, `abandoned` (the caller CANCELled),
+`transfer_declined`, or any scenario-named predicate over the observed state. A
+call that tears down and settles on one of them classes `ok` and counts under
+its branch in `loadgen_branch_total`; an accepted ending still runs the RFC
+audit and the case checks, so an RFC-dirty reject is `rfc_audit_fail`. Every
+other ending fails under its cause's class, keyed by the failed step.
 
-| ends in scope state | teardown the driver runs | example |
+One branch is the harness default: `refused_overload`, a `503` to a
+non-emergency call's INVITE before it connects, accepted only in a run that
+drives overload on purpose (`--overload-expected`, or `overloadExpected` in the
+load profile; default off, so every `503` is a failure). A scenario opts out
+with `Expect::without_overload_refusal()`.
+
+### Add an *abnormal-end* scenario (post-call-cleanup coverage)
+
+Abnormal-end bodies — a call that ends without connecting and hanging up — live
+in `crates/scenario-harness/src/actor/scenarios.rs`, one per teardown path, and
+are registered like any other shape but with `.abnormal_end_weight(w)` instead
+of `.default_weight(w)` — that flag is what puts them in the registry's
+`abnormal_end_mix`, which the no-leak coverage test runs so every reclamation
+branch is exercised **without an endurance run**. Each declares its ending as an
+accepted branch, so a correct SUT leaves every call `ok`:
+
+| ending | branch | example |
 |---|---|---|
-| `Terminated` (final received) | none | `InviteReject` (callee 486) |
-| `Early` (no final) | CANCEL | `AbandonRinging` (caller quits on 180) |
-| `Confirmed` | BYE | `ReferCharlieReject` (transfer 603) |
-
-Return a `StepError` describing the failure (it becomes the report `detail` and
-the NOK callflow banner). If a real final (`status >= 200`) ended the
-transaction, `scope.mark_terminated()` so teardown is a no-op; otherwise leave
-the scope as-is and let the driver CANCEL/BYE. To fully reap an early-CANCEL,
-drive the callee's `200`+`487` in-scenario (see `AbandonRinging`).
+| final received, no dialog | `rejected` | `InviteReject` (callee 486) |
+| caller CANCELs on 180 | `abandoned` | `AbandonRinging` |
+| transfer target declines, caller BYEs | `transfer_declined` | `ReferCharlieReject` (603) |
 
 ### Add a smoke test
 

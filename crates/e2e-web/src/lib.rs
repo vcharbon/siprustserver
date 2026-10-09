@@ -946,7 +946,7 @@ async fn load_run_detail(
                 "chaos=" b { "clear" } " are the genuine results to triage; chaos=" b { "near" }
                 " are within the tolerance of an injected fault (accepted kill collateral). "
                 "case splits a class into its distinct failure modes (RFC rule, failed check, "
-                "agent@phase), each with its own first-N samples."
+                "failed step), each with its own first-N samples."
             }
             table {
                 tr { th { "scenario" } th { "class" } th { "case" } th { "chaos" } th { "count" } th { "samples" } }

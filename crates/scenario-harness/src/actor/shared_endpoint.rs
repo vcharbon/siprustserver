@@ -170,9 +170,17 @@ impl Demux {
 pub struct EndpointPump {
     agent: Agent,
     demux: Arc<Mutex<Demux>>,
+    /// The first sharing actor's role — the `who` a fatal receive is
+    /// attributed to.
+    role: &'static str,
 }
 
 impl EndpointPump {
+    /// The role a failure of this pump is attributed to.
+    pub fn role(&self) -> &'static str {
+        self.role
+    }
+
     /// Pull this endpoint's inbounds and deliver each to its owner until the
     /// endpoint's queue closes. A silent wait is not fatal (the actors' own exit
     /// conditions end the call); an unparseable datagram is, exactly as it is
@@ -249,7 +257,7 @@ pub fn wire_shared_endpoints(
         for (member, (role, inbox)) in inboxes.into_iter().enumerate() {
             wiring.insert(role, (inbox, EndpointHandle { demux: demux.clone(), member }));
         }
-        pumps.push(EndpointPump { agent, demux });
+        pumps.push(EndpointPump { agent, demux, role: specs[indices[0]].role });
     }
     (pumps, wiring)
 }

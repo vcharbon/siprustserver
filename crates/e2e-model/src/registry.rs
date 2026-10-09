@@ -146,15 +146,13 @@ pub struct ShapeDescriptor {
     /// Load: this call is an emergency (`Resource-Priority: esnet.0`) — the SUT
     /// force-admits it under overload, so it must never be shed.
     pub emergency: bool,
-    /// Load: the reject status this shape expects as one of its outcomes; a
-    /// call ending on it classes `expected_reject`, not a failure. `None` =
-    /// every reject is a failure.
-    pub expected_reject: Option<u16>,
     /// Load: weight in the shipped DEFAULT mix (`None` = not in the default mix).
     pub default_weight: Option<f64>,
-    /// Load: weight in the shipped voluntarily-FAILING mix (the post-call
-    /// cleanup-coverage set); `None` = not a failure-mix shape.
-    pub failure_weight: Option<f64>,
+    /// Load: weight in the shipped ABNORMAL-END mix — the post-call cleanup
+    /// coverage set, one shape per teardown path a call takes when it does not
+    /// connect and hang up (each succeeds under its own accepted branch);
+    /// `None` = not in that mix.
+    pub abnormal_end_weight: Option<f64>,
     /// The optional load body factory (`None` = functional-only shape).
     pub load: Option<LoadFactory>,
 }
@@ -169,9 +167,8 @@ impl std::fmt::Debug for ShapeDescriptor {
             .field("needs_charlie", &self.needs_charlie)
             .field("needs_bob2", &self.needs_bob2)
             .field("emergency", &self.emergency)
-            .field("expected_reject", &self.expected_reject)
             .field("default_weight", &self.default_weight)
-            .field("failure_weight", &self.failure_weight)
+            .field("abnormal_end_weight", &self.abnormal_end_weight)
             .field("has_load_body", &self.load.is_some())
             .finish()
     }
@@ -190,9 +187,8 @@ impl ShapeDescriptor {
             needs_charlie: false,
             needs_bob2: false,
             emergency: false,
-            expected_reject: None,
             default_weight: None,
-            failure_weight: None,
+            abnormal_end_weight: None,
             load: None,
         }
     }
@@ -247,20 +243,13 @@ impl ShapeDescriptor {
         self
     }
 
-    /// Declare `status` the reject this shape expects (see
-    /// [`expected_reject`](Self::expected_reject)).
-    pub fn expected_reject(mut self, status: u16) -> Self {
-        self.expected_reject = Some(status);
-        self
-    }
-
     pub fn default_weight(mut self, weight: f64) -> Self {
         self.default_weight = Some(weight);
         self
     }
 
-    pub fn failure_weight(mut self, weight: f64) -> Self {
-        self.failure_weight = Some(weight);
+    pub fn abnormal_end_weight(mut self, weight: f64) -> Self {
+        self.abnormal_end_weight = Some(weight);
         self
     }
 
@@ -355,10 +344,10 @@ impl ShapeRegistry {
         self.iter().filter(|d| d.default_weight.is_some()).collect()
     }
 
-    /// The voluntarily-FAILING load shapes (one per post-call-cleanup teardown
-    /// path), in id order.
-    pub fn failure_mix(&self) -> Vec<&ShapeDescriptor> {
-        self.iter().filter(|d| d.failure_weight.is_some()).collect()
+    /// The ABNORMAL-END load shapes (one per post-call-cleanup teardown path),
+    /// in id order.
+    pub fn abnormal_end_mix(&self) -> Vec<&ShapeDescriptor> {
+        self.iter().filter(|d| d.abnormal_end_weight.is_some()).collect()
     }
 }
 
@@ -524,21 +513,21 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REINVITE_ANCHORS)
             .emergency()
             .load_actor_with(|_| Arc::new(cs::reinvite(cs::default_binder()))),
-        // ── Load: the voluntarily-failing cleanup-coverage set ───────────────
+        // ── Load: the abnormal-end cleanup-coverage set ──────────────────────
         // ACTOR-executed: same downstream contract
         // (table §5.8).
         ShapeDescriptor::new("invite_reject")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::invite_reject(cs::default_binder()))),
         // ACTOR-executed: same downstream contract
         // (table §5.9).
         ShapeDescriptor::new("abandon_ringing")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .load_actor_with(|_| Arc::new(cs::abandon_ringing(cs::default_binder()))),
         // ACTOR-executed: per-endpoint reactors + the
         // ack-gated settle barrier; same downstream contract (table §5.10).
         ShapeDescriptor::new("refer_charlie_reject")
-            .failure_weight(1.0)
+            .abnormal_end_weight(1.0)
             .needs_charlie()
             .load_actor_with(|inputs| {
                 Arc::new(cs::refer_charlie_reject(cs::default_binder(), &inputs.refer_key))
@@ -620,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn default_and_failure_mixes_preserve_canonical_weights_and_add_phase_c() {
+    fn default_and_abnormal_end_mixes_preserve_canonical_weights_and_add_phase_c() {
         let reg = ShapeRegistry::with_defaults();
         let mix: std::collections::BTreeMap<&str, f64> =
             reg.default_mix().iter().map(|d| (d.id, d.default_weight.unwrap())).collect();
@@ -648,8 +637,8 @@ mod tests {
         );
         assert!(reg.get("reroute+reinvite").is_some(), "but they ARE registered by id");
 
-        let failures: Vec<&str> = reg.failure_mix().iter().map(|d| d.id).collect();
-        assert_eq!(failures, vec!["abandon_ringing", "invite_reject", "refer_charlie_reject"]);
+        let abnormal: Vec<&str> = reg.abnormal_end_mix().iter().map(|d| d.id).collect();
+        assert_eq!(abnormal, vec!["abandon_ringing", "invite_reject", "refer_charlie_reject"]);
     }
 
     #[test]

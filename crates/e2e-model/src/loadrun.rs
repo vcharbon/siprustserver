@@ -26,8 +26,8 @@ pub struct LoadRunIndex {
     /// Run metadata: when it ran and the echoed knobs it ran with.
     pub meta: LoadRunMeta,
     /// Per-`(scenario, class, chaos)` completed-call counts (the report's main
-    /// table). A row's `ok` marks its class as no failure (`ok`, or the shape's
-    /// `expected_reject`); `chaos == "near"` is accepted kill collateral,
+    /// table). A row's `ok` marks its class as no failure (`ok`: the call ended
+    /// on an accepted branch); `chaos == "near"` is accepted kill collateral,
     /// `chaos == "clear"` is a genuine result.
     pub counts: Vec<CountRow>,
     /// Per-scenario end-to-end latency summary (ms).
@@ -81,19 +81,19 @@ pub struct LoadRunMeta {
 #[serde(rename_all = "camelCase")]
 pub struct CountRow {
     pub scenario: String,
-    /// The result class label (`ok`, `expected_reject`, `timeout`, `status_503`,
-    /// `check_fail`, …).
+    /// The result class label (`ok`, `timeout`, `status_503`, `check_fail`, …).
     pub class: String,
     /// The bounded case discriminator refining the class into its distinct
-    /// failure modes (RFC rule id(s), failed check id(s), `agent@phase`).
+    /// failure modes (RFC rule id(s), failed check id(s), the failed step
+    /// `<who>[:<kind>#<index>]@<barrier>`).
     /// Empty = un-refined (`ok` rows, indexes written before the field existed).
     #[serde(default)]
     pub case: String,
     /// Chaos proximity: `clear` (genuine) or `near` (accepted kill collateral).
     pub chaos: String,
     pub count: u64,
-    /// `true` iff the class is no failure: `ok`, or `expected_reject` (the
-    /// shape's declared reject). Drives the OK-green / NOK-red split.
+    /// `true` iff the class is no failure (`ok`). Drives the OK-green / NOK-red
+    /// split.
     pub ok: bool,
 }
 

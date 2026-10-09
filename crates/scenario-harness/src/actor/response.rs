@@ -78,9 +78,12 @@ async fn absorb_establishing_provisional(
 
 /// A non-2xx final on the caller's establishing INVITE. Returns `true` when a
 /// §22.2 authenticated resend consumed the challenge (caller re-parks the
-/// INVITE); otherwise records the terminal and — unless the next pending goal
-/// is a RECEPTION goal, which then owns the verdict — surfaces the incidental
-/// establishment failure as the linear `WrongStatus{expected: <180|183>}`,
+/// INVITE); otherwise records the terminal. A final the call accepts
+/// ([`ActorState::accepts`](super::runner::ActorState)) ends the call: it is
+/// recorded as the accepted ending and — unless the next pending goal is a
+/// RECEPTION goal, which then owns the final — the remaining goals are
+/// dropped. Any other final, with a non-reception goal pending, surfaces as
+/// the incidental establishment failure `WrongStatus{expected: <180|183>}`,
 /// never a 32 s barrier timeout.
 async fn absorb_establishing_failure(
     st: &mut ActorState<'_>,
@@ -113,7 +116,15 @@ async fn absorb_establishing_failure(
     );
     st.obs.record(Observation::LegTerminated { leg: st.role }, now);
     st.scope.mark_terminated();
-    if st.goals.has_pending() && !st.goals.next_step().is_some_and(GoalStep::is_reception) {
+    let reception_pending = st.goals.next_step().is_some_and(GoalStep::is_reception);
+    if st.accepts.accepts_final(status) {
+        st.obs.record(Observation::AcceptedEnding, now);
+        if !reception_pending {
+            st.goals.abandon();
+        }
+        return Ok(false);
+    }
+    if st.goals.has_pending() && !reception_pending {
         return Err(StepError::WrongStatus {
             who: st.role.to_string(),
             expected: st.expected_provisional,

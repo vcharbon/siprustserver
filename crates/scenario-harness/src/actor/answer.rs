@@ -37,7 +37,7 @@ pub(super) fn arm_reject_final(st: &mut ActorState<'_>, uas: &ServerTxn, code: u
 /// 200, an in-dialog request awaiting its 2xx — is MOOT once the dialog ends: the
 /// far end's transaction dies with the call, so the ack can never arrive. Without
 /// this the settle barrier holds the verdict its full 32 s ceiling waiting for
-/// that impossible ack, surfacing under loss as a spurious `settle@…` timeout —
+/// that impossible ack, surfacing under loss as a spurious `settle` timeout —
 /// the residual re-INVITE/realign/PRACK tail where an answering/renegotiating leg
 /// strands when the peer BYEs (`reinvite_gap = 0`) before a lost ack could be
 /// recovered. The `RejectFinal` obligation is deliberately preserved (it outlives

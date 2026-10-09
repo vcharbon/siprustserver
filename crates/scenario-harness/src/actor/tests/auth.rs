@@ -206,7 +206,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
     let verdict =
         run_call_with(call, ObservedState::new(), &ctx, Duration::from_secs(5), None).await;
     match verdict {
-        CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
+        CallVerdict::Failed(_, StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!((who.as_str(), expected, got), ("alice", 180, 401));
         }
         other => panic!("expected WrongStatus{{who:alice, 180/401}}, got {other:?}"),

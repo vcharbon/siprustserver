@@ -314,6 +314,33 @@ pub enum GoalStep {
 }
 
 impl GoalStep {
+    /// The step's bounded kind name — the `<kind>` of a failed-step key
+    /// ([`FailedAt`](super::FailedAt)).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            GoalStep::Invite { .. } => "invite",
+            GoalStep::Refer { .. } => "refer",
+            GoalStep::Reinvite => "reinvite",
+            GoalStep::Update => "update",
+            GoalStep::UpdateEarly => "update_early",
+            GoalStep::Options => "options",
+            GoalStep::EveryOptions { .. } => "every_options",
+            GoalStep::Cancel { .. } => "cancel",
+            GoalStep::InDialog { .. } => "in_dialog",
+            GoalStep::Bye => "bye",
+            GoalStep::ByeIfConfirmed => "bye_if_confirmed",
+            GoalStep::ByeWith { .. } => "bye_with",
+            GoalStep::InviteTemplate { .. } => "invite_template",
+            GoalStep::RequestTemplate { .. } => "request_template",
+            GoalStep::RespondTemplate { .. } => "respond_template",
+            GoalStep::Respond { .. } => "respond",
+            GoalStep::ExpectResponse { .. } => "expect_response",
+            GoalStep::ExpectRequest { .. } => "expect_request",
+            GoalStep::ObserveFinal { .. } => "observe_final",
+            GoalStep::ExpectFinal { .. } => "expect_final",
+        }
+    }
+
     /// Whether this is a reception goal (an observation over the shared state).
     /// While the next pending goal is one, the reactor's incidental-failure
     /// shed is suppressed — the goal owns the final's verdict.
@@ -402,6 +429,21 @@ impl GoalCursor {
     /// (the `step` an `AcceptedDelta` observation names).
     pub(super) fn position(&self) -> usize {
         self.cursor
+    }
+
+    /// The pending goal as `(kind, index)` — the goal a failure of this actor
+    /// is attributed to. `None` once every goal has fired.
+    pub(super) fn pending(&self) -> Option<(&'static str, u16)> {
+        let step = self.next_step()?;
+        Some((step.kind(), u16::try_from(self.cursor).unwrap_or(u16::MAX)))
+    }
+
+    /// Drop every un-fired goal: the actor's call ended on an accepted final
+    /// before they could fire, so none of them is owed.
+    pub(super) fn abandon(&mut self) {
+        self.cursor = self.goals.len();
+        self.ready_at = None;
+        self.deadline_at = None;
     }
 
     /// The steps of every un-fired goal, in order — the park-or-react match set.

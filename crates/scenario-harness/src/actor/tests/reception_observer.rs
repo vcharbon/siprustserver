@@ -274,7 +274,7 @@ async fn reception_observer_fires_when_the_matcher_fails() {
     let ctx = CallCtx::new();
     let verdict = run_call_with(call, obs, &ctx, Duration::from_secs(5), None).await;
     match &verdict {
-        CallVerdict::Failed(StepError::UnexpectedKind { who, detail }) => {
+        CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");
             assert!(detail.contains("did not match its template"), "{detail}");
         }

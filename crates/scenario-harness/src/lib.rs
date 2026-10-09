@@ -75,8 +75,8 @@ pub use egress::{ApiCall, CalleeTarget, EgressPolicy, EgressRewrite};
 pub use run::{run, ExpectOutcome, RunReport};
 // The per-call environment shared by the load generator and the in-process
 // functional leak gate, plus the actor-scenario runners
-// (`realcall::run_actor_asserting` for happy-path flows,
-// `realcall::run_actor_collecting` for the voluntarily-failing ones).
+// (`realcall::run_actor_asserting` panics on a failure and returns the accepted
+// branch, `realcall::run_actor_collecting` returns the verdict).
 pub use realcall::{
     run_actor_asserting, run_actor_collecting, CallCtx, CallEnv, CallScope, Challenge,
     ChallengeResponder, CoreIdentity, ScenarioId,

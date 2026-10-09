@@ -162,7 +162,7 @@ fn platform_registry() -> ShapeRegistry {
 
 Descriptor knobs: `.anchors(&[Anchor])` (sampling), `.needs_charlie()` /
 `.needs_bob2()` (extra callee legs the driver binds), `.default_weight(f64)` /
-`.failure_weight(f64)` (mix membership), `.emergency()`, `.load_shared(body)` for
+`.abnormal_end_weight(f64)` (mix membership), `.emergency()`, `.load_shared(body)` for
 a stateless body or `.load_actor_with(|inputs| …)` when the body needs
 `ScenarioInputs` (e.g. a `refer_key`). One id space — a duplicate id panics at
 registration.
