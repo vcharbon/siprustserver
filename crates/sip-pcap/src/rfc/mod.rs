@@ -5,7 +5,7 @@
 //! A detector decides a rule off the WIRE, from what one endpoint was seen to
 //! take and then emit — or fail to emit — so a claim a document makes about a
 //! violation is something a tool verified rather than something an author
-//! asserted. The vocabulary is closed and grows one detector at a time.
+//! asserted. The vocabulary is every rule `rfc-rules` has a body for.
 //!
 //! **Vantage.** A detector reasons per ENDPOINT (`ip:port`), never per leg as
 //! a whole: a leg carries both peers' traffic, and only one of them broke the
@@ -51,10 +51,8 @@ pub use census::{Census, LocatedHit, ReadFailure, RuleTally};
 pub use sut::{Side, SutSet};
 
 /// The rule vocabulary and its evidence live ONCE, in `rfc-rules`;
-/// this module is the capture ADAPTER over them. The census runs the
-/// [`RfcRule::WIRE`] subset — the rules whose corpus numbers back the pivot
-/// §11.1 contract — plus the candidates a sweep names to take their baseline
-/// ([`scan_with`]).
+/// this module is the capture ADAPTER over them. The census runs every rule of
+/// the [`RfcRule::WIRE`] contract, which is all of them.
 pub use rfc_rules::{Evidence, RuleId as RfcRule};
 
 /// Which side of the captured deployment an endpoint sits on, as the GROUP
@@ -113,6 +111,9 @@ pub struct Hit {
     pub taker: String,
     /// CSeq NUMBER of the INVITE transaction — the key the evidence shares.
     pub cseq: u32,
+    /// Index into the leg's `msgs` of the message the decision rests on, the
+    /// same for every rule: where a document states the violation.
+    pub anchor_msg: usize,
     /// The emitter forwarded a message it had itself been sent rather than
     /// originating the behaviour, so the rule the far endpoint broke is
     /// already counted against that endpoint. A relayed hit is a weaker
@@ -155,15 +156,13 @@ impl Scan {
 }
 
 /// Every violation the document's own bytes prove, with its denominators —
-/// the [`RfcRule::WIRE`] vocabulary.
+/// every rule of the [`RfcRule::WIRE`] vocabulary.
 pub fn scan(doc: &FlowsDoc) -> Scan {
     scan_with(doc, &[])
 }
 
-/// [`scan`] with `candidates` run beside the WIRE vocabulary: rules with a body
-/// but no corpus numbers yet, whose baseline THIS sweep takes. A candidate's
-/// hits are tallied under its own token and never join the WIRE contract by
-/// being counted.
+/// [`scan`] with `candidates` named too. The census runs every rule already, so
+/// a candidate adds nothing; the parameter keeps the sweep's flag readable.
 pub fn scan_with(doc: &FlowsDoc, candidates: &[RfcRule]) -> Scan {
     scan_sut(doc, candidates, None)
 }
@@ -240,17 +239,12 @@ pub(crate) struct Site<'a> {
 }
 
 impl Site<'_> {
-    /// The head of a hit at this site, charged to `emitter` and owed to
-    /// `taker`.
-    pub(crate) fn hit(
-        &self,
-        rule: RfcRule,
-        emitter: &str,
-        taker: &str,
-        cseq: u32,
-        relayed: bool,
-        evidence: Evidence,
-    ) -> Hit {
+    /// The hit a violated finding at this site states: its head — charged to
+    /// the finding's `emitter`, owed to its `taker`, anchored on its message —
+    /// and `evidence`, its proof.
+    pub(crate) fn hit(&self, finding: &rfc_rules::Finding, evidence: Evidence) -> Hit {
+        let rfc_rules::Finding { rule, emitter, taker, cseq, relayed, anchor, .. } = finding;
+        let (rule, cseq, relayed, anchor_msg) = (*rule, *cseq, *relayed, *anchor);
         Hit {
             rule,
             group: self.group,
@@ -261,6 +255,7 @@ impl Site<'_> {
             side: self.sut.map_or(Side::Unattributed, |s| s.side_of(emitter)),
             taker: taker.to_string(),
             cseq,
+            anchor_msg,
             relayed,
             evidence,
         }

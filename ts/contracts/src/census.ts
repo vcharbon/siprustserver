@@ -45,7 +45,12 @@ const HitHead = {
   side: Schema.optionalKey(Schema.Literals(["platform", "peer"])),
   taker: Schema.String,
   cseq: Schema.Int,
-  relayed: Schema.Boolean
+  relayed: Schema.Boolean,
+  /**
+   * Index into the leg's messages of the message the decision rests on, the
+   * same for every rule. Absent from a report taken before it was stated.
+   */
+  anchor_msg: Schema.optionalKey(Schema.Int)
 }
 
 /** `no-200-after-cancel`: the CANCEL taken and the 2xx sent after it. */
@@ -133,13 +138,55 @@ export const SecondAnswerHit = Schema.Struct({
 })
 export interface SecondAnswerHit extends Schema.Schema.Type<typeof SecondAnswerHit> {}
 
+/** `unacked-invite-non-2xx-final`: the non-2xx final taken and never ACKed on its INVITE's branch. */
+export const UnackedRejectHit = Schema.Struct({
+  ...HitHead,
+  rule: Schema.Literal("unacked-invite-non-2xx-final"),
+  reject_msg: Schema.Int,
+  reject_hop: Schema.Int,
+  reject_ts_us: Schema.Int,
+  status: Schema.Int,
+  invite_msg: Schema.Int,
+  branch: Schema.String,
+  window_us: Schema.Int
+})
+export interface UnackedRejectHit extends Schema.Schema.Type<typeof UnackedRejectHit> {}
+
+/** The rules whose evidence this mirror models field by field. */
+const MODELLED = [
+  "no-200-after-cancel",
+  "unacked-reliable-provisional",
+  "no-ack-to-dialog-creating-2xx",
+  "no-cancel-after-final",
+  "second-answer-repeats-the-first",
+  "unacked-invite-non-2xx-final"
+] as const satisfies ReadonlyArray<RfcRule>
+
+/** Every other rule of the vocabulary. */
+const UNMODELLED = RFC_RULES.filter(
+  (rule): rule is Exclude<RfcRule, (typeof MODELLED)[number]> =>
+    !(MODELLED as ReadonlyArray<string>).includes(rule)
+)
+
+/**
+ * A hit of any other rule: the head every hit states, and its evidence carried
+ * as the detector wrote it — a reader acts on the head and `anchor_msg` alone.
+ */
+export const OtherHit = Schema.StructWithRest(
+  Schema.Struct({ ...HitHead, rule: Schema.Literals(UNMODELLED) }),
+  [Schema.Record(Schema.String, Schema.Unknown)]
+)
+export type OtherHit = typeof OtherHit.Type
+
 /** One hit, internally tagged on `rule`. */
 export const CensusHit = Schema.Union([
   CancelHit,
   UnackedHit,
   NoAckHit,
   LateCancelHit,
-  SecondAnswerHit
+  SecondAnswerHit,
+  UnackedRejectHit,
+  OtherHit
 ])
 export type CensusHit = typeof CensusHit.Type
 
@@ -173,6 +220,8 @@ export interface CensusFailure extends Schema.Schema.Type<typeof CensusFailure> 
  */
 export const CensusReport = Schema.Struct({
   documents: Schema.Int,
+  /** The captures the sweep covered, each once. Absent from a report taken before it was stated. */
+  captures: Schema.optionalKey(Schema.Array(Schema.String)),
   groups: Schema.Int,
   legs: Schema.Int,
   messages: Schema.Int,

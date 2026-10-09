@@ -207,6 +207,11 @@ struct Args {
     #[arg(long)]
     out: Option<PathBuf>,
 
+    /// Also write every SIP-looking datagram the parser rejected (the
+    /// `parse-failed` count), exactly as captured, to this classic pcap.
+    #[arg(long = "parse-failed-pcap")]
+    parse_failed_pcap: Option<PathBuf>,
+
     /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
     /// flows documents — files, or directories walked recursively for
     /// `*.flows.json` — and print the report as JSON on stdout with its
@@ -223,10 +228,9 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     rfc_census_jobs: usize,
 
-    /// Rule tokens (`rfc_rules::RuleId`) to run BESIDE the WIRE vocabulary in
-    /// the census — a rule with a body but no corpus numbers yet, whose
-    /// baseline this sweep takes. The report then carries its token too, so it
-    /// is not a dated run the cut may read.
+    /// Rule tokens (`rfc_rules::RuleId`) named beside the census vocabulary.
+    /// The census runs every rule with a body already, so naming one changes
+    /// nothing the report carries.
     #[arg(long = "rfc-census-with", value_delimiter = ',', requires = "rfc_census")]
     rfc_census_with: Vec<rfc_rules::RuleId>,
 
@@ -393,6 +397,16 @@ fn main() {
 
     let flows = build_flows(&datagrams, &cfg);
     let sut = sut_of(&args, &flows);
+
+    if let Some(path) = &args.parse_failed_pcap {
+        let failed = flows.stats.parse_failed_at.iter().map(|&i| &datagrams[i]);
+        if let Err(e) = sip_pcap::pcapout::datagrams_to_pcap(failed)
+            .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
+        {
+            eprintln!("cannot write the rejected datagrams to {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
 
     if args.json {
         // Pretty + deterministic field order: the emit is committed as

@@ -72,7 +72,7 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
             "alice CANCELs the renegotiation instead of PRACKing its reliable provisional \
              (RFC 3261 §9.1) — the unacknowledged provisional is this test's subject",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5184").await;
     let bob = h.agent("bob", "127.0.0.1:5185").await;
@@ -118,6 +118,9 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
     // ── alice CANCELs it before the first ladder rung falls ──
     let mut cancel = reinv.cancel().await;
     cancel.expect(200).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
     reinv.expect(487).await;

@@ -51,7 +51,7 @@ export const stampRfcViolations = (input: StampInput): Stamped => {
       if (anchor === undefined) {
         out.warnings.push(
           `${input.capture}: allowed-errors entry '${e.rule}' on call-id '${callId}' ` +
-            `(originator ${e.originator}) is NOT stamped — no step carries ${MESSAGE_OF[e.rule]} ` +
+            `(originator ${e.originator}) is NOT stamped — no step carries ${MESSAGE_OF[e.rule] ?? "its anchor message"} ` +
             `at this case's vantage`
         )
         continue
@@ -71,12 +71,13 @@ export const unanchoredFlag = (detail: string): Case.Flag => ({
 })
 
 /** What a rule's anchor message IS, in the words a warning uses. */
-const MESSAGE_OF: Record<Violation.RfcRule, string> = {
+const MESSAGE_OF: Partial<Record<Violation.RfcRule, string>> = {
   "no-200-after-cancel": "that 200 to INVITE",
   "unacked-reliable-provisional": "that reliable provisional",
   "no-ack-to-dialog-creating-2xx": "that dialog-creating 2xx",
   "no-cancel-after-final": "that late CANCEL",
-  "second-answer-repeats-the-first": "that second answer"
+  "second-answer-repeats-the-first": "that second answer",
+  "unacked-invite-non-2xx-final": "that non-2xx INVITE final"
 }
 
 /**
@@ -93,6 +94,7 @@ const MESSAGE_OF: Record<Violation.RfcRule, string> = {
  * | `no-ack-to-dialog-creating-2xx` | the first dialog-creating 2xx the originator TOOK | its receiver |
  * | `no-cancel-after-final` | the CANCEL the originator EMITTED past its own final | its sender |
  * | `second-answer-repeats-the-first` | the SECOND binding answer the originator EMITTED on one dialog | its sender |
+ * | `unacked-invite-non-2xx-final` | the first non-2xx INVITE final the originator TOOK | its receiver |
  *
  * The last one is the only rule whose anchor is not the first message its
  * predicate admits — the first binding answer is the compliant one — so its
@@ -111,7 +113,8 @@ const anchorOf = (
 ): Violation.RfcViolation | undefined => {
   const charges =
     entry.rule === "unacked-reliable-provisional" ||
-      entry.rule === "no-ack-to-dialog-creating-2xx"
+      entry.rule === "no-ack-to-dialog-creating-2xx" ||
+      entry.rule === "unacked-invite-non-2xx-final"
       ? "receiver"
       : "sender"
   const seconds = entry.rule === "second-answer-repeats-the-first"
@@ -199,7 +202,12 @@ const isAnchorFor = (rule: Violation.RfcRule, msg: Flows.Msg): boolean => {
   // The second answer is not the first message its own predicate admits, so it
   // anchors off the LEG ahead of the walk (see `secondAnswers`), never here.
   if (rule === "second-answer-repeats-the-first") return false
-  return isReliableProvisional(msg, status)
+  // RFC 3261 §17.1.1.3: the ACK this rule misses is owed to a non-2xx final.
+  if (rule === "unacked-invite-non-2xx-final") return status >= 300
+  if (rule === "unacked-reliable-provisional") return isReliableProvisional(msg, status)
+  // A rule the registry reading has no anchor shape for anchors nothing here:
+  // the census hit's own `anchor_msg` states it (`./captured.ts`).
+  return false
 }
 
 /** RFC 3262 §3: reliable means BOTH headers, and 100 is never reliable. */

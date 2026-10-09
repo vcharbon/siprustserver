@@ -124,6 +124,61 @@ impl ActionExecutor<'_> {
         }
     }
 
+    /// ACK `leg_id`'s confirmed dialog on this stack's own account, bare
+    /// (RFC 3261 §13.2.2.4): an offer of the dialog a reliable provisional
+    /// carried is answered first, in the PRACK still owed (RFC 3262 §5), so
+    /// the wire reads PRACK, ACK.
+    pub(super) fn ack_own_bare(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+        let owed = relay::offers_owed_at_ack(call, leg_id);
+        self.prack_offers_owed_at_ack(call, fx, leg_id, owed, None);
+        self.ack_leg(
+            call,
+            fx,
+            leg_id,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Provenance::Authored,
+            relay::Author::Stack,
+        );
+    }
+
+    /// The answer a relayed ACK carrying none owes `target_leg`'s delayed offer
+    /// ([`crate::rules::delayed_offer`]), and whether it is the caller's: the
+    /// offer answered out of her own description (her INVITE's offer, which
+    /// the 2xx answered on her face), else every stream rejected on this
+    /// stack's account (RFC 3264 §6).
+    fn answer_owed(
+        &self,
+        call: &Call,
+        target_leg: &str,
+        ack: &sip_message::SipRequest,
+    ) -> Option<(Vec<u8>, bool)> {
+        if ack.sdp().is_some() {
+            return None;
+        }
+        let leg = call.b_legs.iter().find(|l| l.leg_id == target_leg)?;
+        let offer = crate::rules::delayed_offer::owed(leg, ack.cseq().seq() as i64)?;
+        let caller = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let own = caller.sdp().and_then(|own| {
+            sip_message::sdp_answer::answer_from_own(
+                &offer,
+                own,
+                sip_message::sdp_answer::FormatPreference::Offerer,
+                None,
+            )
+        });
+        if let Some(answer) = own {
+            return Some((answer, true));
+        }
+        let options = sip_message::BuildHeldSdpOptions {
+            local_ip: self.config.sip_local_ip.clone(),
+            now_ms: self.now_ms,
+        };
+        let rejected = sip_message::sdp_answer::reject_offer(&offer, &options)?;
+        Some((rejected, false))
+    }
+
     /// Relay an inbound SIP request to `target_leg`. Replicates the source's
     /// per-dialog CSeq bookkeeping (`relay_cseq_delta` — each dialog has its own
     /// sequence, RFC 3261 §12.2.1.1), the PRACK `RAck` CSeq rewrite (RFC 3262
@@ -165,15 +220,45 @@ impl ActionExecutor<'_> {
             let face = capabilities::Face::of_leg(target_leg);
             let (extra_headers, _) =
                 relayed_request_headers(call, req, target_leg, face, self.config, self.now_ms);
+            let caller = relay::Author::Leg(ctx.source_leg_id);
+            // The confirmed dialog's offer the 2xx left to this ACK takes the
+            // caller's answer in its PRACK; the ACK then carries none.
+            let deferred = relay::offers_owed_at_ack(call, target_leg);
+            if !deferred.is_empty() {
+                let answer = relay::ack_answer_on_leg(
+                    call,
+                    target_leg,
+                    req,
+                    caller,
+                    self.config.sdp_form.as_ref(),
+                );
+                self.prack_offers_owed_at_ack(call, fx, target_leg, deferred, answer);
+                self.ack_leg(
+                    call,
+                    fx,
+                    target_leg,
+                    Vec::new(),
+                    None,
+                    extra_headers,
+                    Provenance::Relayed,
+                    caller,
+                );
+                return;
+            }
+            let (body, content_type, author) = match self.answer_owed(call, target_leg, req) {
+                Some((answer, true)) => (answer, Some(relay::sdp()), caller),
+                Some((answer, false)) => (answer, Some(relay::sdp()), relay::Author::Stack),
+                None => (req.body().to_vec(), content_type, caller),
+            };
             self.ack_leg(
                 call,
                 fx,
                 target_leg,
-                req.body().to_vec(),
+                body,
                 content_type,
                 extra_headers,
                 Provenance::Relayed,
-                relay::Author::Leg(ctx.source_leg_id),
+                author,
             );
             return;
         }
@@ -183,13 +268,14 @@ impl ActionExecutor<'_> {
         let Some(t_idx) = leg_index(call, target_leg) else {
             return;
         };
-        // Forking: pick the early dialog by its callee tag (RFC 3261 §12.2.1.1 —
-        // each forked early dialog is independent); else the first/only dialog.
+        // Forking: pick the early dialog by its identity tag — the callee fork
+        // toward a b-leg, the caller-facing dialog toward the a-leg (RFC 3261
+        // §12.2.1.1: each early dialog is independent); else the first/only one.
         let target_dialog = {
             let leg = leg_at(call, t_idx);
             let picked = target_to_tag
                 .as_deref()
-                .and_then(|tt| leg.dialogs.iter().find(|d| d.sip.remote_tag == tt))
+                .and_then(|tt| call::helpers::dialog_by_identity(leg, tt))
                 .or_else(|| leg.dialogs.first());
             match picked {
                 Some(d) => d.clone(),
@@ -205,10 +291,11 @@ impl ActionExecutor<'_> {
         }
 
         // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
-        //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq). ──
+        //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq), the
+        //    source dialog being the one the request rides (its From-tag). ──
         let inbound_cseq = req.cseq().seq() as i64;
         let source_leg_id = ctx.source_leg_id.to_string();
-        let source_dialog = ctx.source_dialog().cloned();
+        let source_dialog = ctx.request_dialog().cloned();
         let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
         let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
         let target_invite_cseq =

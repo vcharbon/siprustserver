@@ -652,7 +652,9 @@ async fn a_reroute_leg_is_offered_reliability_the_caller_never_offered() {
 /// this stack cannot acknowledge — while the mask stays up: bob2's 18x are
 /// suppressed, and its 200, from a dialog the caller was never shown, opens a
 /// second caller dialog under a fresh To-tag carrying the session description
-/// bob2's 200 brought.
+/// bob2's 200 brought. That 200 carried bob2's offer (RFC 3261 §13.2.1), so
+/// the ACK relayed to bob2 carries the answer, made out of alice's own offer
+/// (§13.2.2.4) although her ACK carried none.
 #[tokio::test]
 async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mask() {
     use b2bua::decision::test_adapter::route_to_with_18x;
@@ -720,7 +722,9 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     assert!(is_sdp(ok.header::<MediaType>()), "alice's 200 carries bob2's session description");
 
     let mut dialog = call.ack().await;
-    bob2.receive("ACK").await;
+    let ack = bob2.receive("ACK").await;
+    let answer = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(answer.contains("m=audio"), "the ACK answers bob2's offer: {answer:?}");
     let mut bye = dialog.bye().await;
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

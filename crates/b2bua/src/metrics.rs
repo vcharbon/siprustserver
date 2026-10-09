@@ -135,6 +135,8 @@ struct Inner {
     // it ran. Measures the race between a call's own clocks and its teardown,
     // not a fault; a rule named here on a live call would have made progress.
     going_away_absorbed: AtomicU64,
+    // PRACKs answered 200 after their call's release (RFC 3262 §3).
+    late_prack_answered: AtomicU64,
     // Another incarnation's event: a timer fire, transaction timeout,
     // callout result or late message of an earlier call on the same
     // callRef, dropped before the live call's rules read it. Measures the
@@ -566,6 +568,7 @@ impl B2buaMetrics {
     );
     counter!(bump_termination_unrecorded, termination_unrecorded_total, termination_unrecorded);
     counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
+    counter!(bump_late_prack_answered, late_prack_answered_total, late_prack_answered);
     counter!(
         bump_other_incarnation_dropped,
         other_incarnation_dropped_total,
@@ -993,6 +996,8 @@ impl B2buaMetrics {
             .render_value(&mut s, self.provisional_after_final_refused_total());
         catalogue::worker::GOING_AWAY_ABSORBED
             .render_value(&mut s, self.going_away_absorbed_total());
+        catalogue::worker::LATE_PRACK_ANSWERED
+            .render_value(&mut s, self.late_prack_answered_total());
         catalogue::worker::OTHER_INCARNATION_DROPPED
             .render_value(&mut s, self.other_incarnation_dropped_total());
         // ── injectable store-fault seam (ADR-0023) ──

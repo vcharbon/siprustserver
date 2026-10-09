@@ -82,7 +82,7 @@ export const buildCalls = (
         // The dwell the platform's own no-answer timer ran before it gave up,
         // stated on the attempt that rang: what a lane has to arm to reproduce
         // the handover. Present exactly when the cause is `no-answer`.
-        ...(cause?.after_ms === undefined ? {} : { no_answer_ms: cause.after_ms }),
+        ...(cause?.after_ms === undefined || cause.cause !== "no-answer" ? {} : { no_answer_ms: cause.after_ms }),
         // The cause's own evidence stays with the attempt that failed; the
         // evidence that JOINED this attempt to the chain stays with the attempt
         // it joined, so neither is duplicated per transition.

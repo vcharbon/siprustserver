@@ -8,18 +8,20 @@
 //! responses ... received from different remote UAs (because the INVITE
 //! forked)"), scripted on bob's socket because the wire is all the SUT sees.
 //!
-//! The B2BUA confirms the winner and takes nothing from the straggler —
-//! `re-ack-retransmitted-2xx` declines a To-tag no dialog on the leg carries
-//! (`reack_retransmitted_2xx::a_foreign_tagged_2xx_is_not_a_retransmission`).
-//! What this cell asserts is that refusing it costs our platform nothing: the
-//! caller keeps the one answer she was given, the hangup BYE addresses the
-//! WINNING tag, the CDR is written, and the call record reaps empty.
+//! The B2BUA confirms the winner and releases the straggler as §13.2.2.4 has a
+//! UAC do with a dialog it does not want: it ACKs that 2xx, then BYEs that
+//! dialog (`release-fork-straggler-2xx`). What this cell asserts is that the
+//! release costs our call nothing: the caller keeps the one answer she was
+//! given, the hangup BYE addresses the WINNING tag, the CDR is written, and
+//! the call record reaps empty.
 
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
+use sip_message::generators::InDialogMethod;
+use sip_message::header::RSeq;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
 const ANSWER_WINNER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
@@ -33,20 +35,12 @@ const WINNER: &str = "bobfork1";
 const STRAGGLER: &str = "bobfork2";
 
 /// Two forks ring, the first answers and the call bridges; the second answers
-/// afterwards on the same INVITE CSeq under its own tag. The B2BUA ignores the
-/// straggler and its own call stays exactly as it was — one answer to alice, a
-/// hangup BYE on the winner's tag, a CDR, and a reaped record.
+/// afterwards on the same INVITE CSeq under its own tag. The B2BUA ACKs and BYEs
+/// the straggler, and its own call stays exactly as it was — one answer to
+/// alice, a hangup BYE on the winner's tag, a CDR, and a reaped record.
 #[tokio::test(start_paused = true)]
 async fn a_fork_straggler_leaves_our_call_intact_and_reaped() {
     let h = Harness::new("b2bua-fork-straggler-no-leak");
-    // The straggler is the deliberate peer-side non-compliance: a second remote
-    // UA's answer that this call refuses, whose own dialog the scripted peer
-    // then neither retransmits to Timer H nor BYEs (§13.3.1.4 is the answerer's
-    // duty, and the answerer is behind the fork, not on this fabric).
-    h.allow_violation(
-        "unacked-2xx-not-cleared",
-        "the scripted fork straggler answers under a tag this call never confirmed and does not clean up its own dialog",
-    );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 6062).start(&h, "b2bua", B2BUA).await;
@@ -74,16 +68,20 @@ async fn a_fork_straggler_leaves_our_call_intact_and_reaped() {
 
     // ── the second fork answers late, same INVITE CSeq, its own tag ──────────
     uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    // §13.2.2.4: the UAC ACKs every 2xx, then BYEs the dialog it does not want.
+    let straggler_ack = bob.receive("ACK").await;
+    assert_eq!(straggler_ack.request().to().tag(), Some(STRAGGLER), "the ACK names the straggler");
+    let mut straggler_bye = bob.receive("BYE").await;
+    assert_eq!(straggler_bye.request().to().tag(), Some(STRAGGLER), "the BYE ends the straggler");
+    straggler_bye.respond(200, "OK").await;
     for _ in 0..5 {
         h.advance(Duration::from_millis(100)).await;
     }
     bob.drain().await;
-
-    // Nothing this call sends belongs to the straggler's dialog.
     assert_eq!(
         datagrams_to_bob_tagged(&h, &b2bua, STRAGGLER),
-        0,
-        "the straggler's dialog draws nothing from us",
+        2,
+        "the straggler's dialog draws its ACK and its BYE, once each",
     );
     assert_eq!(
         alice_finals(&h, &b2bua),
@@ -117,10 +115,281 @@ async fn a_fork_straggler_leaves_our_call_intact_and_reaped() {
 
     assert_eq!(
         datagrams_to_bob_tagged(&h, &b2bua, STRAGGLER),
-        0,
-        "the whole call through, we addressed the straggler's dialog never",
+        2,
+        "the whole call through, the straggler's dialog drew nothing more",
     );
 
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+/// A straggler that repeats its 2xx (RFC 3261 §13.3.1.4: its ACK was lost, as
+/// far as it knows) draws the SAME ACK again — one ACK per 2xx, re-passed to
+/// the transport for every copy (§13.2.2.4) — and no second BYE.
+#[tokio::test(start_paused = true)]
+async fn a_straggler_repeat_is_re_acked_and_draws_no_second_bye() {
+    let h = Harness::new("b2bua-fork-straggler-repeat");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 6062).start(&h, "b2bua", B2BUA).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag(WINNER).await;
+    call.expect(180).await;
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(ANSWER_WINNER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    let first = bob.receive("ACK").await;
+    let mut straggler_bye = bob.receive("BYE").await;
+    straggler_bye.respond(200, "OK").await;
+    // The straggler repeats its 2xx: the same ACK answers it, and nothing else.
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    let again = bob.receive("ACK").await;
+    assert_eq!(
+        again.request().image(),
+        first.request().image(),
+        "the repeat draws the same ACK, byte for byte"
+    );
+    for _ in 0..5 {
+        h.advance(Duration::from_millis(100)).await;
+    }
+    bob.drain().await;
+    assert_eq!(
+        datagrams_to_bob_tagged(&h, &b2bua, STRAGGLER),
+        3,
+        "two ACKs and one BYE: the repeat draws no second BYE",
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the one call");
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+const OFFER_LATE: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+const STRAGGLER_OFFER: &str = "v=0\r\no=bob 2 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20002 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+
+/// A call whose winning fork is bridged: alice dialled through the B2BUA with
+/// `offer` (or none — a delayed offer), the winner answered with `answer`, and
+/// alice ACKed with `ack_answer`. Returns the scene and the straggler's handle.
+async fn bridged(
+    name: &str,
+    ports: (u16, u16, u16),
+    offer: Option<&str>,
+    answer: &str,
+    ack_answer: Option<&str>,
+) -> (
+    Harness,
+    scenario_harness::Agent,
+    scenario_harness::Agent,
+    B2buaSut,
+    scenario_harness::Dialog,
+    scenario_harness::ServerTxn,
+) {
+    let h = Harness::new(name);
+    let (a, b, s) = ports;
+    let alice = h.agent("alice", &format!("127.0.0.1:{a}")).await;
+    let bob = h.agent("bob", &format!("127.0.0.1:{b}")).await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", b)
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", &format!("127.0.0.1:{s}"))
+        .await;
+    let invite = alice.invite(&bob).through(b2bua.addr);
+    let invite = match offer {
+        Some(sdp) => invite.with_sdp(sdp),
+        None => invite,
+    };
+    let mut call = invite.send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag(WINNER).await;
+    call.expect(180).await;
+    uas.respond(180, "Ringing").with_to_tag(STRAGGLER).await;
+    call.expect(180).await;
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(answer).await;
+    call.expect(200).await;
+    let dialog = call.ack_with(ack_answer).await;
+    bob.receive("ACK").await;
+    (h, alice, bob, b2bua, dialog, uas)
+}
+
+/// The straggler's BYE is the release of a dialog this call never wanted, so
+/// nothing about it reaches the winning dialog: left unanswered past its
+/// Timer F (RFC 3261 §17.1.2.2), it times out on its own and the bridged call
+/// stays up, to be hung up and reaped as any other.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_straggler_bye_leaves_the_winning_call_up() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-bye-unanswered",
+        (6071, 6072, 6073),
+        Some(OFFER),
+        ANSWER_WINNER,
+        None,
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    let straggler_bye = bob.receive("BYE").await;
+    assert_eq!(straggler_bye.request().to().tag(), Some(STRAGGLER));
+    // The straggler never answers: the BYE retransmits to Timer F and gives up.
+    for _ in 0..40 {
+        h.advance(Duration::from_secs(1)).await;
+        bob.drain().await;
+    }
+    assert_eq!(alice.drain().await, 0, "nothing reached alice: her call is untouched");
+    assert_eq!(b2bua.active_calls(), 1, "the bridged call survives the straggler's timeout");
+
+    let mut bye = dialog.bye().await;
+    let mut b_bye = bob.receive("BYE").await;
+    assert_eq!(b_bye.request().to().tag(), Some(WINNER), "the hangup ends the winner");
+    b_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let kinds: Vec<CdrEventType> =
+        b2bua.cdr_records()[0].events.iter().map(|e| e.event_type).collect();
+    assert!(kinds.contains(&CdrEventType::Bye), "the call ends on alice's hangup: {kinds:?}");
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+/// The answer to the straggler's BYE is that release's own: arriving while the
+/// winner's BYE still awaits ITS answer, it confirms nothing on the winning
+/// leg, which stays open until the winner answers.
+#[tokio::test(start_paused = true)]
+async fn the_straggler_bye_answer_leaves_the_winners_bye_pending() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-bye-crossing",
+        (6081, 6082, 6083),
+        Some(OFFER),
+        ANSWER_WINNER,
+        None,
+    )
+    .await;
+    let mut bye = dialog.bye().await;
+    let mut winner_bye = bob.receive("BYE").await;
+    assert_eq!(winner_bye.request().to().tag(), Some(WINNER));
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    let mut straggler_bye = bob.receive("BYE").await;
+    assert_eq!(straggler_bye.request().to().tag(), Some(STRAGGLER));
+    straggler_bye.respond(200, "OK").await;
+    h.advance(Duration::from_millis(200)).await;
+    assert!(!b2bua.is_reaped(), "the winner's BYE is still unanswered: its leg is not closed");
+    winner_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+/// A delayed offer (RFC 3261 §13.2.1): the b-leg INVITE carried none, so the
+/// straggler's 2xx carries an offer, and the ACK MUST carry the answer
+/// (§13.2.2.4). The release answers it rejecting every stream — port 0, the
+/// offered formats kept (RFC 3264 §6) — since the BYE follows at once.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_straggler_is_answered_in_its_ack() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-delayed-offer",
+        (6091, 6092, 6093),
+        None,
+        OFFER_LATE,
+        Some(OFFER),
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(STRAGGLER_OFFER).await;
+    let ack = bob.receive("ACK").await;
+    let body = String::from_utf8_lossy(ack.request().body()).to_string();
+    assert!(
+        body.contains("m=audio 0 RTP/AVP 0 8"),
+        "the ACK answers, rejecting the stream: {body}"
+    );
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
+/// RFC 3261 §12.2.1.1: each fork of one INVITE numbers its own requests, and
+/// the straggler's BYE continues the straggler's sequence — fork 1 spent CSeq
+/// 2 on its PRACK, so its BYE is 3, never a number it already used.
+#[tokio::test(start_paused = true)]
+async fn the_straggler_bye_continues_its_forks_own_sequence() {
+    let h = Harness::new("b2bua-fork-straggler-cseq");
+    let alice = h.agent("alice", "127.0.0.1:6101").await;
+    let bob = h.agent("bob", "127.0.0.1:6102").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6102).start(&h, "b2bua", "127.0.0.1:6103").await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    // Fork 1 rings reliably and is PRACKed: its CSeq 2.
+    uas.respond(183, "Session Progress")
+        .with_to_tag(STRAGGLER)
+        .reliable(1)
+        .with_sdp(ANSWER_STRAGGLER)
+        .await;
+    let p1 = call.expect(183).await;
+    let fork1 = p1.to().tag().expect("fork1 a-facing tag").to_string();
+    let rseq = p1.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value();
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork1)
+        .with_rack(&format!("{rseq} 1 INVITE"))
+        .send()
+        .await;
+    let mut prack_at_bob = bob.receive("PRACK").await;
+    assert_eq!(prack_at_bob.request().cseq().seq(), 2, "fork 1 spent CSeq 2");
+    prack_at_bob.respond(200, "OK").await;
+    prack.expect(200).await;
+    // Fork 2 answers and wins.
+    uas.adopt_to_tag(WINNER);
+    uas.respond(200, "OK").with_sdp(ANSWER_WINNER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    // Fork 1 answers late: the straggler, released on its own sequence.
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    let mut straggler_bye = bob.receive("BYE").await;
+    assert_eq!(straggler_bye.request().cseq().seq(), 3, "fork 1's next number after its PRACK");
+    straggler_bye.respond(200, "OK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
     alice.drain().await;
     bob.drain().await;
     let _report = h.finish().await;

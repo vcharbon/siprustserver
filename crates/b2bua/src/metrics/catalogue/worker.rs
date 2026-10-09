@@ -166,6 +166,12 @@ pub const PROVISIONAL_AFTER_FINAL_REFUSED: Family = Family::counter(
     "provisionals toward the a-leg's initial INVITE refused because that transaction already sent its final (RFC 3261 §13.3.1.1 / §17.2.1); a rule showed a ringing leg to an answered caller — expected 0",
 );
 
+pub const LATE_PRACK_ANSWERED: Family = Family::counter(
+    "b2bua_late_prack_answered_total",
+    Labels::None,
+    "PRACKs that reached this node after their call's release and named a reliable provisional it showed, answered 200 (RFC 3262 §3); the caller's PRACK crossing the final",
+);
+
 pub const GOING_AWAY_ABSORBED: Family = Family::counter(
     "b2bua_going_away_absorbed_total",
     Labels::None,
@@ -557,7 +563,7 @@ pub const CENSUS_CDR_EVENTS: Family = Family::gauge(
 pub const CENSUS_PENDING_REQUESTS: Family = Family::gauge(
     "b2bua_census_pending_requests",
     Labels::None,
-    "sum of inbound_pending_requests across all dialogs of live calls (removed only on a correlated final response; a climbing ratio = uncorrelated/lost-response leak)",
+    "sum of inbound_pending_requests across all dialogs of live calls, retired early dialogs' included (removed only on a correlated final response; a climbing ratio = uncorrelated/lost-response leak)",
 );
 
 pub const CENSUS_PENDING_REQUESTS_MAX: Family = Family::gauge(

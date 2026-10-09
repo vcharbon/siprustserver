@@ -78,6 +78,7 @@ pub fn assign_a_rseq(
         a_cseq,
         carried_sdp,
         responder_sdp,
+        responder_offer: None,
     });
     (call, a_rseq)
 }
@@ -214,8 +215,37 @@ pub fn record_pracked_provisional(
         invite_cseq,
         rseq,
         responder_sdp,
+        branch: String::new(),
     });
     (call, true)
+}
+
+/// Note `branch` as the PRACK client transaction this stack sent for the
+/// responder's `(leg_id, remote_tag, invite_cseq, rseq)` provisional.
+pub fn note_own_prack_branch(
+    mut call: Call,
+    leg_id: &str,
+    remote_tag: &str,
+    invite_cseq: i64,
+    rseq: i64,
+    branch: &str,
+) -> Call {
+    if let Some(p) = call.pracked_provisionals.iter_mut().find(|p| {
+        p.leg_id == leg_id
+            && p.remote_tag == remote_tag
+            && p.invite_cseq == invite_cseq
+            && p.rseq == rseq
+    }) {
+        p.branch = branch.to_string();
+    }
+    call
+}
+
+/// Whether `branch` is a PRACK client transaction this stack originated
+/// itself — not one it relayed — so its failure denies that acknowledgement
+/// only (RFC 3261 §14.1 by analogy: one transaction, never the dialog).
+pub fn own_prack_branch(call: &Call, branch: &str) -> bool {
+    !branch.is_empty() && call.pracked_provisionals.iter().any(|p| p.branch == branch)
 }
 
 /// Whether this stack has already PRACKed the responder's `(leg_id,
@@ -235,6 +265,142 @@ pub fn pracked_provisional(
             && p.invite_cseq == invite_cseq
             && p.rseq == rseq
     })
+}
+
+/// Whether the responder's `(leg_id, remote_tag, invite_cseq, rseq)` reliable
+/// provisional has been acknowledged toward it (RFC 3262 §4): PRACKed by this
+/// stack itself, or relayed and PRACKed by the party it was shown to.
+pub fn provisional_acknowledged(
+    call: &Call,
+    leg_id: &str,
+    remote_tag: &str,
+    invite_cseq: i64,
+    rseq: i64,
+) -> bool {
+    pracked_provisional(call, leg_id, remote_tag, invite_cseq, rseq)
+        || call.reliable_provisionals.iter().any(|r| {
+            r.acknowledged
+                && r.b_leg_id == leg_id
+                && r.b_tag == remote_tag
+                && r.b_cseq == invite_cseq
+                && r.b_rseq == rseq
+        })
+}
+
+/// Whether the responder's reliable provisional `rseq` on the `(leg_id,
+/// remote_tag)` early dialog of the INVITE `invite_cseq` is the next in its
+/// sequence (RFC 3262 §4): the dialog's first, or one higher than the highest
+/// this stack has taken there — relayed or PRACKed. One out of order is
+/// neither PRACKed nor processed further.
+pub fn rseq_in_order(
+    call: &Call,
+    leg_id: &str,
+    remote_tag: &str,
+    invite_cseq: i64,
+    rseq: i64,
+) -> bool {
+    let pracked = call
+        .pracked_provisionals
+        .iter()
+        .filter(|p| {
+            p.leg_id == leg_id && p.remote_tag == remote_tag && p.invite_cseq == invite_cseq
+        })
+        .map(|p| p.rseq);
+    let relayed = call
+        .reliable_provisionals
+        .iter()
+        .filter(|r| r.b_leg_id == leg_id && r.b_tag == remote_tag && r.b_cseq == invite_cseq)
+        .map(|r| r.b_rseq);
+    pracked.chain(relayed).max().is_none_or(|highest| rseq == highest + 1)
+}
+
+/// A relayed reliable provisional this stack still owes a PRACK as it CANCELs
+/// the INVITE it answers ([`unacknowledged_relayed_provisionals`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwedPrack {
+    /// The responder's tag on the early dialog the PRACK rides.
+    pub b_tag: String,
+    /// The `CSeq` number of the responder-facing INVITE.
+    pub invite_cseq: i64,
+    /// The `RSeq` the responder stated.
+    pub rseq: i64,
+    /// The provisional carried a description.
+    pub responder_sdp: bool,
+    /// The OFFER it carried, which the PRACK answers (RFC 3262 §5).
+    pub offer: Option<Vec<u8>>,
+}
+
+/// The reliable provisionals `leg_id`'s responder sent on the INVITE
+/// `invite_cseq` that were relayed and still await a PRACK from anyone — the
+/// party shown them has not acknowledged them, nor has this stack — in the
+/// order they were relayed. `None` reads every INVITE of the leg: a leg still
+/// Trying or Early has only its initial one. Only the first
+/// description-carrying provisional of an early dialog carries its offer
+/// (RFC 3264 §4); a later one is owed no answer.
+pub fn unacknowledged_relayed_provisionals(
+    call: &Call,
+    leg_id: &str,
+    invite_cseq: Option<i64>,
+) -> Vec<OwedPrack> {
+    let first_offer = |r: &ReliableProvisional| {
+        call.reliable_provisionals
+            .iter()
+            .filter(|o| {
+                o.b_leg_id == r.b_leg_id
+                    && o.b_tag == r.b_tag
+                    && o.b_cseq == r.b_cseq
+                    && o.responder_offer.is_some()
+            })
+            .min_by_key(|o| o.b_rseq)
+            .is_some_and(|o| o.b_rseq == r.b_rseq)
+    };
+    call.reliable_provisionals
+        .iter()
+        .filter(|r| r.b_leg_id == leg_id && invite_cseq.is_none_or(|c| c == r.b_cseq))
+        .filter(|r| !provisional_acknowledged(call, leg_id, &r.b_tag, r.b_cseq, r.b_rseq))
+        .map(|r| OwedPrack {
+            b_tag: r.b_tag.clone(),
+            invite_cseq: r.b_cseq,
+            rseq: r.b_rseq,
+            responder_sdp: r.responder_sdp,
+            offer: r.responder_offer.clone().filter(|_| first_offer(r)),
+        })
+        .collect()
+}
+
+/// Whether a relayed reliable provisional of `leg_id`'s `(remote_tag,
+/// invite_cseq)` early dialog carried the offer of its INVITE (RFC 3264 §4):
+/// that dialog's offer/answer exchange rides the provisional and its PRACK.
+pub fn offered_in_reliable_provisional(
+    call: &Call,
+    leg_id: &str,
+    remote_tag: &str,
+    invite_cseq: i64,
+) -> bool {
+    call.reliable_provisionals.iter().any(|r| {
+        r.b_leg_id == leg_id
+            && r.b_tag == remote_tag
+            && r.b_cseq == invite_cseq
+            && r.responder_offer.is_some()
+    })
+}
+
+/// Keep `offer` as the OFFER the responder's relayed provisional `(b_leg_id,
+/// b_tag, b_cseq, b_rseq)` carried (RFC 3264 §4: its INVITE carried none).
+pub fn note_responder_offer(
+    mut call: Call,
+    b_leg_id: &str,
+    b_tag: &str,
+    b_cseq: i64,
+    b_rseq: i64,
+    offer: &[u8],
+) -> Call {
+    if let Some(r) = call.reliable_provisionals.iter_mut().find(|r| {
+        r.b_leg_id == b_leg_id && r.b_tag == b_tag && r.b_cseq == b_cseq && r.b_rseq == b_rseq
+    }) {
+        r.responder_offer = Some(offer.to_vec());
+    }
+    call
 }
 
 /// The relayed INVITE transaction, still pending toward its target, that the
@@ -337,6 +503,21 @@ pub fn unacknowledgeable_rack(
     owns_rseq_numbering(call, source_leg_id) && !acknowledges_recorded(call, a_tag, rack)
 }
 
+/// Whether a PRACK in the `a_tag` dialog naming `rack` acknowledges a
+/// provisional this stack already PRACKed toward its responder itself — as it
+/// CANCELled the INVITE it answered. Relaying it would hand the responder a
+/// second PRACK for one `RSeq`, which it answers 481 (RFC 3262 §3); this face
+/// owes the 200 instead.
+pub fn rack_pracked_here(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
+    rack.names_invite
+        && call.reliable_provisionals.iter().any(|r| {
+            r.a_tag == a_tag
+                && r.a_rseq == rack.rseq
+                && r.a_cseq == rack.cseq
+                && pracked_provisional(call, &r.b_leg_id, &r.b_tag, r.b_cseq, r.b_rseq)
+        })
+}
+
 /// Whether `rack` names a reliable provisional recorded in the `a_tag` early
 /// dialog on all three §7.2 tokens.
 fn acknowledges_recorded(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
@@ -352,4 +533,38 @@ fn acknowledges_recorded(call: &Call, a_tag: &str, rack: RAckTokens) -> bool {
 /// for a dialog that has not.
 pub fn starts_reliable_ladder(call: &Call, a_tag: &str) -> bool {
     !call.reliable_provisionals.iter().any(|r| r.a_tag == a_tag)
+}
+
+/// One dialog's reliable provisionals this stack showed and the party shown
+/// them never PRACKed: the dialog's `Call-ID`, this stack's tag in it, and
+/// each provisional's `(RSeq, CSeq-num)` — the §7.2 tokens a PRACK naming it
+/// carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnackedShown {
+    pub call_id: String,
+    pub tag: String,
+    pub racks: Vec<(i64, i64)>,
+}
+
+/// The reliable provisionals shown on either face of `call` that are still
+/// unacknowledged by the party shown them, grouped per shown dialog. A tag no
+/// dialog carries is an a-facing fork tag, the a-leg's ([`leg_shown`]).
+pub fn unacknowledged_shown(call: &Call) -> Vec<UnackedShown> {
+    let mut out: Vec<UnackedShown> = Vec::new();
+    for r in call.reliable_provisionals.iter().filter(|r| !r.acknowledged) {
+        let call_id = leg_shown(call, &r.a_tag)
+            .and_then(|id| crate::helpers::find_leg(call, id))
+            .unwrap_or(&call.a_leg)
+            .call_id
+            .clone();
+        match out.iter_mut().find(|u| u.call_id == call_id && u.tag == r.a_tag) {
+            Some(u) => u.racks.push((r.a_rseq, r.a_cseq)),
+            None => out.push(UnackedShown {
+                call_id,
+                tag: r.a_tag.clone(),
+                racks: vec![(r.a_rseq, r.a_cseq)],
+            }),
+        }
+    }
+    out
 }

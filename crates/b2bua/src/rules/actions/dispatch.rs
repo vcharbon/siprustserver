@@ -4,8 +4,8 @@
 //! respond / dialog_track / teardown).
 
 use call::helpers::{
-    add_cdr_event, add_tag_mapping, deactivate_rule, mark_decision, merge_leg,
-    remove_pending_request, set_leg_disposition, set_leg_state, split_leg,
+    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request,
+    set_leg_disposition, set_leg_state, split_leg,
 };
 use call::{Call, CdrEvent, TagMapping};
 
@@ -47,20 +47,26 @@ impl ActionExecutor<'_> {
                 // §13.2.2.4); default its type to `application/sdp` when none is
                 // given. An empty ACK stays a bare ACK — no body, no Content-Type.
                 let (bytes, content_type, author, descriptors) = parts(body);
-                let ct = (!bytes.is_empty())
-                    .then(|| content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp));
-                let mut own = Vec::new();
-                relay::describe_body(&mut own, bytes, descriptors);
-                self.ack_leg(
-                    call,
-                    fx,
-                    leg_id,
-                    bytes.to_vec(),
-                    ct,
-                    own,
-                    Provenance::Authored,
-                    author,
-                );
+                if bytes.is_empty() {
+                    self.ack_own_bare(call, fx, leg_id);
+                } else {
+                    let ct = content_type.and_then(relay::media_type).unwrap_or_else(relay::sdp);
+                    let mut own = Vec::new();
+                    relay::describe_body(&mut own, bytes, descriptors);
+                    self.ack_leg(
+                        call,
+                        fx,
+                        leg_id,
+                        bytes.to_vec(),
+                        Some(ct),
+                        own,
+                        Provenance::Authored,
+                        author,
+                    );
+                }
+            }
+            RuleAction::ReleaseStraggler2xx { leg_id } => {
+                self.release_straggler(call, fx, ctx, leg_id);
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
@@ -72,8 +78,8 @@ impl ActionExecutor<'_> {
                 }
             }
             RuleAction::AddTagMapping { a_tag, b_leg_id, b_tag } => {
-                *call = add_tag_mapping(
-                    call.clone(),
+                super::dialog_track::map_a_face(
+                    call,
                     TagMapping {
                         a_tag: a_tag.clone(),
                         b_leg_id: b_leg_id.clone(),
@@ -235,7 +241,26 @@ impl ActionExecutor<'_> {
                 // b_tag)` (no first-dialog fallback).
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
                 let responder_sdp = ctx.response().is_some_and(|r| r.sdp().is_some());
-                self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag, responder_sdp);
+                // A leg this stack is CANCELling answers a crossing offer here
+                // (RFC 3262 §5); a live setup leaves the answer to its owner.
+                let cancelling = call::helpers::find_leg(call, leg_id)
+                    .is_some_and(|l| l.disposition == call::LegDisposition::Cancelling);
+                let answer = ctx
+                    .response()
+                    .and_then(|r| r.sdp())
+                    .filter(|_| cancelling)
+                    .filter(|_| !relay::invite_carried_offer(call, leg_id, *invite_cseq))
+                    .and_then(|offer| self.rejecting_answer(offer));
+                self.send_prack_to_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    *rseq,
+                    *invite_cseq,
+                    b_tag,
+                    responder_sdp,
+                    answer,
+                );
             }
             RuleAction::TrackEarlyDialog { leg_id, b_tag } => {
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);

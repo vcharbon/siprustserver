@@ -386,13 +386,17 @@ impl RuleHandleResult {
     }
 
     /// Record without claiming: the engine applies `actions` — call-ext writes
-    /// ([`RuleAction::MergeCallExt`]) only; anything else panics under
-    /// `debug_assertions`, is dropped and logged in release — and hands the
-    /// event on to the next ranked rule, whose handler reads the call with the
-    /// writes and handles the event as it would have. The candidates are
-    /// selected once, on the call before any observation, so a later rule's
-    /// filter never sees the writes; and an observer ranked below the rule
-    /// that claims the event never runs.
+    /// ([`RuleAction::MergeCallExt`]) and the observing rule's own machine's
+    /// bookkeeping (its cursor along a declared edge, the service timers its
+    /// machine owns); anything else panics under `debug_assertions`, is
+    /// dropped and logged in release — and hands the event on to the next
+    /// ranked rule, whose handler reads the call with the writes and handles
+    /// the event as it would have. The observation's effects precede the
+    /// claim's. The candidates are selected once, on the call before any
+    /// observation, so a later rule's filter never sees the writes; and an
+    /// observer ranked below the rule that claims the event never runs. A later
+    /// claimer bound to the observer's machine is selected on the cursor before
+    /// the observation and its own move checked against the cursor after it.
     pub fn observe(actions: Vec<RuleAction>) -> Self {
         Self { actions, diagnostics: Vec::new(), observes: true }
     }
@@ -586,6 +590,12 @@ pub enum RuleAction {
     AckLeg {
         leg_id: String,
         body: Option<Body>,
+    },
+    /// Release the fork straggler whose 2xx the current event carries on a
+    /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK that
+    /// 2xx, and BYE its dialog the first time it arrives.
+    ReleaseStraggler2xx {
+        leg_id: String,
     },
     ConfirmDialog {
         leg_id: String,
@@ -1096,6 +1106,7 @@ impl RuleAction {
             | RuleAction::Respond { .. }
             | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
+            | RuleAction::ReleaseStraggler2xx { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }
@@ -1197,6 +1208,35 @@ impl<'a> RuleCall<'a> {
     ) -> bool {
         call::helpers::unacknowledgeable_rack(self.0, source_leg_id, a_tag, rack)
     }
+    /// Whether the responder's reliable provisional `rseq` is the next in its
+    /// early dialog's sequence (RFC 3262 §4).
+    pub fn rseq_in_order(
+        &self,
+        leg_id: &str,
+        remote_tag: &str,
+        invite_cseq: i64,
+        rseq: i64,
+    ) -> bool {
+        call::helpers::rseq_in_order(self.0, leg_id, remote_tag, invite_cseq, rseq)
+    }
+    /// Whether `branch` is a PRACK client transaction this stack originated
+    /// itself, never one it relayed.
+    pub fn own_prack_branch(&self, branch: &str) -> bool {
+        call::helpers::own_prack_branch(self.0, branch)
+    }
+    /// Whether a PRACK in the `a_tag` dialog naming `rack` acknowledges a
+    /// provisional this stack already PRACKed toward its responder itself, so
+    /// this face answers it rather than relaying a second PRACK (RFC 3262 §3).
+    pub fn rack_pracked_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
+        call::helpers::rack_pracked_here(self.0, a_tag, rack)
+    }
+    /// Whether a relayed reliable provisional of `leg_id` still owes its offer
+    /// an answer in the PRACK this stack sends (RFC 3262 §5).
+    pub fn offer_owed_prack(&self, leg_id: &str) -> bool {
+        call::helpers::unacknowledged_relayed_provisionals(self.0, leg_id, None)
+            .iter()
+            .any(|o| o.offer.is_some())
+    }
     /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
     /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
     /// is its retransmission to discard (RFC 3262 §4).
@@ -1208,6 +1248,18 @@ impl<'a> RuleCall<'a> {
         rseq: i64,
     ) -> bool {
         call::helpers::pracked_provisional(self.0, leg_id, remote_tag, invite_cseq, rseq)
+    }
+    /// Whether the responder's `(leg_id, remote_tag, invite_cseq, rseq)`
+    /// reliable provisional was already acknowledged toward it — by this
+    /// stack, or by the party it was relayed to (RFC 3262 §4).
+    pub fn acknowledged_provisional(
+        &self,
+        leg_id: &str,
+        remote_tag: &str,
+        invite_cseq: i64,
+        rseq: i64,
+    ) -> bool {
+        call::helpers::provisional_acknowledged(self.0, leg_id, remote_tag, invite_cseq, rseq)
     }
     /// The relayed INVITE still pending toward its target — `(leg_id,
     /// outbound_cseq)` there — that the provisional shown as `a_rseq` in the
@@ -1435,6 +1487,14 @@ impl<'a> RuleContext<'a> {
             _ => None,
         }
     }
+    /// For a `Timeout` event: the branch of the client transaction that timed
+    /// out. `None` for every other event kind.
+    pub fn timeout_branch(&self) -> Option<&str> {
+        match self.event {
+            CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
+            _ => None,
+        }
+    }
     /// For a `Timeout` event: which client-transaction timeout fired —
     /// `Response` (nothing at all answered: the hop is dead) or `Transaction`
     /// (it answered a provisional, then went silent past the INVITE bound).
@@ -1484,8 +1544,7 @@ impl<'a> RuleContext<'a> {
     /// service rule can own failover-pending policy; the CORE default is the
     /// `update-peer-unavailable` local 491.
     pub fn peer_relay_ready(&self) -> bool {
-        let to_tag = self.request().and_then(|r| r.to().tag());
-        call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, to_tag)
+        call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, self.request_tags())
     }
 
     /// Whether the current INVITE meets glare (RFC 3261 §14.1), by the same
@@ -1493,8 +1552,7 @@ impl<'a> RuleContext<'a> {
     /// an INVITE transaction still open on the source dialog or on the
     /// dialog its relay would be regenerated on.
     pub fn invite_glare(&self) -> bool {
-        let to_tag = self.request().and_then(|r| r.to().tag());
-        call::helpers::invite_glare(self.call.0, self.source_leg_id, to_tag)
+        call::helpers::invite_glare(self.call.0, self.source_leg_id, self.request_tags())
     }
 
     /// The refusal the current UPDATE draws (RFC 3311 §5.2), if any: 500 over
@@ -1503,7 +1561,8 @@ impl<'a> RuleContext<'a> {
     /// ([`crate::open_offer::open_offer`]).
     pub fn update_refusal(&self) -> Option<GlareRefusal> {
         let req = self.request().filter(|r| *r.method() == Method::Update)?;
-        if call::helpers::peer_update_pending(self.call.0, self.source_leg_id, req.to().tag()) {
+        if call::helpers::peer_update_pending(self.call.0, self.source_leg_id, self.request_tags())
+        {
             return Some(GlareRefusal::Unanswered);
         }
         req.sdp()?;
@@ -1527,8 +1586,8 @@ impl<'a> RuleContext<'a> {
     /// How the current INVITE's glare is refused (RFC 3261 §14.2): by what is
     /// open on the dialog, the sender's own earlier INVITE first.
     pub fn glare_refusal(&self) -> GlareRefusal {
-        let to_tag = self.request().and_then(|r| r.to().tag());
-        if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, to_tag) {
+        let tags = self.request_tags();
+        if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, tags) {
             GlareRefusal::Unanswered
         } else if call::helpers::sender_invite_unacknowledged(self.call.0, self.source_leg_id) {
             GlareRefusal::Unacknowledged
@@ -1537,24 +1596,29 @@ impl<'a> RuleContext<'a> {
         }
     }
 
-    /// Does the current response answer a request THIS STACK RELAYED — i.e.
-    /// does the responder's dialog hold a pending-relay snapshot for the
-    /// response CSeq? The dialog is picked fork-correctly (the responder's
-    /// To-tag, else the source dialog), mirroring the relay executor. `false`
-    /// for a request the B2BUA originated itself (keepalive OPTIONS, its own
-    /// PRACK, a REFER-progress NOTIFY), which leaves no snapshot, and for any
+    /// The pending-relay snapshot the current response answers, read through
+    /// [`call::helpers::relayed_pending`] as the relay executor reads it: the
+    /// dialog the response's identity tag names, or the relays kept for a
+    /// dialog the answer retired — never another dialog's. `None` for any
     /// non-response event.
+    pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
+        let resp = self.response()?;
+        call::helpers::relayed_pending(
+            self.call.0,
+            self.source_leg_id,
+            resp.to().tag(),
+            resp.from().tag(),
+            resp.cseq().seq() as i64,
+        )
+        .map(|(_, p)| p)
+    }
+
+    /// Does the current response answer a request THIS STACK RELAYED
+    /// ([`Self::relayed_pending`])? `false` for a request the B2BUA originated
+    /// itself (keepalive OPTIONS, its own PRACK, a REFER-progress NOTIFY),
+    /// which leaves no snapshot, and for any non-response event.
     pub fn answers_relayed_request(&self) -> bool {
-        let Some(resp) = self.response() else {
-            return false;
-        };
-        let cseq = resp.cseq().seq() as i64;
-        let to_tag = resp.to().tag().unwrap_or_default();
-        self.source_leg()
-            .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, to_tag))
-            .or_else(|| self.source_dialog())
-            .and_then(|d| call::helpers::find_pending_request(d, cseq))
-            .is_some()
+        self.relayed_pending().is_some()
     }
 
     /// The leg the event arrived on.
@@ -1570,12 +1634,25 @@ impl<'a> RuleContext<'a> {
         let leg = self.source_leg()?;
         call::helpers::confirmed_dialog(leg).or_else(|| leg.dialogs.first())
     }
+    /// The To-tag and From-tag of the current request (none for any other event).
+    pub fn request_tags(&self) -> call::helpers::RequestTags<'_> {
+        self.request()
+            .map(|r| call::helpers::RequestTags::new(r.to().tag(), r.from().tag()))
+            .unwrap_or_default()
+    }
+    /// The dialog the current in-dialog request rides on the source leg: the
+    /// one its tags name — each caller-facing dialog and each callee fork keeps
+    /// its own sequence (RFC 3261 §12.1.2, §12.2.1.1). `None` when they name
+    /// none: no other dialog's sequence is the request's.
+    pub fn request_dialog(&self) -> Option<&Dialog> {
+        call::helpers::request_dialog(self.call.0, self.source_leg_id, self.request_tags())
+    }
     /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
     /// regenerated on, resolved with the SAME resolver as the relay executor
     /// ([`call::helpers::relay_peer_dialog`]) so match and action never
     /// disagree. `None` when no peer leg or dialog resolves.
     pub fn peer_dialog(&self) -> Option<&Dialog> {
-        let to_tag = self.request().and_then(|r| r.to().tag());
-        call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, to_tag).map(|(_, d)| d)
+        call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, self.request_tags())
+            .map(|(_, d)| d)
     }
 }

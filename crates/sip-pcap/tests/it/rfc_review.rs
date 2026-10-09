@@ -74,6 +74,7 @@ fn the_review_of_the_selection_is_placed_on_the_stated_side() {
         .as_array()
         .expect("hits")
         .iter()
+        .filter(|h| h["rule"] == "no-ack-to-dialog-creating-2xx")
         .map(|h| {
             (
                 h["rule"].as_str().unwrap(),
@@ -88,6 +89,11 @@ fn the_review_of_the_selection_is_placed_on_the_stated_side() {
             ("no-ack-to-dialog-creating-2xx", "198.51.100.2:5060", "peer"),
             ("no-ack-to-dialog-creating-2xx", "192.0.2.10:5072", "platform"),
         ]
+    );
+    assert!(
+        report["captures"].as_array().is_some_and(|c| c.len() == 1),
+        "the report states the capture it covered: {}",
+        report["captures"]
     );
     assert_eq!(report["sut"]["decided_by"], "stated");
     assert_eq!(report["hits"][0]["capture"], "capture.pcap.gz");

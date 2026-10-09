@@ -427,6 +427,7 @@ impl B2buaCore {
             unborn: Default::default(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
+            late_pracks: Default::default(),
             reentry_tx,
             // Arc-share the injected port into every per-call `ctx.clone()`,
             // exactly like `decision`/`limiter`.

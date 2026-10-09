@@ -233,3 +233,24 @@ describe("a minted arrival is measured inside its own transaction (§6.8)", () =
     expect(d[2]).toMatchObject({ derived: "sut-originated", from: "step:2", ms: 4_983 })
   })
 })
+
+describe("a send the transaction layer owes (RFC 3261 §9.2, §17.1.1.3)", () => {
+  it("anchors the ACK of a non-2xx final on that final, past an arrival of another transaction", () => {
+    const d = classify([
+      step("A", true, 0, "req:INVITE", false, 1),
+      step("A", false, 900, "resp:486:INVITE", false, 1),
+      step("A", false, 905, "req:OPTIONS", false, 7),
+      step("A", true, 910, "req:ACK", false, 1)
+    ])
+    expect(d[3]).toMatchObject({ derived: "measured", from: "step:2", ms: 10 })
+  })
+
+  it("leaves a non-2xx final no CANCEL drew on its leg's previous step", () => {
+    const d = classify([
+      step("B", false, 0, "req:INVITE", false, 1),
+      step("B", false, 400, "req:INFO", false, 2),
+      step("B", true, 600, "resp:486:INVITE", false, 1)
+    ])
+    expect(d[2]).toMatchObject({ derived: "measured", from: "step:2", ms: 200 })
+  })
+})

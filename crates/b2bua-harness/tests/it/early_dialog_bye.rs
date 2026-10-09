@@ -272,9 +272,19 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
 /// RFC 3262 §3: the caller-facing reliable provisional is retransmitted on
 /// this stack's ladder until PRACKed. The caller who BYEs instead of PRACKing
 /// ends the setup, and the ladder with it: no copy of the 180 after the 487.
+/// The callee's own reliable 180 is still owed its PRACK (§4): the caller will
+/// never send one, so this stack acknowledges it as it CANCELs the callee.
 #[tokio::test(start_paused = true)]
 async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-100rel", 1);
+    h.waive(
+        WaiverScope::rule(
+            "unacked-reliable-provisional",
+            "alice BYEs her early dialog instead of PRACKing its reliable 180 — the caller's \
+             withheld PRACK is this test's subject",
+        )
+        .on_party("alice"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
     let b2bua =
@@ -307,6 +317,13 @@ async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
     bye.expect(200).await;
     call.expect(487).await;
 
+    let mut prack = bob.receive("PRACK").await;
+    assert_eq!(
+        stated(prack.request(), "RAck").as_deref(),
+        Some("4711 1 INVITE"),
+        "the callee's 180 is acknowledged under its own RSeq (RFC 3262 §7.2)"
+    );
+    prack.respond(200, "OK").await;
     let mut b_cxl = bob.receive("CANCEL").await;
     b_cxl.respond(200, "OK").await;
     b_inv.respond(487, "Request Terminated").await;

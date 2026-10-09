@@ -346,6 +346,9 @@ pub struct FlowStats {
     pub capture_dups: u64,
     /// SIP-looking datagrams the parser rejected.
     pub parse_failed: u64,
+    /// The index in the input slice of each datagram counted in
+    /// `parse_failed`, in capture-time order.
+    pub parse_failed_at: Vec<usize>,
     /// Datagrams that did not look like SIP (RTP/STUN/DNS on captured ports).
     pub non_sip: u64,
     /// Every stretch of every probe rebased onto another probe's clock before
@@ -400,6 +403,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
             Ok(m) => m,
             Err(_) => {
                 stats.parse_failed += 1;
+                stats.parse_failed_at.push(i);
                 continue;
             }
         };
@@ -1286,6 +1290,7 @@ mod tests {
         let flows = build_flows(&datagrams, &FlowConfig::default());
         assert_eq!(flows.stats.non_sip, 1);
         assert_eq!(flows.stats.parse_failed, 1);
+        assert_eq!(flows.stats.parse_failed_at, vec![1]);
         assert_eq!(flows.stats.sip_messages, 0);
         assert!(flows.legs.is_empty());
     }

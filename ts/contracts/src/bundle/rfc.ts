@@ -4,10 +4,12 @@
  * full RFC suite ran over the run's wire, or the stated fact that no fabric
  * recorded it.
  *
- * A gating finding fails the cell, and only what the SUT side EMITTED gates: a
- * document actor's own deviation is the capture's, replayed as scripted. An
- * advisory finding is written so a triage session can read it, never counted. `not-audited` is a value of its own, so a
- * lane that recorded nothing can never be read as a clean audit.
+ * A gating finding fails the cell, whichever party committed it. A document
+ * actor's violation is named as that actor's and is cancelled only by the
+ * document's statement of the same violation on the same transaction
+ * (`cancelled_by`). An advisory finding is written so a triage session can read
+ * it, never counted. `not-audited` is a value of its own, so a lane that
+ * recorded nothing can never be read as a clean audit.
  */
 import * as Schema from "effect/Schema"
 
@@ -20,14 +22,16 @@ export const RfcFinding = Schema.Struct({
   detail: Schema.String,
   /** Informational only, never gating. */
   advisory: Schema.Boolean,
-  /** Fails the cell: non-advisory, unwaived, and not a document actor's own emission. */
+  /** Fails the cell: non-advisory, unwaived, and not cancelled. */
   gating: Schema.Boolean,
   /** The 1-based audit wire-entry index of the offending message, where the rule pinpoints one. */
   offending: Schema.optionalKey(Schema.Int),
   /** The socket the rule holds responsible: emitted the offending message, or owed the missing one. `lane` is where it was reported. */
   charged: Schema.optionalKey(Schema.String),
-  /** The document endpoint `charged` is, when it is one: a scripted peer's own deviation. */
-  actor: Schema.optionalKey(Schema.String)
+  /** The document actor `charged` names (through the leg the offending call rides), when it is a document endpoint: the violation is the scripted peer's. */
+  actor: Schema.optionalKey(Schema.String),
+  /** What cancels an actor's finding: the document's statement of the same violation on the same transaction. */
+  cancelled_by: Schema.optionalKey(Schema.String)
 })
 export interface RfcFinding extends Schema.Schema.Type<typeof RfcFinding> {}
 

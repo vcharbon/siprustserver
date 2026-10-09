@@ -12,10 +12,10 @@ use call::{
     TerminationCause, TimeoutKind, TimerType,
 };
 use sip_message::header::RAck;
-use sip_message::Method;
+use sip_message::{Method, SipRequest};
 use sip_txn::TimeoutKind as TxnTimeoutKind;
 
-use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
+use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent, owed_prack};
 
 use b2bua_sdk::header_update::final_adds;
 use b2bua_sdk::model::{
@@ -87,19 +87,17 @@ pub(crate) fn unacked_2xx_give_up_actions(
     actions
 }
 
-/// Every leg still holding a 2xx whose ACK this stack can compose alone: the
-/// §13.2.2.4 obligation is armed and undischarged, and the INVITE this stack
-/// sent on that dialog carried the offer, so the ACK owes no answer body
-/// (RFC 3264 §4). Either face qualifies — a b-leg answering the call, or the
-/// caller's face answering a relayed callee re-INVITE. Absent: a delayed-offer
-/// dialog (only the silent peer's own ACK supplies its answer) and the a-leg's
-/// initial round, where this stack sent no INVITE and owes no ACK.
+/// Every leg still holding a 2xx whose ACK this stack can compose alone
+/// ([`crate::rules::relay::bare_ack_owed`]). Either face qualifies — a b-leg
+/// answering the call, or the caller's face answering a relayed callee
+/// re-INVITE. Absent: a delayed-offer 2xx (only the silent peer's own ACK
+/// supplies its answer) and the a-leg's initial round, where this stack sent
+/// no INVITE and owes no ACK.
 fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
-    std::iter::once(call.a_leg()).chain(call.b_legs().iter()).filter_map(|leg| {
-        let d = leg.dialogs.first()?;
-        (d.ext.awaited_ack_cseq.is_some() && crate::rules::relay::acked_invite_carries_offer(d))
-            .then(|| leg.leg_id.clone())
-    })
+    std::iter::once(call.a_leg())
+        .chain(call.b_legs().iter())
+        .filter(|leg| crate::rules::relay::bare_ack_owed(leg, call.offer_owed_prack(&leg.leg_id)))
+        .map(|leg| leg.leg_id.clone())
 }
 
 /// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL
@@ -296,10 +294,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A provisional (1xx) from a callee whose leg is being CANCELLed: the
         // caller's INVITE server transaction has already completed (487 on the
         // CANCEL), so relaying it would put a new 1xx after that final — forbidden
-        // (RFC 3261 §13.3.1.1 / §17.2.1). Absorb it; the crossing 2xx/487 is owned
-        // by `cancel-200-crossing` / `resolve-cancel-response`. The 1xx sibling of
-        // `cancel-200-crossing`; outranks `relay-provisional`, which is
-        // disposition-blind.
+        // (RFC 3261 §13.3.1.1 / §17.2.1). Absorbed; a reliable one is still
+        // PRACKed, since the CANCEL does not end the INVITE transaction (RFC 3262
+        // §4). The crossing 2xx/487 is owned by `cancel-200-crossing` /
+        // `resolve-cancel-response`. The 1xx sibling of `cancel-200-crossing`;
+        // outranks `relay-provisional`, which is disposition-blind.
         rule(
             "absorb-1xx-crossing-cancel",
             &["relay-provisional"],
@@ -308,7 +307,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .status_class(1)
                 .leg_disposition(LegDisposition::Cancelling)
                 .direction(Direction::FromB),
-            |_ctx| ok(vec![]),
+            |ctx| ok(owed_prack(ctx).into_iter().collect()),
         ),
         rule(
             "resolve-cancel-response",
@@ -423,16 +422,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "resolve-cancelled-reinvite-response",
             &["relay-reinvite-response", "relay-provisional", "confirm-dialog", "route-failure"],
-            Match::response().method("INVITE").filter(|ctx| {
-                let cseq = match ctx.response() {
-                    Some(r) => r.cseq().seq() as i64,
-                    None => return false,
-                };
-                ctx.source_dialog()
-                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
-                    .map(|p| p.cancelled)
-                    .unwrap_or(false)
-            }),
+            Match::response()
+                .method("INVITE")
+                .filter(|ctx| ctx.relayed_pending().is_some_and(|p| p.cancelled)),
             |ctx| {
                 let resp = ctx.response()?;
                 if resp.status() < 200 {
@@ -463,19 +455,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "relay-reinvite-response",
             &["relay-provisional", "confirm-dialog", "route-failure", "handle-481"],
-            Match::response().method("INVITE").filter(|ctx| {
-                let cseq = match ctx.response() {
-                    Some(r) => r.cseq().seq() as i64,
-                    None => return false,
-                };
-                // A `cancelled` snapshot is NOT relayable — its originator was
-                // already 487'd by the txn layer when the CANCEL matched; the
-                // final resolves via `resolve-cancelled-reinvite-response`.
-                ctx.source_dialog()
-                    .and_then(|d| call::helpers::find_pending_request(d, cseq))
-                    .map(|p| !p.cancelled)
-                    .unwrap_or(false)
-            }),
+            // A `cancelled` snapshot is NOT relayable — its originator was
+            // already 487'd by the txn layer when the CANCEL matched; the final
+            // resolves via `resolve-cancelled-reinvite-response`.
+            Match::response()
+                .method("INVITE")
+                .filter(|ctx| ctx.relayed_pending().is_some_and(|p| !p.cancelled)),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
@@ -521,6 +506,25 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
             },
         ),
+        // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
+        // b-leg sent, under a To-tag no dialog of that leg carries, once another
+        // fork confirmed the leg. The UAC ACKs every 2xx and BYEs a dialog it
+        // does not want; the call keeps the winner. A repeat is re-ACKed alone.
+        rule(
+            "release-fork-straggler-2xx",
+            &[],
+            Match::response()
+                .method("INVITE")
+                .status_class(2)
+                .leg_states(&[LegState::Confirmed, LegState::Terminated])
+                .direction(Direction::FromB)
+                .filter(fork_straggler),
+            |ctx| {
+                ok(vec![RuleAction::ReleaseStraggler2xx { leg_id: ctx.source_leg_id.to_string() }])
+            },
+        )
+        // A call already ending still owes the straggler its ACK and BYE.
+        .runs_while_terminating(),
         // ── dialog ──────────────────────────────────────────────────────────
         // A callee's INVITE provisional, relayed toward the originator while
         // her INVITE transaction is open. Once that transaction sent its
@@ -1129,6 +1133,48 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![]),
         ),
+        // ── fork-straggler release ──────────────────────────────────────────
+        // The BYE that released a fork straggler (`release-fork-straggler-2xx`)
+        // is that release's alone: its final, whatever the status, and its
+        // transaction timeout are absorbed, and the winning dialog on the same
+        // leg never reads them as its own.
+        rule(
+            "absorb-straggler-release-final",
+            &[],
+            Match::response().method("BYE").filter(|ctx| {
+                let tag = ctx.response().and_then(|r| r.to().tag()).unwrap_or_default();
+                ctx.source_leg()
+                    .is_some_and(|l| crate::rules::fork_straggler::Book::of(l).releases(tag))
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
+        rule(
+            "absorb-straggler-release-timeout",
+            &[],
+            Match::timeout().filter(|ctx| {
+                let branch = ctx.timeout_branch().unwrap_or_default();
+                ctx.source_leg().is_some_and(|l| {
+                    crate::rules::fork_straggler::Book::of(l).owns_bye_branch(branch)
+                })
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
+        // The timeout of a PRACK this stack originated itself (RFC 3261
+        // §17.1.2.2 Timer F) denies that one acknowledgement, as its non-2xx
+        // final does (`absorb-own-request-failure`): the dialog and the call
+        // stay as they were. A relayed PRACK's timeout keeps `handle-timeout`.
+        rule(
+            "absorb-own-prack-timeout",
+            &[],
+            Match::timeout().filter(|ctx| {
+                ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("PRACK"))
+                    && ctx.call.own_prack_branch(ctx.timeout_branch().unwrap_or_default())
+            }),
+            |_ctx| ok(vec![]),
+        )
+        .runs_while_terminating(),
         // ── terminating ─────────────────────────────────────────────────────
         rule(
             "resolve-bye-response",
@@ -1163,6 +1209,28 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         bye_disposition: Some(ByeDisposition::ByeReceived),
                     },
                 ])
+            },
+        ),
+        // A PRACK naming a reliable provisional this stack already PRACKed
+        // toward its responder — as it CANCELled, at the responder's final, or
+        // ahead of a BYE — is answered 200 here (RFC 3262 §3): a relay would
+        // be a second PRACK for one `RSeq`. Outranks `post-bye-481`, whose 481
+        // would deny a provisional this face really sent.
+        rule(
+            "answer-pracked-prack",
+            &["post-bye-481", "relay-prack"],
+            Match::request().method("PRACK").filter(|ctx| {
+                let Some(req) = ctx.request() else { return false };
+                let a_tag = req.to().tag().unwrap_or_default();
+                rack_tokens(req).is_some_and(|rack| ctx.call.rack_pracked_here(a_tag, rack))
+            }),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
             },
         ),
         // A dialog whose BYE is in flight answers in-dialog requests 481 locally:
@@ -1282,6 +1350,27 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
+        // A caller's BYE after this stack answered her INVITE with a non-2xx
+        // final names no dialog: that final ended every early dialog the INVITE
+        // opened (RFC 3261 §12.3), so the BYE draws 481 (§12.2.2) and changes
+        // nothing. Outranks the rules that answer a BYE 200, which hold for a
+        // dialog that exists (a confirmed one crossing our BYE included).
+        rule(
+            "ended-early-dialog-bye",
+            &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
+            Match::request()
+                .method("BYE")
+                .direction(Direction::FromA)
+                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_some_and(|s| s >= 300)),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 481,
+                    reason: "Call/Transaction Does Not Exist".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
         // A BYE from a live party of an Active call ends the session; a BYE on a
         // leg this stack already ended is `resolve-ended-leg-bye`'s.
         rule(
@@ -1323,8 +1412,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A PRACK is answered here where it names nothing this stack showed
         // on its face (481, RFC 3262 §4) or carries no readable `RAck` (400,
         // RFC 3261 §21.4.1); why this stack and not the far party is
-        // `call::helpers::unacknowledgeable_rack`. A SERVICE_LAYER rule
-        // matching PRACK would out-rank this and bypass the check; none does.
+        // `call::helpers::unacknowledgeable_rack`. One this stack answers 200
+        // itself is `answer-pracked-prack`'s. A SERVICE_LAYER rule matching
+        // PRACK would out-rank this and bypass the check; none does.
         rule("relay-prack", &[], Match::request().method("PRACK"), |ctx| {
             let relay = || ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]);
             let refuse = |status: u16, reason: &str| {
@@ -1336,17 +1426,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             };
             let Some(req) = ctx.request() else { return relay() };
-            let Some(rack) = req.header::<RAck>().and_then(Result::ok) else {
+            let Some(tokens) = rack_tokens(req) else {
                 return if ctx.call.owns_rseq_numbering(ctx.source_leg_id) {
                     refuse(400, "Bad Request")
                 } else {
                     relay()
                 };
-            };
-            let tokens = RAckTokens {
-                rseq: i64::from(rack.rseq()),
-                cseq: i64::from(rack.seq()),
-                names_invite: *rack.method() == Method::Invite,
             };
             let a_tag = req.to().tag().unwrap_or_default();
             if ctx.call.unacknowledgeable_rack(ctx.source_leg_id, a_tag, tokens) {
@@ -2043,4 +2128,33 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         )
         .runs_while_terminating(),
     ]
+}
+
+/// The three `RAck` tokens a PRACK carries (RFC 3262 §7.2), or `None` when it
+/// carries no readable `RAck`.
+fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
+    let rack = req.header::<RAck>().and_then(Result::ok)?;
+    Some(RAckTokens {
+        rseq: i64::from(rack.rseq()),
+        cseq: i64::from(rack.seq()),
+        names_invite: *rack.method() == Method::Invite,
+    })
+}
+
+/// Whether the current response is a fork straggler's 2xx on its b-leg: a To-tag
+/// no dialog of the leg carries, on a leg a confirmed dialog holds, answering an
+/// INVITE no later than the one that dialog's ACK acknowledges (every fork of
+/// one INVITE answers on its CSeq, RFC 3261 §12.1.2).
+fn fork_straggler(ctx: &RuleContext) -> bool {
+    let Some(resp) = ctx.response() else { return false };
+    let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) else { return false };
+    let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {
+        return false;
+    };
+    let Some(confirmed) = leg.dialogs.first().filter(|d| !d.sip.remote_tag.is_empty()) else {
+        return false;
+    };
+    !leg.dialogs.iter().any(|d| d.sip.remote_tag == tag)
+        && crate::rules::relay::acked_invite_cseq(confirmed)
+            .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

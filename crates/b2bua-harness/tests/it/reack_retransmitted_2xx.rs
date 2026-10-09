@@ -288,7 +288,8 @@ const FORK_BOB_ADDR: &str = "127.0.0.1:5072";
 /// fork's late 2xx reaches this leg carrying a tag the B2BUA never confirmed.
 /// Taking it for a retransmission would ACK it off the SURVIVING dialog — the
 /// winner's To-tag, at the winner's remote target — an ACK addressed to a dialog
-/// that never sent this response, which quiesces nobody.
+/// that never sent this response, which quiesces nobody. The straggler draws
+/// its own ACK and a BYE of its own dialog instead (§13.2.2.4).
 ///
 /// Driven on a leg the BYE has already Terminated, the state
 /// `re-ack-retransmitted-2xx` was widened to (RFC 5407 §2), because that is where
@@ -296,13 +297,6 @@ const FORK_BOB_ADDR: &str = "127.0.0.1:5072";
 #[tokio::test(start_paused = true)]
 async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
     let h = Harness::new("b2bua-reack-2xx-fork-loser");
-    // The straggler is the deliberate non-compliance: it answers under a tag
-    // nobody confirmed and then neither gets ACKed nor cleans its own dialog up.
-    // Refusing to adopt it is the behaviour under test.
-    h.allow_violation(
-        "unacked-2xx-not-cleared",
-        "the scripted fork-loser 2xx is the corner case: an answer under an unconfirmed tag, which the SUT must not adopt",
-    );
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", FORK_BOB_ADDR).await;
     let b2bua =
@@ -328,15 +322,19 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
 
     // ── a straggler answers on the same INVITE CSeq under a tag of its own ───
     uas.respond(200, "OK").with_to_tag("z-fork-loser").with_sdp(ANSWER).await;
+    // §13.2.2.4: the straggler's 2xx draws its OWN ACK and a BYE of its own
+    // dialog, never an ACK off the surviving one.
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("z-fork-loser"), "the ACK names the straggler");
+    let mut bye = bob.receive("BYE").await;
+    assert_eq!(bye.request().to().tag(), Some("z-fork-loser"), "the BYE ends the straggler");
+    bye.respond(200, "OK").await;
     let mut stragglers = 0;
     for _ in 0..6 {
         h.advance(Duration::from_millis(100)).await;
         stragglers += bob.drain().await;
     }
-    assert_eq!(
-        stragglers, 0,
-        "a 2xx under an unconfirmed tag draws no ACK (got {stragglers} datagrams)"
-    );
+    assert_eq!(stragglers, 0, "nothing more follows (got {stragglers} datagrams)");
     assert_eq!(
         b2bua.metrics().retransmits_total("trigger", "ACK", None),
         0,
@@ -354,8 +352,5 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
         .iter()
         .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
         .count();
-    assert_eq!(
-        acks, 1,
-        "one ACK reached bob — the relayed initial one, and nothing off the straggler"
-    );
+    assert_eq!(acks, 2, "two ACKs reached bob — the relayed initial one, and the straggler's own");
 }

@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
+use rfc_rules::rules::correlation::EARLY_DIALOG_WINDOW_US;
 use sip_message::generators::{
     generate_ack_for_2xx, generate_ack_for_non_2xx, generate_cancel, generate_in_dialog_request,
     generate_out_of_dialog_request, generate_response, GenerateAckFor2xxOpts,
@@ -165,6 +166,11 @@ pub struct LegStack {
     /// confirmation ends the early phase, adopts the answering fork's sequence,
     /// and retires the fork ride a PRACK takes before it.
     confirmed: bool,
+    /// The remote tag of every dialog a 2xx to INVITE confirmed on this leg:
+    /// the To-tag of each one it took, the From-tag of the INVITE it answered.
+    confirmed_remotes: BTreeSet<String>,
+    /// When the leg's dialog confirmed, on the run's clock.
+    confirmed_at_us: Option<u64>,
     /// The INVITEs this side sent, in send order, for their ACK and CANCEL.
     sent_invites: Vec<SipRequest>,
     /// The CSeqs among them this leg has already ACKed. RFC 3261 §14.1 leaves
@@ -198,6 +204,9 @@ pub struct LegStack {
     nonce: String,
     /// Branch and tag counter — one id source per leg, so a trace reads.
     ids: u64,
+    /// How many times this leg's party refreshed its remote target
+    /// ([`LegStack::refresh_target`]); its Contact user part names the count.
+    target_refreshes: u32,
 }
 
 /// The dialog identity a leg's out-of-dialog requests carry: its Call-ID and
@@ -248,6 +257,8 @@ impl LegStack {
             nonce: run_nonce.to_string(),
             has_dialog: false,
             confirmed: false,
+            confirmed_remotes: BTreeSet::new(),
+            confirmed_at_us: None,
             sent_invites: Vec::new(),
             acked_invites: BTreeSet::new(),
             received: Vec::new(),
@@ -256,7 +267,15 @@ impl LegStack {
             last_rseq: None,
             early: Vec::new(),
             ids: 0,
+            target_refreshes: 0,
         }
+    }
+
+    /// Refresh this leg's remote target for the `n`-th time (RFC 3261
+    /// §12.1.2, §12.2.1.2): from the next message on, its Contact names a user
+    /// part of its own. The host and port stay the bound socket's.
+    pub fn refresh_target(&mut self, n: u32) {
+        self.target_refreshes = n;
     }
 
     pub fn has_dialog(&self) -> bool {
@@ -306,8 +325,12 @@ impl LegStack {
     }
 
     fn contact(&self) -> header::Contact {
+        let user = match self.target_refreshes {
+            0 => self.leg.clone(),
+            n => format!("{}-{n}", self.leg),
+        };
         header::Contact::from_uri(
-            Uri::sip_user(SipStr::owned(&self.leg), SipStr::owned(&self.addr.ip().to_string()))
+            Uri::sip_user(SipStr::owned(&user), SipStr::owned(&self.addr.ip().to_string()))
                 .with_port(self.addr.port()),
         )
     }
@@ -385,7 +408,8 @@ impl LegStack {
 
     /// Compose an in-dialog request. `cseq` is a `cseq-override` (§11) and
     /// becomes the dialog's sequence number, as it does on a dialog-opening
-    /// request.
+    /// request. Before any final it rides the leg's only early dialog
+    /// ([`in_dialog_on`](Self::in_dialog_on)).
     pub fn in_dialog(
         &mut self,
         method: Method,
@@ -394,13 +418,44 @@ impl LegStack {
         content_type: Option<String>,
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
-        if !self.has_dialog {
-            return Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() });
-        }
+        self.in_dialog_on(None, method, headers, body, content_type, cseq)
+    }
+
+    /// Whether the leg rings an early dialog it can address a request on: no
+    /// final has opened a dialog yet, and a provisional under a To-tag opened
+    /// one on either side (RFC 3261 §12.1).
+    pub fn rings_early(&self) -> bool {
+        !self.has_dialog && !self.early.is_empty()
+    }
+
+    /// Compose an in-dialog request on the dialog the leg has: the one a final
+    /// opened, else the early dialog `early` names — the leg's only one where
+    /// it names none (RFC 3261 §12.1.1: a UAS's provisional under a To-tag
+    /// opens an early dialog on its side too, and a BYE may ride it, §15).
+    pub fn in_dialog_on(
+        &mut self,
+        early: Option<&str>,
+        method: Method,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+        cseq: Option<u32>,
+    ) -> Result<SipRequest, StackError> {
         let verb = in_dialog_method(&method).ok_or_else(|| StackError::UnsupportedMethod {
             leg: self.leg.clone(),
             method: method.to_string(),
         })?;
+        let fork = if self.has_dialog { None } else { Some(self.early_tag_for(early, &method)?) };
+        let dialog = match &fork {
+            None => self.dialog.clone(),
+            Some(tag) => self.early_dialog(tag).map(|e| e.dialog.clone()).ok_or_else(|| {
+                StackError::EarlyDialogUnknown {
+                    leg: self.leg.clone(),
+                    method: method.to_string(),
+                    early: tag.clone(),
+                }
+            })?,
+        };
         let via = self.via();
         let opts = GenerateInDialogRequestOpts {
             via: Some(via),
@@ -411,12 +466,38 @@ impl LegStack {
             cseq,
             ..Default::default()
         };
-        let result = generate_in_dialog_request(verb, &self.dialog, &opts);
-        self.dialog = result.dialog;
+        let result = generate_in_dialog_request(verb, &dialog, &opts);
+        match fork {
+            None => self.dialog = result.dialog,
+            Some(tag) => {
+                if let Some((_, early)) = self.early.iter_mut().find(|(known, _)| *known == tag) {
+                    early.dialog = result.dialog;
+                }
+            }
+        }
         if method == Method::Invite {
             self.sent_invites.push(result.request.clone());
         }
         Ok(result.request)
+    }
+
+    /// The early dialog a request rides: the one `early` names, else the
+    /// leg's only one. None and several are refusals: which dialog a request
+    /// rides decides which endpoint it reaches, and §14 has the tool infer
+    /// nothing.
+    fn early_tag_for(&self, early: Option<&str>, method: &Method) -> Result<String, StackError> {
+        if let Some(named) = early {
+            return Ok(named.to_string());
+        }
+        match self.early.len() {
+            0 => Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() }),
+            1 => Ok(self.early[0].0.clone()),
+            dialogs => Err(StackError::EarlyDialogAmbiguous {
+                leg: self.leg.clone(),
+                method: method.to_string(),
+                dialogs,
+            }),
+        }
     }
 
     /// Compose a response to the newest received request whose CSeq method is
@@ -535,6 +616,9 @@ impl LegStack {
                 // leg takes its tag and continues that fork's OWN sequence
                 // (RFC 3261 §12.2.1.1) — never a number another fork burned.
                 let fork = self.early_dialog(&to_tag).map(|e| e.dialog.local_cseq);
+                if let Some(remote) = request.from().tag() {
+                    self.confirmed_remotes.insert(remote.to_string());
+                }
                 self.dialog.local_tag = to_tag;
                 if !self.confirmed {
                     self.confirmed = true;
@@ -612,51 +696,7 @@ impl LegStack {
         content_type: Option<String>,
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
-        if self.has_dialog {
-            return self.in_dialog(Method::Update, headers, body, content_type, cseq);
-        }
-        let tag = match early {
-            Some(named) => named.to_string(),
-            None => match self.early.len() {
-                0 => {
-                    return Err(StackError::NoDialog {
-                        leg: self.leg.clone(),
-                        method: Method::Update.to_string(),
-                    })
-                }
-                1 => self.early[0].0.clone(),
-                dialogs => {
-                    return Err(StackError::EarlyDialogAmbiguous {
-                        leg: self.leg.clone(),
-                        method: Method::Update.to_string(),
-                        dialogs,
-                    })
-                }
-            },
-        };
-        let dialog =
-            self.early_dialog(&tag).map(|early| early.dialog.clone()).ok_or_else(|| {
-                StackError::EarlyDialogUnknown {
-                    leg: self.leg.clone(),
-                    method: Method::Update.to_string(),
-                    early: tag.clone(),
-                }
-            })?;
-        let via = self.via();
-        let opts = GenerateInDialogRequestOpts {
-            via: Some(via),
-            contact: Some(self.contact()),
-            body,
-            content_type: content_type.as_deref().map(media_type),
-            extra_headers: frozen(headers),
-            cseq,
-            ..Default::default()
-        };
-        let result = generate_in_dialog_request(InDialogMethod::Update, &dialog, &opts);
-        if let Some((_, early)) = self.early.iter_mut().find(|(known, _)| *known == tag) {
-            early.dialog = result.dialog;
-        }
-        Ok(result.request)
+        self.in_dialog_on(early, Method::Update, headers, body, content_type, cseq)
     }
 
     /// The PRACK this leg owes a reliable provisional it received (RFC 3262
@@ -831,10 +871,13 @@ impl LegStack {
     /// set from a 1xx/2xx to a dialog-creating request alone (RFC 3261
     /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). A
     /// final to a CANCEL or a BYE, or a non-2xx final, states no dialog fact
-    /// and leaves the dialog as it is.
+    /// and leaves the dialog as it is; so does, once a 2xx confirmed the
+    /// dialog, a response under another fork's tag (§13.2.2.4).
     pub fn learn_response(&mut self, response: &SipResponse) {
         let status = response.status();
-        if establishes_dialog(response) {
+        let other_dialog =
+            self.confirmed && response.to().tag() != Some(self.dialog.remote_tag.as_str());
+        if establishes_dialog(response) && !other_dialog {
             if let Some(tag) = response.to().tag() {
                 self.dialog.remote_tag = tag.to_string();
             }
@@ -846,7 +889,7 @@ impl LegStack {
                 self.dialog.route_set = routes.into_iter().rev().collect();
             }
         }
-        if status < 300 {
+        if status < 300 && !other_dialog {
             if let Some(contact) = response.contacts().as_slice().first() {
                 self.dialog.remote_target = contact.uri().to_string();
             }
@@ -880,9 +923,17 @@ impl LegStack {
             };
             self.ring_early(&tag, fork, rseq);
         }
-        if response.status() >= 200 && response.status() < 300 {
+        // A 2xx to a PRACK or UPDATE an early dialog carried confirms nothing
+        // (RFC 3261 §12.1, RFC 3262 §4, RFC 3311 §5.1): the fork keeps its own
+        // sequence, and the INVITE's 2xx continues it.
+        let answers_early_request =
+            !self.confirmed && matches!(response.cseq().method(), Method::Prack | Method::Update);
+        if response.status() >= 200 && response.status() < 300 && !answers_early_request {
             self.has_dialog = true;
             if let Some(tag) = response.to().tag() {
+                if *response.cseq().method() == Method::Invite {
+                    self.confirmed_remotes.insert(tag.to_string());
+                }
                 let fork = self.early_dialog(tag).map(|early| early.dialog.local_cseq);
                 if !self.confirmed && *response.cseq().method() == Method::Invite {
                     self.confirmed = true;
@@ -904,10 +955,16 @@ impl LegStack {
     }
 
     /// Learn the dialog facts an inbound request carries, and keep it so a
-    /// later response can answer it.
+    /// later response can answer it. The remote tag is learned only until a
+    /// 2xx confirms the dialog, which fixes it (RFC 3261 §12.1.2); a request
+    /// under another fork's tag then teaches the confirmed dialog nothing.
     pub fn learn_request(&mut self, request: &SipRequest) {
         let tag = request.from().tag().map(|t| t.to_string()).unwrap_or_default();
-        if !tag.is_empty() {
+        if self.confirmed && !tag.is_empty() && tag != self.dialog.remote_tag {
+            self.received.push(request.clone());
+            return;
+        }
+        if !tag.is_empty() && !self.confirmed {
             self.dialog.remote_tag = tag;
         }
         // RFC 3261 §12.1.1 / §12.2.1.1 set the dialog's URIs once, from the
@@ -932,6 +989,41 @@ impl LegStack {
             }
         }
         self.received.push(request.clone());
+    }
+
+    /// Note when this leg's dialog confirmed, at `now_us` on the run's clock:
+    /// the early dialogs of the other forks stand [`EARLY_DIALOG_WINDOW_US`]
+    /// past it. The first call after confirmation fixes it.
+    pub fn note_confirmed_at(&mut self, now_us: u64) {
+        if self.confirmed && self.confirmed_at_us.is_none() {
+            self.confirmed_at_us = Some(now_us);
+        }
+    }
+
+    /// Whether `request`, taken at `now_us`, names no dialog this leg holds
+    /// (RFC 3261 §12.2.2), so a real UA answers it 481 and learns nothing from
+    /// it: an in-dialog request on a confirmed leg whose From-tag is the remote
+    /// tag of no dialog a 2xx confirmed, nor of another fork's early dialog
+    /// still standing ([`EARLY_DIALOG_WINDOW_US`]) — which a BYE (§15) and an
+    /// INVITE (§14.1) from the answering side never ride. An ACK draws no
+    /// response and a CANCEL is matched by its transaction (§9.1); neither is
+    /// judged.
+    pub fn names_no_dialog(&self, request: &SipRequest, now_us: u64) -> bool {
+        if !self.confirmed
+            || request.to().tag().is_none()
+            || matches!(request.method(), Method::Ack | Method::Cancel)
+        {
+            return false;
+        }
+        let Some(remote) = request.from().tag() else { return false };
+        if self.confirmed_remotes.contains(remote) {
+            return false;
+        }
+        let early_standing = self
+            .confirmed_at_us
+            .is_none_or(|at| now_us <= at.saturating_add(EARLY_DIALOG_WINDOW_US));
+        let early_request = !matches!(request.method(), Method::Bye | Method::Invite);
+        !(early_standing && early_request && self.early_dialog(remote).is_some())
     }
 
     /// The CSeq the peer last used on this leg.
@@ -2093,6 +2185,60 @@ mod tests {
         );
     }
 
+    /// RFC 3261 §12.1.1: a provisional the UAS sends under a To-tag opens an
+    /// early dialog on its side too. A BYE the callee puts on it (§15 forbids
+    /// it to the callee, and peers still send one) rides that dialog: the
+    /// leg's Call-ID, its own tag on the From, the caller's on the To. It is
+    /// never a dialog-opening request, which this leg cannot address.
+    #[test]
+    fn a_callee_bye_on_its_early_dialog_rides_that_dialog() {
+        let (mut uas, invite) = ringing("B");
+        let caller_tag = invite.from().tag().expect("the INVITE carried a From-tag").to_string();
+        uas.respond(
+            &Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("the callee rings under a tag");
+        let bye = uas
+            .in_dialog(Method::Bye, &[], Vec::new(), None, None)
+            .expect("the callee BYEs its early dialog");
+        assert_eq!(bye.method(), Method::Bye);
+        assert_eq!(bye.from().tag(), Some("B-early-f1"), "the BYE rides the early dialog");
+        assert_eq!(bye.to().tag(), Some(caller_tag.as_str()), "the peer's tag is the caller's");
+        assert_eq!(bye.call_id().to_string(), uas.call_id(), "one leg, one Call-ID");
+    }
+
+    /// RFC 3261 §12.1.2: a provisional carrying a new Contact refreshes the
+    /// early dialog's remote target. After `refresh_target` the leg's Contact
+    /// names a user part of its own, on that message and every later one.
+    #[test]
+    fn a_target_refresh_changes_the_contact_the_leg_states() {
+        let (mut uas, _) = ringing("B");
+        let ring = |uas: &mut LegStack| {
+            let answer = Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: None,
+            };
+            let r = uas.respond(&answer, &[], Vec::new(), None).expect("a ring");
+            r.contacts().as_slice().first().expect("a 180 states a Contact").uri().to_string()
+        };
+        let first = ring(&mut uas);
+        uas.refresh_target(1);
+        let second = ring(&mut uas);
+        assert_ne!(first, second, "the refreshed target is another URI");
+        assert!(second.contains("B-1@"), "{second}");
+        assert_eq!(ring(&mut uas), second, "the refresh holds for later messages");
+    }
+
     // ── UPDATE on an early dialog (RFC 3311 §5.1) ───────────────────────────
 
     /// A UAS ringing two forks, each under its own tag and RSeq.
@@ -2306,6 +2452,60 @@ mod tests {
         );
     }
 
+    /// RFC 3261 §12.2.1.1 across confirmation: a 2xx to the PRACK or UPDATE an
+    /// early dialog carries confirms nothing, so the requests the leg sends on
+    /// that early dialog keep advancing ITS sequence, and the 2xx to the INVITE
+    /// continues from the last of them — the BYE behind PRACK 2 and UPDATE 3 is 4.
+    #[test]
+    fn a_2xx_to_an_early_request_confirms_nothing_and_the_sequence_carries_on() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        let rings = uas
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1"),
+                Vec::new(),
+                None,
+            )
+            .expect("the callee rings reliably");
+        uac.learn_response(&rings);
+        let prack = uac.prack(None, &[], Vec::new(), None, None).expect("the caller PRACKs");
+        assert_eq!(prack.cseq().seq(), 2);
+        uas.learn_request(&prack);
+        let pracked = uas
+            .respond(
+                &Answer { status: 200, reason: "OK", cseq_method: Some("PRACK"), early_tag: None },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers the PRACK");
+        uac.learn_response(&pracked);
+        let update = uac.update(None, &[], Vec::new(), None, None).expect("the caller updates");
+        assert_eq!(update.cseq().seq(), 3);
+        let ok = uas
+            .respond(
+                &Answer {
+                    status: 200,
+                    reason: "OK",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers");
+        uac.learn_response(&ok);
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("a BYE");
+        assert_eq!(bye.cseq().seq(), 4, "the BYE follows the UPDATE's 3");
+    }
+
     /// A confirming To-tag that rang no provisional confirms a dialog whose
     /// only prior request was the INVITE, so the INVITE's own CSeq seeds the
     /// sequence the leg continues — never 0 and never the leg's running count.
@@ -2360,15 +2560,38 @@ mod tests {
         assert_eq!(re_invite.cseq().seq(), 2, "the confirmed dialog held only the INVITE's CSeq 1");
     }
 
-    /// Every other in-dialog request still waits for a confirmed dialog: PRACK
-    /// and UPDATE are the two that run inside an early one.
+    /// Before confirmation every in-dialog request rides an early dialog, so a
+    /// leg ringing several forks names which: unnamed, the request is refused,
+    /// never put on a fork the document did not choose.
     #[test]
-    fn an_in_dialog_request_that_is_no_update_still_waits_for_confirmation() {
+    fn an_early_dialog_request_names_its_fork_where_the_leg_rings_several() {
         let (mut uas, _) = forking("B");
         assert_eq!(
             uas.in_dialog(Method::Info, &[], Vec::new(), None, None),
-            Err(StackError::NoDialog { leg: "B".into(), method: "INFO".into() })
+            Err(StackError::EarlyDialogAmbiguous {
+                leg: "B".into(),
+                method: "INFO".into(),
+                dialogs: 2
+            })
         );
+        assert_eq!(
+            uas.in_dialog(Method::Bye, &[], Vec::new(), None, None),
+            Err(StackError::EarlyDialogAmbiguous {
+                leg: "B".into(),
+                method: "BYE".into(),
+                dialogs: 2
+            })
+        );
+        let bye = uas
+            .in_dialog_on(Some("B-early-f2"), Method::Bye, &[], Vec::new(), None, None)
+            .expect("the named fork");
+        assert_eq!(bye.from().tag(), Some("B-early-f2"));
+    }
+
+    /// A leg that rang nothing has no dialog to address an in-dialog request on.
+    #[test]
+    fn an_in_dialog_request_on_a_leg_that_rang_nothing_is_refused() {
+        let (mut uas, _) = ringing("B");
         assert_eq!(
             uas.in_dialog(Method::Bye, &[], Vec::new(), None, None),
             Err(StackError::NoDialog { leg: "B".into(), method: "BYE".into() })
@@ -2439,5 +2662,194 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), one.len(), "{one:?}");
+    }
+
+    /// A caller whose callee rang fork `B-f1`, then answered on fork `B-f3`,
+    /// which never rang; the caller has learned both. Returns the caller, the
+    /// callee, and the 2xx.
+    fn answered_on_an_unrung_fork() -> (LegStack, LegStack, SipResponse) {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        let answer = |status, reason, tag| Answer {
+            status,
+            reason,
+            cseq_method: Some("INVITE"),
+            early_tag: Some(tag),
+        };
+        let rings = uas
+            .respond(&answer(180, "Ringing", "B-f1"), &[], Vec::new(), None)
+            .expect("fork 1 rings");
+        uac.learn_response(&rings);
+        let ok =
+            uas.respond(&answer(200, "OK", "B-f3"), &[], Vec::new(), None).expect("fork 3 answers");
+        uac.learn_response(&ok);
+        uac.note_confirmed_at(1_000_000);
+        (uac, uas, ok)
+    }
+
+    /// `request` as the peer would have sent it under From-tag `from_tag`.
+    fn under_from_tag(request: &SipRequest, from_tag: &str) -> SipRequest {
+        use sip_message::parser::custom::CustomParser;
+        use sip_message::{SipMessage, SipParser};
+        let wire = String::from_utf8(request.image().to_vec()).expect("text");
+        let tag = request.from().tag().expect("the request carries a From-tag");
+        let rewritten = wire.replacen(&format!("tag={tag}"), &format!("tag={from_tag}"), 1);
+        match CustomParser::new().parse(rewritten.as_bytes()).expect("parses") {
+            SipMessage::Request(r) => r,
+            _ => panic!("a request"),
+        }
+    }
+
+    /// RFC 3261 §12.2.2: once fork 3's 2xx confirmed the caller's dialog, a
+    /// request under fork 1's tag names no dialog she holds — past the 64·T1
+    /// the early dialog of fork 1 still stood (§13.2.2.4). One under the
+    /// answering fork's tag does.
+    #[test]
+    fn a_request_under_another_forks_tag_names_no_dialog_once_confirmed() {
+        let (uac, mut uas, ok) = answered_on_an_unrung_fork();
+        assert_eq!(to_tag(&ok), "B-f3");
+        let options = uas.in_dialog(Method::Options, &[], Vec::new(), None, None).expect("OPTIONS");
+        assert_eq!(options.from().tag(), Some("B-f3"), "the callee writes its answering tag");
+        let late = 1_000_000 + EARLY_DIALOG_WINDOW_US + 1;
+        assert!(!uac.names_no_dialog(&options, late), "the answered dialog is hers");
+        let stray = under_from_tag(&options, "B-f1");
+        assert!(uac.names_no_dialog(&stray, late), "fork 1's early dialog has ended");
+        assert!(
+            !uac.names_no_dialog(&stray, 1_000_000 + EARLY_DIALOG_WINDOW_US),
+            "inside 64·T1 fork 1's early dialog still stands"
+        );
+        assert!(uac.names_no_dialog(&under_from_tag(&options, "never-seen"), 1_000_001));
+    }
+
+    /// The answering side never BYEs an early dialog (RFC 3261 §15) nor
+    /// re-INVITEs one while its INVITE is in progress (§14.1): under fork 1's
+    /// tag they name no dialog the caller holds, inside 64·T1 too.
+    #[test]
+    fn a_bye_or_invite_under_another_forks_tag_names_no_dialog_inside_the_window() {
+        let (uac, mut uas, _) = answered_on_an_unrung_fork();
+        for method in [Method::Bye, Method::Invite] {
+            let request =
+                uas.in_dialog(method.clone(), &[], Vec::new(), None, None).expect("composes");
+            assert!(
+                uac.names_no_dialog(&under_from_tag(&request, "B-f1"), 1_000_001),
+                "{method:?} under fork 1's tag"
+            );
+        }
+    }
+
+    /// The tag a request carries is learned only while no 2xx has confirmed the
+    /// dialog: a stray request leaves the caller's dialog where its 2xx put it,
+    /// so her own next request still names fork 3.
+    #[test]
+    fn a_confirmed_dialog_keeps_its_remote_tag_whatever_request_arrives() {
+        let (mut uac, mut uas, _) = answered_on_an_unrung_fork();
+        let options = uas.in_dialog(Method::Options, &[], Vec::new(), None, None).expect("OPTIONS");
+        uac.learn_request(&under_from_tag(&options, "B-f1"));
+        assert_eq!(uac.remote_tag(), Some("B-f3"));
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("BYE");
+        assert_eq!(bye.to().tag(), Some("B-f3"));
+    }
+
+    /// The response `text` holds, re-read after `edit` rewrote it.
+    fn edited(text: &[u8], edit: impl Fn(String) -> String) -> SipResponse {
+        use sip_message::parser::custom::CustomParser;
+        use sip_message::{SipMessage, SipParser};
+        let rewritten = edit(String::from_utf8(text.to_vec()).expect("text"));
+        match CustomParser::new().parse(rewritten.as_bytes()).expect("parses") {
+            SipMessage::Response(r) => r,
+            _ => panic!("a response"),
+        }
+    }
+
+    /// Once fork 3's 2xx confirmed the dialog, another fork's late provisional
+    /// or 2xx confirms nothing of it (RFC 3261 §12.1.2, §13.2.2.4): the leg
+    /// keeps the remote tag and target its own 2xx gave it.
+    #[test]
+    fn another_forks_late_response_leaves_the_confirmed_dialog_as_it_was() {
+        let (mut uac, _, ok) = answered_on_an_unrung_fork();
+        let target = uac.remote_target().to_string();
+        let elsewhere = |text: String| {
+            text.replacen("tag=B-f3", "tag=B-f1", 1).replacen(
+                "Contact: <sip:",
+                "Contact: <sip:elsewhere-",
+                1,
+            )
+        };
+        let late_180 = edited(ok.image(), |t| {
+            elsewhere(t).replacen("SIP/2.0 200 OK", "SIP/2.0 180 Ringing", 1)
+        });
+        let late_200 = edited(ok.image(), elsewhere);
+        for late in [late_180, late_200] {
+            uac.learn_response(&late);
+            assert_eq!(uac.remote_tag(), Some("B-f3"), "{}", late.status());
+            assert_eq!(uac.remote_target(), target, "{}", late.status());
+        }
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("BYE");
+        assert_eq!(bye.to().tag(), Some("B-f3"));
+    }
+
+    /// A request taken inside 64·T1 on another fork's early dialog still
+    /// standing is that dialog's: the confirmed dialog keeps its remote target
+    /// and route set.
+    #[test]
+    fn a_request_on_another_forks_early_dialog_leaves_the_confirmed_dialog_as_it_was() {
+        let (mut uac, mut uas, _) = answered_on_an_unrung_fork();
+        let target = uac.remote_target().to_string();
+        let routes = uac.route_set().to_vec();
+        let update = uas.in_dialog(Method::Update, &[], Vec::new(), None, None).expect("UPDATE");
+        let early = {
+            use sip_message::parser::custom::CustomParser;
+            use sip_message::{SipMessage, SipParser};
+            let text = String::from_utf8(update.image().to_vec())
+                .expect("text")
+                .replacen("tag=B-f3", "tag=B-f1", 1)
+                .replacen("Contact: <sip:", "Contact: <sip:elsewhere-", 1)
+                .replacen("CSeq:", "Record-Route: <sip:10.9.9.9;lr>\r\nCSeq:", 1);
+            match CustomParser::new().parse(text.as_bytes()).expect("parses") {
+                SipMessage::Request(r) => r,
+                _ => panic!("a request"),
+            }
+        };
+        assert!(!uac.names_no_dialog(&early, 1_000_001), "fork 1's early dialog still stands");
+        uac.learn_request(&early);
+        assert_eq!(uac.remote_target(), target);
+        assert_eq!(uac.route_set(), routes.as_slice());
+        assert_eq!(uac.remote_tag(), Some("B-f3"));
+    }
+
+    /// The answering seat holds the caller's From-tag: her requests under it
+    /// name the dialog, a request under another names none.
+    #[test]
+    fn the_answering_seat_holds_the_callers_tag() {
+        let (mut uac, uas, _) = answered_on_an_unrung_fork();
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("BYE");
+        assert!(!uas.names_no_dialog(&bye, 99_000_000));
+        assert!(uas.names_no_dialog(&under_from_tag(&bye, "someone-else"), 99_000_000));
+    }
+
+    /// Before any 2xx, nothing is confirmed: early-dialog traffic names the
+    /// fork it rides and is never refused here.
+    #[test]
+    fn nothing_is_refused_before_the_dialog_confirms() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        let rings = uas
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-f1"),
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("fork 1 rings");
+        uac.learn_response(&rings);
+        let update = uas.in_dialog_on(Some("B-f1"), Method::Update, &[], Vec::new(), None, None);
+        if let Ok(update) = update {
+            assert!(!uac.names_no_dialog(&under_from_tag(&update, "B-f9"), 99_000_000));
+        }
     }
 }

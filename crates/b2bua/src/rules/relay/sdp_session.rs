@@ -319,12 +319,12 @@ pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
 /// it meets an UPDATE of that peer awaiting its final or an open INVITE offer
 /// ([`b2bua_sdk::open_offer::open_offer`], RFC 3311 §5.2). Nothing else.
 pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest) {
-    let to_tag = req.to().tag();
+    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
     let opens = match req.method() {
-        Method::Invite => !call::helpers::invite_glare(call, leg_id, to_tag),
+        Method::Invite => !call::helpers::invite_glare(call, leg_id, tags),
         Method::Update => {
             req.sdp().is_some()
-                && !call::helpers::peer_update_pending(call, leg_id, to_tag)
+                && !call::helpers::peer_update_pending(call, leg_id, tags)
                 && b2bua_sdk::open_offer::open_offer(call, leg_id, req).is_none()
         }
         _ => false,

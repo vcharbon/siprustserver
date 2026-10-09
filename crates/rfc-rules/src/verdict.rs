@@ -13,9 +13,9 @@ use crate::wire::Endpoint;
 /// kebab-case wire token of the pivot vocabulary (§11.1); the dotted
 /// `rfc_audit` ids die as each live module's rung ports it.
 ///
-/// The WIRE subset — what a pivot document may name in `rfc_violations[].rule`
-/// — is [`RuleId::WIRE`], and it grows one census-verified member at a time;
-/// membership here alone does not put a rule on the wire contract.
+/// What a pivot document may name in `rfc_violations[].rule` is
+/// [`RuleId::WIRE`]: every rule, each decided by the census off a capture as
+/// the live audit decides it off a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuleId {
     /// RFC 3261 §9.2: a UAS that has taken a CANCEL for an INVITE answers that
@@ -199,8 +199,9 @@ pub enum RuleId {
     #[serde(rename = "proxy-100-within-grace")]
     Proxy100WithinGrace,
     /// RFC 3261 §17.1.1.3: a non-2xx INVITE final is ACKed, and the ACK reaches
-    /// the UAS that sent it. Charges that UAS — an un-ACKed reject retransmits
-    /// to Timer H and its transaction never completes.
+    /// the UAS that sent it. Charges the UAC that took the final and owed the
+    /// ACK — an un-ACKed reject retransmits to Timer H and its transaction
+    /// never completes.
     #[serde(rename = "unacked-invite-non-2xx-final")]
     UnackedInviteNon2xxFinal,
     /// RFC 3261 §14.1 / §17.1.1.2: a re-INVITE that drew a provisional draws a
@@ -245,11 +246,6 @@ pub enum RuleId {
     /// its own that carried a body is still unPRACKed. Charges that UAS.
     #[serde(rename = "delay-2xx-on-unacked-reliable-1xx-with-sdp")]
     Delay2xxOnUnackedReliable1xxWithSdp,
-    /// RFC 3262 §3: a PRACK arriving after the INVITE final still draws a 2xx —
-    /// the PRACK server transaction outlives the INVITE's. Charges the endpoint
-    /// that answered it.
-    #[serde(rename = "prack-accepted-after-final")]
-    PrackAcceptedAfterFinal,
     /// RFC 3262 §3: a UAS emits no NEW reliable provisional on an INVITE
     /// transaction it has already answered. Charges that UAS; the reliable-only
     /// sibling of [`RuleId::No1xxAfterFinal`], keyed on `RSeq`.
@@ -274,6 +270,10 @@ pub enum RuleId {
     /// already stated one on that dialog. Charges the answerer.
     #[serde(rename = "final-2xx-answers-the-offer")]
     Final2xxAnswersTheOffer,
+    /// RFC 3261 §13.2.2.4 / §13.2.1: an ACK to a 2xx that carried a delayed
+    /// offer carries the answer. Charges the ACK's sender.
+    #[serde(rename = "delayed-offer-answered-in-ack")]
+    DelayedOfferAnsweredInAck,
     /// RFC 3261 §13.2.1: one dialog carries ONE answer — a later description on
     /// that dialog re-states the transport plan the first stated, never another
     /// one, since the peer takes the first and ignores the rest. Charges the
@@ -430,6 +430,11 @@ pub enum RuleId {
     /// that dialog's remote tag in To. Charges the sender that omitted it.
     #[serde(rename = "in-dialog-to-tag")]
     InDialogToTag,
+    /// RFC 3261 §12.2.1.1 / §12.1.2: a request an endpoint takes inside a
+    /// dialog it confirmed carries that dialog's remote tag in From. Charges
+    /// the sender.
+    #[serde(rename = "in-dialog-from-tag")]
+    InDialogFromTag,
     /// RFC 3261 §8.2.2.3: a CANCEL, and the ACK of a non-2xx final, state no
     /// `Require` / `Proxy-Require` — a transaction-management request imposes
     /// no extension. Charges the sender.
@@ -518,12 +523,12 @@ impl RuleId {
         RuleId::UnmatchedPrackProxied,
         RuleId::Prack2xxOr481,
         RuleId::Delay2xxOnUnackedReliable1xxWithSdp,
-        RuleId::PrackAcceptedAfterFinal,
         RuleId::NoNewReliable1xxAfterFinal,
         RuleId::NoPrackOf100Trying,
         RuleId::PrackAnswers1xxOffer,
         RuleId::AckBodyAfterCompleteOfferAnswer,
         RuleId::Final2xxAnswersTheOffer,
+        RuleId::DelayedOfferAnsweredInAck,
         RuleId::SecondAnswerRepeatsTheFirst,
         RuleId::AnswerStreamMatchesOffer,
         RuleId::SdpOriginContinuity,
@@ -557,6 +562,7 @@ impl RuleId {
         RuleId::CancelCseqMethod,
         RuleId::NoToTagOnInitialRequest,
         RuleId::InDialogToTag,
+        RuleId::InDialogFromTag,
         RuleId::NoRequireOnCancelOrAck,
         RuleId::StrictRouteShuffleOnSend,
         RuleId::SdpBodyParseable,
@@ -565,16 +571,11 @@ impl RuleId {
         RuleId::RungByteIdentical,
     ];
 
-    /// The pivot §11.1 wire contract: the rules a pivot document may claim.
-    /// Each member arrived with its detector, its conservatism and its corpus
-    /// numbers; growing this list takes a census run, not a code move.
-    pub const WIRE: &'static [RuleId] = &[
-        RuleId::No200AfterCancel,
-        RuleId::UnackedReliableProvisional,
-        RuleId::NoAckToDialogCreating2xx,
-        RuleId::NoCancelAfterFinal,
-        RuleId::SecondAnswerRepeatsTheFirst,
-    ];
+    /// The pivot §11.1 wire contract: the rules a pivot document may state and
+    /// the census decides off a capture — every rule with a body, so a scripted
+    /// party's violation of any of them can be cancelled by the same violation
+    /// in the captured trace.
+    pub const WIRE: &'static [RuleId] = RuleId::ALL;
 
     /// The rule's wire token — the same spelling serde uses.
     pub fn token(self) -> &'static str {
@@ -627,12 +628,12 @@ impl RuleId {
             RuleId::Delay2xxOnUnackedReliable1xxWithSdp => {
                 "delay-2xx-on-unacked-reliable-1xx-with-sdp"
             }
-            RuleId::PrackAcceptedAfterFinal => "prack-accepted-after-final",
             RuleId::NoNewReliable1xxAfterFinal => "no-new-reliable-1xx-after-final",
             RuleId::NoPrackOf100Trying => "no-prack-of-100-trying",
             RuleId::PrackAnswers1xxOffer => "prack-answers-1xx-offer",
             RuleId::AckBodyAfterCompleteOfferAnswer => "ack-body-after-complete-offer-answer",
             RuleId::Final2xxAnswersTheOffer => "final-2xx-answers-the-offer",
+            RuleId::DelayedOfferAnsweredInAck => "delayed-offer-answered-in-ack",
             RuleId::SecondAnswerRepeatsTheFirst => "second-answer-repeats-the-first",
             RuleId::AnswerStreamMatchesOffer => "answer-stream-matches-offer",
             RuleId::SdpOriginContinuity => "sdp-origin-continuity",
@@ -665,6 +666,7 @@ impl RuleId {
             RuleId::Reliable1xxHeaders => "reliable-1xx-headers",
             RuleId::NoToTagOnInitialRequest => "no-to-tag-on-initial-request",
             RuleId::InDialogToTag => "in-dialog-to-tag",
+            RuleId::InDialogFromTag => "in-dialog-from-tag",
             RuleId::NoRequireOnCancelOrAck => "no-require-on-cancel-or-ack",
             RuleId::CancelCseqMethod => "cancel-cseq-method",
             RuleId::StrictRouteShuffleOnSend => "strict-route-shuffle-on-send",
@@ -1700,34 +1702,12 @@ pub enum Evidence {
         /// The top-Via branch the provisional shares with the 2xx (§17).
         branch: String,
     },
-    /// The PRACK that arrived after the INVITE final and drew something other
-    /// than a 2xx.
-    ///
-    /// Untagged and unambiguous both ways: it is the only variant carrying
-    /// `late_prack_answer_msg`/`late_prack_msg`, and it carries none of the
-    /// required keys of any other variant (`prack_answer_msg` included).
-    LatePrackRejected {
-        /// Index into the view's `msgs` of the response the emitter sent.
-        late_prack_answer_msg: usize,
-        late_prack_answer_hop: usize,
-        late_prack_answer_ts_us: u64,
-        status: u16,
-        /// Index into the view's `msgs` of the PRACK it answers.
-        late_prack_msg: usize,
-        /// Index into the view's `msgs` of the INVITE final already sent, and
-        /// its status — what made this PRACK late.
-        prior_final_msg: usize,
-        prior_final_status: u16,
-        /// The top-Via branch the PRACK shares with this response (§17).
-        branch: String,
-    },
     /// The NEW reliable provisional a UAS sent on an INVITE transaction it had
     /// already answered.
     ///
     /// Untagged and unambiguous both ways: it is the only variant carrying
     /// `stray_1xx_msg`, and it carries none of the required keys of any other
-    /// variant — `LatePrackRejected` requires `late_prack_answer_msg` and
-    /// `late_prack_msg`, which this one has not.
+    /// variant.
     Reliable1xxAfterFinal {
         /// Index into the view's `msgs` of the provisional the emitter sent.
         stray_1xx_msg: usize,
@@ -1820,6 +1800,18 @@ pub enum Evidence {
         /// order — what the final left unanswered. Empty where the offer holds
         /// no `m=` line.
         offered_streams: Vec<String>,
+    },
+    /// The ACK an agent sent on a delayed-offer round carrying no answer.
+    ///
+    /// Untagged and unambiguous both ways: it is the only variant carrying
+    /// `unanswering_ack_msg`/`delayed_offer_msg`.
+    DelayedOfferUnanswered {
+        /// Index into the view's `msgs` of the answerless ACK.
+        unanswering_ack_msg: usize,
+        unanswering_ack_hop: usize,
+        unanswering_ack_ts_us: u64,
+        /// Index into the view's `msgs` of the 2xx that carried the offer.
+        delayed_offer_msg: usize,
     },
     /// The second description an answerer put on one dialog, stating a
     /// transport plan its first answer did not.
@@ -2189,6 +2181,24 @@ pub enum Evidence {
         /// The tags the taker had minted on this dialog by then.
         local_tags: Vec<String>,
     },
+    /// The request taken inside a confirmed dialog whose From-tag is not the
+    /// remote tag of any dialog its taker confirmed under that To-tag.
+    ///
+    /// Untagged and unambiguous both ways: it is the only variant carrying
+    /// `foreign_from_msg`, so no other payload deserializes into it; and every
+    /// other variant requires a key it has not.
+    DialogRemoteTagForeign {
+        /// Index into the view's `msgs` of the request the taker took.
+        foreign_from_msg: usize,
+        foreign_from_hop: usize,
+        foreign_from_ts_us: u64,
+        method: String,
+        /// The From-tag the request carried.
+        from_tag: String,
+        /// The remote tags of the dialogs the taker had confirmed under the
+        /// request's To-tag by then, sorted.
+        dialog_remote_tags: Vec<String>,
+    },
     /// The in-dialog request whose From URI is not the one the dialog was
     /// created with.
     ///
@@ -2427,12 +2437,12 @@ impl Evidence {
             Evidence::PrackAbsorbed { absorbed_prack_msg, .. } => *absorbed_prack_msg,
             Evidence::PrackAnsweredWrongly { prack_answer_msg, .. } => *prack_answer_msg,
             Evidence::AnsweredOverUnackedOffer { early_2xx_msg, .. } => *early_2xx_msg,
-            Evidence::LatePrackRejected { late_prack_answer_msg, .. } => *late_prack_answer_msg,
             Evidence::Reliable1xxAfterFinal { stray_1xx_msg, .. } => *stray_1xx_msg,
             Evidence::PrackedTrying { trying_prack_msg, .. } => *trying_prack_msg,
             Evidence::PrackWithoutAnswer { bodiless_prack_msg, .. } => *bodiless_prack_msg,
             Evidence::AckBodyOnClosedRound { ack_body_msg, .. } => *ack_body_msg,
             Evidence::OfferLeftUnanswered { unanswered_final_msg, .. } => *unanswered_final_msg,
+            Evidence::DelayedOfferUnanswered { unanswering_ack_msg, .. } => *unanswering_ack_msg,
             Evidence::SecondAnswerDiverged { second_answer_msg, .. } => *second_answer_msg,
             Evidence::AnswerStreamRetyped { answer_stream_msg, .. } => *answer_stream_msg,
             Evidence::SdpOriginDiverged { origin_msg, .. } => *origin_msg,
@@ -2453,6 +2463,7 @@ impl Evidence {
             Evidence::ResponseViaDiverged { via_msg, .. } => *via_msg,
             Evidence::ResponseCseqPhantom { phantom_msg, .. } => *phantom_msg,
             Evidence::DialogTagForeign { foreign_tag_msg, .. } => *foreign_tag_msg,
+            Evidence::DialogRemoteTagForeign { foreign_from_msg, .. } => *foreign_from_msg,
             Evidence::PeerUriRewritten { peer_uri_msg, .. } => *peer_uri_msg,
             Evidence::DialogCallIdChanged { call_id_msg, .. } => *call_id_msg,
             Evidence::CancelUriDiverged { cancel_uri_msg, .. } => *cancel_uri_msg,

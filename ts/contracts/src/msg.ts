@@ -7,9 +7,9 @@
  * - **Tier 2, role-mapped**, stored symbolically as a {@link Ref}.
  * - **Tier 3, frozen**, stored verbatim in wire order.
  *
- * The kebab-renamed keys (`cseq-method`, `headers-present`) sit beside snake
- * fields because the Rust struct renames exactly those two; the mirror keeps the
- * wire spelling rather than normalising it.
+ * The kebab-renamed keys (`cseq-method`, `headers-present`, `target-refresh`)
+ * sit beside snake fields because the Rust struct renames exactly those; the
+ * mirror keeps the wire spelling rather than normalising it.
  */
 import * as Schema from "effect/Schema"
 import { Body } from "./body.js"
@@ -64,6 +64,7 @@ export const MsgSpec = Schema.Struct({
   to: Schema.optionalKey(Ref),
   headers: Schema.optionalKey(Schema.Array(Header)),
   "headers-present": Schema.optionalKey(Schema.Array(Schema.String)),
-  body: Schema.optionalKey(Body)
+  body: Schema.optionalKey(Body),
+  "target-refresh": Schema.optionalKey(Schema.Int)
 })
 export interface MsgSpec extends Schema.Schema.Type<typeof MsgSpec> {}

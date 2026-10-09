@@ -106,6 +106,9 @@ Severity = operational risk if the behaviour is wrong.
 | BYE-4 | 12.2 | Simultaneous double BYE | Idempotent teardown | high | 🟡 | reaper covers wedge; add `simultaneous_double_bye_idempotent` |
 | BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua `confirm_dialog_captures_b_leg_route_set...`, relay tests |
 | BYE-6 | 12.2.1.1 | Per-leg CSeq monotonic | Each leg own CSeq counter | med | ✅ | rfc-audit `cseq` rules, generators |
+| BYE-6a | 12.2.1.1 | Callee's requests on its early dialog, then after the 2xx (forked callee included) | Relayed contiguously: confirmation keeps the callee's own sequence, per fork | high | ✅ | b2bua-harness `peer_cseq_across_confirmation::callee_requests_after_the_answer_continue_its_early_sequence`, `the_callee_sequence_is_its_own_across_a_reinvite_answer`, `the_confirmed_fork_keeps_its_own_early_sequence`; the caller direction is guarded by `caller_requests_after_the_answer_continue_its_early_sequence` |
+| BYE-6b | 12.2.2 | In-dialog request with a CSeq below its dialog's last | 500, not relayed; measured per callee fork and per caller-facing early dialog | med | ✅ | b2bua-harness `peer_cseq_across_confirmation::*_out_of_order`, `*_measured_against_*`; `caller_facing_early_dialogs::the_caller_is_measured_per_caller_facing_dialog`, `an_out_of_order_caller_request_is_answered_500`, `a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence`; a confirmed callee leg's request from a fork the answer abandoned draws 481 (`a_losing_fork_request_after_the_answer_names_no_dialog`) |
+| BYE-6c | 12.1.2, 12.2.1.1 | Forked callee's early requests toward the caller | Each rides its own fork's caller-facing dialog (tag and CSeq); the answered one keeps its sequence | high | ✅ | b2bua-harness `caller_facing_early_dialogs::a_forked_callee_request_rides_its_own_caller_facing_dialog`; the caller's late final in a retired dialog reaches its own fork (`a_late_answer_in_a_retired_dialog_reaches_its_own_originator`) |
 | BYE-7 | 15.1.1 | BYE mid B-leg re-INVITE | Abort in-flight re-INVITE, BYE | med | 🟡 | refer a-bye-during-realign analogue; add `bye_during_reinvite_aborts_reinvite` |
 | BYE-8 | 16.6, 20.11 | A/B BYE carries a body | The minted BYE carries the body verbatim with its Content-Type and descriptors (Content-Disposition, MIME-Version, Content-Transfer-Encoding); a minted CANCEL carries no body and no descriptor | med | ✅ | teardown_header_relay `a_releasing_*_body_rides_*`, `a_minted_cancel_carries_no_body_descriptor` |
 
@@ -174,7 +177,7 @@ Severity = operational risk if the behaviour is wrong.
 | PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `serialReliable1xx` |
 | PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | rfc-audit `uacRseqStrictness` |
 | PRACK-RTX-2 | 3262 §3 | Retransmitted PRACK after 2xx | Resend cached 2xx, no re-process | med | ❌ | add `prack_rtx_absorbed` |
-| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | Still 2xx it | med | ✅ | rfc-audit `prack-accepted-after-final` |
+| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | 2xx on a match, 481 without | med | ✅ | rfc-audit `prack-2xx-or-481` |
 | DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay-2xx-on-unacked-reliable-1xx-with-sdp` |
 
 ### Forking & early media

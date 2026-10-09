@@ -6,7 +6,8 @@
 //! between a send and what it provokes; it never binds where nothing could
 //! establish it — a relay standing behind a send (§6.7b) and an answer to a
 //! transaction this leg has already opened (§6.7c) arm beside the step in
-//! front of them. Everything else here is what the three nondeterminism
+//! front of them, and the answers a CANCEL this leg received draws (§6.7e) go
+//! out past it. Everything else here is what the three nondeterminism
 //! constructs mean at run time:
 //!
 //! - **`alt`** — every branch's first message is armed at once; the first one to
@@ -146,11 +147,26 @@ impl<'p> Cursor<'p> {
     ///
     /// `overlap` is symmetric — "this step and the named one may arrive in
     /// either order" (§6.1) — so either side may carry the field and the reading
-    /// is the same.
+    /// is the same. A race outlives a member that settled first: a step naming
+    /// a completed one races whatever that one raced ([`Self::races_of`]).
     fn races_with(&self, frontier: &[String], armed: &[String]) -> bool {
-        let names =
-            |a: &str, b: &str| self.plan.step(a).and_then(|s| s.overlap.as_deref()) == Some(b);
+        let names = |a: &str, b: &str| self.races_of(a).contains(&b);
         frontier.iter().any(|id| armed.iter().any(|prev| names(id, prev) || names(prev, id)))
+    }
+
+    /// The steps `step` races: the one its `overlap` names and, while each
+    /// named step has already completed, the one that step names in turn.
+    fn races_of(&self, step: &str) -> Vec<&'p str> {
+        let mut out: Vec<&'p str> = Vec::new();
+        let mut at = self.plan.step(step).and_then(|s| s.overlap.as_deref());
+        while let Some(named) = at.filter(|n| !out.contains(n) && *n != step) {
+            out.push(named);
+            if self.steps.get(named).copied() != Some(StepStatus::Complete) {
+                break;
+            }
+            at = self.plan.step(named).and_then(|s| s.overlap.as_deref());
+        }
+        out
     }
 
     /// Whether every step of an item is an arrival some OTHER leg has already
@@ -271,6 +287,45 @@ impl<'p> Cursor<'p> {
         Some((along[opened], behind))
     }
 
+    /// Whether every step of an item is an answer a CANCEL this leg RECEIVED
+    /// draws (§6.7e): the `200` to that CANCEL and the INVITE's non-2xx final
+    /// (RFC 3261 §9.2). The transaction layer owes both at once, so neither
+    /// waits behind an arrival of another transaction the leg stands on; the
+    /// CANCEL must have completed, and each send still fires at its own dwell.
+    fn answers_received_cancel(&self, frontier: &[String]) -> bool {
+        !frontier.is_empty()
+            && frontier.iter().all(|id| {
+                let Some(step) = self.plan.step(id) else { return false };
+                let Discriminator::Response { status, cseq_method: Some(method) } =
+                    &step.discriminator
+                else {
+                    return false;
+                };
+                let owed = match Method::from_wire(method) {
+                    Method::Cancel => *status == 200,
+                    Method::Invite => *status >= 300,
+                    _ => false,
+                };
+                step.is_send() && owed && self.cancel_received_before(step)
+            })
+    }
+
+    /// Whether the leg's last `expect` of a CANCEL standing before `step` has
+    /// completed.
+    fn cancel_received_before(&self, step: &CompiledStep) -> bool {
+        let key = self.leg_key(&step.id);
+        self.plan
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == step.leg && self.leg_key(&s.id) < key && s.is_expect())
+            .filter(|s| {
+                matches!(&s.discriminator, Discriminator::Request { method }
+                    if Method::from_wire(method) == Method::Cancel)
+            })
+            .max_by_key(|s| self.leg_key(&s.id))
+            .is_some_and(|s| self.steps.get(&s.id).copied() == Some(StepStatus::Complete))
+    }
+
     /// Whether every step an item puts on this leg is a `send`.
     ///
     /// Nothing armed consumes a datagram but an expect, so walking past a send
@@ -315,6 +370,13 @@ impl<'p> Cursor<'p> {
                 let is_message = self.plan.program().items[index].kind == ItemKind::Message;
                 let caused = !awaited && is_message && self.caused_elsewhere(&frontier, &armed);
                 if blocked && !caused && !self.races_with(&frontier, &armed) {
+                    // The answers a CANCEL this leg received draws go out at
+                    // their own dwell, whatever stands in front (§6.7e).
+                    if is_message && self.answers_received_cancel(&frontier) {
+                        armed.extend(frontier.iter().cloned());
+                        out.extend(frontier);
+                        continue;
+                    }
                     // An answer to a transaction this leg already opened may be
                     // on the wire now, whatever stands in front of it (§6.7c).
                     if is_message && self.answers_open_transaction(&frontier, &armed) {
@@ -737,6 +799,24 @@ mod tests {
         // Either side may settle first: here the arrival beats the send.
         cursor.complete("s3");
         assert_eq!(cursor.frontier(), ["s2"]);
+    }
+
+    /// A race chain outlives its middle settling first: s3 races s2, which
+    /// races the send s1. Once s2 has arrived, s3 still races s1 — whatever
+    /// the wire settles first settles first — so it stays armed beside the send
+    /// rather than queueing behind it.
+    #[test]
+    fn a_race_chain_keeps_its_tail_armed_once_its_middle_settled() {
+        let p = plan(&format!(
+            "[{},{},{}]",
+            send("s1", "A", "BYE"),
+            racing_expect("s2", "A", 200, "s1"),
+            racing_expect("s3", "A", 486, "s2")
+        ));
+        let mut cursor = Cursor::new(&p);
+        assert_eq!(cursor.frontier(), ["s1", "s2", "s3"], "the chain arms together");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s1", "s3"], "s3 races s1 through the settled s2");
     }
 
     /// The race walks past ONE neighbour, not the whole leg.
@@ -1435,6 +1515,35 @@ mod tests {
         cursor.complete("s2");
         cursor.complete("s4");
         assert_eq!(cursor.frontier(), ["s3", "s5"], "s6 waits: s3 would take its 200");
+    }
+
+    fn answer_send(id: &str, leg: &str, status: u16, method: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"send","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
+        )
+    }
+
+    /// RFC 3261 §9.2: the callee owes the 200 to a CANCEL and the INVITE's 487
+    /// at once. A BYE the capture shows arriving first does not gate them, so a
+    /// system that sends no such BYE is still answered; the BYE's own 200 waits.
+    #[test]
+    fn the_answers_a_received_cancel_draws_go_out_past_an_unrelated_arrival() {
+        let p = plan(&format!(
+            "[{},{},{},{},{},{},{}]",
+            request_expect("s1", "B", "INVITE"),
+            answer_send("s2", "B", 180, "INVITE"),
+            request_expect("s3", "B", "CANCEL"),
+            request_expect("s4", "B", "BYE"),
+            answer_send("s5", "B", 200, "CANCEL"),
+            answer_send("s6", "B", 200, "BYE"),
+            answer_send("s7", "B", 487, "INVITE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3"], "nothing is owed before the CANCEL");
+        cursor.complete("s3");
+        assert_eq!(cursor.frontier(), ["s4", "s5", "s7"], "the BYE's 200 waits for the BYE");
     }
 
     /// A block standing between the leg's blocking step and the candidate stops

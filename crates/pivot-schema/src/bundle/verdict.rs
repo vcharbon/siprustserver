@@ -160,7 +160,12 @@ pub enum Failure {
     /// The document states an RFC violation the SYSTEM UNDER TEST emits. Such a
     /// violation gates (§11.1), and no detector decides it yet, so the run
     /// refuses rather than passing a claim nothing verified.
-    RfcViolationUnverified { rule: RfcRule, step: String, emitter: String },
+    RfcViolationUnverified {
+        #[schemars(with = "crate::violation::RuleToken")]
+        rule: RfcRule,
+        step: String,
+        emitter: String,
+    },
     /// A step's retransmission ladder (§6.9) is not the one its emitter owed:
     /// the count is a protocol fact, so it gates on every lane. `declared` is
     /// what the document stated and `expected` what the ladder's pacer owes —
@@ -334,13 +339,14 @@ impl std::fmt::Display for Failure {
 
 /// One RFC violation the document declares, as the verdict lists it (§11.1).
 ///
-/// A scripted peer's violation is the case's own subject matter: it is listed
-/// prominently and gates nothing, so a reader of the bundle sees what the run
-/// deliberately reproduced without the run turning red for reproducing it.
+/// A scripted peer's entry states what that party broke in the source: it is
+/// listed and gates nothing itself, and the RFC audit cancels the run's finding
+/// of the same violation on the same transaction against it (`rfc.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ViolationNote {
     /// The rule broken.
+    #[schemars(with = "crate::violation::RuleToken")]
     pub rule: RfcRule,
     /// The flow step whose message breaks it.
     pub step: String,
@@ -365,6 +371,7 @@ pub struct DeclaredNote {
     /// The anchor the declaration names: the step the divergence turns on.
     pub step: String,
     /// The §11.1 rule the SOURCE broke, whose violation predicted this.
+    #[schemars(with = "crate::violation::RuleToken")]
     pub derived_from: RfcRule,
     /// The failure the run actually produced for it, where the gate raised one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -623,7 +630,8 @@ impl RunVerdict {
     }
 
     /// List a declared violation. A scripted peer's is recorded and nothing
-    /// else; the system under test's also fails the run, because it gates.
+    /// else here — the RFC audit reads it as a cancellation; the system under
+    /// test's also fails the run, because it gates.
     pub fn note_violation(&mut self, violation: &crate::violation::RfcViolation) {
         let gating = violation.sut_emitted();
         self.rfc_violations.push(ViolationNote {

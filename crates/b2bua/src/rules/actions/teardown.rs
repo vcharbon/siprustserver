@@ -142,6 +142,15 @@ impl ActionExecutor<'_> {
             }
             match state {
                 LegState::Confirmed => {
+                    // A 2xx still unACKed is ACKed bare ahead of the BYE
+                    // (RFC 3261 §13.2.2.4), and every relayed provisional of
+                    // the leg still unacknowledged — a 2xx's deferred offer, a
+                    // pending re-INVITE's — is PRACKed first (RFC 3262 §4).
+                    let ack_owed = relay::owes_bare_ack(call, &id);
+                    self.prack_relayed_unacknowledged(call, fx, &id, None);
+                    if ack_owed {
+                        self.ack_own_bare(call, fx, &id);
+                    }
                     let relayed = relayed(&Method::Bye, &id);
                     let reason = reason_header.or_else(|| own_release_reason(ctx));
                     let e = if is_a {
@@ -172,6 +181,7 @@ impl ActionExecutor<'_> {
                         }
                     } else {
                         let relayed = relayed(&Method::Cancel, &id);
+                        self.prack_relayed_unacknowledged(call, fx, &id, None);
                         if let Some(e) = self.cancel_to_leg(call, &id, &relayed.headers) {
                             fx.outbound.push(e);
                         }
@@ -233,6 +243,15 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
+                // A 2xx still unACKed is ACKed bare ahead of the BYE (RFC 3261
+                // §13.2.2.4), and every relayed provisional of the leg still
+                // unacknowledged — a 2xx's deferred offer, a pending
+                // re-INVITE's — is PRACKed first (RFC 3262 §4).
+                let ack_owed = relay::owes_bare_ack(call, leg_id);
+                self.prack_relayed_unacknowledged(call, fx, leg_id, None);
+                if ack_owed {
+                    self.ack_own_bare(call, fx, leg_id);
+                }
                 // A release no peer asked for states the deployment's cause
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));
@@ -246,6 +265,7 @@ impl ActionExecutor<'_> {
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
+                self.prack_relayed_unacknowledged(call, fx, leg_id, None);
                 if let Some(e) = self.cancel_to_leg(call, leg_id, &stated) {
                     fx.outbound.push(e);
                 }
@@ -277,6 +297,7 @@ impl ActionExecutor<'_> {
         // re-offers a leg being cancelled.
         self.retire(call, fx, Scope::Leg(leg_id));
         let situation = RelaySituation::request(&Method::Cancel, relay::toward_leg(leg_id));
+        self.prack_relayed_unacknowledged(call, fx, leg_id, None);
         if let Some(e) = self.cancel_to_leg(call, leg_id, &relayed_teardown(ctx, situation).headers)
         {
             fx.outbound.push(e);
@@ -360,7 +381,7 @@ impl ActionExecutor<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn bye_on_dialog(
+    pub(super) fn bye_on_dialog(
         &self,
         marks: relay::CallMarks,
         leg_id: &str,
@@ -452,6 +473,7 @@ impl ActionExecutor<'_> {
         outbound_cseq: i64,
         cancel: PendingReinviteCancel,
     ) {
+        self.prack_relayed_unacknowledged(call, fx, leg_id, Some(outbound_cseq));
         fx.outbound.push(cancel.effect);
         *call = call::helpers::cancel_pending_request(
             call.clone(),
@@ -466,8 +488,9 @@ impl ActionExecutor<'_> {
     /// where that leg goes `Terminated`: its target's answer relays no further,
     /// and RFC 3261 §8.2.6 owes the originator a final. A PRACK draws 200 — it
     /// named a provisional this stack showed under its own number (RFC 3262
-    /// §3); anything else 481. The snapshot is dropped so a late answer from
-    /// the target is never a second final (§17.2.1). A confirmed leg being
+    /// §3); anything else 481 — the relays of early dialogs the answer retired
+    /// included. The snapshot is dropped so a late answer from the target is
+    /// never a second final (§17.2.1). A confirmed leg being
     /// BYEd keeps its relays; a pending INVITE is [`Self::reject_pending_reinvite`]'s.
     pub(super) fn reject_pending_non_invites(
         &self,
@@ -481,7 +504,7 @@ impl ActionExecutor<'_> {
             call.b_legs.iter().find(|l| l.leg_id == leg_id)
         };
         let Some(leg) = leg else { return };
-        let pending: Vec<(String, call::PendingRequest)> = leg
+        let mut pending: Vec<(Option<String>, call::PendingRequest)> = leg
             .dialogs
             .iter()
             .flat_map(|d| {
@@ -490,18 +513,31 @@ impl ActionExecutor<'_> {
                     .inbound_pending_requests
                     .iter()
                     .filter(|p| !p.method.eq_ignore_ascii_case("INVITE"))
-                    .map(move |p| (tag.clone(), p.clone()))
+                    .map(move |p| (Some(tag.clone()), p.clone()))
             })
             .collect();
+        // The relays of early dialogs the answer retired end with the leg too.
+        let mut retired = Vec::new();
+        *call = call::helpers::update_leg(call.clone(), leg_id, |l| {
+            retired = call::helpers::take_retired(l);
+        });
+        pending.extend(
+            retired
+                .into_iter()
+                .filter(|(_, p)| !p.method.eq_ignore_ascii_case("INVITE"))
+                .map(|(_, p)| (None, p)),
+        );
         let originator =
             call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
         for (identity_tag, p) in pending {
-            *call = call::helpers::remove_pending_request(
-                call.clone(),
-                leg_id,
-                &identity_tag,
-                p.outbound_cseq,
-            );
+            if let Some(identity_tag) = identity_tag {
+                *call = call::helpers::remove_pending_request(
+                    call.clone(),
+                    leg_id,
+                    &identity_tag,
+                    p.outbound_cseq,
+                );
+            }
             // §18.2.2: the final goes to the originator's top Via sent-by.
             let Some(dest) =
                 p.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))
@@ -736,13 +772,18 @@ fn pending_reinvite_cancel(
 
 /// What a minted teardown request carries of the peer's: its end-to-end
 /// headers and, on a BYE minted from the peer's BYE, its body.
-struct Relayed {
+pub(super) struct Relayed {
     headers: Vec<SipHeader>,
     body: Vec<u8>,
     content_type: Option<MediaType>,
 }
 
 impl Relayed {
+    /// Nothing of a peer's: a request this stack mints on its own account.
+    pub(super) fn none() -> Self {
+        Self::headers(Vec::new())
+    }
+
     /// Headers alone, no body.
     fn headers(headers: Vec<SipHeader>) -> Self {
         Self { headers, body: Vec::new(), content_type: None }

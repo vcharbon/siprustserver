@@ -1,17 +1,17 @@
 //! Rule selection + execution — port of `Matcher.ts` (`pickRanked`) +
 //! `RuleExecutor.ts`. First handler returning `Some` wins; its actions run
 //! through the [`ActionExecutor`], then termination is finalized + invariants
-//! enforced. A handler that only observes writes its call-ext slices and the
-//! chain goes on ([`RuleHandleResult::observe`]). No candidate → the default
-//! handler. Selection gates on the
-//! call's lifecycle too: a call already going away makes no forward progress
-//! on its own clock, so an asynchronous trigger reaches only its teardown
-//! rules there (`RuleDefinition::teardown`) and every other candidate is
-//! absorbed and counted.
+//! enforced. A handler that only observes writes its call-ext slices and its
+//! own machine's bookkeeping, and the chain goes on
+//! ([`RuleHandleResult::observe`]). No candidate → the default handler.
+//! Selection gates on the call's lifecycle too: a call already going away
+//! makes no forward progress on its own clock, so an asynchronous trigger
+//! reaches only its teardown rules there (`RuleDefinition::teardown`) and
+//! every other candidate is absorbed and counted.
 
 use std::collections::HashSet;
 
-use call::{Call, CallModelState};
+use call::{Call, CallModelState, TimerType};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::obligations::ObligationSet;
@@ -96,9 +96,11 @@ pub fn pick_ranked<'a>(
 
 /// Run the rule chain for `ctx` over the authoritative `call`. The first
 /// matching rule that returns `Some` handles the event; a result that only
-/// observes ([`RuleHandleResult::observe`]) writes its call-ext slices and the
-/// chain goes on over the call with those writes. No candidate → the default
-/// no-op result (the call as the observers left it, no effects). A fire the
+/// observes ([`RuleHandleResult::observe`]) writes its call-ext slices and its
+/// own machine's bookkeeping, and the chain goes on over the call with those
+/// writes. The observers' effects precede the claiming rule's, so a teardown
+/// the claim begins supersedes a timer an observer armed. No candidate → the
+/// call as the observers left it, with their effects only. A fire the
 /// going-away gate absorbed is counted either way.
 pub fn execute_rules(
     rules: &[RuleDefinition],
@@ -110,6 +112,7 @@ pub fn execute_rules(
     let selection = select(rules, call, ctx);
     // The call as the observers so far left it; `None` until one wrote.
     let mut observed: Option<Call> = None;
+    let mut observed_fx = HandlerEffects::new();
     for rule in selection.ranked {
         let call = observed.as_ref().unwrap_or(call);
         let rule_ctx = RuleContext { call: RuleCall::new(call), ..*ctx };
@@ -117,9 +120,11 @@ pub fn execute_rules(
         if let Some(outcome) = (rule.handle)(ctx) {
             if outcome.observes {
                 report_diagnostics(rule, call, &outcome);
-                let next = apply_observation(rule, call, &outcome.actions);
-                crate::trace::emit::rule_observed(&next, exec.now_ms, rule.id);
-                observed = Some(next);
+                let next = apply_observation(rule, call, ctx, exec, &outcome.actions);
+                crate::trace::emit::rule_observed(&next.call, exec.now_ms, rule.id);
+                record_cursor_moves(rule, call, &next.call, exec.now_ms);
+                observed_fx.extend(next.effects);
+                observed = Some(next.call);
                 continue;
             }
             let before = call.clone();
@@ -150,21 +155,33 @@ pub fn execute_rules(
             // `call.transition`.
             record_transitions(rule, &before, &enforced.call, exec.now_ms);
             note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
+            observed_fx.extend(enforced.effects);
+            enforced.effects = observed_fx;
             return enforced;
         }
     }
     let call = observed.as_ref().unwrap_or(call);
-    let mut result = HandlerResult::new(call.clone());
+    let mut result = HandlerResult { call: call.clone(), effects: observed_fx };
     note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
     result
 }
 
-/// Apply an observation's call-ext writes to `call`. Any other action is not
-/// an observation's to take: an authoring bug, which panics under
-/// `debug_assertions` (as an undeclared effect does) and is dropped and logged
-/// in release, so the claiming rule's handling stays the turn's only effect.
-fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction]) -> Call {
+/// Apply an observation to `call`: its call-ext writes, then its own
+/// machine's bookkeeping ([`is_own_bookkeeping`]) through the executor, held
+/// to the rule's declared effects and edges as a claim's actions are. Any
+/// other action is not an observation's to take: an authoring bug, which
+/// panics under `debug_assertions` (as an undeclared effect does) and is
+/// dropped and logged in release, so the claiming rule's handling stays the
+/// turn's only other effect.
+fn apply_observation(
+    rule: &RuleDefinition,
+    call: &Call,
+    ctx: &RuleContext,
+    exec: &ActionExecutor,
+    actions: &[RuleAction],
+) -> HandlerResult {
     let mut call = call.clone();
+    let mut bookkeeping = Vec::new();
     for action in actions {
         match action {
             RuleAction::MergeCallExt { ext } => {
@@ -173,10 +190,12 @@ fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction])
                     call = call::helpers::set_call_ext(call, key, value);
                 }
             }
+            own if is_own_bookkeeping(rule, own) => bookkeeping.push(own.clone()),
             other => {
                 if cfg!(debug_assertions) {
                     panic!(
-                        "rule '{}' observed with a {:?} action (an observation writes call ext only)",
+                        "rule '{}' observed with a {:?} action (an observation writes call ext \
+                         and its own machine's bookkeeping only)",
                         rule.id,
                         other.effect_kind(),
                     );
@@ -185,12 +204,42 @@ fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction])
                     call_ref = %call.call_ref,
                     rule = %rule.id,
                     action = ?other,
-                    "an observing rule may only write call ext; action dropped"
+                    "an observing rule may only write call ext and its own machine's bookkeeping; \
+                     action dropped"
                 );
             }
         }
     }
-    call
+    if bookkeeping.is_empty() {
+        return HandlerResult::new(call);
+    }
+    check_declared_effects(rule, &bookkeeping);
+    let ctx = RuleContext { call: RuleCall::new(&call), ..*ctx };
+    let result = exec.execute(&bookkeeping, &call, &ctx);
+    check_declared_transition(rule, &call.sm_cursors, &result.call.sm_cursors, false);
+    result
+}
+
+/// The observing rule's own bookkeeping: a move of its machine's cursor, or
+/// the arming or cancelling of a service timer its machine owns
+/// ([`TimerType::Service`] keyed by that machine). A machine-less rule owns none.
+fn is_own_bookkeeping(rule: &RuleDefinition, action: &RuleAction) -> bool {
+    let Some(machine) = rule.machine.as_ref() else {
+        return false;
+    };
+    match action {
+        RuleAction::SetState { machine: m, .. } | RuleAction::ClearState { machine: m } => {
+            m == machine
+        }
+        RuleAction::ScheduleTimer { timer_type: TimerType::Service { service_id, .. }, .. } => {
+            service_id == machine
+        }
+        RuleAction::CancelTimer { id } => {
+            // Every id of the machine's service timers starts with this recipe's.
+            id.starts_with(&TimerType::service_owned(machine.clone(), String::new()).timer_id(None))
+        }
+        _ => false,
+    }
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming
@@ -239,6 +288,19 @@ fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms
         return;
     }
     crate::trace::emit::rule_fired(after, now_ms, rule.id);
+    record_cursor_moves(rule, before, after, now_ms);
+    if before.state != after.state {
+        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
+    }
+}
+
+/// Record on a traced call every state-machine cursor `rule`'s turn moved
+/// between `before` and `after`, a claim's or an observation's alike
+/// (ADR-0026). Guarded like [`record_transitions`].
+fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+    if !crate::trace::sampled(after) {
+        return;
+    }
     for (machine, to) in &after.sm_cursors {
         if before.sm_cursors.get(machine) != Some(to) {
             let from = before.sm_cursors.get(machine).map(call::StateLabel::as_str).unwrap_or("");
@@ -264,9 +326,6 @@ fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms
                 "terminal",
             );
         }
-    }
-    if before.state != after.state {
-        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
     }
 }
 

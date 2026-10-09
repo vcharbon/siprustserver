@@ -5,7 +5,23 @@
 #[cfg(test)]
 mod tests {
     use super::super::testkit::*;
-    use super::super::{detect, scan, Evidence, RfcRule};
+    use super::super::{Evidence, FlowsDoc, Hit, RfcRule, Scan};
+
+    /// The rules this module pins: the census runs every rule, and the pins
+    /// read only these.
+    const PINNED: &[RfcRule] = &[RfcRule::UnackedReliableProvisional];
+
+    /// The pinned rules' hits over `doc`.
+    fn detect(doc: &FlowsDoc) -> Vec<Hit> {
+        super::super::detect(doc).into_iter().filter(|h| PINNED.contains(&h.rule)).collect()
+    }
+
+    /// The census scan over `doc`, its hits narrowed to the pinned rules.
+    fn scan(doc: &FlowsDoc) -> Scan {
+        let mut scanned = super::super::scan(doc);
+        scanned.hits.retain(|h| PINNED.contains(&h.rule));
+        scanned
+    }
 
     const REL_180: &str = "Require: 100rel\r\nRSeq: 1\r\n";
     const OFFER: &str = "Supported: 100rel\r\n";
@@ -64,7 +80,7 @@ mod tests {
         };
         assert_eq!((rseq, status), (1, 180));
         assert_eq!(provisional_ts_us, 1_200_000);
-        assert_eq!(window_us, 8_800_000, "released by the 200 at 10 s");
+        assert_eq!(window_us, 8_800_000, "answered by the 200 at 10 s");
     }
 
     /// The compliant path, and the RED PROOF for the one above: the SAME
@@ -127,11 +143,10 @@ mod tests {
         assert_eq!((p.occasions, p.decided), (1, 0));
     }
 
-    /// The dialog dies before the window closes: a 486 four hundred
-    /// milliseconds after the reliable provisional. A PRACK may have been in
-    /// flight, so the occasion is undecided rather than charged.
+    /// A 486 four hundred milliseconds after the reliable provisional does not
+    /// excuse the PRACK (RFC 3262 §4): the occasion is decided, and charged.
     #[test]
-    fn a_transaction_that_ended_inside_the_prack_window_is_not_charged() {
+    fn a_final_soon_after_the_provisional_does_not_excuse_the_prack() {
         let scanned = scan(&doc_of(vec![
             dg(1_000_000, A, B, request_hdr("INVITE", 1, "e1", "fa", None, OFFER)),
             dg(
@@ -146,14 +161,16 @@ mod tests {
             dg(9_100_000, B, A, response(486, "Busy Here", 5, "INVITE", "e1", "fa", Some("tb"))),
             dg(9_110_000, A, B, request("ACK", 5, "e1", "fa", Some("tb"))),
         ]));
-        assert!(scanned.hits.is_empty(), "released 400 ms in: {:?}", scanned.hits);
+        assert_eq!(scanned.hits.len(), 1, "answered 400 ms in, never PRACKed: {:?}", scanned.hits);
+        assert_eq!(scanned.hits[0].emitter, A, "the UAC owed the PRACK");
         let p = scanned.population["unacked-reliable-provisional"];
-        assert_eq!((p.occasions, p.decided), (1, 0));
+        assert_eq!((p.occasions, p.decided), (1, 1));
     }
 
-    /// The UAC's own CANCEL releases it the same way a final does.
+    /// A CANCEL ends nothing (RFC 3262 §4), and the 487 four hundred
+    /// milliseconds after the provisional does not excuse its PRACK.
     #[test]
-    fn a_uac_that_cancels_inside_the_window_is_not_charged() {
+    fn a_final_soon_after_a_cancel_does_not_excuse_the_prack() {
         let scanned = scan(&doc_of(vec![
             dg(1_000_000, A, B, request_hdr("INVITE", 1, "k1", "fa", None, OFFER)),
             dg(
@@ -175,7 +192,36 @@ mod tests {
             dg(9_100_000, B, A, response(486, "Busy Here", 5, "INVITE", "k1", "fa", Some("tb"))),
             dg(9_110_000, A, B, request("ACK", 5, "k1", "fa", Some("tb"))),
         ]));
-        assert!(scanned.hits.is_empty(), "the UAC gave up 300 ms in: {:?}", scanned.hits);
+        assert_eq!(scanned.hits.len(), 1, "the 487 came 400 ms in, no PRACK: {:?}", scanned.hits);
+        assert_eq!(scanned.hits[0].emitter, A, "the UAC owed the PRACK");
+    }
+
+    /// RFC 3262 §4: the CANCEL does not end the INVITE transaction. A reliable
+    /// 183 the UAC takes after cancelling, with the 487 a window later, is
+    /// owed its PRACK and charged to the UAC.
+    #[test]
+    fn a_reliable_provisional_after_the_cancel_is_owed_its_prack() {
+        let hits = detect(&doc_of(vec![
+            dg(1_000_000, A, B, request_hdr("INVITE", 1, "c2", "fa", None, OFFER)),
+            dg(1_100_000, A, B, request("CANCEL", 1, "c2", "fa", None)),
+            dg(1_150_000, B, A, response(200, "OK", 1, "CANCEL", "c2", "fa", Some("tb"))),
+            dg(
+                1_200_000,
+                B,
+                A,
+                response_hdr(183, "Progress", 1, "INVITE", "c2", "fa", Some("tb"), REL_180),
+            ),
+            dg(
+                2_700_000,
+                B,
+                A,
+                response(487, "Request Terminated", 1, "INVITE", "c2", "fa", Some("tb")),
+            ),
+            dg(2_710_000, A, B, request("ACK", 1, "c2", "fa", Some("tb"))),
+            dg(9_000_000, A, B, request_hdr("INVITE", 5, "c2", "fa", None, OFFER)),
+        ]));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].emitter, A, "the UAC owed the PRACK");
     }
 
     /// A capture that stops inside the window proves nothing: the missing

@@ -31,6 +31,14 @@
  * peer emits after the relaying leg has taken its own final reaches no
  * transaction user and is relayed by nobody.
  *
+ * **An early dialog's own header is its identity, not content.** A UAS ringing
+ * several early dialogs (RFC 3261 §13.2.2.4) may write a header whose value is
+ * fixed per dialog — the To-tag's companion. Two emissions on two dialogs are
+ * compared without the headers each dialog carries at one value on every
+ * emission and the two dialogs carry at different values, and the derived arrival takes such a header's value from a relay
+ * of its OWN dialog the capture holds; with none to read it from, nothing is
+ * derived.
+ *
  * A derived arrival keeps the `observed` coordinate of the arrival it copies.
  * The SUT emits that captured message again, so that message is what both
  * datagrams are rightly compared against — `capturedMessage` is a lookup, not a
@@ -61,6 +69,8 @@ export interface MirrorInput {
   readonly sources: Array<StepSource>
   /** The case's stored bodies, so a ref compares by CONTENT and not by name. */
   readonly resources: ReadonlyArray<ResourceFile>
+  /** The early dialog a step rides: the captured To-tag behind its source. */
+  readonly dialogOf: (source: StepSource) => string | undefined
 }
 
 /**
@@ -101,7 +111,38 @@ const canonical = (value: unknown, textOf: (ref: string) => string | undefined):
 const shaper = (resources: ReadonlyArray<ResourceFile>) => {
   const byPath = new Map(resources.map((r) => [r.relPath, Wire.base64Of(r.bytes)]))
   const textOf = (ref: string): string | undefined => byPath.get(ref)
-  return (step: StepDraft): string => JSON.stringify(canonical(step.msg, textOf))
+  return (step: StepDraft, without: ReadonlySet<string> = new Set()): string =>
+    JSON.stringify(
+      canonical(
+        { ...step.msg, headers: (step.msg.headers ?? []).filter((h) => !without.has(h.name.toLowerCase())) },
+        textOf
+      )
+    )
+}
+
+/**
+ * The headers `leg`'s emissions on `dialog` all carry at one value, by
+ * lowercase name: what that early dialog states about itself. Empty where the
+ * dialog is unknown.
+ */
+const dialogHeaders = (
+  steps: ReadonlyArray<StepDraft>,
+  sources: ReadonlyArray<StepSource>,
+  dialogOf: (source: StepSource) => string | undefined,
+  leg: string,
+  dialog: string | undefined
+): ReadonlyMap<string, string> => {
+  if (dialog === undefined) return new Map()
+  const emitted = steps.filter((s, i) => s.op === "send" && s.leg === leg && dialogOf(sources[i]!) === dialog)
+  const out = new Map<string, string>()
+  const [first, ...rest] = emitted
+  for (const h of first?.msg.headers ?? []) {
+    const name = h.name.toLowerCase()
+    const valueOn = (s: StepDraft) => (s.msg.headers ?? []).filter((x) => x.name.toLowerCase() === name).map((x) => x.value)
+    const values = [first!, ...rest].map(valueOn)
+    if (values.every((v) => v.length === 1 && v[0] === h.value)) out.set(name, h.value)
+  }
+  return out
 }
 
 /**
@@ -124,6 +165,38 @@ const finalTaken = (
     s.leg === leg && s.op === "expect" && (s.msg.status ?? 0) >= 200 &&
     s.msg["cseq-method"] === method
   )
+
+/**
+ * The arrival `copy` restated for `dialog`: each per-dialog header it carries
+ * takes the value a captured relay of an emission on `dialog` states for it.
+ * `copy` itself where no header is per-dialog; undefined where some relay
+ * value of the dialog is not in the capture.
+ */
+const ownDialogCopy = (
+  copy: StepDraft,
+  perDialog: ReadonlySet<string>,
+  dialog: string | undefined,
+  claimed: ReadonlyMap<number, number>,
+  steps: ReadonlyArray<StepDraft>,
+  sources: ReadonlyArray<StepSource>,
+  dialogOf: (source: StepSource) => string | undefined
+): StepDraft | undefined => {
+  const carried = (copy.msg.headers ?? []).filter((h) => perDialog.has(h.name.toLowerCase()))
+  if (carried.length === 0) return copy
+  const relays = [...claimed].filter(([e]) => dialogOf(sources[e]!) === dialog).map(([, a]) => steps[a]!)
+  const valueFor = (name: string): string | undefined =>
+    relays.flatMap((r) => (r.msg.headers ?? []).filter((h) => h.name.toLowerCase() === name)).map((h) => h.value)[0]
+  if (carried.some((h) => valueFor(h.name.toLowerCase()) === undefined)) return undefined
+  return {
+    ...copy,
+    msg: {
+      ...copy.msg,
+      headers: (copy.msg.headers ?? []).map((h) =>
+        perDialog.has(h.name.toLowerCase()) ? { ...h, value: valueFor(h.name.toLowerCase())! } : h
+      )
+    }
+  }
+}
 
 /** The emission of `status` on `from`'s leg nearest before it, or -1. */
 const lastEmissionBefore = (
@@ -149,7 +222,7 @@ const lastEmissionBefore = (
  * any other: `propagated`, ~0, anchored on the emission it relays.
  */
 export const mirrorRelayedProvisionals = (input: MirrorInput): Array<Mirrored> => {
-  const { resources, sources, steps, timings } = input
+  const { resources, sources, steps, timings, dialogOf } = input
   const shape = shaper(resources)
 
   /** Emission index -> the arrival that relays it. Absent where nothing does. */
@@ -174,20 +247,39 @@ export const mirrorRelayedProvisionals = (input: MirrorInput): Array<Mirrored> =
     readonly copyTiming: StepTiming
     /** The relay latency the capture measured on the pair it copies (µs). */
     readonly latency_us: number
+    /** The To-tag a relay of the emission's own dialog rode, where it is not the copy's. */
+    readonly rides: string | undefined
   }
   const derived: Array<Derived> = []
   steps.forEach((step, at) => {
     if (!isEmission(at) || claimed.has(at)) return
-    const twin = [...claimed.keys()].find((e) => shape(steps[e]!) === shape(step))
-    if (twin === undefined) return
-    const copy = claimed.get(twin)!
+    const dialog = dialogOf(sources[at]!)
+    const own = dialogHeaders(steps, sources, dialogOf, step.leg, dialog)
+    const match = [...claimed.keys()].flatMap((e) => {
+      const twinDialog = dialogOf(sources[e]!)
+      if (twinDialog === dialog) return shape(steps[e]!) === shape(step) ? [{ twin: e, perDialog: new Set<string>() }] : []
+      const theirs = dialogHeaders(steps, sources, dialogOf, step.leg, twinDialog)
+      const perDialog = new Set(
+        [...own.keys()].filter((name) => theirs.has(name) && theirs.get(name) !== own.get(name))
+      )
+      return shape(steps[e]!, perDialog) === shape(step, perDialog) ? [{ twin: e, perDialog }] : []
+    })[0]
+    if (match === undefined) return
+    const copy = claimed.get(match.twin)!
     if (finalTaken(steps, steps[copy]!.leg, step.msg["cseq-method"], at)) return
+    const copyStep = ownDialogCopy(steps[copy]!, match.perDialog, dialog, claimed, steps, sources, dialogOf)
+    if (copyStep === undefined) return
+    const ownRelay = [...claimed].find(([e]) => e !== match.twin && dialogOf(sources[e]!) === dialog)?.[1]
+    const rides = dialogOf(sources[match.twin]!) === dialog || ownRelay === undefined
+      ? undefined
+      : dialogOf(sources[ownRelay]!)
     derived.push({
       at,
-      copyStep: steps[copy]!,
+      copyStep,
       copySource: sources[copy]!,
       copyTiming: timings[copy]!,
-      latency_us: Math.max(0, timings[copy]!.ts_us - timings[twin]!.ts_us)
+      latency_us: Math.max(0, timings[copy]!.ts_us - timings[match.twin]!.ts_us),
+      rides
     })
   })
   if (derived.length === 0) return []
@@ -213,7 +305,7 @@ export const mirrorRelayedProvisionals = (input: MirrorInput): Array<Mirrored> =
       // emission would.
       ts_us: timings[d.at]!.ts_us + d.latency_us
     })
-    sources.splice(d.at + 1, 0, { ...d.copySource })
+    sources.splice(d.at + 1, 0, { ...d.copySource, ...(d.rides === undefined ? {} : { toTag: d.rides }) })
     pending.push({ step, relays: send, copies: d.copyStep })
   }
 

@@ -199,6 +199,10 @@ enum Closer {
     /// transaction to Proceeding and RESET Timer E to T2 — it slows the ladder,
     /// it does not stop it.
     Final,
+    /// A CANCEL: its own final, or the final to the INVITE it names. Once that
+    /// INVITE has its final the CANCEL is moot (§9.1) and its ladder stops
+    /// (ADR-0028 X4), whether or not the CANCEL itself was ever answered.
+    Cancel,
     /// A class whose repeats are drawn by the wire, so nothing this vantage
     /// sees ends a ladder it never paced.
     Nothing,
@@ -220,6 +224,7 @@ impl Closer {
         match sip_message::sniff::req_method(raw).as_deref() {
             Some("ACK") => Closer::Nothing,
             Some("INVITE") => Closer::AnyResponse,
+            Some("CANCEL") => Closer::Cancel,
             Some(_) => Closer::Final,
             None => Closer::Nothing,
         }
@@ -280,6 +285,20 @@ impl StepLadder {
             None => true,
             Some(tag) => sip_message::sniff::to_tag(raw) == *tag,
         }
+    }
+
+    /// Whether `bye`, sent by the SUT, names this ladder's dialog: an
+    /// expect-side 2xx to an INVITE whose dialog the BYE names from the 2xx's
+    /// own side — its From tag is the 2xx's To tag, the tag the SUT holds the
+    /// dialog under.
+    fn ended_by_emitters_bye(&self, bye: &[u8]) -> bool {
+        let two_xx =
+            sip_message::sniff::resp_status(&self.claimed).is_some_and(|s| (200..300).contains(&s));
+        self.side == LadderSide::Expect
+            && self.closer == Closer::Ack
+            && two_xx
+            && self.call_id == sip_message::sniff::call_id(bye)
+            && self.to_tag.as_deref() == Some(sip_message::sniff::from_tag(bye).as_str())
     }
 
     /// How long the ladder ran: the claimed datagram to the closer that ended
@@ -362,6 +381,12 @@ impl Repeats {
 
     /// Register the datagram `step` put on the wire or matched, with the count
     /// the document declares for it.
+    ///
+    /// A BYE an expect claims is the SUT ending a dialog (RFC 3261 §15): every
+    /// ladder of a 2xx the SUT ran to a re-INVITE of ours on that dialog stops
+    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]).
+    /// The 2xx that created the dialog keeps its ladder to the ACK or the
+    /// §13.3.1.4 give-up.
     pub fn claim(
         &mut self,
         step: &str,
@@ -372,6 +397,28 @@ impl Repeats {
         raw: &[u8],
         at_us: u64,
     ) {
+        if side == LadderSide::Expect
+            && sip_message::sniff::req_method(raw).as_deref() == Some("BYE")
+        {
+            let reinvites: Vec<(Option<String>, Option<u32>)> = self
+                .ladders
+                .iter()
+                .filter(|l| l.leg == leg && l.side == LadderSide::Send && l.to_tag.is_some())
+                .filter(|l| sip_message::sniff::req_method(&l.claimed).as_deref() == Some("INVITE"))
+                .map(|l| (l.call_id.clone(), l.cseq))
+                .collect();
+            for ladder in self.ladders.iter_mut().filter(|l| l.leg == leg) {
+                let answers_a_reinvite = reinvites
+                    .iter()
+                    .any(|(call, cseq)| *call == ladder.call_id && *cseq == ladder.cseq);
+                if ladder.closed_us.is_none()
+                    && answers_a_reinvite
+                    && ladder.ended_by_emitters_bye(raw)
+                {
+                    ladder.closed_us = Some(at_us);
+                }
+            }
+        }
         self.ladders.retain(|l| l.step != step);
         self.ladders.push(StepLadder {
             step: step.to_string(),
@@ -445,6 +492,12 @@ impl Repeats {
                 Closer::AnyResponse => is_response && same_transaction,
                 Closer::Final => {
                     is_response && status.is_some_and(|s| s >= 200) && same_transaction
+                }
+                Closer::Cancel => {
+                    is_response
+                        && status.is_some_and(|s| s >= 200)
+                        && ladder.cseq == cseq
+                        && (method == "CANCEL" || method == "INVITE")
                 }
                 Closer::Nothing => false,
             };
@@ -1189,6 +1242,84 @@ mod tests {
             repeats.notes(1_600_000)[0].dwell_us,
             None,
             "a coincidental CSeq is not an answer, so nothing closed this ladder"
+        );
+    }
+
+    /// A CANCEL's ladder ends with the INVITE it names: once that INVITE has
+    /// its final the CANCEL is moot (RFC 3261 §9.1) and the system stops
+    /// retransmitting it (ADR-0028 X4). The final our side sends to that
+    /// INVITE closes the CANCEL's window, so no Timer E rung is owed past it.
+    #[test]
+    fn the_final_to_the_invite_a_cancel_names_closes_the_cancels_ladder() {
+        let cancel = b"CANCEL sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>\r\nCSeq: 1 CANCEL\r\n\r\n";
+        let answer = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let mut repeats = Repeats::new();
+        // The system's CANCEL, never answered; our 200 to its INVITE 319 ms on.
+        repeats.claim("s10", "B", LadderSide::Expect, None, &[], cancel, 8_036_000);
+        repeats.answered("B", answer, 8_355_000);
+        assert!(
+            repeats.mismatches(8_600_000).is_empty(),
+            "the INVITE's final at 319 ms ended the ladder before its 500 ms rung: {:#?}",
+            repeats.mismatches(8_600_000)
+        );
+    }
+
+    /// The 2xx to our INITIAL INVITE is the dialog-creating one: its ladder
+    /// runs until the ACK or the 64·T1 give-up (RFC 3261 §13.3.1.4), and a BYE
+    /// its sender puts on the dialog meanwhile stops nothing — the rungs inside
+    /// the window stay owed.
+    #[test]
+    fn the_emitters_bye_does_not_close_a_dialog_creating_2xx_ladder() {
+        let invite = b"INVITE sip:s@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:s@h>\r\nCSeq: 1 INVITE\r\n\r\n";
+        let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:a@h>;tag=a1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let bye = b"BYE sip:a@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+            To: <sip:a@h>;tag=a1\r\nCSeq: 2 BYE\r\n\r\n";
+        let mut repeats = Repeats::new();
+        repeats.claim("s1", "A", LadderSide::Send, None, &[], invite, 0);
+        // The system's 2xx to our INVITE, never ACKed as captured; its BYE 300 ms on.
+        repeats.note("A", ok, 100_000);
+        repeats.claim("s2", "A", LadderSide::Expect, None, &[], ok, 100_000);
+        repeats.note("A", bye, 400_000);
+        repeats.claim("s3", "A", LadderSide::Expect, None, &[], bye, 400_000);
+        let charged: Vec<Failure> = repeats
+            .mismatches(5_000_000)
+            .into_iter()
+            .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s2"))
+            .collect();
+        assert_eq!(charged.len(), 1, "the 2xx ladder still owes its rungs: {charged:#?}");
+    }
+
+    /// A 2xx's ladder ends with the dialog it would confirm: a UAS that sends
+    /// its BYE on that dialog has ended it (RFC 3261 §15), and the system
+    /// stops retransmitting the 2xx there. The emitter's BYE, claimed as an
+    /// exec claims a matched arrival, closes the 2xx's window.
+    #[test]
+    fn the_emitters_bye_on_the_dialog_closes_its_2xx_ladder() {
+        let ok = b"SIP/2.0 200 OK\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let bye = b"BYE sip:b@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:s@h>;tag=s1\r\n\
+            To: <sip:b@h>;tag=b1\r\nCSeq: 2 BYE\r\n\r\n";
+        let reinvite = b"INVITE sip:s@h SIP/2.0\r\nCall-ID: c1\r\nFrom: <sip:b@h>;tag=b1\r\n\
+            To: <sip:s@h>;tag=s1\r\nCSeq: 1 INVITE\r\n\r\n";
+        let mut repeats = Repeats::new();
+        repeats.claim("s12", "B", LadderSide::Send, None, &[], reinvite, 900_000);
+        // The system's 2xx to our re-INVITE, never ACKed; its BYE 415 ms on.
+        repeats.note("B", ok, 917_000);
+        repeats.claim("s14", "B", LadderSide::Expect, None, &[], ok, 917_000);
+        repeats.note("B", bye, 1_332_000);
+        repeats.claim("s17", "B", LadderSide::Expect, None, &[], bye, 1_332_000);
+        let charged: Vec<Failure> = repeats
+            .mismatches(5_272_000)
+            .into_iter()
+            .filter(|f| matches!(f, Failure::RetransmitCountMismatch { step, .. } if step == "s14"))
+            .collect();
+        assert!(
+            charged.is_empty(),
+            "the BYE at 415 ms ended the dialog before the 2xx's 500 ms rung: {charged:#?}"
         );
     }
 }

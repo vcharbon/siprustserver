@@ -1,8 +1,8 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
-//! no call draws, the retry-later 500 and the merged-request 482. The 503
-//! refusing a new INVITE is the admission ladder's
-//! ([`crate::admission::Refusals`]).
+//! no call draws, the out-of-order 500, the retry-later 500 and the
+//! merged-request 482. The 503 refusing a new INVITE is the admission
+//! ladder's ([`crate::admission::Refusals`]).
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
@@ -30,6 +30,12 @@ pub(super) fn build_200(req: &SipRequest) -> SipResponse {
 pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
     let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
+}
+
+/// `500 Server Internal Error` to `req`, an in-dialog request whose CSeq is
+/// below the last one its dialog took: out of order (RFC 3261 §12.2.2).
+pub(super) fn build_out_of_order_500(req: &SipRequest) -> SipResponse {
+    generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default())
 }
 
 /// `500 Server Internal Error` to `req` with `Retry-After: retry_after_sec`,

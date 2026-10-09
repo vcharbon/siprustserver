@@ -7,9 +7,9 @@
 //! fails as declared is the case succeeding; a run that fails any other way, or
 //! that does not fail at all, is the case failing.
 //!
-//! `failure` is a CLOSED enum for the same reason [`crate::violation::RfcRule`]
-//! is: a failure nothing can PREDICT off the capture is a claim nothing can
-//! hold a run to, so the vocabulary grows one prediction at a time.
+//! `failure` is a CLOSED enum: a failure nothing can PREDICT off the capture is
+//! a claim nothing can hold a run to, so the vocabulary grows one prediction at
+//! a time.
 //! `derived_from` names the rule whose violation in the SOURCE predicts it, so
 //! a declaration is traceable to the evidence rather than hand-guessed.
 
@@ -32,6 +32,7 @@ pub struct MustFail {
     pub step: String,
     /// The rule the SOURCE broke, whose violation predicts this failure. A
     /// declaration is DERIVED from a detector's hit, never hand-guessed.
+    #[schemars(with = "crate::violation::RuleToken")]
     pub derived_from: RfcRule,
 }
 

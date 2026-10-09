@@ -65,7 +65,7 @@ impl ActionExecutor<'_> {
                 );
             }
             if req.to().tag().is_some() {
-                if let Some(sd) = ctx.source_dialog() {
+                if let Some(sd) = ctx.request_dialog() {
                     let inbound_cseq = req.cseq().seq() as i64;
                     if sd.ext.remote_cseq.map_or(true, |c| inbound_cseq > c) {
                         let s_id = dialog_identity_tag(ctx.source_leg_id, sd);

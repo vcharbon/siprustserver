@@ -154,3 +154,26 @@ describe("declared races: two arrivals answering two of our own sends", () => {
     expect(steps[4]!.overlap).toBeUndefined()
   })
 })
+
+/**
+ * A REFER answered by the SUT while our ACK to the re-INVITE before it is
+ * still in its dwell (leg B): the 202 (s17) and the first NOTIFY (s18) are both
+ * the SUT's own reaction to the REFER (s15), the NOTIFY timed off the 202. The
+ * ACK (s16) shares the 202's anchor, so the 202 races it — and the NOTIFY,
+ * which the SUT puts on the wire right behind the 202, races it just as much.
+ */
+const refer = (): Array<StepDraft> => [
+  step("s15", "B", "send", "step:s14", 28),
+  step("s16", "B", "send", "step:s15", 4),
+  step("s17", "B", "expect", "step:s15", 9),
+  step("s18", "B", "expect", "step:s17", 13)
+]
+
+describe("declared races: a SUT reaction chained behind a racing arrival", () => {
+  it("races the arrival the SUT minted behind one that races our send", () => {
+    const steps = refer()
+    stampOverlaps(steps, causality("measured", "measured", "sut-originated", "sut-originated"))
+    expect(steps[2]!.overlap).toBe("s16")
+    expect(steps[3]!.overlap).toBe("s17")
+  })
+})

@@ -207,6 +207,28 @@ fn surfaced_at_either_end(
     at_vantage(events, rule, |f, bind| f.emitter == *bind || f.taker == *bind, detail)
 }
 
+/// The same, surfaced ONCE at the taker where the taker is a recorded bind and
+/// at the emitter otherwise — for an omission the taker is OWED: its own lane is
+/// where the missing message had to arrive, and a recording that holds only the
+/// emitter's lane (the taker is no bind of it) still names the offence there.
+fn surfaced_at_taker_else_emitter(
+    events: &[Stamped<SignalingNetworkEvent>],
+    rule: &dyn Obligation,
+    detail: impl Fn(&rfc_rules::Finding, &str) -> String,
+) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    let recorded: std::collections::HashSet<LaneKey> =
+        bind_views(events).into_iter().map(|v| v.bind).collect();
+    at_vantage(
+        events,
+        rule,
+        |f, bind| {
+            let vantage = if recorded.contains(&f.taker) { &f.taker } else { &f.emitter };
+            vantage == bind
+        },
+        detail,
+    )
+}
+
 /// The To tag a violated ACK-family finding names, off its evidence.
 fn evidence_to_tag(f: &rfc_rules::Finding) -> &str {
     match &f.decision {
@@ -1991,15 +2013,17 @@ impl CrossMessageAuditRule for Proxy100WithinGraceRule {
 }
 
 /// RFC 3261 §17.1.1.3 live: the merged `unacked-invite-non-2xx-final` rule
-/// (`rfc_rules::rules::ack`) at this bind's vantage — a reject this bind sent
-/// was never ACKed back to it.
+/// (`rfc_rules::rules::ack`) — a reject was never ACKed back to the UAS that
+/// sent it, charged to the UAC that took it and owed the ACK.
 ///
-/// The live policy this bind adds to the rule body: none, and it GATES. The
-/// harness UAC carries the §17.1.1.3 client-transaction behaviour (its INVITE
-/// agents auto-ACK any non-2xx final they surface), so an undischarged
-/// obligation on the functional surface is a genuine defect: an unread reject,
-/// a peer that never ACKs, or a final emitted and never delivered. A test that
-/// deliberately models a peer which never ACKs waives it.
+/// The live policy this bind adds to the rule body: reported at the rejecting
+/// UAS's lane, where the ACK had to arrive, or at the UAC's where the UAS is no
+/// recorded bind — and it GATES. The harness UAC carries the §17.1.1.3
+/// client-transaction behaviour (its INVITE agents auto-ACK any non-2xx final
+/// they surface), so an undischarged obligation on the functional surface is a
+/// genuine defect: an unread reject, a peer that never ACKs, or a final emitted
+/// and never delivered. A test that deliberately models a peer which never ACKs
+/// waives it.
 pub struct UnackedInviteNon2xxFinalRule;
 
 impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
@@ -2015,19 +2039,25 @@ impl CrossMessageAuditRule for UnackedInviteNon2xxFinalRule {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        surfaced(events, &rfc_rules::rules::ack::UnackedInviteNon2xxFinal, |f, cid| {
-            let Decision::Violated(rfc_rules::Evidence::UnackedReject { status, branch, .. }) =
-                &f.decision
-            else {
-                return String::new();
-            };
-            format!(
-                "Sent a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) that \
-                 was never ACKed — the INVITE transaction never completes and the reject \
-                 retransmits to Timer H; RFC 3261 §17.1.1.3 makes the ACK mandatory \
-                 (hop-by-hop, so a proxy in the path owes this UAS its own synthesized ACK)"
+        surfaced_at_taker_else_emitter(
+            events,
+            &rfc_rules::rules::ack::UnackedInviteNon2xxFinal,
+            |f, cid| {
+                let Decision::Violated(rfc_rules::Evidence::UnackedReject {
+                    status, branch, ..
+                }) = &f.decision
+                else {
+                    return String::new();
+                };
+                format!(
+                "Took a non-2xx final {status} to an INVITE (callId {cid}, branch {branch}) and \
+                 never ACKed it to the UAS that sent it — the INVITE transaction never \
+                 completes and the reject retransmits to Timer H; RFC 3261 §17.1.1.3 makes \
+                 the ACK mandatory (hop-by-hop, so a proxy in the path owes the UAS its own \
+                 synthesized ACK)"
             )
-        })
+            },
+        )
     }
 }
 
@@ -2421,46 +2451,6 @@ impl CrossMessageAuditRule for Delay2xxOnUnackedReliable1xxWithSdpRule {
     }
 }
 
-/// RFC 3262 §3 live: the merged `prack-accepted-after-final` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK's own server
-/// transaction outlives the INVITE's.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, for the
-/// reason its `prack-2xx-or-481` sibling carries.
-pub struct PrackAcceptedAfterFinalRule;
-
-impl CrossMessageAuditRule for PrackAcceptedAfterFinalRule {
-    fn name(&self) -> &'static str {
-        rfc_rules::RuleId::PrackAcceptedAfterFinal.token()
-    }
-
-    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
-        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
-    }
-
-    fn check_positioned(
-        &self,
-        events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        let relays = relay_lanes(events);
-        surfaced(events, &rfc_rules::rules::prack::PrackAcceptedAfterFinal, |f, cid| {
-            let Decision::Violated(rfc_rules::Evidence::LatePrackRejected {
-                status, branch, ..
-            }) = &f.decision
-            else {
-                return String::new();
-            };
-            format!(
-                "Received PRACK after final INVITE response was sent (callId {cid}, PRACK branch \
-                 {branch}) but PRACK got {status} instead of 2xx — RFC 3262 §3 / RFC3262-MUST-015"
-            )
-        })
-        .into_iter()
-        .filter(|(lane, _, _, _)| !relays.contains(lane))
-        .collect()
-    }
-}
-
 /// RFC 3262 §3 live: the merged `no-new-reliable-1xx-after-final` rule
 /// (`rfc_rules::rules::prack`) at this bind's vantage — no fresh `RSeq` on a
 /// transaction that has answered.
@@ -2546,11 +2536,10 @@ impl CrossMessageAuditRule for NoPrackOf100TryingRule {
 /// carries the answer.
 ///
 /// The live policy this bind adds to the rule body: subject `{Uac, Uas}`; a
-/// relay-lane skip; the finding is surfaced at BOTH ends, because the occasion
-/// is one negotiation and the party that sent the PRACK need not be a recorded
-/// bind at all; and it is **advisory**, because a genuine reliable-1xx offer and
-/// its PRACK answer can straddle two legs of a B2BUA, which rewrites the
-/// Call-ID between them.
+/// relay-lane skip; and the finding is surfaced at BOTH ends, because the
+/// occasion is one negotiation and the party that sent the PRACK need not be a
+/// recorded bind at all. It gates: the rule reads each offer within its own
+/// call and early dialog, so the two legs of a B2BUA never meet in it.
 pub struct PrackAnswers1xxOfferRule;
 
 impl CrossMessageAuditRule for PrackAnswers1xxOfferRule {
@@ -2560,10 +2549,6 @@ impl CrossMessageAuditRule for PrackAnswers1xxOfferRule {
 
     fn subject(&self) -> std::collections::HashSet<UaRole> {
         std::collections::HashSet::from([UaRole::Uac, UaRole::Uas])
-    }
-
-    fn force_advisory(&self) -> bool {
-        true
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
@@ -2690,6 +2675,51 @@ impl CrossMessageAuditRule for Final2xxAnswersTheOfferRule {
                      description although the request it answers offered one ({table}) and no \
                      reliable message had answered it — expected the answer in this final, RFC \
                      3261 §13.2.1 / RFC 3264 §6",
+                    cseq = f.cseq,
+                )
+            },
+        )
+        .into_iter()
+        .filter(|(lane, _, _, _)| !relays.contains(lane))
+        .collect()
+    }
+}
+
+/// RFC 3261 §13.2.2.4 live: the merged `delayed-offer-answered-in-ack` rule
+/// (`rfc_rules::rules::offer_answer`) — the ACK to a 2xx that carried a
+/// delayed offer carries the answer.
+///
+/// The live policy this bind adds to the rule body: reported once, at the
+/// 2xx's sender where it is a recorded bind and at the ACK's sender otherwise,
+/// charged to the ACK's sender; a relay lane is skipped, as its siblings skip
+/// it — the answer it relays is its peer's.
+pub struct DelayedOfferAnsweredInAckRule;
+
+impl CrossMessageAuditRule for DelayedOfferAnsweredInAckRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::DelayedOfferAnsweredInAck.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        let relays = relay_lanes(events);
+        surfaced_at_taker_else_emitter(
+            events,
+            &rfc_rules::rules::offer_answer::DelayedOfferAnsweredInAck,
+            |f, cid| {
+                if !f.violated() {
+                    return String::new();
+                }
+                format!(
+                    "Sent an ACK (callId {cid}, CSeq {cseq}) carrying no session description \
+                     although the 2xx it acknowledges carried the offer (the INVITE had none) — \
+                     the ACK MUST carry the answer, RFC 3261 §13.2.2.4 / §13.2.1",
                     cseq = f.cseq,
                 )
             },
@@ -4195,6 +4225,53 @@ impl CrossMessageAuditRule for InDialogToTagRule {
     }
 }
 
+/// RFC 3261 §12.2.1.1 live: the merged `in-dialog-from-tag` rule — a request
+/// taken inside a confirmed dialog carries that dialog's remote tag in From.
+///
+/// The live policy this bind adds to the rule body: reported once, at the
+/// taker where it is a recorded bind (the dialog the request fails to name is
+/// its own) and at the sender otherwise, charged to the sender.
+pub struct InDialogFromTagRule;
+
+impl CrossMessageAuditRule for InDialogFromTagRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::InDialogFromTag.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        surfaced_at_taker_else_emitter(
+            events,
+            &rfc_rules::rules::correlation::InDialogFromTag,
+            |f, cid| {
+                let Decision::Violated(rfc_rules::Evidence::DialogRemoteTagForeign {
+                    method,
+                    from_tag,
+                    dialog_remote_tags,
+                    ..
+                }) = &f.decision
+                else {
+                    return String::new();
+                };
+                format!(
+                    "{method} (callId {cid}, CSeq {cseq}) taken inside a confirmed dialog carries \
+                     From-tag \"{from_tag}\", but the dialogs confirmed under its To-tag have \
+                     remote tags [{remotes}] — RFC 3261 §12.2.1.1 / §12.1.2 (the request names no \
+                     dialog its taker holds)",
+                    cseq = f.cseq,
+                    remotes = dialog_remote_tags.join(" | "),
+                )
+            },
+        )
+    }
+}
+
 /// RFC 3261 §8.2.2.3 live: the merged `no-require-on-cancel-or-ack` rule at
 /// this bind's vantage — the sender writes the demand.
 pub struct NoRequireOnCancelOrAckRule;
@@ -4500,12 +4577,12 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(UnmatchedPrackProxiedRule),
         std::sync::Arc::new(Prack2xxOr481Rule),
         std::sync::Arc::new(Delay2xxOnUnackedReliable1xxWithSdpRule),
-        std::sync::Arc::new(PrackAcceptedAfterFinalRule),
         std::sync::Arc::new(NoNewReliable1xxAfterFinalRule),
         std::sync::Arc::new(NoPrackOf100TryingRule),
         std::sync::Arc::new(PrackAnswers1xxOfferRule),
         std::sync::Arc::new(AckBodyAfterCompleteOfferAnswerRule),
         std::sync::Arc::new(Final2xxAnswersTheOfferRule),
+        std::sync::Arc::new(DelayedOfferAnsweredInAckRule),
         std::sync::Arc::new(SecondAnswerRepeatsTheFirstRule),
         std::sync::Arc::new(AnswerStreamMatchesOfferRule),
         std::sync::Arc::new(SdpOriginContinuityRule),
@@ -4540,6 +4617,7 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(CancelCseqMethodRule),
         std::sync::Arc::new(NoToTagOnInitialRequestRule),
         std::sync::Arc::new(InDialogToTagRule),
+        std::sync::Arc::new(InDialogFromTagRule),
         std::sync::Arc::new(NoRequireOnCancelOrAckRule),
         std::sync::Arc::new(StrictRouteShuffleOnSendRule),
         std::sync::Arc::new(SdpBodyParseableRule),
@@ -5842,8 +5920,9 @@ mod tests {
         assert!(f[0].1.contains("Δ=350ms"), "{}", f[0].1);
     }
 
-    /// §17.1.1.3 GATES at the rejecting UAS lane, and only there: the UAC that
-    /// merely TOOK a reject owes nothing, and a 2xx is another rule's business.
+    /// §17.1.1.3 GATES, reported at the rejecting UAS lane where the ACK had to
+    /// arrive and charged to the UAC that owed it; a 2xx is another rule's
+    /// business.
     #[test]
     fn an_unacked_reject_gates_at_the_uas_lane() {
         let evs = vec![
@@ -5853,6 +5932,7 @@ mod tests {
         let out = UnackedInviteNon2xxFinalRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, BOB);
+        assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the UAC that owed the ACK");
         assert!(out[0].1.contains("never ACKed"), "{}", out[0].1);
         assert_eq!(out[0].2, Some(2), "offending points at the un-ACKed final");
         assert!(!UnackedInviteNon2xxFinalRule.force_advisory(), "promoted to gating");
@@ -5864,11 +5944,25 @@ mod tests {
         ];
         assert!(UnackedInviteNon2xxFinalRule.check_positioned(&acked).is_empty());
 
+        // A recording holding only the UAC's lane names the withheld ACK there.
         let uac_side = vec![
             sent(ALICE, req("INVITE", "z9hG4bK-u", 1, None), BOB, 0),
             recv(ALICE, resp(486, 1, "INVITE", "bt", "z9hG4bK-u"), BOB, 1),
         ];
-        assert!(UnackedInviteNon2xxFinalRule.check_positioned(&uac_side).is_empty());
+        let out = UnackedInviteNon2xxFinalRule.check_positioned(&uac_side);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (ALICE, Some(ALICE)));
+
+        // Both lanes recorded: one finding, at the UAS's.
+        let both = vec![
+            sent(ALICE, req("INVITE", "z9hG4bK-b", 1, None), BOB, 0),
+            recv(BOB, req("INVITE", "z9hG4bK-b", 1, None), ALICE, 1),
+            sent(BOB, resp(486, 1, "INVITE", "bt", "z9hG4bK-b"), ALICE, 2),
+            recv(ALICE, resp(486, 1, "INVITE", "bt", "z9hG4bK-b"), BOB, 3),
+        ];
+        let out = UnackedInviteNon2xxFinalRule.check_positioned(&both);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!((out[0].0.as_str(), out[0].3.as_deref()), (BOB, Some(ALICE)));
     }
 
     /// §14.1's abandoned transaction: a provisional and then silence on a
@@ -6111,6 +6205,31 @@ mod tests {
         assert!(UnackedReliableProvisionalRule.check(&unwitnessed).is_empty());
     }
 
+    /// RFC 3262 §4 live: a reliable 180 the SUT takes after its own CANCEL,
+    /// the 487 two seconds later, is owed its PRACK — the CANCEL ends nothing.
+    #[test]
+    fn a_reliable_provisional_after_the_cancel_still_owes_its_prack() {
+        let cancel = format!(
+            "CANCEL {B} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-i\r\n\
+             From: <{A}>;tag=at\r\n\
+             To: <{B}>\r\n\
+             Call-ID: cid-1@127.0.0.1\r\n\
+             CSeq: 1 CANCEL\r\n\
+             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+        )
+        .into_bytes();
+        let events = vec![
+            sent(SUT, invite_3262("z9hG4bK-i", "Supported: 100rel\r\n", None, false), BOB, 0),
+            sent(SUT, cancel, BOB, 50),
+            recv(SUT, inv_resp_3262(180, "z9hG4bK-i", &reliable_rows(1), false), BOB, 100),
+            recv(SUT, inv_resp_3262(487, "z9hG4bK-i", "", false), BOB, 2_100),
+        ];
+        let out = UnackedReliableProvisionalRule.check(&events);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].1.contains("MUST-021"), "{}", out[0].1);
+    }
+
     #[test]
     fn pracking_out_of_order_is_flagged_at_the_prack() {
         let in_order = vec![
@@ -6296,25 +6415,6 @@ mod tests {
     }
 
     #[test]
-    fn a_late_prack_rejected_after_the_final_is_flagged() {
-        let rejected = vec![
-            sent(SUT, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 0),
-            recv(SUT, prack_3262("z9hG4bK-p", "1 1 INVITE", false), ALICE, 1),
-            sent(SUT, prack_resp_3262(481, "z9hG4bK-p"), ALICE, 2),
-        ];
-        let out = PrackAcceptedAfterFinalRule.check(&rejected);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert!(out[0].1.contains("MUST-015"), "{}", out[0].1);
-
-        let accepted = vec![
-            sent(SUT, inv_resp_3262(200, "z9hG4bK-i", "", false), ALICE, 0),
-            recv(SUT, prack_3262("z9hG4bK-p", "1 1 INVITE", false), ALICE, 1),
-            sent(SUT, prack_resp_3262(200, "z9hG4bK-p"), ALICE, 2),
-        ];
-        assert!(PrackAcceptedAfterFinalRule.check(&accepted).is_empty());
-    }
-
-    #[test]
     fn a_new_reliable_1xx_after_the_final_is_flagged_and_a_retransmit_is_not() {
         let stray = vec![
             sent(SUT, inv_resp_3262(180, "z9hG4bK-i", &reliable_rows(1), false), ALICE, 0),
@@ -6356,7 +6456,7 @@ mod tests {
 
     #[test]
     fn a_bodiless_prack_for_a_1xx_offer_is_named_at_either_end() {
-        assert!(PrackAnswers1xxOfferRule.force_advisory());
+        assert!(!PrackAnswers1xxOfferRule.force_advisory(), "a bodiless PRACK to an offer gates");
         assert_eq!(PrackAnswers1xxOfferRule.subject(), HashSet::from([UaRole::Uac, UaRole::Uas]));
         // The bind SENT the offending PRACK: charged party and vantage are one.
         let sender = vec![
@@ -6527,6 +6627,63 @@ m=audio 20000 RTP/AVP 0\r\n";
         let plain = resp_sdp(status, cseq, "INVITE", branch, body);
         let text = String::from_utf8(plain).unwrap();
         text.replacen("CSeq:", "Require: 100rel\r\nRSeq: 1\r\nCSeq:", 1).into_bytes()
+    }
+
+    /// §12.2.1.1 GATES: a request the caller takes long after a forking
+    /// callee's answer, under the tag of the branch that only rang, is flagged
+    /// at the caller's lane and charged to its sender.
+    #[test]
+    fn a_request_under_a_rung_branch_tag_after_the_answer_gates() {
+        assert!(!InDialogFromTagRule.force_advisory(), "a MUST gates");
+        let toward_alice = |from_tag: &str| {
+            format!(
+                "OPTIONS {A} SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-o1\r\n\
+                 From: <{B}>;tag={from_tag}\r\n\
+                 To: <{A}>;tag=at\r\n\
+                 Call-ID: cid-1@127.0.0.1\r\n\
+                 CSeq: 1 OPTIONS\r\n\
+                 Max-Forwards: 70\r\n\
+                 Content-Length: 0\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let call = |from_tag: &str| {
+            vec![
+                sent(ALICE, req("INVITE", "z9hG4bK-i1", 1, None), BOB, 0),
+                recv(ALICE, resp(180, 1, "INVITE", "b1", "z9hG4bK-i1"), BOB, 1),
+                recv(ALICE, resp(200, 1, "INVITE", "b2", "z9hG4bK-i1"), BOB, 2),
+                sent(ALICE, req("ACK", "z9hG4bK-a1", 1, Some("b2")), BOB, 3),
+                recv(ALICE, toward_alice(from_tag), BOB, 300_000),
+            ]
+        };
+        assert!(InDialogFromTagRule.check(&call("b2")).is_empty());
+        let out = InDialogFromTagRule.check_positioned(&call("b1"));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].0, ALICE, "reported at the caller, whose dialog it fails to name");
+        assert_eq!(out[0].3, Some(BOB.to_string()), "charged to the request's sender");
+    }
+
+    /// §13.2.2.4 GATES: an ACK to a delayed-offer 2xx that carries no answer
+    /// is flagged at the 2xx sender's lane, charged to the ACK's sender.
+    #[test]
+    fn a_delayed_offer_acked_without_an_answer_gates() {
+        assert!(!DelayedOfferAnsweredInAckRule.force_advisory(), "a MUST gates");
+        let answered = vec![
+            recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
+            sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
+            recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), Some(AUDIO_ANSWER)), ALICE, 2),
+        ];
+        assert!(DelayedOfferAnsweredInAckRule.check(&answered).is_empty());
+        let silent = vec![
+            recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
+            sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
+            recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
+        ];
+        let out = DelayedOfferAnsweredInAckRule.check_positioned(&silent);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].0, BOB, "reported where the answer had to arrive");
+        assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the ACK's sender");
     }
 
     #[test]

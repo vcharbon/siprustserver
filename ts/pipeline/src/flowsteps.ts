@@ -46,6 +46,9 @@ import { stampDrawnAckCounts } from "./drawn-ack.js"
 import { deriveFarSideReinvites } from "./far-side-reinvite.js"
 import { stampEarlyDialogs } from "./fork.js"
 import { mirrorRelayedProvisionals } from "./mirrored-provisional.js"
+import { relayImageOf } from "./relay-image.js"
+import { placeRelaysAfterSources } from "./relay-placement.js"
+import { stampTargetRefreshes } from "./target-refresh.js"
 import { stampSpareProvisionals } from "./spare-provisional.js"
 import { buildMsg, isAutomatic, typeKey } from "./msgspec.js"
 import type { PartsIndex } from "./parts.js"
@@ -100,6 +103,12 @@ export interface StepSource {
    * against, and the message it names was captured on the other leg.
    */
   readonly mirrored?: true
+  /**
+   * The To-tag the step rides where it is not its coordinate's: an arrival
+   * derived for another early dialog than the one it copies
+   * (`mirrored-provisional.ts`).
+   */
+  readonly toTag?: string
 }
 
 export interface FlowOut {
@@ -270,7 +279,8 @@ export const synthesize = (
       ts_us: o.ts_us,
       typeKey: typeKey(msg),
       cseq: msg.summary.cseq.seq,
-      timerLinked: hasHeader(msg, "Session-Expires")
+      timerLinked: isSessionRefresh(msg),
+      image: relayImageOf(msg)
     })
     stepOfMsg.set(coord(o.origLeg, o.msgIdx), steps.length)
     rungAt.set(steps.length, o.ts_us)
@@ -303,6 +313,11 @@ export const synthesize = (
     })
   }
 
+  // First of the passes over positions: every later one reads "the emission
+  // listed before" as the source of a relay (§6.9).
+  // The records hold step OBJECTS: the flag is written once every id has settled.
+  const placed = placeRelaysAfterSources({ steps, timings, sources })
+
   // Before the delays, so a derived step is classified like any other — the
   // relay it is, the answer it emits (§6.9). Every array below indexes the
   // others, and the records hold step OBJECTS: the provisional pass renumbers
@@ -314,7 +329,7 @@ export const synthesize = (
   // Before the delays, so a derived arrival is classified like any other: the
   // relay it is (§6.9). Every array below indexes the others.
   const derived = transparent18x
-    ? mirrorRelayedProvisionals({ resources, sources, steps, timings })
+    ? mirrorRelayedProvisionals({ resources, sources, steps, timings, dialogOf: (src) => capturedToTag(flows, src) })
     : []
   if (derived.length > 0) {
     flags.push({
@@ -328,6 +343,17 @@ export const synthesize = (
         derived
           .map((d) => `${d.step} (leg ${d.leg}, ${d.status}, relays ${d.relays}, copies ${d.copies})`)
           .join("; ")
+    })
+  }
+
+  if (placed.length > 0) {
+    flags.push({
+      kind: "relay-placed-after-source",
+      detail:
+        `${placed.length} relayed arrival(s) listed after the emission carrying their content ` +
+        `rather than at their capture instant: a relay stamped before its source, or relays out ` +
+        `of their sources' order, are expected as a relaying platform emits them (§6.9): ` +
+        placed.map((p) => `${p.step.id} relays ${p.source.id} (${p.why})`).join("; ")
     })
   }
 
@@ -406,6 +432,7 @@ export const synthesize = (
     }
   })
   stampInDialog(steps, sources.map((src) => capturedToTag(flows, src)))
+  stampTargetRefreshes(flows, steps, sources)
   stampOverlaps(steps, delays.map((d) => d.derived))
 
   // After `in_dialog`, which is what says where an early dialog stops.
@@ -461,9 +488,22 @@ export const synthesize = (
 
 const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
 
-/** The To-tag the captured message behind a step carries, where it carries one. */
+/**
+ * A session refresh (RFC 4028 §7.4, §10): a re-INVITE or UPDATE inside a
+ * dialog stating `Session-Expires`. It is the one message the capture shows a
+ * session timer sent, so its dwell is timer-linked. A response carrying the
+ * header answered a request and an initial INVITE opened the session: neither
+ * went out on a timer.
+ */
+const isSessionRefresh = (msg: Flows.Msg): boolean =>
+  msg.summary.kind === "request" &&
+  msg.summary.to.tag !== null &&
+  (Flows.isMethod(msg, "INVITE") || Flows.isMethod(msg, "UPDATE")) &&
+  hasHeader(msg, "Session-Expires")
+
+/** The To-tag a step rides: its stated one, else the captured message's, where it carries one. */
 const capturedToTag = (flows: Flows.FlowsDoc, src: StepSource): string | undefined =>
-  flows.legs[src.origLeg]?.msgs[src.msgIdx]?.summary.to.tag ?? undefined
+  src.toTag ?? flows.legs[src.origLeg]?.msgs[src.msgIdx]?.summary.to.tag ?? undefined
 
 /**
  * Mark every step that runs after its leg's DIALOG-CREATING FINAL — the first

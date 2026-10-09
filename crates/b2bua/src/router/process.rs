@@ -22,7 +22,10 @@ use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::{build_481, build_merged_482, build_retry_later_500, build_store_fault_500};
+use super::responses::{
+    build_481, build_merged_482, build_out_of_order_500, build_retry_later_500,
+    build_store_fault_500,
+};
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::answer_deadline::Screened;
@@ -175,6 +178,12 @@ pub(super) async fn process(
         if let Some(answer) =
             reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
         {
+            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
+            return;
+        }
+        // A request below its dialog's last CSeq is refused before any rule
+        // reads it (RFC 3261 §12.2.2).
+        if let Some(answer) = refuse_out_of_order(ctx, &call, &event, &res).await {
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
@@ -597,8 +606,9 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
 }
 
 /// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a To-tag naming
-/// no dialog this stack holds on the leg it arrived on draws 481 and touches
-/// nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
+/// no dialog this stack holds on the leg it arrived on — or, on a confirmed
+/// b-leg, a From-tag naming none ([`call::helpers::abandoned_dialog`]) — draws
+/// 481 and touches nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
 /// §13.3.1.4 ladder keeps repeating the 2xx it failed to acknowledge. A CANCEL
 /// is matched by transaction (§9.1) and never read here. `Some` when refused,
 /// holding the 481 sent, if any.
@@ -614,7 +624,10 @@ async fn refuse_foreign_dialog(
         return None;
     }
     let tag = req.to().tag()?;
-    if call::helpers::holds_local_tag(call, &res.source_leg_id, tag) != Some(false) {
+    let tags = call::helpers::RequestTags::new(Some(tag), req.from().tag());
+    let foreign = call::helpers::holds_local_tag(call, &res.source_leg_id, tag) == Some(false)
+        || call::helpers::abandoned_dialog(call, &res.source_leg_id, tags);
+    if !foreign {
         return None;
     }
     if req.method() == Method::Ack {
@@ -626,6 +639,35 @@ async fn refuse_foreign_dialog(
     crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(Some(refusal))
+}
+
+/// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a CSeq below the
+/// last one its dialog took ([`call::helpers::out_of_order`]) draws 500 and
+/// touches nothing. ACK and CANCEL carry the CSeq of the request they belong
+/// to and are never measured. The 500 sent, if refused.
+async fn refuse_out_of_order(
+    ctx: &RouterCtx,
+    call: &Call,
+    event: &CallEvent,
+    res: &Resolution,
+) -> Option<sip_message::SipResponse> {
+    let CallEvent::Sip { message, src, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
+    if matches!(req.method(), Method::Ack | Method::Cancel) {
+        return None;
+    }
+    req.to().tag()?;
+    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
+    let cseq = i64::from(req.cseq().seq());
+    if !call::helpers::out_of_order(call, &res.source_leg_id, tags, cseq) {
+        return None;
+    }
+    // An in-call refusal is a message of the leg it resolved to: it takes the
+    // call's stated headers.
+    let mut refusal = build_out_of_order_500(req);
+    crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
+    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
+    Some(refusal)
 }
 
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
@@ -760,6 +802,7 @@ pub(super) fn rule_chain_turn(
     // as in flight before the rules read it.
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
+            exec.prack_owed_at_final(&mut call, &mut ladder_fx, &res.source_leg_id, resp);
             if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
                 if let Some(branch) = resp.top_via().branch() {
                     call = call::helpers::close_rejected_invite_round(
@@ -939,12 +982,16 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
     }
 }
 
-/// A request for a vanished call draws the answer a request naming no call is
-/// owed ([`super::unroutable::refusal`]); an ACK or a response draws nothing.
+/// A request for a vanished call draws the 200 of a PRACK its released call
+/// still answers ([`super::late_prack::answer`]), else the answer a request
+/// naming no call is owed ([`super::unroutable::refusal`]); an ACK or a
+/// response draws nothing.
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if let Some(answer) = super::unroutable::refusal(ctx, req) {
+            let answer = super::late_prack::answer(ctx, req)
+                .or_else(|| super::unroutable::refusal(ctx, req));
+            if let Some(answer) = answer {
                 let _ = ctx.txn.send_response(answer, *src).await;
             }
         }

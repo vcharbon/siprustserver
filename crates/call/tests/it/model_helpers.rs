@@ -50,6 +50,30 @@ fn cseq_lens_helpers() {
     assert_eq!(relay_cseq_delta(5, Some(9)), 1); // clamped ≥ 1
 }
 
+/// §12.2.2: a request below the last CSeq of the dialog its tags name is out
+/// of order — a b-leg dialog named by the peer's From-tag, an a-leg dialog by
+/// the To-tag (ours). The last one again, a higher one, a dialog with no
+/// request yet and tags naming no dialog are not.
+#[test]
+fn out_of_order_measures_the_named_dialog_against_its_last_cseq() {
+    let from_bob = |tag| RequestTags::new(Some("ours"), Some(tag));
+    let call = update_remote_cseq(representative_call(), "b-1", B_TAG, 7);
+    assert!(out_of_order(&call, "b-1", from_bob(B_TAG), 6));
+    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 7));
+    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 8));
+    assert!(!out_of_order(&call, "b-1", from_bob("another-fork"), 1));
+
+    let mut unseen = call.clone();
+    unseen.b_legs[0].dialogs[0].ext.remote_cseq = None;
+    assert!(!out_of_order(&unseen, "b-1", from_bob(B_TAG), 1));
+
+    let to_us = |tag| RequestTags::new(Some(tag), Some("alice-tag"));
+    let call = update_remote_cseq(call, "a", A_TAG, 4);
+    assert!(out_of_order(&call, "a", to_us(A_TAG), 3));
+    assert!(!out_of_order(&call, "a", to_us(A_TAG), 5));
+    assert!(!out_of_order(&call, "a", to_us("another-face"), 1));
+}
+
 #[test]
 fn pending_request_lifecycle() {
     let call = representative_call();
@@ -473,6 +497,32 @@ fn a_stack_pracked_provisional_is_acknowledged_once() {
     assert!(!pracked_provisional(&call, "b-1", "bf2", 2, 4711), "another fork's provisional");
 }
 
+/// A relayed reliable provisional is owed its PRACK until someone sends one:
+/// the party shown it (its entry acknowledged) or this stack itself. Only the
+/// leg's own entries on the INVITE named are read (RFC 3262 §4).
+#[test]
+fn a_relayed_provisional_stays_owed_until_either_side_acknowledges_it() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, true);
+    let (call, _) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, false, false);
+    let (call, _) = assign_a_rseq(call, "a2", 1, "b-2", "bf2", 1, 4711, 9_000, false, false);
+    let owed: Vec<_> = unacknowledged_relayed_provisionals(&call, "b-1", None)
+        .into_iter()
+        .map(|o| (o.b_tag, o.invite_cseq, o.rseq, o.responder_sdp))
+        .collect();
+    assert_eq!(owed, vec![("bf1".to_string(), 1, 4711, true), ("bf1".to_string(), 1, 4712, false)]);
+    assert!(
+        unacknowledged_relayed_provisionals(&call, "b-1", Some(2)).is_empty(),
+        "another INVITE"
+    );
+    let call = retire_a_rseq(call, "a1", a1);
+    assert!(provisional_acknowledged(&call, "b-1", "bf1", 1, 4711), "the caller's PRACK");
+    let (call, _) = record_pracked_provisional(call, "b-1", "bf1", 1, 4712, false);
+    assert!(provisional_acknowledged(&call, "b-1", "bf1", 1, 4712), "this stack's PRACK");
+    assert!(unacknowledged_relayed_provisionals(&call, "b-1", None).is_empty());
+    assert_eq!(unacknowledged_relayed_provisionals(&call, "b-2", Some(1)).len(), 1);
+}
+
 /// Forks mirrored as DISTINCT a-facing early dialogs each carry their own
 /// ladder (RFC 3262 §4, errata 4603/4604), so interleaving them never shows
 /// either caller dialog a gap — the failure a single call-wide ladder produces.
@@ -587,6 +637,7 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
         emission: None,
         carried_sdp: false,
         responder_sdp: false,
+        responder_offer: None,
     });
 
     let provisionals = obligations_in(&call, &Scope::Provisionals);
@@ -787,4 +838,65 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     let mut owes_ack = base.clone();
     owes_ack.ext.awaited_ack_cseq = Some(4002);
     assert!(invite_transaction_open(&owes_ack));
+}
+
+/// A released call leaves, per shown dialog, the provisionals its party never
+/// PRACKed, under that dialog's Call-ID: an unknown tag is an a-facing fork
+/// tag, the a-leg's (RFC 3262 §3).
+#[test]
+fn the_unacknowledged_shown_provisionals_are_grouped_per_shown_dialog() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, false, false);
+    let (call, a2) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, false, false);
+    let (call, f2) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 4711, 7_000, false, false);
+    let call = retire_a_rseq(call, "a1", a1);
+    assert_eq!(
+        unacknowledged_shown(&call),
+        vec![
+            UnackedShown {
+                call_id: "call-id-deadbeef@example.com".into(),
+                tag: "a1".into(),
+                racks: vec![(a2, 1)],
+            },
+            UnackedShown {
+                call_id: "call-id-deadbeef@example.com".into(),
+                tag: "a2".into(),
+                racks: vec![(f2, 1)],
+            },
+        ],
+    );
+}
+
+/// Only a dialog's first description-carrying provisional carries the offer
+/// (RFC 3264 §4): a later one owes its PRACK no answer, whether the first is
+/// still owed or was acknowledged already.
+#[test]
+fn only_the_first_offer_of_a_dialog_is_owed_an_answer() {
+    let (call, a1) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000, true, true);
+    let (call, _) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000, true, true);
+    let (call, _) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 4711, 7_000, true, true);
+    let call = note_responder_offer(call, "b-1", "bf1", 1, 4711, b"offer-1");
+    let call = note_responder_offer(call, "b-1", "bf1", 1, 4712, b"offer-1-again");
+    let call = note_responder_offer(call, "b-1", "bf2", 1, 4711, b"offer-2");
+    let offers = |call: &Call| -> Vec<(String, i64, Option<Vec<u8>>)> {
+        unacknowledged_relayed_provisionals(call, "b-1", None)
+            .into_iter()
+            .map(|o| (o.b_tag, o.rseq, o.offer))
+            .collect()
+    };
+    assert_eq!(
+        offers(&call),
+        vec![
+            ("bf1".to_string(), 4711, Some(b"offer-1".to_vec())),
+            ("bf1".to_string(), 4712, None),
+            ("bf2".to_string(), 4711, Some(b"offer-2".to_vec())),
+        ],
+    );
+    let call = retire_a_rseq(call, "a1", a1);
+    assert_eq!(
+        offers(&call),
+        vec![("bf1".to_string(), 4712, None), ("bf2".to_string(), 4711, Some(b"offer-2".to_vec()))],
+        "the offer was answered in the caller's PRACK"
+    );
 }

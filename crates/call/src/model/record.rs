@@ -87,6 +87,12 @@ pub struct ReliableProvisional {
     /// The responder's provisional carried a description.
     #[serde(default)]
     pub responder_sdp: bool,
+    /// The description the responder's provisional carried where it was the
+    /// OFFER — the INVITE it answers carried none (RFC 3264 §4) — kept so a
+    /// PRACK this stack sends in the originator's place answers it (RFC 3262
+    /// §5). `None` for an answer, or no description.
+    #[serde(default, with = "serde_bytes")]
+    pub responder_offer: Option<Vec<u8>>,
 }
 
 /// A reliable provisional this stack acknowledged ITSELF, on the responder's
@@ -111,6 +117,11 @@ pub struct PrackedProvisional {
     /// The responder's provisional carried a description.
     #[serde(default)]
     pub responder_sdp: bool,
+    /// The top-Via branch of the PRACK client transaction this stack sent, so
+    /// its timeout is recognised as its own (RFC 3261 §17.1.2.2); empty until
+    /// the PRACK leaves.
+    #[serde(default)]
+    pub branch: String,
 }
 
 /// A single `name: value` header line.
@@ -276,10 +287,11 @@ pub struct Call {
     /// the life of the call. It survives here because a PRACK arriving after a
     /// takeover still translates onto the b-leg number it acknowledges.
     pub reliable_provisionals: Vec<ReliableProvisional>,
-    /// The reliable provisionals this stack PRACKed on the responder's behalf
-    /// (no shown number, so no `reliable_provisionals` entry), one per
-    /// provisional for the life of the call — the books that make a
-    /// responder's retransmission of one recognisable as such.
+    /// The reliable provisionals this stack PRACKed itself (RFC 3262 §4) —
+    /// one shown to no one, or one relayed and left unacknowledged when this
+    /// stack CANCELled its INVITE — one per provisional for the life of the
+    /// call: the books that make a responder's retransmission of one
+    /// recognisable as such, and a later PRACK naming it answerable here.
     pub pracked_provisionals: Vec<PrackedProvisional>,
     /// The `seq` of the last message recorded on any leg's ring — the
     /// call-wide sequence [`crate::helpers::record_message`] draws from; `0`

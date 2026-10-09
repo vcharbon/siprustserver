@@ -309,7 +309,7 @@ async fn the_ladder_gives_up_at_64_t1() {
             "alice deliberately never PRACKs, so the a-face ladder runs to its 64·T1 bound \
              (RFC 3262 §3) — the caller's silence is this test's subject",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5403").await;
     let bob = h.agent("bob", "127.0.0.1:5413").await;
@@ -340,6 +340,9 @@ async fn the_ladder_gives_up_at_64_t1() {
     // her — on a B2BUA the reject is a call teardown, not a timer's last line.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     call.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
 
@@ -460,7 +463,7 @@ async fn the_ladder_ceases_at_the_final_response() {
             "alice deliberately never PRACKs — the subject is the ladder's cancellation at the \
              final response, which a PRACK would reach first",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5404").await;
     let bob = h.agent("bob", "127.0.0.1:5414").await;
@@ -484,6 +487,9 @@ async fn the_ladder_ceases_at_the_final_response() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
+    // The final ends alice's chance to PRACK: the stack acknowledges the
+    // callee's provisional itself (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -521,7 +527,7 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
             "alice CANCELs instead of PRACKing — the subject is the ladder's cancellation on an \
              abandoned setup",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5405").await;
     let bob = h.agent("bob", "127.0.0.1:5415").await;
@@ -547,6 +553,9 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
 
@@ -581,7 +590,7 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
             "alice never PRACKs the failed fork's ring — the subject is what happens to its \
              ladder when the call reroutes underneath it",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5406").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5416").await;
@@ -618,8 +627,11 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
     alice.drain().await;
 
     // …then fails. The rejection is not relayed: the call reroutes to bob2.
+    // The failed fork's ring is PRACKed by the stack as its final arrives
+    // (RFC 3262 §4).
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await;
+    bob1.receive("PRACK").await.respond(200, "OK").await;
     let mut uas2 = bob2.receive("INVITE").await;
 
     // Two rungs' worth of quiet is owed here — the leg that raised the ring is
@@ -676,7 +688,7 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
             "alice never PRACKs the FAILED fork's ring — that dialog dies with its leg, and the \
              subject is the dialog the reroute opens next",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5408").await;
     let bob1 = h.agent("bob1", "127.0.0.1:5418").await;
@@ -711,9 +723,11 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
 
-    // …then fails, and the call reroutes.
+    // …then fails, and the call reroutes; its ring is PRACKed by the stack as
+    // its final arrives (RFC 3262 §4).
     uas1.respond(503, "Service Unavailable").await;
     bob1.receive("ACK").await;
+    bob1.receive("PRACK").await.respond(200, "OK").await;
     let mut uas2 = bob2.receive("INVITE").await;
 
     // Attempt 2 rings reliably too. Under the primary tag this is §3's
@@ -808,7 +822,7 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
             "alice deliberately never PRACKs the re-INVITE's 183 — the subject is the ladder's \
              cancellation at the re-INVITE's final, which a PRACK would reach first",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5109").await;
     let bob = h.agent("bob", "127.0.0.1:5110").await;
@@ -842,6 +856,9 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     h.advance(Duration::from_millis(700)).await;
     alice.drain().await;
     re_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    // The re-INVITE's final ends alice's chance to PRACK its 180: the stack
+    // acknowledges it toward bob itself (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     reinv.expect(200).await;
     dialog.ack_for(reinvite_cseq, None).await;
     bob.receive("ACK").await;

@@ -243,10 +243,13 @@ pub struct FailureInfo {
     /// The leg whose failure triggered this decision (`None` for pre-leg
     /// origins such as a limiter reject).
     pub failed_leg_id: Option<String>,
-    /// For origin `transaction_timeout` only: which client-transaction timeout
-    /// fired — `"response"` (nothing at all answered the INVITE, not even a
-    /// `100`: the hop is dead) or `"transaction"` (it answered a provisional,
-    /// then went silent past the INVITE bound). Absent for every other origin.
+    /// Which deadline of a timeout origin fired. For `transaction_timeout`, the
+    /// client-transaction timeout — `"response"` (nothing at all answered the
+    /// INVITE, not even a `100`: the hop is dead) or `"transaction"` (it
+    /// answered a provisional, then went silent past the INVITE bound). For
+    /// `no_answer_timeout`, a service's own no-answer-class deadline may name
+    /// itself here (e.g. `"provisional"`: none above 100 arrived in time); the
+    /// core treats it as any no-answer. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_kind: Option<String>,
     /// The failed final response's non-structural headers, verbatim and in

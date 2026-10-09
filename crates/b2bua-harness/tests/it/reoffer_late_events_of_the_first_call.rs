@@ -292,6 +292,14 @@ async fn a_callout_result_of_the_first_call_does_not_end_the_reoffer() {
 #[tokio::test(start_paused = true)]
 async fn a_late_bye_of_the_first_call_is_answered_481_and_does_not_end_the_reoffer() {
     let s = scene("reoffer-late-bye", None).await;
+    s.h.waive(
+        WaiverScope::rule(
+            "no-bye-outside-or-early-dialog",
+            "alice BYEs the early dialog the first call's 487 already ended (RFC 3261 §12.3), \
+             the stale request under test",
+        )
+        .on_party("alice"),
+    );
     let start = tokio::time::Instant::now();
     let mut first = first_call_cancelled(&s, start).await;
     let (reoffer, uas) = reoffer_rings(&s, start).await;

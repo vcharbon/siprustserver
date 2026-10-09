@@ -218,30 +218,14 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let resp = ctx.response()?;
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
-                let b_tag = resp.to().tag().unwrap_or_default().to_string();
                 let final_sdp = resp.body().clone();
                 let state = ctx.call.promote_pem_state().cloned().unwrap_or_default();
                 let promoted_sdp = state.promoted_sdp.clone();
 
-                // Re-seed the (bLegId, winningBTag) → aFacingTag mapping under the
-                // winning fork's tag using the SAME a-facing tag pinned at
-                // promotion (forking). confirm-dialog reuses a pre-seeded a-tag
-                // via find_by_b_tag, so this keeps Alice's identity stable.
-                let existing = ctx.call.find_by_b_tag(&b, &b_tag);
-                let seeded = ctx.call.tag_map().iter().find(|m| m.b_leg_id == b);
-                let a_facing =
-                    existing.map(|m| m.a_tag.clone()).or_else(|| seeded.map(|m| m.a_tag.clone()));
-
+                // Alice already holds the synthetic 200's dialog: the
+                // confirmation re-identifies nothing on her side, so the
+                // winning fork needs no a-facing mapping.
                 let mut actions: Vec<RuleAction> = Vec::new();
-                if existing.is_none() {
-                    if let Some(a_tag) = &a_facing {
-                        actions.push(RuleAction::AddTagMapping {
-                            a_tag: a_tag.clone(),
-                            b_leg_id: b.clone(),
-                            b_tag: b_tag.to_string(),
-                        });
-                    }
-                }
 
                 // Confirm b, ACK b locally (no end-to-end ACK; Alice already
                 // ACK'd the synthetic 200), merge a↔b. NO relay-to-peer.

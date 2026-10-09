@@ -10,6 +10,8 @@
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution, tags
+//!   - [`identity`] — which dialog of a leg an in-dialog message names
+//!   - [`retired`] — the relays still open in caller-facing dialogs the answer retired
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
 //!   - [`dialog`] — CSeq, ACK branch, pending relays, SDP cache, constructors
@@ -28,6 +30,7 @@
 
 pub mod decision_log;
 pub mod dialog;
+pub mod identity;
 pub mod leg;
 pub mod lens;
 pub mod lifecycle;
@@ -36,6 +39,7 @@ pub mod obligation;
 pub mod peering;
 pub mod record;
 pub mod reliable;
+pub mod retired;
 pub mod services;
 pub mod termination;
 pub mod timer;
@@ -44,10 +48,13 @@ pub use decision_log::mark_decision;
 pub use dialog::{
     add_pending_request, bump_local_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
     cancel_pending_request, close_rejected_invite_round, find_pending_request, invite_glare,
-    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, peer_update_pending,
-    relay_cseq_delta, remove_pending_request, retain_ack_branch, retain_emitted_ack,
-    sender_invite_unacknowledged, sender_invite_unanswered, set_awaited_ack_cseq,
-    update_remote_cseq, MakeDialogLegCtx,
+    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, out_of_order,
+    peer_update_pending, relay_cseq_delta, relayed_pending, remove_pending_request,
+    retain_ack_branch, retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
+    set_awaited_ack_cseq, update_remote_cseq, MakeDialogLegCtx, PendingHolder,
+};
+pub use identity::{
+    abandoned_dialog, dialog_by_identity, request_dialog, response_identity, RequestTags,
 };
 pub use leg::{
     add_b_leg, b2bua_tag, caller_answered, confirmed_dialog, find_b_leg, find_b_leg_by_call_id,
@@ -70,11 +77,14 @@ pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_curs
 pub use reliable::{
     admits_reliable_provisional, advance_reliable_ladder, assign_a_rseq, b_rseq_for,
     clear_all_reliable_provisional_emissions, clear_reliable_provisional_emission, leg_shown,
-    owns_rseq_numbering, pending_invite_answered_by, pracked_provisional,
-    record_pracked_provisional, record_reliable_provisional_emission,
-    reliable_provisional_emission, reliable_provisional_relayed, retire_a_rseq,
-    starts_reliable_ladder, unacknowledgeable_rack, RAckTokens,
+    note_own_prack_branch, note_responder_offer, offered_in_reliable_provisional, own_prack_branch,
+    owns_rseq_numbering, pending_invite_answered_by, pracked_provisional, provisional_acknowledged,
+    rack_pracked_here, record_pracked_provisional, record_reliable_provisional_emission,
+    reliable_provisional_emission, reliable_provisional_relayed, retire_a_rseq, rseq_in_order,
+    starts_reliable_ladder, unacknowledgeable_rack, unacknowledged_relayed_provisionals,
+    unacknowledged_shown, OwedPrack, RAckTokens, UnackedShown,
 };
+pub use retired::{release_retired, retire_pending, retired_count, retired_pending, take_retired};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

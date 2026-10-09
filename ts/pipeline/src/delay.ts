@@ -3,7 +3,11 @@
  * classification. Every pivot delay is relative to an explicit anchor, and a
  * delay is trustworthy only at the leg that CAUSED it:
  *
- * - a `send` is origin-side, measured from the actor's previous step on the
+ * - a `send` the transaction layer OWES (the answers a received CANCEL draws,
+ *   the ACK of a non-2xx final) is measured from what drew it (`owedCauseOf`),
+ *   never from a message of another transaction the system under test sent
+ *   between;
+ * - any other `send` is origin-side, measured from the actor's previous step on the
  *   same leg (or `trigger` for the first) — unless an actor emit on ANOTHER leg
  *   is the nearer preceding instant and sits within the proximity window, in
  *   which case the send anchors THERE: two near-simultaneous originations have
@@ -30,6 +34,8 @@
  * emitted delay keeps the anchor and drops the reason it was chosen.
  */
 
+import { identifiesSession } from "./relay-image.js"
+
 /** Why a delay is anchored where it is. */
 export type DelayCausality = "measured" | "propagated" | "sut-originated"
 
@@ -55,12 +61,24 @@ export interface StepTiming {
   /** The captured CSeq number: with `typeKey`, the transaction the message rides. */
   readonly cseq: number
   readonly timerLinked: boolean
+  /**
+   * What of the message survives a relay (`relayImageOf`): equal images on two
+   * legs are the same content. Absent where the step states none.
+   */
+  readonly image?: string
 }
 
 /**
- * The index of the cross-leg emit that relayed into this arrival — the latest of
- * the same message type inside the proximity window — or -1 where the SUT minted
- * the message itself.
+ * The index of the cross-leg emit listed before this arrival that relayed into
+ * it, or -1 where the SUT minted the message itself. Among the emits of the
+ * same message type inside the proximity window, the one carrying the
+ * arrival's content (`image`) wins; among equals, the latest. A relayed
+ * provisional's content is its session description or its bareness — a
+ * platform may relay a bare one and one with an answer in either order, and
+ * bare pairs with bare. Any other message pairs on a session description
+ * alone; bare, it pairs by time. Content decides
+ * before time because a relay may leave in another order than its sources
+ * arrived, and the latest emit would then collect the wrong arrival.
  *
  * ONE definition of "which emission this arrival is the relay of", shared by the
  * delay classification and by the pass that gives an unrelayed emission its
@@ -70,13 +88,29 @@ export interface StepTiming {
 export const relayOriginOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
   const s = steps[i]!
   let originIdx = -1
+  let originCarries = false
   for (let p = 0; p < i; p++) {
     const c = steps[p]!
     if (!c.emits || c.leg === s.leg || c.typeKey !== s.typeKey) continue
     if (s.ts_us - c.ts_us >= PROXIMITY_US) continue
-    if (originIdx < 0 || c.ts_us > steps[originIdx]!.ts_us) originIdx = p
+    const carries =
+      (relayedProvisional(s) ? s.image !== undefined : identifiesSession(s.image)) && c.image === s.image
+    const better =
+      originIdx < 0 ||
+      (carries && !originCarries) ||
+      (carries === originCarries && c.ts_us > steps[originIdx]!.ts_us)
+    if (better) {
+      originIdx = p
+      originCarries = carries
+    }
   }
   return originIdx
+}
+
+/** Whether a step's type is a provisional to an INVITE above 100: what a platform relays. */
+export const relayedProvisional = (s: StepTiming): boolean => {
+  const m = /^resp:(\d+):INVITE$/.exec(s.typeKey)
+  return m !== null && Number(m[1]) > 100 && Number(m[1]) < 200
 }
 
 /** The transaction a step rides on its leg: the CSeq, method and number. */
@@ -93,6 +127,31 @@ const transactionPredecessorOf = (steps: ReadonlyArray<StepTiming>, i: number): 
   for (let p = i - 1; p >= 0; p--) {
     const c = steps[p]!
     if (c.leg === steps[i]!.leg && transaction(c) === key) return p
+  }
+  return -1
+}
+
+/**
+ * The arrival a send the scripted party OWES on the transaction layer is timed
+ * from, or -1 where the send is not one of those: the 200 to a received CANCEL
+ * and the non-2xx INVITE final that CANCEL draws are timed from the CANCEL
+ * (RFC 3261 §9.2), the ACK of a non-2xx final from that final (§17.1.1.3).
+ * A message the system under test sent on another transaction in between never
+ * gates them: a system that does not send it must still be answered. Every
+ * other send keeps its leg's previous step.
+ */
+const owedCauseOf = (steps: ReadonlyArray<StepTiming>, i: number): number => {
+  const s = steps[i]!
+  const final = /^resp:(\d+):INVITE$/.exec(s.typeKey)
+  const answersCancel = s.typeKey === "resp:200:CANCEL" || (final !== null && Number(final[1]) >= 300)
+  for (let p = i - 1; p >= 0; p--) {
+    const c = steps[p]!
+    if (c.leg !== s.leg || c.cseq !== s.cseq || c.emits) continue
+    if (answersCancel && c.typeKey === "req:CANCEL") return p
+    if (s.typeKey === "req:ACK") {
+      const acked = /^resp:(\d+):INVITE$/.exec(c.typeKey)
+      if (acked !== null) return Number(acked[1]) >= 300 ? p : -1
+    }
   }
   return -1
 }
@@ -117,7 +176,17 @@ export const classify = (steps: ReadonlyArray<StepTiming>): Array<ClassifiedDela
       return { ms, from: head < 0 ? "trigger" : `step:${head + 1}`, timer_linked: false, derived }
     }
     if (s.emits) {
-      out.push(coincident(steps, i) ?? anchored("measured"))
+      const owed = owedCauseOf(steps, i)
+      out.push(
+        owed >= 0
+          ? {
+              ms: Math.floor((s.ts_us - steps[owed]!.ts_us) / 1000),
+              from: `step:${owed + 1}`,
+              timer_linked: s.timerLinked,
+              derived: "measured"
+            }
+          : coincident(steps, i) ?? anchored("measured")
+      )
       return
     }
     const originIdx = relayOriginOf(steps, i)

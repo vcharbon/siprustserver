@@ -60,12 +60,24 @@ pub fn call_id(raw: &[u8]) -> Option<String> {
 /// The `tag` parameter of the To header (full or compact `t` form), or the
 /// empty string when absent (e.g. a tagless 100 Trying).
 pub fn to_tag(raw: &[u8]) -> String {
-    let Some(v) = header_value(raw, "to").or_else(|| header_value(raw, "t")) else {
-        return String::new();
-    };
-    let lower = v.to_ascii_lowercase();
+    header_value(raw, "to")
+        .or_else(|| header_value(raw, "t"))
+        .map_or_else(String::new, |v| tag_of(&v))
+}
+
+/// The `tag` parameter of the From header (full or compact `f` form), or the
+/// empty string when absent.
+pub fn from_tag(raw: &[u8]) -> String {
+    header_value(raw, "from")
+        .or_else(|| header_value(raw, "f"))
+        .map_or_else(String::new, |v| tag_of(&v))
+}
+
+/// The `tag` parameter of one From or To value, or the empty string.
+fn tag_of(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
     let Some(pos) = lower.find("tag=") else { return String::new() };
-    let rest = &v[pos + "tag=".len()..];
+    let rest = &value[pos + "tag=".len()..];
     let end = rest.find([';', ',', ' ', '\t', '>']).unwrap_or(rest.len());
     rest[..end].trim().to_string()
 }
@@ -702,6 +714,13 @@ mod tests {
             v: SIP/2.0/UDP a;branch=z9hG4bK-a;rport\r\n\
             CSeq: 2 BYE\r\n\r\n";
         assert_eq!(via_branches(raw), vec!["z9hG4bK-p", "", "z9hG4bK-a"]);
+    }
+
+    #[test]
+    fn from_tag_extracts_the_from_parameter() {
+        let raw = b"BYE sip:b@h SIP/2.0\r\nf: <sip:a@h>;tag=a1\r\nTo: <sip:b@h>;tag=b1\r\n\r\n";
+        assert_eq!(from_tag(raw), "a1");
+        assert_eq!(from_tag(b"BYE sip:b@h SIP/2.0\r\nFrom: <sip:a@h>\r\n\r\n"), "");
     }
 
     #[test]

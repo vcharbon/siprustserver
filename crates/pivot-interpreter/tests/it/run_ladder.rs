@@ -34,7 +34,7 @@ use pivot_interpreter::{
     Booking, ClockMode, CloseOwed, Failure, IdentityBindings, Lane, Outcome, RunConfig, Sut,
     UriComposer, VerdictStatus,
 };
-use pivot_schema::bundle::recording::Dir;
+use pivot_schema::bundle::recording::{Dir, RecordedMessage};
 use pivot_schema::bundle::{Arrived, GatedOn};
 use pivot_schema::msg::Header;
 use pivot_schema::must_fail::{DeclaredFailure, MustFail};
@@ -1020,6 +1020,262 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
     scene.finish().await;
 }
 
+/// The unscripted-cancel case with leg B's own final to the INVITE scripted
+/// behind the CANCEL the system relays: `status` 500 ms after its ringing, once
+/// the relayed CANCEL is in.
+fn unscripted_cancel_then_final(status: u16, reason: &str) -> Case {
+    unscripted_cancel_then_final_after(status, reason, 500)
+}
+
+/// [`unscripted_cancel_then_final`] with the scripted final `dwell_ms` behind
+/// the 180.
+fn unscripted_cancel_then_final_after(status: u16, reason: &str, dwell_ms: u64) -> Case {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = std::fs::read_to_string(base_dir.join("unscripted-cancel.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["case"]["id"] = format!("unscripted-cancel-then-{status}").into();
+    let flow = doc["flow"].as_array_mut().unwrap();
+    let at = flow.iter().position(|s| s["id"] == "s4").unwrap() + 1;
+    flow.insert(
+        at,
+        serde_json::json!({
+            "id": "s4b", "leg": "B", "op": "send",
+            "msg": { "cseq-method": "INVITE", "reason": reason, "status": status },
+            "delay": { "compressible": true, "from": "step:s4", "ms": dwell_ms, "timer_linked": false }
+        }),
+    );
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    Case { document, base_dir }
+}
+
+/// The finals leg B sent to its INVITE, first emissions only.
+fn invite_finals(legs: &BTreeMap<String, Vec<RecordedMessage>>) -> Vec<String> {
+    legs["B"]
+        .iter()
+        .filter(|m| m.dir == Dir::Out && m.repeat_of.is_none())
+        .map(|m| text(m).to_string())
+        .filter(|t| t.starts_with("SIP/2.0 ") && !t.starts_with("SIP/2.0 1"))
+        .filter(|t| t.lines().any(|l| l.starts_with("CSeq:") && l.ends_with(" INVITE")))
+        .map(|t| t.lines().next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The SUT's INVITE to a callee that never rings retransmits on Timer A until
+/// a response (RFC 3261 §17.1.1.2). Here the only response is the `487` leg B
+/// composes for the CANCEL the flow never scripted: an answer the run authored
+/// ends that ladder exactly as a scripted one would, so the rungs it owes are
+/// the ones before it: its dwell runs to the 487.
+#[tokio::test(start_paused = true)]
+async fn an_unscripted_answer_closes_the_ladder_of_the_request_it_ends() {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text_doc = std::fs::read_to_string(base_dir.join("unscripted-cancel.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text_doc).unwrap();
+    doc["case"]["id"] = "unscripted-cancel-unrung".into();
+    doc["flow"].as_array_mut().unwrap().retain(|s| s["id"] != "s4" && s["id"] != "s5");
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    let scene = api_scene("pivot-unscripted-cancel-unrung").await;
+    let (outcome, _dir) = replay_case(&scene, Case { document, base_dir }, BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_eq!(invite_finals(&legs), ["SIP/2.0 487 Request Terminated"], "{:#?}", legs["B"]);
+    let note = outcome.verdict.retransmits.iter().find(|n| n.step == "s3").expect("s3's ladder");
+    assert_eq!(note.dwell_us, Some(1_260_000), "the 487 closed the INVITE's ladder: {note:#?}");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The generic close's act ends a ladder as a scripted send does: leg B never
+/// answers the SUT's INVITE before its script is abandoned (it waits on an
+/// INFO that never comes), and the final the close composes for that INVITE
+/// (`PCAP2TEST_PIVOT_V3.md` §11.2: a request taken and never answered) is what
+/// closes the INVITE's Timer A ladder.
+#[tokio::test(start_paused = true)]
+async fn the_generic_close_ends_the_ladder_of_the_request_it_answers() {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text_doc = std::fs::read_to_string(base_dir.join("linear-attempt.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text_doc).unwrap();
+    doc["case"]["id"] = "linear-attempt-abandoned-unanswered".into();
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(3);
+    flow.push(serde_json::json!({
+        "id": "s4", "leg": "B", "op": "expect", "check": "record",
+        "msg": { "method": "INFO" },
+        "delay": { "compressible": true, "from": "step:s3", "ms": 0, "timer_linked": false }
+    }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    let scene = api_scene("pivot-abandoned-unanswered").await;
+    let (outcome, _dir) = replay_case(&scene, Case { document, base_dir }, BTreeMap::new()).await;
+    assert!(
+        outcome.verdict.abandoned.is_some(),
+        "the script was abandoned: {:#?}",
+        outcome.verdict
+    );
+    let note = outcome.verdict.retransmits.iter().find(|n| n.step == "s3").expect("s3's ladder");
+    assert!(note.dwell_us.is_some(), "the close's final closed the INVITE's ladder: {note:#?}");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// RFC 3261 §9.2 leaves the INVITE's final to the UAS — 487 SHOULD, any
+/// non-2xx may — and §17.2.1 allows ONE. Where leg B scripts its own non-2xx
+/// final behind a CANCEL the flow never scripted, that captured final is THE
+/// answer: the CANCEL draws its `200` and no `487` of the stack's own, so the
+/// INVITE is answered once, faithfully.
+#[tokio::test(start_paused = true)]
+async fn a_scripted_reject_answers_the_invite_an_unscripted_cancel_named() {
+    let scene = api_scene("pivot-unscripted-cancel-reject").await;
+    let (outcome, _dir) =
+        replay_case(&scene, unscripted_cancel_then_final(486, "Busy Here"), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_eq!(
+        invite_finals(&legs),
+        ["SIP/2.0 486 Busy Here"],
+        "one final, the scripted one: {:#?}",
+        legs["B"]
+    );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The CANCEL is answered when it arrives, whatever the script's dwell before
+/// its own reject: leg B's 486 is scheduled 40 s behind its 180, yet the
+/// CANCELled INVITE draws it at once — a UAS answers a CANCELled INVITE
+/// promptly (RFC 3261 §9.2), and holding it would outlast the canceller's own
+/// wait for that final (§17.1.1.2, 64*T1).
+#[tokio::test(start_paused = true)]
+async fn a_scripted_reject_behind_a_long_dwell_answers_the_cancel_at_once() {
+    let scene = api_scene("pivot-unscripted-cancel-reject-dwell").await;
+    let case = unscripted_cancel_then_final_after(486, "Busy Here", 40_000);
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_eq!(invite_finals(&legs), ["SIP/2.0 486 Busy Here"], "{:#?}", legs["B"]);
+    let at = |pred: &dyn Fn(&str) -> bool| {
+        legs["B"].iter().find(|m| pred(&text(m))).map(|m| m.at_us).expect("on leg B")
+    };
+    let cancel = at(&|t| t.starts_with("CANCEL "));
+    let reject = at(&|t| t.starts_with("SIP/2.0 486"));
+    assert!(
+        reject - cancel < 100_000,
+        "the reject answers the CANCEL at once: {cancel} → {reject}"
+    );
+    let sent = legs["B"].iter().find(|m| text(m).starts_with("SIP/2.0 486")).expect("the 486");
+    assert_eq!(sent.step.as_deref(), Some("s4b"), "it is the scripted step, drawn forward");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The re-INVITE leg B sends is relayed to leg A, which answers `100` and
+/// scripts a `487` 40 s later; leg B CANCELs it, so the SUT CANCELs leg A's
+/// copy, which the flow never scripts. The `487` is drawn forward and the SUT
+/// ACKs it. `scripts_ack` adds leg A's `expect` of that ACK.
+fn cancelled_reinvite(scripts_ack: bool) -> Case {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = std::fs::read_to_string(base_dir.join("reinvite-captured-cseq.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["case"]["id"] = format!("cancelled-reinvite-ack-{scripts_ack}").into();
+    let d = |from: &str, ms: u64| serde_json::json!({ "compressible": true, "from": format!("step:{from}"), "ms": ms, "timer_linked": false });
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(12);
+    flow.push(serde_json::json!({ "id": "s12a", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+        "msg": { "cseq-method": "INVITE", "reason": "Trying", "status": 100 }, "delay": d("s12", 0) }));
+    flow.push(serde_json::json!({ "id": "s13", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "method": "CANCEL" }, "delay": d("s12", 30) }));
+    flow.push(serde_json::json!({ "id": "s14", "leg": "A", "op": "send", "in_dialog": true,
+        "msg": { "cseq-method": "INVITE", "reason": "Request Terminated", "status": 487 },
+        "delay": d("s12a", 40_000) }));
+    if scripts_ack {
+        flow.push(serde_json::json!({ "id": "s14a", "leg": "A", "op": "expect", "auto": true,
+            "check": "record", "in_dialog": true, "msg": { "method": "ACK" }, "delay": d("s14", 0) }));
+    }
+    flow.push(serde_json::json!({ "id": "u1", "op": "unordered", "steps": [
+        { "id": "s15", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+          "msg": { "cseq-method": "CANCEL", "reason": "OK", "status": 200 }, "delay": d("s13", 0) },
+        { "id": "s16", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+          "msg": { "cseq-method": "INVITE", "reason": "Request Terminated", "status": 487 },
+          "delay": d("s13", 0) } ] }));
+    flow.push(serde_json::json!({ "id": "s16a", "leg": "B", "op": "send", "auto": true,
+        "in_dialog": true, "msg": { "method": "ACK" }, "delay": d("s16", 0) }));
+    flow.push(serde_json::json!({ "id": "s17", "leg": "A", "op": "send", "in_dialog": true,
+        "msg": { "method": "BYE" }, "delay": d("s16a", 50) }));
+    flow.push(serde_json::json!({ "id": "s18", "leg": "B", "op": "expect", "check": "record",
+        "in_dialog": true, "msg": { "method": "BYE" }, "delay": d("s17", 0) }));
+    flow.push(serde_json::json!({ "id": "s19", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 }, "delay": d("s18", 0) }));
+    flow.push(serde_json::json!({ "id": "s20", "leg": "A", "op": "expect", "check": "record",
+        "in_dialog": true, "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": d("s19", 0) }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    Case { document, base_dir }
+}
+
+/// The one failure a CANCEL no step scripts leaves: its own refusal (§6.7e).
+fn assert_only_the_cancel_refused(failures: &[Failure], ladder: &[RecordedMessage]) {
+    let refused = |f: &Failure| matches!(f, Failure::UnexpectedDatagram { arrived, .. } if format!("{arrived:?}").contains("CANCEL"));
+    assert!(
+        failures.len() == 1 && refused(&failures[0]),
+        "only the CANCEL is refused: {failures:#?}\n{ladder:#?}"
+    );
+}
+
+/// RFC 3261 §17.2.1: the ACK to a non-2xx final leg A sent is hop-by-hop and
+/// belongs to that INVITE server transaction. No step scripts it, so the
+/// transaction layer consumes it: no unexpected datagram, and the run is clean.
+#[tokio::test(start_paused = true)]
+async fn the_ack_to_a_reject_no_step_scripts_is_the_transactions_own() {
+    let scene = api_scene("pivot-cancelled-reinvite-ack-unscripted").await;
+    let (outcome, _dir) = replay_case(&scene, cancelled_reinvite(false), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_only_the_cancel_refused(&outcome.verdict.failures, &legs["A"]);
+    let ack = legs["A"]
+        .iter()
+        .find(|m| m.dir == Dir::In && text(m).starts_with("ACK "))
+        .expect("the SUT ACKed the 487");
+    assert_eq!(ack.step, None, "no step claims it");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The same ACK, scripted: the document's `expect` takes it as today.
+#[tokio::test(start_paused = true)]
+async fn the_ack_to_a_reject_a_step_scripts_is_that_steps() {
+    let scene = api_scene("pivot-cancelled-reinvite-ack-scripted").await;
+    let (outcome, _dir) = replay_case(&scene, cancelled_reinvite(true), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_only_the_cancel_refused(&outcome.verdict.failures, &legs["A"]);
+    let ack = legs["A"]
+        .iter()
+        .find(|m| m.dir == Dir::In && text(m).starts_with("ACK "))
+        .expect("the SUT ACKed the 487");
+    assert_eq!(ack.step.as_deref(), Some("s14a"), "the scripted expect claims it");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// A scripted 2xx cannot answer a CANCELled INVITE (§9.2: 487, never 2xx), so
+/// the stack's `487` does, and the scripted 2xx — a second final on a
+/// transaction already answered (§17.2.1) — is moot: never sent.
+#[tokio::test(start_paused = true)]
+async fn a_scripted_final_on_an_invite_already_answered_is_not_sent() {
+    let scene = api_scene("pivot-unscripted-cancel-2xx").await;
+    let (outcome, _dir) =
+        replay_case(&scene, unscripted_cancel_then_final(200, "OK"), BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert_eq!(
+        invite_finals(&legs),
+        ["SIP/2.0 487 Request Terminated"],
+        "one final, the stack's 487: {:#?}",
+        legs["B"]
+    );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// The act RFC 3262 §3 makes the endpoint's own: a PRACK no step scripts is
 /// answered `200` when its RAck names the reliable provisional this leg sent,
 /// while the arrival stays the refusal it is. The document declares it — the
@@ -1120,16 +1376,23 @@ async fn an_unscripted_non_2xx_final_is_refused_and_acked_on_the_invite_s_branch
     );
 
     // And ONLY the act the RFC names: the ACK the system sends leg B for its own
-    // 486 is unscripted too, and no rule makes it anyone's to answer — it is
-    // refused, and nothing is invented in reply.
+    // 486 is no step's, so leg B's server transaction consumes it (§17.2.1) —
+    // no failure, and nothing is invented in reply.
     assert!(
-        outcome.verdict.failures.iter().any(|f| matches!(
+        !outcome.verdict.failures.iter().any(|f| matches!(
             f,
             Failure::UnexpectedDatagram { leg, arrived: Arrived::Request { method, .. }, .. }
                 if leg == "B" && method == "ACK"
         )),
         "{:#?}",
         outcome.verdict.failures
+    );
+    assert!(
+        legs["B"].iter().any(|m| m.dir == Dir::In
+            && text(m).starts_with("ACK ")
+            && m.note.as_deref().is_some_and(|n| n.contains("§17.2.1"))),
+        "leg B's transaction consumed the ACK: {:#?}",
+        legs["B"]
     );
     assert!(
         legs["B"]
@@ -1248,6 +1511,123 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
             && m.note.as_deref().is_some_and(|note| note.contains("15.1.2"))),
         "{:#?}",
         legs["A"]
+    );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The linear call with its teardown CROSSING: the captured trace shows the
+/// callee's own BYE 400 ms behind the caller's, and no BYE reaching the
+/// callee. Leg B scripts its BYE (s11) and that BYE's 200 (s12), nothing for a
+/// BYE it takes. 400 ms outlasts this lane's 200 ms relay of the caller's BYE,
+/// so the relay reaches leg B first.
+fn crossing_bye_case() -> Case {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text = std::fs::read_to_string(base_dir.join("linear-attempt.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    doc["case"]["id"] = "linear-attempt-crossing-bye".into();
+    let delay = |from: &str, ms: u64| serde_json::json!({ "compressible": true, "from": from, "ms": ms, "timer_linked": false });
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(10);
+    flow.push(serde_json::json!({
+        "id": "s11", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "method": "BYE" }, "delay": delay("step:s10", 400)
+    }));
+    flow.push(serde_json::json!({
+        "id": "s12", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": delay("step:s11", 0)
+    }));
+    flow.push(serde_json::json!({
+        "id": "s13", "leg": "A", "op": "expect", "check": "record", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "OK", "status": 200 },
+        "delay": delay("step:s10", 0)
+    }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the crossing case parses");
+    Case { document, base_dir }
+}
+
+/// RFC 3261 §15.1.1 / §15.1.2: once a UA has answered the peer's BYE 200 the
+/// dialog is gone, so a BYE it would send on it names no dialog and draws a
+/// 481. Where the system's relay of the caller's BYE reaches the callee
+/// before the callee's own crossing BYE goes out, the callee answers the
+/// relay (an unscripted arrival) and its scripted BYE is moot: it is never
+/// put on the wire.
+#[tokio::test(start_paused = true)]
+async fn a_scripted_bye_on_a_dialog_the_leg_already_ended_is_not_sent() {
+    let scene = api_scene("pivot-crossing-bye").await;
+    let (outcome, _dir) = replay_case(&scene, crossing_bye_case(), BTreeMap::new()).await;
+
+    let legs = outcome.recording.legs();
+    let answered = legs["B"]
+        .iter()
+        .position(|m| {
+            m.dir == Dir::Out && text(m).starts_with("SIP/2.0 200") && text(m).contains(" BYE\r\n")
+        })
+        .unwrap_or_else(|| panic!("leg B answered the relayed BYE: {:#?}", legs["B"]));
+    assert!(
+        legs["B"][answered + 1..]
+            .iter()
+            .all(|m| !(m.dir == Dir::Out && text(m).starts_with("BYE "))),
+        "leg B sent its BYE on the dialog its own 200 had ended: {:#?}",
+        legs["B"]
+    );
+    assert!(
+        legs["B"].iter().all(|m| !(m.dir == Dir::In && text(m).starts_with("SIP/2.0 481"))),
+        "a 481 answered a BYE leg B should never have sent: {:#?}",
+        legs["B"]
+    );
+    // The verdict names the one divergence — the relayed BYE the document never
+    // scripted on leg B — and nothing of the moot BYE: no timeout on its final,
+    // which is retired.
+    let failures = &outcome.verdict.failures;
+    assert!(
+        failures.iter().all(|f| matches!(f, Failure::UnexpectedDatagram { leg, .. } if leg == "B")),
+        "{failures:#?}"
+    );
+    assert_eq!(failures.len(), 1, "{failures:#?}");
+    assert_eq!(outcome.verdict.retired, ["s12"], "the moot BYE's final is retired");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// A BYE the document scripts AFTER the peer's BYE it already answered is the
+/// captured peer's own act, 481 and all (RFC 3261 §15.1.2): leg B takes the
+/// caller's BYE, answers it, then sends the BYE it scripts behind, and the
+/// system answers 481. Nothing is moot about it — it is what was captured.
+#[tokio::test(start_paused = true)]
+async fn a_bye_the_document_scripts_after_the_peers_is_sent() {
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let text_doc = std::fs::read_to_string(base_dir.join("linear-attempt.v3.json")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&text_doc).unwrap();
+    doc["case"]["id"] = "linear-attempt-bye-after-bye".into();
+    let delay = |from: &str, ms: u64| serde_json::json!({ "compressible": true, "from": from, "ms": ms, "timer_linked": false });
+    let flow = doc["flow"].as_array_mut().unwrap();
+    flow.truncate(13);
+    flow.push(serde_json::json!({
+        "id": "s14", "leg": "B", "op": "send", "in_dialog": true,
+        "msg": { "method": "BYE" }, "delay": delay("step:s12", 50)
+    }));
+    flow.push(serde_json::json!({
+        "id": "s15", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+        "msg": { "cseq-method": "BYE", "reason": "Call/Transaction Does Not Exist", "status": 481 },
+        "delay": delay("step:s14", 0)
+    }));
+    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
+    let scene = api_scene("pivot-bye-after-bye").await;
+    let (outcome, _dir) = replay_case(&scene, Case { document, base_dir }, BTreeMap::new()).await;
+    let legs = outcome.recording.legs();
+    assert!(
+        legs["B"].iter().any(|m| m.dir == Dir::Out && text(m).starts_with("BYE ")),
+        "leg B sent the BYE the document scripts: {:#?}",
+        legs["B"]
+    );
+    assert!(
+        outcome.verdict.completed_steps.contains(&"s15".to_string()),
+        "the 481 it drew matched: {:#?}",
+        outcome.verdict
     );
     b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();

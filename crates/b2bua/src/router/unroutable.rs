@@ -1,9 +1,11 @@
 //! An event that resolved to no call: the answer RFC 3261 owes the peer, and
-//! its accounting in three classes that never overlap.
+//! its accounting in classes that never overlap.
 //!
 //! - A wire request other than ACK is one a peer waits on, and draws
 //!   [`refusal`] (`b2bua_unroutable_refused_total{method,code}`). A stray
 //!   CANCEL's 481 is stateless, so each repeat of it counts again.
+//! - A PRACK a released call still answers draws 200 instead
+//!   ([`super::late_prack`], `b2bua_late_prack_answered_total`).
 //! - An ACK or a response is owed nothing and is dropped
 //!   (`b2bua_unroutable_dropped_total{kind}`).
 //! - This node's own event — a client transaction released from its call
@@ -99,6 +101,10 @@ pub(super) async fn on_unroutable(ctx: &RouterCtx, event: &CallEvent, lookup: Lo
 }
 
 async fn on_request(ctx: &RouterCtx, req: &SipRequest, src: SocketAddr) {
+    if let Some(answer) = super::late_prack::answer(ctx, req) {
+        let _ = ctx.txn.send_response(answer, src).await;
+        return;
+    }
     let method = req.method().as_str();
     let class = wave_label(req.method());
     let sample = format!("method={method} call_id={} src={src}", req.call_id().as_str());

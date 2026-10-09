@@ -95,7 +95,7 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
              ladder runs to its 64·T1 bound (RFC 3262 §3) — the caller's silence is this test's \
              subject",
         )
-        .conditional(),
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5181").await;
     let bob = h.agent("bob", "127.0.0.1:5182").await;
@@ -145,6 +145,9 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     // with it — transaction-scoped (RFC 3261 §9.1), leg state untouched.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     reinv.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    bob.receive("PRACK").await.respond(200, "OK").await;
     bob.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
 
@@ -195,11 +198,9 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
             "unacked-reliable-provisional",
             "bob deliberately never PRACKs the reliable provisional answering his own \
              re-INVITE, so the ladder shown toward him runs to its 64·T1 bound \
-             (RFC 3262 §3). His silence charges the B2BUA bind too: the acknowledgement \
-             toward alice is bob's to give and never came, so the stack has none to \
-             relay — §3's reject is the answer it owes instead, and it sends it",
+             (RFC 3262 §3) — his silence is this test's subject",
         )
-        .conditional(),
+        .on_party("bob"),
     );
     let alice = h.agent("alice", "127.0.0.1:5187").await;
     let bob = h.agent("bob", "127.0.0.1:5188").await;
@@ -241,6 +242,9 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     // toward alice ends with it.
     h.advance(Duration::from_millis(T1_MS + 2 * MARGIN_MS)).await;
     reinv.expect(504).await;
+    // The provisional no one PRACKed end to end is acknowledged by this stack as
+    // it CANCELs the transaction (RFC 3262 §4).
+    alice.receive("PRACK").await.respond(200, "OK").await;
     alice.receive("CANCEL").await.respond(200, "OK").await;
     re_uas.respond(487, "Request Terminated").await;
 

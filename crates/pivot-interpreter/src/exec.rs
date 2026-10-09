@@ -45,7 +45,7 @@ use tokio::time::Instant;
 
 use crate::cancel;
 use crate::checks::{self, MessageObservables};
-use crate::close::{self, Owed};
+use crate::close::{self, Owed, FOREIGN_DIALOG, FOREIGN_DIALOG_481};
 use crate::deviation::StepEffects;
 use crate::early::{EarlyDialogs, LearnedForks};
 use crate::gate::{self, GateVerdict, Inbound};
@@ -59,6 +59,7 @@ use crate::render::{self, UriComposer};
 use crate::resolve::Resolver;
 use crate::retransmit::{self, DrawnAck, DrawnAcks, Repeats};
 use crate::scope::Finding;
+use crate::scripted_final;
 use crate::settle::{self, Sut};
 use crate::stack::LegStack;
 use crate::state::StepOutcome;
@@ -70,6 +71,10 @@ const UNSCRIPTED: &str = "(unscripted)";
 /// The recording note for the RFC 3261 §15.1.2 final the document never held.
 const OWED_BYE_FINAL: &str =
     "absorbed: the §15.1.2 final owed to the BYE this leg sent, which no expect scripts";
+
+/// The recording note for the RFC 3261 §17.2.1 ACK to a reject no step scripts.
+const REJECT_ACK: &str =
+    "absorbed: the §17.2.1 ACK to the non-2xx final this leg sent, which no expect scripts";
 
 /// The recording note for the RFC 3261 §17.1.1.3 ACK the settle waited for.
 const OWED_FINAL_ACK: &str =
@@ -460,7 +465,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     async fn emit_ready(&mut self) -> bool {
         loop {
             let Some(step) = self.next_send() else { return true };
-            if !self.emit(&step).await {
+            if !self.emit(&step, None).await {
                 // A send the run cannot compose, pace or put on the wire is a
                 // script it cannot keep following (§11.2): the close ends what
                 // the legs still hold.
@@ -711,6 +716,13 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         }
 
+        // RFC 3261 §12.2.2 before anything reads it: a request naming no dialog
+        // its leg holds is answered 481, and neither a policy nor the flow
+        // takes it.
+        if let Some(leg) = self.foreign_dialog_leg(&message) {
+            return self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
+        }
+
         // Background next (§5.1): a policy's traffic never touches the cursor.
         // The policy is sought over every actor on the RECEIVING endpoint, not
         // only the one whose pump surfaced it: a loopback endpoint hosts a UAC
@@ -917,6 +929,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return true;
         }
+        if self.unscripted_reject_ack(&leg, &inbound) {
+            self.record_arrival(&leg, bytes, None, Some(REJECT_ACK), repeat);
+            return true;
+        }
         let seq = match held_seq {
             Some(seq) => {
                 self.instance.recording().renote(&leg, seq, HELD_TAKEN);
@@ -933,11 +949,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         let confirmed_before = self.stacks.get(&leg).is_some_and(|stack| stack.confirmed());
         // Learn the dialog facts before matching: a step's inline checks may
         // read what this very message taught the leg.
+        let now_us = self.now_us();
         if let Some(stack) = self.stacks.get_mut(&leg) {
             match &message {
                 SipMessage::Request(r) => stack.learn_request(r),
                 SipMessage::Response(r) => stack.learn_response(r),
             }
+            stack.note_confirmed_at(now_us);
         }
         // Only an INVITE final is ACKed, so only one kind is kept: a 200 to a
         // CANCEL is a final too, and ACKing it would answer the wrong
@@ -1226,16 +1244,92 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
-    /// Whether `inbound` is the ACK a non-2xx INVITE final this leg SENT is
-    /// owed (RFC 3261 §17.1.1.3): the closer of the server transaction the
-    /// settle floor holds the run open for, so it is the settle's own arrival
-    /// and never the late datagram a completed flow reports.
+    /// Whether `inbound` is an ACK to a non-2xx INVITE final this leg SENT
+    /// (RFC 3261 §17.1.1.3): its server transaction's own, which the settle
+    /// floor holds the run open for, so it is the settle's arrival and never
+    /// the late datagram a completed flow reports — a repeat included.
     fn owed_final_ack(&self, leg: &str, inbound: &Inbound) -> bool {
         if !inbound.method.as_deref().is_some_and(|method| method.eq_ignore_ascii_case("ACK")) {
             return false;
         }
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
-        close::unacked_finals(&ladder).iter().any(|owed| owed.cseq == inbound.cseq)
+        scripted_final::rejected(&ladder, inbound.cseq)
+    }
+
+    /// Whether `inbound` is an ACK to a non-2xx INVITE final this leg sent that
+    /// no pending `expect` scripts ([`scripted_final::scripts_reject_ack`]):
+    /// hop by hop, its server transaction consumes it (RFC 3261 §17.2.1), so it
+    /// is neither unexpected nor a match for another step.
+    fn unscripted_reject_ack(&self, leg: &str, inbound: &Inbound) -> bool {
+        if !self.owed_final_ack(leg, inbound) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        let steps = self.instance.plan().steps();
+        let cursor = self.instance.cursor();
+        !scripted_final::scripts_reject_ack(&steps, leg, inbound.cseq, &ladder, |id| {
+            cursor.node_complete(id)
+        })
+    }
+
+    /// The leg of `message` when it is a request naming no dialog that leg
+    /// holds ([`LegStack::names_no_dialog`]).
+    fn foreign_dialog_leg(&self, message: &SipMessage) -> Option<String> {
+        let SipMessage::Request(request) = message else { return None };
+        let leg = self.leg_by_call_id(request.call_id().as_str())?;
+        let stack = self.stacks.get(&leg)?;
+        stack.names_no_dialog(request, self.now_us()).then_some(leg)
+    }
+
+    /// Answer `message` 481 (RFC 3261 §12.2.2): it names no dialog its leg
+    /// holds, so it is recorded, refused, taught to nothing, and failed as the
+    /// unexpected datagram it is — mid-flow and during settle alike. `false`
+    /// when the 481 could not be sent.
+    async fn refuse_foreign_dialog(
+        &mut self,
+        actor: &str,
+        leg: &str,
+        message: &SipMessage,
+        bytes: Vec<u8>,
+        repeat: bool,
+    ) -> bool {
+        let SipMessage::Request(request) = message else { return true };
+        self.record_arrival(leg, bytes, None, Some(FOREIGN_DIALOG), repeat);
+        self.instance.fail(Failure::UnexpectedDatagram {
+            leg: leg.to_string(),
+            arrived: Inbound::of(message).arrived(),
+            detail: Some(FOREIGN_DIALOG.to_string()),
+        });
+        let Some(agent) = self.lane.agents.get(actor).cloned() else { return true };
+        let response = sip_message::generators::generate_response(
+            request,
+            481,
+            reason_for(481),
+            &sip_message::generators::GenerateResponseOpts::default(),
+        );
+        let wire = sip_message::serialize(&SipMessage::Response(response));
+        let dst = via_target(request).unwrap_or(self.lane.route_target);
+        match agent.try_send_datagram(&wire, dst).await {
+            Ok(()) => {
+                self.instance.recording().push(
+                    leg,
+                    Dir::Out,
+                    self.now_us(),
+                    wire,
+                    None,
+                    Some(FOREIGN_DIALOG_481),
+                );
+                true
+            }
+            Err(e) => {
+                self.instance.fail(Failure::SendFailed {
+                    step: "(foreign dialog)".into(),
+                    leg: leg.to_string(),
+                    detail: e.to_string(),
+                });
+                false
+            }
+        }
     }
 
     /// Answer a background policy's message. It is answered and recorded; the
@@ -1342,6 +1436,10 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.draw_for_repeat(&message).await;
             return;
         }
+        if let Some(leg) = self.foreign_dialog_leg(&message) {
+            self.refuse_foreign_dialog(actor, &leg, &message, bytes, repeat).await;
+            return;
+        }
         if let Some(method) = &inbound.method {
             if let Some((index, policy)) = self.background_policy(
                 actor,
@@ -1373,11 +1471,13 @@ impl<'a, 'p> Runner<'a, 'p> {
         // takes here too, past the same absorbed final `deliver` never learns
         // — a request it never took is one it cannot answer (§11.2), whether
         // the generic close or this window answers it.
+        let now_us = self.now_us();
         if let Some(stack) = self.stacks.get_mut(&leg) {
             match &message {
                 SipMessage::Request(r) => stack.learn_request(r),
                 SipMessage::Response(r) => stack.learn_response(r),
             }
+            stack.note_confirmed_at(now_us);
         }
         self.record_arrival(
             &leg,
@@ -1483,6 +1583,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                 continue;
             }
             let sent = sip_message::sniff::first_line(&wire);
+            // An emission the run authored ends a ladder as a scripted one does.
+            self.repeats.answered(&leg, &wire, self.now_us());
             self.instance.recording().push(
                 &leg,
                 Dir::Out,
@@ -1513,6 +1615,19 @@ impl<'a, 'p> Runner<'a, 'p> {
         for _ in 0..2 {
             let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
             let Some(owed) = close::unscripted(&ladder, message) else { return };
+            // A CANCELled INVITE the flow still owes its own reject draws that
+            // step at once, its dwell not waited on (RFC 3261 §9.2: any non-2xx
+            // may answer it); the flow walks on from it as from any send.
+            if let Owed::Answer { cseq_method, status: 487, cseq, to_tag, .. } = &owed {
+                if cseq_method == "INVITE" {
+                    if let Some(step) = self.pending_reject(leg, *cseq) {
+                        if !self.emit(&step, Some((*cseq, to_tag.clone()))).await {
+                            self.end_script(Some(leg), Some(&step.id));
+                        }
+                        return;
+                    }
+                }
+            }
             let Some(agent) = self.agent_of_leg(leg) else { return };
             let (wire, dst) = match self.compose_close(leg, &owed, UNSCRIPTED) {
                 Ok(composed) => composed,
@@ -1529,6 +1644,8 @@ impl<'a, 'p> Runner<'a, 'p> {
                 });
                 return;
             }
+            // An emission the run authored ends a ladder as a scripted one does.
+            self.repeats.answered(leg, &wire, self.now_us());
             self.instance.recording().push(
                 leg,
                 Dir::Out,
@@ -1721,6 +1838,68 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
+    /// Whether `step` is a BYE its leg's dialog no longer holds:
+    /// [`close::bye_moot`] over the leg's recorded ladder. A BYE the document
+    /// scripts behind an expect of the peer's BYE on its leg is the captured
+    /// party's own act, 481 included, and is sent as written.
+    fn bye_moot(&mut self, step: &CompiledStep) -> bool {
+        let is_bye = |s: &CompiledStep| {
+            matches!(&s.discriminator, Discriminator::Request { method }
+                if Method::from_wire(method) == Method::Bye)
+        };
+        let steps = self.instance.plan().steps();
+        let scripted_behind = steps
+            .iter()
+            .take_while(|s| s.id != step.id)
+            .any(|s| s.leg == step.leg && s.is_expect() && is_bye(s));
+        is_bye(step)
+            && !scripted_behind
+            && close::bye_moot(
+                &self.instance.recording().legs().remove(&step.leg).unwrap_or_default(),
+            )
+    }
+
+    /// Whether `step` is a final to an INVITE its leg already answered: the
+    /// INVITE it answers ([`scripted_final::answered_invite`]) arrived and
+    /// already drew a final. One whose INVITE has not arrived is not moot.
+    fn final_moot(&self, step: &CompiledStep) -> bool {
+        if !scripted_final::is_final_to_invite(step) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(&step.leg).unwrap_or_default();
+        let steps = self.instance.plan().steps();
+        let Some(at) = steps.iter().position(|s| s.id == step.id) else { return false };
+        scripted_final::answered_invite(&steps, at, &ladder)
+            .is_some_and(|cseq| scripted_final::invite_answered(&ladder, cseq))
+    }
+
+    /// The reject `leg`'s flow still owes its INVITE CSeq `cseq`
+    /// ([`scripted_final::pending_reject`]).
+    fn pending_reject(&self, leg: &str, cseq: u32) -> Option<CompiledStep> {
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        let steps = self.instance.plan().steps();
+        let cursor = self.instance.cursor();
+        scripted_final::pending_reject(&steps, leg, cseq, &ladder, |id| cursor.node_complete(id))
+            .cloned()
+    }
+
+    /// Retire every expect on `send`'s leg waiting on the transaction `send`
+    /// would have opened: a request never sent draws no response.
+    fn retire_answers_to(&mut self, send: &CompiledStep) {
+        let answers: Vec<String> = self
+            .instance
+            .plan()
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == send.leg && s.is_expect())
+            .filter(|s| self.instance.cursor().opening_send(&s.id) == Some(send.id.as_str()))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in answers {
+            self.instance.retire_step(&id);
+        }
+    }
+
     /// Mark a step done and remember when, for the dwells anchored on it.
     fn complete(&mut self, step: &CompiledStep) {
         let now = Instant::now();
@@ -1793,7 +1972,11 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Emit one send step.
-    async fn emit(&mut self, step: &CompiledStep) -> bool {
+    async fn emit(
+        &mut self,
+        step: &CompiledStep,
+        answering: Option<(u32, Option<String>)>,
+    ) -> bool {
         let effects = StepEffects::of(self.instance.plan().deviations_for(&step.id));
         let refusals = effects.refusals();
         if !refusals.is_empty() {
@@ -1816,7 +1999,40 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.complete(step);
             return true;
         }
-        let message = match self.compose(step, &effects) {
+        // RFC 3261 §15.1.2: a BYE on a dialog this leg already ended by
+        // answering the peer's BYE names nothing and would draw a 481. It is
+        // moot: never put on the wire, and the final it would have drawn is
+        // retired with it.
+        if self.bye_moot(step) {
+            self.instance.recording().push(
+                &step.leg,
+                Dir::Out,
+                self.now_us(),
+                Vec::new(),
+                Some(&step.id),
+                Some("moot: the dialog ended when this leg answered the peer's BYE"),
+            );
+            self.complete(step);
+            self.retire_answers_to(step);
+            return true;
+        }
+        // RFC 3261 §17.2.1: a server transaction sends one final. A scripted
+        // final to an INVITE this leg already answered is moot: never sent, so
+        // its ladder never starts.
+        if self.final_moot(step) {
+            self.instance.recording().push(
+                &step.leg,
+                Dir::Out,
+                self.now_us(),
+                Vec::new(),
+                Some(&step.id),
+                Some("moot: the INVITE this final answers already has its final"),
+            );
+            self.complete(step);
+            return true;
+        }
+        let answering = answering.as_ref().map(|(cseq, tag)| (*cseq, tag.as_deref()));
+        let message = match self.compose(step, &effects, answering) {
             Ok(message) => message,
             Err(failure) => {
                 self.instance.fail(failure);
@@ -2144,11 +2360,14 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.stacks.get(leg).map(|s| s.sent_invite_cseqs().collect()).unwrap_or_default()
     }
 
-    /// Compose the message a send step emits.
+    /// Compose the message a send step emits. A response answers the request
+    /// `answering` names — CSeq number and dialog To-tag — where given, else
+    /// the leg's latest of its CSeq method.
     fn compose(
         &mut self,
         step: &CompiledStep,
         effects: &StepEffects,
+        answering: Option<(u32, Option<&str>)>,
     ) -> Result<SipMessage, Failure> {
         let site = format!("step {:?}", step.id);
         // The lane's per-call directives (§4.3) reach exactly one step: the
@@ -2228,6 +2447,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let early_tag = self.fork_tag_of(step).map(str::to_string);
         let stack =
             self.stacks.get_mut(&step.leg).ok_or_else(|| fail("the leg has no stack".into()))?;
+        if let Some(n) = step.msg.target_refresh {
+            stack.refresh_target(n);
+        }
 
         // Where the CSeq is NOT the stack's to choose, an override cannot be
         // honoured, and a message that quietly kept the compliant number would
@@ -2255,9 +2477,13 @@ impl<'a, 'p> Runner<'a, 'p> {
                 cseq_method: step.msg.cseq_method.as_deref(),
                 early_tag: early_tag.as_deref(),
             };
-            let response = stack
-                .respond(&answer, &headers, body, content_type)
-                .map_err(|e| fail(e.to_string()))?;
+            let response = match answering {
+                Some((cseq, to_tag)) => {
+                    stack.respond_to(cseq, to_tag, &answer, &headers, body, content_type)
+                }
+                None => stack.respond(&answer, &headers, body, content_type),
+            }
+            .map_err(|e| fail(e.to_string()))?;
             let message = SipMessage::Response(response);
             preserved_block(step, effects, &rendered, &message)?;
             return Ok(message);
@@ -2300,7 +2526,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             Method::Update => stack
                 .update(early_tag.as_deref(), &headers, body, content_type, cseq_override)
                 .map_err(|e| fail(e.to_string()))?,
-            _ if !stack.has_dialog() && stack.sent_invite().is_none() => {
+            _ if !stack.has_dialog() && stack.sent_invite().is_none() && !stack.rings_early() => {
                 // A dialog-opening request is addressed at a party. Emitting one
                 // with an empty Request-URI, From or To puts a malformed message
                 // on the wire and calls it a replay.
@@ -2329,8 +2555,18 @@ impl<'a, 'p> Runner<'a, 'p> {
                     .out_of_dialog(method, &addresses, &headers, body, content_type, cseq_override)
                     .map_err(|e| fail(e.to_string()))?
             }
+            // A request on a leg still ringing rides the early dialog the step
+            // names, or the leg's only one (RFC 3261 §12.1.1): a callee's BYE
+            // on the dialog its provisional opened is one (§15).
             _ => stack
-                .in_dialog(method, &headers, body, content_type, cseq_override)
+                .in_dialog_on(
+                    early_tag.as_deref(),
+                    method,
+                    &headers,
+                    body,
+                    content_type,
+                    cseq_override,
+                )
                 .map_err(|e| fail(e.to_string()))?,
         };
         let message = SipMessage::Request(request);
