@@ -531,7 +531,7 @@ impl<'a> Respond<'a> {
         // the proxy's, so the response correctly traverses it back.
         let dst = top_via_addr(&txn.request).unwrap_or(txn.agent.addr);
         let msg = SipMessage::Response(resp);
-        txn.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
+        txn.agent.try_send_emitted(&msg, &emitted_wire(&msg, &headers), dst).await?;
         // §17.1.1.3 UAS obligation: a non-2xx final to an INVITE (initial or
         // re-INVITE) arms the txn-owned ACK wait — the arriving hop ACK is the
         // transaction layer's to claim, in whatever order it lands relative to

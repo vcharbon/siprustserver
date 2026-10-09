@@ -15,6 +15,7 @@ use sip_message::{
 };
 
 use super::client_invite::ClientInvite;
+use super::step::unwrap_step;
 use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
 
@@ -257,7 +258,7 @@ impl<'a> Invite<'a> {
             &self.remote_emits,
         );
         let invite_wire = emitted_wire(&msg, &headers);
-        caller.send_wire(&invite_wire, wire_dst).await;
+        unwrap_step(caller.try_send_emitted(&msg, &invite_wire, wire_dst).await);
 
         let dialog = StackDialog {
             call_id,

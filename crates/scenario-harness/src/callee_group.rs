@@ -322,6 +322,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 txn: std::sync::Arc::new(crate::absorption::Absorption::transaction_view()),
                 two_xx_acks: std::sync::Arc::default(),
                 holdback: std::sync::Arc::default(),
+                dialogs: self.harness.dialog_judge(name),
             };
             agents.insert(name.clone(), agent);
         }

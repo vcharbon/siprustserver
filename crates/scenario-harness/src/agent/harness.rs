@@ -19,12 +19,14 @@ use sip_clock::Clock;
 use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint};
 
 use super::artifact_dump::ArtifactDump;
+use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::log_dump::LogDump;
 use super::rr_fold::decide_rr_fold;
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
+use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 use crate::run::RunReport;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -96,6 +98,12 @@ pub struct Harness {
     /// Futures [`finish`](Harness::finish) awaits before it settles the fabric
     /// (see [`settle_before_finish`](Harness::settle_before_finish)).
     finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
+    /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
+    /// gates their verdicts.
+    judges: RefCell<Vec<Arc<DialogJudge>>>,
+    /// The `dialog-…` waivers, shared with every UA so a scripted receive
+    /// honours them.
+    dialog_opt_ins: DialogOptIns,
 }
 
 impl Harness {
@@ -215,7 +223,18 @@ impl Harness {
             recv_timeout,
             anchors,
             finish_settles: RefCell::new(Vec::new()),
+            judges: RefCell::new(Vec::new()),
+            dialog_opt_ins: DialogOptIns::default(),
         }
+    }
+
+    /// A harness-judged dialog table for the UA `party`, gated at
+    /// [`finish`](Self::finish).
+    pub(crate) fn dialog_judge(&self, party: &str) -> Arc<DialogJudge> {
+        let judge =
+            Arc::new(DialogJudge::new(party, self.dialog_opt_ins.clone(), DialogJudging::Harness));
+        self.judges.borrow_mut().push(judge.clone());
+        judge
     }
 
     /// Re-seed the shared branch/tag/Call-ID counter. The default (1) is
@@ -295,6 +314,9 @@ impl Harness {
             self.name,
             scope.justification,
         );
+        if scope.rule.starts_with("dialog-") {
+            self.dialog_opt_ins.lock().unwrap().push(scope.clone());
+        }
         self.waivers.borrow_mut().push(WaiverState::new(scope));
     }
 
@@ -395,6 +417,9 @@ impl Harness {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name.clone(), NetworkTag::Ext);
+        // A proxy relays requests it is not a party to: it holds no dialogs.
+        let holds_dialogs =
+            roles.contains(&sip_net::UaRole::Uac) || roles.contains(&sip_net::UaRole::Uas);
         let mut opts = BindUdpOpts::new(addr, 64).with_roles(roles);
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
@@ -406,6 +431,10 @@ impl Harness {
             "[harness] UA {name}: Record-Route fold = {rr_fold:?} \
              (set HARNESS_RR_FOLD=separate|combined to pin)"
         );
+        let dialogs = self.dialog_judge(&name);
+        if !holds_dialogs {
+            dialogs.set_judging(DialogJudging::Off);
+        }
         Agent {
             name: name.clone(),
             addr,
@@ -417,6 +446,7 @@ impl Harness {
             txn: Arc::new(Absorption::transaction_view()),
             two_xx_acks: Arc::default(),
             holdback: Arc::default(),
+            dialogs,
         }
     }
 
@@ -620,6 +650,12 @@ impl Harness {
         // released before the `close().await` below.
         {
             let waivers = self.waivers.borrow();
+            // The dialog verdicts first: they name the UA and the request, the
+            // most specific reason a run can fail for.
+            let verdicts = surviving_verdicts(&self.judges.borrow(), &waivers);
+            if !verdicts.is_empty() && !std::thread::panicking() {
+                panic!("{}", render_dialog_panic(&self.name, &verdicts));
+            }
             let names = super::run_guards::addr_names(&self.recorder);
             let cseq_findings = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names);
             if !cseq_findings.is_empty() && !std::thread::panicking() {
@@ -689,16 +725,22 @@ impl Harness {
         // the matching `RfcFinding`s so the caller gets the full objects.
         // Compute the gating set in a scope so the borrow is released before the
         // `close().await` below.
-        let gate: std::collections::HashSet<(String, String)> = {
+        let (gate, verdicts) = {
             let waivers = self.waivers.borrow();
             let names = super::run_guards::addr_names(&self.recorder);
-            rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names).into_iter().collect()
+            let gate: std::collections::HashSet<(String, String)> =
+                rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names)
+                    .into_iter()
+                    .collect();
+            (gate, surviving_verdicts(&self.judges.borrow(), &waivers))
         };
-        let gating: Vec<sip_net::RfcFinding> = rfc_findings
-            .iter()
-            .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
-            .cloned()
-            .collect();
+        let mut gating = as_findings(verdicts);
+        gating.extend(
+            rfc_findings
+                .iter()
+                .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
+                .cloned(),
+        );
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();

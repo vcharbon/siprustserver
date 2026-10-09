@@ -33,6 +33,8 @@
 //! Module map (one concern per file):
 //! - `harness` — the session: recording-wrapped network, agent binding,
 //!   virtual-time advance, `finish()` + the RFC hard gate.
+//! - `dialog_gate` — `finish()`'s gate on the UAs' dialog verdicts
+//!   ([`crate::dialogs`]) and the `dialog-…` waivers that opt one out.
 //! - `run_guards` — Drop-armed backstops: panic-time trace dump, the
 //!   forgot-to-`finish` RFC gate.
 //! - `log_dump` — the panic-time dump of what the SUT logged and traced.
@@ -62,6 +64,7 @@ mod artifact_dump;
 mod client_invite;
 mod client_txn;
 mod dialog;
+pub(crate) mod dialog_gate;
 mod harness;
 mod invite;
 mod log_dump;

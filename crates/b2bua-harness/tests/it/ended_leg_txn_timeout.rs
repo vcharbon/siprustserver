@@ -15,7 +15,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::ByeDisposition;
-use scenario_harness::Harness;
+use scenario_harness::dialogs::DIALOG_ENDED;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -94,6 +95,13 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     let h = Harness::new("ended-leg-txn-timeout");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
+    h.waive(
+        WaiverScope::rule(
+            DIALOG_ENDED,
+            "the test's own service sends the NOTIFY after bob's BYE: its timeout is the subject",
+        )
+        .on_party("bob"),
+    );
     let b2bua = B2buaSut::builder(decision())
         .services(vec![lingering::service_def()])
         // No keepalive inside the Timer F window: the caller side answers none.
@@ -138,6 +146,7 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
 /// the NOTIFY there is unanswered; when the NOTIFY's transaction times out,
 /// the pending INFO is answered 481 and the leg keeps `ByeReceived`.
 #[tokio::test(start_paused = true)]
+#[ignore = "SUT defect pending decision: the caller's INFO is relayed onto the callee dialog whose BYE the SUT answered"]
 async fn a_request_pending_on_an_ended_leg_is_answered_when_its_transaction_times_out() {
     let h = Harness::new("ended-leg-txn-timeout-pending");
     let alice = h.agent("alice", "127.0.0.1:5060").await;

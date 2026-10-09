@@ -3,6 +3,8 @@
 //! (`try_receive`, `try_expect`, `try_send`, …); the panicking fluent methods
 //! (`receive`/`expect`/`send`) are thin veneers over it.
 
+use crate::dialogs::DialogVerdict;
+
 /// A fallible step outcome — the error type of the agent's ONE receive/expect/
 /// send core. Two policies, one mechanism: a `#[tokio::test]` stops the world
 /// at the first divergence (panic → the panic-time trace dump renders the wire
@@ -25,6 +27,8 @@ pub enum StepError {
     UnexpectedKind { who: String, detail: String },
     /// Sending a datagram failed at the transport.
     Transport { who: String, detail: String },
+    /// A received request failed the UA's dialog table (RFC 3261 §12.2.2).
+    Dialog { who: String, verdict: Box<DialogVerdict> },
 }
 
 impl std::fmt::Display for StepError {
@@ -43,6 +47,7 @@ impl std::fmt::Display for StepError {
             }
             StepError::UnexpectedKind { who, detail } => write!(f, "{who}: {detail}"),
             StepError::Transport { who, detail } => write!(f, "{who} send failed: {detail}"),
+            StepError::Dialog { who, verdict } => write!(f, "{who}: {verdict}"),
         }
     }
 }

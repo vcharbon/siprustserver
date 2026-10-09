@@ -52,6 +52,7 @@ use sip_net::{
 };
 
 use crate::agent::{decide_rr_fold, Agent, Ids};
+use crate::dialogs::{DialogJudge, DialogJudging, DialogOptIns};
 
 /// The result of applying the structural waivers to a sampled call's audit
 /// (ADR-0024 §6): the surviving findings plus a per-waiver "did it filter
@@ -75,6 +76,8 @@ pub struct AgentBinder {
     recorder: Option<Recorder>,
     ids: Arc<Ids>,
     recv_timeout: Duration,
+    /// The dialog judge of every agent bound, for the call's verdicts.
+    judges: std::sync::Mutex<Vec<Arc<DialogJudge>>>,
 }
 
 impl AgentBinder {
@@ -152,7 +155,14 @@ impl AgentBinder {
     ) -> Self {
         let ids = Arc::new(Ids(AtomicU64::new(1)));
         if !record {
-            return Self { network, recording: None, recorder: None, ids, recv_timeout };
+            return Self {
+                network,
+                recording: None,
+                recorder: None,
+                ids,
+                recv_timeout,
+                judges: Default::default(),
+            };
         }
         // Recording path: wrap the raw network in the recorder + the default RFC
         // 3261/3262/3264 wire-invariant suite, exactly as `Harness::build` does,
@@ -175,6 +185,7 @@ impl AgentBinder {
             recorder: Some(recorder),
             ids,
             recv_timeout,
+            judges: Default::default(),
         }
     }
 
@@ -237,9 +248,16 @@ impl AgentBinder {
                 NetworkTag::Ext,
             );
         }
+        let dialogs = Arc::new(DialogJudge::new(
+            name.clone(),
+            DialogOptIns::default(),
+            DialogJudging::Harness,
+        ));
+        self.judges.lock().unwrap().push(dialogs.clone());
         Ok(Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
             rr_fold: decide_rr_fold(&name),
+            dialogs,
             name,
             addr,
             ep: Arc::from(ep),
@@ -307,19 +325,21 @@ impl AgentBinder {
     /// `allowViolations` semantics). The returned [`WaiverOutcome::used`] mask (aligned
     /// to `waivers`) folds into the per-CAMPAIGN unused-waiver gate — NOT
     /// enforced per call (a divergent branch may legitimately never trip a rule).
+    ///
+    /// The dialog verdicts of the call's UAs ([`crate::dialogs`]) join the
+    /// findings whether or not the call recorded, each under its rule and its
+    /// UA's name, waived by a `dialog-…` scope on that UA.
     pub fn rfc_findings(&self, waivers: &[crate::WaiverScope]) -> WaiverOutcome {
+        use crate::agent::dialog_gate::{as_findings, surviving_verdicts};
         use crate::agent::waiver::{apply_waivers_findings, Attribution, WaiverState};
-        match &self.recording {
-            Some(rec) => {
-                let events = rec.channel().snapshot();
-                let states: Vec<WaiverState> =
-                    waivers.iter().cloned().map(WaiverState::new).collect();
-                let findings = apply_waivers_findings(&events, &states, &Attribution::SubLane);
-                let used = states.iter().map(|s| s.used.get()).collect();
-                WaiverOutcome { findings, used }
-            }
-            None => WaiverOutcome { findings: Vec::new(), used: vec![false; waivers.len()] },
+        let states: Vec<WaiverState> = waivers.iter().cloned().map(WaiverState::new).collect();
+        let mut findings = as_findings(surviving_verdicts(&self.judges.lock().unwrap(), &states));
+        if let Some(rec) = &self.recording {
+            let events = rec.channel().snapshot();
+            findings.extend(apply_waivers_findings(&events, &states, &Attribution::SubLane));
         }
+        let used = states.iter().map(|s| s.used.get()).collect();
+        WaiverOutcome { findings, used }
     }
 
     /// The NORMALIZED projection of this call's recorded trace (ADR-0024 §7) —

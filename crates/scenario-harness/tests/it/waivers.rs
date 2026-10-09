@@ -4,6 +4,7 @@
 //! recording-wrapped simulated network. The deliberate violation exercised is a
 //! CSeq reuse (RFC 3261 §12.2.1.1), driven via the declared CSeq deviation.
 
+use scenario_harness::dialogs::DIALOG_CSEQ_SKIP;
 use scenario_harness::{Agent, CseqOp, CseqOpAt, CseqPattern, Harness, Proxy, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::CSeq;
@@ -320,6 +321,12 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
         WaiverScope::rule(CSEQ_RULE, "alice's numbering is not under test")
             .on_party("alice")
             .conditional(),
+    );
+    // mid's rewrite leaves bob's remote CSeq a step behind alice's, so her BYE
+    // skips one at bob: the audit's charge to mid is what this test pins.
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_SKIP, "the rewrite under test skips bob's remote CSeq")
+            .on_party("bob"),
     );
     let (bob_addr, alice_addr) = (bob.addr(), alice.addr());
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(mid.addr()).send().await;

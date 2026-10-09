@@ -200,9 +200,6 @@ pub(super) async fn apply_disposition(
                 }
                 st.early_provisionals.insert((*tag).to_string());
             }
-            if let Some(loser) = loser_late_200 {
-                st.fork_loser_tags.insert(loser.to_string());
-            }
             st.obs.record(Observation::LegEarly { leg: st.role }, now);
             let fork = ForkAnswer {
                 winner,

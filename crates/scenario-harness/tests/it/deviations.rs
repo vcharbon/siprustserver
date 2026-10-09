@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use scenario_harness::dialogs::DIALOG_CSEQ_SKIP;
 use scenario_harness::{
     CseqOp, CseqOpAt, CseqPattern, EmitOpts, Harness, MessageTemplate, TemplateHeader, WaiverScope,
 };
@@ -31,6 +32,12 @@ async fn cseq_jump_visible_on_the_wire() {
             "replaying a captured out-of-pattern in-dialog CSeq (declared jump deviation)",
         )
         .on_party("alice"),
+    );
+    // bob's dialog table sees the jump as a skipped CSeq (RFC 3261 §12.2.1.1):
+    // the deviation is what this test sends on purpose.
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_SKIP, "the declared jump skips bob's remote CSeq")
+            .on_party("bob"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -179,6 +186,12 @@ async fn shared_cseq_counter_survives_a_scope_refresh_clone() {
     h.waive(
         WaiverScope::rule("cseq-in-dialog-order", "declared jump; shared-counter clone test")
             .on_party("alice"),
+    );
+    // bob's dialog table sees the jump as a skipped CSeq (RFC 3261 §12.2.1.1):
+    // the deviation is what this test sends on purpose.
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_SKIP, "the declared jump skips bob's remote CSeq")
+            .on_party("bob"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -341,6 +354,12 @@ async fn templated_in_dialog_request_honors_the_pattern() {
             "replaying a captured out-of-pattern CSeq via a templated in-dialog request",
         )
         .on_party("alice"),
+    );
+    // bob's dialog table sees the jump as a skipped CSeq (RFC 3261 §12.2.1.1):
+    // the deviation is what this test sends on purpose.
+    h.waive(
+        WaiverScope::rule(DIALOG_CSEQ_SKIP, "the declared jump skips bob's remote CSeq")
+            .on_party("bob"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;

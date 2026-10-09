@@ -142,6 +142,9 @@ impl From<&CallOutcome> for ResultClass {
                 StepError::UnexpectedKind { .. } => ResultClass::Unexpected,
                 StepError::Transport { .. } => ResultClass::Transport,
                 StepError::Unparseable { .. } => ResultClass::Unparseable,
+                // A request a UA's dialog table refuses is an RFC 3261 §12.2.2
+                // violation of whoever sent it.
+                StepError::Dialog { .. } => ResultClass::RfcAuditFail,
             },
         }
     }

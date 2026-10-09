@@ -1,0 +1,27 @@
+//! The dialog state of a simulated UA (RFC 3261 §12) and the one judge of the
+//! in-dialog requests it receives, shared by the fluent agent, the reactive
+//! actor and the scenario interpreter.
+//!
+//! - `table` — [`DialogTable`]: the dialogs one UA holds, fed from both
+//!   directions, and the verdict on each received in-dialog request.
+//! - `verdict` — [`DialogVerdict`]: what is wrong with a request, its rule
+//!   name, and the wire answer a UA gives it.
+//! - `judge` — [`DialogJudge`]: one UA's table and the verdicts it recorded,
+//!   gated by the harness or handed to a driver.
+//!
+//! A verdict fails the run unless a `dialog-…` waiver on the receiving UA opts
+//! it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`).
+
+mod judge;
+mod table;
+mod verdict;
+
+pub use judge::{covers, DialogJudge, DialogJudging, DialogOptIns};
+pub use table::{BackwardsCseq, DialogState, DialogTable};
+pub use verdict::{
+    DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_ENDED,
+    DIALOG_UNKNOWN,
+};
+
+#[cfg(test)]
+mod tests;

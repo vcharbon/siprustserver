@@ -12,6 +12,7 @@ mod alice_calls_bob;
 mod any_method_prack_update;
 mod callee_group;
 mod deviations;
+mod dialog_table;
 mod early_dialogs;
 mod finish_settles;
 mod fluent_dialog;

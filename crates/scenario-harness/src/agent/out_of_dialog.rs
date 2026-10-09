@@ -188,7 +188,7 @@ impl<'a> OutOfDialogRequest<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
+        caller.try_send_emitted(&msg, &emitted_wire(&msg, &headers), wire_dst).await?;
         Ok(InDialogTxn::new(
             caller.clone(),
             // An out-of-dialog INVITE's non-2xx final takes a txn-layer ACK
@@ -257,7 +257,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 &apply_name_forms(msg.headers(), &self.name_forms),
                 &self.remote_emits,
             );
-            caller.try_send_wire(&emitted_wire(&msg, &headers), wire_dst).await?;
+            caller.try_send_emitted(&msg, &emitted_wire(&msg, &headers), wire_dst).await?;
             // Raw-receive so a 401/407 keeps its challenge header (a real digest
             // responder reads `nonce`/`realm` off it); a matching final returns
             // straight away, an unsolicited 100 is absorbed.

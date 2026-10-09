@@ -104,6 +104,32 @@ async fn react_request(st: &mut ActorState<'_>, uas: ServerTxn) -> Result<(), St
         return apply_disposition(st, uas).await;
     }
 
+    // The UA's dialog table judged the request when it was sighted (RFC 3261
+    // §12.2.2): one on no dialog or an ended one draws 481, one whose CSeq
+    // goes backwards 500, whatever a script expects; a CSeq skip is taken.
+    // The verdict stays recorded, so it still fails the run unless opted in.
+    if method != "ACK" {
+        if let Some((code, reason)) =
+            st.agent.dialog_verdict(uas.request()).and_then(|v| v.kind.refusal())
+        {
+            let mut uas = uas;
+            uas.respond(code, reason).try_send().await?;
+            st.obs.record(
+                Observation::ServicedStray {
+                    leg: st.role,
+                    method,
+                    action: if code == 481 {
+                        "refused 481 by the dialog table"
+                    } else {
+                        "refused 500 by the dialog table"
+                    },
+                },
+                Instant::now(),
+            );
+            return Ok(());
+        }
+    }
+
     // Scripted CANCEL park-or-react (ADR-0024): the CANCEL hop's `200` stays
     // a stack automatic, but the CANCEL itself PARKS when a remaining
     // `ExpectRequest{Cancel}` claims it — the script sequences the 487 on the
@@ -233,14 +259,17 @@ pub(super) async fn react_in_dialog_request(
                 st.feed.on_ack_rx.stamp(st.ctx);
             }
         }
-        // A BYE tears this leg down — UNLESS it is addressed to a LOSING fork's
-        // tag (C1/E3: the caller ACK+BYEs a losing fork's late 200, §13.2.2.4):
-        // that BYE ends only the abandoned early fork, the winning dialog lives
-        // on, so it is 200'd (and its CSeq folded into the dialog stream) but
-        // the leg is NOT terminated.
+        // A BYE tears this leg down — UNLESS it names a dialog other than the
+        // leg's confirmed one (C1/E3: the caller ACK+BYEs a losing fork's late
+        // 200, §13.2.2.4): that BYE ends only the losing fork's dialog, the
+        // winning dialog lives on, so it is 200'd (and its CSeq folded into the
+        // dialog stream) but the leg is NOT terminated.
         "BYE" => {
-            let is_fork_teardown =
-                uas.request().to().tag().is_some_and(|t| st.fork_loser_tags.contains(t));
+            let is_fork_teardown = st
+                .dialogs
+                .confirmed
+                .as_ref()
+                .is_some_and(|d| uas.request().to().tag().is_some_and(|t| t != d.local_tag()));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
             st.obs.record(

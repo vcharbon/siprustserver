@@ -19,6 +19,7 @@ pub mod anchors;
 pub mod callee_group;
 pub mod callflow;
 pub mod claim;
+pub mod dialogs;
 pub mod dsl;
 pub mod egress;
 pub mod legpick;

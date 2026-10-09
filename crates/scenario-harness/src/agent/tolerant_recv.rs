@@ -13,7 +13,7 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 
 use super::addressing::top_via_addr;
 use super::server_txn::ServerTxn;
-use super::step::StepError;
+use super::step::{unwrap_step, StepError};
 use super::Agent;
 
 /// The stateless answer a UA with **no remaining dialog state** owes an
@@ -169,6 +169,7 @@ impl Agent {
                     r.reason()
                 ),
             };
+            unwrap_step(self.dialog_check(&r));
             let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method() == method {
                 return Some(txn);
@@ -177,7 +178,8 @@ impl Agent {
                 continue; // txn-owned §17.1.1.3 hop ACK
             }
             if tolerate.iter().any(|t| txn.request.method() == *t) {
-                txn.respond(200, "OK").send().await;
+                let (code, reason) = self.dialog_refusal(&txn.request).unwrap_or((200, "OK"));
+                txn.respond(code, reason).send().await;
                 continue;
             }
             panic!(
@@ -225,6 +227,7 @@ impl Agent {
                     })
                 }
             };
+            self.dialog_check(&r)?;
             let mut txn = ServerTxn::from_request(self.clone(), r);
             if txn.request.method() == method {
                 return Ok((txn, absorbed));
@@ -232,6 +235,13 @@ impl Agent {
             if txn.request.method().as_str() == "ACK" {
                 absorbed.push(txn.request);
                 continue;
+            }
+            if let Some((code, reason)) = self.dialog_refusal(&txn.request) {
+                if tolerate.iter().any(|t| txn.request.method() == *t) {
+                    txn.respond(code, reason).try_send().await?;
+                    absorbed.push(txn.request);
+                    continue;
+                }
             }
             if tolerate.iter().any(|t| txn.request.method() == *t) {
                 let is_offer_reinvite =
@@ -265,6 +275,7 @@ impl Agent {
             let msg = self.recv().await;
             match msg {
                 SipMessage::Request(r) => {
+                    unwrap_step(self.dialog_check(&r));
                     if r.method() == method {
                         return ServerTxn::from_request(self.clone(), r);
                     }
@@ -274,8 +285,9 @@ impl Agent {
                     if tolerate.iter().any(|t| r.method() == *t) {
                         // Drain + answer the duplicate so the txn layer stops
                         // retransmitting it, then keep waiting for `method`.
+                        let (code, reason) = self.dialog_refusal(&r).unwrap_or((200, "OK"));
                         let mut txn = ServerTxn::from_request(self.clone(), r);
-                        txn.respond(200, "OK").send().await;
+                        txn.respond(code, reason).send().await;
                         continue;
                     }
                     panic!(
@@ -319,6 +331,7 @@ impl Agent {
             match self.recv().await {
                 SipMessage::Request(r) => {
                     if r.method() == method {
+                        unwrap_step(self.dialog_check(&r));
                         return ServerTxn::from_request(self.clone(), r);
                     }
                     if absorb.iter().any(|t| r.method() == *t) {

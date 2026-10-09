@@ -26,6 +26,7 @@ use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
 use super::Invite;
 use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
+use crate::dialogs::{BackwardsCseq, DialogJudge, DialogJudging, DialogVerdict};
 
 /// The media type a scenario names as text. A value the reader rejects still
 /// reaches the wire as the test wrote it — a scenario states the bytes it means
@@ -71,8 +72,14 @@ pub enum Inbound {
     Response(SipResponse),
 }
 
-/// A stateful fake UA. Cheap to clone (shares the endpoint + id source); the
-/// dialog state lives on the per-transaction handles it returns, not here.
+/// A stateful fake UA. Cheap to clone (shares the endpoint, the id source, the
+/// transaction layer and the dialog table). The per-transaction handles it
+/// returns carry what a request is composed from; the UA's RFC 3261 §12 dialog
+/// table ([`DialogJudge`]) is fed by every message it sends and sights and
+/// judges every in-dialog request it receives: a scripted receive of a request
+/// on no dialog, an ended one, or out of CSeq order is a
+/// [`StepError::Dialog`], and [`Harness::finish`](super::Harness::finish)
+/// fails on any such verdict a `dialog-…` waiver on this UA does not opt out.
 #[derive(Clone)]
 pub struct Agent {
     // Fields are `pub(crate)` so the Send [`crate::loadbind::AgentBinder`] can
@@ -101,6 +108,8 @@ pub struct Agent {
     /// kept by the TU view, waiting for the body's next pull. Every receive
     /// path drains it first, so sighting early never reorders the stream.
     pub(crate) holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
+    /// This UA's dialog table and the verdicts it recorded. Shared across clones.
+    pub(crate) dialogs: Arc<DialogJudge>,
 }
 
 impl Agent {
@@ -129,6 +138,43 @@ impl Agent {
     /// [`wire_view`](Self::wire_view), in the same order.
     pub fn tu_view(&self) -> Vec<WireEntry> {
         self.txn.tu_view()
+    }
+
+    /// The verdict this UA's dialog table passed on `request` when it was
+    /// sighted (RFC 3261 §12.2.2), whoever answers for it.
+    pub fn dialog_verdict(&self, request: &SipRequest) -> Option<DialogVerdict> {
+        self.dialogs.verdict_for(request)
+    }
+
+    /// A scripted receive's check of `request`: its dialog verdict as a
+    /// [`StepError::Dialog`], unless a `dialog-…` waiver on this UA opts it out.
+    pub(super) fn dialog_check(&self, request: &SipRequest) -> Result<(), StepError> {
+        match self.dialogs.failure_for(request) {
+            Some(verdict) => {
+                Err(StepError::Dialog { who: self.name.clone(), verdict: Box::new(verdict) })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The answer this UA owes `request` instead of a `200` when its dialog
+    /// table refuses it (RFC 3261 §12.2.2): `481` or `500`.
+    pub(super) fn dialog_refusal(&self, request: &SipRequest) -> Option<(u16, &'static str)> {
+        self.dialogs.verdict_for(request).and_then(|v| v.kind.refusal())
+    }
+
+    /// Hand this UA's dialog verdicts to a driver that is its stack (a
+    /// scenario interpreter): the driver reads each one through
+    /// [`dialog_verdict`](Self::dialog_verdict) and the harness gates none.
+    /// Affects every clone of this UA.
+    pub fn hand_dialogs_to_driver(&self, backwards: BackwardsCseq) {
+        self.dialogs.set_judging(DialogJudging::Driver(backwards));
+    }
+
+    /// This agent relays requests it is not a party to (a hand-built proxy or
+    /// registrar front): it keeps no dialog table. Affects every clone.
+    pub fn hold_no_dialogs(&self) {
+        self.dialogs.set_judging(DialogJudging::Off);
     }
 
     /// Stop absorbing duplicates: every repeat reaches this UA's pulls again.
@@ -186,6 +232,7 @@ impl Agent {
         // answers is retransmitted, the CORE owes the same ACK again. A hop ACK
         // to a non-2xx is cached too and never read — its final is absorbed as a
         // transaction-layer duplicate before the cache is ever consulted.
+        self.dialogs.note_sent(msg);
         if let SipMessage::Request(r) = msg {
             if r.method().as_str() == "ACK" {
                 if let Some(tag) = r.to().tag() {
@@ -199,7 +246,19 @@ impl Agent {
                 }
             }
         }
-        self.try_send_wire(&serialize(msg), dst).await
+        self.send_bytes(&serialize(msg), dst).await
+    }
+
+    /// Send `wire`, the emitted form of `msg` (its header names and layout as
+    /// the test wrote them), feeding `msg` to the dialog table.
+    pub(crate) async fn try_send_emitted(
+        &self,
+        msg: &SipMessage,
+        wire: &[u8],
+        dst: SocketAddr,
+    ) -> Result<(), StepError> {
+        self.dialogs.note_sent(msg);
+        self.send_bytes(wire, dst).await
     }
 
     /// **The datagram seam**, for a driver that owns its own dialog state and
@@ -224,6 +283,16 @@ impl Agent {
         wire: &[u8],
         dst: SocketAddr,
     ) -> Result<(), StepError> {
+        if self.dialogs.is_on() {
+            if let Ok(msg) = CustomParser::new().parse(wire) {
+                self.dialogs.note_sent(&msg);
+            }
+        }
+        self.send_bytes(wire, dst).await
+    }
+
+    /// One datagram out, nothing fed.
+    async fn send_bytes(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
         self.ep
             .send_to(wire, dst)
             .await
@@ -318,6 +387,9 @@ impl Agent {
         if sighting.owner == Owner::TxnDuplicate {
             return None;
         }
+        if sighting.owner == Owner::Tu && !sighting.repeat {
+            self.dialogs.sight(&msg);
+        }
         if sighting.repeat {
             if let SipMessage::Response(r) = &msg {
                 if let Some((ack, dst)) = self.two_xx_acks.owed_for(r) {
@@ -350,6 +422,7 @@ impl Agent {
         loop {
             match self.try_recv().await? {
                 SipMessage::Request(r) => {
+                    self.dialog_check(&r)?;
                     if r.method() != method {
                         if self.ack_obligation_claims(&r) {
                             continue;

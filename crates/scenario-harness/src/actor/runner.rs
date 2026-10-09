@@ -181,11 +181,6 @@ pub struct ActorState<'c> {
     /// PRACK arm answers the INVITE only on the WINNER fork's PRACK (a losing
     /// fork's PRACK is 200'd but does not release the 200-to-INVITE).
     pub(super) fork_answer: Option<ForkAnswer>,
-    /// The LOSING fork tags this forking callee emitted a late `200` under — an
-    /// inbound BYE addressed to one of these tears down only that early fork,
-    /// NOT this leg (the winning dialog lives on; the BYE is 200'd and its CSeq
-    /// folded into the dialog stream, but no `LegTerminated` is recorded).
-    pub(super) fork_loser_tags: HashSet<String>,
     /// CSeq numbers of in-dialog re-INVITEs THIS caller has ORIGINATED whose
     /// `reneg` sub-flow has not yet been advanced (the `reinvite` body's
     /// delayed-offer re-INVITE). A set keyed by CSeq — NOT a one-shot bool — so
@@ -372,7 +367,6 @@ impl<'c> ActorState<'c> {
             held_silent: None,
             pracked_rseqs: HashSet::new(),
             fork_answer: None,
-            fork_loser_tags: HashSet::new(),
             sent_reinvites: HashSet::new(),
             sent_reinvite_txns: HashMap::new(),
             reinvite_retry: None,

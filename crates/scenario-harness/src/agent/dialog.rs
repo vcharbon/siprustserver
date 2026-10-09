@@ -605,7 +605,7 @@ impl<'a> InDialogRequest<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        self.agent.try_send_wire(&emitted_wire(&msg, &headers), dst).await?;
+        self.agent.try_send_emitted(&msg, &emitted_wire(&msg, &headers), dst).await?;
         Ok((
             InDialogTxn::new(
                 self.agent.clone(),

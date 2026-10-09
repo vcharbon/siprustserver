@@ -57,6 +57,24 @@ Automatic (you cannot opt out, only waive per-rule):
   still has a baseline. It is not a waiver hatch: an accepted deviation needs
   the ADR entry AND the scenario's own assertion on the accepted outcome. A
   SUT-side deviation with no such ADR entry is a bug to fix, never a window.
+- **Dialog table** — every simulated UA (an `Agent`, the reactive actor's
+  agents, the load lane's) keeps an RFC 3261 §12 dialog table
+  (`scenario_harness::dialogs`), fed by every message it sends and sights.
+  A received in-dialog request on no dialog it holds (an unknown From- or
+  To-tag, or another fork's early dialog past the §13.2.2.4 window), on a
+  dialog a non-2xx final or a BYE ended, or whose CSeq goes backwards or
+  skips, is a verdict: a scripted `receive` of it fails at once with a
+  `StepError::Dialog` naming the UA, the request and the tags it holds
+  (`alice: OPTIONS From-tag A1 names no dialog (holds A2)`); the actor
+  answers it 481 (500 for a CSeq going backwards) on its own; and
+  `finish()` fails on every verdict, in the load lane `rfc_findings` counts
+  it. A test that sends such a request on purpose opts in on the receiving
+  UA: `h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`
+  (`dialog-unknown`, `dialog-ended`, `dialog-cseq-backwards`,
+  `dialog-cseq-skip`); an opt-in that covers nothing is a dead waiver. A
+  proxy agent keeps no table (`Agent::hold_no_dialogs` for a hand-built one),
+  and the scenario interpreter reads the verdicts itself
+  (`Agent::hand_dialogs_to_driver`).
 - **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
   compact wire trace to stderr. Read it before adding instrumentation.
 - **Failure artifacts** (env-gated) — with `SCENARIO_ARTIFACT_DIR=<dir>` set, a
