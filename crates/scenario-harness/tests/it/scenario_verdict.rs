@@ -144,3 +144,18 @@ async fn an_unmet_barrier_names_the_barrier() {
     assert_eq!(at.barrier, "never_holds", "at {at}");
     assert_eq!(at.goal, None, "at {at}");
 }
+
+/// The callee's 200 crosses the caller's CANCEL in flight (a ring of one hop:
+/// the 200 leaves as the CANCEL does). The CANCEL then has no effect
+/// (RFC 3261 §9.2): the caller ACKs the 200 and hangs up with a BYE (§15), and
+/// `abandon_ringing` ends on its `answered_despite_cancel` branch — torn down,
+/// settled and audit-clean.
+#[tokio::test(start_paused = true)]
+async fn a_200_crossing_the_cancel_is_answered_despite_cancel() {
+    let v = verdict_of("verdict-abandon-crossing", &AbandonRinging, |env| {
+        env.ring_delay =
+            std::time::Duration::from_millis(scenario_harness::SIMULATED_TRANSIT_DELAY_MS);
+    })
+    .await;
+    assert_eq!(success_branch(&v), Some("answered_despite_cancel"), "got {v:?}");
+}

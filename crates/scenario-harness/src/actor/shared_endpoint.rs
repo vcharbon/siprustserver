@@ -74,6 +74,15 @@ impl Inbox {
             }
         }
     }
+
+    /// The next inbound already waiting, without waiting — `None` when
+    /// nothing is pending.
+    pub async fn try_take(&mut self) -> Option<Inbound> {
+        match self {
+            Inbox::Own(agent) => agent.take_queued_inbound().await,
+            Inbox::Shared { rx, .. } => rx.try_recv().ok(),
+        }
+    }
 }
 
 /// One actor's seat at a shared endpoint.

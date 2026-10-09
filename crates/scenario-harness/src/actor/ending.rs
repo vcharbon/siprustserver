@@ -43,6 +43,11 @@ impl Branch {
     /// The caller CANCELled its pending INVITE (RFC 3261 §9.1), which drew
     /// `487 Request Terminated`.
     pub const ABANDONED: Branch = Branch::new("abandoned", Ending::Refused(487));
+    /// The callee's 2xx crossed the caller's CANCEL: the CANCEL had no effect
+    /// (RFC 3261 §9.2), so the caller ACKed the 2xx and hung up with a BYE
+    /// (§15).
+    pub const ANSWERED_DESPITE_CANCEL: Branch =
+        Branch::new("answered_despite_cancel", Ending::Answered);
     pub const fn new(name: &'static str, ending: Ending) -> Self {
         Branch { name, ending }
     }

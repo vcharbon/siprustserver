@@ -72,7 +72,8 @@ pub enum Establishment {
     /// dialog, no teardown (the `rejected` branch).
     RejectTerminal { code: u16 },
     /// TERMINAL: the caller CANCELs once ringing (RFC 3261 §9.1) — no dialog,
-    /// no teardown ([`Branch::ABANDONED`]).
+    /// no teardown ([`Branch::ABANDONED`]); a 200 that crosses the CANCEL is
+    /// ACKed and BYEd ([`Branch::ANSWERED_DESPITE_CANCEL`]).
     AbandonAfterRinging,
     /// CANCEL×200 CROSSING (C2/E5): the caller CANCELs while the callee answers,
     /// so the terminal outcome is EITHER confirmed (the 200 crossed the CANCEL,
@@ -611,6 +612,14 @@ impl ShapePlan {
                     Barrier::pred("ringing", ringing),
                     GoalStep::Cancel { stated: Vec::new() },
                 ));
+                // A 200 that crossed the CANCEL confirmed the call: hang up
+                // (RFC 3261 §15). After a 487 the accepted final drops it.
+                b.caller_goals.push(Goal::new(
+                    Barrier::pred("answered", |s: &StateInner| {
+                        s.leg_at_least("alice", LegPhase::Confirmed)
+                    }),
+                    GoalStep::ByeIfConfirmed,
+                ));
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
                 b.callees.push(ActorSpec {
                     role: "bob",
@@ -627,7 +636,9 @@ impl ShapePlan {
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
-                b.expect = Expect::one(Branch::ABANDONED);
+                const ABANDON_ENDINGS: &[Branch] =
+                    &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
+                b.expect = Expect::of(ABANDON_ENDINGS);
             }
             Establishment::CancelAnswerCrossing => {
                 // C2/E5: alice INVITEs then CANCELs (gated on ringing, after a

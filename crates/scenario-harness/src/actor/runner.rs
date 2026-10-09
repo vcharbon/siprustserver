@@ -478,7 +478,15 @@ async fn react_until_done(st: &mut ActorState<'_>) -> Result<(), StepError> {
                 // remaining goal can consume, so it never starves.
                 requeue_parked(st).await?;
             }
+            // The answer is due: first react to whatever landed with it, so a
+            // CANCEL that arrived at the same instant 487s the INVITE and the
+            // dropped answer never sends a 2xx after it (RFC 3261 §9.2).
             _ = wait_timed_answer(&st.pending_answer), if st.pending_answer.is_some() => {
+                tokio::task::yield_now().await;
+                while st.pending_answer.is_some() {
+                    let Some(m) = inbox.try_take().await else { break };
+                    default_react(st, m).await?;
+                }
                 fire_timed_answer(st).await?;
             }
             // Our non-2xx final's hop-ACK was sighted (the receive core claims

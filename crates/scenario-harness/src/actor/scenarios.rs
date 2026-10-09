@@ -909,11 +909,21 @@ impl ActorScenario for InviteReject {
 /// The caller ABANDONS after ringing (CANCEL), actor-declared. Alice INVITEs,
 /// sees the 180, then CANCELs the still-pending INVITE (RFC 3261 §9.1); the SUT
 /// relays the CANCEL to bob, who 200s it and 487s his held INVITE, and both legs
-/// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`].
+/// reap. The torn-down, settled call succeeds under [`Branch::ABANDONED`]. When
+/// bob's 200 crosses the CANCEL, alice ACKs it and BYEs, and the call succeeds
+/// under [`Branch::ANSWERED_DESPITE_CANCEL`].
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.9):
 /// NO phases, NO anchors, checkpoint `time_to_180` only, NO `mark_ringing`.
 pub struct AbandonRinging;
+
+/// The abandon's accepted endings: the CANCEL won (487), or the 200 crossed it.
+const ABANDON_ENDINGS: &[Branch] = &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
+
+/// Alice's call confirmed (a 2xx answered her INVITE).
+fn alice_confirmed(s: &StateInner) -> bool {
+    s.leg_at_least("alice", LegPhase::Confirmed)
+}
 
 impl ActorScenario for AbandonRinging {
     fn id(&self) -> ScenarioId {
@@ -938,6 +948,9 @@ impl ActorScenario for AbandonRinging {
                         Barrier::pred("ringing", alice_ringing),
                         GoalStep::Cancel { stated: Vec::new() },
                     ),
+                    // A 200 that crossed the CANCEL confirmed the call: hang
+                    // up (§15). After a 487 the accepted final drops this goal.
+                    Goal::new(Barrier::pred("answered", alice_confirmed), GoalStep::ByeIfConfirmed),
                 ],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
@@ -977,7 +990,7 @@ impl ActorScenario for AbandonRinging {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
-            expect: Expect::one(Branch::ABANDONED),
+            expect: Expect::of(ABANDON_ENDINGS),
 
             waivers: Vec::new(),
             automatics: Default::default(),

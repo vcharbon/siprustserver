@@ -116,6 +116,31 @@ async fn cancel_answer_crossing_answer_wins() {
     h.finish().await;
 }
 
+/// A CANCEL that reaches the callee in the same instant its answer timer
+/// fires (a 5 ms hop, the CANCEL sent exactly one ring after the INVITE): the
+/// callee processes the CANCEL first, 200s it and 487s the INVITE, and never
+/// sends a 2xx for the cancelled INVITE (RFC 3261 §9.2). Repeated, because
+/// task order within one instant must not decide it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_landing_with_the_answer_timer_is_processed_first() {
+    for i in 0..16 {
+        let h = Harness::with_transit_delay(format!("actor-cancel-with-timer-{i}"), 5);
+        let alice = h.agent("alice", "127.0.0.1:5060").await;
+        let bob = h.agent("bob", "127.0.0.1:5070").await;
+        let ring = Duration::from_millis(20);
+        let obs = ObservedState::new();
+        let ctx = crate::realcall::CallCtx::new();
+        let call = cancel_crossing_plan(&alice, &bob, ring, ring);
+        let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+        assert!(verdict.is_ok(), "run {i}: {verdict:?}");
+        assert!(
+            obs.with_snapshot(|s| s.leg_ref("alice").is_some_and(|l| l.saw_final(487))),
+            "run {i}: the CANCEL must win over the answer timer"
+        );
+        h.finish().await;
+    }
+}
+
 /// No-answer machinery: a `RingThenSilent` callee emits its 180 then holds the
 /// INVITE server txn with NO answer ever scheduled — the peer's CANCEL (in
 /// production, the SUT's no-answer timer firing) releases the held txn as a
