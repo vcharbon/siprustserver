@@ -9,6 +9,10 @@
 //! - `judge` — [`DialogJudge`]: one UA's table and the verdicts it recorded,
 //!   gated by the harness or handed to a driver.
 //!
+//! Two requests on an ended dialog draw no verdict:
+//! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
+//! - a NOTIFY of a subscription the UA opened, after a BYE (RFC 5057 §5.2).
+//!
 //! A verdict fails the run unless a `dialog-…` waiver on the receiving UA opts
 //! it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`).
 
