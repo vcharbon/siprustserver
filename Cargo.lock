@@ -529,6 +529,7 @@ dependencies = [
  "call",
  "call-limiter",
  "callshapes",
+ "futures",
  "http-net",
  "layer-harness",
  "load-shed",
@@ -772,6 +773,7 @@ name = "callshapes"
 version = "0.1.0"
 dependencies = [
  "scenario-harness",
+ "sip-message",
 ]
 
 [[package]]

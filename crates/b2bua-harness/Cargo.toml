@@ -37,6 +37,8 @@ call-limiter = { path = "../call-limiter" }
 [dev-dependencies]
 # The call-shape catalog (forked establishments) driven through the SUT.
 callshapes = { path = "../callshapes" }
+# `catch_unwind` on a future: a cell's failure is collected, the next cell runs.
+futures = "0.3"
 # The rule vocabulary (`model::Body`) a test-authored rule builds its actions from.
 b2bua-sdk = { path = "../b2bua-sdk" }
 tokio = { workspace = true, features = ["test-util"] }

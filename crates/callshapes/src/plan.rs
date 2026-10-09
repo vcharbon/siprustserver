@@ -22,10 +22,11 @@ pub use scenario_harness::actor::ForkWinner;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, BarrierPhase, Branch, CtxFeed,
     Disposition, Ending, Expect, Feed, Goal, GoalStep, LegPhase, MediaState, SettleBarrier,
-    StateInner, SubflowState, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
+    StateInner, SubflowState, STEP_TIMEOUT, SUBFLOW_EARLY, SUBFLOW_REALIGN, SUBFLOW_REFER,
 };
 use scenario_harness::realcall::{CallEnv, ScenarioId};
 use scenario_harness::{StepError, ANSWER_SDP, OFFER_SDP};
+use sip_message::generators::InDialogMethod;
 
 use crate::binder::{RouteBinder, RouteIntent};
 
@@ -70,6 +71,13 @@ pub enum Establishment {
         reliable: bool,
         loser_late_200: Option<&'static str>,
     },
+    /// A HELD answer: the callee rings at once (`reliable`: a `183` per early
+    /// dialog that the caller PRACKs, RFC 3262) and answers only once the
+    /// [`Stage::Early`] stages that follow completed, after the ring dwell.
+    /// The first stage that is not early, or the teardown, marks the answer.
+    /// [`Forks::Forked`] is valid only under the SUT's transparent CORE relay,
+    /// like [`Forked`](Self::Forked).
+    Held { forks: Forks, reliable: bool },
     /// TERMINAL: the callee rejects with `code` and that IS the call — no
     /// dialog, no teardown (the `rejected` branch).
     RejectTerminal { code: u16 },
@@ -89,15 +97,73 @@ pub enum Establishment {
     CancelAnswerCrossing,
 }
 
+/// The early dialogs a [`Establishment::Held`] callee presents.
+#[derive(Debug, Clone, Copy)]
+pub enum Forks {
+    /// One early dialog, under the callee's own tag, which answers.
+    Sole,
+    /// One early dialog per tag (RFC 3261 §12.1.2), answered under `winner`.
+    Forked { tags: &'static [&'static str], winner: ForkWinner },
+}
+
+impl Forks {
+    /// The fork tag the callee's own early requests ride: the winner's when it
+    /// rang, else the first fork's (`None`: the callee's own tag).
+    pub(crate) fn early_fork(self) -> Option<&'static str> {
+        match self {
+            Forks::Sole => None,
+            Forks::Forked { winner: ForkWinner::Tag(tag), .. } => Some(tag),
+            Forks::Forked { tags, winner: ForkWinner::Unrung } => tags.first().copied(),
+        }
+    }
+
+    /// How many early dialogs ring.
+    pub(crate) fn count(self) -> usize {
+        match self {
+            Forks::Sole => 1,
+            Forks::Forked { tags, .. } => tags.len(),
+        }
+    }
+}
+
+/// Which party of the call drives a stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Party {
+    Caller,
+    Callee,
+}
+
+/// The method of an early-dialog request ([`Stage::Early`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlyMethod {
+    /// An UPDATE carrying the sender's session description as an offer
+    /// (RFC 3311 §5.1).
+    Update,
+    /// A bodiless INFO.
+    Info,
+}
+
 /// An in-dialog script or a dialog-changing transfer — the chainable stages
 /// after establishment.
 #[derive(Debug, Clone)]
 pub enum Stage {
+    /// A script the caller drives on the current dialog.
     Script(Script),
+    /// A script the answering callee drives on the current dialog.
+    Callee(Script),
+    /// `count` requests `by` sends one after another on the early dialog of a
+    /// [`Establishment::Held`] call, each after the previous one's 2xx. Early
+    /// stages come before every other stage; the answer follows them.
+    Early {
+        by: Party,
+        method: EarlyMethod,
+        count: u32,
+    },
     Transfer(Transfer),
 }
 
-/// A deliberate in-dialog sequence the caller drives on the CURRENT dialog.
+/// A deliberate in-dialog sequence a party drives on the CURRENT dialog (the
+/// caller's through [`Stage::Script`], the callee's through [`Stage::Callee`]).
 #[derive(Debug, Clone, Copy)]
 pub enum Script {
     /// `n` sequential delayed-offer re-INVITE renegotiations (each guarded on
@@ -121,6 +187,9 @@ pub enum Script {
     /// elapses (both env knobs). Gate unchanged; the goal cursor advances only
     /// after the hold, so a following teardown is naturally held back.
     KeepaliveLoop,
+    /// ONE in-dialog OPTIONS whose 200 the reactor observes. Replaces the gate
+    /// with `pinged`.
+    Ping,
 }
 
 /// A blind transfer (REFER) — moves the current dialog to the transfer target.
@@ -144,6 +213,8 @@ pub enum DwellKnob {
     TalkTime,
     ReinviteGap,
     LongHold,
+    /// A dwell the shape fixes itself, whatever the env.
+    Fixed(Duration),
 }
 
 impl DwellKnob {
@@ -153,6 +224,7 @@ impl DwellKnob {
             DwellKnob::TalkTime => env.talk_time,
             DwellKnob::ReinviteGap => env.reinvite_gap,
             DwellKnob::LongHold => env.long_hold,
+            DwellKnob::Fixed(d) => d,
         }
     }
 }
@@ -179,9 +251,39 @@ pub enum Teardown {
     /// is outstanding; both legs terminate. The caller stamps the same
     /// checkpoint/phase feed as a plain `CallerBye`.
     CrossingBye { after: DwellKnob },
+    /// The answering callee BYEs once the final gate holds, after the dwell.
+    CalleeBye { after: DwellKnob },
+    /// The caller CANCELs the [`Establishment::Held`] call at `at` (RFC 3261
+    /// §9.1); an answer that crossed the CANCEL is ACKed and BYEd. Only early
+    /// stages precede it.
+    Cancel(CancelAt),
     /// No teardown goal — only legal for terminal establishments.
     None,
 }
+
+/// Where the caller's CANCEL meets the callee's responses. The callee rings
+/// and answers on its own clock, so each value is a deterministic timing on
+/// the harness fabric's one-hop transit delay ([`TRANSIT`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CancelAt {
+    /// After the `100 Trying`, before the callee rang: it rings only later.
+    BeforeProvisional,
+    /// In flight toward the SUT while the SUT's relayed provisional is in
+    /// flight toward the caller.
+    CrossingProvisional,
+    /// While the callee rings: the CANCEL reaches it well before its answer.
+    AfterProvisional,
+    /// Reaching the callee just after it sent its 2xx, which reaches the SUT
+    /// after the CANCEL did.
+    CrossingFinal,
+    /// Reaching the SUT just after it relayed the 2xx toward the caller, who
+    /// sent the CANCEL before that 2xx arrived: no effect, then BYE (§9.1).
+    AfterFinal,
+}
+
+/// The one-hop transit delay of the harness fabric the [`CancelAt`] timings
+/// are computed for.
+pub const TRANSIT: Duration = Duration::from_millis(scenario_harness::SIMULATED_TRANSIT_DELAY_MS);
 
 /// A composed call shape: establishment → stages → teardown, routed through a
 /// [`RouteBinder`]. Implements [`ActorScenario`], so it plugs into the shape
@@ -203,42 +305,109 @@ pub struct ShapePlan {
 }
 
 /// The compile fold's accumulator.
-struct Build {
-    caller_goals: Vec<Goal>,
-    caller_feed: CtxFeed,
+pub(crate) struct Build {
+    pub(crate) caller_goals: Vec<Goal>,
+    pub(crate) caller_feed: CtxFeed,
     /// Upgraded to `full` (answer SDP) when a stage answers renegotiations
     /// reactively (re-INVITE scripts, the post-transfer realign).
     caller_needs_answer_sdp: bool,
-    callees: Vec<ActorSpec>,
-    phases: Vec<BarrierPhase>,
-    expect: Expect,
+    pub(crate) callees: Vec<ActorSpec>,
+    pub(crate) phases: Vec<BarrierPhase>,
+    pub(crate) expect: Expect,
     /// The barrier gating the next deliberate action on the current dialog.
-    gate: Barrier,
+    pub(crate) gate: Barrier,
     /// The winning callee role (`"bob"`, or `"bob2"` after a reroute) — the leg
     /// a crossing-BYE teardown gives its own BYE goal to.
-    winner: &'static str,
+    pub(crate) winner: &'static str,
+    /// A [`Establishment::Held`] answer not yet placed: the winner it answers
+    /// under. Placed by [`crate::held::place_answer`].
+    pub(crate) held_answer: Option<Option<ForkWinner>>,
+    /// The renegotiations each role completed so far (its early UPDATEs
+    /// included), which its next renegotiation gate counts on from.
+    renegs: Vec<(&'static str, u32)>,
+    /// The in-dialog OPTIONS each role had answered so far.
+    pings: Vec<(&'static str, u32)>,
 }
 
 impl Build {
-    fn callee_mut(&mut self, role: &'static str) -> &mut ActorSpec {
+    pub(crate) fn callee_mut(&mut self, role: &'static str) -> &mut ActorSpec {
         self.callees
             .iter_mut()
             .find(|a| a.role == role)
             .expect("stage references an undeclared callee role")
     }
+
+    /// The role a party names on the current dialog.
+    pub(crate) fn role(&self, party: Party) -> &'static str {
+        match party {
+            Party::Caller => "alice",
+            Party::Callee => self.winner,
+        }
+    }
+
+    /// The goal list of `role`.
+    pub(crate) fn goals_mut(&mut self, role: &'static str) -> &mut Vec<Goal> {
+        if role == "alice" {
+            &mut self.caller_goals
+        } else {
+            &mut self.callee_mut(role).goals
+        }
+    }
+
+    /// Count `n` more completed renegotiations for `role`; the new total.
+    pub(crate) fn add_renegs(&mut self, role: &'static str, n: u32) -> u32 {
+        bump(&mut self.renegs, role, n)
+    }
+
+    /// Count one more answered OPTIONS for `role`; the new total.
+    fn add_ping(&mut self, role: &'static str) -> u32 {
+        bump(&mut self.pings, role, 1)
+    }
+}
+
+/// Add `n` to `role`'s counter in `counts`; the new value.
+fn bump(counts: &mut Vec<(&'static str, u32)>, role: &'static str, n: u32) -> u32 {
+    match counts.iter_mut().find(|(r, _)| *r == role) {
+        Some((_, c)) => {
+            *c += n;
+            *c
+        }
+        None => {
+            counts.push((role, n));
+            n
+        }
+    }
+}
+
+/// The renegotiation count of `role` reached `n` — the `reinvited` /
+/// `updated` gate.
+fn renegs_reached(name: &'static str, role: &'static str, n: u32) -> Barrier {
+    Barrier::pred(name, move |s| s.leg(role).reneg_count() >= n)
+}
+
+/// `role` received `n` 2xx to its `method` requests.
+pub(crate) fn answered(
+    name: &'static str,
+    role: &'static str,
+    method: &'static str,
+    n: u32,
+) -> Barrier {
+    Barrier::pred(name, move |s| {
+        let ok = |f: &&scenario_harness::actor::ResponseFact| {
+            (200..300).contains(&f.status) && f.cseq_method == method
+        };
+        s.leg(role).responses().iter().filter(ok).count() >= n as usize
+    })
 }
 
 /// `alice` + `winner` both confirmed — the `established` gate/phase, with the
 /// winning callee role captured (bob, or bob2 after a reroute).
-fn established_pred(winner: &'static str) -> impl Fn(&StateInner) -> bool + Send + Sync + Clone {
+pub(crate) fn established_pred(
+    winner: &'static str,
+) -> impl Fn(&StateInner) -> bool + Send + Sync + Clone {
     move |s: &StateInner| {
         s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least(winner, LegPhase::Confirmed)
     }
-}
-
-/// The caller's renegotiation (re-INVITE 2xx ACKed / UPDATE 200) completed.
-fn reneg_done(s: &StateInner) -> bool {
-    s.leg("alice").subflow(SUBFLOW_RENEG).is_some_and(|f| f >= SubflowState::Confirmed)
 }
 
 /// The post-transfer media merge completed on BOTH realign legs.
@@ -257,6 +426,51 @@ fn declined(s: &StateInner) -> bool {
 /// The declined transfer's accepted ending: the target refused, and the
 /// original call tore down.
 const TRANSFER_DECLINED: Branch = Branch::new("transfer_declined", Ending::Observed(declined));
+
+/// The fork wiring every forked establishment shares: at least two tags, a
+/// tagged winner among them.
+fn validate_forks(tags: &[&str], winner: ForkWinner) -> Result<(), &'static str> {
+    if tags.len() < 2 {
+        return Err("Forked needs >= 2 distinct fork tags");
+    }
+    if let ForkWinner::Tag(w) = winner {
+        if !tags.contains(&w) {
+            return Err("Forked winner must be one of the declared tags");
+        }
+    }
+    Ok(())
+}
+
+/// An early stage of a Held establishment (`held_reliable`: whether its
+/// provisionals are reliable; `None`: not Held), before any answered stage.
+fn validate_early(
+    held_reliable: Option<bool>,
+    answered: bool,
+    by: Party,
+    method: EarlyMethod,
+    count: u32,
+) -> Result<(), &'static str> {
+    let Some(reliable) = held_reliable else {
+        return Err("an Early stage needs a Held establishment");
+    };
+    if answered {
+        return Err("an Early stage must precede every answered stage");
+    }
+    if count == 0 {
+        return Err("Early count must be >= 1");
+    }
+    // RFC 3311 §5.1: an UPDATE offer needs the INVITE's answer first, which
+    // only a reliable provisional carries.
+    if method == EarlyMethod::Update && !reliable {
+        return Err("an early UPDATE needs reliable provisionals");
+    }
+    // The callee learns that the caller holds its early dialog only from the
+    // PRACK (RFC 3262).
+    if by == Party::Callee && !reliable {
+        return Err("a callee's early request needs reliable provisionals");
+    }
+    Ok(())
+}
 
 impl ShapePlan {
     /// Whether the establishment terminates the call by itself (no dialog to
@@ -289,22 +503,25 @@ impl ShapePlan {
             return Err(err("non-terminal shape with no teardown (calls must terminate)"));
         }
         if let Establishment::Forked { tags, winner, loser_late_200, .. } = self.establish {
-            if tags.len() < 2 {
-                return Err(err("Forked needs >= 2 distinct fork tags"));
-            }
-            if let ForkWinner::Tag(w) = winner {
-                if !tags.contains(&w) {
-                    return Err(err("Forked winner must be one of the declared tags"));
-                }
-            }
+            validate_forks(tags, winner).map_err(&err)?;
             if let Some(loser) = loser_late_200 {
                 if winner == ForkWinner::Tag(loser) || !tags.contains(&loser) {
                     return Err(err("Forked loser_late_200 must be a declared tag != winner"));
                 }
             }
         }
+        if let Establishment::Held { forks: Forks::Forked { tags, winner }, .. } = self.establish {
+            validate_forks(tags, winner).map_err(&err)?;
+        }
+        let held_reliable = match self.establish {
+            Establishment::Held { reliable, .. } => Some(reliable),
+            _ => None,
+        };
+        let mut answered = false;
         for stage in &self.stages {
-            if let Stage::Script(Script::Reinvite { n }) = stage {
+            if let Stage::Script(Script::Reinvite { n }) | Stage::Callee(Script::Reinvite { n }) =
+                stage
+            {
                 if *n == 0 {
                     return Err(err("Reinvite n must be >= 1"));
                 }
@@ -315,6 +532,26 @@ impl ShapePlan {
                 && !matches!(self.establish, Establishment::Reliable)
             {
                 return Err(err("UpdateEarly requires a reliable establishment (early dialog)"));
+            }
+            if matches!(stage, Stage::Callee(Script::UpdateEarly)) {
+                return Err(err("UpdateEarly is the caller's; a callee's is Stage::Early"));
+            }
+            if let Stage::Early { by, method, count } = stage {
+                validate_early(held_reliable, answered, *by, *method, *count).map_err(&err)?;
+            } else {
+                answered = true;
+            }
+        }
+        if let Teardown::Cancel(at) = self.teardown {
+            if held_reliable.is_none() {
+                return Err(err("a Cancel teardown needs a Held establishment"));
+            }
+            if answered {
+                return Err(err("a Cancel teardown follows early stages only"));
+            }
+            let early = !self.stages.is_empty();
+            if early && matches!(at, CancelAt::BeforeProvisional | CancelAt::CrossingProvisional) {
+                return Err(err("a CANCEL before the provisional leaves no early dialog to use"));
             }
         }
         Ok(())
@@ -331,17 +568,32 @@ impl ShapePlan {
             expect: Expect::answered(),
             gate: Barrier::None,
             winner: "bob",
+            held_answer: None,
+            renegs: Vec::new(),
+            pings: Vec::new(),
         };
 
         self.compile_establishment(env, &mut b)?;
 
         for stage in &self.stages {
+            if let Stage::Early { by, method, count } = stage {
+                crate::held::compile_early(self.establish, &mut b, *by, *method, *count);
+                continue;
+            }
+            crate::held::place_answer(env, &mut b);
             match stage {
-                Stage::Script(s) => self.compile_script(env, &mut b, s),
+                Stage::Script(s) => self.compile_script(env, &mut b, s, Party::Caller),
+                Stage::Callee(s) => self.compile_script(env, &mut b, s, Party::Callee),
                 Stage::Transfer(t) => self.compile_transfer(env, &mut b, t)?,
+                Stage::Early { .. } => unreachable!("compiled above"),
             }
         }
 
+        if let Teardown::Cancel(at) = self.teardown {
+            crate::held::compile_cancel(env, &mut b, at);
+        } else {
+            crate::held::place_answer(env, &mut b);
+        }
         match self.teardown {
             Teardown::CallerBye { after, feed } => {
                 b.caller_goals
@@ -366,6 +618,14 @@ impl ShapePlan {
                 let gate = b.gate.clone();
                 b.callee_mut(b.winner).goals.push(Goal::new(gate, GoalStep::Bye).after(dwell));
             }
+            Teardown::CalleeBye { after } => {
+                let gate = b.gate.clone();
+                b.callee_mut(b.winner)
+                    .goals
+                    .push(Goal::new(gate, GoalStep::Bye).after(after.resolve(env)));
+            }
+            // Compiled with the answer above.
+            Teardown::Cancel(_) => {}
             Teardown::None => {} // legal only for terminals — validate() gates
         }
 
@@ -389,6 +649,11 @@ impl ShapePlan {
             claim: None,
         }];
         actors.extend(b.callees);
+        // A dwell that takes half the barrier wait raises it by the dwell: the
+        // barrier after it still gets the whole protocol bound.
+        let longest =
+            actors.iter().flat_map(|a| a.goals.iter().map(|g| g.delay)).max().unwrap_or_default();
+        let ceiling = (longest * 2 > STEP_TIMEOUT).then(|| STEP_TIMEOUT + longest);
 
         Ok(ActorCall {
             actors,
@@ -398,7 +663,7 @@ impl ShapePlan {
 
             waivers: Vec::new(),
             automatics: Default::default(),
-            ceiling: None,
+            ceiling,
             delta_policy: None,
             reception_observer: None,
         })
@@ -586,6 +851,37 @@ impl ShapePlan {
                 b.phases.push(phase("established", est.clone()));
                 b.gate = Barrier::pred("established", est);
             }
+            Establishment::Held { forks, reliable } => {
+                let mut plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
+                if reliable {
+                    plan = plan.with_supported_100rel();
+                }
+                b.caller_goals.push(Goal::new(
+                    Barrier::None,
+                    GoalStep::Invite { callee: "bob", plan: Some(plan) },
+                ));
+                b.caller_feed.on_answer_rx = Feed::new(Some("time_to_200"), None);
+                if reliable {
+                    b.caller_feed.on_prack_ok =
+                        Feed::new(Some("time_to_prack_200"), Some("pracked"));
+                }
+                let ring_after = match self.teardown {
+                    Teardown::Cancel(at) => crate::held::ring_after(at),
+                    _ => Duration::ZERO,
+                };
+                b.callees.push(crate::held::held_callee(
+                    env.bob.clone(),
+                    forks,
+                    reliable,
+                    ring_after,
+                    connected_feed(self.stamp_connected),
+                ));
+                b.gate = crate::held::early_gate(forks, reliable);
+                b.held_answer = Some(match forks {
+                    Forks::Sole => None,
+                    Forks::Forked { winner, .. } => Some(winner),
+                });
+            }
             Establishment::RejectTerminal { code } => {
                 let plan = self.binder.invite_plan(env, RouteIntent::Direct { target: "bob" });
                 b.caller_goals.push(Goal::new(
@@ -707,62 +1003,86 @@ impl ShapePlan {
         Ok(())
     }
 
-    fn compile_script(&self, env: &CallEnv<'_>, b: &mut Build, script: &Script) {
+    fn compile_script(&self, env: &CallEnv<'_>, b: &mut Build, script: &Script, by: Party) {
+        let role = b.role(by);
+        let caller = by == Party::Caller;
         match *script {
             Script::Reinvite { n } => {
                 // C6: serialize N delayed-offer re-INVITE cycles. Cycle 0 fires
                 // on the incoming gate; cycle `i` (i>=1) waits until the leg has
-                // COMPLETED i prior cycles (`reneg_count() >= i`), so no two
-                // re-INVITEs are ever in flight (that would glare into a 491).
-                // `reneg_count` is the cardinality of the caller's grow-only
-                // completed-reneg set (state.rs `RenegCompleted`) — a real
-                // per-cycle counter, unlike the monotone SUBFLOW_RENEG latch.
-                // For n=1 this equals a single `reneg_done` gate (the count hits
-                // 1 the same instant the latch confirms).
+                // COMPLETED i prior renegotiations, counted on from the ones it
+                // completed before this script (its early UPDATEs included), so
+                // no two re-INVITEs are ever in flight (that would glare into a
+                // 491). `reneg_count` is the cardinality of the leg's grow-only
+                // completed-reneg set (state.rs `RenegCompleted`).
+                let base = b.add_renegs(role, 0);
                 for i in 0..n {
                     let guard = if i == 0 {
                         b.gate.clone()
                     } else {
-                        Barrier::pred("reinvited", move |s| s.leg("alice").reneg_count() >= i)
+                        renegs_reached("reinvited", role, base + i)
                     };
-                    b.caller_goals
-                        .push(Goal::new(guard, GoalStep::Reinvite).after(env.reinvite_gap));
+                    let goal = Goal::new(guard, GoalStep::Reinvite).after(env.reinvite_gap);
+                    b.goals_mut(role).push(goal);
                 }
-                b.caller_feed.on_reinvite_ok =
-                    Feed::new(Some("time_to_reinvite_200"), Some("reinvited"));
-                b.caller_needs_answer_sdp = true;
-                b.gate = Barrier::pred("reinvited", move |s| s.leg("alice").reneg_count() >= n);
+                if caller {
+                    b.caller_feed.on_reinvite_ok =
+                        Feed::new(Some("time_to_reinvite_200"), Some("reinvited"));
+                    b.caller_needs_answer_sdp = true;
+                }
+                b.gate = renegs_reached("reinvited", role, b.add_renegs(role, n));
             }
             Script::UpdatePostConnect => {
-                b.caller_goals
-                    .push(Goal::new(b.gate.clone(), GoalStep::Update).after(env.reinvite_gap));
-                b.caller_feed.on_update_ok = Feed::new(Some("time_to_update_200"), Some("updated"));
-                b.gate = Barrier::pred("updated", reneg_done);
+                let goal = Goal::new(b.gate.clone(), GoalStep::Update).after(env.reinvite_gap);
+                b.goals_mut(role).push(goal);
+                if caller {
+                    b.caller_feed.on_update_ok =
+                        Feed::new(Some("time_to_update_200"), Some("updated"));
+                }
+                b.gate = renegs_reached("updated", role, b.add_renegs(role, 1));
             }
             // C5 (RFC 3311 §5.1): the caller UPDATEs the reliable EARLY dialog
-            // BEFORE the final 200 (validate() guarantees Establishment::Reliable
-            // — bob is a ReliableAnswer callee we upgrade to hold its INVITE 200
-            // until the UPDATE completes). The UPDATE fires once the caller is
-            // Early (the 183 is in + PRACKed); the gate stays `established`.
+            // BEFORE the final 200 (validate() guarantees a caller script on
+            // Establishment::Reliable — bob is a ReliableAnswer callee we upgrade
+            // to hold its INVITE 200 until the UPDATE completes). The UPDATE
+            // fires once the caller is Early (the 183 is in + PRACKed); the gate
+            // stays `established`.
             Script::UpdateEarly => {
                 let early = |s: &StateInner| s.leg("alice").subflow(SUBFLOW_EARLY).is_some();
                 b.caller_goals
                     .push(Goal::new(Barrier::pred("early", early), GoalStep::UpdateEarly));
                 b.caller_feed.on_update_ok = Feed::new(Some("time_to_update_200"), Some("updated"));
                 b.callee_mut("bob").disposition = Disposition::ReliableAnswerEarlyUpdate;
+                b.add_renegs("alice", 1);
             }
             Script::KeepaliveOnce => {
-                b.caller_goals.push(Goal::new(b.gate.clone(), GoalStep::Options));
-                b.caller_feed.on_options_ok =
-                    Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
+                let goal = Goal::new(b.gate.clone(), GoalStep::Options);
+                b.goals_mut(role).push(goal);
+                if caller {
+                    b.caller_feed.on_options_ok =
+                        Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
+                }
             }
             Script::KeepaliveLoop => {
-                b.caller_goals.push(Goal::new(
-                    b.gate.clone(),
-                    GoalStep::EveryOptions { cadence: env.options_cadence, hold: env.options_hold },
-                ));
-                b.caller_feed.on_options_ok =
-                    Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
+                let step =
+                    GoalStep::EveryOptions { cadence: env.options_cadence, hold: env.options_hold };
+                let goal = Goal::new(b.gate.clone(), step);
+                b.goals_mut(role).push(goal);
+                if caller {
+                    b.caller_feed.on_options_ok =
+                        Feed::new(Some("time_to_options_200"), Some("keepalive_ack"));
+                }
+            }
+            Script::Ping => {
+                let step = GoalStep::InDialog {
+                    method: InDialogMethod::Options,
+                    content_type: None,
+                    body: None,
+                    headers: Vec::new(),
+                };
+                let goal = Goal::new(b.gate.clone(), step).after(env.reinvite_gap);
+                b.goals_mut(role).push(goal);
+                b.gate = answered("pinged", role, "OPTIONS", b.add_ping(role));
             }
         }
     }

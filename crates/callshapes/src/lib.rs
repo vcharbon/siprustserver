@@ -24,10 +24,13 @@
 //! land on it (program phases C/D).
 
 pub mod binder;
+pub mod generator;
+mod held;
 pub mod plan;
 pub mod shapes;
 
 pub use binder::{EgressBinder, RouteBinder, RouteIntent};
 pub use plan::{
-    ByeFeed, DwellKnob, Establishment, ForkWinner, Script, ShapePlan, Stage, Teardown, Transfer,
+    ByeFeed, CancelAt, DwellKnob, EarlyMethod, Establishment, ForkWinner, Forks, Party, Script,
+    ShapePlan, Stage, Teardown, Transfer,
 };
