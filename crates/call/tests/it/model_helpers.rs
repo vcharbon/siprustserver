@@ -900,3 +900,41 @@ fn only_the_first_offer_of_a_dialog_is_owed_an_answer() {
         "the offer was answered in the caller's PRACK"
     );
 }
+
+/// A CANCEL the transaction layer answered 487 before the recorded 2xx left
+/// (RFC 3261 §9.2): the record comes back to what the wire carried. The 2xx
+/// is kept as `answer_preempted` only; no dialog awaits its ACK, and the
+/// message ring no longer lists it as sent.
+#[test]
+fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
+    let mut call = representative_call();
+    call.a_leg.dialogs[0].ext.awaited_ack_cseq = Some(1);
+    let entry = |seq, direction, code: Option<u16>| MessageEntry {
+        seq,
+        at_ms: 0,
+        direction,
+        method: "INVITE".into(),
+        cseq: 1,
+        code,
+        to_tag: None,
+        decision_ordinal: 0,
+        headers: Vec::new(),
+        turn: seq,
+    };
+    call.a_leg.messages.entries = vec![
+        entry(1, MessageDirection::Received, None),
+        entry(2, MessageDirection::Relayed, Some(180)),
+        entry(3, MessageDirection::Relayed, Some(200)),
+    ];
+
+    let call = record_cancelled_invite(call, "a");
+
+    let a = &call.a_leg;
+    assert_eq!(a.invite_final_sent, Some(487));
+    assert_eq!(a.answer_preempted, Some(200));
+    assert_eq!(a.state, LegState::Early);
+    assert!(a.dialogs.iter().all(|d| d.ext.answered_2xx.is_none()), "no ACK ladder stands");
+    assert!(a.dialogs.iter().all(|d| d.ext.awaited_ack_cseq.is_none()), "no ACK is awaited");
+    let ring: Vec<_> = a.messages.entries.iter().map(|e| e.seq).collect();
+    assert_eq!(ring, [1, 2], "the ring holds what reached the wire");
+}

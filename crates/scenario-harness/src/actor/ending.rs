@@ -27,9 +27,12 @@ pub enum Ending {
     /// establishing INVITE drew this non-2xx final.
     EarlyMediaRefused(u16),
     /// The callee's 2xx crossed the caller's CANCEL (RFC 3261 §9.2): her
-    /// INVITE drew a 2xx before her CANCEL drew its 200, and no non-2xx final.
-    /// A server that ignores the CANCEL — no final to it, or a 2xx after its
-    /// 200 — shows neither order and is no crossing.
+    /// INVITE drew a 2xx before her CANCEL drew its final — a 200, or a 481 when
+    /// a CANCEL retransmit found the answered transaction gone — and no
+    /// non-2xx final. A server that ignores the CANCEL — no final to it, or a
+    /// 2xx after its 200 — shows neither order and is no crossing. That second
+    /// reading holds when the SUT is the UAS; a stateful proxy may 200 the
+    /// CANCEL itself and still relay a 2xx (§16.10).
     AnsweredAcrossCancel,
     /// The callee's 2xx reached the caller before her CANCEL left: she sent
     /// none, her INVITE drew a 2xx and no non-2xx final.
@@ -102,7 +105,7 @@ impl Branch {
                     facts.iter().position(|f| f.status >= 200 && f.cseq_method == "CANCEL");
                 l.first_final().is_none()
                     && matches!((answered, cancel_final), (Some(a), Some(c))
-                        if a < c && facts[c].status == 200)
+                        if a < c && matches!(facts[c].status, 200 | 481))
             }),
             Ending::AnsweredBeforeCancel => leg.is_some_and(|l| {
                 !l.cancel_sent()

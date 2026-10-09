@@ -8,7 +8,11 @@
 //! never reads the teardown as a branch behind the answered copy.
 
 use call::helpers::{make_empty_dialog, MakeDialogLegCtx};
-use call::{Call, Direction, LegState};
+use call::{
+    Call, Direction, LegState, Obligation, Repeated, RetainedEmission, TimerEntry, TimerType,
+    Unacked2xx,
+};
+use sip_retransmit::Class;
 
 use super::process::rule_chain_turn;
 use super::resolve::Resolution;
@@ -20,7 +24,8 @@ use b2bua_sdk::event::CallEvent;
 
 /// The call as the turn on bob's 200 left it: the callee leg `b-1` confirmed,
 /// and the relayed 2xx recorded on the caller's leg (her dialog confirmed
-/// under the a-facing tag) though it never reached the wire.
+/// under the a-facing tag, its §13.3.1.4 ladder armed) though it never
+/// reached the wire.
 fn relayed_answer_call() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let mut call = build_initial_call(
@@ -43,6 +48,25 @@ fn relayed_answer_call() -> Call {
     call.a_leg.dialogs[0].sip.remote_target = "sip:alice@10.0.0.9:5060".into();
     call.a_leg.state = LegState::Confirmed;
     call.a_leg.invite_final_sent = Some(200);
+    let (emission, _) = RetainedEmission::paced(
+        b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+        ("10.0.0.9".into(), 5060),
+        Class::Final2xx,
+        Repeated::response("INVITE", 200),
+    );
+    call.a_leg.dialogs[0].ext.answered_2xx =
+        Some(Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission });
+    let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
+    for timer_type in
+        [TimerType::Rung { obligation: obligation.clone() }, TimerType::RepeatGiveUp { obligation }]
+    {
+        call.timers.push(TimerEntry {
+            id: timer_type.timer_id(None),
+            timer_type,
+            fire_at: 1_500,
+            leg_id: None,
+        });
+    }
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "b-cid@10.0.0.2".into();
@@ -100,8 +124,20 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
     assert_eq!(requests_to("a"), Vec::<String>::new(), "nothing goes to the caller");
     assert!(requests_to("b-1").iter().any(|m| m == "BYE"), "bob gets his BYE");
     assert_eq!(result.call.a_leg.invite_final_sent, Some(487), "the final the wire carries");
-    assert_ne!(result.call.a_leg.state, LegState::Confirmed, "the caller holds no dialog");
+    assert_eq!(result.call.a_leg.state, LegState::Terminated, "the caller holds no dialog");
     assert!(!call::helpers::caller_answered(&result.call), "the caller was never answered");
+    assert!(
+        result.call.a_leg.dialogs.iter().all(|d| d.ext.answered_2xx.is_none()),
+        "no 2xx awaits the caller's ACK"
+    );
+    let ladders: Vec<_> = result
+        .call
+        .timers
+        .iter()
+        .filter(|t| matches!(t.timer_type, TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. }))
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(ladders, Vec::<String>::new(), "no ladder repeats a 2xx that never left");
     assert_eq!(
         call::helpers::lifecycle_position(&result.call).0,
         1,

@@ -448,8 +448,8 @@ async fn loadgen_fake_net_crossing_bye() {
 /// `abandoned` (the CANCEL won, 487). On this paused fake net the timing is
 /// fixed: the caller CANCELs one ring after her 180, the callee answers one
 /// ring after sending it, so the 200 always leaves first and every call is the
-/// crossing. The `abandoned` branch through the SUT is pinned by the B2BUA's
-/// own crossing test.
+/// crossing. The other two branches through the SUT are pinned by
+/// `realcall_abandon_ringing_ending_follows_the_answer_timing` (b2bua-harness).
 #[tokio::test(start_paused = true)]
 #[ignore = "slow lane: loadgen"]
 async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {

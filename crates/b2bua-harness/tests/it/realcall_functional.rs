@@ -225,6 +225,57 @@ async fn realcall_abandon_ringing_no_leak() {
     abnormal_end_no_leak_actor("realcall-abandon-ringing", &ActorAbandonRinging, "abandoned").await;
 }
 
+/// The abandon's branch through the SUT when bob answers `ring` after his
+/// 180, every hop one transit long, and whether bob sent a 2xx to the INVITE.
+async fn abandon_with_ring(name: &str, ring: std::time::Duration) -> (&'static str, bool) {
+    let scene = B2buaScene::new(name).await;
+    let mut env = CallEnv::for_functional(
+        &scene.alice,
+        &scene.bob,
+        None,
+        scene.b2bua.addr,
+        "X-Loadgen-Id",
+        format!("{name}-tok"),
+    );
+    env.ring_delay = ring;
+    let bob = scene.bob.addr();
+    let branch = run_actor_asserting(&ActorAbandonRinging, &env).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
+    let report = scene.finish().await;
+    assert!(report.passed(), "RFC audit failed for `{name}`");
+    let bob_answered = report.entries().iter().any(|e| {
+        let text = String::from_utf8_lossy(&e.raw);
+        e.from == bob && text.starts_with("SIP/2.0 2") && text.contains(" INVITE\r\n")
+    });
+    (branch, bob_answered)
+}
+
+/// The two abandon endings timing alone decides through the SUT. With no ring
+/// the 200 trails the 180 by nothing and reaches alice before her CANCEL
+/// leaves: `answered_before_cancel`. With a ring of 2.5 transits her CANCEL
+/// (sent on the 180, two transits after bob sent it) reaches the SUT after
+/// bob's 200 left him but before it arrives: the SUT answers her CANCEL 200
+/// and her INVITE 487, and tears bob's answered leg down — `abandoned`, with
+/// bob's answer on the wire. The no-ring case repeats: the order of two
+/// messages landing in one instant must not decide it.
+#[tokio::test(start_paused = true)]
+async fn realcall_abandon_ringing_ending_follows_the_answer_timing() {
+    let transit = std::time::Duration::from_millis(scenario_harness::SIMULATED_TRANSIT_DELAY_MS);
+    for i in 0..8 {
+        assert_eq!(
+            abandon_with_ring(&format!("realcall-abandon-no-ring-{i}"), std::time::Duration::ZERO)
+                .await,
+            ("answered_before_cancel", true),
+            "run {i}"
+        );
+    }
+    assert_eq!(
+        abandon_with_ring("realcall-abandon-cancel-meets-the-200", transit * 5 / 2).await,
+        ("abandoned", true)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn realcall_refer_charlie_reject_no_leak() {
     // A↔B establish, B REFERs to C, C 603-declines: the transfer fails but A↔B

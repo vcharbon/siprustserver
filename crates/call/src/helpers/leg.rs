@@ -4,6 +4,7 @@
 
 use crate::model::{
     ByeDisposition, Call, CallModelState, Dialog, Leg, LegDisposition, LegKind, LegState,
+    MessageDirection, MessageEntry,
 };
 
 use super::lens::update_leg;
@@ -61,12 +62,15 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
 /// initial INVITE with (RFC 3261 §9.2). It is the final the wire carries even
 /// when the record already holds a 2xx: one built after the layer's 487, which
 /// the completed transaction never sent. That 2xx is kept as
-/// [`Leg::answer_preempted`], and the leg goes back to the early dialog its
-/// provisional opened: no confirmation, no 2xx awaiting its ACK.
+/// [`Leg::answer_preempted`], the leg goes back to the early dialog its
+/// provisional opened (no confirmation, no 2xx awaiting its ACK), and its
+/// message ring drops the 2xx entry, so the ring holds only what reached the
+/// wire.
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
     update_leg(call, leg_id, |l| {
         if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
             l.answer_preempted = Some(answer);
+            l.messages.entries.retain(|e| !is_sent_invite_2xx(e));
             if l.state == LegState::Confirmed {
                 l.state = LegState::Early;
             }
@@ -77,6 +81,15 @@ pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
         }
         l.invite_final_sent = Some(487);
     })
+}
+
+/// A 2xx to an INVITE the stack sent on a leg. Before the leg's initial
+/// INVITE is answered on the wire it is that INVITE's answer: no other INVITE
+/// can be in progress on an unconfirmed leg.
+fn is_sent_invite_2xx(e: &MessageEntry) -> bool {
+    e.direction != MessageDirection::Received
+        && e.method == "INVITE"
+        && e.code.is_some_and(|c| (200..300).contains(&c))
 }
 
 /// Whether a single leg has reached a terminal resolution for termination

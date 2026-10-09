@@ -274,6 +274,18 @@ async fn either_branch_of_the_race_is_its_accepted_ending() {
     assert_eq!(v.branch(), Some("answered_despite_cancel"), "answer-wins, got {v:?}");
 }
 
+/// A true crossing whose CANCEL was lost and retransmitted after the server
+/// had already answered the INVITE and deleted its transaction: the retransmit
+/// draws a 481 (RFC 3261 §9.2), and the call is still the crossing.
+#[tokio::test]
+async fn a_crossing_whose_cancel_draws_481_is_answered_despite_cancel() {
+    let expect = Expect::of(&[Branch::ANSWERED_DESPITE_CANCEL, Branch::ABANDONED]);
+    let crossed = caller_saw(&[(180, "INVITE"), (200, "INVITE"), (481, "CANCEL")], None);
+    crossed.record(Observation::CancelSent { leg: "alice" }, tokio::time::Instant::now());
+    let v = verdict(expect, CallVerdict::Ok, &crossed, "alice");
+    assert_eq!(v.branch(), Some("answered_despite_cancel"), "got {v:?}");
+}
+
 /// The 2xx reached the caller before her CANCEL left: she sent none, was
 /// answered, and hung up. That is the `answered_before_cancel` ending; the
 /// same log with a CANCEL sent and never answered is no accepted ending.
