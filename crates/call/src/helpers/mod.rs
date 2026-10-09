@@ -70,8 +70,8 @@ pub use obligation::{
     restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
-    add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer, merge_leg,
-    relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg,
+    a_tag_shown, add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer,
+    merge_leg, relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg,
 };
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{

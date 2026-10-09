@@ -261,6 +261,70 @@ async fn an_out_of_order_caller_request_is_answered_500() {
     let _ = h.finish().await;
 }
 
+/// The 180's early dialog keeps its record beside the one a service's 183
+/// opens: the answer confirms it with the 2 and 3 the caller spent there, so
+/// her reuse of 2 after the answer is out of order (RFC 3261 §12.2.2) — 500,
+/// not relayed — and her BYE (4) continues it.
+#[tokio::test(start_paused = true)]
+async fn the_shown_early_dialog_keeps_its_sequence_beside_a_service_tag() {
+    let h = Harness::with_transit_delay("b2bua-shown-tag-beside-service-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:7393").await;
+    let bob = h.agent("bob", "127.0.0.1:7394").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 7394)
+        .services(vec![restamp::service_def()])
+        .start(&h, "b2bua", "127.0.0.1:7395")
+        .await;
+    h.waive(
+        WaiverScope::rule(
+            "cseq-in-dialog-order",
+            "alice reuses a spent CSeq after the answer: the out-of-order request under test (RFC 3261 §12.2.2)",
+        )
+        .on_party("alice"),
+    );
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    let ringing_tag = call.expect(180).await.to().tag().expect("the 180's tag").to_string();
+    uas.respond(183, "Session Progress").await;
+    let shown = call.expect(183).await;
+    assert_eq!(shown.to().tag(), Some(restamp::TAG), "the service's own early dialog");
+
+    for _ in 0..2 {
+        let mut update =
+            call.send_request(InDialogMethod::Update).with_to_tag(&ringing_tag).send().await;
+        bob.receive("UPDATE").await.respond(200, "OK").await;
+        update.expect(200).await;
+    }
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to().tag(), Some(ringing_tag.as_str()), "the callee's dialog answers");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(dialog.local_cseq(), 3, "the 180's dialog spent 2 and 3");
+
+    dialog.set_local_cseq(1);
+    let mut stale = dialog.request(InDialogMethod::Info, None).await;
+    dialog.set_local_cseq(3);
+    stale.expect(500).await;
+    h.advance(Duration::from_millis(500)).await;
+    assert!(
+        bob.try_receive_tolerating("INFO", &[]).await.is_none(),
+        "an out-of-order request is not relayed"
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// The service that shows the caller a second early dialog of its own: the
 /// callee's 183 is answered toward her as a 183 under a To-tag the service
 /// states, and is not relayed.
@@ -313,12 +377,12 @@ mod restamp {
     }
 }
 
-/// A request the caller sends in an early dialog whose tag names no
-/// caller-facing record moves no other dialog's sequence: she spends 2 and 3
-/// on the callee's dialog (the 180's tag), then her own 2 on the dialog a
-/// service's 183 showed her under its own tag — in order there, so relayed.
+/// A service's 183 under a tag of its own, beside the callee's 180 the caller
+/// already holds, opens a caller-facing early dialog of its own (RFC 3261
+/// §12.1.2): she spends 2 and 3 on the callee's dialog (the 180's tag), then
+/// her own 2 on the service's — in order there, so relayed.
 #[tokio::test(start_paused = true)]
-async fn a_request_on_an_unrecorded_caller_facing_tag_moves_no_other_sequence() {
+async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
     let h = Harness::with_transit_delay("b2bua-unrecorded-caller-facing-tag", 1);
     let alice = h.agent("alice", "127.0.0.1:7336").await;
     let bob = h.agent("bob", "127.0.0.1:7337").await;

@@ -461,12 +461,9 @@ impl ActionExecutor<'_> {
 }
 
 /// Map a callee dialog to its a-facing tag, opening the caller-facing early
-/// dialog that tag names when the a-leg does not hold it yet: a record of its
-/// own beside the a-dialog — same caller, route set and target — whose two
-/// sequences start from the caller's INVITE (RFC 3261 §12.1.2, §12.2.1.1).
-/// Nothing is mapped or opened once the caller's INVITE has its final, nor for
-/// a callee dialog already mapped; an a-leg with no dialog yet opens nothing,
-/// its first dialog takes the tag.
+/// dialog that tag names when the a-leg does not hold it yet
+/// ([`open_early_a_dialog`]). Nothing is mapped or opened once the caller's
+/// INVITE has its final, nor for a callee dialog already mapped.
 pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
     if call.a_leg.invite_final_sent.is_some()
         || find_by_b_tag(call, &mapping.b_leg_id, &mapping.b_tag).is_some()
@@ -475,6 +472,15 @@ pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
     }
     let tag = mapping.a_tag.clone();
     *call = add_tag_mapping(call.clone(), mapping);
+    open_early_a_dialog(call, &tag);
+}
+
+/// Open the caller-facing early dialog `tag` names beside the a-dialog: a
+/// record of its own — same caller, route set and target — whose two
+/// sequences start from the caller's INVITE (RFC 3261 §12.1.2, §12.2.1.1).
+/// Nothing is opened for an empty tag, a tag the a-leg already holds, or an
+/// a-leg with no dialog yet, whose first dialog takes the tag.
+pub(super) fn open_early_a_dialog(call: &mut Call, tag: &str) {
     if tag.is_empty() || call.a_leg.dialogs.iter().any(|d| d.sip.local_tag == tag) {
         return;
     }
@@ -484,7 +490,7 @@ pub(super) fn map_a_face(call: &mut Call, mapping: TagMapping) {
         call_id: &primary.sip.call_id,
         local_uri: &primary.sip.local_uri,
         remote_uri: &primary.sip.remote_uri,
-        local_tag: &tag,
+        local_tag: tag,
         remote_tag: &primary.sip.remote_tag,
     };
     let mut face =

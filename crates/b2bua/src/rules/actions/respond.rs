@@ -336,10 +336,12 @@ impl ActionExecutor<'_> {
     /// caller's early identity, stated by the service; absent ⇒ the B2BUA's own
     /// (reuse/mint).
     ///
-    /// Either way the tag the caller is SHOWN becomes the a-dialog's, so the
-    /// non-2xx final ending this transaction answers under it (§17.2.1) rather
-    /// than under a tag the caller was never in — a b-leg confirm may have minted
-    /// one before she saw anything. Only a 2xx supersedes it, under A2
+    /// Either way the tag the caller is SHOWN has an a-dialog: the a-dialog's
+    /// own where it held none the caller saw — a b-leg confirm may have minted
+    /// one before she saw anything — so the non-2xx final ending this
+    /// transaction answers under a tag she is in (§17.2.1); an early dialog of
+    /// its own beside a tag she already holds, which keeps its record
+    /// (§12.1.2). Only a 2xx supersedes them, under A2
     /// ([`Self::answer_a_leg_new_dialog`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_provisional_to_leg(
@@ -365,14 +367,21 @@ impl ActionExecutor<'_> {
             return;
         }
         // `to_tag` provided → the service states the caller's early identity: it
-        // seeds the a-dialog, and re-stamps one a b-leg confirm minted before any
-        // caller-facing response carried it. Absent → the B2BUA's own early
-        // identity: reuse the existing a-dialog tag or mint and persist one.
+        // seeds the a-dialog, re-stamps one a b-leg confirm minted before any
+        // caller-facing response carried it, and beside a tag the caller was
+        // already shown opens an early dialog of its own (RFC 3261 §12.1.2).
+        // Absent → the B2BUA's own early identity: reuse the existing a-dialog
+        // tag or mint and persist one.
         let to_tag = match to_tag {
             Some(t) => {
-                self.ensure_a_dialog_with(call, Some(t.to_string()));
-                if let Some(d) = call.a_leg.dialogs.first_mut() {
-                    d.sip.local_tag = t.to_string();
+                let primary = self.ensure_a_dialog_with(call, Some(t.to_string()));
+                let held = call.a_leg.dialogs.iter().any(|d| d.sip.local_tag == t);
+                if !held && call::helpers::a_tag_shown(call, &primary) {
+                    super::dialog_track::open_early_a_dialog(call, t);
+                } else if !held {
+                    if let Some(d) = call.a_leg.dialogs.first_mut() {
+                        d.sip.local_tag = t.to_string();
+                    }
                 }
                 t.to_string()
             }
