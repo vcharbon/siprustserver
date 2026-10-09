@@ -10,8 +10,8 @@
 //! samples are capped per bucket; and the sampling gate
 //! ([`Reporter::should_record`]) decides at call start
 //! whether to record at all, converging to ~zero recording once every bucket is
-//! full (with a small background fraction so a late-appearing error class still
-//! gets captured). Recording itself is per-call (freed when the call's binder
+//! full or has chased its next sample long enough (with a small background
+//! fraction so a late-appearing error class still gets captured). Recording itself is per-call (freed when the call's binder
 //! drops), so nothing accumulates across calls.
 
 use std::collections::BTreeMap;
@@ -83,6 +83,20 @@ impl Default for ReporterCfg {
 // un-refined (Ok).
 type Bucket = (ScenarioId, String, String, ChaosTag);
 
+/// How many calls of its scenario a bucket under cap keeps recording after its
+/// last sample: the sampling gate chases the bucket's next occurrence that
+/// long, then leaves it to the background fraction, so a rare failure mode
+/// never keeps a whole scenario recording.
+const CHASE_CALLS: u32 = 64;
+
+/// One sample bucket's tally: the samples it holds, and the calls recorded to
+/// chase its next sample since the last one ([`CHASE_CALLS`]).
+#[derive(Default, Clone, Copy)]
+struct BucketTally {
+    taken: u32,
+    chased: u32,
+}
+
 /// The run-dir-relative path of one sample page — THE single place the on-disk
 /// layout is spelled, used by both `finalize` (the writer) and `build_index`
 /// (the machine-readable listing) so the two can never disagree. An empty case
@@ -109,7 +123,7 @@ struct Inner {
     checkpoints: BTreeMap<(ScenarioId, &'static str), Hist>,
     /// SIP round trips per scenario and exchange (`Hist::round_trip` bounds).
     rtt: BTreeMap<(ScenarioId, Exchange), Hist>,
-    sample_taken: BTreeMap<Bucket, u32>,
+    sample_taken: BTreeMap<Bucket, BucketTally>,
     samples: BTreeMap<Bucket, Vec<RenderedSample>>,
     /// Per-scenario Test-case check-verdict tally over the SAMPLED calls:
     /// `(passed_all, failed_any)`. Fed only for calls whose attached case had
@@ -230,7 +244,8 @@ impl Reporter {
     }
 
     /// The sampling-gate decision at call start: should this call record its
-    /// trace? True while any bucket for the scenario is still under cap (or none
+    /// trace? True while a bucket for the scenario is still under cap and has
+    /// chased its next sample for fewer than [`CHASE_CALLS`] calls (or none is
     /// recorded yet), plus a small background fraction so a late error class is
     /// eventually captured. Converges to (background-only) once full.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
@@ -240,12 +255,13 @@ impl Reporter {
         {
             return true;
         }
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
         let mut saw_bucket = false;
-        for ((s, _, _, _), &c) in g.sample_taken.iter() {
+        for ((s, _, _, _), tally) in g.sample_taken.iter_mut() {
             if *s == scenario {
                 saw_bucket = true;
-                if c < self.cfg.sample_cap {
+                if tally.taken < self.cfg.sample_cap && tally.chased < CHASE_CALLS {
+                    tally.chased += 1;
                     return true;
                 }
             }
@@ -267,7 +283,7 @@ impl Reporter {
     ) -> bool {
         let g = self.inner.lock().unwrap();
         let key = (scenario, class.label(), case.to_string(), chaos);
-        g.sample_taken.get(&key).copied().unwrap_or(0) < self.cfg.sample_cap
+        g.sample_taken.get(&key).map_or(0, |t| t.taken) < self.cfg.sample_cap
     }
 
     /// Record one completed call: bump its `(scenario, class, case)` count and
@@ -309,9 +325,9 @@ impl Reporter {
         }
         if let Some(sample) = sample {
             let key = (scenario, label, case.to_string(), chaos);
-            let taken = g.sample_taken.entry(key.clone()).or_default();
-            if *taken < self.cfg.sample_cap {
-                *taken += 1;
+            let tally = g.sample_taken.entry(key.clone()).or_default();
+            if tally.taken < self.cfg.sample_cap {
+                *tally = BucketTally { taken: tally.taken + 1, chased: 0 };
                 g.samples.entry(key).or_default().push(sample);
             }
         }
@@ -738,7 +754,7 @@ impl Reporter {
             .sample_taken
             .iter()
             .filter(|((s, c, _, _), _)| *s == scenario && *c == label)
-            .map(|(_, n)| *n)
+            .map(|(_, t)| t.taken)
             .sum()
     }
 
@@ -953,6 +969,34 @@ mod tests {
             "{prom}"
         );
         assert!(!prom.contains("exchange=\"invite_100\""), "an unobserved exchange is not written");
+    }
+
+    /// A bucket under cap keeps its scenario recording for [`CHASE_CALLS`]
+    /// calls after its last sample, then only the background fraction does;
+    /// its next sample re-arms the chase.
+    #[test]
+    #[ignore = "slow lane: loadgen"]
+    fn a_bucket_under_cap_chases_its_next_sample_for_a_bounded_run() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 2, background_record_every: 0 });
+        assert!(r.should_record("s"), "nothing recorded yet");
+        let failed = || CallOutcome::Step {
+            at: FailedAt::at_barrier("established"),
+            cause: scenario_harness::StepError::Timeout { who: "established".into() },
+        };
+        let record = |o: &CallOutcome| {
+            let sample = RenderedSample { html: None, detail: o.detail(), e2e_ms: 1.0 };
+            r.record("s", o, &o.case(None), Duration::ZERO, &[], Some(sample), ChaosTag::Clear);
+        };
+        record(&failed());
+        let chased = (0..CHASE_CALLS + 10).filter(|_| r.should_record("s")).count();
+        assert_eq!(chased, CHASE_CALLS as usize, "the chase is bounded");
+        record(&failed());
+        assert!(!r.should_record("s"), "a full bucket is not chased");
+        record(&CallOutcome::Step {
+            at: FailedAt::at_barrier("torn_down"),
+            cause: scenario_harness::StepError::Timeout { who: "torn_down".into() },
+        });
+        assert!(r.should_record("s"), "a new bucket re-arms the chase");
     }
 
     /// The index counts an accepted reject as ok: it is no failed call.
