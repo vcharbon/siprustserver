@@ -28,7 +28,8 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
 3. **A dialog carries its state**: `Early`, `Confirmed`, `Ending` (our BYE
    in flight), `Ended(Rejected | PeerBye | OurBye)` and `Retired` — an early
    dialog the call let go of without a BYE (a losing fork, a caller-facing
-   dialog the answer did not take), holding the relays still open in it and
+   dialog the answer did not take, a leg given up before its INVITE's final),
+   holding the relays still open in it and
    the ACK/BYE that released its late 2xx (§13.2.2.4). No record is removed
    before the call is: a late message is answered by what its dialog was.
 4. **A caller-facing dialog states the callee dialogs it relays**
@@ -73,14 +74,23 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    (§12.2.1.1): a gap in the sender's sequence is not reproduced on the other
    face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
    leg (§8.1.1.5 allows any start below 2³¹).
+8. **The model states its invariants at the end of every turn**
+   (`crates/b2bua/src/rules/model_invariants.rs`, on in debug builds and every
+   harness): each dialog of a leg is named by exactly one pair of tags; a leg
+   is confirmed exactly when one dialog is confirmed or ending (§12.1), a
+   released leg's BYE in flight reading ending; every `fronts` entry and the
+   leg's own tag name a dialog the call holds; a dialog stays until the call
+   is released and its two sequences never decrease (§12.2.1.1, §12.2.2); no
+   dialog is early once its INVITE has its final or its leg ended (§12.1);
+   and every in-dialog request but an ACK ends its turn with a final sent or
+   its relay recorded (§8.2.6, §8.1.3.3).
 
 ## Consequences
 
 - A request on a retired or ended dialog is told apart from one on a dialog
   never held, without a side table.
-- Every turn can check the model whole: each dialog reachable by one pair of
-  tags, at most one confirmed dialog per leg, every `fronts` naming a dialog
-  the callee leg holds.
+- Every turn checks the model whole (decision 8), so a defect shows at the
+  turn that made it, not at the message that later meets it.
 - Each face of a call carries a contiguous run of this stack's own numbers;
   a trace that maps a request across the call matches it by the relay
   record, not by its CSeq.
