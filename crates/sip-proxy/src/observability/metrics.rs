@@ -1,11 +1,6 @@
-//! [`ProxyMetrics`] — atomics-backed counters/gauges for the proxy data path
-//! (port of `observability/Metrics.ts`). The source uses Effect `Metric`s; here
-//! we keep live atomics + small labeled maps and render Prometheus text
+//! [`ProxyMetrics`] — atomics-backed counters/gauges for the proxy data path:
+//! live atomics + small labeled maps, rendered as Prometheus text
 //! ([`ProxyMetrics::prometheus_text`]) for the `/metrics` endpoint.
-//!
-//! Mirrors the source metric names so dashboards transfer: `sip_messages_total`,
-//! `sip_routing_decision_total`, `sip_routing_duration_seconds` (histogram),
-//! `sip_proxy_hmac_failures_total`, `sip_worker_health`, etc.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -657,7 +652,7 @@ impl ProxyMetrics {
         c::RECV_SHARDS_STALLED.render_value(&mut s, load(&self.recv_shards_stalled));
         c::WORKER_POOL_EMPTY.render_value(&mut s, load(&self.worker_pool_empty));
 
-        // Overload-shed visibility (port of the TS AIMD counters). Without these a
+        // Overload-shed visibility. Without these a
         // worker that gets silently rate-capped (`bucket_empty`), filtered out
         // (`no_target_critical_filtered`), or floored on stale telemetry
         // (`stale_decrease`) leaves no Prometheus trail. `overload_rejections` is

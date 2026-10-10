@@ -2,10 +2,7 @@
 //! set + a proxy-only `WorkerAnnotations` overlay, composed into the
 //! [`WorkerEntry`] set the LB reads.
 //!
-//! This is "the rest" that every registry impl now shares. Before, each of the
-//! three registries (`static`, `simulated`, `membership`) carried its own
-//! `RegistryState` — a second container mirroring topology's `MembershipState`
-//! — plus a forked copy of topology's `reconcile_to_desired`. Once **health** (the
+//! This is "the rest" that every registry impl shares. Once **health** (the
 //! one genuinely proxy-only, OPTIONS-driven field) is lifted out of the worker
 //! set, the set *is* membership, and a `WorkerEntry` is a pure projection:
 //!

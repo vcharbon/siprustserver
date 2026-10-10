@@ -22,11 +22,10 @@
 //!   not one per packet;
 //! - a **size cap**, because the `;outbound` self-Route lets any sender steer
 //!   arbitrary R-URI hostnames into resolution — uncapped, each distinct name
-//!   was a permanent map entry (remote memory growth).
+//!   would be a permanent map entry (remote memory growth).
 //!
 //! Packets that race an in-flight resolve for the same name are dropped (and
-//! counted): SIP retransmission covers the loss, and carrying waiters would
-//! buy complexity for a window that is typically single-digit milliseconds.
+//! counted).
 //!
 //! Cold-cache latency is attacked from three sides, so the
 //! FIRST b-leg forward after a deploy / CoreDNS restart / TTL expiry is
@@ -111,7 +110,7 @@ where
 /// The production resolver — `tokio::net::lookup_host` (getaddrinfo on the
 /// blocking pool), first result wins. A per-pod name is single-A, so it
 /// resolves to ONE pod consistently. Dotted names are queried
-/// absolutely-qualified first (see `resolution_candidates` — the ndots fix).
+/// absolutely-qualified first (see `resolution_candidates`).
 pub struct SystemResolver;
 
 #[async_trait]

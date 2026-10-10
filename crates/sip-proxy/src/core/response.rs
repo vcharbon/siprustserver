@@ -104,11 +104,9 @@ impl ProxyCore {
         // worker-outbound classification on). The received/rport-derived
         // `host:port` above stays the SEND target per §18.2.2/RFC 3581, but it
         // must not be the lookup key: behind the keepalived VIP it is the SNAT
-        // node IP + an ephemeral port, which matches no registry entry — that
-        // made this whole Dead branch unreachable in production, so a dead
-        // worker's in-flight responses were blackholed at its stale SNAT
-        // address instead of failing over to `w_bak`. A departed address answers
-        // `Dead` from the registry's tombstone, so this branch covers it too.
+        // node IP + an ephemeral port, which matches no registry entry. A
+        // departed address answers `Dead` from the registry's tombstone, so
+        // this branch covers it too.
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
         let dead_worker = (cseq.method() == Method::Invite)

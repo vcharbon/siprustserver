@@ -173,7 +173,7 @@ async fn in_flight_cap_bounds_spawned_resolves() {
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "cap must bound concurrent resolves");
 }
 
-// ── absolute-first resolution (the kube ndots:5 fix) ────────────────────
+// ── absolute-first resolution ───────────────────────────────────────────
 
 /// Pure candidate ordering: dotted names try the absolutely-qualified form
 /// first (ONE lookup instead of ndots search expansion), falling back to

@@ -28,7 +28,6 @@ fn gate(size: u32, rate: u32, elu_critical: f64) -> (EluCpsGate, SimulatedLoadCo
     (g, ctl)
 }
 
-/// The default config matches `defaultProxySelfGateConfig` exactly.
 #[test]
 fn defaults_match_the_ts_source() {
     let c = ProxySelfGateConfig::default();
@@ -41,7 +40,7 @@ fn defaults_match_the_ts_source() {
 
 /// Before any sample fires the EWMA is `0`, so the gate admits external
 /// traffic up to the bucket capacity even with a high injected ELU (cold
-/// start: the TS `initialized` flag keeps `eluEwma = 0`).
+/// start).
 #[tokio::test(start_paused = true)]
 async fn cold_start_admits_until_the_first_sample() {
     let (g, ctl) = gate(2, 0, 0.8);
@@ -52,7 +51,7 @@ async fn cold_start_admits_until_the_first_sample() {
 
 /// ELU above `elu_critical` (once sampled) sheds with `proxy_overload_elu` +
 /// `Retry-After: 1`, and crucially does NOT spend a CPS token (step 1 is
-/// before the bucket). Port of the `eluEwma > eluCritical` branch.
+/// before the bucket).
 #[tokio::test(start_paused = true)]
 async fn elu_above_critical_503s_without_spending_a_token() {
     let (g, ctl) = gate(1, 0, 0.8);
@@ -70,7 +69,7 @@ async fn elu_above_critical_503s_without_spending_a_token() {
     assert!(g.try_admit_external().is_admit(), "the ELU reject must not have spent the token");
 }
 
-/// At exactly `elu_critical` the gate still admits (`>` is strict, matching TS).
+/// At exactly `elu_critical` the gate still admits (`>` is strict).
 #[tokio::test(start_paused = true)]
 async fn elu_exactly_at_critical_still_admits() {
     let (g, ctl) = gate(10, 0, 0.8);
@@ -80,7 +79,7 @@ async fn elu_exactly_at_critical_still_admits() {
 }
 
 /// With ELU calm, the gate admits until the CPS bucket drains, then sheds
-/// with `proxy_overload_cps`. Port of the `!bucket.tryConsume()` branch.
+/// with `proxy_overload_cps`.
 #[tokio::test(start_paused = true)]
 async fn admits_until_the_cps_bucket_drains_then_503s_cps() {
     // Capacity 2, refill 0/s so the bucket can't top up between consumes.
@@ -88,7 +87,7 @@ async fn admits_until_the_cps_bucket_drains_then_503s_cps() {
     assert!(g.try_admit_external().is_admit());
     assert!(g.try_admit_external().is_admit());
     let d = g.try_admit_external();
-    // rate 0 + empty → the TS 60 s Retry-After fallback.
+    // rate 0 + empty → the 60 s Retry-After fallback.
     assert_eq!(d, AdmitDecision::Reject { reason: ShedReason::Cps, retry_after_sec: 60 });
     assert_eq!(g.metrics().rejected_cps_total, 1);
     assert_eq!(g.metrics().external_admitted_total, 2);
@@ -140,7 +139,7 @@ async fn metrics_snapshot_reflects_config_and_counters() {
 
 /// The EWMA smooths toward a sustained reading across repeated ticks
 /// (alpha 0.2): the first tick seats it, subsequent ticks pull it toward the
-/// new value but never past it. Port of `eluEwma = α·raw + (1−α)·eluEwma`.
+/// new value but never past it.
 #[test]
 fn ewma_smooths_across_repeated_samples() {
     let (g, ctl) = gate(50, 100, 0.8);

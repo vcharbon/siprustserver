@@ -62,7 +62,7 @@ fn is_dialog_creating(method: &str) -> bool {
 /// UDP socket bound on the caller plane, its own advertise, and the internal
 /// CIDR classifier that picks the egress face per destination IP. Handed to
 /// [`ProxyCoreBuilder::external_face`]; when absent the core is the classic
-/// single-face proxy (behaviour byte-identical to before dual-face existed).
+/// single-face proxy.
 pub struct ExternalFaceParts {
     /// The external-plane socket (bound on the external VIP).
     pub endpoint: Box<dyn UdpEndpoint>,
@@ -205,8 +205,8 @@ impl ProxyCore {
 
     // ── Dual-face plumbing ──────────────────────────────────────────────────
     // Single-face mode (external = None): every helper below degenerates to
-    // the pre-dual-face behaviour — internal endpoint, internal advertise,
-    // `is_self_addr` == "matches the one advertise". Zero behavioural delta.
+    // internal endpoint, internal advertise, `is_self_addr` == "matches the
+    // one advertise".
 
     /// Is `ip` on the internal plane? Single-face: everything is internal.
     fn ip_is_internal(&self, ip: IpAddr) -> bool {
@@ -355,10 +355,10 @@ impl ProxyCore {
         // slot, so N shards never stomp one gauge; the metrics render the
         // cross-shard aggregate. The AbortOnDrop guard aborts it even when the
         // whole recv-loop TASK is aborted (a supervisor/harness abort drops
-        // this future mid-`recv`): without it the stats task kept a strong
+        // this future mid-`recv`): without it the stats task would keep a strong
         // endpoint `Arc` alive forever, so the socket (and on the simulated
-        // fabric the bind address itself) leaked past the core's death — which
-        // broke rebinding the same VIP for a takeover proxy.
+        // fabric the bind address itself) would leak past the core's death and
+        // block rebinding the same VIP for a takeover proxy.
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
@@ -520,8 +520,7 @@ impl ProxyCoreBuilder {
     }
     /// Enable **dual-face mode**: a second socket on the external (caller)
     /// plane with its own advertise, and the internal CIDR list that picks the
-    /// egress face per destination IP. Absent → single-face, byte-identical to
-    /// the pre-dual-face proxy.
+    /// egress face per destination IP. Absent → single-face.
     pub fn external_face(mut self, parts: ExternalFaceParts) -> Self {
         self.external = Some(parts);
         self

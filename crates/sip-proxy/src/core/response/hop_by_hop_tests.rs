@@ -98,9 +98,9 @@ impl sip_net::UdpEndpoint for ByteCapturingEndpoint {
 
 // RFC 3261 §16.11 / ADR-0022 X4 — loss-recovery of a rejected call. The
 // proxy must NOT synthesize the §17.1.1.3 hop ACK when relaying a non-2xx
-// INVITE final: that quenched the downstream UAS's Timer G (the only
+// INVITE final: that would quench the downstream UAS's Timer G (the only
 // retransmitter in the system) while the upstream relay stays
-// exactly-once, so one lost relayed copy wedged the caller until Timer B
+// exactly-once, so one lost relayed copy would wedge the caller until Timer B
 // / the 32 s safety timer. Reliability is end-to-end instead — the
 // upstream's own ACK is relayed downstream to the node the final arrived
 // from, on the INVITE's outbound Via branch (so the UAS's server

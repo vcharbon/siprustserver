@@ -124,7 +124,7 @@ fn per_method_request_response_and_calls_render() {
 fn overload_shed_counters_render() {
     // Both the keyed rejection counter and the coarse stale-decrease aggregate
     // must surface in the exposition — a silently rate-capped or floored worker
-    // is otherwise invisible in Prometheus (the minor-comment fix).
+    // is otherwise invisible in Prometheus.
     let m = ProxyMetrics::new();
     m.record_overload_rejection("bucket_empty");
     m.record_overload_rejection("bucket_empty");
