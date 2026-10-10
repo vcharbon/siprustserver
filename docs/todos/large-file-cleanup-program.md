@@ -66,7 +66,8 @@ invariant (time-based settle, wire-touching reclaim, non-pristine reboot —
 see docs/testing/ha-acceptance.md). Do NOT fix the behavior in the same
 commit as the split. Append it to the **Raised suspicions** log below with
 file:line, the quoted comment, and a one-line assessment; leave the code
-as-is (or add `FIXME(scope):` only if the defect is unambiguous).
+as-is. A comment that has to justify wrong behaviour is never written: the
+defect is reported.
 
 **Danger zones — read the doc before touching**
 
