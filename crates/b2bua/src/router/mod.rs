@@ -27,6 +27,7 @@ mod dialog_gate;
 #[cfg(test)]
 mod dialog_gate_tests;
 mod ingress;
+mod initial_turn;
 mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
@@ -40,6 +41,7 @@ mod resolve;
 mod resolve_tests;
 mod responses;
 mod restore_hygiene;
+mod route_payload;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod timer_screen;

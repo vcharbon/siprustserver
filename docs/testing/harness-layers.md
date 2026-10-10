@@ -219,7 +219,7 @@ The dump follows, in this order:
 2. **wire ladder** — every recorded message, sender → receiver, relative time.
 3. **SUT trace per call** — each sampled call's trace-plane facts (ADR-0026),
    grouped per call, one line each: `sip.in`/`sip.out` with the message's
-   first line, `rule.fired`, `rule.observed`, `rule.transition`,
+   first line, `rule.fired`, `rule.lifecycle`, `rule.transition`,
    `call.transition`, `limiter`, `http.*`. Any trace kind a SUT adds (timer
    arm/cancel/fire facts) appears here with no harness change. Bounded: the
    last 8 calls, the last 80 facts of each.

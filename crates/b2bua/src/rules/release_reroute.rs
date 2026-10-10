@@ -41,7 +41,7 @@
 //! from either party still rides `relay-bye` and ends the call.
 
 use call::{
-    CdrEventType, Direction, LegState, MachineId, ReleaseEventKind, ReroutePhase, RerouteState,
+    CdrEventType, Direction, LegState, ReleaseEventKind, ReroutePhase, RerouteState,
     TerminationCause, TimerKey, TimerType,
 };
 
@@ -50,12 +50,9 @@ use b2bua_sdk::model::{
     CORE_LAYER,
 };
 
-/// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
-pub const RELEASE_REROUTE_MACHINE: MachineId = MachineId::new("release-reroute");
-const GUARD_KEY: &str = "guard";
-
+/// The reroute's overall guard.
 fn guard_timer() -> TimerKey {
-    TimerKey::call(TimerType::service(RELEASE_REROUTE_MACHINE, GUARD_KEY))
+    TimerKey::call(TimerType::RerouteGuard)
 }
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
@@ -187,9 +184,8 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     _ => return None,
                 };
                 let fold = super::defaults::parse_route_fold(payload)?;
-                // Same recipe as the CreateLeg executor, so the slice's
-                // `new_leg_id` names the leg CreateLeg is about to mint.
-                let new_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
+                // The slice's `new_leg_id` names the leg CreateLeg mints.
+                let new_leg_id = ctx.call.next_b_leg_id();
                 let old_leg_id = ctx.call.active_peer().map(|p| p.leg_b.clone());
                 // The duration cap stood as the consult's answer deadline;
                 // the reroute's features re-arm it where their anchor says.
@@ -197,6 +193,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     vec![RuleAction::cancel(TimerKey::call(TimerType::GlobalDuration))];
                 actions.extend(super::defaults::route_fold_parity_actions(&fold, ctx));
                 let leg_body = fold.leg_body(ctx);
+                let attempt = fold.attempt(call::AttemptCause::Reroute, payload);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
@@ -208,6 +205,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     header_updates: fold.header_updates,
                     header_adds: fold.header_adds,
                     kind: None,
+                    attempt: Some(attempt),
                 });
                 actions.push(RuleAction::SetReroute {
                     state: Some(RerouteState {
@@ -383,7 +381,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             "reroute-guard-timeout",
             &[],
             Match::timer()
-                .timer_type(TimerType::service(RELEASE_REROUTE_MACHINE, GUARD_KEY))
+                .timer_type(TimerType::RerouteGuard)
                 .filter(|ctx| ctx.call.reroute_active()),
             |ctx| {
                 let mut actions = vec![RuleAction::AddCdrEvent {

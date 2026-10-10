@@ -59,6 +59,11 @@ pub struct Leg {
     pub ext: Option<ExtMap>,
     /// Explicit leg role (ADR-0014); read via [`crate::helpers::leg_kind`].
     pub kind: Option<LegKind>,
+    /// The attempt that dialled the leg; `None` on the originator's leg and
+    /// on a leg a service dials for its own use (a media leg).
+    pub attempt: Option<super::attempt::AttemptId>,
+    /// The leg's INVITE received a 180–189 provisional: the callee rang.
+    pub rang: bool,
     /// Whether this leg takes part in the originator's session timer (RFC
     /// 4028), fixed when the stack dials it: false on a leg whose answers never
     /// reach the originator (a media leg, one dialled after the originator's

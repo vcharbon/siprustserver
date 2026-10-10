@@ -776,11 +776,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── failover resolution (/call/failure result) ──────────────────────
-        // The async /call/failure round-trip folds its decision back via a
-        // `call-failure-result` internal event. `failover` → cancel the failed
-        // leg's no-answer timer + create a fresh b-leg toward the new
-        // destination (A's INVITE snapshot; the relay_first_18x slice survives so
-        // the new leg's To-tag stays the first 180's).
+        // The async /call/failure round-trip folds its decision back as a
+        // `call-failure-result` internal event. `failover` → a fresh b-leg toward
+        // the new destination under the failover's attempt (A's INVITE snapshot;
+        // the relay_first_18x slice survives: the To-tag stays the first 180's).
         rule(
             "failover-create-leg",
             &[],
@@ -807,6 +806,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let mut actions = route_fold_parity_actions(&fold, ctx);
                 let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
+                    attempt: Some(fold.attempt(call::AttemptCause::Failover, payload)),
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
                     new_from: fold.new_from,

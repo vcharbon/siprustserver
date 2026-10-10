@@ -19,6 +19,7 @@ mod announcement;
 mod answer_new_dialog_relays_the_final;
 mod asserted_identity_privacy;
 mod attached_parts;
+mod attempts;
 mod basic_call;
 mod basic_call_media;
 mod bye_no_200_reap;

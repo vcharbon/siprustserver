@@ -2,17 +2,15 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
+use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use call::helpers::{add_originated_b_leg, mark_decision};
-use call::{Call, Deadline, DecisionKind, TerminationCause, TimerKey, TimerType};
+use call::{AttemptCause, Call, Deadline, DecisionKind, TerminationCause, TimerKey, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::decision::{
-    header_lines, no_answer_deadline, CallDecisionEngine, CallDecisionError, CallFailureRequest,
-    CallTreatment, FailureInfo,
-};
+use crate::decision::{header_lines, no_answer_deadline, CallDecisionEngine};
 use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterWorker};
@@ -30,7 +28,9 @@ use super::schemas::{BodyUpdate, RouteDecision};
 pub(crate) const MAX_LIMITER_FAILOVER: u32 = 5;
 
 /// Apply a route decision to `call` (which already carries the a-leg), creating
-/// the first b-leg + its outbound INVITE. `depth` tracks chained limiter-reject
+/// the first b-leg + its outbound INVITE under the attempt the route opens (a
+/// route admission refuses is an attempt that ends `Refused`; a route whose
+/// dial a service defers opens none here). `depth` tracks chained limiter-reject
 /// failovers (start at 0); `invite_wire` is the a-leg INVITE's datagram, which a
 /// late trace activation backfills from. `now_ms` is the turn's timestamp (every
 /// CDR entry and timer deadline below reads it); `clock` measures the failover
@@ -93,6 +93,12 @@ pub async fn apply_route(
     // parity, same as `features`).
     call.subscriptions = route.subscriptions.clone();
 
+    // The routing answer the attempt this route opens dials, as its services
+    // read it.
+    let answer = RouteAnswer { label: route.label.clone(), service_ext: route.service_ext.clone() };
+    let cause = if depth == 0 { AttemptCause::Route } else { AttemptCause::Failover };
+    let ring = no_answer_deadline(route.no_answer_timeout_sec, Some(&route.features));
+
     // Seed per-service ext slices (service-layer activation gate).
     call = super::apply_reject::seed_service_ext(call, route.service_ext);
 
@@ -124,7 +130,9 @@ pub async fn apply_route(
     }
 
     if let Some(limiter_id) = admit_route(&mut call, &route.call_limiter, limiter, now_ms).await {
-        return Box::pin(limiter_reject_failover(
+        // The refused route is an attempt that dialled nothing.
+        crate::attempts::refuse(&mut call, &mut fx, cause, answer, ring);
+        let mut result = Box::pin(super::limiter_failover::limiter_reject_failover(
             call,
             limiter_id,
             a_invite,
@@ -138,6 +146,9 @@ pub async fn apply_route(
             depth,
         ))
         .await;
+        fx.extend(std::mem::take(&mut result.effects));
+        result.effects = fx;
+        return result;
     }
 
     // The route is admitted: it is what the call is handled under from here
@@ -176,12 +187,12 @@ pub async fn apply_route(
     // A per-pod name is single-A, so it resolves consistently across retransmits
     // and the call never splits across pods. The R-URI therefore carries the name
     // (set by the decision engine) straight through.
-    let leg_id = "b-1";
+    let leg_id = call::helpers::next_b_leg_id(&call);
+    let leg_id = leg_id.as_str();
     let dest = (route.destination.host.clone(), route.destination.port());
     // A route-supplied ring deadline above `bound − margin` is held under the
     // configured transaction bound so the CANCEL→487 exchange still completes
     // inside the live b-leg client transaction (`relay::clamp_no_answer`).
-    let ring = no_answer_deadline(route.no_answer_timeout_sec, Some(&route.features));
     let no_answer = relay::clamp_no_answer(config, &call.call_ref, ring);
     // The decision's header statements (sets of one or more lines, removals).
     // Structural From/To/R-URI go through the typed fields below, never this
@@ -293,6 +304,9 @@ pub async fn apply_route(
     );
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
+    let attempt =
+        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer), no_answer);
+    call::helpers::join_attempt(&mut call, attempt, leg_id);
 
     // The leg's ring deadline, retired with the leg.
     if let Some(ms) = no_answer.millis() {
@@ -375,199 +389,6 @@ async fn admit_route(
         | AdmitOutcome::Released => None,
         AdmitOutcome::Rejected { limiter_id, .. } => Some(limiter_id),
     }
-}
-
-/// The limiter refused this route: consult `/call/failure` for a failover
-/// treatment and apply it, or answer `486 Busy Here` when the call has no
-/// callback context to fail over with — or has already burned
-/// [`MAX_LIMITER_FAILOVER`] hops, so a plan that keeps returning limited
-/// destinations terminates instead of looping.
-#[allow(clippy::too_many_arguments)]
-async fn limiter_reject_failover(
-    mut call: Call,
-    limiter_id: String,
-    a_invite: &SipRequest,
-    invite_wire: &[u8],
-    decision: &dyn CallDecisionEngine,
-    limiter: &LimiterWorker,
-    config: &B2buaConfig,
-    id_gen: &IdGen,
-    clock: &Clock,
-    now_ms: i64,
-    depth: u32,
-) -> HandlerResult {
-    if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
-        return crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            486,
-            Some("Busy Here".into()),
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            id_gen,
-            now_ms,
-            TerminationCause::Admission,
-        );
-    }
-    let req = limiter_failure_request(&call, &limiter_id);
-    let mut request_json = crate::trace::intake::request_body(&call, &req);
-    let sent_at_ms = clock.now_ms();
-    let response = decision.call_failure(req).await;
-    let received_at_ms = clock.now_ms();
-    // A failover route carrying `trace: true` opens the trace right here, so
-    // activate before recording: the consult that turned tracing on is the first
-    // thing its child span carries. The rebuild is derived from the same call,
-    // so it IS the body that went out.
-    if let Ok(CallTreatment::Route(route2)) = &response {
-        if route2.trace && !crate::trace::sampled(&call) {
-            let rebuilt =
-                crate::trace::intake::json_body(&limiter_failure_request(&call, &limiter_id));
-            if crate::trace::intake::force_enable(&mut call, invite_wire, now_ms) {
-                request_json = Some(rebuilt);
-            }
-        }
-    }
-    record_failure_round_trip(&call, request_json, &response, sent_at_ms, received_at_ms);
-    match response {
-        Ok(CallTreatment::Route(route2)) => {
-            Box::pin(apply_route(
-                call,
-                route2,
-                a_invite,
-                invite_wire,
-                decision,
-                limiter,
-                config,
-                id_gen,
-                clock,
-                now_ms,
-                depth + 1,
-            ))
-            .await
-        }
-        // A limiter refusal names no failed leg: these marks carry none.
-        Ok(CallTreatment::Reject(rj)) => super::apply_reject::apply_reject(
-            call,
-            rj,
-            DecisionKind::FailoverReject,
-            None,
-            a_invite,
-            &config.minted_final_advertisement,
-            id_gen,
-            now_ms,
-        ),
-        Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
-            call,
-            rd,
-            DecisionKind::FailoverRedirect,
-            None,
-            a_invite,
-            &config.minted_final_advertisement,
-            id_gen,
-            now_ms,
-        ),
-        // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5); a backend error → the final the engine
-        // stated, else 486 Busy Here: the stack's own, no decision behind it
-        // and no mark.
-        Ok(CallTreatment::Relay { label }) => {
-            let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                480,
-                Some("Temporarily Unavailable".into()),
-                None,
-                &[],
-                &config.minted_final_advertisement,
-                id_gen,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
-        Err(CallDecisionError::Refused { code, reason, update_headers }) => {
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                code,
-                reason,
-                update_headers.as_ref(),
-                &[],
-                &config.minted_final_advertisement,
-                id_gen,
-                now_ms,
-                TerminationCause::Admission,
-            )
-        }
-        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            486,
-            Some("Busy Here".into()),
-            None,
-            &[],
-            &config.minted_final_advertisement,
-            id_gen,
-            now_ms,
-            TerminationCause::Admission,
-        ),
-    }
-}
-
-/// The `/call/failure` consult a limiter reject raises: origin `call_limiter`,
-/// the refusing limiter, and the call's context snapshot. Pure — the trace path
-/// rebuilds it after a late activation, and the rebuild must equal what was sent.
-fn limiter_failure_request(call: &Call, limiter_id: &str) -> CallFailureRequest {
-    CallFailureRequest {
-        callback_context: call.callback_context.clone(),
-        failure: FailureInfo {
-            origin: "call_limiter".to_string(),
-            status_code: None,
-            limiter_id: Some(limiter_id.to_string()),
-            failed_leg_id: None,
-            timeout_kind: None,
-            sip_headers: Vec::new(),
-        },
-        snapshot: crate::decision::CallSnapshot::of(call),
-    }
-}
-
-/// Record the limiter-reject `/call/failure` consult as a child span on a traced
-/// call (ADR-0026), with the times the request left and the response landed.
-/// `request_json` is `None` for an unsampled call, which is also when this
-/// returns immediately — nothing was serialized for it.
-fn record_failure_round_trip(
-    call: &Call,
-    request_json: Option<Vec<u8>>,
-    response: &Result<CallTreatment, crate::decision::CallDecisionError>,
-    sent_at_ms: i64,
-    received_at_ms: i64,
-) {
-    let Some(request) = request_json else {
-        return;
-    };
-    let (outcome, body) = match response {
-        Ok(treatment) => (
-            match treatment {
-                CallTreatment::Route(_) => "route",
-                CallTreatment::Redirect(_) => "redirect",
-                CallTreatment::Reject(_) => "reject",
-                CallTreatment::Relay { .. } => "relay",
-            },
-            crate::trace::intake::json_body(treatment),
-        ),
-        Err(err) => crate::trace::intake::error_outcome(err),
-    };
-    crate::trace::emit::round_trip(
-        call,
-        "/call/failure",
-        sent_at_ms,
-        &request,
-        received_at_ms,
-        outcome,
-        &body,
-    );
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call, replacing the

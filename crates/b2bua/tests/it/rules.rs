@@ -7,12 +7,13 @@ use std::net::SocketAddr;
 use b2bua::config::B2buaConfig;
 use b2bua::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use b2bua::initial_invite::build_initial_call;
+use b2bua::rules::lifecycle_delivery::{close_turn, TurnStart};
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
     RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
 };
 use b2bua_sdk::event::CallEvent;
-use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
+use b2bua_sdk::model::{Body, BodyAuthor, LegEnd, LifecycleEvent};
 use call::{
     CallModelState, Dialog, DialogState, Direction, EndingBy, Leg, LegKind, LegState, MachineId,
     OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerKey, TimerType,
@@ -2077,6 +2078,8 @@ fn b_leg_pending() -> Leg {
         adopted: None,
         invite_final_sent: None,
         answer_preempted: None,
+        attempt: None,
+        rang: false,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),
@@ -3597,6 +3600,7 @@ mod create_leg_admission {
             header_updates: vec![],
             header_adds: vec![],
             kind: None,
+            attempt: None,
         }
     }
 
@@ -3764,6 +3768,7 @@ mod default_sdp_create_leg {
             header_updates: vec![],
             header_adds: vec![],
             kind: None,
+            attempt: None,
         };
         let result = exec.execute(&[create], &call, &ctx);
 
@@ -3867,6 +3872,7 @@ mod header_update_removal_withholds_a_relayed_name {
             header_updates,
             header_adds: vec![],
             kind: None,
+            attempt: None,
         };
         let result = exec.execute(&[create], &call, &ctx);
         match &result
@@ -5362,7 +5368,7 @@ mod going_away_gate {
     }
 }
 
-// ── observation: a rule that records without claiming ────────────────────────
+// ── lifecycle delivery: every active service hears the turn's lifecycle ──────
 
 fn bye_event() -> CallEvent {
     CallEvent::Sip {
@@ -5376,55 +5382,91 @@ fn ext_write(key: &str, value: serde_json::Value) -> RuleAction {
     RuleAction::MergeCallExt { ext: [(key.to_string(), value)].into_iter().collect() }
 }
 
-/// Observes every BYE: records it under `seen`.
-fn observe_bye(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![ext_write("seen", serde_json::json!({"bye": true}))]))
-}
+/// The listening machine's own guard timer.
+const WATCH: TimerType = TimerType::service(MachineId::new(TEST_MACHINE), "watch");
+static WATCH_EFFECTS: [Effect; 1] = [Effect::GuardTimer { timer: WATCH, label: "arm watch" }];
 
-/// Observes every BYE with a write AND a final of its own, which an
-/// observation may not carry.
-fn observe_bye_answering(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![
-        ext_write("seen", serde_json::json!({"bye": true})),
-        RuleAction::Respond {
-            status: 486,
-            reason: "Busy Here".into(),
-            body: vec![],
-            content_type: None,
-        },
+/// Hears a leg end on its own machine: arms its guard timer, moves its cursor
+/// S0 → S1 and writes its slice, naming the leg.
+fn on_leg_ended_arming(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let Some(LifecycleEvent::LegEnded { leg, .. }) = ctx.lifecycle() else {
+        return None;
+    };
+    Some(RuleHandleResult::new(vec![
+        RuleAction::arm(TimerKey::call(WATCH), TimerDelay::secs(5)),
+        RuleAction::SetState { machine: MachineId::new(TEST_MACHINE), to: StateLabel::new("S1") },
+        ext_write("seen", serde_json::json!({ "ended": leg })),
     ]))
 }
 
-/// Observes every BYE with a write AND a record mutation (a cursor move and a
-/// teardown), which an observation may not carry either.
-fn observe_bye_mutating(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![
-        ext_write("seen", serde_json::json!({"bye": true})),
-        RuleAction::SetState { machine: MachineId::new(TEST_MACHINE), to: StateLabel::new("S2") },
-        RuleAction::BeginTermination {
-            reason: Some("observer".into()),
-            cause: TerminationCause::Supervisor,
-            by_leg: None,
-        },
-    ]))
+/// Hears a leg end and answers a final of its own.
+fn on_leg_ended_answering(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::Respond {
+        status: 486,
+        reason: "Busy Here".into(),
+        body: vec![],
+        content_type: None,
+    }]))
 }
 
-/// Observes every BYE after `observe_bye`, reading what it wrote.
-fn observe_bye_second(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    let first = ctx.call.ext().and_then(|e| e.get("seen")).cloned();
-    Some(RuleHandleResult::observe(vec![ext_write(
-        "second",
-        serde_json::json!({"first_seen": first.is_some()}),
+/// Hears a leg end and arms a core timer, which is no machine's own.
+fn on_leg_ended_arming_a_core_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::arm(
+        TimerKey::call(TimerType::NoAnswer),
+        TimerDelay::secs(5),
     )]))
 }
 
-fn observer(
-    id: &'static str,
-    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
-) -> RuleDefinition {
-    RuleDefinition::core(id, SERVICE_LAYER, &[], Match::request().method("BYE"), handle)
+/// Hears a leg end and arms another machine's guard timer.
+fn on_leg_ended_arming_a_foreign_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::arm(
+        TimerKey::call(TimerType::service(MachineId::new("other-machine"), "watch")),
+        TimerDelay::secs(5),
+    )]))
 }
 
+/// Hears a leg end and moves its cursor along an edge it did not declare.
+fn on_leg_ended_undeclared_move(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::SetState {
+        machine: MachineId::new(TEST_MACHINE),
+        to: StateLabel::new("S2"),
+    }]))
+}
+
+/// A machine-bound leg-end listener active in S0, declaring S0 → S1 and its
+/// timer.
+fn leg_end_listener(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefinition {
+    RuleDefinition {
+        id: "test-leg-end-listener",
+        matcher: Match::leg_ended(),
+        effects: &WATCH_EFFECTS,
+        ..sm_rule(handle)
+    }
+}
+
+/// A rule that claims the BYE, answers it and ends the caller's leg: the
+/// call itself stays up.
+fn answering_claimer() -> RuleDefinition {
+    RuleDefinition::core(
+        "test-answering-claimer",
+        b2bua::rules::CORE_LAYER,
+        &[],
+        Match::request().method("BYE"),
+        |_| {
+            Some(RuleHandleResult::new(vec![
+                RuleAction::Respond {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: vec![],
+                    content_type: None,
+                },
+                RuleAction::TerminateLeg { leg_id: "a".into(), end: LegEnd::PeerByeAnswered },
+            ]))
+        },
+    )
+}
+
+/// The BYE turn under `rules`, closed: its lifecycle settled and delivered.
 fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
     let event = bye_event();
     let config = B2buaConfig::default();
@@ -5436,159 +5478,56 @@ fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let ctx = ctx_for(call, &event, &config);
-    execute_rules(rules, call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+    let claimed =
+        execute_rules(rules, call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    close_turn(rules, &TurnStart::of(call), claimed, &exec)
 }
 
-fn confirmed_call() -> call::Call {
+fn confirmed_call_in_s0() -> call::Call {
     let mut call = test_call();
     confirm_a(&mut call);
+    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
     call
 }
 
-/// A rule that observes the BYE writes its call-ext slice and the event goes
-/// on to the rule that claims it: the core's relay answers and tears down.
+fn watch_scheduled(result: &HandlerResult) -> bool {
+    result
+        .effects
+        .critical
+        .iter()
+        .any(|e| matches!(e, CriticalStateEffect::ScheduleTimer(t) if *t.timer_type() == WATCH))
+}
+
+/// The leg a turn ended reaches a service that did not claim the turn: its
+/// handler arms its own timer, moves its own cursor and writes its slice,
+/// beside the claimer's handling.
 #[test]
-fn an_observed_event_still_reaches_the_rule_that_claims_it() {
-    let call = confirmed_call();
-    let mut rules = vec![observer("test-observer", observe_bye)];
-    rules.extend(default_rules());
-    let result = run_bye(&rules, &call);
+fn a_leg_end_reaches_a_service_that_did_not_claim_the_turn() {
+    let rules = vec![leg_end_listener(on_leg_ended_arming), answering_claimer()];
+    let result = run_bye(&rules, &confirmed_call_in_s0());
+    assert_eq!(finals_to_a(&result), vec![200], "the claimer answered the BYE");
     assert_eq!(
         result.call.ext.as_ref().and_then(|e| e.get("seen")),
-        Some(&serde_json::json!({"bye": true})),
-        "the observation's write lands"
+        Some(&serde_json::json!({ "ended": "a" })),
+        "the listener heard the caller's leg end",
     );
-    assert_eq!(finals_to_a(&result), vec![200], "relay-bye answered the BYE");
-
-    // The same turn without the observer: the same teardown, no slice.
-    let bare = run_bye(&default_rules(), &call);
-    assert_eq!(finals_to_a(&bare), vec![200]);
-    assert_ne!(bare.call.state, CallModelState::Active, "relay-bye tore the call down");
+    assert!(
+        result.call.timers.iter().any(|t| *t.timer_type() == WATCH) && watch_scheduled(&result),
+        "its timer is armed: {:?}",
+        result.call.timers,
+    );
     assert_eq!(
-        without_seen(result.call),
-        bare.call,
-        "the observed turn is the bare turn but the write"
+        result.call.sm_cursors.get(&MachineId::new(TEST_MACHINE)).map(StateLabel::as_str),
+        Some("S1"),
+        "it moved its own cursor",
     );
 }
 
-/// `call` with the observers' `seen` slice removed (and an ext map it leaves
-/// empty dropped, as a call that never had one carries none).
-fn without_seen(call: call::Call) -> call::Call {
-    let mut call = call::helpers::set_call_ext(call, "seen", None);
-    if call.ext.as_ref().is_some_and(|e| e.is_empty()) {
-        call.ext = None;
-    }
-    call
-}
-
-/// An observation carries only call-ext writes: a final in one is an
-/// authoring bug, caught in debug builds as an undeclared effect is.
-#[cfg(debug_assertions)]
+/// Without a leg end the listener hears nothing: the same claim, no write.
 #[test]
-#[should_panic(expected = "an observation writes call ext and its own machine's bookkeeping only")]
-fn an_observation_stating_a_final_is_an_authoring_bug() {
-    let mut rules = vec![observer("test-observer", observe_bye_answering)];
-    rules.extend(default_rules());
-    let _ = run_bye(&rules, &confirmed_call());
-}
-
-/// A record mutation in an observation is the same authoring bug.
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic(expected = "an observation writes call ext and its own machine's bookkeeping only")]
-fn an_observation_mutating_the_record_is_an_authoring_bug() {
-    let mut rules = vec![observer("test-observer", observe_bye_mutating)];
-    rules.extend(default_rules());
-    let _ = run_bye(&rules, &confirmed_call());
-}
-
-/// In release the non-ext actions are dropped: nothing but the write leaks
-/// into the turn, whose handling is the claiming rule's alone.
-#[cfg(not(debug_assertions))]
-#[test]
-fn an_observation_leaks_nothing_but_its_writes() {
-    let call = confirmed_call();
-    let bare = run_bye(&default_rules(), &call);
-    let handles: [fn(&RuleContext) -> Option<RuleHandleResult>; 2] =
-        [observe_bye_answering, observe_bye_mutating];
-    for handle in handles {
-        let mut rules = vec![observer("test-observer", handle)];
-        rules.extend(default_rules());
-        let result = run_bye(&rules, &call);
-        assert_eq!(finals_to_a(&result), vec![200], "no 486 from the observer");
-        assert_eq!(without_seen(result.call), bare.call, "no cursor move, no teardown of its own");
-    }
-}
-
-/// Observers chain in rank order, each reading what the one before wrote, and
-/// an event no rule claims keeps what the observers wrote.
-#[test]
-fn observers_chain_and_an_unclaimed_event_keeps_their_writes() {
-    let call = confirmed_call();
-    let rules =
-        vec![observer("test-observer", observe_bye), observer("test-second", observe_bye_second)];
-    let result = run_bye(&rules, &call);
-    let ext = result.call.ext.as_ref().expect("the writes persist");
-    assert!(ext.get("seen").is_some());
-    assert_eq!(ext.get("second"), Some(&serde_json::json!({"first_seen": true})));
-    assert!(result.effects.outbound.is_empty(), "nothing claimed the BYE here");
-    assert_eq!(result.call.state, CallModelState::Active);
-}
-
-// ── observation: a machine keeps its own bookkeeping in step ─────────────────
-
-/// The observing machine's own guard timer.
-const WATCH: TimerType = TimerType::service(MachineId::new(TEST_MACHINE), "watch");
-static WATCH_EFFECTS: [Effect; 1] = [Effect::GuardTimer { timer: WATCH, label: "arm watch" }];
-
-/// Observes the BYE on its own machine: arms its guard timer, moves its
-/// cursor S0 → S1 and writes its slice.
-fn observe_bye_arming(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![
-        RuleAction::arm(TimerKey::call(WATCH), TimerDelay::secs(5)),
-        RuleAction::SetState { machine: MachineId::new(TEST_MACHINE), to: StateLabel::new("S1") },
-        ext_write("seen", serde_json::json!({"bye": true})),
-    ]))
-}
-
-/// Observes the BYE and arms a core timer, which is no machine's own.
-fn observe_bye_arming_a_core_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::arm(
-        TimerKey::call(TimerType::NoAnswer),
-        TimerDelay::secs(5),
-    )]))
-}
-
-/// Observes the BYE and arms another machine's guard timer.
-fn observe_bye_arming_a_foreign_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::arm(
-        TimerKey::call(TimerType::service(MachineId::new("other-machine"), "watch")),
-        TimerDelay::secs(5),
-    )]))
-}
-
-/// Observes the BYE and moves its cursor along an edge it did not declare.
-fn observe_bye_undeclared_move(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::SetState {
-        machine: MachineId::new(TEST_MACHINE),
-        to: StateLabel::new("S2"),
-    }]))
-}
-
-/// A machine-bound BYE observer active in S0, declaring S0 → S1 and its timer.
-fn machine_observer(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefinition {
-    RuleDefinition {
-        id: "test-machine-observer",
-        matcher: Match::request().method("BYE"),
-        effects: &WATCH_EFFECTS,
-        ..sm_rule(handle)
-    }
-}
-
-/// A rule that claims the BYE and only answers it: the call stays up.
-fn answering_claimer() -> RuleDefinition {
-    RuleDefinition::core(
-        "test-answering-claimer",
+fn a_turn_ending_no_leg_delivers_no_leg_end() {
+    let answer_only = RuleDefinition::core(
+        "test-answer-only",
         b2bua::rules::CORE_LAYER,
         &[],
         Match::request().method("BYE"),
@@ -5600,101 +5539,104 @@ fn answering_claimer() -> RuleDefinition {
                 content_type: None,
             }]))
         },
-    )
-}
-
-fn confirmed_call_in_s0() -> call::Call {
-    let mut call = confirmed_call();
-    call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
-    call
-}
-
-fn watch_scheduled_at(result: &HandlerResult) -> Option<usize> {
-    result.effects.critical.iter().position(
-        |e| matches!(e, CriticalStateEffect::ScheduleTimer(t) if *t.timer_type() == WATCH),
-    )
-}
-
-/// An observer arms its own guard timer and moves its own cursor on an event
-/// another rule claims: both land beside the claimer's handling.
-#[test]
-fn an_observer_keeps_its_own_machine_in_step_with_an_event_it_does_not_claim() {
-    let rules = vec![machine_observer(observe_bye_arming), answering_claimer()];
+    );
+    let rules = vec![leg_end_listener(on_leg_ended_arming), answer_only];
     let result = run_bye(&rules, &confirmed_call_in_s0());
-    assert_eq!(finals_to_a(&result), vec![200], "the claimer answered the BYE");
-    assert!(
-        result.call.timers.iter().any(|t| *t.timer_type() == WATCH),
-        "the observer's timer is on the ledger: {:?}",
-        result.call.timers,
-    );
-    assert!(watch_scheduled_at(&result).is_some(), "its fiber is scheduled");
-    assert_eq!(
-        result.call.sm_cursors.get(&MachineId::new(TEST_MACHINE)).map(StateLabel::as_str),
-        Some("S1"),
-        "the observer moved its own cursor",
-    );
-    assert!(result.call.ext.as_ref().is_some_and(|e| e.get("seen").is_some()));
+    assert!(result.call.ext.as_ref().is_none_or(|e| e.get("seen").is_none()));
+    assert!(!watch_scheduled(&result));
 }
 
-/// The claimer's teardown runs after the observer's arming, so the call ends
-/// with the observer's timer cancelled, not left armed.
+/// A service the turn's teardown deactivated still hears the leg end the
+/// turn caused, for its call-ext writes alone: its timer and its cursor go
+/// with the machine.
 #[test]
-fn an_observers_timer_is_cancelled_by_the_claimers_teardown() {
-    let mut rules = vec![machine_observer(observe_bye_arming)];
+fn a_service_the_turn_deactivated_hears_the_leg_end_for_its_ext_writes() {
+    let mut rules = vec![leg_end_listener(on_leg_ended_arming)];
     rules.extend(default_rules());
     let result = run_bye(&rules, &confirmed_call_in_s0());
-    assert_eq!(finals_to_a(&result), vec![200], "relay-bye answered the BYE");
-    let armed = watch_scheduled_at(&result).expect("the observer armed its timer");
-    let cancelled = result
-        .effects
-        .critical
-        .iter()
-        .position(
-            |e| matches!(e, CriticalStateEffect::CancelTimer { key } if key.timer_type == WATCH),
-        )
-        .expect("the teardown cancelled it");
-    assert!(armed < cancelled, "arming precedes the teardown's cancel");
-    assert!(result.call.timers.iter().all(|t| *t.timer_type() != WATCH), "nothing left armed");
-}
-
-/// An event no rule claims keeps the observer's bookkeeping.
-#[test]
-fn an_unclaimed_event_keeps_the_observers_bookkeeping() {
-    let result = run_bye(&[machine_observer(observe_bye_arming)], &confirmed_call_in_s0());
-    assert!(result.effects.outbound.is_empty(), "nothing claimed the BYE");
-    assert!(watch_scheduled_at(&result).is_some());
+    assert_ne!(result.call.state, CallModelState::Active, "relay-bye tore the call down");
     assert_eq!(
-        result.call.sm_cursors.get(&MachineId::new(TEST_MACHINE)).map(StateLabel::as_str),
-        Some("S1"),
+        result.call.ext.as_ref().and_then(|e| e.get("seen")),
+        Some(&serde_json::json!({ "ended": "a" })),
     );
+    assert!(!watch_scheduled(&result), "no timer armed for a deactivated machine");
+    assert!(result.call.timers.iter().all(|t| *t.timer_type() != WATCH));
+    assert!(!result.call.sm_cursors.contains_key(&MachineId::new(TEST_MACHINE)));
 }
 
-/// A core timer is no machine's own: arming it in an observation is an
-/// authoring bug.
+/// A machine-less rule is no service: it hears no lifecycle event.
+#[test]
+fn a_core_rule_hears_no_lifecycle_event() {
+    let core_listener =
+        RuleDefinition::core("test-core-listener", SERVICE_LAYER, &[], Match::leg_ended(), |_| {
+            Some(RuleHandleResult::new(vec![ext_write("seen", serde_json::json!(true))]))
+        });
+    let rules = vec![core_listener, answering_claimer()];
+    let result = run_bye(&rules, &confirmed_call_in_s0());
+    assert!(result.call.ext.as_ref().is_none_or(|e| e.get("seen").is_none()));
+}
+
+/// A lifecycle handler writes call ext, its own cursor and its own timers: a
+/// final in one is an authoring bug, caught in debug builds.
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "an observation writes call ext and its own machine's bookkeeping only")]
-fn an_observation_arming_a_core_timer_is_an_authoring_bug() {
-    let rules = vec![machine_observer(observe_bye_arming_a_core_timer), answering_claimer()];
+#[should_panic(
+    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
+)]
+fn a_lifecycle_handler_stating_a_final_is_an_authoring_bug() {
+    let rules = vec![leg_end_listener(on_leg_ended_answering), answering_claimer()];
     let _ = run_bye(&rules, &confirmed_call_in_s0());
 }
 
-/// Another machine's timer is not the observer's either.
+/// A core timer is no machine's own.
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "an observation writes call ext and its own machine's bookkeeping only")]
-fn an_observation_arming_a_foreign_timer_is_an_authoring_bug() {
-    let rules = vec![machine_observer(observe_bye_arming_a_foreign_timer), answering_claimer()];
+#[should_panic(
+    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
+)]
+fn a_lifecycle_handler_arming_a_core_timer_is_an_authoring_bug() {
+    let rules = vec![leg_end_listener(on_leg_ended_arming_a_core_timer), answering_claimer()];
     let _ = run_bye(&rules, &confirmed_call_in_s0());
 }
 
-/// An observer's cursor move is held to its declared edges, as a claim's is.
+/// Another machine's timer is not the handler's either.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(
+    expected = "a lifecycle handler writes call ext, its own machine's cursor and its own timers only"
+)]
+fn a_lifecycle_handler_arming_a_foreign_timer_is_an_authoring_bug() {
+    let rules = vec![leg_end_listener(on_leg_ended_arming_a_foreign_timer), answering_claimer()];
+    let _ = run_bye(&rules, &confirmed_call_in_s0());
+}
+
+/// A lifecycle handler's cursor move is held to its declared edges.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "caused an undeclared transition")]
-fn an_observers_undeclared_move_is_an_authoring_bug() {
-    let rules = vec![machine_observer(observe_bye_undeclared_move), answering_claimer()];
+fn a_lifecycle_handlers_undeclared_move_is_an_authoring_bug() {
+    let rules = vec![leg_end_listener(on_leg_ended_undeclared_move), answering_claimer()];
     let _ = run_bye(&rules, &confirmed_call_in_s0());
+}
+
+/// In release the actions a lifecycle handler may not take are dropped: the
+/// turn is the claimer's and the handler's admitted writes alone.
+#[cfg(not(debug_assertions))]
+#[test]
+fn a_lifecycle_handler_leaks_nothing_it_may_not_take() {
+    let call = confirmed_call_in_s0();
+    let bare = run_bye(&[answering_claimer()], &call);
+    let handles: [fn(&RuleContext) -> Option<RuleHandleResult>; 3] = [
+        on_leg_ended_answering,
+        on_leg_ended_arming_a_core_timer,
+        on_leg_ended_arming_a_foreign_timer,
+    ];
+    for handle in handles {
+        let rules = vec![leg_end_listener(handle), answering_claimer()];
+        let result = run_bye(&rules, &call);
+        assert_eq!(finals_to_a(&result), vec![200], "no 486 from the handler");
+        assert_eq!(result.call, bare.call, "nothing of the handler's lands");
+    }
 }
 
 // ── the limiter refresh is always armed on a counted live call ───────────────

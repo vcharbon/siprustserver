@@ -92,6 +92,7 @@ fn summarize_matcher(m: &Match) -> String {
             (Some(t), None) => t.to_string(),
             _ => "event".into(),
         },
+        MatchKind::Lifecycle => m.lifecycle.unwrap_or("lifecycle").to_string(),
     };
     fn dbg_list<T: std::fmt::Debug>(v: &[T]) -> String {
         v.iter().map(|x| format!("{x:?}")).collect::<Vec<_>>().join("/")

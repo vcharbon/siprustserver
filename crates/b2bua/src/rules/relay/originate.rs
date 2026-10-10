@@ -1,19 +1,17 @@
 //! [`build_b_leg`] — the single mint point for every leg the B2BUA originates:
 //! the callee b-leg, and the REFER transfer leg (fed the caller's rehydrated
-//! INVITE via [`rebuild_a_leg_invite`]). The originated leg's dialog identity
+//! INVITE via [`super::rebuild_a_leg_invite`]). The originated leg's dialog identity
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
 use call::{Deadline, InviteTxnHandle, Leg, RemoteInfo};
-use sip_message::draft::RequestDraft;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
 };
 use sip_message::header::{
-    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, NameAddr,
-    TokenListHeader, Uri,
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, NameAddr, TokenListHeader,
 };
-use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
+use sip_message::{hops, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
@@ -24,31 +22,6 @@ use super::body::{media_type, sdp, source_content_type};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_contact, leg_via, CallMarks};
 use b2bua_sdk::model::Body;
-
-/// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
-/// Every header rides as an unparsed line, so the rebuilt message carries the
-/// caller's bytes exactly as they arrived. A caller that omitted `Max-Forwards`
-/// gets RFC 3261 §8.1.1.6's default, which is the count [`build_b_leg`] then
-/// carries onto the transfer leg it originates from this rebuild.
-///
-/// The Request-URI is read verbatim, not refused: this is a round-trip of text
-/// the inbound parser's own strict gates already admitted, so a refusal here
-/// would drop a call the stack accepted. Nothing routes on it — the b-leg's
-/// Request-URI comes from the decision, through [`build_b_leg`]'s reader.
-pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
-    let mut draft =
-        RequestDraft::new(Method::Invite, Uri::parse_or_verbatim(&SipStr::owned(&snap.uri)));
-    for h in &snap.headers {
-        draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
-    }
-    if !draft.has(&HeaderName::MaxForwards) {
-        draft = draft.push(MaxForwards::DEFAULT);
-    }
-    draft
-        .with_body(snap.body.clone().into())
-        .freeze()
-        .expect("a-leg INVITE snapshot is well-formed")
-}
 
 /// What an override's bytes are to the originator's body, the one place an
 /// override is classed: the originator's own bytes are [`SourceBody::Verbatim`];
@@ -523,6 +496,8 @@ pub fn build_b_leg(
         in_session_timer: Some(takes_part),
         invite_final_sent: None,
         answer_preempted: None,
+        attempt: None,
+        rang: false,
         messages: Default::default(),
         sdp_session: Default::default(),
     };

@@ -198,8 +198,12 @@ pub struct Call {
     /// Deterministic: derived from a-leg call-id + from-tag (+ primary ordinal).
     pub call_ref: String,
     pub a_leg: Leg,
-    /// The legs this stack dialled, in creation order ("b-1", "b-2", …).
+    /// The legs this stack dialled, in creation order ("b-1", "b-2", …):
+    /// destination, transfer-target and media legs alike.
     pub b_legs: Vec<Leg>,
+    /// The routing answers the call dialled, in opening order
+    /// ([`crate::helpers::attempt`] is the writer).
+    pub attempts: Vec<super::attempt::Attempt>,
     /// Active peering — the typed pair makes N↔N unrepresentable. `None` = 1↔0.
     pub active_peer: Option<ActivePeer>,
     pub callback_context: Option<String>,

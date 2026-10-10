@@ -209,6 +209,7 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
         },
         // Handled (and returned) in `on_event` before `resolve` is ever called.
         CallEvent::CallQuiesced { .. } => unreachable!("CallQuiesced is handled before resolve"),
+        CallEvent::Lifecycle(_) => unreachable!("a lifecycle event is delivered, never dispatched"),
     }
 }
 

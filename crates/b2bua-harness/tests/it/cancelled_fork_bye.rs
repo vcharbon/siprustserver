@@ -72,6 +72,7 @@ mod retarget {
                         header_updates: vec![],
                         header_adds: vec![],
                         kind: None,
+                        attempt: None,
                     },
                     RuleAction::SetState { machine: RETARGET, to: RetargetState::Retargeted.label() },
                 ]))

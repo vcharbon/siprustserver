@@ -122,7 +122,7 @@ fn record_round_trip(
 /// Serialize a typed payload to the internal-event JSON. Payload structs are
 /// program-constructed (no non-string keys, no non-finite floats), so failure
 /// is unreachable; degrade to an empty object rather than kill the callout task.
-fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
+pub(super) fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
     serde_json::to_value(p).unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
 }
 
@@ -353,6 +353,9 @@ async fn failure_outcome(
     // a route carries the refusal's report.
     let mut held = limiter.held_set();
     let mut refused: Option<AdmitReport> = None;
+    // Every route the limiter refused on the way, for the engine to record
+    // as an attempt that dialled nothing.
+    let mut refused_routes = Vec::new();
     let (outcome, mut payload) = loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
@@ -361,6 +364,11 @@ async fn failure_outcome(
                     match admit_route_limiters(ctx, limiter.key(), &held, change, &route).await {
                         Ok(admitted) => admitted,
                         Err(report) => {
+                            refused_routes.push(crate::attempts::refused_route_entry(
+                                route.label.as_deref(),
+                                &route.service_ext,
+                                route.no_answer(),
+                            ));
                             let limiter_id =
                                 report.outcome.refused_on().unwrap_or_default().to_string();
                             held = report.held().unwrap_or_default();
@@ -397,7 +405,14 @@ async fn failure_outcome(
                             );
                         }
                     };
-                break ("failover", route_result_payload(route, admitted, Some(failed_leg_id)));
+                break (
+                    "failover",
+                    super::route_payload::route_result_payload(
+                        route,
+                        admitted,
+                        Some(failed_leg_id),
+                    ),
+                );
             }
             // Decision-authored reject — the plan declined to fail over and
             // supplied its own final failure (code/reason/headers).
@@ -467,6 +482,9 @@ async fn failure_outcome(
     if let Some(report) = refused.filter(|_| outcome != "failover") {
         payload[LimiterAdmitResult::REPORT] = to_payload(report);
     }
+    if !refused_routes.is_empty() {
+        payload[crate::attempts::REFUSED_ROUTES] = json!(refused_routes);
+    }
     (outcome, payload)
 }
 
@@ -508,7 +526,10 @@ pub(super) fn spawn_release_callout(
                 )
                 .await;
                 match admitted {
-                    Ok(admitted) => ("reroute", route_result_payload(route, admitted, None)),
+                    Ok(admitted) => (
+                        "reroute",
+                        super::route_payload::route_result_payload(route, admitted, None),
+                    ),
                     // A limiter reject here does NOT re-consult the engine: the
                     // reject degrades to the release default (local teardown)
                     // instead of a recursive failover walk; the refusal released
@@ -517,11 +538,17 @@ pub(super) fn spawn_release_callout(
                     // but its route: the release is marked under its label and
                     // its service slices are merged.
                     Err(report) => {
+                        let refused = crate::attempts::refused_route_entry(
+                            route.label.as_deref(),
+                            &route.service_ext,
+                            route.no_answer(),
+                        );
                         let mut payload = json!({
                             "reason": "limiter_rejected",
                             "event": event,
                             "label": route.label,
                             LimiterAdmitResult::REPORT: report,
+                            crate::attempts::REFUSED_ROUTES: [refused],
                         });
                         if !route.service_ext.is_empty() {
                             payload["service_ext"] = json!(route.service_ext);
@@ -666,98 +693,6 @@ pub(super) fn spawn_limiter_admit_callout(ctx: &Arc<RouterCtx>, c: LimiterAdmitC
             LimiterAdmitResult { call_ref: c.call_ref, correlation_id: c.correlation_id, report };
         send_admit_fold(&ctx2.reentry_tx, &ctx2.limiter, result.into_event());
     });
-}
-
-// ── route-result payload (shared by failover + release) ────────────────────
-
-#[derive(Serialize)]
-struct RouteDestinationPayload {
-    host: String,
-    // Emitted even when None (null) — matches the initial-route wire shape.
-    port: Option<u16>,
-}
-
-/// The internal-event payload the route-fold rules (`failover-create-leg` /
-/// `release-reroute`) consume: destination, identity/header rewrites, the
-/// output-parity fields the initial `apply_route` honors (features,
-/// service_ext, update_body, subscriptions), and the admit the dispatching
-/// task **already sent** to the limiter. ONE shape shared
-/// by the failover and release folds, so the two can never drift.
-#[derive(Serialize)]
-struct RoutePayload {
-    destination: RouteDestinationPayload,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_ruri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_from: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    new_to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update_headers: Option<SipHeaderUpdates>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    no_answer_timeout_sec: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    callback_context: Option<String>,
-    // Route parity: the fields the initial `apply_route` honors, forwarded to
-    // the resolution rule.
-    features: call::features::FeatureActivations,
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
-    // Always present (even when empty): the latest applied route OWNS the
-    // subscription registry, so a route with no subscriptions must CLEAR a
-    // previous route's — exactly what `apply_route` does on the initial path.
-    subscriptions: Vec<call::ReleaseEventKind>,
-    // Keep / AttachParts → absent; Drop → null; Replace(s) → the string.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    update_body: Option<Option<String>>,
-    // AttachParts(parts) → the parts; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attach_parts: Option<Vec<sip_message::MultipartPart>>,
-    /// The admit the dispatching task sent to replace the call's set.
-    limiter_admit: AdmitReport,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_leg_id: Option<String>,
-    /// The decision's label, for the fold's `MarkDecision`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-/// Serialize a [`RouteDecision`] into the [`RoutePayload`] internal-event JSON.
-/// `admitted` is the admit `admit_route_limiters` sent (or did not send);
-/// `failed_leg_id` is the failover fold's echo (release folds pass `None`).
-fn route_result_payload(
-    route: RouteDecision,
-    admitted: AdmitReport,
-    failed_leg_id: Option<String>,
-) -> serde_json::Value {
-    let no_answer_timeout_sec = route.no_answer().millis().map(|ms| ms / 1000);
-    to_payload(RoutePayload {
-        destination: RouteDestinationPayload {
-            host: route.destination.host,
-            port: route.destination.port,
-        },
-        new_ruri: route.new_ruri,
-        new_from: route.new_from,
-        new_to: route.new_to,
-        update_headers: route.update_headers,
-        no_answer_timeout_sec,
-        callback_context: route.callback_context,
-        features: route.features,
-        service_ext: route.service_ext,
-        subscriptions: route.subscriptions,
-        update_body: match &route.update_body {
-            crate::decision::BodyUpdate::Keep | crate::decision::BodyUpdate::AttachParts(_) => None,
-            crate::decision::BodyUpdate::Drop => Some(None),
-            crate::decision::BodyUpdate::Replace(s) => Some(Some(s.clone())),
-        },
-        attach_parts: match route.update_body {
-            crate::decision::BodyUpdate::AttachParts(parts) => Some(parts),
-            _ => None,
-        },
-        limiter_admit: admitted,
-        failed_leg_id,
-        label: route.label,
-    })
 }
 
 // ── request parsers (seed-rule JSON → typed decision requests) ─────────────

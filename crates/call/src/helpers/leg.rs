@@ -114,6 +114,19 @@ pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call
 }
 
+/// The id the next leg this stack dials takes: `b-{n}`, `n` one more than
+/// the legs it dialled so far.
+pub fn next_b_leg_id(call: &Call) -> String {
+    format!("b-{}", call.b_legs.len() + 1)
+}
+
+/// Record that `leg_id` rang: its INVITE received a 180–189 provisional.
+pub fn mark_rang(call: &mut Call, leg_id: &str) {
+    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+        leg.rang = true;
+    }
+}
+
 /// Find a b-leg by legId.
 pub fn find_b_leg<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
     call.b_legs.iter().find(|l| l.leg_id == leg_id)

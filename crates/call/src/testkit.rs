@@ -75,6 +75,8 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         adopted: None,
         invite_final_sent: None,
         answer_preempted: None,
+        attempt: None,
+        rang: false,
         messages: Default::default(),
         sdp_session: Default::default(),
     }

@@ -6,7 +6,8 @@
 //! the first is a call that silently stops surviving a takeover, so it is
 //! named on stderr. Pure builder, no clock.
 
-use super::{build_initial_call, read_topology_cookie, CookieRead};
+use super::build_initial_call;
+use super::topology_cookie::{read_topology_cookie, CookieRead};
 use crate::config::B2buaConfig;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};

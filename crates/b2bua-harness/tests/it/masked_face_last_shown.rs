@@ -65,6 +65,7 @@ mod fork_out {
                         header_updates: vec![],
                         header_adds: vec![],
                         kind: None,
+                        attempt: None,
                     },
                     RuleAction::SetState { machine: FORK_OUT, to: ForkOutState::Dialled.label() },
                 ]))

@@ -1,8 +1,9 @@
 //! ReferAuthorizing phase: resolution of the `/call/refer` consult — denial,
 //! authorization (dial C on held SDP), and the consult-hung timeout.
 
+use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use b2bua_sdk::sm_rule;
-use call::TransferPhase;
+use call::{AttemptCause, TransferPhase};
 use sip_message::header::{HeaderValue, ReferTo};
 use sip_message::{Method, SipStr};
 
@@ -183,7 +184,11 @@ pub(super) fn http_allow() -> RuleDefinition {
                 Ok(uri) => uri,
                 Err(err) => return refuse_transfer(ctx, err.field, &err.reason),
             };
-            let c_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
+            let c_leg_id = ctx.call.next_b_leg_id();
+            let route = RouteAnswer {
+                label: payload.get("label").and_then(|v| v.as_str()).map(str::to_string),
+                service_ext: crate::rules::defaults::parse_service_ext(payload),
+            };
 
             let mut new_state = st.clone();
             new_state.phase = TransferPhase::CRinging;
@@ -205,6 +210,7 @@ pub(super) fn http_allow() -> RuleDefinition {
                     header_updates,
                     header_adds,
                     kind: None,
+                    attempt: Some(AttemptOpening::new(AttemptCause::Transfer, route)),
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },
             ])

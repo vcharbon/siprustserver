@@ -9,6 +9,7 @@
 use call::{CallModelState, TimerKey, TimerType};
 
 use b2bua_sdk::header_update::{payload_adds, payload_lines};
+use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use b2bua_sdk::model::{Body, RuleAction, RuleContext, TimerDelay};
 
 /// Whether a decision fold has landed on a call already going away — the
@@ -108,6 +109,19 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
 }
 
 impl RouteFold {
+    /// The attempt the fold's leg opens for `cause`: the fold's label and
+    /// service slices, as its services read them.
+    pub(crate) fn attempt(
+        &self,
+        cause: call::AttemptCause,
+        payload: &serde_json::Value,
+    ) -> AttemptOpening {
+        AttemptOpening::new(
+            cause,
+            RouteAnswer { label: parse_label(payload), service_ext: self.service_ext.clone() },
+        )
+    }
+
     /// The body the fold's leg is minted with: A's INVITE body beside the
     /// attached parts, the substitute, or `None` to relay A's body.
     pub(crate) fn leg_body(&self, ctx: &RuleContext) -> Option<Body> {

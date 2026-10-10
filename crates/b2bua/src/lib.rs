@@ -24,6 +24,7 @@
 pub(crate) mod abort_on_drop;
 pub mod admission;
 pub mod answer_deadline;
+pub(crate) mod attempts;
 pub mod b2bua_core;
 pub mod capacity;
 pub mod cdr;

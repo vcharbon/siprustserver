@@ -96,6 +96,7 @@ fn originate(
         header_updates: vec![],
         header_adds: vec![],
         kind,
+        attempt: None,
     };
     exec.execute(&[leg], &call, &ctx)
 }

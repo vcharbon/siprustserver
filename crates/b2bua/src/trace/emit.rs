@@ -56,13 +56,13 @@ pub fn rule_fired(call: &Call, at_ms: i64, rule_id: &str) {
     record(call, "rule.fired", at_ms, rule_id, b"");
 }
 
-/// A rule that observed the event without claiming it: its call-ext writes
-/// landed and the chain went on.
-pub fn rule_observed(call: &Call, at_ms: i64, rule_id: &str) {
+/// A service rule that handled a lifecycle event the engine delivered after
+/// the turn's claim (`event`: the event's kind).
+pub fn lifecycle_delivered(call: &Call, at_ms: i64, rule_id: &str, event: &str) {
     if !sampled(call) {
         return;
     }
-    record(call, "rule.observed", at_ms, rule_id, b"");
+    record(call, "rule.lifecycle", at_ms, &format!("{rule_id} {event}"), b"");
 }
 
 /// A state-machine cursor move a rule caused (ADR-0016 X1).

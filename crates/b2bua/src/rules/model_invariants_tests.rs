@@ -365,3 +365,38 @@ fn a_timer_armed_on_a_terminated_leg_breaks_the_timer_scope_invariant() {
     let err = no_timer_on_a_terminated_leg(&after(&call)).unwrap_err();
     assert!(err.contains("which is gone"), "{err}");
 }
+
+#[test]
+fn a_timer_armed_on_an_ended_attempt_breaks_the_timer_scope_invariant() {
+    let mut call = call();
+    let (attempt, _) =
+        call::helpers::open_attempt(&mut call, call::AttemptCause::Route, call::Deadline::Off);
+    call.timers.push(call::TimerEntry {
+        key: call::TimerKey::attempt(call::TimerType::NoAnswer, attempt),
+        generation: 1,
+        fire_at: 30_000,
+    });
+    assert_eq!(no_timer_on_an_ended_attempt(&after(&call)), Ok(()), "attempt still open");
+    call::helpers::end_attempt(&mut call, attempt, call::AttemptOutcome::Failed);
+    let err = no_timer_on_an_ended_attempt(&after(&call)).unwrap_err();
+    assert!(err.contains("which ended Some(Failed)"), "{err}");
+    call.attempts.clear();
+    let err = no_timer_on_an_ended_attempt(&after(&call)).unwrap_err();
+    assert!(err.contains("which is gone"), "{err}");
+}
+
+#[test]
+fn a_service_timer_of_an_inactive_machine_breaks_the_timer_scope_invariant() {
+    let mut call = call();
+    let machine = call::MachineId::new("watching");
+    call.timers.push(call::TimerEntry {
+        key: call::TimerKey::call(call::TimerType::service(machine.clone(), "watch")),
+        generation: 1,
+        fire_at: 30_000,
+    });
+    call.sm_cursors.insert(machine.clone(), call::StateLabel::new("S0"));
+    assert_eq!(no_timer_of_an_inactive_machine(&after(&call)), Ok(()), "machine active");
+    call.sm_cursors.remove(&machine);
+    let err = no_timer_of_an_inactive_machine(&after(&call)).unwrap_err();
+    assert!(err.contains("for machine watching, which is inactive"), "{err}");
+}

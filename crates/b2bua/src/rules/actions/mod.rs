@@ -8,7 +8,8 @@
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
-//! - `originate` — requests the B2BUA sends itself (CreateLeg, re-INVITE,
+//! - `create_leg` — the new leg's INVITE, opening the attempt it dials
+//! - `originate` — requests the B2BUA sends itself (re-INVITE,
 //!   NOTIFY, PRACK, in-dialog probes)
 //! - `respond` — response synthesis toward a leg (finals, provisionals)
 //! - `ladder` — the dialog-level retransmission ladders the framework owns
@@ -19,6 +20,7 @@
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
 mod confirm;
+mod create_leg;
 mod dialog_end;
 mod dialog_track;
 mod dispatch;

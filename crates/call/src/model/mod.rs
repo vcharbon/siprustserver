@@ -24,6 +24,7 @@
 //!     state, topology, peering, INVITE snapshot, policy)
 //!   - [`limiter`] — the call's admission state on the call limiter
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
+//!   - [`attempt`] — one routing answer the call dials and its legs
 //!   - [`dialog`] — one §12 dialog: identity, state, sequences, what the
 //!     B2BUA keeps on it
 //!   - [`dialogs`] — a leg's dialogs and the one lookup surface over them
@@ -41,6 +42,7 @@
 //!   - [`services`] — per-service typed runtime slices + opaque [`ExtMap`]
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
+pub mod attempt;
 pub mod cdr;
 pub mod deadline;
 pub mod decision_log;
@@ -61,6 +63,7 @@ pub mod sm;
 pub mod termination;
 pub mod timer;
 
+pub use attempt::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use cdr::{CdrEvent, CdrEventType};
 pub use deadline::Deadline;
 pub use decision_log::{DecisionKind, DecisionMark};

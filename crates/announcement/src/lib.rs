@@ -35,7 +35,8 @@
 //! (the one-hop service→global command, `BeginTermination`).
 
 use b2bua_sdk::rules::{
-    Body, Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
+    AttemptCause, AttemptOpening, Body, Effect, Match, Method, RouteAnswer, RuleAction, RuleCall,
+    RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
 use call::{CdrEventType, Direction, LegState, TerminationCause};
@@ -147,6 +148,8 @@ fn on_mscml_done(ctx: &RuleContext) -> Option<RuleHandleResult> {
             header_updates: vec![],
             header_adds: vec![],
             kind: None,
+            // The route's own destination, its dial deferred to this service.
+            attempt: Some(AttemptOpening::new(AttemptCause::Route, RouteAnswer::default())),
         },
         // The announcement is done: hand off to the destination leg + core bridge
         // and **deactivate** the machine (ADR-0016 X9) rather than lingering at a
@@ -271,6 +274,7 @@ define_service! {
                     header_updates: vec![],
                     header_adds: vec![],
                     kind: Some(call::LegKind::Media),
+                    attempt: None,
                 },
             ]),
         )

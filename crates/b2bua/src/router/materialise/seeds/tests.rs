@@ -100,6 +100,8 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
         adopted: None,
         invite_final_sent: None,
         answer_preempted: None,
+        attempt: None,
+        rang: false,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),

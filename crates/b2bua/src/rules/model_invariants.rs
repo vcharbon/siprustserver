@@ -22,7 +22,8 @@
 //! To-tag past the ACK, and only the one-live-dialog half holds.
 //!
 //! A timer dies with the scope it guards: no armed timer names a leg that is
-//! Terminated or gone from the record.
+//! Terminated or gone from the record, an attempt that ended or is gone, or a
+//! service machine that is inactive.
 
 use std::fmt;
 use std::sync::Mutex;
@@ -65,6 +66,8 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
     ("no-timer-on-a-terminated-leg", no_timer_on_a_terminated_leg),
+    ("no-timer-on-an-ended-attempt", no_timer_on_an_ended_attempt),
+    ("no-timer-of-an-inactive-machine", no_timer_of_an_inactive_machine),
 ];
 
 /// Check every invariant on `turn`; panics on the first violated, naming
@@ -445,26 +448,15 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
     Err(format!("{method} CSeq {cseq} ends the turn neither answered nor relayed"))
 }
 
-/// A leg-scoped timer dies with its leg: no armed timer names a leg that is
-/// Terminated or no longer in the record.
-fn no_timer_on_a_terminated_leg(turn: &Turn<'_>) -> Result<(), String> {
-    for timer in &turn.after.timers {
-        let Some(leg_id) = timer.leg_id() else { continue };
-        let state = find_leg(turn.after, leg_id).map(Leg::state);
-        if matches!(state, None | Some(LegState::Terminated)) {
-            let state = state.map_or("gone".to_string(), |s| format!("{s:?}"));
-            let timer_type = timer.timer_type();
-            return Err(format!(
-                "timer {timer_type:?}:{leg_id} is armed on leg {leg_id}, which is {state}"
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn legs(call: &Call) -> impl Iterator<Item = &Leg> {
     std::iter::once(&call.a_leg).chain(call.b_legs.iter())
 }
+
+#[path = "model_invariants_timers.rs"]
+mod timers;
+use timers::{
+    no_timer_of_an_inactive_machine, no_timer_on_a_terminated_leg, no_timer_on_an_ended_attempt,
+};
 
 #[cfg(test)]
 #[path = "model_invariants_tests.rs"]

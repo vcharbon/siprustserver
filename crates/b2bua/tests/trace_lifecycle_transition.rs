@@ -1,10 +1,11 @@
 // Own binary (ADR-0030 X2): installs the process trace registry (`install_process_traces`).
-//! A cursor move an observing rule makes reaches the trace (ADR-0026).
+//! A cursor move a lifecycle handler makes reaches the trace (ADR-0026).
 //!
-//! A rule that observes an event without claiming it may move its own
-//! machine's cursor ([`RuleHandleResult::observe`]). That move is a state-machine
+//! A service hearing a lifecycle event the engine delivers after a turn's
+//! claim may move its own machine's cursor. That move is a state-machine
 //! transition like a claim's, and a traced call records it as one: a
-//! `rule.transition` naming the observer, its machine and the edge.
+//! `rule.transition` naming the handler, its machine and the edge, beside the
+//! `rule.lifecycle` delivery itself.
 //!
 //! The trace registry is process-wide, so this file holds exactly ONE test and
 //! installs its own gate.
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
+use b2bua::rules::lifecycle_delivery::{close_turn, TurnStart};
 use b2bua::rules::{
     execute_rules, ActionExecutor, Match, RuleAction, RuleCall, RuleContext, RuleDefinition,
     RuleHandleResult, SERVICE_LAYER,
@@ -26,37 +28,37 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 use sip_txn::IdGen;
 
-const MACHINE: &str = "observing-machine";
+const MACHINE: &str = "listening-machine";
 
 static ACTIVE_S0: [StateLabel; 1] = [StateLabel::new("S0")];
 static S0_TO_S1: [(StateLabel, StateLabel); 1] = [(StateLabel::new("S0"), StateLabel::new("S1"))];
 
 const INVITE: &[u8] = b"INVITE sip:bob@example.com SIP/2.0\r\n\
-Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-observed\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-lifecycle\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@example.com>;tag=alicetag\r\n\
 To: <sip:bob@example.com>\r\n\
-Call-ID: observed-transition@10.0.0.9\r\n\
+Call-ID: lifecycle-transition@10.0.0.9\r\n\
 CSeq: 1 INVITE\r\n\
 Contact: <sip:alice@10.0.0.9:5060>\r\n\
 Content-Length: 0\r\n\r\n";
 
-/// Observes the event and moves its own cursor S0 → S1.
-fn observe_moving(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::SetState {
+/// Hears a leg end and moves its own cursor S0 → S1.
+fn on_leg_ended(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::new(vec![RuleAction::SetState {
         machine: MachineId::new(MACHINE),
         to: StateLabel::new("S1"),
     }]))
 }
 
-/// A machine-bound observer of internal events, active in S0, declaring S0 → S1.
-fn observer() -> RuleDefinition {
+/// A machine-bound leg-end listener, active in S0, declaring S0 → S1.
+fn listener() -> RuleDefinition {
     RuleDefinition {
-        id: "test-cursor-observer",
+        id: "test-leg-end-listener",
         layer: SERVICE_LAYER,
         overrides: &[],
-        matcher: Match::internal_event().topic("observed"),
-        handle: observe_moving,
+        matcher: Match::leg_ended(),
+        handle: on_leg_ended,
         machine: Some(MachineId::new(MACHINE)),
         active_states: &ACTIVE_S0,
         transitions: &S0_TO_S1,
@@ -65,7 +67,25 @@ fn observer() -> RuleDefinition {
     }
 }
 
-/// A sampled call with an open root span and the observing machine at S0.
+/// Claims the internal event and refuses the caller, which ends her leg.
+fn ending_claimer() -> RuleDefinition {
+    RuleDefinition::core(
+        "test-ending-claimer",
+        SERVICE_LAYER,
+        &[],
+        Match::internal_event().topic("end-a"),
+        |_| {
+            Some(RuleHandleResult::new(vec![RuleAction::RespondToALeg {
+                status: 486,
+                reason: "Busy Here".into(),
+                header_updates: vec![],
+                contacts: vec![],
+            }]))
+        },
+    )
+}
+
+/// A sampled call with an open root span and the listening machine at S0.
 fn traced_call() -> call::Call {
     let invite = match CustomParser::new().parse(INVITE).expect("fixture INVITE parses") {
         SipMessage::Request(r) => r,
@@ -83,7 +103,7 @@ fn traced_call() -> call::Call {
 }
 
 #[test]
-fn an_observers_cursor_move_is_on_the_trace() {
+fn a_lifecycle_handlers_cursor_move_is_on_the_trace() {
     install_process_traces(Arc::new(CallTraces::new(
         SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(5), activation_bucket(0)),
         false,
@@ -93,7 +113,7 @@ fn an_observers_cursor_move_is_on_the_trace() {
     let call = traced_call();
     let event = CallEvent::InternalEvent {
         call_ref: call.call_ref.clone(),
-        topic: "observed".into(),
+        topic: "end-a".into(),
         outcome: "ok".into(),
         payload: serde_json::json!({}),
         body: vec![],
@@ -118,27 +138,26 @@ fn an_observers_cursor_move_is_on_the_trace() {
         discharged: None,
         resolved: &call::helpers::UNRESOLVED,
     };
-    let result = execute_rules(
-        &[observer()],
-        &call,
-        &ctx,
-        &exec,
-        &b2bua::obligations::ObligationSet::core(),
-    );
+    let rules = [listener(), ending_claimer()];
+    let claimed =
+        execute_rules(&rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+    let result = close_turn(&rules, &TurnStart::of(&call), claimed, &exec);
     assert_eq!(
         result.call.sm_cursors.get(&MachineId::new(MACHINE)).map(StateLabel::as_str),
         Some("S1"),
-        "the observer moved its cursor",
+        "the listener moved its cursor",
     );
 
     assert!(
-        !log.matching("kind=rule.observed").is_empty(),
-        "the call is traced: the observation itself is on the trace",
+        log.matching("kind=rule.lifecycle")
+            .iter()
+            .any(|e| e.contains("test-leg-end-listener leg-ended")),
+        "the call is traced: the delivery itself is on the trace",
     );
     let transitions = log.matching("kind=rule.transition");
     assert!(
-        transitions.iter().any(|e| e.contains("test-cursor-observer observing-machine: S0 -> S1")),
-        "the observer's move is a traced transition: {:?}",
+        transitions.iter().any(|e| e.contains("test-leg-end-listener listening-machine: S0 -> S1")),
+        "the listener's move is a traced transition: {:?}",
         transitions.iter().map(|e| e.line()).collect::<Vec<_>>(),
     );
 

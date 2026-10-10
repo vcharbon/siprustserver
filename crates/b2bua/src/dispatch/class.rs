@@ -97,8 +97,8 @@ impl DispatchClass {
         DispatchClass::Internal,
     ];
 
-    /// The class of `event`; `None` for a `CallQuiesced`, which no queue
-    /// sees.
+    /// The class of `event`; `None` for a `CallQuiesced` or a lifecycle
+    /// event, which no queue sees.
     pub fn of(event: &CallEvent) -> Option<Self> {
         Some(match event {
             CallEvent::Sip { message, matched_client_txn, .. } => match message.as_ref() {
@@ -121,7 +121,7 @@ impl DispatchClass {
             CallEvent::Cancelled { .. } => DispatchClass::Cancelled,
             CallEvent::Timer { .. } => DispatchClass::Timer,
             CallEvent::InternalEvent { .. } => DispatchClass::Internal,
-            CallEvent::CallQuiesced { .. } => return None,
+            CallEvent::CallQuiesced { .. } | CallEvent::Lifecycle(_) => return None,
         })
     }
 

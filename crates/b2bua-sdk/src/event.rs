@@ -94,6 +94,9 @@ pub enum CallEvent {
     /// cleared (ADR-0014). The router uses it to self-release an acting-backup
     /// takeover copy whose served transaction(s) are done.
     CallQuiesced { call_ref: String },
+    /// A lifecycle event of the call the turn caused, as the engine delivers
+    /// it to the active services after the turn's claim. Never dispatched.
+    Lifecycle(crate::lifecycle::LifecycleEvent),
 }
 
 impl CallEvent {
@@ -153,7 +156,8 @@ impl CallEvent {
             | CallEvent::InternalEvent { incarnation, .. } => incarnation.as_deref(),
             CallEvent::Sip { .. }
             | CallEvent::Cancelled { .. }
-            | CallEvent::CallQuiesced { .. } => None,
+            | CallEvent::CallQuiesced { .. }
+            | CallEvent::Lifecycle(_) => None,
         }
     }
 
@@ -190,6 +194,7 @@ impl CallEvent {
             CallEvent::Timeout { .. } => "timeout",
             CallEvent::InternalEvent { .. } => "internal-event",
             CallEvent::CallQuiesced { .. } => "call-quiesced",
+            CallEvent::Lifecycle(_) => "lifecycle",
         }
     }
 }

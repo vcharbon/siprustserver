@@ -24,6 +24,7 @@
 //!
 //! Header/message *extraction* does NOT live here — see `sip-message`.
 
+mod a_leg_invite;
 mod a_leg_response;
 mod ack;
 mod address;
@@ -45,11 +46,12 @@ mod session_timer;
 mod originate_tests;
 
 // Originating a leg + answering/acknowledging on an existing one.
+pub use a_leg_invite::rebuild_a_leg_invite;
 pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::ack_b_leg;
 pub(crate) use ack::{acked_invite, acked_invite_carries_offer, acked_invite_cseq};
+pub use originate::build_b_leg;
 pub(crate) use originate::{apply_withheld_option_tags, clamp_no_answer, dialling_invite};
-pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use owed_answer::{
     ack_answer_on_leg, bare_ack_owed, invite_carried_offer, offers_owed_at_ack, owes_bare_ack,
 };

@@ -6,6 +6,7 @@
 
 pub(crate) mod apply_reject;
 pub mod apply_route;
+mod limiter_failover;
 mod no_answer;
 mod schemas;
 pub mod test_adapter;

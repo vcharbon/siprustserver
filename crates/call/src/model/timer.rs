@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use super::attempt::AttemptId;
 use super::obligation::Obligation;
 use super::sm::MachineId;
 
@@ -64,6 +65,9 @@ pub enum TimerType {
     ReferReinviteAnswer,
     /// Overall REFER safety timer covering the full transfer state machine.
     ReferOverallSafety,
+    /// The bound on an established call's reroute: the replacement leg's dial,
+    /// the realign and the old leg's release.
+    RerouteGuard,
     /// The deadline of the answer to the adaptation HTTP request a service
     /// sent off the call's turn, named by its `correlation_id`: the request's
     /// budget plus a margin. In the ledger while the answer is awaited; its
@@ -154,6 +158,7 @@ impl std::fmt::Debug for TimerType {
             TimerType::ReferSubscriptionExpiry => f.write_str("ReferSubscriptionExpiry"),
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),
             TimerType::ReferOverallSafety => f.write_str("ReferOverallSafety"),
+            TimerType::RerouteGuard => f.write_str("RerouteGuard"),
             TimerType::ServiceHttpAnswer { correlation_id } => {
                 write!(f, "ServiceHttpAnswer:{correlation_id}")
             }
@@ -169,13 +174,14 @@ impl std::fmt::Debug for TimerType {
 }
 
 /// What a timer guards: it lives as long as that scope does, and leaving the
-/// scope retires it. An attempt scope joins these with the call model's
-/// attempts.
+/// scope retires it.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimerScope {
     /// The call: retired when the call ends or its termination begins.
     Call,
+    /// One attempt, by id: retired when the attempt ends.
+    Attempt(AttemptId),
     /// One leg, by id: retired when the leg ends (cancelled, destroyed or
     /// terminated).
     Leg(String),
@@ -187,6 +193,7 @@ impl std::fmt::Debug for TimerScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TimerScope::Call => f.write_str("call"),
+            TimerScope::Attempt(id) => write!(f, "{id:?}"),
             TimerScope::Leg(leg) => write!(f, "leg {leg}"),
             TimerScope::Obligation(o) => write!(f, "{o:?}"),
         }
@@ -208,6 +215,11 @@ impl TimerKey {
         TimerKey { timer_type, scope: TimerScope::Call }
     }
 
+    /// `timer_type` guarding attempt `id`.
+    pub const fn attempt(timer_type: TimerType, id: AttemptId) -> Self {
+        TimerKey { timer_type, scope: TimerScope::Attempt(id) }
+    }
+
     /// `timer_type` guarding leg `leg_id`.
     pub fn leg(timer_type: TimerType, leg_id: impl Into<String>) -> Self {
         TimerKey { timer_type, scope: TimerScope::Leg(leg_id.into()) }
@@ -222,6 +234,14 @@ impl TimerKey {
     pub fn leg_id(&self) -> Option<&str> {
         match &self.scope {
             TimerScope::Leg(leg) => Some(leg),
+            _ => None,
+        }
+    }
+
+    /// The attempt the timer guards, for an attempt-scoped timer.
+    pub fn attempt_id(&self) -> Option<AttemptId> {
+        match self.scope {
+            TimerScope::Attempt(id) => Some(id),
             _ => None,
         }
     }

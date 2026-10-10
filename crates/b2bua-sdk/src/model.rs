@@ -3,14 +3,10 @@
 //! (non-type-narrowed) shape sufficient for the basic B2BUA. Service-layer
 //! ext narrowing and rule composition are deferred with their consumers.
 
-use std::collections::BTreeMap;
-
-use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::helpers::RAckTokens;
+use call::features::FeatureActivations;
 use call::{
-    ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Deadline, Dialog,
-    Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
-    PromotePemState, StateLabel, TerminationCause, TimerKey, TimerType, TransferState,
+    CallModelState, CdrEventType, Deadline, Dialog, Direction, ExtMap, Leg, LegDisposition,
+    LegKind, LegState, MachineId, Obligation, StateLabel, TerminationCause, TimerKey, TimerType,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -21,7 +17,9 @@ pub use crate::body::{Body, BodyAuthor};
 use crate::config::B2buaConfig;
 use crate::event::CallEvent;
 pub use crate::leg_end::LegEnd;
+pub use crate::lifecycle::{AttemptOpening, LifecycleEvent, RouteAnswer};
 use crate::relayed_final::RelayedFinal;
+pub use crate::rule_call::RuleCall;
 
 pub const CORE_LAYER: u8 = 0;
 #[allow(dead_code)]
@@ -56,6 +54,10 @@ pub enum MatchKind {
     Timeout,
     Cancelled,
     InternalEvent,
+    /// A lifecycle event the engine delivers to the active services after a
+    /// turn's claim ([`crate::lifecycle`]); only a machine-bound rule
+    /// receives one.
+    Lifecycle,
 }
 
 /// A declarative match descriptor — every omitted column matches any value.
@@ -82,6 +84,9 @@ pub struct Match {
     pub direction: Option<Direction>,
     pub topic: Option<&'static str>,
     pub outcome: Option<&'static str>,
+    /// For a lifecycle rule: the one event kind it takes
+    /// ([`LifecycleEvent::kind`]); `None` takes every kind.
+    pub lifecycle: Option<&'static str>,
     /// A corner-case predicate (pure, sync) over the resolved context.
     pub filter: Option<fn(&RuleContext) -> bool>,
 }
@@ -100,6 +105,7 @@ impl Match {
             direction: None,
             topic: None,
             outcome: None,
+            lifecycle: None,
             filter: None,
         }
     }
@@ -120,6 +126,18 @@ impl Match {
     }
     pub fn internal_event() -> Self {
         Self::base(MatchKind::InternalEvent)
+    }
+    /// An attempt opened ([`LifecycleEvent::AttemptStarted`]).
+    pub fn attempt_started() -> Self {
+        Self { lifecycle: Some("attempt-started"), ..Self::base(MatchKind::Lifecycle) }
+    }
+    /// An attempt ended ([`LifecycleEvent::AttemptEnded`]).
+    pub fn attempt_ended() -> Self {
+        Self { lifecycle: Some("attempt-ended"), ..Self::base(MatchKind::Lifecycle) }
+    }
+    /// A leg ended ([`LifecycleEvent::LegEnded`]).
+    pub fn leg_ended() -> Self {
+        Self { lifecycle: Some("leg-ended"), ..Self::base(MatchKind::Lifecycle) }
     }
     pub fn topic(mut self, t: &'static str) -> Self {
         self.topic = Some(t);
@@ -192,6 +210,7 @@ impl Match {
                 | (MatchKind::Timeout, CallEvent::Timeout { .. })
                 | (MatchKind::Cancelled, CallEvent::Cancelled { .. })
                 | (MatchKind::InternalEvent, CallEvent::InternalEvent { .. })
+                | (MatchKind::Lifecycle, CallEvent::Lifecycle(_))
         );
         if !kind_ok {
             return false;
@@ -264,6 +283,11 @@ impl Match {
         }
         if let Some(topic) = self.topic {
             if !matches!(ctx.event, CallEvent::InternalEvent { topic: t, .. } if t == topic) {
+                return false;
+            }
+        }
+        if let Some(lifecycle) = self.lifecycle {
+            if !matches!(ctx.event, CallEvent::Lifecycle(e) if e.kind() == lifecycle) {
                 return false;
             }
         }
@@ -381,29 +405,11 @@ pub struct RuleHandleResult {
     /// refusal it owns. The engine logs and counts these; they emit no wire
     /// traffic of their own, so a rule can never route on one.
     pub diagnostics: Vec<RuleDiagnostic>,
-    /// The rule observed the event without claiming it ([`Self::observe`]).
-    pub observes: bool,
 }
 
 impl RuleHandleResult {
     pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new(), observes: false }
-    }
-
-    /// Record without claiming: the engine applies `actions` — call-ext writes
-    /// ([`RuleAction::MergeCallExt`]) and the observing rule's own machine's
-    /// bookkeeping (its cursor along a declared edge, the service timers its
-    /// machine owns); anything else panics under `debug_assertions`, is
-    /// dropped and logged in release — and hands the event on to the next
-    /// ranked rule, whose handler reads the call with the writes and handles
-    /// the event as it would have. The observation's effects precede the
-    /// claim's. The candidates are selected once, on the call before any
-    /// observation, so a later rule's filter never sees the writes; and an
-    /// observer ranked below the rule that claims the event never runs. A later
-    /// claimer bound to the observer's machine is selected on the cursor before
-    /// the observation and its own move checked against the cursor after it.
-    pub fn observe(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new(), observes: true }
+        Self { actions, diagnostics: Vec::new() }
     }
 
     /// The same actions, carrying `diagnostic` — what a rule returns when an
@@ -645,6 +651,10 @@ pub enum RuleAction {
         /// leg's `adopted` flag derives from this kind (`is_adopted`), so a media
         /// leg is gated out of the generic relay-to-peer fallback.
         kind: Option<LegKind>,
+        /// The attempt this leg dials: a destination or transfer-target leg
+        /// opens one ([`AttemptOpening`]), the leg joining it; a leg a
+        /// service dials for its own use (a media leg) opens none.
+        attempt: Option<AttemptOpening>,
     },
     /// End b-leg `leg_id` as its state asks: a confirmed dialog is BYE'd, a
     /// pending INVITE CANCELled (RFC 3261 §9.1), and the leg terminated.
@@ -1152,271 +1162,6 @@ impl RuleAction {
     }
 }
 
-/// The **refined view** of a [`Call`] a rule reads (ADR-0020 X8) — the entire
-/// read surface a rule handler, `Match::filter` guard, or service `init` hook
-/// gets. A borrowed newtype exposing only the *semantic* call state; there is
-/// deliberately **no `Deref` and no raw escape hatch** to the underlying
-/// `Call`, so framework internals are not part of the rule-author interface
-/// and can change freely. The write side is unchanged: rules mutate only by
-/// returning [`RuleAction`]s through the executor.
-///
-/// Hidden by design (the framework-internal fields — do not add accessors for
-/// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
-/// `sampled`/`trace_id`/`root_span_id` (observability), `message_count`,
-/// `terminating_refresh_legs`, `a_leg_pending_vias`/`a_leg_pending_cseq`
-/// (relay frame state), `limiter` (but its held and target sets), `timers`, `active_rules`,
-/// `policy_update_headers`/`policy_update_body`, `billing_context`,
-/// `emergency`. Add an accessor only when a real rule needs it — never
-/// speculatively.
-#[derive(Clone, Copy)]
-pub struct RuleCall<'a>(&'a Call);
-
-impl<'a> RuleCall<'a> {
-    /// Wrap a call for rule consumption. Built by the engine at the dispatch
-    /// boundary (router / seed path); constructing one grants only the narrow
-    /// read surface below.
-    pub fn new(call: &'a Call) -> Self {
-        Self(call)
-    }
-
-    // ── identity / lifecycle ─────────────────────────────────────────────
-    pub fn call_ref(&self) -> &'a str {
-        &self.0.call_ref
-    }
-    pub fn state(&self) -> CallModelState {
-        self.0.state
-    }
-    /// Whether `leg_id` is a face whose reliable-provisional numbering is this
-    /// stack's own — every leg of the call — and so the UAS that answers a
-    /// PRACK naming nothing locally (RFC 3262 §4).
-    pub fn owns_rseq_numbering(&self, leg_id: &str) -> bool {
-        call::helpers::owns_rseq_numbering(self.0, leg_id)
-    }
-    /// Whether a PRACK arriving on `source_leg_id` naming `rack` in the `a_tag`
-    /// dialog provably acknowledges no reliable provisional this stack showed
-    /// there (RFC 3262 §4, §7.2 — all three `RAck` tokens must name it).
-    pub fn unacknowledgeable_rack(
-        &self,
-        source_leg_id: &str,
-        a_tag: &str,
-        rack: RAckTokens,
-    ) -> bool {
-        call::helpers::unacknowledgeable_rack(self.0, source_leg_id, a_tag, rack)
-    }
-    /// Whether the responder's reliable provisional `rseq` is the next in its
-    /// early dialog's sequence (RFC 3262 §4).
-    pub fn rseq_in_order(
-        &self,
-        leg_id: &str,
-        remote_tag: &str,
-        invite_cseq: i64,
-        rseq: i64,
-    ) -> bool {
-        call::helpers::rseq_in_order(self.0, leg_id, remote_tag, invite_cseq, rseq)
-    }
-    /// Whether `branch` is a PRACK client transaction this stack originated
-    /// itself, never one it relayed.
-    pub fn own_prack_branch(&self, branch: &str) -> bool {
-        call::helpers::own_prack_branch(self.0, branch)
-    }
-    /// Whether a PRACK in the `a_tag` dialog naming `rack` acknowledges a
-    /// provisional this stack already PRACKed toward its responder itself, so
-    /// this face answers it rather than relaying a second PRACK (RFC 3262 §3).
-    pub fn rack_pracked_here(&self, a_tag: &str, rack: RAckTokens) -> bool {
-        call::helpers::rack_pracked_here(self.0, a_tag, rack)
-    }
-    /// Whether a relayed reliable provisional of `leg_id` still owes its offer
-    /// an answer in the PRACK this stack sends (RFC 3262 §5).
-    pub fn offer_owed_prack(&self, leg_id: &str) -> bool {
-        call::helpers::unacknowledged_relayed_provisionals(self.0, leg_id, None)
-            .iter()
-            .any(|o| o.offer.is_some())
-    }
-    /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
-    /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
-    /// is its retransmission to discard (RFC 3262 §4).
-    pub fn pracked_provisional(
-        &self,
-        leg_id: &str,
-        remote_tag: &str,
-        invite_cseq: i64,
-        rseq: i64,
-    ) -> bool {
-        call::helpers::pracked_provisional(self.0, leg_id, remote_tag, invite_cseq, rseq)
-    }
-    /// Whether the responder's `(leg_id, remote_tag, invite_cseq, rseq)`
-    /// reliable provisional was already acknowledged toward it — by this
-    /// stack, or by the party it was relayed to (RFC 3262 §4).
-    pub fn acknowledged_provisional(
-        &self,
-        leg_id: &str,
-        remote_tag: &str,
-        invite_cseq: i64,
-        rseq: i64,
-    ) -> bool {
-        call::helpers::provisional_acknowledged(self.0, leg_id, remote_tag, invite_cseq, rseq)
-    }
-    /// The relayed INVITE still pending toward its target — `(leg_id,
-    /// outbound_cseq)` there — that the provisional shown as `a_rseq` in the
-    /// `a_tag` dialog answers; `None` for the initial INVITE or a transaction
-    /// already resolved.
-    pub fn pending_invite_answered_by(&self, a_tag: &str, a_rseq: i64) -> Option<(String, i64)> {
-        call::helpers::pending_invite_answered_by(self.0, a_tag, a_rseq)
-    }
-    /// The leg whose dialog carries `shown_tag` as this stack's own — the face
-    /// a reliable provisional so tagged was shown on.
-    pub fn leg_shown(&self, shown_tag: &str) -> Option<&'a str> {
-        call::helpers::leg_shown(self.0, shown_tag)
-    }
-    /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer
-    /// rather than of a re-INVITE's 2xx — what tells the `RepeatGiveUp` of the
-    /// call's own setup from an in-dialog one (RFC 3261 §13.3.1.4). A rule
-    /// answering either give-up may re-author the teardown — its cause, its
-    /// CDR, the order the legs go — but not decline it: a call left Active
-    /// after an `AckOf2xx` give-up is torn down by the framework with the CORE
-    /// verdict (ADR-0032 X5). A `PrackOf` give-up carries no such floor.
-    pub fn answers_initial_invite(&self, obligation: &Obligation) -> bool {
-        call::helpers::answers_initial_invite(self.0, obligation)
-    }
-    /// Every machine's current cursor (ADR-0016 X4) — read-only; `SetState` /
-    /// `ClearState` are the only writers.
-    pub fn sm_cursors(&self) -> &'a BTreeMap<MachineId, StateLabel> {
-        &self.0.sm_cursors
-    }
-    pub fn created_at(&self) -> i64 {
-        self.0.created_at
-    }
-
-    // ── legs ─────────────────────────────────────────────────────────────
-    pub fn a_leg(&self) -> &'a Leg {
-        &self.0.a_leg
-    }
-    pub fn b_legs(&self) -> &'a [Leg] {
-        &self.0.b_legs
-    }
-    /// The read-only snapshot of the original a-leg INVITE (URI/headers/body).
-    pub fn a_leg_invite(&self) -> &'a ALegInviteSnapshot {
-        &self.0.a_leg_invite
-    }
-
-    // ── routing / decision ───────────────────────────────────────────────
-    /// The opaque decision-layer token (carries the reroute plan, ADR-0017).
-    pub fn callback_context(&self) -> Option<&'a str> {
-        self.0.callback_context.as_deref()
-    }
-    pub fn features(&self) -> Option<&'a FeatureActivations> {
-        self.0.features.as_ref()
-    }
-    pub fn active_peer(&self) -> Option<&'a ActivePeer> {
-        self.0.active_peer.as_ref()
-    }
-    /// The caller-facing dialog fronting `b_leg_id`'s dialog with peer tag
-    /// `b_tag` ([`call::Dialog::fronts`]).
-    pub fn fronting_dialog(&self, b_leg_id: &str, b_tag: &str) -> Option<&'a Dialog> {
-        call::helpers::fronting_dialog(self.0, b_leg_id, b_tag)
-    }
-    /// Both peered leg ids (`active_peer`), or empty when split.
-    pub fn all_peered_legs(&self) -> Vec<String> {
-        call::helpers::all_peered_legs(self.0)
-    }
-
-    // ── admission ──────────────────────────────────────────────────────────
-    /// The set the call limiter last stated it holds for the call: what a
-    /// service computes its next replacement from
-    /// ([`RuleAction::ReplaceAdmissionSet`]), never from an admit whose
-    /// answer it has not seen.
-    pub fn limiter_held(&self) -> &'a [call::LimiterEntry] {
-        self.0.limiter.held()
-    }
-    /// The set the call's latest admit asked for, from the turn that sends
-    /// it (a replacement's) or from its report (a consult's); after a refused
-    /// or superseded change, the held set. With
-    /// [`limiter_held`](Self::limiter_held), what a service tells a confirmed
-    /// hold from an unconfirmed add.
-    pub fn limiter_target(&self) -> &'a [call::LimiterEntry] {
-        self.0.limiter.target()
-    }
-
-    // ── service slices (typed data backing; the cursor lives in sm_cursors) ──
-    pub fn ext(&self) -> Option<&'a ExtMap> {
-        self.0.ext.as_ref()
-    }
-    pub fn transfer_state(&self) -> Option<&'a TransferState> {
-        self.0.transfer.as_ref()
-    }
-    pub fn transfer_active(&self) -> bool {
-        call::helpers::transfer_active(self.0)
-    }
-    /// The routing decision directed LOCAL REFER processing (`features.refer`)
-    /// — the gate on the transfer seed rules.
-    pub fn refer_processed_locally(&self) -> bool {
-        call::helpers::refer_processed_locally(self.0)
-    }
-    pub fn relay_first_18x_strategy(&self) -> Option<RelayFirst18xStrategy> {
-        call::helpers::relay_first_18x_strategy(self.0)
-    }
-    pub fn relay_first_18x_first_relayed(&self) -> bool {
-        call::helpers::relay_first_18x_first_relayed(self.0)
-    }
-    pub fn relay_first_18x_stored_a_tag(&self) -> Option<&'a str> {
-        call::helpers::relay_first_18x_stored_a_tag(self.0)
-    }
-    /// The active `Relay18xMessages` policy (defaults to `FIRST`).
-    pub fn relay_first_18x_messages(&self) -> call::features::Relay18xMessages {
-        call::helpers::relay_first_18x_messages(self.0)
-    }
-    /// Whether an 18x with this *upstream* status value was already relayed
-    /// (the `ONE_PER_VALUE` dedupe test).
-    pub fn relay_first_18x_value_relayed(&self, status: u16) -> bool {
-        call::helpers::relay_first_18x_value_relayed(self.0, status)
-    }
-    pub fn promote_pem_state(&self) -> Option<&'a PromotePemState> {
-        self.0.promote_pem.as_ref()
-    }
-    pub fn promote_pem_promoted(&self) -> bool {
-        call::helpers::promote_pem_promoted(self.0)
-    }
-    pub fn promote_pem_window_open(&self) -> bool {
-        call::helpers::promote_pem_window_open(self.0)
-    }
-    /// The SDP cached on a b-leg early dialog (`fake-prack`).
-    pub fn cached_sdp_for_leg_dialog(&self, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
-        call::helpers::cached_sdp_for_leg_dialog(self.0, leg_id, b_tag)
-    }
-
-    // ── subscribed release events + established-call reroute ──────────────────
-    /// The release events the decision backend subscribed to on the last
-    /// applied `Route` (written via `SetSubscriptions` / `apply_route`).
-    pub fn subscriptions(&self) -> &'a [call::ReleaseEventKind] {
-        &self.0.subscriptions
-    }
-    /// Whether the backend subscribed to `event` — the gate that decides
-    /// consult-the-engine vs act-locally when the event fires.
-    pub fn subscribed(&self, event: call::ReleaseEventKind) -> bool {
-        self.0.subscriptions.contains(&event)
-    }
-    /// The in-flight established-call reroute slice (written via `SetReroute`).
-    pub fn reroute_state(&self) -> Option<&'a call::RerouteState> {
-        self.0.reroute.as_ref()
-    }
-    /// Whether an established-call reroute is in flight (the activation guard
-    /// for the `release-reroute` rules, mirroring `transfer_active`).
-    pub fn reroute_active(&self) -> bool {
-        self.0.reroute.is_some()
-    }
-
-    // ── bookkeeping (read-only; written via `AddCdrEvent`) ───────────────
-    pub fn cdr_events(&self) -> &'a [CdrEvent] {
-        &self.0.cdr_events
-    }
-    /// The count of decisions applied to the call so far — the ordinal every
-    /// message and event written now is stamped with; `0` before the first
-    /// decision. A service records its own marks under the same ordinal.
-    pub fn decision_ordinal(&self) -> u32 {
-        self.0.decision_ordinal
-    }
-}
-
 /// The resolved context a rule sees. Built by the executor/router from the
 /// event + call (the source's match-narrowed `RuleContext`, flattened). The
 /// call is exposed as the narrow [`RuleCall`] view — the framework keeps the
@@ -1462,6 +1207,13 @@ impl<'a> RuleContext<'a> {
     }
     pub fn timer_type(&self) -> Option<&TimerType> {
         self.timer_key().map(|key| &key.timer_type)
+    }
+    /// For a lifecycle delivery: the event delivered.
+    pub fn lifecycle(&self) -> Option<&LifecycleEvent> {
+        match self.event {
+            CallEvent::Lifecycle(e) => Some(e),
+            _ => None,
+        }
     }
     /// For a timer fire: the key of the timer that fired.
     pub fn timer_key(&self) -> Option<&TimerKey> {

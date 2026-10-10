@@ -1,8 +1,9 @@
 //! Leaving a scope retires it ([`Scope`]): every ladder the scope owes ends —
 //! its rung and give-up leave the ledger and the live driver, and what it
 //! repeated stops riding the replicated body — and every timer guarding the
-//! scope is disarmed: a leg's timers with the leg, the call's as its
-//! termination begins. No rule cancels a timer its scope already took.
+//! scope is disarmed: a leg's timers with the leg, an attempt's as it ends, a
+//! service machine's as it deactivates, the call's as its termination
+//! begins. No rule cancels a timer its scope already took.
 
 use call::helpers::Scope;
 use call::{Call, TimerType};
@@ -30,6 +31,10 @@ impl ActionExecutor<'_> {
         }
         match scope {
             Scope::Leg(leg_id) => self.scrub_where(call, fx, |t| t.leg_id() == Some(leg_id)),
+            Scope::Attempt(id) => crate::attempts::retire(call, fx, id),
+            Scope::Machine(machine) => self.scrub_where(call, fx, |t| {
+                matches!(t.timer_type(), TimerType::Service { service_id, .. } if service_id == machine)
+            }),
             Scope::Call => self.scrub_where(call, fx, |t| !outlives_termination(t.timer_type())),
             Scope::Obligation(_) | Scope::Transaction { .. } | Scope::Provisionals => {}
         }

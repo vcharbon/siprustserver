@@ -3,10 +3,10 @@
 //! several steps delegates to its action-family module (relay / originate /
 //! respond / dialog_track / teardown).
 
-use call::helpers::RelayPeer;
 use call::helpers::{
     add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request, split_leg,
 };
+use call::helpers::{RelayPeer, Scope};
 use call::{Call, CdrEvent};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
@@ -98,6 +98,7 @@ impl ActionExecutor<'_> {
                 header_updates,
                 header_adds,
                 kind,
+                attempt,
             } => {
                 self.create_leg(
                     call,
@@ -113,6 +114,7 @@ impl ActionExecutor<'_> {
                     header_updates,
                     header_adds,
                     *kind,
+                    attempt.as_ref(),
                 );
             }
             RuleAction::DestroyLeg { leg_id, headers } => {
@@ -183,7 +185,9 @@ impl ActionExecutor<'_> {
                 // Machine deactivation (ADR-0016 X9): remove the cursor, returning
                 // the machine to dormant — the declarative inverse of `SetState`,
                 // realising the transition to the terminal `[*]`. Idempotent.
+                // The machine's own timers retire with it.
                 call.sm_cursors.remove(machine);
+                self.retire(call, fx, Scope::Machine(machine));
             }
             RuleAction::SendRequestToLeg { leg_id, method, body, headers } => {
                 let (bytes, content_type, author, descriptors) = parts(body);

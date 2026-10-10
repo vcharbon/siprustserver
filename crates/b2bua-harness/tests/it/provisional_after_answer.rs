@@ -85,6 +85,7 @@ mod consult {
                         header_updates: vec![],
                         header_adds: vec![],
                         kind: None,
+                        attempt: None,
                     },
                     RuleAction::SetState { machine: CONSULT, to: ConsultState::Dialled.label() },
                 ]))

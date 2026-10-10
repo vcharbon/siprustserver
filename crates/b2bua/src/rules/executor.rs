@@ -1,9 +1,9 @@
 //! Rule selection + execution — port of `Matcher.ts` (`pickRanked`) +
 //! `RuleExecutor.ts`. First handler returning `Some` wins; its actions run
 //! through the [`ActionExecutor`], then termination is finalized + invariants
-//! enforced. A handler that only observes writes its call-ext slices and its
-//! own machine's bookkeeping, and the chain goes on
-//! ([`RuleHandleResult::observe`]). No candidate → the default handler.
+//! enforced. The turn's lifecycle events reach the active services after
+//! the claim (`super::lifecycle_delivery`). No candidate → the default
+//! handler.
 //! Selection gates on the call's lifecycle too: a call already going away
 //! makes no forward progress on its own clock, so an asynchronous trigger
 //! reaches only its teardown rules there (`RuleDefinition::teardown`) and
@@ -19,14 +19,14 @@ use crate::obligations::ObligationSet;
 use super::actions::ActionExecutor;
 use super::invariants;
 use b2bua_sdk::model::{
-    Effect, EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+    Effect, EffectKind, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
 };
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
 /// machine's cursor is one of its `active_states`. A machine-less core rule is
 /// always a candidate (an unseeded machine keeps its rules dormant — selection
 /// costs a vanilla call nothing).
-fn machine_active(r: &RuleDefinition, call: &Call) -> bool {
+pub(super) fn machine_active(r: &RuleDefinition, call: &Call) -> bool {
     match &r.machine {
         None => true,
         Some(m) => call.sm_cursors.get(m).is_some_and(|cursor| r.active_states.contains(cursor)),
@@ -95,13 +95,8 @@ pub fn pick_ranked<'a>(
 }
 
 /// Run the rule chain for `ctx` over the authoritative `call`. The first
-/// matching rule that returns `Some` handles the event; a result that only
-/// observes ([`RuleHandleResult::observe`]) writes its call-ext slices and its
-/// own machine's bookkeeping, and the chain goes on over the call with those
-/// writes. The observers' effects precede the claiming rule's, so a teardown
-/// the claim begins supersedes a timer an observer armed. No candidate → the
-/// call as the observers left it, with their effects only. A fire the
-/// going-away gate absorbed is counted either way.
+/// matching rule that returns `Some` handles the event. No candidate → the
+/// call unchanged. A fire the going-away gate absorbed is counted either way.
 pub fn execute_rules(
     rules: &[RuleDefinition],
     call: &Call,
@@ -110,136 +105,43 @@ pub fn execute_rules(
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);
-    // The call as the observers so far left it; `None` until one wrote.
-    let mut observed: Option<Call> = None;
-    let mut observed_fx = HandlerEffects::new();
     for rule in selection.ranked {
-        let call = observed.as_ref().unwrap_or(call);
-        let rule_ctx = RuleContext { call: RuleCall::new(call), ..*ctx };
-        let ctx = &rule_ctx;
-        if let Some(outcome) = (rule.handle)(ctx) {
-            if outcome.observes {
-                report_diagnostics(rule, call, &outcome);
-                let next = apply_observation(rule, call, ctx, exec, &outcome.actions);
-                crate::trace::emit::rule_observed(&next.call, exec.now_ms, rule.id);
-                record_cursor_moves(rule, call, &next.call, exec.now_ms);
-                observed_fx.extend(next.effects);
-                observed = Some(next.call);
-                continue;
-            }
-            let before = call.clone();
-            report_diagnostics(rule, call, &outcome);
-            check_declared_effects(rule, &outcome.actions);
-            let result = exec.execute(&outcome.actions, call, ctx);
-            // The rule's OWN cursor move is checked against what the rule
-            // produced — the projections, the terminal fold below and the
-            // machine deactivation termination performs belong to the engine,
-            // not to the rule that triggered them.
-            let torn_down = before.state != result.call.state
-                && matches!(
-                    result.call.state,
-                    CallModelState::Terminating | CallModelState::Terminated
-                );
-            check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors, torn_down);
-            let result = invariants::finalize(result);
-            let mut enforced = invariants::enforce(
-                obligations,
-                &before,
-                result,
-                exec.now_ms,
-                invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+        let Some(outcome) = (rule.handle)(ctx) else {
+            continue;
+        };
+        let before = call.clone();
+        report_diagnostics(rule, call, &outcome);
+        check_declared_effects(rule, &outcome.actions);
+        let result = exec.execute(&outcome.actions, call, ctx);
+        // The rule's OWN cursor move is checked against what the rule
+        // produced — the projections, the terminal fold below and the
+        // machine deactivation termination performs belong to the engine,
+        // not to the rule that triggered them.
+        let torn_down = before.state != result.call.state
+            && matches!(
+                result.call.state,
+                CallModelState::Terminating | CallModelState::Terminated
             );
-            // Recorded from the FINAL call, so the trace carries what finalize
-            // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
-            // otherwise shows on a traced call as a `sip.out` with no matching
-            // `call.transition`.
-            record_transitions(rule, &before, &enforced.call, exec.now_ms);
-            note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
-            observed_fx.extend(enforced.effects);
-            enforced.effects = observed_fx;
-            return enforced;
-        }
+        check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors, torn_down);
+        let result = invariants::finalize(result);
+        let mut enforced = invariants::enforce(
+            obligations,
+            &before,
+            result,
+            exec.now_ms,
+            invariants::UnansweredCaller::Answer(&exec.config.minted_final_advertisement),
+        );
+        // Recorded from the FINAL call, so the trace carries what finalize
+        // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
+        // otherwise shows on a traced call as a `sip.out` with no matching
+        // `call.transition`.
+        record_transitions(rule, &before, &enforced.call, exec.now_ms);
+        note_absorbed(&mut enforced.effects, call, ctx, &selection.absorbed);
+        return enforced;
     }
-    let call = observed.as_ref().unwrap_or(call);
-    let mut result = HandlerResult { call: call.clone(), effects: observed_fx };
+    let mut result = HandlerResult::new(call.clone());
     note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
     result
-}
-
-/// Apply an observation to `call`: its call-ext writes, then its own
-/// machine's bookkeeping ([`is_own_bookkeeping`]) through the executor, held
-/// to the rule's declared effects and edges as a claim's actions are. Any
-/// other action is not an observation's to take: an authoring bug, which
-/// panics under `debug_assertions` (as an undeclared effect does) and is
-/// dropped and logged in release, so the claiming rule's handling stays the
-/// turn's only other effect.
-fn apply_observation(
-    rule: &RuleDefinition,
-    call: &Call,
-    ctx: &RuleContext,
-    exec: &ActionExecutor,
-    actions: &[RuleAction],
-) -> HandlerResult {
-    let mut call = call.clone();
-    let mut bookkeeping = Vec::new();
-    for action in actions {
-        match action {
-            RuleAction::MergeCallExt { ext } => {
-                for (key, value) in ext {
-                    let value = (!value.is_null()).then(|| value.clone());
-                    call = call::helpers::set_call_ext(call, key, value);
-                }
-            }
-            own if is_own_bookkeeping(rule, own) => bookkeeping.push(own.clone()),
-            other => {
-                if cfg!(debug_assertions) {
-                    panic!(
-                        "rule '{}' observed with a {:?} action (an observation writes call ext \
-                         and its own machine's bookkeeping only)",
-                        rule.id,
-                        other.effect_kind(),
-                    );
-                }
-                tracing::error!(
-                    call_ref = %call.call_ref,
-                    rule = %rule.id,
-                    action = ?other,
-                    "an observing rule may only write call ext and its own machine's bookkeeping; \
-                     action dropped"
-                );
-            }
-        }
-    }
-    if bookkeeping.is_empty() {
-        return HandlerResult::new(call);
-    }
-    check_declared_effects(rule, &bookkeeping);
-    let ctx = RuleContext { call: RuleCall::new(&call), ..*ctx };
-    let result = exec.execute(&bookkeeping, &call, &ctx);
-    check_declared_transition(rule, &call.sm_cursors, &result.call.sm_cursors, false);
-    result
-}
-
-/// The observing rule's own bookkeeping: a move of its machine's cursor, or
-/// the arming or cancelling of a service timer its machine owns
-/// ([`TimerType::Service`] keyed by that machine). A machine-less rule owns none.
-fn is_own_bookkeeping(rule: &RuleDefinition, action: &RuleAction) -> bool {
-    let Some(machine) = rule.machine.as_ref() else {
-        return false;
-    };
-    match action {
-        RuleAction::SetState { machine: m, .. } | RuleAction::ClearState { machine: m } => {
-            m == machine
-        }
-        RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key } => {
-            let owner = match &key.timer_type {
-                TimerType::Service { service_id, .. } => Some(service_id),
-                _ => None,
-            };
-            owner == Some(machine)
-        }
-        _ => false,
-    }
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming
@@ -295,9 +197,9 @@ fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms
 }
 
 /// Record on a traced call every state-machine cursor `rule`'s turn moved
-/// between `before` and `after`, a claim's or an observation's alike
+/// between `before` and `after`, a claim's or a lifecycle delivery's alike
 /// (ADR-0026). Guarded like [`record_transitions`].
-fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+pub(super) fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
     if !crate::trace::sampled(after) {
         return;
     }
@@ -336,7 +238,7 @@ fn record_cursor_moves(rule: &RuleDefinition, before: &Call, after: &Call, now_m
 /// `torn_down`: the turn moved the call into `Terminating`/`Terminated`, so a
 /// cursor that vanished is the engine's deactivation of every machine, not a
 /// move of the rule's own.
-fn check_declared_transition(
+pub(super) fn check_declared_transition(
     rule: &RuleDefinition,
     before: &std::collections::BTreeMap<call::MachineId, call::StateLabel>,
     after: &std::collections::BTreeMap<call::MachineId, call::StateLabel>,
@@ -393,7 +295,7 @@ fn check_declared_transition(
 /// no effects and are not checked. Debug builds panic (a test failure);
 /// release builds log and proceed — an authoring gap must never panic a live
 /// worker. Mirrors [`check_declared_transition`].
-fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
+pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
     if rule.machine.is_none() {
         return;
     }

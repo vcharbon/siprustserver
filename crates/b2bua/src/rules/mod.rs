@@ -13,6 +13,7 @@ pub mod delayed_offer;
 pub mod docgen;
 pub mod executor;
 pub mod invariants;
+pub mod lifecycle_delivery;
 pub mod model_invariants;
 mod pending_refusal;
 pub mod promote_pem;
@@ -25,8 +26,9 @@ pub mod stated_headers;
 
 pub use actions::ActionExecutor;
 pub use b2bua_sdk::model::{
-    Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
-    RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER, SERVICE_LAYER,
+    AttemptOpening, Effect, EffectKind, LifecycleEvent, Match, MatchKind, MessageTransform,
+    RouteAnswer, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, StatusMatch,
+    TimerDelay, CORE_LAYER, SERVICE_LAYER,
 };
 pub use b2bua_sdk::relayed_final::RelayedFinal;
 pub use defaults::{default_rules, default_rules_with, ComposeOptions};

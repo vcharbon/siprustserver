@@ -238,6 +238,10 @@ pub struct HandlerEffects {
     /// framework's rung turn and the bodyless re-ACK; the router persists the
     /// turn quietly only when its whole effect set is that repeat.
     pub quiet: Option<QuietTurn>,
+    /// The attempts the turn opened, each with the routing answer it dials:
+    /// what the turn's `AttemptStarted` deliveries carry
+    /// (`rules::lifecycle`). Turn-local, never replicated.
+    pub opened_attempts: Vec<(call::AttemptId, b2bua_sdk::lifecycle::RouteAnswer)>,
 }
 
 impl HandlerEffects {
@@ -255,6 +259,7 @@ impl HandlerEffects {
         self.soft.extend(other.soft);
         self.buffered.extend(other.buffered);
         self.fire_and_forget.extend(other.fire_and_forget);
+        self.opened_attempts.extend(other.opened_attempts);
     }
 }
 

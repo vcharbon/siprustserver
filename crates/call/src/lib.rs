@@ -61,6 +61,8 @@ pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
 // Timers, CDR events, the message ring, the decision log and the termination
 // record on the replicated body.
 pub use model::Deadline;
+// The routing answers a call dials (attempts).
+pub use model::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use model::{
     CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
     MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerKey, TimerScope,

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::model::{Call, Obligation, RetainedEmission, Unacked2xx};
 
-/// What a retirement covers: the obligations it ends, and for a leg or the
-/// call, the timers that guard it.
+/// What a retirement covers: the obligations it ends, and for a leg, an
+/// attempt, a service machine or the call, the timers that guard it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope<'a> {
     /// Exactly this one — the discharging ACK or PRACK arrived, or a spent
@@ -35,6 +35,12 @@ pub enum Scope<'a> {
     Provisionals,
     /// Every obligation on the call — a terminating call repeats nothing.
     Call,
+    /// The timers guarding one attempt — an ended attempt owes no
+    /// retransmission of its own.
+    Attempt(crate::model::AttemptId),
+    /// The timers a service machine owns — a deactivated machine owes no
+    /// retransmission of its own.
+    Machine(&'a crate::model::MachineId),
 }
 
 /// Every obligation the books name inside `scope`, ladder live or not: a
@@ -67,6 +73,7 @@ pub fn obligations_in(call: &Call, scope: &Scope<'_>) -> Vec<Obligation> {
             .iter()
             .map(|r| Obligation::PrackOf { a_tag: r.a_tag.clone(), a_rseq: r.a_rseq })
             .collect(),
+        Scope::Attempt(_) | Scope::Machine(_) => Vec::new(),
         Scope::Call => unacked_2xx(call)
             .into_iter()
             .chain(
