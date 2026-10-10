@@ -268,10 +268,10 @@ define_service! {
             effects: [
                 Effect::Relay { label: "200 OK → A (shown dialog: the 180's To-tag; unshown: a fresh one; fake-prack: inject cached SDP)" },
                 Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
-                Effect::GuardTimer { timer: TimerType::NoAnswer, label: "cancel B no-answer" },
-                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "cancel the setup deadline" },
-                Effect::GuardTimer { timer: TimerType::GlobalDuration, label: "arm max-duration" },
-                Effect::GuardTimer { timer: TimerType::Keepalive, label: "arm keepalive" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "cancel B no-answer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Call, label: "cancel the setup deadline" },
+                Effect::GuardTimer { timer: TimerType::GlobalDuration, scope: call::TimerScopeKind::Call, label: "arm max-duration" },
+                Effect::GuardTimer { timer: TimerType::Keepalive, scope: call::TimerScopeKind::Call, label: "arm keepalive" },
             ],
             matcher: Match::response()
                 .method("INVITE")

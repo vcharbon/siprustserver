@@ -67,9 +67,9 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             Effect::Originate { method: Method::Ack, label: "ACK → C (answer initial INVITE)" },
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
             Effect::Originate { method: Method::Invite, label: "re-INVITE → C (c-realign, A's SDP)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "arm c-realign re-INVITE watchdog" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::NoAnswer, label: "cancel C no-answer" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "arm c-realign re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "cancel C no-answer" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -141,8 +141,8 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated (C failed) → referrer" },
             Effect::Originate { method: Method::Bye, label: "BYE → C (terminate failed leg)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -190,8 +190,8 @@ pub(super) fn c_no_answer() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
             Effect::Originate { method: Method::Bye, label: "BYE → C (no answer)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::NoAnswer)

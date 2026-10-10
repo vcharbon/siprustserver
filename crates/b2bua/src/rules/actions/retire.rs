@@ -53,5 +53,6 @@ fn outlives_termination(timer_type: &TimerType) -> bool {
             | TimerType::ServiceHttpAnswer { .. }
             | TimerType::ServiceAdmitAnswer { .. }
             | TimerType::FailureAnswer { .. }
+            | TimerType::ReleaseAnswer { .. }
     )
 }

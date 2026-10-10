@@ -5,14 +5,16 @@
 //! the turn. A service handles one with a machine-bound rule matching
 //! [`MatchKind::Lifecycle`]; its handler may arm or cancel its own service
 //! timers, move its own machine's cursor and write call ext. A machine the
-//! turn deactivated still hears the events the turn caused, for its ext
-//! writes alone.
+//! turn deactivated, or one on a call the turn terminated, still hears the
+//! events the turn caused, for its ext writes alone.
 
 use std::collections::BTreeMap;
 
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::lifecycle::{LifecycleEvent, RouteAnswer};
-use call::{AttemptId, Call, Direction, LegState, MachineId, StateLabel, TimerType};
+use call::{
+    AttemptId, Call, CallModelState, Direction, LegState, MachineId, StateLabel, TimerType,
+};
 
 use crate::effects::HandlerResult;
 
@@ -134,12 +136,14 @@ fn deliver(
         let Some(machine) = rule.machine.as_ref() else {
             continue;
         };
-        let live = machine_active(rule, &result.call);
+        let active = machine_active(rule, &result.call);
         let deactivated = !result.call.sm_cursors.contains_key(machine)
             && start.cursors.get(machine).is_some_and(|c| rule.active_states.contains(c));
-        if !live && !deactivated {
+        if !active && !deactivated {
             continue;
         }
+        // A terminated call is removed as the turn lands: nothing is armed on it.
+        let live = active && result.call.state != CallModelState::Terminated;
         let before = result.call.sm_cursors.clone();
         let sub = {
             let ctx = RuleContext {

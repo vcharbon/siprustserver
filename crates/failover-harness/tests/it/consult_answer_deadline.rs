@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use b2bua::answer_deadline::{failure_budget, MARGIN};
+use b2bua::answer_deadline::{failure_budget, release_budget, MARGIN};
 use b2bua::decision::test_adapter::route_to_processing_refer;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
@@ -388,7 +388,7 @@ async fn take_over(c: &mut Cluster, call: &mut Established) {
 }
 
 /// The subscribed maximum duration fires and its release consult is lost
-/// with the primary. The copy that serves the call fires the duration timer
+/// with the primary. The copy that serves the call reads the release event
 /// again at the consult's answer deadline — at once when it is served past
 /// it — and re-sends the consult (the decision layer sees the release event
 /// twice); unanswered within its decision deadline, it ends the call locally.
@@ -403,7 +403,8 @@ async fn release_cell(name: &str, recovery: Recovery) {
         Recovery::Takeover => take_over(&mut c, &mut call).await,
     }
     let served_at = c.fh.now_ms();
-    let deadline = asked_at + (CONSULT_BUDGET + MARGIN).as_millis() as i64;
+    let budget = release_budget(CONSULT_BUDGET, ADMIT_BUDGET).expect("a bounded consult");
+    let deadline = asked_at + (budget + MARGIN).as_millis() as i64;
     let resent_at = consults_sent(&mut c, 2).await;
     assert!(
         resent_at <= served_at.max(deadline) + STEP.as_millis() as i64,

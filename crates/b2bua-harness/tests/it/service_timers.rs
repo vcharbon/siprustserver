@@ -65,7 +65,7 @@ mod ringwatch {
             transitions: [ RwState::Armed => RwState::Disarmed ],
             effects: [
                 Effect::Relay { label: "relay the 18x onward" },
-                Effect::GuardTimer { timer: T18X, label: "disarm deadline18x" },
+                Effect::GuardTimer { timer: T18X, scope: call::TimerScopeKind::Call, label: "disarm deadline18x" },
             ],
             matcher: Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             handle: |ctx: &RuleContext| {
@@ -172,6 +172,7 @@ mod dualkeys {
             effects: [
                 Effect::GuardTimer {
                     timer: TimerType::service(DUALKEYS, "fast"),
+                    scope: call::TimerScopeKind::Call,
                     label: "re-arm fast",
                 },
                 Effect::LifecycleCommand { label: "terminate on slow" },

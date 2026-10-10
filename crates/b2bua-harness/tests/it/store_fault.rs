@@ -155,3 +155,57 @@ async fn keepalive_audit_store_fault_fails_open_and_rearms() {
 
     let _report = s.finish().await;
 }
+
+/// (3b) A keepalive fire already handed to the router when its timer was
+/// re-armed reaches the audit path during a store fault: it is stale, so the
+/// gate re-arms nothing. The live instance keeps its place in the driver and
+/// probes both legs at its cadence once the store recovers.
+#[tokio::test(start_paused = true)]
+async fn a_stale_keepalive_fire_under_an_audit_fault_leaves_the_live_one_armed() {
+    const CALL_ID: &str = "store-fault-stale-keepalive@127.0.0.1";
+    const FROM_TAG: &str = "alice-tag";
+    let faults = StoreFaults::default();
+    let s = scene_with_faults("store-fault-stale-keepalive", &faults).await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER_SDP)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+    let mut uas = s.bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(OFFER_SDP).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let live = s.b2bua.live_call(&call_ref).expect("the call is live");
+    let keepalive = live
+        .timers
+        .iter()
+        .find(|t| *t.timer_type() == call::TimerType::Keepalive)
+        .expect("the keepalive is armed")
+        .clone();
+    assert!(keepalive.generation > 1, "an earlier generation is stale");
+
+    faults.arm(StoreFaultPoint::LiveAudit);
+    s.b2bua.post_event(b2bua::CallEvent::Timer {
+        key: keepalive.key.clone(),
+        generation: keepalive.generation - 1,
+        call_ref: call_ref.clone(),
+        incarnation: None,
+    });
+    s.h.advance(Duration::from_millis(100)).await;
+    faults.disarm(StoreFaultPoint::LiveAudit);
+
+    s.h.advance(KEEPALIVE_INTERVAL).await;
+    s.alice.receive("OPTIONS").await.respond(200, "OK").await;
+    s.bob.receive("OPTIONS").await.respond(200, "OK").await;
+
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}

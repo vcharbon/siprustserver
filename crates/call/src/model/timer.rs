@@ -19,10 +19,10 @@ use super::sm::MachineId;
 /// whose semantics core never interprets. A type names what a timer does; the
 /// [`TimerScope`] of its [`TimerKey`] names what it guards.
 ///
-/// Equality is the type's identity; the hash reads the fields that identify
-/// a timer (a [`TimerType::FailureAnswer`]'s `unanswered` payload is carried,
-/// not hashed).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Equality and the hash read the fields that identify a timer: a
+/// [`TimerType::FailureAnswer`]'s `unanswered` payload is carried, no part of
+/// its identity.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     NoAnswer,
@@ -91,6 +91,14 @@ pub enum TimerType {
         change: u64,
         unanswered: serde_json::Value,
     },
+    /// The deadline of the answer to a release event's consult, named by the
+    /// change number its turn reserved: the decision budget plus the admit
+    /// budget of the route it may answer, plus a margin. In the ledger while
+    /// the answer is awaited; its expiry is the release event again
+    /// (ADR-0039).
+    ReleaseAnswer {
+        change: u64,
+    },
     /// A **service-owned** per-call timer (ADR-0016): `service_id` is the owning
     /// callflow service's [`MachineId`], `key` a service-chosen discriminator
     /// (e.g. `"deadline18x"`). Core schedules / cancels / replicates / restores it
@@ -124,6 +132,29 @@ impl TimerType {
     }
 }
 
+impl PartialEq for TimerType {
+    fn eq(&self, other: &Self) -> bool {
+        use TimerType::*;
+        match (self, other) {
+            (ServiceHttpAnswer { correlation_id: a }, ServiceHttpAnswer { correlation_id: b }) => {
+                a == b
+            }
+            (
+                ServiceAdmitAnswer { correlation_id: a, change: x },
+                ServiceAdmitAnswer { correlation_id: b, change: y },
+            ) => a == b && x == y,
+            (FailureAnswer { change: a, .. }, FailureAnswer { change: b, .. })
+            | (ReleaseAnswer { change: a }, ReleaseAnswer { change: b }) => a == b,
+            (Service { service_id: a, key: k }, Service { service_id: b, key: l }) => {
+                a == b && k == l
+            }
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
+impl Eq for TimerType {}
+
 impl Hash for TimerType {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -133,7 +164,9 @@ impl Hash for TimerType {
                 correlation_id.hash(state);
                 change.hash(state);
             }
-            TimerType::FailureAnswer { change, .. } => change.hash(state),
+            TimerType::FailureAnswer { change, .. } | TimerType::ReleaseAnswer { change } => {
+                change.hash(state)
+            }
             TimerType::Service { service_id, key } => {
                 service_id.hash(state);
                 key.hash(state);
@@ -166,6 +199,7 @@ impl std::fmt::Debug for TimerType {
                 write!(f, "ServiceAdmitAnswer:{correlation_id}")
             }
             TimerType::FailureAnswer { change, .. } => write!(f, "FailureAnswer:{change}"),
+            TimerType::ReleaseAnswer { change } => write!(f, "ReleaseAnswer:{change}"),
             TimerType::Service { service_id, key } => {
                 write!(f, "Service:{}:{}", service_id.as_str(), key)
             }
@@ -196,6 +230,28 @@ impl std::fmt::Debug for TimerScope {
             TimerScope::Attempt(id) => write!(f, "{id:?}"),
             TimerScope::Leg(leg) => write!(f, "leg {leg}"),
             TimerScope::Obligation(o) => write!(f, "{o:?}"),
+        }
+    }
+}
+
+/// The kind of scope a timer guards, its id aside: what a rule declares of
+/// the timers it arms or cancels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimerScopeKind {
+    Call,
+    Attempt,
+    Leg,
+    Obligation,
+}
+
+impl TimerScope {
+    /// The kind of this scope.
+    pub fn kind(&self) -> TimerScopeKind {
+        match self {
+            TimerScope::Call => TimerScopeKind::Call,
+            TimerScope::Attempt(_) => TimerScopeKind::Attempt,
+            TimerScope::Leg(_) => TimerScopeKind::Leg,
+            TimerScope::Obligation(_) => TimerScopeKind::Obligation,
         }
     }
 }
@@ -282,5 +338,25 @@ impl TimerEntry {
     /// The leg the timer guards, for a leg-scoped timer.
     pub fn leg_id(&self) -> Option<&str> {
         self.key.leg_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failure consult's deadline is named by its change number: the lost
+    /// answer it carries is no part of its identity.
+    #[test]
+    fn a_failure_answer_key_is_its_change_number() {
+        let key = |unanswered| TimerKey::call(TimerType::FailureAnswer { change: 4, unanswered });
+        assert_eq!(key(serde_json::json!({ "status": 486 })), key(serde_json::Value::Null));
+        assert_ne!(
+            key(serde_json::Value::Null),
+            TimerKey::call(TimerType::FailureAnswer {
+                change: 5,
+                unanswered: serde_json::Value::Null
+            })
+        );
     }
 }

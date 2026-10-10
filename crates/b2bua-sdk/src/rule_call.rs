@@ -160,6 +160,11 @@ impl<'a> RuleCall<'a> {
     pub fn attempts(&self) -> &'a [call::Attempt] {
         &self.0.attempts
     }
+    /// The id the next attempt opens under — the one a `CreateLeg` emitted
+    /// now opens ([`crate::model::RuleAction::CreateLeg`]).
+    pub fn next_attempt_id(&self) -> call::AttemptId {
+        call::helpers::next_attempt_id(self.0)
+    }
     /// The attempt `id` names.
     pub fn attempt(&self, id: call::AttemptId) -> Option<&'a call::Attempt> {
         call::helpers::find_attempt(self.0, id)

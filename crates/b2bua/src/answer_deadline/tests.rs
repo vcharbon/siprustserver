@@ -6,6 +6,7 @@ const BUDGETS: AnswerBudgets = AnswerBudgets {
     http: Duration::from_secs(3),
     admit: Duration::from_millis(150),
     failure: Some(Duration::from_secs(40)),
+    release: Some(Duration::from_secs(8)),
 };
 const NOW: i64 = 10_000;
 
@@ -380,4 +381,74 @@ fn an_event_that_is_no_request_s_answer_is_left_to_the_rules() {
     };
     assert!(matches!(screen(&mut call, &mut fx, &uncorrelated), Screened::Other));
     assert!(deadline(&call, "ServiceHttpAnswer:a").is_some(), "still awaited");
+}
+
+fn release_consult(change: u64) -> FireAndForgetEffect {
+    FireAndForgetEffect::ReleaseAsyncHttp {
+        call_ref: "c".into(),
+        request: serde_json::json!({ "callback_context": "ctx", "event": "max_call_duration" }),
+        limiter_change: change,
+        deadline: None,
+    }
+}
+
+fn release_fold(change: Option<u64>) -> CallEvent {
+    let mut payload = serde_json::json!({ "destination": { "host": "127.0.0.1", "port": 5090 } });
+    if let Some(change) = change {
+        payload[CONSULT_CHANGE] = serde_json::json!(change);
+    }
+    CallEvent::InternalEvent {
+        call_ref: "c".into(),
+        topic: RELEASE_TOPIC.into(),
+        outcome: "reroute".into(),
+        payload,
+        body: Vec::new(),
+        incarnation: None,
+    }
+}
+
+#[test]
+fn a_release_consult_is_answered_by_its_decision_and_its_route_s_admit() {
+    let (decision, admit) = (Duration::from_secs(5), Duration::from_millis(2_650));
+    assert_eq!(release_budget(decision, admit), Some(decision + admit + ADMIT_SLACK));
+    assert_eq!(release_budget(Duration::ZERO, admit), None, "an unbounded consult");
+}
+
+#[test]
+fn a_release_consult_arms_its_deadline_and_names_it() {
+    let result = arm(sending(call(), vec![release_consult(7)]), &BUDGETS, NOW);
+    assert_eq!(
+        deadline(&result.call, "ReleaseAnswer:7"),
+        Some(NOW + (Duration::from_secs(8) + MARGIN).as_millis() as i64)
+    );
+    assert!(matches!(
+        result.effects.fire_and_forget.as_slice(),
+        [FireAndForgetEffect::ReleaseAsyncHttp { deadline: Some(7), .. }]
+    ));
+}
+
+#[test]
+fn a_release_fold_is_answered_once() {
+    let mut call = arm(sending(call(), vec![release_consult(7)]), &BUDGETS, NOW).call;
+    let mut fx = HandlerEffects::new();
+    assert!(matches!(screen(&mut call, &mut fx, &release_fold(Some(7))), Screened::Awaited));
+    assert!(deadline(&call, "ReleaseAnswer:7").is_none(), "the answer took its deadline");
+    assert!(
+        matches!(screen(&mut call, &mut fx, &release_fold(Some(7))), Screened::Unawaited),
+        "a second answer of the consult reaches no rule"
+    );
+}
+
+#[test]
+fn an_expired_release_deadline_is_the_release_event_for_the_rules() {
+    let mut call = arm(sending(call(), vec![release_consult(7)]), &BUDGETS, NOW).call;
+    let mut fx = HandlerEffects::new();
+    assert!(matches!(
+        deliver(&mut call, &mut fx, "ReleaseAnswer:7", TimerType::ReleaseAnswer { change: 7 }),
+        Some(Screened::Other)
+    ));
+    assert!(
+        matches!(screen(&mut call, &mut fx, &release_fold(Some(7))), Screened::Unawaited),
+        "the answer landing after its deadline reaches no rule"
+    );
 }

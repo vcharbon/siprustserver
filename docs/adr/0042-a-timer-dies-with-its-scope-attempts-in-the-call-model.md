@@ -72,7 +72,11 @@ next leg id was predicted as `b-{len+1}` wherever a rule needed it.
 7. **The model states it.** The per-turn model invariants
    hold that no armed timer names a terminated leg, an ended attempt or a
    service machine without a cursor, and the trace records `timer.arm`,
-   `timer.cancel`, `timer.fire` and `timer.drop` per call (ADR-0026).
+   `timer.cancel`, `timer.fire` and `timer.drop` per call (ADR-0026). A
+   machine-bound rule's guard-timer declaration names the timer's type and
+   the kind of scope its key guards (`TimerScopeKind`); the executor holds
+   every key the rule arms or cancels to it, where both the rule and its
+   actions are known — the record the invariants read names neither.
 
 ## Consequences
 

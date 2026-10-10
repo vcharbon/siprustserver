@@ -94,4 +94,4 @@ pub use services::{
 };
 pub use sm::{MachineId, StateLabel};
 pub use termination::{Termination, TerminationCause, TimeoutKind};
-pub use timer::{TimerEntry, TimerKey, TimerScope, TimerType};
+pub use timer::{TimerEntry, TimerKey, TimerScope, TimerScopeKind, TimerType};

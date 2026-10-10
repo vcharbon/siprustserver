@@ -1,7 +1,8 @@
 //! The deadline of the answer to a request sent off the call's turn: a
 //! service's adaptation HTTP request (`RuleAction::ServiceHttpRequest`) or
 //! replacement of the call's admission set (`RuleAction::ReplaceAdmissionSet`),
-//! and the core's `/call/failure` consult (`RuleAction::FailureAsyncHttp`).
+//! and the core's `/call/failure` and release-event consults
+//! (`RuleAction::FailureAsyncHttp`, `RuleAction::ReleaseAsyncHttp`).
 //! The task awaiting the answer lives on the node that sent the request and
 //! dies with it; the deadline lives in the call's replicated timer ledger and
 //! is re-armed wherever the call is materialised, so a call taken over or
@@ -18,7 +19,9 @@
 //!   deadline's expiry — a fire the router's timer screen delivered, so its
 //!   answer had not come first — is the request's answer with nothing usable:
 //!   an HTTP request's `error` result ([`NO_ANSWER`]), an admit's
-//!   `unavailable` report, a failure consult's unanswered `terminate` fold.
+//!   `unavailable` report, a failure consult's unanswered `terminate` fold. A
+//!   release consult's expiry is the release event again, which its rule
+//!   consults on anew.
 
 use std::time::Duration;
 
@@ -51,6 +54,19 @@ pub fn failure_budget(decision: Duration, admit: Duration) -> Option<Duration> {
     (!decision.is_zero()).then(|| (decision + admit + ADMIT_SLACK) * FAILURE_CHAIN)
 }
 
+/// The budget a release event's consult is answered in: the consult, then
+/// the admit of the route it may answer (bounded just past the admit
+/// budget). `None` when the decision deadline is off (`decision` zero).
+pub fn release_budget(decision: Duration, admit: Duration) -> Option<Duration> {
+    (!decision.is_zero()).then(|| decision + admit + ADMIT_SLACK)
+}
+
+/// [`release_budget`] under `config`'s decision deadline.
+pub(crate) fn release_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
+    let decision = Duration::from_millis(config.call_control_timeout_ms.max(0) as u64);
+    release_budget(decision, admit)
+}
+
 /// [`failure_budget`] under `config`'s decision deadline
 /// (`call_control_timeout_ms`, off when not positive).
 pub(crate) fn failure_budget_under(config: &B2buaConfig, admit: Duration) -> Option<Duration> {
@@ -70,6 +86,9 @@ pub const NO_ANSWER: &str = "no_answer";
 /// The topic of an adaptation HTTP request's result.
 const SERVICE_HTTP_RESULT: &str = "service-http-result";
 
+/// The topic of a release event's consult fold.
+const RELEASE_TOPIC: &str = "call-release-result";
+
 /// The budgets the router answers a service's requests by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnswerBudgets {
@@ -80,6 +99,9 @@ pub struct AnswerBudgets {
     /// A `/call/failure` consult's chain ([`failure_budget`]); `None` when
     /// the consult is unbounded.
     pub failure: Option<Duration>,
+    /// A release event's consult ([`release_budget`]); `None` when the
+    /// consult is unbounded.
+    pub release: Option<Duration>,
 }
 
 /// `result` with the deadline of every request its turn sends off the call's
@@ -94,8 +116,14 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
     let deadlines: Vec<(TimerType, Duration)> =
         result.effects.fire_and_forget.iter().filter_map(|fx| deadline_of(fx, budgets)).collect();
     for fx in &mut result.effects.fire_and_forget {
-        if let FireAndForgetEffect::FailureAsyncHttp { limiter_change, deadline, .. } = fx {
-            *deadline = budgets.failure.map(|_| *limiter_change);
+        match fx {
+            FireAndForgetEffect::FailureAsyncHttp { limiter_change, deadline, .. } => {
+                *deadline = budgets.failure.map(|_| *limiter_change);
+            }
+            FireAndForgetEffect::ReleaseAsyncHttp { limiter_change, deadline, .. } => {
+                *deadline = budgets.release.map(|_| *limiter_change);
+            }
+            _ => {}
         }
     }
     for (timer_type, budget) in deadlines {
@@ -132,6 +160,9 @@ fn deadline_of(fx: &FireAndForgetEffect, budgets: &AnswerBudgets) -> Option<(Tim
                 (TimerType::FailureAnswer { change: *limiter_change, unanswered }, budget)
             })
         }
+        FireAndForgetEffect::ReleaseAsyncHttp { limiter_change, .. } => budgets
+            .release
+            .map(|budget| (TimerType::ReleaseAnswer { change: *limiter_change }, budget)),
         FireAndForgetEffect::Reenter(event) => {
             answered(event).map(|timer_type| (timer_type, Duration::ZERO))
         }
@@ -157,17 +188,20 @@ fn answered(event: &CallEvent) -> Option<TimerType> {
     }
 }
 
-/// The deadline a `/call/failure` fold closes: its consult's first change
-/// number ([`CONSULT_CHANGE`]), matched on that alone ([`closes`]).
-fn failure_answered(event: &CallEvent) -> Option<TimerType> {
+/// The deadline a `/call/failure` or release fold closes: its consult's first
+/// change number ([`CONSULT_CHANGE`]), matched on that alone ([`closes`]).
+fn consult_answered(event: &CallEvent) -> Option<TimerType> {
     let CallEvent::InternalEvent { topic, payload, .. } = event else {
         return None;
     };
-    if topic != FAILURE_TOPIC {
-        return None;
-    }
     let change = payload.get(CONSULT_CHANGE)?.as_u64()?;
-    Some(TimerType::FailureAnswer { change, unanswered: serde_json::Value::Null })
+    if topic == FAILURE_TOPIC {
+        Some(TimerType::FailureAnswer { change, unanswered: serde_json::Value::Null })
+    } else if topic == RELEASE_TOPIC {
+        Some(TimerType::ReleaseAnswer { change })
+    } else {
+        None
+    }
 }
 
 /// Whether the armed deadline `armed` is the one `answer` closes: an HTTP
@@ -186,7 +220,10 @@ fn closes(armed: &TimerType, answer: &TimerType) -> bool {
         (
             TimerType::FailureAnswer { change: a, .. },
             TimerType::FailureAnswer { change: b, .. },
-        ) => a == b,
+        )
+        | (TimerType::ReleaseAnswer { change: a }, TimerType::ReleaseAnswer { change: b }) => {
+            a == b
+        }
         _ => false,
     }
 }
@@ -226,7 +263,7 @@ pub fn screen(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) -> Sc
             _ => Screened::Other,
         };
     }
-    let Some(answer) = answered(event).or_else(|| failure_answered(event)) else {
+    let Some(answer) = answered(event).or_else(|| consult_answered(event)) else {
         return Screened::Other;
     };
     if of_another_call(call, event) {

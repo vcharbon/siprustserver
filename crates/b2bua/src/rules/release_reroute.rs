@@ -50,6 +50,15 @@ use b2bua_sdk::model::{
     CORE_LAYER,
 };
 
+/// The duration cap the reroute's features arm at the replacement leg's
+/// answer: under the answer anchor (`MaxDurationAnchor`), where the fold did
+/// not arm it at route time.
+fn cap_at_answer(ctx: &RuleContext) -> Option<TimerDelay> {
+    let platform = &ctx.call.features()?.platform;
+    (!platform.arms_cap_at_creation(ctx.config.setup_timeout_sec))
+        .then(|| TimerDelay::secs(platform.max_duration_sec))
+}
+
 /// The reroute's overall guard.
 fn guard_timer() -> TimerKey {
     TimerKey::call(TimerType::RerouteGuard)
@@ -179,6 +188,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 if super::defaults::fold_lands_on_going_away_call(ctx) {
                     return ok(vec![]);
                 }
+                // A reroute already in progress answered the call's consult:
+                // this fold dials no second replacement.
+                if ctx.call.reroute_active() {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     b2bua_sdk::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
@@ -187,11 +201,10 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 // The slice's `new_leg_id` names the leg CreateLeg mints.
                 let new_leg_id = ctx.call.next_b_leg_id();
                 let old_leg_id = ctx.call.active_peer().map(|p| p.leg_b.clone());
-                // The duration cap stood as the consult's answer deadline;
-                // the reroute's features re-arm it where their anchor says.
-                let mut actions =
-                    vec![RuleAction::cancel(TimerKey::call(TimerType::GlobalDuration))];
-                actions.extend(super::defaults::route_fold_parity_actions(&fold, ctx));
+                // The cap that raised the consult has fired; the reroute's
+                // features re-arm it where their anchor says: here at
+                // creation, else at the replacement leg's answer.
+                let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
                 let leg_body = fold.leg_body(ctx);
                 let attempt = fold.attempt(call::AttemptCause::Reroute, payload);
                 actions.push(RuleAction::CreateLeg {
@@ -245,26 +258,31 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 let new_leg = st.new_leg_id.clone();
                 let mut new_state = st;
                 new_state.phase = ReroutePhase::ARealigning;
-                ok(vec![
-                    RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
-                    RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
-                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
-                    RuleAction::SendReinvite {
-                        leg_id: "a".to_string(),
-                        body: Some(
-                            Body::from_leg(resp.body().to_vec(), new_leg.clone())
-                                .described_by(resp.headers()),
-                        ),
-                        add_headers: vec![],
-                    },
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Answer,
-                        leg_id: new_leg,
-                        status_code: Some(200),
-                        reason: Some("release-reroute".into()),
-                    },
-                    RuleAction::SetReroute { state: Some(new_state) },
-                ])
+                let cap = cap_at_answer(ctx)
+                    .map(|delay| RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), delay));
+                ok(cap
+                    .into_iter()
+                    .chain([
+                        RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
+                        RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
+                        RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
+                        RuleAction::SendReinvite {
+                            leg_id: "a".to_string(),
+                            body: Some(
+                                Body::from_leg(resp.body().to_vec(), new_leg.clone())
+                                    .described_by(resp.headers()),
+                            ),
+                            add_headers: vec![],
+                        },
+                        RuleAction::AddCdrEvent {
+                            event_type: CdrEventType::Answer,
+                            leg_id: new_leg,
+                            status_code: Some(200),
+                            reason: Some("release-reroute".into()),
+                        },
+                        RuleAction::SetReroute { state: Some(new_state) },
+                    ])
+                    .collect())
             },
         ),
         // ── replacement leg fails (3xx–6xx) → the documented fail-teardown.

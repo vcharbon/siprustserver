@@ -24,6 +24,7 @@
 
 pub mod body;
 pub mod config;
+pub mod effect;
 pub mod event;
 pub mod failure_image;
 pub mod fold_payload;
@@ -67,7 +68,7 @@ pub mod rules {
     // `ServiceSeed::data_write` installer.
     pub use call::{
         AttemptCause, AttemptId, AttemptOutcome, MachineId, StateLabel, TerminationCause,
-        TimeoutKind,
+        TimeoutKind, TimerScopeKind,
     };
 }
 

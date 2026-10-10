@@ -99,8 +99,8 @@ pub(super) fn overall_timeout() -> RuleDefinition {
         active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel both re-INVITE watchdogs" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel both re-INVITE watchdogs" },
             Effect::LifecycleCommand { label: "terminate (overall-safety watchdog rollback)" },
         ],
         matcher: Match::timer()

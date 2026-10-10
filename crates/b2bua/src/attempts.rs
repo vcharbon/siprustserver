@@ -6,12 +6,12 @@
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::lifecycle::{AttemptOpening, RouteAnswer};
 use call::helpers::retire_timers;
-use call::{AttemptCause, AttemptId, AttemptOutcome, Call, Deadline};
+use call::{AttemptCause, AttemptId, AttemptOutcome, Call, CallModelState, Deadline};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects};
 
 /// The key under which a decision fold lists the routes admission refused
-/// before its answer: each `{label, service_ext, no_answer_timeout_sec}`.
+/// before its answer: each `{label, service_ext, no_answer_ms}`.
 pub const REFUSED_ROUTES: &str = "refused_routes";
 
 /// Open the attempt `opening` states, its legs ringing for `no_answer`. An
@@ -53,11 +53,15 @@ pub(crate) fn retire(call: &mut Call, fx: &mut HandlerEffects, id: AttemptId) {
 
 /// Record the refused routes a decision fold lists ([`REFUSED_ROUTES`]),
 /// before the fold's own answer is applied: a setup failover's under
-/// `Failover`, an established call's reroute under `Reroute`.
+/// `Failover`, an established call's reroute under `Reroute`. A call already
+/// going away records none: its attempts ended with it.
 pub(crate) fn record_refused_routes(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) {
     let CallEvent::InternalEvent { topic, payload, .. } = event else {
         return;
     };
+    if matches!(call.state, CallModelState::Terminating | CallModelState::Terminated) {
+        return;
+    }
     let cause = match topic.as_str() {
         "call-failure-result" => AttemptCause::Failover,
         "call-release-result" => AttemptCause::Reroute,
@@ -71,9 +75,7 @@ pub(crate) fn record_refused_routes(call: &mut Call, fx: &mut HandlerEffects, ev
             label: route.get("label").and_then(|v| v.as_str()).map(str::to_string),
             service_ext: crate::rules::defaults::parse_service_ext(route),
         };
-        let no_answer =
-            Deadline::of_secs(route.get("no_answer_timeout_sec").and_then(|v| v.as_i64()));
-        refuse(call, fx, cause, answer, no_answer);
+        refuse(call, fx, cause, answer, refused_deadline(route));
     }
 }
 
@@ -86,6 +88,27 @@ pub(crate) fn refused_route_entry(
     serde_json::json!({
         "label": label,
         "service_ext": service_ext,
-        "no_answer_timeout_sec": no_answer.millis().map(|ms| ms / 1000),
+        "no_answer_ms": no_answer.millis(),
     })
+}
+
+/// The ring deadline a refused route entry states.
+fn refused_deadline(route: &serde_json::Value) -> Deadline {
+    Deadline::of_millis(route.get("no_answer_ms").and_then(|v| v.as_i64()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused route's ring deadline reads back as it was stated, to the
+    /// millisecond.
+    #[test]
+    fn a_refused_route_keeps_its_ring_deadline_to_the_millisecond() {
+        let entry =
+            refused_route_entry(Some("l"), &Default::default(), Deadline::of_millis(Some(750)));
+        assert_eq!(refused_deadline(&entry), Deadline::of_millis(Some(750)));
+        let entry = refused_route_entry(None, &Default::default(), Deadline::Off);
+        assert_eq!(refused_deadline(&entry), Deadline::Off);
+    }
 }

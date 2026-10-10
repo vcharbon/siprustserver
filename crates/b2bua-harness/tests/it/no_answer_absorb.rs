@@ -65,6 +65,7 @@ mod stalerestore {
             effects: [
                 Effect::GuardTimer {
                     timer: TimerType::NoAnswer,
+                    scope: call::TimerScopeKind::Leg,
                     label: "re-arm the stale NoAnswer entry",
                 },
             ],

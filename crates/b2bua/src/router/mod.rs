@@ -20,6 +20,7 @@
 mod admit;
 #[cfg(test)]
 mod answer_deadline_tests;
+mod callout_requests;
 mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
@@ -42,6 +43,7 @@ mod resolve_tests;
 mod responses;
 mod restore_hygiene;
 mod route_payload;
+mod store_fault_gate;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod timer_screen;

@@ -25,7 +25,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Ack, label: "ACK → C (c-realign answered)" },
             Effect::Originate { method: Method::Invite, label: "re-INVITE → A (a-realign, C's active SDP)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel C / arm A re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel C / arm A re-INVITE watchdog" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -81,8 +81,8 @@ pub(super) fn c_realign_fail() -> RuleDefinition {
         active: [ Phase::CRealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel the re-INVITE watchdog" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel the re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
             Effect::LifecycleCommand { label: "terminate (c-realign rollback — BYE A/B/C)" },
         ],
         matcher: Match::response()
@@ -134,7 +134,7 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
         active: [ Phase::CRealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
             Effect::LifecycleCommand { label: "terminate (c-realign timeout rollback)" },
         ],
         matcher: Match::timer()
@@ -176,8 +176,8 @@ pub(super) fn a_realign_200() -> RuleDefinition {
         transitions: [ Phase::ARealigning => Terminal ],
         effects: [
             Effect::Originate { method: Method::Ack, label: "ACK → A (a-realign answered)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel A re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
             Effect::LifecycleCommand { label: "merge A↔C (transfer complete)" },
         ],
         matcher: Match::response()
@@ -218,8 +218,8 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
         active: [ Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, scope: call::TimerScopeKind::Leg, label: "cancel A re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall" },
             Effect::LifecycleCommand { label: "terminate (a-realign rollback — BYE A/B/C)" },
         ],
         matcher: Match::response()
@@ -261,7 +261,7 @@ pub(super) fn a_realign_timeout() -> RuleDefinition {
         active: [ Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
             Effect::LifecycleCommand { label: "terminate (a-realign timeout rollback)" },
         ],
         matcher: Match::timer()

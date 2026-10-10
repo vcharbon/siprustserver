@@ -149,13 +149,10 @@ fn fired_give_up<'a>(ctx: &'a RuleContext) -> Option<&'a Obligation> {
         .then(|| ctx.timer_key().and_then(TimerKey::obligation_of))
         .flatten()
 }
-/// How long a release consult's answer is awaited before the duration cap
-/// fires again: the decision deadline plus the answer margin (ADR-0039);
-/// `None` when the decision deadline is off and the consult unbounded.
-fn release_consult_deadline(ctx: &RuleContext) -> Option<TimerDelay> {
-    let decision = ctx.config.call_control_timeout_ms;
-    let margin = crate::answer_deadline::MARGIN.as_millis() as i64;
-    (decision > 0).then(|| TimerDelay::millis(decision + margin))
+/// The duration cap fired, or a release consult it raised went unanswered by
+/// its deadline (ADR-0039): either way the release event stands.
+fn release_event_due(ctx: &RuleContext) -> bool {
+    matches!(ctx.timer_type(), Some(TimerType::GlobalDuration | TimerType::ReleaseAnswer { .. }))
 }
 /// What ended the call when a failure consult lets the failure stand (the
 /// `terminate` fold): the failed leg's final where it drew one, else the
@@ -1748,7 +1745,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             ])
         })
         .runs_while_terminating(),
-        rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
+        rule("max-duration", &[], Match::timer().filter(release_event_due), |ctx| {
             // A **subscribed** max-call-duration on an ANSWERED
             // call with a callback_context consults the engine (`call_release`
             // via `ReleaseAsyncHttp` → `call-release-result`: release |
@@ -1783,23 +1780,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 && ctx.call.subscribed(call::ReleaseEventKind::MaxCallDuration)
             {
                 if let Some(cbctx) = ctx.call.callback_context() {
-                    // The cap is re-armed as the consult's answer deadline: a
-                    // copy served elsewhere fires it again and re-sends the
-                    // consult (ADR-0039); the answer's own turn ends or
-                    // re-arms it.
-                    let mut actions = vec![RuleAction::ReleaseAsyncHttp {
+                    // The consult's answer deadline is armed with it
+                    // (`answer_deadline::arm`): wherever the call is served
+                    // when it expires, the release event stands again and
+                    // the consult is re-sent (ADR-0039).
+                    return ok(vec![RuleAction::ReleaseAsyncHttp {
                         request: serde_json::json!({
                             "callback_context": cbctx,
                             "event": "max_call_duration",
                         }),
-                    }];
-                    if let Some(deadline) = release_consult_deadline(ctx) {
-                        actions.push(RuleAction::arm(
-                            TimerKey::call(TimerType::GlobalDuration),
-                            deadline,
-                        ));
-                    }
-                    return ok(actions);
+                    }]);
                 }
             }
             ok(vec![

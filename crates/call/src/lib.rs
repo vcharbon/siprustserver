@@ -66,7 +66,7 @@ pub use model::{Attempt, AttemptCause, AttemptId, AttemptOutcome};
 pub use model::{
     CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
     MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerKey, TimerScope,
-    TimerType,
+    TimerScopeKind, TimerType,
 };
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{

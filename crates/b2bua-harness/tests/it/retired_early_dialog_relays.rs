@@ -155,8 +155,8 @@ mod fresh_tag {
             transitions: [ FreshState::Waiting => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 under a fresh To-tag" },
-                Effect::GuardTimer { timer: TimerType::NoAnswer, label: "disarm the ring timer" },
-                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "disarm the setup timer" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, scope: call::TimerScopeKind::Leg, label: "disarm the ring timer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, scope: call::TimerScopeKind::Call, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::response()

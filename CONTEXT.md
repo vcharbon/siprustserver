@@ -656,8 +656,10 @@ _Avoid_: re-listing the global machine's downstream BYEs as service leg messages
 
 **Guard timer**:
 A **tracked side effect**: a service safety/watchdog timer the rule **arms** (or
-cancels) — e.g. the REFER re-INVITE-answer watchdog. (Re-uses the existing
-`TimerType`; "armed" is the canonical verb, per the HA glossary above.)
+cancels) — e.g. the REFER re-INVITE-answer watchdog. Declared by its `TimerType`
+and the kind of **timer scope** its key guards; every key the rule arms or
+cancels is held to a declaration. ("Armed" is the canonical verb, per the HA
+glossary above.)
 
 **Machine deactivation**:
 A machine leaving the call's active set by having its **cursor removed**

@@ -85,8 +85,8 @@ pub(super) fn http_reject() -> RuleDefinition {
         transitions: [ Phase::ReferAuthorizing => Terminal ],
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
         ],
         matcher: Match::internal_event()
             .topic("refer-http-result")
@@ -129,8 +129,8 @@ pub(super) fn http_allow() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Invite, label: "INVITE → C (transfer target)" },
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated → referrer (unreadable target)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, scope: call::TimerScopeKind::Call, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
         ],
         matcher: Match::internal_event()
             .topic("refer-http-result")
@@ -227,7 +227,7 @@ pub(super) fn http_timeout() -> RuleDefinition {
         transitions: [ Phase::ReferAuthorizing => Terminal ],
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall-safety" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, scope: call::TimerScopeKind::Call, label: "cancel overall-safety" },
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferSubscriptionExpiry),

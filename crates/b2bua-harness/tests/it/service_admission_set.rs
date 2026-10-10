@@ -158,7 +158,7 @@ mod admitset {
             machine: ADMITSET,
             active: [ AsState::Awaiting ],
             transitions: [],
-            effects: [ b2bua::rules::Effect::GuardTimer { timer: NEXT, label: "the plan's next admit" } ],
+            effects: [ b2bua::rules::Effect::GuardTimer { timer: NEXT, scope: call::TimerScopeKind::Call, label: "the plan's next admit" } ],
             matcher: Match::internal_event().topic("limiter-admit-result"),
             handle: |ctx: &RuleContext| {
                 if let CallEvent::InternalEvent { outcome, payload, .. } = ctx.event {

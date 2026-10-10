@@ -57,6 +57,7 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
         http: ctx.adaptation_http.as_ref().map_or(std::time::Duration::ZERO, |p| p.default_timeout),
         admit,
         failure: crate::answer_deadline::failure_budget_under(&ctx.config, admit),
+        release: crate::answer_deadline::release_budget_under(&ctx.config, admit),
     }
 }
 
@@ -285,13 +286,19 @@ pub(super) async fn process_result(
                     deadline,
                 );
             }
-            FireAndForgetEffect::ReleaseAsyncHttp { call_ref, request, limiter_change } => {
+            FireAndForgetEffect::ReleaseAsyncHttp {
+                call_ref,
+                request,
+                limiter_change,
+                deadline,
+            } => {
                 callouts::spawn_release_callout(
                     ctx,
                     &result.call,
                     call_ref,
                     request,
                     limiter_change,
+                    deadline,
                 );
             }
             FireAndForgetEffect::LimiterAdmit {

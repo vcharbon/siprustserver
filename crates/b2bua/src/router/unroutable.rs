@@ -22,8 +22,8 @@ use std::net::SocketAddr;
 
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
-use super::process::refuse_on_store_fault;
 use super::responses::{build_405, build_481};
+use super::store_fault_gate::refuse_on_store_fault;
 use super::RouterCtx;
 use crate::store::StoreFaultPoint;
 use b2bua_sdk::event::CallEvent;

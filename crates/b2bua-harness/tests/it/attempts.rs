@@ -73,7 +73,13 @@ mod probe {
             machine: PROBE,
             active: [ ProbeState::Listening ],
             transitions: [],
-            effects: [ Effect::GuardTimer { timer: WATCH, label: "watch the attempt" } ],
+            effects: [
+                Effect::GuardTimer {
+                    timer: WATCH,
+                    scope: call::TimerScopeKind::Attempt,
+                    label: "watch the attempt",
+                },
+            ],
             matcher: Match::attempt_started(),
             handle: |ctx: &RuleContext| {
                 let Some(LifecycleEvent::AttemptStarted { attempt, .. }) = ctx.lifecycle() else {
@@ -413,4 +419,121 @@ async fn a_limiter_refused_failover_route_is_a_refused_attempt() {
             "ended 2 Answered",
         ],
     );
+}
+
+/// A decision engine whose `/call/failure` answers `delay` late.
+struct SlowFailure {
+    delay: Duration,
+    inner: Arc<dyn CallDecisionEngine>,
+}
+
+#[async_trait::async_trait]
+impl CallDecisionEngine for SlowFailure {
+    async fn new_call(
+        &self,
+        req: b2bua::decision::NewCallRequest,
+    ) -> Result<NewCallResponse, b2bua::decision::CallDecisionError> {
+        self.inner.new_call(req).await
+    }
+    async fn call_failure(
+        &self,
+        req: b2bua::decision::CallFailureRequest,
+    ) -> Result<b2bua::decision::CallFailureResponse, b2bua::decision::CallDecisionError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.call_failure(req).await
+    }
+    async fn call_refer(
+        &self,
+        req: b2bua::decision::CallReferRequest,
+    ) -> Result<b2bua::decision::CallReferResponse, b2bua::decision::CallDecisionError> {
+        self.inner.call_refer(req).await
+    }
+    async fn call_release(
+        &self,
+        req: b2bua::decision::CallReleaseRequest,
+    ) -> Result<b2bua::decision::CallReleaseResponse, b2bua::decision::CallDecisionError> {
+        self.inner.call_release(req).await
+    }
+}
+
+/// The ring deadline fires and the failure consult goes out; the caller
+/// CANCELs while it is in flight, ending the route's attempt with the call.
+/// The consult's fold then lands (its route refused by the limiter, its
+/// re-consult answered by a reject, each 2 s late), listing the refused
+/// route: the call is going away, so no attempt opens after it ended.
+#[tokio::test(start_paused = true)]
+async fn a_fold_landing_on_a_call_going_away_records_no_refused_route() {
+    const CALL_ID: &str = "attempts-refused-going-away@127.0.0.1";
+    let h = Harness::new("attempts-refused-going-away");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let http = SimulatedHttpNetwork::new();
+    let (_server, client) = limiter(&http).await;
+    let decision = Arc::new(SlowFailure {
+        delay: Duration::from_secs(2),
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| {
+                    let mut r = route_to("127.0.0.1", 5070);
+                    r.callback_context = Some("attempts".into());
+                    r.no_answer_timeout_sec = Some(2);
+                    NewCallResponse::Route(r)
+                })
+                .on_failure(|req| {
+                    if req.failure.origin == "call_limiter" {
+                        return CallTreatment::Reject(b2bua::decision::RejectDecision {
+                            reject_code: 486,
+                            reject_reason: Some("Busy Here".into()),
+                            update_headers: None,
+                            service_ext: Default::default(),
+                            label: None,
+                        });
+                    }
+                    let mut r = route_to("127.0.0.1", 5071);
+                    r.call_limiter = closed();
+                    r.callback_context = Some("attempts".into());
+                    CallTreatment::Route(r)
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .services(vec![probe::service_def()])
+        .limiter(client)
+        .keep_terminated_calls()
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    h.advance(Duration::from_millis(2_100)).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+
+    // The caller gives up while the consult is in flight; bob withholds his
+    // 487 past the consult's answer.
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    h.advance(Duration::from_secs(6)).await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+
+    let record = terminated(&b2bua, &call_ref);
+    assert_eq!(
+        attempts(&record),
+        vec![(AttemptCause::Route, vec!["b-1".to_string()], Some(AttemptOutcome::CallEnded))],
+    );
+    let _ = h.finish().await;
 }

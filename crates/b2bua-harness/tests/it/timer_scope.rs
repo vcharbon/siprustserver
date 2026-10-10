@@ -304,7 +304,7 @@ mod ring_deadline {
             transitions: [ RdState::Waiting => RdState::Ringing ],
             effects: [
                 Effect::Relay { label: "relay the 18x onward" },
-                Effect::GuardTimer { timer: DEADLINE, label: "re-arm the ring deadline" },
+                Effect::GuardTimer { timer: DEADLINE, scope: call::TimerScopeKind::Call, label: "re-arm the ring deadline" },
             ],
             matcher: Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
             handle: |ctx: &RuleContext| {

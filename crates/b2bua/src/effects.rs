@@ -175,6 +175,9 @@ pub enum FireAndForgetEffect {
         request: serde_json::Value,
         /// The change number a reroute's admit carries.
         limiter_change: u64,
+        /// The change number the consult's answer deadline is armed under
+        /// (`answer_deadline::arm`); `None` for an unbounded consult.
+        deadline: Option<u64>,
     },
     /// Replace the call's admission set on the call limiter with `entries`
     /// under `change`, carrying the call's `held` set of the sending turn (a

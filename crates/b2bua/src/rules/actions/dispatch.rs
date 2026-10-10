@@ -346,6 +346,7 @@ impl ActionExecutor<'_> {
                     call_ref: call.call_ref.clone(),
                     request: request.clone(),
                     limiter_change: call.limiter.owe_consult(1),
+                    deadline: None,
                 });
             }
             RuleAction::ReplaceAdmissionSet { correlation_id, entries, moves_call } => {

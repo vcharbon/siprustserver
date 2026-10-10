@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use call::{Call, CallModelState, TimerType};
+use call::{Call, CallModelState, TimerKey, TimerType};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::obligations::ObligationSet;
@@ -307,9 +307,9 @@ pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleActio
         } else {
             match action {
                 RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key }
-                    if !declares_timer(rule, &key.timer_type) =>
+                    if !declares_timer(rule, key) =>
                 {
-                    Some(format!("timer {:?}", key.timer_type))
+                    Some(format!("timer {key:?}"))
                 }
                 _ => None,
             }
@@ -331,15 +331,22 @@ pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleActio
     }
 }
 
-/// Whether `rule` declares a `GuardTimer` of `timer_type`: the same type, or
-/// for a service timer, one of the same owning service.
-fn declares_timer(rule: &RuleDefinition, timer_type: &TimerType) -> bool {
-    rule.effects.iter().any(|e| match (e, timer_type) {
+/// Whether `rule` declares a `GuardTimer` naming `key`: the same type (for a
+/// service timer, one of the same owning service) under the same kind of
+/// scope.
+fn declares_timer(rule: &RuleDefinition, key: &TimerKey) -> bool {
+    rule.effects.iter().any(|e| match (e, &key.timer_type) {
         (
-            Effect::GuardTimer { timer: TimerType::Service { service_id: declared, .. }, .. },
+            Effect::GuardTimer {
+                timer: TimerType::Service { service_id: declared, .. },
+                scope,
+                ..
+            },
             TimerType::Service { service_id, .. },
-        ) => declared == service_id,
-        (Effect::GuardTimer { timer, .. }, _) => timer == timer_type,
+        ) => declared == service_id && *scope == key.scope.kind(),
+        (Effect::GuardTimer { timer, scope, .. }, timer_type) => {
+            timer == timer_type && *scope == key.scope.kind()
+        }
         _ => false,
     })
 }
