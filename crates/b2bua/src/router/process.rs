@@ -208,7 +208,7 @@ pub(super) async fn process(
 
     record_keepalive_timeout_peer(ctx, &event, &result.call);
 
-    let turn = crate::rules::model_invariants::EventSummary { call_ref: &call_ref, event: &event };
+    let turn = super::turn_label::EventSummary { call_ref: &call_ref, event: &event };
     process_result(ctx, &call_ref, result, now_ms, &turn).await;
 }
 

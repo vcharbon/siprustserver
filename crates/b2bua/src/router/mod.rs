@@ -40,6 +40,7 @@ mod restore_hygiene;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod turn;
+mod turn_label;
 mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;
