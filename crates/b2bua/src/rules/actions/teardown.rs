@@ -8,8 +8,8 @@ use call::helpers::{
     TERMINATING_TIMEOUT_MS,
 };
 use call::{
-    ByeDisposition, Call, LegDisposition, LegKind, LegState, StackDialog, TerminationCause,
-    TimerType,
+    ByeDisposition, Call, Dialog, DialogId, Leg, LegDisposition, LegKind, LegState,
+    TerminationCause, TimerType,
 };
 use sip_message::generators::{
     self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle, RelayScope,
@@ -29,7 +29,7 @@ use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::RuleContext;
 use b2bua_sdk::release_reason::CancelReason;
 
-use super::select::{dialog_identity_tag, find_pending_dialog};
+use super::select::find_pending_dialog;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -85,8 +85,7 @@ impl ActionExecutor<'_> {
             .chain(call.b_legs.iter())
             .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
             .flat_map(|(leg, d)| {
-                d.ext
-                    .inbound_pending_requests
+                d.inbound_pending_requests
                     .iter()
                     .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
                     .map(move |p| (leg.leg_id.clone(), p.outbound_cseq))
@@ -162,6 +161,7 @@ impl ActionExecutor<'_> {
                         fx.outbound.push(e);
                     }
                     *call = set_bye_disposition(call.clone(), &id, ByeDisposition::ByeSent);
+                    super::dialog_end::end_dialogs(call, ctx, &id, ByeDisposition::ByeSent);
                 }
                 LegState::Trying | LegState::Early => {
                     if is_a {
@@ -263,6 +263,7 @@ impl ActionExecutor<'_> {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
+                super::dialog_end::end_dialogs(call, ctx, leg_id, ByeDisposition::ByeSent);
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
                 self.prack_relayed_unacknowledged(call, fx, leg_id, None);
@@ -311,6 +312,7 @@ impl ActionExecutor<'_> {
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         leg_id: &str,
         bye_disposition: Option<ByeDisposition>,
     ) {
@@ -321,6 +323,7 @@ impl ActionExecutor<'_> {
         *call = set_leg_state(call.clone(), leg_id, LegState::Terminated);
         if let Some(bd) = bye_disposition {
             *call = set_bye_disposition(call.clone(), leg_id, bd);
+            super::dialog_end::end_dialogs(call, ctx, leg_id, bd);
         }
         // Settle an in-flight CANCEL: a leg that TerminateLeg brings to a
         // terminal state is no longer "cancel pending", so clear the
@@ -347,19 +350,12 @@ impl ActionExecutor<'_> {
         hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-        let d = leg.dialogs.first()?;
+        let d = leg.dialogs.confirmed()?;
         if is_media(leg) {
             let relayed = Relayed { headers: without_reason(&relayed.headers), ..relayed };
-            return self.bye_on_dialog(
-                relay::CallMarks::of(call),
-                leg_id,
-                &d.sip,
-                None,
-                relayed,
-                hops,
-            );
+            return self.bye_on_dialog(relay::CallMarks::of(call), leg, d, None, relayed, hops);
         }
-        self.bye_on_dialog(relay::CallMarks::of(call), leg_id, &d.sip, reason, relayed, hops)
+        self.bye_on_dialog(relay::CallMarks::of(call), leg, d, reason, relayed, hops)
     }
 
     fn bye_to_leg_a(
@@ -369,31 +365,22 @@ impl ActionExecutor<'_> {
         relayed: Relayed,
         hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
-        let d = call.a_leg.dialogs.first()?;
-        self.bye_on_dialog(
-            relay::CallMarks::of(call),
-            &call.a_leg.leg_id,
-            &d.sip,
-            reason,
-            relayed,
-            hops,
-        )
+        let d = call.a_leg.dialogs.confirmed()?;
+        self.bye_on_dialog(relay::CallMarks::of(call), &call.a_leg, d, reason, relayed, hops)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn bye_on_dialog(
         &self,
         marks: relay::CallMarks,
-        leg_id: &str,
-        sip: &StackDialog,
+        leg: &Leg,
+        d: &Dialog,
         reason: Option<&str>,
         relayed: Relayed,
         hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
-        if sip.remote_tag.is_empty() {
-            return None; // not a confirmed dialog
-        }
-        let dialog = relay::to_gen_dialog(sip);
+        let leg_id = leg.leg_id.as_str();
+        let dialog = relay::to_gen_dialog(leg, d);
         let branch = self.id_gen.new_branch();
         let mut extra_headers: Vec<SipHeader> = reason
             .map(|r| {
@@ -413,7 +400,7 @@ impl ActionExecutor<'_> {
             }
         }
         // Per-dialog CSeq (§12.2.1.1): `generate_in_dialog_request` defaults to
-        // this dialog's `local_cseq + 1`, the next sequence number within THIS
+        // this dialog's `our_cseq + 1`, the next sequence number within THIS
         // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, marks, leg_id, branch)),
@@ -504,22 +491,21 @@ impl ActionExecutor<'_> {
             call.b_legs.iter().find(|l| l.leg_id == leg_id)
         };
         let Some(leg) = leg else { return };
-        let mut pending: Vec<(Option<String>, call::PendingRequest)> = leg
+        let mut pending: Vec<(Option<DialogId>, call::PendingRequest)> = leg
             .dialogs
             .iter()
             .flat_map(|d| {
-                let tag = dialog_identity_tag(leg_id, d);
-                d.ext
-                    .inbound_pending_requests
+                let id = d.id();
+                d.inbound_pending_requests
                     .iter()
                     .filter(|p| !p.method.eq_ignore_ascii_case("INVITE"))
-                    .map(move |p| (Some(tag.clone()), p.clone()))
+                    .map(move |p| (Some(id.clone()), p.clone()))
             })
             .collect();
         // The relays of early dialogs the answer retired end with the leg too.
         let mut retired = Vec::new();
         *call = call::helpers::update_leg(call.clone(), leg_id, |l| {
-            retired = call::helpers::take_retired(l);
+            retired = call::helpers::take_retired_relays(l);
         });
         pending.extend(
             retired
@@ -529,12 +515,12 @@ impl ActionExecutor<'_> {
         );
         let originator =
             call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
-        for (identity_tag, p) in pending {
-            if let Some(identity_tag) = identity_tag {
+        for (id, p) in pending {
+            if let Some(id) = id {
                 *call = call::helpers::remove_pending_request(
                     call.clone(),
                     leg_id,
-                    &identity_tag,
+                    &id,
                     p.outbound_cseq,
                 );
             }
@@ -670,8 +656,7 @@ impl ActionExecutor<'_> {
         relayed: &[SipHeader],
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-        let d = leg.dialogs.first()?;
-        let handle = d.ext.pending_invite_txn.as_ref()?;
+        let handle = leg.pending_invite_txn.as_ref()?;
         let parsed = CustomParser::new().parse(&handle.original_invite).ok()?;
         let req = match parsed {
             SipMessage::Request(r) => r,
@@ -731,7 +716,7 @@ fn deactivate_service_machines(call: &mut Call) {
 /// A re-INVITE CANCEL ready to leave, with the identity of the dialog whose
 /// snapshot it settles.
 struct PendingReinviteCancel {
-    t_id: String,
+    t_id: DialogId,
     effect: OutboundSipEffect,
 }
 
@@ -748,7 +733,7 @@ fn pending_reinvite_cancel(
     outbound_cseq: i64,
 ) -> Option<PendingReinviteCancel> {
     let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
-    let handle = dialog.ext.pending_invite_txn.as_ref()?;
+    let handle = dialog.pending_invite_txn.as_ref()?;
     let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite) else {
         return None;
     };

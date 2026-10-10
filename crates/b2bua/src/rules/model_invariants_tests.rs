@@ -1,8 +1,7 @@
 //! Each model invariant holds on a sound record and names the violation on a
 //! broken one.
 
-use call::helpers::{make_dialog_from_incoming, MakeDialogLegCtx};
-use call::{Call, Dialog, LegState, ReliableProvisional, TagMapping};
+use call::{Call, Dialog, DialogState, LegState, OutboundInvite, PeerDialog, ReliableProvisional};
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
@@ -17,7 +16,7 @@ fn uri(text: &str) -> Uri {
 }
 
 /// A call holding the caller's INVITE and one callee leg `b-1`, both with
-/// one dialog: the a-dialog under `a1`, the callee's under `b1`.
+/// one dialog: the a-dialog under `a1`, fronting the callee's under `b1`.
 fn call() -> Call {
     let invite = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
@@ -45,29 +44,23 @@ fn call() -> Call {
         &sip_txn::IdGen::seeded(1),
         0,
     );
-    call.a_leg.dialogs = vec![dialog("acid@alice", "a1", "atag")];
+    let mut a1 = dialog("a1", "atag");
+    a1.fronts = vec![PeerDialog { leg_id: "b-1".into(), peer_tag: "b1".into() }];
+    call.a_leg.dialogs = vec![a1].into();
+    call.a_leg.own_tag = Some("a1".into());
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "bcid".into();
-    b.dialogs = vec![dialog("bcid", "own", "b1")];
-    call = call::helpers::add_b_leg(call, b);
-    call.tag_map.push(TagMapping {
-        a_tag: "a1".into(),
-        b_leg_id: "b-1".into(),
-        b_tag: "b1".into(),
-    });
-    call
+    b.own_tag = None;
+    b.outbound_invite = Some(OutboundInvite { our_tag: "own".into(), cseq: 1 });
+    b.dialogs = vec![dialog("own", "b1")].into();
+    call::helpers::add_b_leg(call, b)
 }
 
-fn dialog(call_id: &str, local: &str, remote: &str) -> Dialog {
-    let ctx = MakeDialogLegCtx {
-        call_id,
-        local_uri: "sip:l@h",
-        remote_uri: "sip:r@h",
-        local_tag: local,
-        remote_tag: remote,
-    };
-    make_dialog_from_incoming(&ctx, 1, vec![], 1)
+fn dialog(local: &str, remote: &str) -> Dialog {
+    let mut d = Dialog::new(local, remote, DialogState::Early, 1);
+    d.peer_cseq = Some(1);
+    d
 }
 
 fn after(call: &Call) -> Turn<'_> {
@@ -86,24 +79,24 @@ fn a_sound_call_breaks_no_invariant() {
 fn a_confirmed_a_leg_with_two_dialogs_breaks_the_one_dialog_invariant() {
     let mut call = call();
     call.a_leg.state = LegState::Confirmed;
-    call.a_leg.dialogs.push(dialog("acid@alice", "a2", "atag"));
+    call.a_leg.dialogs.insert(dialog("a2", "atag"));
     let err = confirmed_a_leg_one_dialog(&after(&call)).unwrap_err();
-    assert!(err.contains("holds 2 dialogs"), "{err}");
+    assert!(err.contains("holds 2 live dialogs"), "{err}");
 }
 
 #[test]
-fn a_mapping_naming_no_a_dialog_breaks_the_tag_map_invariant() {
+fn a_front_naming_no_callee_dialog_breaks_the_fronts_invariant() {
     let mut call = call();
-    call.tag_map[0].a_tag = "gone".into();
-    let err = tag_map_names_a_dialog(&after(&call)).unwrap_err();
-    assert!(err.contains("gone -> b-1:b1"), "{err}");
+    call.a_leg.dialogs.by_tags_mut("a1", "atag").unwrap().fronts[0].peer_tag = "gone".into();
+    let err = fronts_name_a_dialog(&after(&call)).unwrap_err();
+    assert!(err.contains("a1 fronts b-1:gone"), "{err}");
 }
 
 #[test]
 fn a_remote_cseq_going_down_breaks_the_monotonic_invariant() {
     let before = call();
     let mut now = before.clone();
-    now.b_legs[0].dialogs[0].ext.remote_cseq = Some(0);
+    now.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().peer_cseq = Some(0);
     let err =
         dialog_cseq_never_decreases(&Turn { before: Some(&before), after: &now }).unwrap_err();
     assert!(err.contains("remote CSeq went from 1"), "{err}");

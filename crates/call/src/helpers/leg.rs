@@ -1,10 +1,10 @@
-//! Leg-level helpers: role resolution, leg/dialog lookup, state and
-//! disposition setters, termination-resolution predicates, and the per-leg
-//! tag readers.
+//! Leg-level helpers: role resolution, leg lookup, the dialog of a leg named
+//! by the one tag a caller does not already know, state and disposition
+//! setters, and termination-resolution predicates.
 
 use crate::model::{
-    ByeDisposition, Call, CallModelState, Dialog, Leg, LegDisposition, LegKind, LegState,
-    MessageDirection, MessageEntry,
+    ByeDisposition, Call, CallModelState, Dialog, DialogEnd, DialogState, Leg, LegDisposition,
+    LegKind, LegState, MessageDirection, MessageEntry,
 };
 
 use super::lens::update_leg;
@@ -24,14 +24,60 @@ pub fn is_adopted(leg: &Leg) -> bool {
     !matches!(leg_kind(leg), LegKind::Media | LegKind::TransferTarget)
 }
 
-/// Find a dialog by remote tag (early-state forking on the b-leg).
-pub fn find_dialog_by_to_tag<'a>(leg: &'a Leg, to_tag: &str) -> Option<&'a Dialog> {
-    leg.dialogs.iter().find(|d| d.sip.remote_tag == to_tag)
+/// The dialog of a leg this stack dialled whose peer tag is `peer_tag`: its
+/// own tag is the From-tag of the leg's INVITE ([`Leg::outbound_invite`]).
+pub fn callee_dialog<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
+    let ours = &leg.outbound_invite.as_ref()?.our_tag;
+    leg.dialogs.by_tags(ours, peer_tag)
 }
 
-/// The single confirmed dialog (only valid when `leg.state == Confirmed`).
-pub fn confirmed_dialog(leg: &Leg) -> Option<&Dialog> {
-    leg.dialogs.first()
+/// The dialog of `leg` whose peer tag is `peer_tag`, on either face: on a leg
+/// this stack dialled, its [`callee_dialog`]; on a leg whose INVITE it
+/// received, where every dialog carries the caller's tag, the one the leg's
+/// requests ride ([`crate::Dialogs::carrying`]) when it is that peer's.
+pub fn dialog_with_peer<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> {
+    if leg.outbound_invite.is_some() {
+        return callee_dialog(leg, peer_tag);
+    }
+    leg.dialogs.carrying().filter(|d| d.peer_tag == peer_tag)
+}
+
+/// [`callee_dialog`], to update.
+pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
+    let ours = leg.outbound_invite.as_ref()?.our_tag.clone();
+    leg.dialogs.by_tags_mut(&ours, peer_tag)
+}
+
+/// This stack's tag on `leg` for a message no dialog names (RFC 3261
+/// §8.2.6.2): the From-tag of the INVITE it sent the leg, else the tag of the
+/// dialog it answers the leg's INVITE under ([`Leg::own_tag`]).
+pub fn leg_own_tag(leg: &Leg) -> Option<&str> {
+    leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()).or(leg.own_tag.as_deref())
+}
+
+/// The dialog a request this stack originates on `leg` rides: the leg's
+/// confirmed dialog, else — before the leg's INVITE is answered — the dialog
+/// it answers that INVITE under ([`Leg::own_tag`]).
+pub fn carrying_dialog(leg: &Leg) -> Option<&Dialog> {
+    leg.dialogs.confirmed().or_else(|| own_dialog(leg).filter(|d| d.is_live()))
+}
+
+/// The dialog `leg` answers its INVITE under ([`Leg::own_tag`]), in any
+/// state; `None` on a leg this stack dialled, and before it holds a dialog.
+pub fn own_dialog(leg: &Leg) -> Option<&Dialog> {
+    let own = leg.own_tag.as_deref()?;
+    leg.dialogs.iter().find(|d| d.our_tag == own)
+}
+
+/// The caller-facing dialog whose own tag is `our_tag`: its peer tag is the
+/// caller's, the From-tag of her INVITE.
+pub fn caller_dialog<'a>(call: &'a Call, our_tag: &str) -> Option<&'a Dialog> {
+    call.a_leg.dialogs.by_tags(our_tag, &call.a_leg_invite.from_tag)
+}
+
+/// [`caller_dialog`], to update.
+pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mut Dialog> {
+    call.a_leg.dialogs.by_tags_mut(our_tag, &call.a_leg_invite.from_tag)
 }
 
 /// Set the state of a specific leg.
@@ -52,10 +98,34 @@ pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Cal
 /// Record the final sent on a leg's initial inbound INVITE
 /// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
 /// carries one is left as is — the transaction took exactly that one final.
+/// A non-2xx final ends every early dialog of the leg (RFC 3261 §12.1).
 pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
     update_leg(call, leg_id, |l| {
+        if l.invite_final_sent.is_none() && status >= 300 {
+            reject_early_dialogs(l, status);
+        }
         l.invite_final_sent.get_or_insert(status);
     })
+}
+
+/// Record the non-2xx final `status` that answered, on `leg_id`, the INVITE
+/// of CSeq `cseq` this stack sent: when it is the INVITE that dialled the leg
+/// ([`Leg::outbound_invite`]), every early dialog it created ends (RFC 3261
+/// §12.1). A final to a re-INVITE changes no dialog's state (§14.1).
+pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
+    update_leg(call, leg_id, |l| {
+        if l.outbound_invite.as_ref().is_some_and(|i| i.cseq == cseq) {
+            reject_early_dialogs(l, status);
+        }
+    })
+}
+
+/// End every early dialog of `leg` under the non-2xx final `status` its
+/// dialog-creating INVITE took (RFC 3261 §12.1).
+pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
+    for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
+        d.state = DialogState::Ended(DialogEnd::Rejected(status));
+    }
 }
 
 /// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
@@ -65,7 +135,8 @@ pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
 /// [`Leg::answer_preempted`], the leg goes back to the early dialog its
 /// provisional opened (no confirmation, no 2xx awaiting its ACK), and its
 /// message ring drops the 2xx entry, so the ring holds only what reached the
-/// wire.
+/// wire. Every dialog the INVITE opened, the one the 2xx would have
+/// confirmed included, ends under the 487 (RFC 3261 §12.1).
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
     update_leg(call, leg_id, |l| {
         if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
@@ -74,11 +145,15 @@ pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
             if l.state == LegState::Confirmed {
                 l.state = LegState::Early;
             }
-            for d in &mut l.dialogs {
-                d.ext.answered_2xx = None;
-                d.ext.awaited_ack_cseq = None;
+            for d in l.dialogs.iter_mut() {
+                d.answered_2xx = None;
+                d.awaited_ack_cseq = None;
+                if d.state == DialogState::Confirmed {
+                    d.state = DialogState::Early;
+                }
             }
         }
+        reject_early_dialogs(l, 487);
         l.invite_final_sent = Some(487);
     })
 }
@@ -166,46 +241,6 @@ pub fn find_leg<'a>(call: &'a Call, leg_id: &str) -> Option<&'a Leg> {
 /// Find a b-leg by callId.
 pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Leg> {
     call.b_legs.iter().find(|l| l.call_id == call_id)
-}
-
-/// The B2BUA's own tag for a leg (`sip.localTag` of `dialogs[0]`).
-pub fn b2bua_tag(call: &Call, leg_id: &str) -> Option<String> {
-    if leg_id == "a" {
-        return call.a_leg.dialogs.first().map(|d| d.sip.local_tag.clone());
-    }
-    let b = find_b_leg(call, leg_id)?;
-    Some(b.dialogs.first().map(|d| d.sip.local_tag.clone()).unwrap_or_else(|| b.from_tag.clone()))
-}
-
-/// Whether `tag` is one this stack put on `leg_id`: the `localTag` of any of
-/// its dialogs, an a-facing fork tag in the tag map, or the From-tag the leg's
-/// own INVITE carried (a b-leg). `None` while the leg holds no tag of its own,
-/// so a request's To-tag has nothing to be measured against (RFC 3261 §12.2.2).
-pub fn holds_local_tag(call: &Call, leg_id: &str, tag: &str) -> Option<bool> {
-    let leg = find_leg(call, leg_id)?;
-    let mut own: Vec<&str> =
-        leg.dialogs.iter().map(|d| d.sip.local_tag.as_str()).filter(|t| !t.is_empty()).collect();
-    if leg_id == "a" {
-        own.extend(call.tag_map.iter().map(|m| m.a_tag.as_str()).filter(|t| !t.is_empty()));
-    } else if !leg.from_tag.is_empty() {
-        own.push(leg.from_tag.as_str());
-    }
-    (!own.is_empty()).then(|| own.contains(&tag))
-}
-
-/// The remote party's tag for a leg (`sip.remoteTag` of `dialogs[0]`).
-pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
-    if leg_id == "a" {
-        return Some(
-            call.a_leg
-                .dialogs
-                .first()
-                .map(|d| d.sip.remote_tag.clone())
-                .unwrap_or_else(|| call.a_leg.from_tag.clone()),
-        );
-    }
-    let b = find_b_leg(call, leg_id)?;
-    b.dialogs.first().map(|d| d.sip.remote_tag.clone())
 }
 
 /// Whether this stack answered the caller: true from the 2xx onward and still

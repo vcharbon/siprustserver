@@ -7,10 +7,9 @@
 //! its BYE; and the answer stays on the call's lifecycle axis, so replication
 //! never reads the teardown as a branch behind the answered copy.
 
-use call::helpers::{make_empty_dialog, MakeDialogLegCtx};
 use call::{
-    Call, Direction, LegState, Obligation, Repeated, RetainedEmission, TimerEntry, TimerType,
-    Unacked2xx,
+    Call, Dialog, DialogState, Direction, LegState, Obligation, OutboundInvite, Repeated,
+    RetainedEmission, TimerEntry, TimerType, Unacked2xx,
 };
 use sip_retransmit::Class;
 
@@ -35,17 +34,8 @@ fn relayed_answer_call() -> Call {
         &sip_txn::IdGen::seeded(1),
         0,
     );
-    call.a_leg.dialogs = vec![make_empty_dialog(
-        &MakeDialogLegCtx {
-            call_id: &call.a_leg.call_id.clone(),
-            local_uri: "sip:bob@example.com",
-            remote_uri: "sip:alice@example.com",
-            local_tag: "a1",
-            remote_tag: &call.a_leg.from_tag.clone(),
-        },
-        1,
-    )];
-    call.a_leg.dialogs[0].sip.remote_target = "sip:alice@10.0.0.9:5060".into();
+    let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
+    a1.remote_target = "sip:alice@10.0.0.9:5060".into();
     call.a_leg.state = LegState::Confirmed;
     call.a_leg.invite_final_sent = Some(200);
     let (emission, _) = RetainedEmission::paced(
@@ -54,8 +44,9 @@ fn relayed_answer_call() -> Call {
         Class::Final2xx,
         Repeated::response("INVITE", 200),
     );
-    call.a_leg.dialogs[0].ext.answered_2xx =
-        Some(Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission });
+    a1.answered_2xx = Some(Unacked2xx { dialog_tag: "a1".into(), cseq: 1, emission });
+    call.a_leg.dialogs = vec![a1].into();
+    call.a_leg.own_tag = Some("a1".into());
     let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
     for timer_type in
         [TimerType::Rung { obligation: obligation.clone() }, TimerType::RepeatGiveUp { obligation }]
@@ -70,19 +61,12 @@ fn relayed_answer_call() -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "b-cid@10.0.0.2".into();
-    b.from_tag = "b2bua-b-tag".into();
+    b.outbound_invite = Some(OutboundInvite { our_tag: "b2bua-b-tag".into(), cseq: 1 });
+    b.own_tag = None;
     b.invite_final_sent = None;
-    b.dialogs = vec![make_empty_dialog(
-        &MakeDialogLegCtx {
-            call_id: "b-cid@10.0.0.2",
-            local_uri: "sip:alice@example.com",
-            remote_uri: "sip:bob@example.com",
-            local_tag: "b2bua-b-tag",
-            remote_tag: "bob-tag",
-        },
-        1,
-    )];
-    b.dialogs[0].sip.remote_target = "sip:bob@10.0.0.2:5060".into();
+    let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Confirmed, 1);
+    bob.remote_target = "sip:bob@10.0.0.2:5060".into();
+    b.dialogs = vec![bob].into();
     call::helpers::add_b_leg(call, b)
 }
 
@@ -92,7 +76,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
     let call = relayed_answer_call();
     let event = CallEvent::Cancelled {
         call_id: call.a_leg.call_id.clone(),
-        from_tag: call.a_leg.from_tag.clone(),
+        from_tag: call.a_leg_invite.from_tag.clone(),
         invite_cseq: Some(1),
         in_dialog: false,
         headers: vec![],
@@ -127,7 +111,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
     assert_eq!(result.call.a_leg.state, LegState::Terminated, "the caller holds no dialog");
     assert!(!call::helpers::caller_answered(&result.call), "the caller was never answered");
     assert!(
-        result.call.a_leg.dialogs.iter().all(|d| d.ext.answered_2xx.is_none()),
+        result.call.a_leg.dialogs.iter().all(|d| d.answered_2xx.is_none()),
         "no 2xx awaits the caller's ACK"
     );
     let ladders: Vec<_> = result

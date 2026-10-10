@@ -82,7 +82,7 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
         clock_skew_clamped,
         a_leg: CdrLeg {
             call_id: call.a_leg.call_id.clone(),
-            from_tag: call.a_leg.from_tag.clone(),
+            from_tag: call.a_leg_invite.from_tag.clone(),
             state: call.a_leg.state,
         },
         b_legs: call

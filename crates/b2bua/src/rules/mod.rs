@@ -12,7 +12,6 @@ pub mod defaults;
 pub mod delayed_offer;
 pub mod docgen;
 pub mod executor;
-pub mod fork_straggler;
 pub mod invariants;
 pub mod model_invariants;
 mod pending_refusal;

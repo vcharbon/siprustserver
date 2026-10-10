@@ -20,7 +20,7 @@ use crate::effects::{
 /// says whose response it is — a callee's forwarded, or this stack's own.
 ///
 /// A provisional carrying `to_tag` marks the a-dialog of that tag shown
-/// ([`call::B2buaDialogExt::shown`]).
+/// ([`call::Dialog::shown`]).
 ///
 /// A final (≥ 200) is admitted once per transaction (RFC 3261 §17.2.1): the
 /// first records itself as [`call::Leg::invite_final_sent`]; any later one is
@@ -59,8 +59,8 @@ pub fn response_to_a_leg(
         return None;
     } else if let Some(tag) = to_tag.as_deref().filter(|_| status > 100) {
         // The caller now holds the early dialog this provisional names.
-        if let Some(d) = call.a_leg.dialogs.iter_mut().find(|d| d.sip.local_tag == tag) {
-            d.ext.shown = true;
+        if let Some(d) = call.a_leg.dialogs.iter_mut().find(|d| d.our_tag == tag) {
+            d.shown = true;
         }
     }
     let a_leg = call.a_leg.leg_id.clone();

@@ -49,14 +49,15 @@ impl ActionExecutor<'_> {
         };
         let (unacked, obligation, first) =
             unacked_2xx_of(resp, effect.destination.clone(), &call.a_leg.leg_id);
-        if let Some(d) = call.a_leg.dialogs.first_mut() {
-            d.ext.answered_2xx = Some(unacked);
+        if let Some(d) = call::helpers::caller_dialog_mut(call, &unacked.dialog_tag.clone()) {
+            d.answered_2xx = Some(unacked);
         }
         self.arm_ack_ladder(call, fx, obligation, first);
     }
 
     /// Retain a **re-INVITE** 2xx relayed toward its originator (`target_leg`,
-    /// either face) and arm its §13.3.1.4 ladder. The
+    /// either face), on the originator's dialog the 2xx names, and arm its
+    /// §13.3.1.4 ladder. The
     /// marker also holds the dialog's INVITE server transaction in RFC 6026
     /// *Accepted* for `reinvite-glare`, for exactly as long as the ladder's
     /// give-up stands.
@@ -69,17 +70,13 @@ impl ActionExecutor<'_> {
         target_leg: &str,
     ) {
         let (unacked, obligation, first) = unacked_2xx_of(resp, dest, target_leg);
-        let target_dialog = if target_leg == call.a_leg.leg_id {
-            call.a_leg.dialogs.first_mut()
-        } else {
-            call.b_legs
-                .iter_mut()
-                .find(|l| l.leg_id == target_leg)
-                .and_then(|l| l.dialogs.first_mut())
-        };
-        if let Some(d) = target_dialog {
-            d.ext.pending_reinvite_2xx = Some(unacked);
-        }
+        let (ours, peer) =
+            (resp.to().tag().map(str::to_string), resp.from().tag().map(str::to_string));
+        *call = call::helpers::update_leg(call.clone(), target_leg, |leg| {
+            if let Some(d) = ours.zip(peer).and_then(|(o, p)| leg.dialogs.by_tags_mut(&o, &p)) {
+                d.pending_reinvite_2xx = Some(unacked);
+            }
+        });
         self.arm_ack_ladder(call, fx, obligation, first);
     }
 

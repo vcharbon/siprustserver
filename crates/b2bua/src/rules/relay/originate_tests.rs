@@ -104,7 +104,11 @@ Content-Length: 0\r\n\r\n",
         let from = invite.from();
         let from_tag = from.tag().expect("b-leg From carries a tag");
         assert_ne!(from_tag, "alice-from-tag", "b-leg From-tag must not be the a-leg's");
-        assert_eq!(from_tag, leg.from_tag, "leg + INVITE From-tags agree");
+        assert_eq!(
+            Some(from_tag),
+            leg.outbound_invite.as_ref().map(|i| i.our_tag.as_str()),
+            "leg + INVITE From-tags agree"
+        );
         let to = invite.to();
         assert!(to.tag().is_none(), "initial b-leg INVITE has no To-tag, got {:?}", to.tag());
 

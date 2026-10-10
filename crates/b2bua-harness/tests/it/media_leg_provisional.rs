@@ -130,11 +130,12 @@ async fn media_leg_rings_first(name: &str, shape: Shape) {
         .expect("the call is live");
     let media = live.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the media leg");
     assert!(
-        media.dialogs.iter().any(|d| d.sip.remote_tag == MRF_TAG),
+        media.dialogs.iter().any(|d| d.peer_tag == MRF_TAG),
         "the media leg holds the early dialog its provisional created (RFC 3261 §12.1.2): {:?}",
-        media.dialogs.iter().map(|d| &d.sip.remote_tag).collect::<Vec<_>>(),
+        media.dialogs.iter().map(|d| &d.peer_tag).collect::<Vec<_>>(),
     );
-    assert!(live.tag_map.is_empty(), "no caller-facing tag stands for it: {:?}", live.tag_map);
+    let fronts: Vec<_> = live.a_leg.dialogs.iter().flat_map(|d| d.fronts.iter()).collect();
+    assert!(fronts.is_empty(), "no caller-facing dialog stands for it: {fronts:?}");
 
     // ── the media leg answers and plays; the caller gets its early media ──
     mrf_uas.respond(200, "OK").with_to_tag(MRF_TAG).with_sdp(MRF_SDP).await;

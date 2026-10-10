@@ -40,7 +40,7 @@ pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,
-    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
+    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
 };
 // The call's admission state on the call limiter (ADR-0040).
 pub use model::{
@@ -49,8 +49,9 @@ pub use model::{
 };
 // Leg + dialog state.
 pub use model::{
-    B2buaDialogExt, ByeDisposition, Dialog, Direction, HostPort, InviteTxnHandle, LegDisposition,
-    LegKind, LegSdpSession, LegState, PendingRequest, RemoteInfo, StackDialog, Unacked2xx,
+    ByeDisposition, Dialog, DialogEnd, DialogId, DialogState, Dialogs, Direction, HostPort,
+    InviteTxnHandle, LegDisposition, LegKind, LegSdpSession, LegState, OutboundInvite, PeerDialog,
+    PendingRequest, RemoteInfo, RetiredDialog, StragglerRelease, Unacked2xx,
 };
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).

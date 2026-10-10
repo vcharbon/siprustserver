@@ -1271,7 +1271,7 @@ impl FailoverHarness {
     /// The one deviation this exists for is [`RULE_CSEQ_IN_DIALOG_ORDER`] across a
     /// takeover window: ADR-0014's accepted keepalive-vs-backup-transaction
     /// overlap. Two owners of one leg (a proxy-Dead-but-alive primary and/or a
-    /// stale-hydrated backup) each mint `dialog.sip.local_cseq + 1`; `(p,b)` rejects
+    /// stale-hydrated backup) each mint `dialog.our_cseq + 1`; `(p,b)` rejects
     /// the loser, but its mutation already reached the wire. The reused number rides
     /// a FRESH `branch`, so a compliant UAS does not fold it away as a
     /// retransmission: it sees a new server transaction whose sequence number did

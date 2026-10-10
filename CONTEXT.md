@@ -743,6 +743,39 @@ The call runs on an id held lacks: it runs fail open, or on a set a service
 or a route moved it onto that held does not name. Restated on every write of
 the call, so the next statement that holds the set ends it.
 
+## Dialog model vocabulary
+
+How a leg keeps its dialogs (ADR-0041). The `call` crate's `Dialog` /
+`Dialogs`; the engine and the rules read them, never by position.
+
+**Dialog identity**:
+The leg's Call-ID plus the dialog's **our tag** (this stack's) and **peer
+tag**. A received request names it by `(To-tag, From-tag)`, a response by
+`(From-tag, To-tag)` — on every leg alike (RFC 3261 §12).
+_Avoid_: "identity tag" (one tag never names a dialog of a leg that holds
+several), "local/remote tag" for the fields (the RFC terms stay for the RFC).
+
+**Dialog state**:
+`Early`, `Confirmed`, `Ending` (our BYE in flight), `Ended` (rejected by the
+INVITE's final, the peer's BYE, our BYE's final or timeout) or **retired**.
+A dialog record stays until its call is released.
+
+**Retired dialog**:
+An early dialog the call let go of without a BYE: a losing callee fork, a
+caller-facing dialog the answer did not take. It keeps the relays still open
+in it and, for a fork whose 2xx came late, the ACK and BYE that released it.
+_Avoid_: "pruned"/"dropped" dialog (nothing is removed).
+
+**Fronting**:
+A caller-facing dialog **fronts** the callee dialogs it relays (`fronts`); a
+dialog the stack answers itself fronts none.
+_Avoid_: "tag map".
+
+**Outbound INVITE**:
+The dialog-creating INVITE a leg sent (its From-tag and CSeq): each dialog a
+response to it creates is minted from it. A dialled leg holds no dialog
+before such a response.
+
 ## Call reaper vocabulary
 
 The terminal-guarantee module (design in progress; extends ADR-0010 X5's

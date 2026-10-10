@@ -100,6 +100,7 @@ Content-Length: 4\r\n\r\nv=0\n";
             headers: vec![call::SipHeader { name: "Timestamp".into(), value: "12.5".into() }],
             body: Vec::new(),
             cseq: 1,
+            from_tag: String::new(),
         }
     }
 

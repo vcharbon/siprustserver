@@ -14,8 +14,8 @@ use b2bua::rules::{
 use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{Body, BodyAuthor};
 use call::{
-    B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
-    MachineId, RemoteInfo, StackDialog, StateLabel, TerminationCause, TimerType,
+    CallModelState, Dialog, DialogState, Direction, Leg, LegDisposition, LegKind, LegState,
+    MachineId, OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerType,
 };
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
@@ -76,32 +76,30 @@ fn test_call() -> call::Call {
 /// or minted provisional pinned), the leg itself still Trying.
 fn call_with_early_a_dialog(a1: &str) -> call::Call {
     let mut call = test_call();
-    call.a_leg.dialogs = vec![Dialog {
-        sip: StackDialog {
-            call_id: call.a_leg.call_id.clone(),
-            local_tag: a1.into(),
-            remote_tag: call.a_leg.from_tag.clone(),
-            local_uri: "sip:bob@host".into(),
-            remote_uri: "sip:alice@host".into(),
-            remote_target: "sip:alice@127.0.0.1:5060".into(),
-            local_cseq: 1,
-            route_set: vec![],
-        },
-        ext: B2buaDialogExt {
-            remote_cseq: Some(1),
-            inbound_pending_requests: vec![],
-            ack_branch: None,
-            pending_invite_txn: None,
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            answered_2xx: None,
-            emitted_ack: None,
-            sdp_session: None,
-            awaited_ack_cseq: None,
-            shown: false,
-        },
-    }];
+    call.a_leg.dialogs = vec![a_dialog(&call, a1, DialogState::Early)].into();
+    call.a_leg.own_tag = Some(a1.into());
     call
+}
+
+/// A dialog of the caller's leg under `tag`, in `state`, both sequences at 1.
+fn a_dialog(call: &call::Call, tag: &str, state: DialogState) -> Dialog {
+    let mut d = Dialog::new(tag, call.a_leg_invite.from_tag.clone(), state, 1);
+    d.peer_cseq = Some(1);
+    d.remote_target = "sip:alice@127.0.0.1:5060".into();
+    d
+}
+
+/// Give `leg` — dialled under `svc` — the dialog the peer tag `peer_tag`
+/// names, confirmed on a confirmed leg, early otherwise; return it.
+fn with_dialog<'a>(leg: &'a mut Leg, peer_tag: &str) -> &'a mut Dialog {
+    let state = match leg.state {
+        LegState::Confirmed => DialogState::Confirmed,
+        _ => DialogState::Early,
+    };
+    let mut d = Dialog::new("svc", peer_tag, state, 1);
+    d.remote_target = "sip:bob@10.0.0.2:5070".into();
+    leg.dialogs.insert(d);
+    leg.dialogs.by_tags_mut("svc", peer_tag).expect("the dialog just inserted")
 }
 
 #[test]
@@ -721,7 +719,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     });
     let event = CallEvent::Cancelled {
         call_id: call.a_leg.call_id.clone(),
-        from_tag: call.a_leg.from_tag.clone(),
+        from_tag: call.a_leg_invite.from_tag.clone(),
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
@@ -835,7 +833,7 @@ fn in_dialog_bye_selects_relay_bye() {
 /// carries a final is not this rule's.
 #[test]
 fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination() {
-    let call = call_with_early_a_dialog("early");
+    let call = call_with_early_a_dialog("btag");
     let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Request(bye)),
@@ -886,7 +884,7 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
 /// teardown under way is not restarted.
 #[test]
 fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
-    let mut call = call_with_early_a_dialog("early");
+    let mut call = call_with_early_a_dialog("btag");
     call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
     call.state = CallModelState::Terminating;
     let bye = in_dialog_request(sip_message::Method::Bye);
@@ -927,7 +925,7 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
 fn bye_on_an_early_a_dialog_ended_by_a_non_2xx_final_draws_481_alone() {
     let rules = default_rules();
     for state in [CallModelState::Terminating, CallModelState::Terminated] {
-        let mut call = call_with_early_a_dialog("early");
+        let mut call = call_with_early_a_dialog("btag");
         call.a_leg.invite_final_sent = Some(487);
         call.a_leg.state = LegState::Terminated;
         call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
@@ -1272,7 +1270,7 @@ fn execute_on(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
 fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
     let event = CallEvent::Cancelled {
         call_id: call.a_leg.call_id.clone(),
-        from_tag: call.a_leg.from_tag.clone(),
+        from_tag: call.a_leg_invite.from_tag.clone(),
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
@@ -1457,7 +1455,7 @@ fn a_provisional_after_the_final_is_refused() {
         result.effects.outbound
     );
     assert!(
-        result.call.a_leg.dialogs.iter().all(|d| d.sip.local_tag != "late-tag"),
+        result.call.a_leg.dialogs.iter().all(|d| d.our_tag != "late-tag"),
         "a refused provisional re-tags no dialog",
     );
     assert_eq!(result.call.a_leg.invite_final_sent, Some(200), "the 200 stands");
@@ -1595,8 +1593,11 @@ fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed(
     // …and the early dialog the provisional establishes (RFC 3261 §12.1.2):
     // the callee's tag, its Contact as the remote target, the recorded route.
     let result = execute_from_b1(&call, &b_leg_ringing_event(false), &actions);
-    let dialog = &result.call.b_legs[0].dialogs[0].sip;
-    assert_eq!(dialog.remote_tag, "bobtag", "the early dialog carries the callee's tag");
+    let dialog = result.call.b_legs[0]
+        .dialogs
+        .by_tags("svc", "bobtag")
+        .expect("the early dialog carries the callee's tag");
+    assert_eq!(dialog.state, DialogState::Early);
     assert!(
         dialog.remote_target.contains(CALLEE_RINGING_CONTACT),
         "the remote target is the provisional's Contact: {}",
@@ -1673,7 +1674,8 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
     );
     assert!(provisionals_to_a(&result).is_empty(), "no 180 leaves: {:?}", result.effects.outbound);
     assert_eq!(late_provisional_refusals(&result), vec![(180, 200)]);
-    assert!(result.call.tag_map.is_empty(), "no a-facing tag is mapped: {:?}", result.call.tag_map);
+    let fronts: Vec<_> = result.call.a_leg.dialogs.iter().flat_map(|d| d.fronts.iter()).collect();
+    assert!(fronts.is_empty(), "no caller-facing dialog fronts it: {fronts:?}");
     assert!(
         !call::helpers::relay_first_18x_first_relayed(&result.call),
         "the mask has relayed nothing"
@@ -1689,7 +1691,7 @@ fn a_repeated_transfer_target_provisional_is_accounted_once() {
     call.a_leg.state = LegState::Confirmed;
     let mut referrer = b_leg_pending();
     referrer.state = LegState::Confirmed;
-    referrer.dialogs[0].sip.remote_tag = "reftag".into();
+    with_dialog(&mut referrer, "reftag");
     call = call::helpers::add_b_leg(call, referrer);
     let mut target = b_leg_pending();
     target.leg_id = "b-2".into();
@@ -1734,7 +1736,7 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
     call.a_leg.state = LegState::Confirmed;
     let mut confirmed = b_leg_pending();
     confirmed.state = LegState::Confirmed;
-    confirmed.dialogs[0].sip.remote_tag = "bobtag".into();
+    with_dialog(&mut confirmed, "bobtag");
     call = call::helpers::add_b_leg(call, confirmed);
 
     let event = b_leg_ringing_event(false);
@@ -2116,47 +2118,23 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
 // request `;outbound` and ignores the cookie either way), so the only place the
 // omission shows is the Route header content asserted here.
 
-/// A pending (Trying) b-leg with one dialog whose route set is still empty —
-/// the state `ConfirmDialog` mutates when the 2xx arrives.
+/// A pending (Trying) b-leg dialled under `svc`, no response yet so no
+/// dialog — the state `ConfirmDialog` mutates when the 2xx arrives.
 fn b_leg_pending() -> Leg {
-    let dialog = Dialog {
-        sip: StackDialog {
-            call_id: "bcid@x".into(),
-            local_tag: "svc".into(),
-            remote_tag: String::new(),
-            local_uri: "sip:svc@10.0.0.9".into(),
-            remote_uri: "sip:bob@10.0.0.2".into(),
-            remote_target: "sip:bob@10.0.0.2:5070".into(),
-            local_cseq: 1,
-            route_set: vec![],
-        },
-        ext: B2buaDialogExt {
-            remote_cseq: None,
-            inbound_pending_requests: vec![],
-            ack_branch: None,
-            pending_invite_txn: None,
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            answered_2xx: None,
-            emitted_ack: None,
-            sdp_session: None,
-            awaited_ack_cseq: None,
-            shown: false,
-        },
-    };
     Leg {
         leg_id: "b-1".into(),
         call_id: "bcid@x".into(),
-        from_tag: "svc".into(),
         source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
         state: LegState::Trying,
         disposition: LegDisposition::Pending,
-        dialogs: vec![dialog],
+        dialogs: Default::default(),
         no_answer_timeout_sec: None,
         bye_disposition: None,
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
+        outbound_invite: Some(OutboundInvite { our_tag: "svc".into(), cseq: 1 }),
+        own_tag: None,
         pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::Destination),
@@ -2216,7 +2194,7 @@ Content-Length: 0\r\n\r\n";
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
-    let d = &result.call.b_legs[0].dialogs[0].sip;
+    let d = result.call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog");
     assert_eq!(
         d.route_set,
         vec![
@@ -2226,7 +2204,7 @@ Content-Length: 0\r\n\r\n";
         "b-leg route set must be the 2xx Record-Route in reverse order (§12.1.2)"
     );
     // The other 2xx-learned fields stay correct alongside the new capture.
-    assert_eq!(d.remote_tag, "bobtag");
+    assert_eq!(d.peer_tag, "bobtag");
     assert_eq!(d.remote_target, "sip:bob@10.0.0.2:5070");
 }
 
@@ -2283,7 +2261,7 @@ Content-Length: 0\r\n\r\n";
     };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
-    let rs = &result.call.b_legs[0].dialogs[0].sip.route_set;
+    let rs = &result.call.b_legs[0].dialogs.confirmed().expect("the confirmed dialog").route_set;
     assert_eq!(rs.len(), 2, "combined header must be split into 2 individual routes: {rs:?}");
     assert!(
         rs[0].contains("outbound"),
@@ -2340,7 +2318,12 @@ Content-Length: 0\r\n\r\n";
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
     assert!(
-        result.call.b_legs[0].dialogs[0].sip.route_set.is_empty(),
+        result.call.b_legs[0]
+            .dialogs
+            .confirmed()
+            .expect("the confirmed dialog")
+            .route_set
+            .is_empty(),
         "no Record-Route on the 2xx → b-leg route set stays empty"
     );
 }
@@ -2483,8 +2466,7 @@ mod media_primitives {
         leg.state = LegState::Confirmed;
         leg.kind = Some(kind);
         leg.adopted = None; // derive adoption from the kind
-        leg.dialogs[0].sip.remote_tag = "bobtag".into();
-        leg.dialogs[0].ext.remote_cseq = Some(1);
+        with_dialog(&mut leg, "bobtag").peer_cseq = Some(1);
         leg
     }
 
@@ -2492,31 +2474,8 @@ mod media_primitives {
     /// has a target dialog to ride.
     fn give_a_leg_dialog(call: &mut call::Call) {
         call.a_leg.state = LegState::Confirmed;
-        call.a_leg.dialogs = vec![Dialog {
-            sip: StackDialog {
-                call_id: call.a_leg.call_id.clone(),
-                local_tag: "a-svc".into(),
-                remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: "sip:svc@10.0.0.9".into(),
-                remote_uri: "sip:alice@host".into(),
-                remote_target: "sip:alice@127.0.0.1:5060".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: B2buaDialogExt {
-                remote_cseq: Some(1),
-                inbound_pending_requests: vec![],
-                ack_branch: None,
-                pending_invite_txn: None,
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: None,
-                emitted_ack: None,
-                sdp_session: None,
-                awaited_ack_cseq: None,
-                shown: false,
-            },
-        }];
+        call.a_leg.dialogs = vec![a_dialog(call, "a-svc", DialogState::Confirmed)].into();
+        call.a_leg.own_tag = Some("a-svc".into());
     }
 
     /// An in-dialog INFO request (carries a To-tag) with a DTMF payload.
@@ -2778,7 +2737,9 @@ mod media_primitives {
         }
         // The minted tag is persisted on the a-dialog for reuse on later 1xx.
         assert!(
-            result.call.a_leg.dialogs.first().is_some_and(|d| !d.sip.local_tag.is_empty()),
+            result.call.a_leg.own_tag.as_deref().is_some_and(|t| {
+                !t.is_empty() && call::helpers::caller_dialog(&result.call, t).is_some()
+            }),
             "the a-facing early tag is persisted"
         );
     }
@@ -2908,10 +2869,19 @@ mod answer_a_leg_new_dialog {
             }
             _ => panic!("expected an outbound response"),
         };
-        let d = result.call.a_leg.dialogs.first().expect("a-dialog present");
-        assert_eq!(d.sip.local_tag, a2, "the a-dialog local_tag is re-stamped to A2");
+        let d = result.call.a_leg.dialogs.confirmed().expect("a confirmed a-dialog");
+        assert_eq!(d.our_tag, a2, "the confirmed a-dialog is A2's");
+        assert!(
+            result
+                .call
+                .a_leg
+                .dialogs
+                .by_tags("A1early", &d.peer_tag)
+                .is_some_and(|e| e.retired().is_some()),
+            "the early-media dialog A1 is retired, not renamed"
+        );
         assert_eq!(
-            d.ext.cached_sdp.as_deref(),
+            d.cached_sdp.as_deref(),
             Some(sdp_b.as_slice()),
             "the answer SDP is cached for a §13.3.1.4 un-ACKed-2xx retransmit"
         );
@@ -2928,7 +2898,7 @@ mod answer_a_leg_new_dialog {
         let mut call = call_with_early_a_dialog("A1early");
         let mut b = super::b_leg_pending();
         b.state = LegState::Confirmed;
-        b.dialogs[0].ext.pending_reinvite_2xx = Some(call::Unacked2xx {
+        with_dialog(&mut b, "bobtag").pending_reinvite_2xx = Some(call::Unacked2xx {
             dialog_tag: "svc".into(),
             cseq: 7,
             emission: call::RetainedEmission::paced(
@@ -2990,9 +2960,9 @@ mod answer_a_leg_new_dialog {
             }],
         );
 
-        let b_dialog = &result.call.b_legs[0].dialogs[0];
+        let b_dialog = result.call.b_legs[0].dialogs.confirmed().expect("the b-leg dialog");
         assert!(
-            b_dialog.ext.pending_reinvite_2xx.is_some(),
+            b_dialog.pending_reinvite_2xx.is_some(),
             "the b-leg's re-INVITE 2xx still awaits its ACK: marker kept",
         );
         let ladder_timers = |o: &call::Obligation| {
@@ -3034,7 +3004,7 @@ mod answer_a_leg_new_dialog {
             "only the provisional's timers leave the driver",
         );
         assert!(
-            result.call.a_leg.dialogs[0].ext.answered_2xx.is_some(),
+            result.call.a_leg.dialogs.confirmed().is_some_and(|d| d.answered_2xx.is_some()),
             "the caller's answer is retained under its own obligation",
         );
     }
@@ -3071,7 +3041,7 @@ mod answer_a_leg_new_dialog {
             _ => panic!("expected an outbound response"),
         }
         assert_eq!(
-            result.call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()),
+            result.call.a_leg.dialogs.confirmed().map(|d| d.our_tag.as_str()),
             Some("A2explicit"),
         );
     }
@@ -3100,9 +3070,10 @@ mod answer_a_leg_new_dialog {
             }],
         );
         assert!(result.effects.outbound.is_empty(), "a non-2xx final establishes no a-dialog");
+        let a1 = result.call.a_leg.dialogs.iter().map(|d| (d.our_tag.as_str(), &d.state));
         assert_eq!(
-            result.call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()),
-            Some("A1early"),
+            a1.collect::<Vec<_>>(),
+            vec![("A1early", &DialogState::Early)],
             "the early dialog A1 is left untouched",
         );
     }
@@ -3273,7 +3244,7 @@ Content-Length: 4\r\n\r\nv=0\n";
                     1,
                     "the B2BUA's Contact, not the callee's"
                 );
-                assert_eq!(r.to().tag(), Some(result.call.a_leg.dialogs[0].sip.local_tag.as_str()));
+                assert_eq!(r.to().tag(), result.call.a_leg.own_tag.as_deref());
             }
             _ => panic!("expected an outbound response"),
         }
@@ -3355,9 +3326,7 @@ mod ack_leg_body {
         let mut leg = b_leg_pending();
         leg.state = LegState::Confirmed;
         leg.disposition = LegDisposition::Bridged;
-        if let Some(d) = leg.dialogs.first_mut() {
-            d.sip.remote_tag = "bobtag".into();
-        }
+        with_dialog(&mut leg, "bobtag");
         leg
     }
 
@@ -3534,8 +3503,8 @@ mod ack_leg_body {
         let OutboundBody::Request(sent) = &effect.body else { unreachable!() };
         let retained = result.call.b_legs[0]
             .dialogs
-            .first()
-            .and_then(|d| d.ext.emitted_ack.clone())
+            .confirmed()
+            .and_then(|d| d.emitted_ack.clone())
             .expect("the emitted ACK datagram is retained on the dialog");
         let (bytes, dest) = retained.wire();
         assert_eq!(bytes, sent.image(), "retained bytes are the wire bytes");
@@ -3593,8 +3562,8 @@ mod ack_leg_body {
         let OutboundBody::Request(sent) = &ack_effect(&first).body else { unreachable!() };
         let retained = first.call.b_legs[0]
             .dialogs
-            .first()
-            .and_then(|d| d.ext.emitted_ack.clone())
+            .confirmed()
+            .and_then(|d| d.emitted_ack.clone())
             .expect("the bare ACK is retained as well");
         assert_eq!(retained.wire().0, sent.image());
         assert!(sent.body().is_empty(), "a minted ACK stays bare");
@@ -4757,41 +4726,20 @@ fn call_with_retained_answered_2xx() -> call::Call {
     b.state = LegState::Confirmed;
     call = call::helpers::add_b_leg(call, b);
     // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
-    call.a_leg.dialogs.push(Dialog {
-        sip: StackDialog {
-            call_id: call.a_leg.call_id.clone(),
-            local_tag: "btag".into(),
-            remote_tag: call.a_leg.from_tag.clone(),
-            local_uri: "sip:bob@host".into(),
-            remote_uri: "sip:alice@host".into(),
-            remote_target: "sip:alice@127.0.0.1:5060".into(),
-            local_cseq: 1,
-            route_set: vec![],
-        },
-        ext: B2buaDialogExt {
-            remote_cseq: Some(1),
-            inbound_pending_requests: vec![],
-            ack_branch: None,
-            pending_invite_txn: None,
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            awaited_ack_cseq: None,
-            shown: false,
-            answered_2xx: Some(call::Unacked2xx {
-                dialog_tag: "btag".into(),
-                cseq: 1,
-                emission: call::RetainedEmission::paced(
-                    b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
-                    ("127.0.0.1".into(), 5060),
-                    sip_retransmit::Class::Final2xx,
-                    call::Repeated::response("INVITE", 200),
-                )
-                .0,
-            }),
-            emitted_ack: None,
-            sdp_session: None,
-        },
+    let mut answered = a_dialog(&call, "btag", DialogState::Confirmed);
+    answered.answered_2xx = Some(call::Unacked2xx {
+        dialog_tag: "btag".into(),
+        cseq: 1,
+        emission: call::RetainedEmission::paced(
+            b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+            ("127.0.0.1".into(), 5060),
+            sip_retransmit::Class::Final2xx,
+            call::Repeated::response("INVITE", 200),
+        )
+        .0,
     });
+    call.a_leg.dialogs.insert(answered);
+    call.a_leg.own_tag = Some("btag".into());
     let obligation = answered_obligation();
     for (timer_type, fire_at) in [
         (TimerType::Rung { obligation: obligation.clone() }, 500),
@@ -4849,7 +4797,7 @@ fn caller_ack_discharges_the_retained_answered_2xx() {
     let (discharged, after, fx) = discharge_ack(&call, "a");
     assert_eq!(discharged, Some(answered_obligation()), "the a-leg ACK names the retained answer");
     assert!(
-        after.a_leg.dialogs.first().expect("dialog kept").ext.answered_2xx.is_none(),
+        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_2xx.is_none(),
         "the retained datagram is discharged from the replicated body",
     );
     assert!(
@@ -4883,7 +4831,7 @@ fn callee_side_ack_leaves_the_retained_answered_2xx() {
     let (discharged, after, fx) = discharge_ack(&call, "b-1");
     assert_eq!(discharged, None, "a b-leg ACK must not discharge the caller's obligation");
     assert!(
-        after.a_leg.dialogs.first().expect("dialog kept").ext.answered_2xx.is_some(),
+        after.a_leg.dialogs.confirmed().expect("dialog kept").answered_2xx.is_some(),
         "the retained datagram still awaits the caller's ACK",
     );
     assert_eq!(after.timers.len(), call.timers.len(), "the ladder keeps running");
@@ -4940,36 +4888,14 @@ mod ladder_give_up {
     fn answered_call() -> call::Call {
         let mut call = test_call();
         call.a_leg.state = LegState::Confirmed;
-        call.a_leg.dialogs = vec![Dialog {
-            sip: StackDialog {
-                call_id: call.a_leg.call_id.clone(),
-                local_tag: A_TAG.into(),
-                remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: "sip:svc@10.0.0.9".into(),
-                remote_uri: "sip:alice@host".into(),
-                remote_target: "sip:alice@127.0.0.1:5060".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: B2buaDialogExt {
-                remote_cseq: Some(1),
-                inbound_pending_requests: vec![],
-                ack_branch: None,
-                pending_invite_txn: None,
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: Some(retained_2xx(A_TAG, 1, 5060)),
-                emitted_ack: None,
-                sdp_session: None,
-                awaited_ack_cseq: None,
-                shown: false,
-            },
-        }];
+        let mut answered = a_dialog(&call, A_TAG, DialogState::Confirmed);
+        answered.answered_2xx = Some(retained_2xx(A_TAG, 1, 5060));
+        call.a_leg.dialogs = vec![answered].into();
+        call.a_leg.own_tag = Some(A_TAG.into());
         let mut b = super::b_leg_pending();
         b.state = LegState::Confirmed;
         b.disposition = LegDisposition::Bridged;
-        b.dialogs[0].sip.remote_tag = "bobtag".into();
-        b.dialogs[0].ext.remote_cseq = Some(1);
+        with_dialog(&mut b, "bobtag").peer_cseq = Some(1);
         call::helpers::add_b_leg(call, b)
     }
 
@@ -5089,7 +5015,7 @@ mod ladder_give_up {
         // What the rules alone left: the defect's shape.
         assert_eq!(ruled.call.state, CallModelState::Active, "the service parked the call");
         assert!(
-            ruled.call.a_leg.dialogs[0].ext.answered_2xx.is_some(),
+            ruled.call.a_leg.dialogs.confirmed().unwrap().answered_2xx.is_some(),
             "the rules alone keep the retained 2xx"
         );
 
@@ -5101,7 +5027,7 @@ mod ladder_give_up {
             "RFC 3261 §13.3.1.4: the session ends"
         );
         assert!(
-            settled.call.a_leg.dialogs[0].ext.answered_2xx.is_none(),
+            settled.call.a_leg.dialogs.confirmed().unwrap().answered_2xx.is_none(),
             "no retained datagram survives the give-up"
         );
         let mut byes = byes_in(&settled);
@@ -5125,8 +5051,9 @@ mod ladder_give_up {
         let mut call = answered_call();
         // The caller's initial ACK arrived; the b-leg's re-INVITE 2xx (CSeq 7)
         // is the one still owed.
-        call.a_leg.dialogs[0].ext.answered_2xx = None;
-        call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx = Some(retained_2xx("svc", 7, 5070));
+        call.a_leg.dialogs.confirmed_mut().unwrap().answered_2xx = None;
+        call.b_legs[0].dialogs.confirmed_mut().unwrap().pending_reinvite_2xx =
+            Some(retained_2xx("svc", 7, 5070));
         let obligation =
             Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
         let mut rules = vec![parking_rule(is_2xx_give_up)];
@@ -5136,7 +5063,7 @@ mod ladder_give_up {
 
         assert_eq!(settled.call.state, CallModelState::Terminating);
         assert!(
-            settled.call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx.is_none(),
+            settled.call.b_legs[0].dialogs.confirmed().unwrap().pending_reinvite_2xx.is_none(),
             "the re-INVITE 2xx is not retained either"
         );
         let marker = settled
@@ -5159,7 +5086,7 @@ mod ladder_give_up {
         // absorbs. The settlement forces nothing — the §13.3.1.4 floor is the
         // 2xx's alone.
         let mut call = answered_call();
-        call.a_leg.dialogs[0].ext.answered_2xx = None;
+        call.a_leg.dialogs.confirmed_mut().unwrap().answered_2xx = None;
         call.reliable_provisionals.push(call::ReliableProvisional {
             a_tag: A_TAG.into(),
             a_rseq: 1,
@@ -5405,7 +5332,7 @@ mod going_away_gate {
             .insert(b2bua::rules::invariants::GLOBAL_CALL_MACHINE, StateLabel::new("Active"));
         let event = CallEvent::Cancelled {
             call_id: call.a_leg.call_id.clone(),
-            from_tag: call.a_leg.from_tag.clone(),
+            from_tag: call.a_leg_invite.from_tag.clone(),
             invite_cseq: None,
             in_dialog: false,
             headers: vec![],
@@ -5935,7 +5862,7 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
 fn ringing_call() -> call::Call {
     let mut leg = b_leg_pending();
     // The INVITE this leg is ringing on, which its CANCEL names (RFC 3261 §9.1).
-    leg.dialogs[0].ext.pending_invite_txn = Some(call::InviteTxnHandle {
+    leg.pending_invite_txn = Some(call::InviteTxnHandle {
         branch: "z9hG4bK-b1".into(),
         original_invite: invite().image().to_vec(),
         destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
@@ -6109,17 +6036,15 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
         .push(call::SipHeader { name: "Content-Type".into(), value: "application/sdp".into() });
     let mut carol = b_leg_pending();
     carol.state = LegState::Terminated;
-    carol.dialogs[0].sip.remote_tag = "c1".into();
+    with_dialog(&mut carol, "c1");
     let mut bob = b_leg_pending();
     bob.leg_id = "b-2".into();
     bob.state = LegState::Early;
-    bob.dialogs[0].sip.remote_tag = "b2".into();
+    with_dialog(&mut bob, "b2");
     call = call::helpers::add_b_leg(call, carol);
     call = call::helpers::add_b_leg(call, bob);
-    call = call::helpers::add_tag_mapping(
-        call,
-        call::TagMapping { a_tag: "a1".into(), b_leg_id: "b-2".into(), b_tag: "b2".into() },
-    );
+    call.a_leg.dialogs.by_tags_mut("a1", &call.a_leg_invite.from_tag.clone()).unwrap().fronts =
+        vec![PeerDialog { leg_id: "b-2".into(), peer_tag: "b2".into() }];
     let shown = |b_leg_id: &str, b_tag: &str| call::ReliableProvisional {
         a_tag: "a1".into(),
         a_rseq: 1,
@@ -6214,11 +6139,9 @@ mod charging_in_dialog {
         let mut leg = super::b_leg_pending();
         leg.leg_id = leg_id.into();
         leg.call_id = format!("{leg_id}@x");
-        leg.dialogs[0].sip.call_id = leg.call_id.clone();
         leg.state = LegState::Confirmed;
         leg.kind = Some(kind);
-        leg.dialogs[0].sip.remote_tag = format!("{leg_id}-tag");
-        leg.dialogs[0].ext.remote_cseq = Some(1);
+        with_dialog(&mut leg, &format!("{leg_id}-tag")).peer_cseq = Some(1);
         let dialled = super::invite()
             .thaw()
             .push_raw(HeaderName::from("P-Charging-Vector"), vector.to_string())
@@ -6242,20 +6165,8 @@ mod charging_in_dialog {
                 .push(call::SipHeader { name: "P-Charging-Vector".into(), value: own.into() });
         }
         call.a_leg.state = LegState::Confirmed;
-        call.a_leg.dialogs = vec![Dialog {
-            sip: StackDialog {
-                call_id: call.a_leg.call_id.clone(),
-                local_tag: "a-svc".into(),
-                remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: "sip:svc@10.0.0.9".into(),
-                remote_uri: "sip:alice@host".into(),
-                remote_target: "sip:alice@127.0.0.1:5060".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: super::b_leg_pending().dialogs[0].ext.clone(),
-        }];
-        call.a_leg.dialogs[0].ext.remote_cseq = Some(1);
+        call.a_leg.dialogs = vec![super::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
+        call.a_leg.own_tag = Some("a-svc".into());
         call.b_legs = vec![
             confirmed("b-1", LegKind::Destination, B1),
             confirmed("b-2", LegKind::Destination, B2),
@@ -6304,8 +6215,10 @@ mod charging_in_dialog {
         let c = call(None, true, false);
         let result = reinvite(&c, "b-2", Some("a"), vec![]);
         assert_eq!(vectors_sent(&result, "b-2"), [B2]);
-        let held = result.call.b_legs[1].dialogs[0]
-            .ext
+        let held = result.call.b_legs[1]
+            .dialogs
+            .confirmed()
+            .expect("the confirmed dialog")
             .pending_invite_txn
             .as_ref()
             .expect("the re-INVITE's client transaction is held");

@@ -76,12 +76,12 @@ fn extract_sip_headers(req: &sip_message::SipRequest) -> Vec<serde_json::Value> 
         .collect()
 }
 
-/// `Call-ID;to-tag=…;from-tag=…` from the referrer (B) leg's perspective.
+/// `Call-ID;to-tag=…;from-tag=…` of the dialog the REFER rides, from the
+/// referrer's perspective: its tag is the To-tag, this stack's the From-tag.
 fn state_dialog_id(ctx: &RuleContext, leg_id: &str) -> String {
-    let leg = ctx.source_leg();
-    let (call_id, from_tag) =
-        leg.map(|l| (l.call_id.clone(), l.from_tag.clone())).unwrap_or_default();
-    let to_tag = ctx.source_dialog().map(|d| d.sip.remote_tag.clone()).unwrap_or_default();
+    let call_id = ctx.source_leg().map(|l| l.call_id.clone()).unwrap_or_default();
+    let (to_tag, from_tag) =
+        ctx.dialog().map(|d| (d.peer_tag.clone(), d.our_tag.clone())).unwrap_or_default();
     let _ = leg_id;
     format!("{call_id};to-tag={to_tag};from-tag={from_tag}")
 }

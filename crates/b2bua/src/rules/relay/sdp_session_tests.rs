@@ -314,17 +314,10 @@ fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
         .chain(call.b_legs.iter_mut())
         .find(|l| l.leg_id == target)
         .unwrap();
-    if target.dialogs.is_empty() {
-        let ctx = call::helpers::MakeDialogLegCtx {
-            call_id: "c-b",
-            local_uri: "sip:b2bua@192.0.2.100",
-            remote_uri: "sip:bob@192.0.2.2",
-            local_tag: "as",
-            remote_tag: "bob",
-        };
-        target.dialogs.push(call::helpers::make_empty_dialog(&ctx, 1));
+    if target.dialogs.confirmed().is_none() {
+        target.dialogs.insert(call::Dialog::new("as", "bob", call::DialogState::Confirmed, 1));
     }
-    target.dialogs[0].ext.inbound_pending_requests.push(pending);
+    target.dialogs.confirmed_mut().unwrap().inbound_pending_requests.push(pending);
 }
 
 /// The peer of `leg` opens an offer/answer exchange with a request carrying a
@@ -578,18 +571,10 @@ fn forked() -> Call {
     let mut c = call();
     let leg = &mut c.b_legs[0];
     leg.state = LegState::Early;
+    leg.outbound_invite = Some(call::OutboundInvite { our_tag: "as".into(), cseq: 1 });
     leg.dialogs = ["f1", "f2"]
         .into_iter()
-        .map(|tag| {
-            let ctx = call::helpers::MakeDialogLegCtx {
-                call_id: "b-1",
-                local_uri: "sip:alice@192.0.2.1",
-                remote_uri: "sip:bob@192.0.2.2",
-                local_tag: "as",
-                remote_tag: tag,
-            };
-            call::helpers::make_empty_dialog(&ctx, 1)
-        })
+        .map(|tag| call::Dialog::new("as", tag, call::DialogState::Early, 1))
         .collect();
     send(
         &mut c,
@@ -655,7 +640,7 @@ fn each_early_dialog_keeps_its_own_session() {
     assert_eq!(next_origin_in_dialog(leg, "f2").as_deref(), Some("alice 1 2 IN IP4 192.0.2.1"));
 
     let mut other = c.clone();
-    adopt_confirmed_dialog(&mut other.b_legs[0], 1);
+    adopt_confirmed_dialog(&mut other.b_legs[0], "f2");
     other.b_legs[0].state = LegState::Confirmed;
     let reoffer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
     assert_eq!(
@@ -664,7 +649,7 @@ fn each_early_dialog_keeps_its_own_session() {
         "f2 never saw a version of the stack's: the caller's own continues",
     );
 
-    adopt_confirmed_dialog(&mut c.b_legs[0], 0);
+    adopt_confirmed_dialog(&mut c.b_legs[0], "f1");
     c.b_legs[0].state = LegState::Confirmed;
     let restated = send(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, &reoffer);
     assert_eq!(
@@ -702,7 +687,7 @@ fn a_relayed_early_exchange_survives_confirmation() {
         policy(SdpForm::AsWritten),
     );
     assert_eq!(String::from_utf8(out).unwrap(), answer);
-    adopt_confirmed_dialog(&mut c.b_legs[0], 0);
+    adopt_confirmed_dialog(&mut c.b_legs[0], "f1");
     assert_eq!(
         c.b_legs[0].sdp_session.sent_origin.as_deref(),
         Some("alice 1 2 IN IP4 192.0.2.1"),
@@ -725,7 +710,7 @@ fn a_relayed_description_does_not_leak_into_another_fork() {
         Some(&ct()),
         policy(SdpForm::AsWritten),
     );
-    adopt_confirmed_dialog(&mut c.b_legs[0], 1);
+    adopt_confirmed_dialog(&mut c.b_legs[0], "f2");
     assert_eq!(
         c.b_legs[0].sdp_session.sent_origin.as_deref(),
         Some("alice 1 1 IN IP4 192.0.2.1"),
@@ -897,9 +882,14 @@ fn a_restatement_in_a_losing_fork_stays_the_calls() {
         Some(&ct()),
         policy(SdpForm::AsWritten),
     );
-    adopt_confirmed_dialog(&mut c.b_legs[0], 1);
-    let winner = c.b_legs[0].dialogs.remove(1);
-    c.b_legs[0].dialogs = vec![winner];
+    adopt_confirmed_dialog(&mut c.b_legs[0], "f2");
+    for d in c.b_legs[0].dialogs.iter_mut() {
+        d.state = if d.peer_tag == "f2" {
+            call::DialogState::Confirmed
+        } else {
+            call::DialogState::Retired(Default::default())
+        };
+    }
     c.b_legs[0].state = LegState::Confirmed;
     assert!(c.b_legs[0].sdp_session.has_restated, "the confirmed leg keeps the call's fact");
     send(

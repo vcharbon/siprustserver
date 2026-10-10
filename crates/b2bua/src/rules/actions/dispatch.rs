@@ -7,7 +7,7 @@ use call::helpers::{
     add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request,
     set_leg_disposition, set_leg_state, split_leg,
 };
-use call::{Call, CdrEvent, TagMapping};
+use call::{Call, CdrEvent};
 
 use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
 use crate::rules::relay;
@@ -28,9 +28,9 @@ impl ActionExecutor<'_> {
     ) {
         match action {
             RuleAction::RelayToPeer { transform } => {
-                let (peer, target_to_tag) = resolve_peer(call, ctx);
+                let (peer, target_dialog) = resolve_peer(call, ctx);
                 if let Some(peer) = peer {
-                    self.relay_to(call, fx, ctx, &peer, transform, target_to_tag);
+                    self.relay_to(call, fx, ctx, &peer, transform, target_dialog);
                 }
             }
             RuleAction::RelayToLeg { leg_id, transform } => {
@@ -76,16 +76,6 @@ impl ActionExecutor<'_> {
                 if let Some(d) = disposition {
                     *call = set_leg_disposition(call.clone(), leg_id, *d);
                 }
-            }
-            RuleAction::AddTagMapping { a_tag, b_leg_id, b_tag } => {
-                super::dialog_track::map_a_face(
-                    call,
-                    TagMapping {
-                        a_tag: a_tag.clone(),
-                        b_leg_id: b_leg_id.clone(),
-                        b_tag: b_tag.clone(),
-                    },
-                );
             }
             RuleAction::MapUnshownDialog { b_leg_id, b_tag } => {
                 self.map_unshown_dialog(call, b_leg_id, b_tag);
@@ -163,7 +153,7 @@ impl ActionExecutor<'_> {
                 self.begin_termination(call, fx, ctx, reason.as_deref(), (*cause, by_leg.clone()));
             }
             RuleAction::TerminateLeg { leg_id, bye_disposition } => {
-                self.terminate_leg(call, fx, leg_id, *bye_disposition);
+                self.terminate_leg(call, fx, ctx, leg_id, *bye_disposition);
             }
             RuleAction::AddCdrEvent { event_type, leg_id, status_code, reason } => {
                 *call = add_cdr_event(
@@ -463,14 +453,14 @@ impl ActionExecutor<'_> {
         ctx: &RuleContext,
         target_leg: &str,
         transform: &MessageTransform,
-        target_to_tag: Option<String>,
+        target_dialog: Option<call::DialogId>,
     ) {
         if let Some(resp) = ctx.response() {
             self.relay_response(call, fx, ctx, target_leg, transform, resp);
             return;
         }
         if let Some(req) = ctx.request() {
-            self.relay_request(call, fx, ctx, target_leg, req, target_to_tag);
+            self.relay_request(call, fx, ctx, target_leg, req, target_dialog);
         }
     }
 }

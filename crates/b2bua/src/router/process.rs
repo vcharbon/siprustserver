@@ -174,7 +174,9 @@ pub(super) async fn process(
         // no INVITE for it; the re-offer above was the seeded INVITE's chance.
         // Otherwise RFC 3261 §9.2: 481, and no effect on the call. The rules
         // never see a CANCEL request.
-        let own_tag = call::helpers::b2bua_tag(&call, &res.source_leg_id);
+        let own_tag = call::helpers::find_leg(&call, &res.source_leg_id)
+            .and_then(call::helpers::leg_own_tag)
+            .map(str::to_string);
         if let Some(answer) =
             reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
         {
@@ -431,7 +433,7 @@ async fn initial_invite_turn(
     // invariant reaps the call + propagates the delete.
     let mut handled = if cancelled {
         crate::initial_invite::cancelled_setup(call.clone(), req.image(), now_ms)
-    } else if call.a_leg.from_tag.is_empty() {
+    } else if call.a_leg_invite.from_tag.is_empty() {
         let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
         crate::initial_invite::reject_call(
             call.clone(),
@@ -626,7 +628,7 @@ async fn refuse_foreign_dialog(
     }
     let tag = req.to().tag()?;
     let tags = call::helpers::RequestTags::new(Some(tag), req.from().tag());
-    let foreign = call::helpers::holds_local_tag(call, &res.source_leg_id, tag) == Some(false)
+    let foreign = holds_our_tag(call, &res.source_leg_id, tag) == Some(false)
         || call::helpers::abandoned_dialog(call, &res.source_leg_id, tags);
     if !foreign {
         return None;
@@ -640,6 +642,24 @@ async fn refuse_foreign_dialog(
     crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
     Some(Some(refusal))
+}
+
+/// Whether `tag` is one this stack put on `leg_id`: the tag of one of its
+/// dialogs the call still holds (a retired one excepted), or the leg's own
+/// ([`call::helpers::leg_own_tag`]). `None` while the leg holds no tag of its
+/// own, so a request's To-tag has nothing to be measured against (RFC 3261
+/// §12.2.2).
+fn holds_our_tag(call: &Call, leg_id: &str, tag: &str) -> Option<bool> {
+    let leg = call::helpers::find_leg(call, leg_id)?;
+    let own: Vec<&str> = leg
+        .dialogs
+        .iter()
+        .filter(|d| d.retired().is_none())
+        .map(|d| d.our_tag.as_str())
+        .chain(call::helpers::leg_own_tag(leg))
+        .filter(|t| !t.is_empty())
+        .collect();
+    (!own.is_empty()).then(|| own.contains(&tag))
 }
 
 /// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a CSeq below the
@@ -800,7 +820,8 @@ pub(super) fn rule_chain_turn(
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
     // A non-2xx INVITE final ends the transaction it answers (RFC 3261
     // §17.1.1.3, hop-ACKed below the TU): the record stops naming that round
-    // as in flight before the rules read it.
+    // as in flight before the rules read it. A final to the INVITE that
+    // dialled the leg ends every early dialog it created (§12.1).
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
             exec.prack_owed_at_final(&mut call, &mut ladder_fx, &res.source_leg_id, resp);
@@ -812,6 +833,12 @@ pub(super) fn rule_chain_turn(
                         branch,
                     );
                 }
+                call = call::helpers::record_dialling_invite_rejected(
+                    call,
+                    &res.source_leg_id,
+                    i64::from(resp.cseq().seq()),
+                    resp.status(),
+                );
             }
         }
     }

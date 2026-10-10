@@ -153,7 +153,7 @@ pub(super) async fn process_result(
     //
     // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
     // carries authoritative state the replica needs — the b-leg `ByeSent`
-    // disposition and its bumped `local_cseq`. Without it an acting-backup
+    // disposition and its bumped `our_cseq`. Without it an acting-backup
     // whose primary crashed never propagates that progress; a reclaim racing
     // the in-flight BYE then pulls a STALE `Active` snapshot, restarts
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops

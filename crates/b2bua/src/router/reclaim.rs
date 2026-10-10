@@ -22,7 +22,7 @@ use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 /// - **Terminated** → discharge as our own through the reaper funnel — one CDR,
 ///   limiter released, the propagated delete evicts the backup's deferred copy.
 /// - **Active** (a re-INVITE/UPDATE the backup re-originated) → fold the new state
-///   in, notably the bumped b-leg `local_cseq`, so OUR next request to the peer
+///   in, notably the bumped b-leg `our_cseq`, so OUR next request to the peer
 ///   continues the dialog monotonically (C11: no CSeq split).
 /// - **Terminating** → transient teardown-in-progress; wait for the Terminated
 ///   flush rather than fold a half-state.
@@ -81,7 +81,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                     discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
                 }
                 // The backup served the call on: an answer, or a re-INVITE/UPDATE
-                // it re-originated (the bumped b-leg `local_cseq`, C11). Fold its
+                // it re-originated (the bumped b-leg `our_cseq`, C11). Fold its
                 // state in and let the timer service follow the folded ledger. No
                 // discharge — the call continues.
                 CallModelState::Active => {

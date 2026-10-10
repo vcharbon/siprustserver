@@ -7,6 +7,7 @@
 //! - `dispatch` — the `RuleAction` → handler table (+ inline state mutations)
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
+//! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `originate` — requests the B2BUA sends itself (CreateLeg, re-INVITE,
 //!   NOTIFY, PRACK, in-dialog probes)
 //! - `respond` — response synthesis toward a leg (finals, provisionals)
@@ -16,6 +17,7 @@
 //! - `select` — shared leg/dialog selection views
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
+mod dialog_end;
 mod dialog_track;
 mod dispatch;
 mod ladder;

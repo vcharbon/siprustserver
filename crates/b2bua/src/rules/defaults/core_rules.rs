@@ -113,8 +113,7 @@ fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> +
 fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
     std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()).find_map(|leg| {
         leg.dialogs.iter().find_map(|d| {
-            d.ext
-                .inbound_pending_requests
+            d.inbound_pending_requests
                 .iter()
                 .find(|p| {
                     p.method.eq_ignore_ascii_case("INVITE")
@@ -374,9 +373,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // In-dialog UPDATE while the peer side is NOT in a relayable state:
         // no peer leg, the peer leg terminated by a failure whose
-        // `/call/failure` reroute is still pending, or a replacement leg whose
-        // dialog has no remote tag yet. `relay-update` would either be silently
-        // dropped by the relay machinery (tag-less target dialog) or fired into
+        // `/call/failure` reroute is still pending, or a replacement leg that
+        // holds no dialog yet. `relay-update` would either be silently
+        // dropped by the relay machinery (no target dialog) or fired into
         // a dead dialog, leaving the requester to time out. Answer **491
         // Request Pending** locally instead (RFC 5407 §3.1 glare treatment —
         // the spec-expected "retry later" during a pending failover; the
@@ -385,7 +384,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // executor uses — and is part of the rule vocabulary, so a
         // SERVICE_LAYER rule can out-rank this CORE default and own the policy
         // (park, alternate code, …). A legitimate early-dialog UPDATE
-        // (RFC 3311 §5.1 — peer early WITH a remote tag) stays relayable and
+        // (RFC 3311 §5.1 — an early peer dialog) stays relayable and
         // never matches here.
         rule(
             "update-peer-unavailable",
@@ -500,16 +499,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .status_class(2)
                 .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(|ctx| {
-                    let Some(d) = ctx.source_dialog() else { return false };
+                    let Some(d) = ctx.dialog() else { return false };
                     let Some(resp) = ctx.response() else { return false };
-                    d.ext.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
+                    d.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg { leg_id: ctx.source_leg_id.to_string(), body: None }])
             },
         ),
         // RFC 3261 §13.2.2.4 — a fork STRAGGLER's 2xx: a 2xx to the INVITE a
-        // b-leg sent, under a To-tag no dialog of that leg carries, once another
+        // b-leg sent, under a To-tag no live dialog of that leg carries, once another
         // fork confirmed the leg. The UAC ACKs every 2xx and BYEs a dialog it
         // does not want; the call keeps the winner. A repeat is re-ACKed alone.
         rule(
@@ -1107,7 +1106,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // and `relay-non-invite-200` forwards the 200 to the peer.
             Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
                 let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.source_dialog(), cseq) {
+                match (ctx.dialog(), cseq) {
                     (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
                     _ => true,
                 }
@@ -1129,7 +1128,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // forwards the 200 back to the requester. Mirrors `absorb-options-200`.
             Match::response().method("NOTIFY").status_class(2).filter(|ctx| {
                 let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
-                match (ctx.source_dialog(), cseq) {
+                match (ctx.dialog(), cseq) {
                     (Some(d), Some(seq)) => call::helpers::find_pending_request(d, seq).is_none(),
                     _ => true,
                 }
@@ -1145,9 +1144,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "absorb-straggler-release-final",
             &[],
             Match::response().method("BYE").filter(|ctx| {
-                let tag = ctx.response().and_then(|r| r.to().tag()).unwrap_or_default();
-                ctx.source_leg()
-                    .is_some_and(|l| crate::rules::fork_straggler::Book::of(l).releases(tag))
+                ctx.dialog().and_then(|d| d.retired()).is_some_and(|r| r.release.is_some())
             }),
             |_ctx| ok(vec![]),
         )
@@ -1158,7 +1155,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             Match::timeout().filter(|ctx| {
                 let branch = ctx.timeout_branch().unwrap_or_default();
                 ctx.source_leg().is_some_and(|l| {
-                    crate::rules::fork_straggler::Book::of(l).owns_bye_branch(branch)
+                    l.dialogs
+                        .iter()
+                        .filter_map(|d| d.retired())
+                        .any(|r| r.release.as_ref().is_some_and(|rel| rel.bye_branch == branch))
                 })
             }),
             |_ctx| ok(vec![]),
@@ -1314,8 +1314,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(|ctx| {
                     let a = ctx.call.a_leg();
-                    a.invite_final_sent.is_none()
-                        && a.dialogs.first().is_some_and(|d| !d.sip.local_tag.is_empty())
+                    a.invite_final_sent.is_none() && ctx.dialog().is_some()
                 }),
             |ctx| {
                 let a = ctx.source_leg_id.to_string();
@@ -2161,20 +2160,21 @@ fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
     })
 }
 
-/// Whether the current response is a fork straggler's 2xx on its b-leg: a To-tag
-/// no dialog of the leg carries, on a leg a confirmed dialog holds, answering an
-/// INVITE no later than the one that dialog's ACK acknowledges (every fork of
-/// one INVITE answers on its CSeq, RFC 3261 §12.1.2).
+/// Whether the current response is a fork straggler's 2xx on its b-leg: a
+/// To-tag naming no dialog of the leg, or a retired one, on a leg a 2xx
+/// established, answering an INVITE no later than the one the established
+/// dialog's ACK acknowledges (every fork of one INVITE answers on its CSeq,
+/// RFC 3261 §12.1.2).
 fn fork_straggler(ctx: &RuleContext) -> bool {
     let Some(resp) = ctx.response() else { return false };
-    let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) else { return false };
+    if resp.to().tag().is_none_or(str::is_empty) {
+        return false;
+    }
     let Some(leg) = ctx.call.b_legs().iter().find(|l| l.leg_id == ctx.source_leg_id) else {
         return false;
     };
-    let Some(confirmed) = leg.dialogs.first().filter(|d| !d.sip.remote_tag.is_empty()) else {
-        return false;
-    };
-    !leg.dialogs.iter().any(|d| d.sip.remote_tag == tag)
-        && crate::rules::relay::acked_invite_cseq(confirmed)
+    let Some(established) = leg.dialogs.established() else { return false };
+    ctx.dialog().is_none_or(|d| d.retired().is_some())
+        && crate::rules::relay::acked_invite_cseq(established)
             .is_some_and(|acked| resp.cseq().seq() <= acked)
 }

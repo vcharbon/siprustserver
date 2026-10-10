@@ -46,17 +46,14 @@ pub fn ack_b_leg(
     extra_headers: Vec<SipHeader>,
     provenance: Provenance,
 ) -> Option<(OutboundSipEffect, String)> {
-    let dialog = leg.dialogs.first()?;
     // A leg with no 2xx in hand cannot be ACKed — the ACK would acknowledge a
-    // final response that does not exist — and a tag-less dialog cannot form the
-    // in-dialog request (§12.2.1.1): refuse rather than mint a branch toward a
-    // provisional Contact. Same defensive shape as `relay_request`'s tag guard.
-    if !matches!(leg.state, LegState::Confirmed | LegState::Terminated)
-        || dialog.sip.remote_tag.is_empty()
-    {
+    // final response that does not exist: refuse rather than mint a branch
+    // toward a provisional Contact.
+    if !matches!(leg.state, LegState::Confirmed | LegState::Terminated) {
         return None;
     }
-    let gen_dialog = to_gen_dialog(&dialog.sip);
+    let dialog = leg.dialogs.established()?;
+    let gen_dialog = to_gen_dialog(leg, dialog);
     // RFC 3261 §13.2.2.4: the ACK for a 2xx is a UAC-core retransmit target. The
     // answerer re-sends its 2xx end-to-end until ACKed (up to its Timer H ≈ 32 s),
     // so a retransmitted 2xx MUST be re-ACKed reusing the SAME Via branch — a
@@ -66,12 +63,12 @@ pub fn ack_b_leg(
     // armed (`confirm_dialog`), else mint one here. `ack_branch` is reset wherever
     // a new INVITE transaction is cached on the dialog, so a `Some(_)` here always
     // belongs to the CSeq echoed just below.
-    let branch = dialog.ext.ack_branch.clone().unwrap_or_else(|| id_gen.new_branch());
+    let branch = dialog.ack_branch.clone().unwrap_or_else(|| id_gen.new_branch());
     // The ACK reuses the CSeq of the INVITE it acknowledges — not the dialog's
-    // running `local_cseq`, which an intervening early PRACK/UPDATE (or a later
+    // running `our_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the cached
     // INVITE transaction handle.
-    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.sip.local_cseq.max(0) as u32);
+    let ack_cseq = acked_invite_cseq(dialog).unwrap_or_else(|| dialog.our_cseq.max(0) as u32);
     let opts = GenerateAckFor2xxOpts {
         via: Some(leg_via(config, marks, &leg.leg_id, branch.clone())),
         cseq: Some(ack_cseq),
@@ -81,7 +78,7 @@ pub fn ack_b_leg(
         ..Default::default()
     };
     let ack = generators::generate_ack_for_2xx(None, &gen_dialog, &opts);
-    let dest = target_dest(&dialog.sip.remote_target);
+    let dest = target_dest(&dialog.remote_target);
     let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
     Some((
         OutboundSipEffect {
@@ -115,7 +112,7 @@ pub(crate) fn acked_invite_carries_offer(dialog: &Dialog) -> bool {
 /// The INVITE last sent on this dialog, re-parsed from its cached
 /// client-transaction handle.
 pub(crate) fn acked_invite(dialog: &Dialog) -> Option<sip_message::SipRequest> {
-    parse_request(&dialog.ext.pending_invite_txn.as_ref()?.original_invite)
+    parse_request(&dialog.pending_invite_txn.as_ref()?.original_invite)
 }
 
 /// A request re-parsed from the bytes a client-transaction handle caches it as.

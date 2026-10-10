@@ -13,7 +13,7 @@
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
 
-use call::helpers::{confirmed_dialog, find_leg, find_pending_request, record_message};
+use call::helpers::{find_leg, find_pending_request, record_message};
 use call::{Call, MessageDirection, MessageEntry, Obligation};
 use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
@@ -266,8 +266,8 @@ fn repeated(
                 })
         }
         SipMessage::Response(resp) => {
-            confirmed_dialog(leg)
-                .or_else(|| leg.dialogs.first())
+            leg.dialogs
+                .of_response(resp.to().tag(), resp.from().tag())
                 .is_some_and(|d| crate::rules::relay::retransmitted_2xx(d, resp))
                 || crate::rules::relay::repeated_reliable_provisional(call, leg_id, resp)
         }
@@ -275,7 +275,7 @@ fn repeated(
 }
 
 /// Whether `message` answers the liveness probe this stack sent on `leg_id`:
-/// a response to an OPTIONS no pending relay on the leg's dialog accounts
+/// a response to an OPTIONS no pending relay on the dialog it names accounts
 /// for — the reading the keepalive absorbs by. A relayed OPTIONS leaves a
 /// pending request, so its answer is dialog history and is recorded.
 fn probe_answer(call: &Call, leg_id: &str, message: &SipMessage) -> bool {
@@ -285,6 +285,6 @@ fn probe_answer(call: &Call, leg_id: &str, message: &SipMessage) -> bool {
     }
     let cseq = i64::from(resp.cseq().seq());
     find_leg(call, leg_id)
-        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()))
+        .and_then(|leg| leg.dialogs.of_response(resp.to().tag(), resp.from().tag()))
         .is_none_or(|d| find_pending_request(d, cseq).is_none())
 }

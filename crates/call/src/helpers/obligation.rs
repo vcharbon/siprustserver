@@ -83,7 +83,7 @@ fn unacked_2xx(call: &Call) -> Vec<Obligation> {
         .chain(call.b_legs.iter())
         .flat_map(|leg| {
             leg.dialogs.iter().flat_map(move |d| {
-                d.ext.answered_2xx.iter().chain(d.ext.pending_reinvite_2xx.iter()).map(move |u| {
+                d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()).map(move |u| {
                     Obligation::AckOf2xx {
                         leg: leg.leg_id.clone(),
                         dialog_tag: u.dialog_tag.clone(),
@@ -115,10 +115,7 @@ pub fn answers_initial_invite(call: &Call, obligation: &Obligation) -> bool {
     };
     *leg == call.a_leg.leg_id
         && call.a_leg.dialogs.iter().any(|d| {
-            d.ext
-                .answered_2xx
-                .as_ref()
-                .is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
+            d.answered_2xx.as_ref().is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
         })
 }
 
@@ -171,11 +168,11 @@ pub fn clear_retained(mut call: Call, obligation: &Obligation) -> Call {
                 .filter(|l| l.leg_id == *leg)
                 .flat_map(|l| l.dialogs.iter_mut())
             {
-                if matches(&d.ext.answered_2xx) {
-                    d.ext.answered_2xx = None;
+                if matches(&d.answered_2xx) {
+                    d.answered_2xx = None;
                 }
-                if matches(&d.ext.pending_reinvite_2xx) {
-                    d.ext.pending_reinvite_2xx = None;
+                if matches(&d.pending_reinvite_2xx) {
+                    d.pending_reinvite_2xx = None;
                 }
             }
             call
@@ -194,7 +191,7 @@ fn unacked_2xx_slot<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a U
     crate::helpers::find_leg(call, leg)?
         .dialogs
         .iter()
-        .flat_map(|d| d.ext.answered_2xx.iter().chain(d.ext.pending_reinvite_2xx.iter()))
+        .flat_map(|d| d.answered_2xx.iter().chain(d.pending_reinvite_2xx.iter()))
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
@@ -210,7 +207,7 @@ fn unacked_2xx_slot_mut<'a>(
         .find(|l| l.leg_id == *leg)?
         .dialogs
         .iter_mut()
-        .flat_map(|d| d.ext.answered_2xx.iter_mut().chain(d.ext.pending_reinvite_2xx.iter_mut()))
+        .flat_map(|d| d.answered_2xx.iter_mut().chain(d.pending_reinvite_2xx.iter_mut()))
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
@@ -221,7 +218,7 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
         restate_leg_invite(leg, was, now);
         for dialog in &mut leg.dialogs {
-            let ext = &mut dialog.ext;
+            let ext = dialog;
             for unacked in
                 [ext.answered_2xx.as_mut(), ext.pending_reinvite_2xx.as_mut()].into_iter().flatten()
             {
@@ -245,7 +242,7 @@ pub fn restate_leg_invite(leg: &mut crate::model::Leg, was: &[u8], now: &[u8]) {
     let handles = leg
         .pending_invite_txn
         .iter_mut()
-        .chain(leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()));
+        .chain(leg.dialogs.iter_mut().filter_map(|d| d.pending_invite_txn.as_mut()));
     for handle in handles {
         if handle.original_invite == was {
             handle.original_invite = now.to_vec();

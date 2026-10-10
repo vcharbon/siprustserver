@@ -6,8 +6,10 @@
 //! holds only the replica reads the replicated one and binds the leg once the
 //! takeover copy is in hand.
 
-use call::helpers::{make_empty_dialog, MakeDialogLegCtx};
-use call::{call_index_keys, Call, CallBodyCodec, Direction, KeyKind, MsgpackCodec};
+use call::{
+    call_index_keys, Call, CallBodyCodec, Dialog, DialogState, Direction, KeyKind, MsgpackCodec,
+    OutboundInvite,
+};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -32,17 +34,8 @@ fn answered_call(pri: &str, bak: &str, cid: &str) -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = B_CALL_ID.into();
-    b.from_tag = B_LOCAL_TAG.into();
-    b.dialogs = vec![make_empty_dialog(
-        &MakeDialogLegCtx {
-            call_id: B_CALL_ID,
-            local_uri: "sip:alice@example.com",
-            remote_uri: "sip:bob@example.com",
-            local_tag: B_LOCAL_TAG,
-            remote_tag: BOB_TAG,
-        },
-        1,
-    )];
+    b.outbound_invite = Some(OutboundInvite { our_tag: B_LOCAL_TAG.into(), cseq: 1 });
+    b.dialogs = vec![Dialog::new(B_LOCAL_TAG, BOB_TAG, DialogState::Confirmed, 1)].into();
     call::helpers::add_b_leg(call, b)
 }
 

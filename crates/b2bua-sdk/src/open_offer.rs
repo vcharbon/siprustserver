@@ -39,7 +39,7 @@ pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<
 
 /// The re-INVITE relayed onto `dialog` still awaiting its final.
 fn pending_invite(dialog: &Dialog) -> Option<&PendingRequest> {
-    dialog.ext.inbound_pending_requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    dialog.inbound_pending_requests.iter().find(|p| p.method.eq_ignore_ascii_case("INVITE"))
 }
 
 /// A relayed re-INVITE: its offer is the sender's until answered, this stack's
@@ -71,7 +71,7 @@ fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<Op
     }
     let (leg, dialog) = peer?;
     let pending = matches!(leg.state, LegState::Trying | LegState::Early);
-    (pending && !responder_answered(call, &leg.leg_id, &dialog.sip.remote_tag, None))
+    (pending && !responder_answered(call, &leg.leg_id, &dialog.peer_tag, None))
         .then_some(OpenOffer::Stack)
 }
 

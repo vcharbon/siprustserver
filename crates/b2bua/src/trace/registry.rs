@@ -172,8 +172,8 @@ pub struct RoundTripSide<'a> {
 pub fn call_identity(call: &call::Call) -> CallIdentity<'_> {
     CallIdentity {
         call_id: &call.a_leg.call_id,
-        from_tag: &call.a_leg.from_tag,
-        to_tag: call.a_leg.dialogs.first().map(|d| d.sip.local_tag.as_str()).unwrap_or(""),
+        from_tag: &call.a_leg_invite.from_tag,
+        to_tag: call.a_leg.own_tag.as_deref().unwrap_or(""),
     }
 }
 

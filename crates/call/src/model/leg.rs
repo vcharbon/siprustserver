@@ -4,9 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::dialog::Dialog;
+use super::dialogs::Dialogs;
 use super::invite_txn::InviteTxnHandle;
 use super::message_ring::MessageRing;
+use super::outbound_invite::OutboundInvite;
 use super::sdp_session::LegSdpSession;
 use super::services::ExtMap;
 
@@ -86,23 +87,32 @@ pub enum LegKind {
 pub struct Leg {
     pub leg_id: String,
     pub call_id: String,
-    pub from_tag: String,
     pub source: RemoteInfo,
     pub state: LegState,
     pub disposition: LegDisposition,
-    /// Multiple during early state (forking); one survives after confirmed.
-    pub dialogs: Vec<Dialog>,
+    /// The leg's dialogs in every state: several while early (forking), one
+    /// confirmed at most.
+    pub dialogs: Dialogs,
     pub no_answer_timeout_sec: Option<i64>,
     /// How this leg was torn down. `None` while the call is active.
     pub bye_disposition: Option<ByeDisposition>,
-    /// B2BUA's local address on this leg (From for outbound requests), as the
-    /// leg's dialog keeps it ([`crate::StackDialog::local_uri`]).
+    /// B2BUA's local address on this leg (§12.1.1's local URI) as the
+    /// dialog-creating INVITE stated it, display name included, tag excluded:
+    /// the From of every request this side sends in the leg's dialogs.
     pub local_uri: Option<String>,
-    /// Remote party's address on this leg (To for outbound requests), in the
-    /// same form.
+    /// Remote party's address on this leg, in the same form: the To of every
+    /// such request.
     pub remote_uri: Option<String>,
     /// Request-URI of the outbound INVITE — needed for CANCEL (§9.1).
     pub invite_request_uri: Option<String>,
+    /// The dialog-creating INVITE this stack sent on the leg; `None` on a leg
+    /// whose INVITE it received.
+    pub outbound_invite: Option<OutboundInvite>,
+    /// On a leg whose INVITE this stack received: the tag of the dialog this
+    /// stack answers that INVITE under where no callee dialog names one —
+    /// set with the leg's first dialog, moved to the dialog a 2xx confirms
+    /// (RFC 3261 §8.2.6.2). `None` until the leg holds a dialog.
+    pub own_tag: Option<String>,
     /// In-flight initial-INVITE client transaction handle on this leg.
     pub pending_invite_txn: Option<InviteTxnHandle>,
     /// Per-service opaque extension slot (ADR-0016).

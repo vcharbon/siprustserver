@@ -8,7 +8,8 @@ use crate::common;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use call::{
-    CallBodyCodec, CallDecodeError, LegKind, MachineId, MsgpackCodec, PolicyUpdateBody, StateLabel,
+    CallBodyCodec, CallDecodeError, DialogState, LegKind, MachineId, MsgpackCodec,
+    PolicyUpdateBody, StateLabel,
 };
 use common::{arb_call, paced_emission, representative_call};
 use proptest::prelude::*;
@@ -233,18 +234,19 @@ fn the_invite_final_sent_fact_round_trips() {
 fn every_caller_facing_early_dialog_survives_a_takeover_copy() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
-    let mut second = call.a_leg.dialogs[0].clone();
-    second.sip.local_tag = "second-face".into();
-    second.sip.local_cseq = 3;
-    second.ext.remote_cseq = Some(2);
-    call.a_leg.dialogs.push(second);
+    let mut second = call.a_leg.dialogs.confirmed().expect("the answered dialog").clone();
+    second.our_tag = "second-face".into();
+    second.state = DialogState::Early;
+    second.our_cseq = 3;
+    second.peer_cseq = Some(2);
+    call.a_leg.dialogs.insert(second);
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call);
     let faces: Vec<_> = decoded
         .a_leg
         .dialogs
         .iter()
-        .map(|d| (d.sip.local_tag.as_str(), d.sip.local_cseq, d.ext.remote_cseq))
+        .map(|d| (d.our_tag.as_str(), d.our_cseq, d.peer_cseq))
         .collect();
     assert_eq!(faces.len(), 2);
     assert_eq!(faces[1], ("second-face", 3, Some(2)));
@@ -262,7 +264,7 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter_mut()
         .flat_map(|leg| leg.dialogs.iter_mut())
-        .flat_map(|d| d.ext.inbound_pending_requests.iter_mut())
+        .flat_map(|d| d.inbound_pending_requests.iter_mut())
         .next()
         .expect("the representative call holds a pending request");
     pending.source_timestamp = Some("54.2".into());
@@ -272,7 +274,7 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
         .b_legs
         .iter()
         .flat_map(|leg| leg.dialogs.iter())
-        .flat_map(|d| d.ext.inbound_pending_requests.iter())
+        .flat_map(|d| d.inbound_pending_requests.iter())
         .find_map(|p| p.source_timestamp.clone());
     assert_eq!(echoed.as_deref(), Some("54.2"));
 }
@@ -357,15 +359,15 @@ fn the_retained_emitted_ack_round_trips() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
-        d.ext.emitted_ack = None;
+    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
+        d.emitted_ack = None;
     }
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
 
     let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
-    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
-        d.ext.emitted_ack = Some(RetainedEmission::on_trigger(
+    if let Some(d) = call.b_legs[0].dialogs.confirmed_mut() {
+        d.emitted_ack = Some(RetainedEmission::on_trigger(
             datagram.to_vec(),
             ("10.0.0.7".into(), 5060),
             call::Repeated::request("ACK"),
@@ -373,7 +375,7 @@ fn the_retained_emitted_ack_round_trips() {
     }
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "the retained ACK survives byte-exact");
-    let ack = decoded.b_legs[0].dialogs[0].ext.emitted_ack.as_ref().unwrap();
+    let ack = decoded.b_legs[0].dialogs.confirmed().unwrap().emitted_ack.as_ref().unwrap();
     assert_eq!(
         ack.wire(),
         (&datagram[..], ("10.0.0.7", 5060)),
@@ -400,13 +402,19 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
 
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let answered =
-        call.a_leg.dialogs[0].ext.answered_2xx.as_ref().expect("the fixture answered the caller");
+    let answered = call
+        .a_leg
+        .dialogs
+        .confirmed()
+        .unwrap()
+        .answered_2xx
+        .as_ref()
+        .expect("the fixture answered");
     assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
 
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
-    let restored = decoded.a_leg.dialogs[0].ext.answered_2xx.as_ref().unwrap();
+    let restored = decoded.a_leg.dialogs.confirmed().unwrap().answered_2xx.as_ref().unwrap();
     assert_eq!(
         (restored.dialog_tag.as_str(), restored.cseq),
         ("b2bua-to-tag-aleg-9876", 1),

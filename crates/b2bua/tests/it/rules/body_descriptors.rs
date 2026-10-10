@@ -34,23 +34,11 @@ fn described() -> Body {
 fn bridged() -> call::Call {
     let mut call = test_call();
     call.a_leg.state = LegState::Confirmed;
-    call.a_leg.dialogs = vec![Dialog {
-        sip: StackDialog {
-            call_id: call.a_leg.call_id.clone(),
-            local_tag: "a-svc".into(),
-            remote_tag: call.a_leg.from_tag.clone(),
-            local_uri: "sip:svc@10.0.0.9".into(),
-            remote_uri: "sip:alice@host".into(),
-            remote_target: "sip:alice@127.0.0.1:5060".into(),
-            local_cseq: 1,
-            route_set: vec![],
-        },
-        ext: b_leg_pending().dialogs[0].ext.clone(),
-    }];
+    call.a_leg.dialogs = vec![a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
+    call.a_leg.own_tag = Some("a-svc".into());
     let mut leg = b_leg_pending();
     leg.state = LegState::Confirmed;
-    leg.dialogs[0].sip.remote_tag = "b-tag".into();
-    leg.dialogs[0].ext.pending_invite_txn = Some(InviteTxnHandle {
+    with_dialog(&mut leg, "b-tag").pending_invite_txn = Some(InviteTxnHandle {
         branch: "z9hG4bKb1".into(),
         original_invite: invite().image().to_vec(),
         destination: HostPort { host: "10.0.0.2".into(), port: 5070 },

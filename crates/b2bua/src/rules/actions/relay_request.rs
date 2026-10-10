@@ -4,10 +4,9 @@
 //! [`super::relay_response`].
 
 use call::helpers::{
-    add_pending_request, bump_local_cseq, find_b_leg, leg_kind, relay_cseq_delta,
-    update_remote_cseq,
+    add_pending_request, bump_our_cseq, find_b_leg, leg_kind, relay_cseq_delta, set_peer_cseq,
 };
-use call::{ByeDisposition, Call, PendingRequest, RetainedEmission};
+use call::{ByeDisposition, Call, DialogId, PendingRequest, RetainedEmission};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
 };
@@ -23,9 +22,7 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
 
-use super::select::{
-    dialog_identity_tag, in_dialog_method, invite_cseq_from_handle, leg_at, leg_index,
-};
+use super::select::{in_dialog_method, invite_cseq_from_handle, leg_at, leg_index};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -46,10 +43,10 @@ impl ActionExecutor<'_> {
         provenance: Provenance,
         author: relay::Author<'_>,
     ) {
-        // The ACK rides the leg's dialog: the one a 2xx confirmed.
+        // The ACK rides the leg's dialog: the one a 2xx established.
         let dialog = call::helpers::find_leg(call, leg_id)
-            .and_then(|l| l.dialogs.first())
-            .map(|d| d.sip.remote_tag.clone());
+            .and_then(|l| l.dialogs.established())
+            .map(|d| d.peer_tag.clone());
         let body = relay::continue_on_leg(
             call,
             leg_id,
@@ -73,7 +70,7 @@ impl ActionExecutor<'_> {
         // first emission and composes below.
         if body.is_empty() {
             if let Some(retained) =
-                leg.and_then(|l| l.dialogs.first()).and_then(|d| d.ext.emitted_ack.as_ref())
+                leg.and_then(|l| l.dialogs.established()).and_then(|d| d.emitted_ack.as_ref())
             {
                 fx.outbound.push(super::ladder::repeat_of(
                     retained,
@@ -191,7 +188,7 @@ impl ActionExecutor<'_> {
         ctx: &RuleContext,
         target_leg: &str,
         req: &sip_message::SipRequest,
-        target_to_tag: Option<String>,
+        target_dialog: Option<DialogId>,
     ) {
         // ACK for 2xx: reuse the INVITE CSeq (no dialog-sequence advance,
         // §13.2.2.4) — delegate to the dedicated builder, carrying the inbound
@@ -211,8 +208,8 @@ impl ActionExecutor<'_> {
         if req.method() == Method::Ack {
             let owed = leg_index(call, target_leg)
                 .map(|i| leg_at(call, i))
-                .and_then(|leg| leg.dialogs.first())
-                .is_some_and(|d| d.ext.awaited_ack_cseq == Some(req.cseq().seq() as i64));
+                .and_then(|leg| leg.dialogs.established())
+                .is_some_and(|d| d.awaited_ack_cseq == Some(req.cseq().seq() as i64));
             if !owed {
                 return;
             }
@@ -276,47 +273,41 @@ impl ActionExecutor<'_> {
         let Some(t_idx) = leg_index(call, target_leg) else {
             return;
         };
-        // Forking: pick the early dialog by its identity tag — the callee fork
-        // toward a b-leg, the caller-facing dialog toward the a-leg (RFC 3261
-        // §12.2.1.1: each early dialog is independent); else the first/only one.
+        // Forking: the dialog the resolver named — the callee fork toward a
+        // b-leg, the caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1:
+        // each early dialog is independent); else the one the leg's requests
+        // ride (`Dialogs::carrying`). A leg holding none has no dialog to carry
+        // the request.
         let target_dialog = {
             let leg = leg_at(call, t_idx);
-            let picked = target_to_tag
-                .as_deref()
-                .and_then(|tt| call::helpers::dialog_by_identity(leg, tt))
-                .or_else(|| leg.dialogs.first());
+            let picked = match &target_dialog {
+                Some(id) => leg.dialogs.by_tags(&id.our_tag, &id.peer_tag),
+                None => leg.dialogs.carrying(),
+            };
             match picked {
                 Some(d) => d.clone(),
                 None => return,
             }
         };
-        // A tag-less (mid-confirm / early) target dialog cannot produce a
-        // well-formed in-dialog request — skip rather than panic in `make_request`
-        // and leak the dialog. An X11 takeover/reclaim can surface a replica
-        // dialog captured before its confirming To-tag landed.
-        if target_dialog.sip.remote_tag.is_empty() {
-            return;
-        }
 
-        // ── Per-dialog CSeq (§12.2.1.1): outbound = target.localCSeq + delta,
-        //    delta = relay_cseq_delta(inbound, sourceDialog.remoteCSeq), the
-        //    source dialog being the one the request rides (its From-tag). ──
+        // ── Per-dialog CSeq (§12.2.1.1): outbound = target.ourCSeq + delta,
+        //    delta = relay_cseq_delta(inbound, sourceDialog.peerCSeq), the
+        //    source dialog being the one the request's tags name. ──
         let inbound_cseq = req.cseq().seq() as i64;
         let source_leg_id = ctx.source_leg_id.to_string();
-        let source_dialog = ctx.request_dialog().cloned();
-        let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
+        let source_dialog = ctx.dialog().cloned();
+        let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.peer_cseq);
         let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
         let target_invite_cseq =
-            invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.sip.local_cseq);
-        let outbound_cseq = target_dialog.sip.local_cseq + delta;
+            invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.our_cseq);
+        let outbound_cseq = target_dialog.our_cseq + delta;
 
         // Advance the sequences: source learns the inbound CSeq; target bumps.
         if let Some(sd) = &source_dialog {
-            let s_id = dialog_identity_tag(&source_leg_id, sd);
-            *call = update_remote_cseq(call.clone(), &source_leg_id, &s_id, inbound_cseq);
+            *call = set_peer_cseq(call.clone(), &source_leg_id, &sd.id(), inbound_cseq);
         }
-        let t_id = dialog_identity_tag(target_leg, &target_dialog);
-        *call = bump_local_cseq(call.clone(), target_leg, &t_id, delta);
+        let t_id = target_dialog.id();
+        *call = bump_our_cseq(call.clone(), target_leg, &t_id, delta);
 
         // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
         // *on the target leg* — the CSeq token becomes the target's INVITE CSeq
@@ -353,7 +344,7 @@ impl ActionExecutor<'_> {
         let body = relay::continue_on_leg(
             call,
             target_leg,
-            Some(&target_dialog.sip.remote_tag),
+            Some(&target_dialog.peer_tag),
             relay::Author::Leg(ctx.source_leg_id),
             relay::Carried::of(req.method(), None, true),
             req.body().to_vec(),
@@ -361,7 +352,7 @@ impl ActionExecutor<'_> {
             self.config.sdp_form.as_ref(),
         );
         let branch = self.id_gen.new_branch();
-        let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
+        let gen_dialog = relay::to_gen_dialog(leg_at(call, t_idx), &target_dialog);
         let target_face = capabilities::Face::of_leg(target_leg);
         let (extra_headers, advertised) =
             relayed_request_headers(call, req, target_leg, target_face, self.config, self.now_ms);
@@ -407,7 +398,7 @@ impl ActionExecutor<'_> {
         // `CreateLeg`/`build_b_leg`.)
         if method == InDialogMethod::Invite {
             *call = call::helpers::update_dialog(call.clone(), target_leg, &t_id, |d| {
-                d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
+                d.pending_invite_txn = Some(call::InviteTxnHandle {
                     branch: branch.clone(),
                     original_invite: out_req.image().to_vec(),
                     destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
@@ -418,9 +409,9 @@ impl ActionExecutor<'_> {
                 // never be re-ACKed with the PREVIOUS transaction's answer.
                 // Any stale relay-ACK obligation dies with it — this 2xx arms
                 // its own (`relay_response`).
-                d.ext.ack_branch = None;
-                d.ext.emitted_ack = None;
-                d.ext.awaited_ack_cseq = None;
+                d.ack_branch = None;
+                d.emitted_ack = None;
+                d.awaited_ack_cseq = None;
             });
         }
 

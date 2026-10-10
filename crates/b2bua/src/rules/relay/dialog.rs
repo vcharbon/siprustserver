@@ -4,21 +4,22 @@
 //! Decision-supplied address *refusal* does NOT live here — see
 //! [`super::address`] (dialog text was already admitted by the inbound parser).
 
-use call::StackDialog;
+use call::{Dialog, Leg};
 use sip_message::generators;
 use sip_message::header::{HeaderValue, HostPort, NameAddr};
 use sip_message::{SipRequest, SipStr};
 
-/// Convert a `call` dialog to the generators' `StackDialog` input shape.
-pub fn to_gen_dialog(d: &StackDialog) -> generators::StackDialog {
+/// The generators' `StackDialog` input for dialog `d` of `leg`: the Call-ID
+/// and the two addresses are the leg's, the rest the dialog's.
+pub fn to_gen_dialog(leg: &Leg, d: &Dialog) -> generators::StackDialog {
     generators::StackDialog {
-        call_id: d.call_id.clone(),
-        local_tag: d.local_tag.clone(),
-        remote_tag: d.remote_tag.clone(),
-        local_uri: d.local_uri.clone(),
-        remote_uri: d.remote_uri.clone(),
+        call_id: leg.call_id.clone(),
+        local_tag: d.our_tag.clone(),
+        remote_tag: d.peer_tag.clone(),
+        local_uri: leg.local_uri.clone().unwrap_or_default(),
+        remote_uri: leg.remote_uri.clone().unwrap_or_default(),
         remote_target: d.remote_target.clone(),
-        local_cseq: d.local_cseq.max(0) as u32,
+        local_cseq: d.our_cseq.max(0) as u32,
         route_set: d.route_set.clone(),
     }
 }

@@ -56,14 +56,9 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
             sent_by: SentBy::of(invite.top_via()),
             call_id: invite.call_id().as_str().to_string(),
             from_tag: invite.from().tag().unwrap_or_default().to_string(),
-            // The tag every provisional to the caller carried (`ensure_a_dialog`);
+            // The tag the a-leg's own responses carry (`ensure_a_dialog`);
             // none while nothing above a 100 went out.
-            to_tag: call
-                .a_leg
-                .dialogs
-                .first()
-                .map(|d| d.sip.local_tag.clone())
-                .filter(|t| !t.is_empty()),
+            to_tag: call.a_leg.own_tag.clone().filter(|t| !t.is_empty()),
             leg_id: Some(call.a_leg.leg_id.clone()),
             original_request: Some(invite),
         });
@@ -77,15 +72,14 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
             }
         }
         for dialog in &leg.dialogs {
-            if let Some(handle) = &dialog.ext.pending_invite_txn {
+            if let Some(handle) = &dialog.pending_invite_txn {
                 if initial_in_flight || round_open(dialog, handle) {
                     if let Some(seed) = client_seed(handle) {
                         push(seed);
                     }
                 }
             }
-            for pending in dialog.ext.inbound_pending_requests.iter().filter(|p| pending_invite(p))
-            {
+            for pending in dialog.inbound_pending_requests.iter().filter(|p| pending_invite(p)) {
                 if let Some(seed) = relayed_server_seed(call, leg, pending) {
                     push(seed);
                 }
@@ -107,7 +101,7 @@ pub(super) fn names_server_branch(call: &Call, branch: &str) -> bool {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
         .flat_map(|leg| leg.dialogs.iter())
-        .flat_map(|d| d.ext.inbound_pending_requests.iter())
+        .flat_map(|d| d.inbound_pending_requests.iter())
         .filter(|p| pending_invite(p))
         .any(|p| {
             pending_via(p).and_then(|v| v.branch().map(str::to_string)).as_deref() == Some(branch)
@@ -118,14 +112,13 @@ pub(super) fn names_server_branch(call: &Call, branch: &str) -> bool {
 /// no 2xx taken for it, and — for a relayed round — its snapshot not already
 /// CANCELled toward the target.
 fn round_open(dialog: &Dialog, handle: &InviteTxnHandle) -> bool {
-    if dialog.ext.ack_branch.is_some() || dialog.ext.awaited_ack_cseq.is_some() {
+    if dialog.ack_branch.is_some() || dialog.awaited_ack_cseq.is_some() {
         return false;
     }
     let Some(cseq) = parse_request(&handle.original_invite).map(|r| r.cseq().seq() as i64) else {
         return false;
     };
     dialog
-        .ext
         .inbound_pending_requests
         .iter()
         .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
@@ -194,8 +187,8 @@ fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
 mod tests {
     use super::*;
     use call::{
-        B2buaDialogExt, Dialog, Direction, HostPort, LegDisposition, LegKind, RemoteInfo,
-        StackDialog,
+        Dialog, DialogState, Direction, HostPort, LegDisposition, LegKind, OutboundInvite,
+        RemoteInfo,
     };
     use sip_message::generators::{
         generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -279,50 +272,24 @@ mod tests {
         }
     }
 
+    /// The b-leg in `state`: a Trying leg holds no dialog, an Early one the
+    /// fork that rang, a Confirmed one the dialog its 2xx confirmed.
     fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
-        let dialog = Dialog {
-            sip: StackDialog {
-                call_id: "bcid@x".into(),
-                local_tag: "svc".into(),
-                remote_tag: if state == LegState::Confirmed {
-                    "btag".into()
-                } else {
-                    String::new()
-                },
-                local_uri: "sip:svc@10.0.0.9".into(),
-                remote_uri: "sip:bob@10.0.0.2".into(),
-                remote_target: "sip:bob@10.0.0.2:5070".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: B2buaDialogExt {
-                remote_cseq: None,
-                inbound_pending_requests: vec![],
-                ack_branch: (state == LegState::Confirmed).then(|| "z9hG4bK-ack".to_string()),
-                pending_invite_txn: handle.clone(),
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: None,
-                emitted_ack: None,
-                sdp_session: None,
-                awaited_ack_cseq: None,
-                shown: false,
-            },
-        };
-        Leg {
+        let mut leg = Leg {
             leg_id: "b-1".into(),
             call_id: "bcid@x".into(),
-            from_tag: "svc".into(),
             source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
             state,
             disposition: LegDisposition::Pending,
-            dialogs: vec![dialog],
+            dialogs: Default::default(),
             no_answer_timeout_sec: None,
             bye_disposition: None,
             local_uri: Some("sip:svc@10.0.0.9".into()),
             remote_uri: Some("sip:bob@10.0.0.2".into()),
             invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-            pending_invite_txn: handle,
+            outbound_invite: Some(OutboundInvite { our_tag: "svc".into(), cseq: 1 }),
+            own_tag: None,
+            pending_invite_txn: handle.clone(),
             ext: None,
             kind: Some(LegKind::Destination),
             adopted: None,
@@ -331,7 +298,18 @@ mod tests {
             in_session_timer: None,
             messages: Default::default(),
             sdp_session: Default::default(),
-        }
+        };
+        let dialog_state = match state {
+            LegState::Confirmed => DialogState::Confirmed,
+            LegState::Early => DialogState::Early,
+            LegState::Trying | LegState::Terminated => return leg,
+        };
+        let mut dialog = Dialog::new("svc", "btag", dialog_state, 1);
+        dialog.remote_target = "sip:bob@10.0.0.2:5070".into();
+        dialog.ack_branch = (state == LegState::Confirmed).then(|| "z9hG4bK-ack".to_string());
+        dialog.pending_invite_txn = handle;
+        leg.dialogs.insert(dialog);
+        leg
     }
 
     /// The caller's relayed re-INVITE, pending on the b-leg dialog under
@@ -373,31 +351,15 @@ mod tests {
 
     /// The a-leg dialog the first provisional to the caller pinned under `tag`.
     fn ring_a_leg(call: &mut Call, tag: &str) {
-        call.a_leg.dialogs.push(Dialog {
-            sip: StackDialog {
-                call_id: "acid@alice".into(),
-                local_tag: tag.into(),
-                remote_tag: "atag".into(),
-                local_uri: "sip:bob@10.0.0.9".into(),
-                remote_uri: "sip:alice@10.0.0.1".into(),
-                remote_target: "sip:alice@10.0.0.1:5060".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: B2buaDialogExt {
-                remote_cseq: None,
-                inbound_pending_requests: vec![],
-                ack_branch: None,
-                pending_invite_txn: None,
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: None,
-                emitted_ack: None,
-                sdp_session: None,
-                awaited_ack_cseq: None,
-                shown: false,
-            },
-        });
+        let mut dialog = Dialog::new(tag, "atag", DialogState::Early, 1);
+        dialog.remote_target = "sip:alice@10.0.0.1:5060".into();
+        call.a_leg.dialogs.insert(dialog);
+        call.a_leg.own_tag = Some(tag.into());
+    }
+
+    /// The b-leg's confirmed dialog, to update.
+    fn confirmed(leg: &mut Leg) -> &mut Dialog {
+        leg.dialogs.confirmed_mut().expect("the confirmed dialog")
     }
 
     fn server_branches(seeds: &[TxnSeed]) -> Vec<(String, bool)> {
@@ -491,9 +453,9 @@ mod tests {
     #[test]
     fn a_relayed_reinvite_in_flight_seeds_both_halves_of_the_round() {
         let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-        leg.dialogs[0].ext.pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-        leg.dialogs[0].ext.ack_branch = None;
-        leg.dialogs[0].ext.inbound_pending_requests.push(relayed_reinvite(2, false));
+        confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
+        confirmed(&mut leg).ack_branch = None;
+        confirmed(&mut leg).inbound_pending_requests.push(relayed_reinvite(2, false));
         let call = call_with(LegState::Confirmed, leg);
         let seeds = seeds_for(&call);
         assert_eq!(server_branches(&seeds), vec![(RELAYED_BRANCH.to_string(), false)]);
@@ -519,15 +481,15 @@ mod tests {
     #[test]
     fn a_self_originated_reinvite_in_flight_seeds_its_client_invite() {
         let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-        leg.dialogs[0].ext.pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-        leg.dialogs[0].ext.ack_branch = None;
+        confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
+        confirmed(&mut leg).ack_branch = None;
         let open = call_with(LegState::Confirmed, leg.clone());
         let seeds = seeds_for(&open);
         assert!(server_branches(&seeds).is_empty(), "nothing was relayed, so no server seed");
         assert_eq!(client_branches(&seeds), vec![REINVITE_BRANCH.to_string()]);
 
         let mut answered = leg.clone();
-        answered.dialogs[0].ext.awaited_ack_cseq = Some(2);
+        confirmed(&mut answered).awaited_ack_cseq = Some(2);
         assert!(
             seeds_for(&call_with(LegState::Confirmed, answered)).is_empty(),
             "a 2xx taken closes the round"
@@ -543,7 +505,8 @@ mod tests {
     fn closing_a_round_touches_only_a_confirmed_leg() {
         let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
         let call = call::helpers::close_rejected_invite_round(call, "b-1", B_BRANCH);
-        assert!(call.b_legs[0].dialogs[0].ext.pending_invite_txn.is_some());
+        let fork = call.b_legs[0].dialogs.by_tags("svc", "btag").expect("the fork that rang");
+        assert!(fork.pending_invite_txn.is_some());
     }
 
     /// A relayed re-INVITE already CANCELled has had its finals from the node
@@ -551,9 +514,9 @@ mod tests {
     #[test]
     fn a_cancelled_relayed_reinvite_seeds_nothing() {
         let mut leg = b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1)));
-        leg.dialogs[0].ext.pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
-        leg.dialogs[0].ext.ack_branch = None;
-        leg.dialogs[0].ext.inbound_pending_requests.push(relayed_reinvite(2, true));
+        confirmed(&mut leg).pending_invite_txn = Some(b_handle(REINVITE_BRANCH, 2));
+        confirmed(&mut leg).ack_branch = None;
+        confirmed(&mut leg).inbound_pending_requests.push(relayed_reinvite(2, true));
         assert!(seeds_for(&call_with(LegState::Confirmed, leg)).is_empty());
     }
 

@@ -463,7 +463,7 @@ mod tests {
         let held = leg.pending_invite_txn.as_ref().expect("the leg's INVITE handle");
         assert_eq!(held.original_invite, sent.image().to_vec(), "the handle holds what left");
         for d in &leg.dialogs {
-            if let Some(h) = &d.ext.pending_invite_txn {
+            if let Some(h) = &d.pending_invite_txn {
                 assert_eq!(h.original_invite, sent.image().to_vec());
             }
         }

@@ -13,7 +13,7 @@ use crate::config::B2buaConfig;
 /// the hop the unanswered OPTIONS used — for the per-peer keepalive-timeout metric.
 /// Mirrors `bye_on_dialog`'s destination decision (to_gen_dialog → dest_of →
 /// `relay::leg_egress_dest`) WITHOUT mutating a request. Returns `None` (record
-/// nothing) when the leg or its first dialog can't be resolved — never a fabricated
+/// nothing) when the leg or its confirmed dialog can't be resolved — never a fabricated
 /// address. The returned `(host, port)` may be a hostname (the outbound proxy); the
 /// caller resolves it to a `SocketAddr` before recording.
 pub(super) fn keepalive_timeout_peer(
@@ -28,8 +28,8 @@ pub(super) fn keepalive_timeout_peer(
     } else {
         call.b_legs.iter().find(|l| l.leg_id == leg_id)?
     };
-    let d = leg.dialogs.first()?;
-    let gd = relay::to_gen_dialog(&d.sip);
+    let d = leg.dialogs.confirmed()?;
+    let gd = relay::to_gen_dialog(leg, d);
     let base = relay::target_dest(&gd.remote_target);
     Some(relay::leg_egress_dest(config, leg_id, &gd.route_set, base))
 }
@@ -155,47 +155,27 @@ mod tests {
     }
 
     fn test_dialog(remote_host: &str, remote_port: u16, route_set: &[&str]) -> call::Dialog {
-        call::Dialog {
-            sip: call::StackDialog {
-                call_id: "cid@x".into(),
-                local_tag: "ltag".into(),
-                remote_tag: "rtag".into(),
-                local_uri: "sip:svc@b2bua".into(),
-                remote_uri: format!("sip:peer@{remote_host}"),
-                remote_target: format!("sip:peer@{remote_host}:{remote_port}"),
-                local_cseq: 1,
-                route_set: route_set.iter().map(|s| s.to_string()).collect(),
-            },
-            ext: call::B2buaDialogExt {
-                remote_cseq: None,
-                inbound_pending_requests: vec![],
-                ack_branch: None,
-                pending_invite_txn: None,
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: None,
-                emitted_ack: None,
-                sdp_session: None,
-                awaited_ack_cseq: None,
-                shown: false,
-            },
-        }
+        let mut d = call::Dialog::new("ltag", "rtag", call::DialogState::Confirmed, 1);
+        d.remote_target = format!("sip:peer@{remote_host}:{remote_port}");
+        d.route_set = route_set.iter().map(|s| s.to_string()).collect();
+        d
     }
 
     fn test_leg(leg_id: &str, dialogs: Vec<call::Dialog>) -> call::Leg {
         call::Leg {
             leg_id: leg_id.into(),
             call_id: "cid@x".into(),
-            from_tag: "ftag".into(),
             source: call::RemoteInfo { address: "0.0.0.0".into(), port: 0 },
             state: LegState::Confirmed,
             disposition: call::LegDisposition::Bridged,
-            dialogs,
+            dialogs: dialogs.into(),
             no_answer_timeout_sec: None,
             bye_disposition: None,
             local_uri: None,
             remote_uri: None,
             invite_request_uri: None,
+            outbound_invite: None,
+            own_tag: None,
             pending_invite_txn: None,
             ext: None,
             kind: None,
@@ -216,7 +196,7 @@ mod tests {
             &sip_txn::IdGen::seeded(1),
             0,
         );
-        call.a_leg.dialogs = a_dialogs;
+        call.a_leg.dialogs = a_dialogs.into();
         call.b_legs = b_legs.into_iter().map(|(id, ds)| test_leg(id, ds)).collect();
         call
     }
@@ -240,6 +220,7 @@ mod tests {
             ],
             body: vec![],
             cseq: 1,
+            from_tag: "alice".into(),
         }
     }
 }

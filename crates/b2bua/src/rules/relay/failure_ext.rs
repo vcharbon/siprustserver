@@ -96,6 +96,7 @@ mod tests {
                 .collect(),
             body: Vec::new(),
             cseq: 1,
+            from_tag: String::new(),
         }
     }
 

@@ -21,10 +21,13 @@
 //!
 //! Concern map:
 //!   - [`record`] — master [`Call`] record + call-level satellites (lifecycle
-//!     state, topology, peering, INVITE snapshot, tag map, policy)
+//!     state, topology, peering, INVITE snapshot, policy)
 //!   - [`limiter`] — the call's admission state on the call limiter
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
-//!   - [`dialog`] — §12 dialog state + B2BUA-only dialog extensions
+//!   - [`dialog`] — one §12 dialog: identity, state, sequences, what the
+//!     B2BUA keeps on it
+//!   - [`dialogs`] — a leg's dialogs and the one lookup surface over them
+//!   - [`outbound_invite`] — the dialog-creating INVITE a leg sent
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
 //!     and the key that discharges it (ADR-0032)
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
@@ -39,12 +42,14 @@
 pub mod cdr;
 pub mod decision_log;
 pub mod dialog;
+pub mod dialogs;
 pub mod emission;
 pub mod invite_txn;
 pub mod leg;
 pub mod limiter;
 pub mod message_ring;
 pub mod obligation;
+pub mod outbound_invite;
 pub mod record;
 pub mod sdp_session;
 pub mod services;
@@ -54,7 +59,11 @@ pub mod timer;
 
 pub use cdr::{CdrEvent, CdrEventType};
 pub use decision_log::{DecisionKind, DecisionMark};
-pub use dialog::{B2buaDialogExt, Dialog, Direction, PendingRequest, StackDialog, Unacked2xx};
+pub use dialog::{
+    Dialog, DialogEnd, DialogId, DialogState, Direction, PeerDialog, PendingRequest, RetiredDialog,
+    StragglerRelease, Unacked2xx,
+};
+pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};
 pub use leg::{ByeDisposition, Leg, LegDisposition, LegKind, LegState, RemoteInfo};
@@ -64,9 +73,10 @@ pub use limiter::{
 };
 pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};
+pub use outbound_invite::OutboundInvite;
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
-    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader, TagMapping,
+    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
 };
 pub use sdp_session::LegSdpSession;
 pub use services::{

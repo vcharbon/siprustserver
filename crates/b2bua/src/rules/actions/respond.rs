@@ -21,7 +21,6 @@ use crate::rules::relay;
 use crate::rules::RelayedFinal;
 use b2bua_sdk::model::{GlareRefusal, RuleContext};
 
-use super::select::dialog_identity_tag;
 use super::ActionExecutor;
 
 /// The `Retry-After` range RFC 3261 §14.2 and RFC 3311 §5.2 set on the 500
@@ -64,18 +63,15 @@ impl ActionExecutor<'_> {
                     &mut extra_headers,
                 );
             }
-            if req.to().tag().is_some() {
-                if let Some(sd) = ctx.request_dialog() {
-                    let inbound_cseq = req.cseq().seq() as i64;
-                    if sd.ext.remote_cseq.map_or(true, |c| inbound_cseq > c) {
-                        let s_id = dialog_identity_tag(ctx.source_leg_id, sd);
-                        *call = call::helpers::update_remote_cseq(
-                            call.clone(),
-                            ctx.source_leg_id,
-                            &s_id,
-                            inbound_cseq,
-                        );
-                    }
+            if let Some(sd) = ctx.dialog() {
+                let inbound_cseq = req.cseq().seq() as i64;
+                if sd.peer_cseq.is_none_or(|c| inbound_cseq > c) {
+                    *call = call::helpers::set_peer_cseq(
+                        call.clone(),
+                        ctx.source_leg_id,
+                        &sd.id(),
+                        inbound_cseq,
+                    );
                 }
             }
             // A request naming no dialog is answered under the leg's own tag
@@ -84,7 +80,11 @@ impl ActionExecutor<'_> {
                 .to()
                 .tag()
                 .is_none()
-                .then(|| call::helpers::b2bua_tag(call, ctx.source_leg_id))
+                .then(|| {
+                    call::helpers::find_leg(call, ctx.source_leg_id)
+                        .and_then(call::helpers::leg_own_tag)
+                        .map(str::to_string)
+                })
                 .flatten();
             let content_type = content_type.and_then(relay::media_type);
             let body = relay::continue_on_leg(
@@ -101,7 +101,7 @@ impl ActionExecutor<'_> {
             // request names this face as the dialog's remote target
             // (`response_states_own_contact`); anything else states none. The
             // response echoes the request's To tag, else carries the leg's own
-            // (`b2bua_tag`; none on the a-leg before its dialog exists). No
+            // (`leg_own_tag`; none on the a-leg before its dialog exists). No
             // rule answers locally with a 1xx, so the policy's tagged-1xx
             // clause needs no check here.
             let contact =
@@ -326,6 +326,13 @@ impl ActionExecutor<'_> {
         mut effect: OutboundSipEffect,
     ) {
         self.retire(call, fx, Scope::Provisionals);
+        // The 2xx confirms the caller-facing dialog its To-tag names (RFC 3261
+        // §12.1.1) and retires her other early dialogs.
+        if let OutboundBody::Response(resp) = &effect.body {
+            if let Some(tag) = resp.to().tag().filter(|t| !t.is_empty()) {
+                super::dialog_track::adopt_a_tag(call, tag);
+            }
+        }
         self.retain_a_leg_answer(call, fx, &mut effect);
         fx.outbound.push(effect);
     }
@@ -375,13 +382,16 @@ impl ActionExecutor<'_> {
         let to_tag = match to_tag {
             Some(t) => {
                 let primary = self.ensure_a_dialog_with(call, Some(t.to_string()));
-                let held = call.a_leg.dialogs.iter().any(|d| d.sip.local_tag == t);
+                let held = call::helpers::caller_dialog(call, t).is_some();
                 if !held && call::helpers::a_tag_shown(call, &primary) {
                     super::dialog_track::open_early_a_dialog(call, t);
                 } else if !held {
-                    if let Some(d) = call.a_leg.dialogs.first_mut() {
-                        d.sip.local_tag = t.to_string();
+                    // The a-leg's own dialog was never shown: the caller
+                    // knows it under no tag, so it takes the stated one.
+                    if let Some(d) = super::dialog_track::own_a_dialog_mut(call) {
+                        d.our_tag = t.to_string();
                     }
+                    call.a_leg.own_tag = Some(t.to_string());
                 }
                 t.to_string()
             }
@@ -538,15 +548,15 @@ impl ActionExecutor<'_> {
             return;
         };
         // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
-        // already exists under the early-media A1, `ensure_a_dialog_with` returns
-        // A1 unchanged, so `adopt_a_tag` re-identifies it under A2 and retires
-        // A1's mappings — the early dialog is superseded, not kept. The answer
-        // SDP becomes the dialog's `cached_sdp`, as `confirm_dialog` keeps it.
+        // already exists under the early-media A1, `adopt_a_tag` confirms a
+        // dialog of its own under A2 and retires A1 — the early dialog is
+        // superseded, not kept. The answer SDP becomes the dialog's
+        // `cached_sdp`, as `confirm_dialog` keeps it.
         self.ensure_a_dialog_with(call, Some(a2.clone()));
         super::dialog_track::adopt_a_tag(call, &a2);
-        if let Some(d) = call.a_leg.dialogs.first_mut() {
+        if let Some(d) = super::dialog_track::own_a_dialog_mut(call) {
             if !body.is_empty() {
-                d.ext.cached_sdp = Some(body.to_vec());
+                d.cached_sdp = Some(body.to_vec());
             }
         }
         // This 2xx answers the caller: it goes through the one seam that

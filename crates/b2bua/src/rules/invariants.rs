@@ -152,15 +152,9 @@ fn answer_a_leg_if_unanswered(
     }
     let a_leg_id = before.a_leg.leg_id.as_str();
     let a_invite = super::relay::rebuild_a_leg_invite(&result.call.a_leg_invite);
-    // Reuse the a-dialog tag when an 18x already pinned one (Early); otherwise
-    // `generate_response`'s deterministic fallback tag applies.
-    let to_tag = result
-        .call
-        .a_leg
-        .dialogs
-        .first()
-        .map(|d| d.sip.local_tag.clone())
-        .filter(|t| !t.is_empty());
+    // Reuse the a-leg's own tag when an 18x already pinned one (Early);
+    // otherwise `generate_response`'s deterministic fallback tag applies.
+    let to_tag = result.call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
     let mut own = Vec::new();
     super::capabilities::stamp_own_advertisement(advertisement, |_| false, &mut own);
     let Some(mut effect) = super::relay::response_to_a_leg(

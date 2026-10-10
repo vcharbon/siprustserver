@@ -4,18 +4,15 @@
 //! from the caller's view, without deep clones. The data types themselves live
 //! in [`crate::model`].
 //!
-//! The RNG seam is deferred (ADR-0008): the dialog constructors take the
-//! initial CSeq as a parameter instead of drawing it from a runtime RNG.
-//!
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
-//!   - [`leg`] — role, lookup, state/disposition setters, resolution, tags
-//!   - [`identity`] — which dialog of a leg an in-dialog message names
-//!   - [`retired`] — the relays still open in caller-facing dialogs the answer retired
+//!   - [`leg`] — role, lookup, state/disposition setters, resolution
+//!   - [`identity`] — the tags an in-dialog request carries
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
-//!   - [`dialog`] — CSeq, ACK branch, pending relays, SDP cache, constructors
-//!   - [`peering`] — tag map, active peer pair, relay-peer resolution
+//!   - [`dialog`] — CSeq, ACK branch, pending and retired relays, SDP cache
+//!   - [`peering`] — caller-facing fronts, active peer pair, relay-peer
+//!     resolution
 //!   - [`reliable`] — the a-facing reliable-provisional sequence (RFC 3262)
 //!   - [`obligation`] — the dialog-level retransmission obligations: what the
 //!     call owes, what an ACK discharges, the scopes a ladder is retired under
@@ -39,28 +36,26 @@ pub mod obligation;
 pub mod peering;
 pub mod record;
 pub mod reliable;
-pub mod retired;
 pub mod services;
 pub mod termination;
 pub mod timer;
 
 pub use decision_log::mark_decision;
 pub use dialog::{
-    add_pending_request, bump_local_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    cancel_pending_request, close_rejected_invite_round, find_pending_request, invite_glare,
-    invite_transaction_open, make_dialog_from_incoming, make_empty_dialog, out_of_order,
-    peer_update_pending, relay_cseq_delta, relayed_pending, remove_pending_request,
-    retain_ack_branch, retain_emitted_ack, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, update_remote_cseq, MakeDialogLegCtx, PendingHolder,
+    add_pending_request, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
+    cancel_pending_request, close_rejected_invite_round, close_relay, find_pending_request,
+    invite_glare, invite_transaction_open, out_of_order, peer_update_pending, relay_cseq_delta,
+    relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
+    retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
+    set_awaited_ack_cseq, set_peer_cseq, take_retired_relays, PendingHolder,
 };
-pub use identity::{
-    abandoned_dialog, dialog_by_identity, request_dialog, response_identity, RequestTags,
-};
+pub use identity::{abandoned_dialog, RequestTags};
 pub use leg::{
-    add_b_leg, b2bua_tag, caller_answered, confirmed_dialog, find_b_leg, find_b_leg_by_call_id,
-    find_dialog_by_to_tag, find_leg, holds_local_tag, is_adopted, is_fully_resolved,
-    leg_is_going_away, leg_is_resolved, leg_kind, record_cancelled_invite, record_invite_final,
-    remote_tag, set_bye_disposition, set_leg_disposition, set_leg_state,
+    add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
+    carrying_dialog, dialog_with_peer, find_b_leg, find_b_leg_by_call_id, find_leg, is_adopted,
+    is_fully_resolved, leg_is_going_away, leg_is_resolved, leg_kind, leg_own_tag, own_dialog,
+    record_cancelled_invite, record_dialling_invite_rejected, record_invite_final,
+    reject_early_dialogs, set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};
@@ -70,8 +65,8 @@ pub use obligation::{
     restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
-    a_tag_shown, add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer,
-    merge_leg, relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg,
+    a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, relay_peer_dialog,
+    relay_peer_dialog_ready, resolve_relay_peer, split_leg,
 };
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
@@ -83,9 +78,6 @@ pub use reliable::{
     reliable_provisional_emission, reliable_provisional_relayed, retire_a_rseq, rseq_in_order,
     starts_reliable_ladder, unacknowledgeable_rack, unacknowledged_relayed_provisionals,
     unacknowledged_shown, OwedPrack, RAckTokens, UnackedShown,
-};
-pub use retired::{
-    holds_retired, release_retired, retire_pending, retired_count, retired_pending, take_retired,
 };
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,

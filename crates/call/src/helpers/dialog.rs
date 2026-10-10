@@ -1,38 +1,35 @@
 //! Dialog-level helpers: CSeq bookkeeping, the ACK-branch retention rule,
-//! pending transparent-relay entries, the per-dialog SDP cache, and the dialog
-//! constructors.
+//! pending transparent-relay entries and the per-dialog SDP cache.
 
-use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
+use crate::model::{Call, Dialog, DialogId, Leg, PendingRequest, RetainedEmission};
 
-use super::identity::{dialog_by_identity, response_identity, RequestTags};
-use super::leg::{confirmed_dialog, find_leg};
+use super::identity::RequestTags;
+use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
-use super::retired::retired_pending;
 
 // ── CSeq ────────────────────────────────────────────────────────────────────
 
-/// Bump a dialog's local CSeq by `delta` (CSeq is dialog-scoped — §12.2.1.1).
-/// Each dialog (including each forked early dialog, keyed by its own remote tag)
-/// owns an independent sequence, so a sibling fork's CSeq never constrains this one.
-pub fn bump_local_cseq(call: Call, leg_id: &str, identity_tag: &str, delta: i64) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| d.sip.local_cseq += delta)
+/// Bump a dialog's own CSeq by `delta` (CSeq is dialog-scoped — §12.2.1.1).
+/// Each dialog (including each forked early dialog) owns an independent
+/// sequence, so a sibling fork's CSeq never constrains this one.
+pub fn bump_our_cseq(call: Call, leg_id: &str, id: &DialogId, delta: i64) -> Call {
+    update_dialog(call, leg_id, id, |d| d.our_cseq += delta)
 }
 
-/// Track the other side's latest CSeq on a dialog.
-pub fn update_remote_cseq(call: Call, leg_id: &str, identity_tag: &str, remote_cseq: i64) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| d.ext.remote_cseq = Some(remote_cseq))
+/// Track the peer's latest CSeq on a dialog.
+pub fn set_peer_cseq(call: Call, leg_id: &str, id: &DialogId, peer_cseq: i64) -> Call {
+    update_dialog(call, leg_id, id, |d| d.peer_cseq = Some(peer_cseq))
 }
 
 /// Whether a request `leg_id`'s peer sent in the dialog its `tags` name carries
 /// a CSeq below the last one that dialog took: out of order (RFC 3261 §12.2.2).
-/// Each dialog record is one peer dialog (`identity`), so each is measured on
-/// its own sequence; a request naming no record is not measured.
+/// Each dialog is measured on its own sequence; a request naming no dialog is
+/// not measured.
 pub fn out_of_order(call: &Call, leg_id: &str, tags: RequestTags<'_>, cseq: i64) -> bool {
     find_leg(call, leg_id)
-        .zip(tags.identity(leg_id))
-        .and_then(|(leg, tag)| dialog_by_identity(leg, tag))
-        .and_then(|d| d.ext.remote_cseq)
+        .and_then(|leg| leg.dialogs.of_request(tags.to, tags.from))
+        .and_then(|d| d.peer_cseq)
         .is_some_and(|last| cseq < last)
 }
 
@@ -46,7 +43,8 @@ pub fn relay_cseq_delta(inbound_cseq: i64, source_remote_cseq: Option<i64>) -> i
 
 // ── ACK branch ──────────────────────────────────────────────────────────────
 
-/// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s dialog, so a
+/// Retain the Via branch of the ACK-for-2xx just sent on `leg_id`'s
+/// established dialog, so a
 /// re-ACK of a **retransmitted** 2xx reuses the SAME branch (RFC 3261 §13.2.2.4).
 /// A fresh branch would mint a new client transaction and never quiesce the
 /// answerer's INVITE server txn, leaking / late-timing-out the confirmed call
@@ -54,31 +52,30 @@ pub fn relay_cseq_delta(inbound_cseq: i64, source_remote_cseq: Option<i64>) -> i
 /// 2xx that armed it on confirmation, else the first ACK — and every later ACK
 /// re-observes that value. Reset to `None` wherever a new INVITE transaction is
 /// cached on the dialog, so the stored branch always belongs to the current
-/// INVITE's CSeq. Mirrors the `dialogs.first()` dialog choice in
-/// `rules::relay::ack_b_leg`, its twin.
+/// INVITE's CSeq.
 pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str) -> Call {
     update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.first_mut() {
-            if d.ext.ack_branch.is_none() {
-                d.ext.ack_branch = Some(branch.to_string());
+        if let Some(d) = leg.dialogs.established_mut() {
+            if d.ack_branch.is_none() {
+                d.ack_branch = Some(branch.to_string());
             }
         }
     })
 }
 
-/// Retain the ACK-for-2xx datagram just emitted on `leg_id`'s dialog, so a
+/// Retain the ACK-for-2xx datagram just emitted on `leg_id`'s established
+/// dialog, so a
 /// re-ACK of a **retransmitted** 2xx re-passes THE ACK to the transport
 /// (RFC 3261 §13.2.2.4) instead of composing an equivalent — on a delayed offer
 /// the retained bytes carry the answer a fresh composition would drop
 /// (RFC 3264 §4). First write wins, like `retain_ack_branch`: the ACK the 2xx
 /// triggered is the one every later copy re-sends. Reset to `None` alongside
 /// `ack_branch` wherever a new INVITE transaction is cached on the dialog.
-/// Mirrors the `dialogs.first()` dialog choice in `rules::relay::ack_b_leg`.
 pub fn retain_emitted_ack(call: Call, leg_id: &str, ack: RetainedEmission) -> Call {
     update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.first_mut() {
-            if d.ext.emitted_ack.is_none() {
-                d.ext.emitted_ack = Some(ack.clone());
+        if let Some(d) = leg.dialogs.established_mut() {
+            if d.emitted_ack.is_none() {
+                d.emitted_ack = Some(ack.clone());
             }
         }
     })
@@ -97,22 +94,21 @@ pub fn close_rejected_invite_round(call: Call, leg_id: &str, branch: &str) -> Ca
             return;
         }
         for d in leg.dialogs.iter_mut() {
-            let round_open = d.ext.ack_branch.is_none() && d.ext.awaited_ack_cseq.is_none();
-            if round_open && d.ext.pending_invite_txn.as_ref().is_some_and(|h| h.branch == branch) {
-                d.ext.pending_invite_txn = None;
+            let round_open = d.ack_branch.is_none() && d.awaited_ack_cseq.is_none();
+            if round_open && d.pending_invite_txn.as_ref().is_some_and(|h| h.branch == branch) {
+                d.pending_invite_txn = None;
             }
         }
     })
 }
 
 /// Arm (`Some`) or discharge (`None`) the §13.2.2.4 relay-ACK obligation on
-/// `leg_id`'s dialog. `cseq` is the number the acknowledging peer's ACK will
-/// carry — the peer's own INVITE CSeq, not this dialog's. Mirrors the
-/// `dialogs.first()` dialog choice in `rules::relay::ack_b_leg`.
+/// `leg_id`'s established dialog. `cseq` is the number the acknowledging peer's
+/// ACK will carry — the peer's own INVITE CSeq, not this dialog's.
 pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call {
     update_leg(call, leg_id, |leg| {
-        if let Some(d) = leg.dialogs.first_mut() {
-            d.ext.awaited_ack_cseq = cseq;
+        if let Some(d) = leg.dialogs.established_mut() {
+            d.awaited_ack_cseq = cseq;
         }
     })
 }
@@ -120,15 +116,8 @@ pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call
 // ── Pending transparent-relay requests ──────────────────────────────────────
 
 /// Add a pending transparent-relay entry to a dialog.
-pub fn add_pending_request(
-    call: Call,
-    leg_id: &str,
-    identity_tag: &str,
-    entry: PendingRequest,
-) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| {
-        d.ext.inbound_pending_requests.push(entry.clone())
-    })
+pub fn add_pending_request(call: Call, leg_id: &str, id: &DialogId, entry: PendingRequest) -> Call {
+    update_dialog(call, leg_id, id, |d| d.inbound_pending_requests.push(entry))
 }
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
@@ -139,20 +128,19 @@ pub fn add_pending_request(
 /// a new INVITE on the dialog is glare and is refused, 491 or 500 by which
 /// INVITE is open (RFC 3261 §14.2).
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    dialog.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
-        || dialog.ext.pending_reinvite_2xx.is_some()
-        || dialog.ext.answered_2xx.is_some()
-        || dialog.ext.awaited_ack_cseq.is_some()
+    dialog.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
+        || dialog.pending_reinvite_2xx.is_some()
+        || dialog.answered_2xx.is_some()
+        || dialog.awaited_ack_cseq.is_some()
 }
 
 /// Whether an INVITE from `source_leg_id`'s peer, carrying `tags`,
 /// meets glare (RFC 3261 §14.1): an INVITE transaction still open
-/// ([`invite_transaction_open`]) on the dialog it arrived on (the leg's
-/// confirmed dialog, else its first) or on the dialog its relay would be
-/// regenerated on ([`relay_peer_dialog`]).
+/// ([`invite_transaction_open`]) on the dialog it arrived on or on the dialog
+/// its relay would be regenerated on ([`relay_peer_dialog`]).
 pub fn invite_glare(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    let source = find_leg(call, source_leg_id)
-        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()));
+    let source =
+        find_leg(call, source_leg_id).and_then(|leg| leg.dialogs.of_request(tags.to, tags.from));
     source.is_some_and(invite_transaction_open)
         || relay_peer_dialog(call, source_leg_id, tags)
             .is_some_and(|(_, d)| invite_transaction_open(d))
@@ -164,20 +152,23 @@ pub fn invite_glare(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> 
 /// relay-target dialog and was not CANCELled.
 pub fn sender_invite_unanswered(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
     relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
-        d.ext
-            .inbound_pending_requests
+        d.inbound_pending_requests
             .iter()
             .any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
     })
 }
 
 /// Whether `source_leg_id`'s peer has an earlier INVITE of its own whose 2xx
-/// this side sent and still awaits the ACK for, on the source dialog (RFC 6026
-/// *Accepted*).
-pub fn sender_invite_unacknowledged(call: &Call, source_leg_id: &str) -> bool {
+/// this side sent and still awaits the ACK for, on the dialog `tags` name
+/// (RFC 6026 *Accepted*).
+pub fn sender_invite_unacknowledged(
+    call: &Call,
+    source_leg_id: &str,
+    tags: RequestTags<'_>,
+) -> bool {
     find_leg(call, source_leg_id)
-        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()))
-        .is_some_and(|d| d.ext.pending_reinvite_2xx.is_some() || d.ext.answered_2xx.is_some())
+        .and_then(|leg| leg.dialogs.of_request(tags.to, tags.from))
+        .is_some_and(|d| d.pending_reinvite_2xx.is_some() || d.answered_2xx.is_some())
 }
 
 /// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
@@ -185,26 +176,24 @@ pub fn sender_invite_unacknowledged(call: &Call, source_leg_id: &str) -> bool {
 /// that leg, carrying `tags`, is relayed on.
 pub fn peer_update_pending(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
     relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
-        d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
+        d.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
     })
 }
 
 /// Where the relay a response answers is kept.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingHolder {
-    /// On the leg's dialog with this identity tag.
-    Dialog(String),
-    /// Among the relays of the leg's dialog with this identity tag the answer
-    /// retired ([`super::retired`]).
-    Retired(String),
+    /// Among the pending relays of the leg's dialog with this identity.
+    Dialog(DialogId),
+    /// Among the open relays of the leg's retired dialog with this identity.
+    Retired(DialogId),
 }
 
 /// The relay a response arriving on `leg_id` with outbound CSeq `cseq`
 /// answers (RFC 3261 §8.1.3.3), and where it is kept: on the dialog the
-/// response's identity tag names, else among the relays of the retired early
-/// dialog that tag names. A response with no
-/// identity tag reads the leg's confirmed dialog. Never another dialog's
-/// relay: two dialogs may carry the same CSeq.
+/// response's tags name, or among that dialog's open relays once it retired.
+/// A response with no To-tag reads the leg's confirmed dialog. Never another
+/// dialog's relay: two dialogs may carry the same CSeq.
 pub fn relayed_pending(
     call: &Call,
     leg_id: &str,
@@ -213,45 +202,64 @@ pub fn relayed_pending(
     cseq: i64,
 ) -> Option<(PendingHolder, PendingRequest)> {
     let leg = find_leg(call, leg_id)?;
-    let identity = |d: &Dialog| {
-        if leg_id == "a" {
-            d.sip.local_tag.clone()
-        } else {
-            d.sip.remote_tag.clone()
-        }
+    let d = match to {
+        None => leg.dialogs.confirmed()?,
+        Some(_) => leg.dialogs.of_response(to, from)?,
     };
-    let Some(tag) = response_identity(leg_id, to, from) else {
-        let d = confirmed_dialog(leg)?;
-        let p = find_pending_request(d, cseq)?;
-        return Some((PendingHolder::Dialog(identity(d)), p.clone()));
-    };
-    match dialog_by_identity(leg, tag) {
-        Some(d) => {
-            find_pending_request(d, cseq).map(|p| (PendingHolder::Dialog(identity(d)), p.clone()))
-        }
-        None => {
-            retired_pending(leg, tag, cseq).map(|p| (PendingHolder::Retired(tag.to_string()), p))
+    match d.retired() {
+        Some(r) => r
+            .open_relays
+            .iter()
+            .find(|p| p.outbound_cseq == cseq)
+            .map(|p| (PendingHolder::Retired(d.id()), p.clone())),
+        None => find_pending_request(d, cseq).map(|p| (PendingHolder::Dialog(d.id()), p.clone())),
+    }
+}
+
+/// Close the relay `holder` keeps with outbound CSeq `cseq` on `leg_id`: its
+/// transaction has its final.
+pub fn close_relay(call: Call, leg_id: &str, holder: &PendingHolder, cseq: i64) -> Call {
+    match holder {
+        PendingHolder::Dialog(id) => remove_pending_request(call, leg_id, id, cseq),
+        PendingHolder::Retired(id) => update_dialog(call, leg_id, id, |d| {
+            if let Some(r) = d.retired_mut() {
+                r.open_relays.retain(|p| p.outbound_cseq != cseq);
+            }
+        }),
+    }
+}
+
+/// Close every relay still open in `leg`'s retired dialogs and return them,
+/// each with its dialog: the leg ends, so no final reaches them but the one
+/// this stack answers (RFC 3261 §8.2.6).
+pub fn take_retired_relays(leg: &mut Leg) -> Vec<(DialogId, PendingRequest)> {
+    let mut taken = Vec::new();
+    for d in leg.dialogs.iter_mut() {
+        let id = d.id();
+        if let Some(r) = d.retired_mut() {
+            taken.extend(std::mem::take(&mut r.open_relays).into_iter().map(|p| (id.clone(), p)));
         }
     }
+    taken
+}
+
+/// How many relays are still open in `leg`'s retired dialogs.
+pub fn retired_relay_count(leg: &Leg) -> usize {
+    leg.dialogs.iter().filter_map(Dialog::retired).map(|r| r.open_relays.len()).sum()
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.
 pub fn find_pending_request(dialog: &Dialog, outbound_cseq: i64) -> Option<&PendingRequest> {
-    dialog.ext.inbound_pending_requests.iter().find(|p| p.outbound_cseq == outbound_cseq)
+    dialog.inbound_pending_requests.iter().find(|p| p.outbound_cseq == outbound_cseq)
 }
 
 /// Mark a pending transparent-relay entry CANCELled (RFC 3261 §9): the relayed
 /// (re-)INVITE it snapshots has been CANCELled toward its target, so the
 /// eventual final response resolves locally instead of being relayed back.
-pub fn cancel_pending_request(
-    call: Call,
-    leg_id: &str,
-    identity_tag: &str,
-    outbound_cseq: i64,
-) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| {
+pub fn cancel_pending_request(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
+    update_dialog(call, leg_id, id, |d| {
         if let Some(p) =
-            d.ext.inbound_pending_requests.iter_mut().find(|p| p.outbound_cseq == outbound_cseq)
+            d.inbound_pending_requests.iter_mut().find(|p| p.outbound_cseq == outbound_cseq)
         {
             p.cancelled = true;
         }
@@ -259,113 +267,33 @@ pub fn cancel_pending_request(
 }
 
 /// Remove a pending transparent-relay entry after its response is handled.
-pub fn remove_pending_request(
-    call: Call,
-    leg_id: &str,
-    identity_tag: &str,
-    outbound_cseq: i64,
-) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| {
-        d.ext.inbound_pending_requests.retain(|p| p.outbound_cseq != outbound_cseq)
+pub fn remove_pending_request(call: Call, leg_id: &str, id: &DialogId, outbound_cseq: i64) -> Call {
+    update_dialog(call, leg_id, id, |d| {
+        d.inbound_pending_requests.retain(|p| p.outbound_cseq != outbound_cseq)
     })
 }
 
 // ── Per-dialog SDP cache ────────────────────────────────────────────────────
 
-/// Cache an SDP body on a b-leg dialog selected **strictly** by its callee
-/// (remote) tag. No first-dialog fallback: under downstream forking each early
-/// dialog carries its own answer (RFC 3264 §4), and a fallback write would
-/// overwrite a *different* fork's cache. A miss is a no-op — the executor
-/// ensures the `(leg, b_tag)` dialog exists before caching.
-pub fn cache_sdp_on_leg_dialog(mut call: Call, leg_id: &str, b_tag: &str, body: Vec<u8>) -> Call {
-    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == b_tag) {
-            d.ext.cached_sdp = Some(body);
+/// Cache an SDP body on the callee dialog of `leg_id` whose peer tag is
+/// `b_tag`, and on no other: under downstream forking each early dialog
+/// carries its own answer (RFC 3264 §4). A miss is a no-op — the executor
+/// ensures the dialog exists before caching.
+pub fn cache_sdp_on_leg_dialog(call: Call, leg_id: &str, b_tag: &str, body: Vec<u8>) -> Call {
+    update_leg(call, leg_id, |leg| {
+        if let Some(d) = super::leg::callee_dialog_mut(leg, b_tag) {
+            d.cached_sdp = Some(body);
         }
-    }
-    call
+    })
 }
 
-/// The SDP cached on a b-leg dialog selected **strictly** by callee tag (no
-/// first-dialog fallback — a different fork's cache must never leak into this
-/// dialog's answer).
+/// The SDP cached on the callee dialog of `leg_id` whose peer tag is `b_tag`
+/// — never another fork's.
 pub fn cached_sdp_for_leg_dialog<'a>(
     call: &'a Call,
     leg_id: &str,
     b_tag: &str,
 ) -> Option<&'a [u8]> {
-    let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
-    let dialog = leg.dialogs.iter().find(|d| d.sip.remote_tag == b_tag)?;
-    dialog.ext.cached_sdp.as_deref()
-}
-
-// ── Constructors ────────────────────────────────────────────────────────────
-
-/// Fields a dialog constructor needs from the enclosing leg.
-pub struct MakeDialogLegCtx<'a> {
-    pub call_id: &'a str,
-    pub local_uri: &'a str,
-    pub remote_uri: &'a str,
-    pub local_tag: &'a str,
-    pub remote_tag: &'a str,
-}
-
-fn stack_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64, route_set: Vec<String>) -> StackDialog {
-    StackDialog {
-        call_id: ctx.call_id.to_string(),
-        local_tag: ctx.local_tag.to_string(),
-        remote_tag: ctx.remote_tag.to_string(),
-        local_uri: ctx.local_uri.to_string(),
-        remote_uri: ctx.remote_uri.to_string(),
-        remote_target: String::new(),
-        local_cseq: initial_cseq,
-        route_set,
-    }
-}
-
-/// Build the initial empty dialog stub. `initial_cseq` is supplied by the
-/// caller (the RNG seam is deferred — ADR-0008).
-pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
-    Dialog {
-        sip: stack_dialog(ctx, initial_cseq, Vec::new()),
-        ext: B2buaDialogExt {
-            remote_cseq: None,
-            inbound_pending_requests: Vec::new(),
-            ack_branch: None,
-            pending_invite_txn: None,
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            answered_2xx: None,
-            emitted_ack: None,
-            sdp_session: None,
-            awaited_ack_cseq: None,
-            shown: false,
-        },
-    }
-}
-
-/// Build a dialog initialised from a received request's CSeq. `routeSet` carries
-/// the dialog-creating request's `Record-Route` headers in order (§12.1.1).
-pub fn make_dialog_from_incoming(
-    ctx: &MakeDialogLegCtx,
-    remote_cseq: i64,
-    route_set: Vec<String>,
-    initial_cseq: i64,
-) -> Dialog {
-    Dialog {
-        sip: stack_dialog(ctx, initial_cseq, route_set),
-        ext: B2buaDialogExt {
-            remote_cseq: Some(remote_cseq),
-            inbound_pending_requests: Vec::new(),
-            ack_branch: None,
-            pending_invite_txn: None,
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            answered_2xx: None,
-            emitted_ack: None,
-            sdp_session: None,
-            awaited_ack_cseq: None,
-            shown: false,
-        },
-    }
+    let leg = find_leg(call, leg_id)?;
+    super::leg::callee_dialog(leg, b_tag)?.cached_sdp.as_deref()
 }

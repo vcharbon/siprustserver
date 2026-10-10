@@ -1,11 +1,11 @@
 //! Relaying an inbound SIP **response** toward the peer (normally the a-leg):
-//! pending-correlated transparent relay, the per-fork a-facing tag map on
+//! pending-correlated transparent relay, the per-fork caller-facing dialog on
 //! b-leg INVITE 1xx/2xx, the a-leg server-txn regeneration default, and the
 //! bare-180 downgrade (`relayFirst18xTo180`). Request relay does NOT live
 //! here — see [`super::relay_request`].
 
-use call::helpers::{remove_pending_request, PendingHolder, Scope};
-use call::{Call, PendingRequest, TagMapping};
+use call::helpers::{PendingHolder, Scope};
+use call::{Call, PendingRequest};
 use sip_message::draft::Entry;
 use sip_message::generators::{
     self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
@@ -97,8 +97,8 @@ impl ActionExecutor<'_> {
     ///     originator's Via/From/To/CSeq; a reliable provisional leaves under
     ///     this stack's own `RSeq` where RFC 3262 admits one at all.
     ///   - **default** (initial-INVITE 1xx/2xx): regenerate on the a-leg server
-    ///     transaction, establishing the b-leg early dialog + a-facing tag map
-    ///     on a reliable 1xx so a later PRACK can target the callee.
+    ///     transaction, establishing the b-leg early dialog + the caller-facing
+    ///     dialog fronting it on a reliable 1xx so a later PRACK can target the callee.
     pub(super) fn relay_response(
         &self,
         call: &mut Call,
@@ -188,9 +188,8 @@ impl ActionExecutor<'_> {
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
         // The relay this response answers is read only through the dialog its
-        // identity tag names (a b-leg's: the responder's To-tag; the a-leg's:
-        // our From-tag, one dialog per caller-facing tag), or the relays kept
-        // for an early dialog the answer retired. Two dialogs may carry
+        // tags name (our From-tag, the responder's To-tag), live or retired by
+        // the answer. Two dialogs may carry
         // the same CSeq, so a fallback onto another dialog would deliver the
         // final to a transaction it does not answer — or, finding none, fall
         // through to the INVITE-response regeneration below and corrupt a
@@ -272,7 +271,7 @@ impl ActionExecutor<'_> {
                 relay::reliable_rseq(resp).filter(|_| (101..200).contains(&status))
             {
                 let shown_tag = call::helpers::admits_reliable_provisional(&pending)
-                    .then(|| shown_tag_of(call, target_leg, &pending))
+                    .then(|| shown_tag_of(&pending))
                     .flatten();
                 match shown_tag {
                     Some(shown_tag) => {
@@ -342,17 +341,7 @@ impl ActionExecutor<'_> {
             // `route-failure`, and wrongly tear the call down). Remove it only
             // on the FINAL (>= 200); the transaction has no later response then.
             if status >= 200 {
-                match &holder {
-                    PendingHolder::Dialog(s_id) => {
-                        *call =
-                            remove_pending_request(call.clone(), &source_leg_id, s_id, cseq_num);
-                    }
-                    PendingHolder::Retired(tag) => {
-                        *call = call::helpers::update_leg(call.clone(), &source_leg_id, |l| {
-                            call::helpers::release_retired(l, tag, cseq_num)
-                        });
-                    }
-                }
+                *call = call::helpers::close_relay(call.clone(), &source_leg_id, &holder, cseq_num);
                 // The final ends this transaction's reliable provisionals
                 // on the face they were shown: no rung follows it (RFC
                 // 3262 §3, RFC 3261 §17.2.1). This transaction's alone —
@@ -422,7 +411,7 @@ impl ActionExecutor<'_> {
             && status < 200
             && relay::provisional_after_final(call, fx, status)
         {
-            if !to_tag.is_empty() && source_leg_id != "a" {
+            if !to_tag.is_empty() && call::helpers::find_b_leg(call, &source_leg_id).is_some() {
                 self.ensure_b_early_dialog(call, ctx, &source_leg_id, &to_tag);
                 if let Some(rseq) = relay::reliable_rseq(resp) {
                     let invite_cseq = i64::from(resp.cseq().seq());
@@ -442,7 +431,7 @@ impl ActionExecutor<'_> {
             return;
         }
 
-        // ── b-leg INVITE 1xx/2xx → per-fork a-facing tag map ──
+        // ── b-leg INVITE 1xx/2xx → per-fork caller-facing dialog ──
         // Each callee early dialog (forking → several per b-leg) gets its own
         // a-facing tag so the caller sees independent early dialogs; the response
         // is relayed under that per-fork tag (RFC 3261 §12; source confirm/relay).
@@ -456,7 +445,7 @@ impl ActionExecutor<'_> {
         if cseq_method == "INVITE"
             && (100..300).contains(&resp.status())
             && !to_tag.is_empty()
-            && source_leg_id != "a"
+            && call::helpers::find_b_leg(call, &source_leg_id).is_some()
         {
             self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
             let a_face = self.a_face_tag(call, &source_leg_id, &to_tag);
@@ -562,7 +551,7 @@ impl ActionExecutor<'_> {
                 .stamped(invite_timestamp(&call.a_leg_invite)),
         ));
         // A compliant callee's provisional carries a To tag (RFC 3261 §8.2.6.2)
-        // and takes the tag-map seam above, where the call's provisional
+        // and takes the per-fork seam above, where the call's provisional
         // withhold applies; this seam relays finals and a tagless 1xx.
         // A 2xx INVITE answer carries the originator face's Allow/Supported —
         // the callee's own, carried through, unless the call declares a set
@@ -626,10 +615,11 @@ impl ActionExecutor<'_> {
     /// mapped. A LATER 18x the `Relay18xMessages` policy relays again (ALL /
     /// ONE_PER_VALUE) reads back the same tag, so the caller holds ONE early
     /// dialog regardless of which fork rings; the 2xx of a dialog it never
-    /// showed her opens a second (`answering-dialog-identity`). Seed the tag map
-    /// for this b-leg dialog, record it (+ the upstream status value for
-    /// ONE_PER_VALUE dedupe), then relay the current 1xx as a bare 180. The
-    /// relay path resolves the a-facing tag from the map (`find_by_b_tag`).
+    /// showed her opens a second (`answering-dialog-identity`). The a-facing
+    /// dialog fronts this b-leg dialog; record it (+ the upstream status value
+    /// for ONE_PER_VALUE dedupe), then relay the current 1xx as a bare 180. The
+    /// relay path resolves the a-facing tag from the fronting dialog
+    /// (`fronting_dialog`).
     pub(super) fn relay_first_bare_180(
         &self,
         call: &mut Call,
@@ -645,14 +635,7 @@ impl ActionExecutor<'_> {
         }
         let stored = call::helpers::relay_first_18x_stored_a_tag(call).map(str::to_string);
         let a_facing_tag = self.ensure_a_dialog_with(call, stored);
-        super::dialog_track::map_a_face(
-            call,
-            TagMapping {
-                a_tag: a_facing_tag.clone(),
-                b_leg_id: leg_id.to_string(),
-                b_tag: b_tag.to_string(),
-            },
-        );
+        self.map_a_face(call, &a_facing_tag, leg_id, b_tag);
         *call = call::helpers::set_relay_first_18x_relayed(call.clone(), &a_facing_tag);
         if let Some(resp) = ctx.response() {
             *call = call::helpers::record_relay_first_18x_value(call.clone(), resp.status());
@@ -679,19 +662,9 @@ impl ActionExecutor<'_> {
 /// The tag this stack showed the originator of `pending` — its own on the
 /// dialog the response is relayed into, read off the originator's `To` (RFC
 /// 3261 §12.2.1.1), which the relayed response echoes verbatim and the
-/// originator's PRACK names again. A `To` that does not read falls back to
-/// the target leg's dialog; `None` when neither names a tag.
-fn shown_tag_of(call: &Call, target_leg: &str, pending: &PendingRequest) -> Option<String> {
-    To::parse(&SipStr::owned(&pending.source_to))
-        .ok()
-        .and_then(|to| to.tag().map(str::to_string))
-        .or_else(|| {
-            call::helpers::find_leg(call, target_leg)?
-                .dialogs
-                .first()
-                .map(|d| d.sip.local_tag.clone())
-                .filter(|t| !t.is_empty())
-        })
+/// originator's PRACK names again. `None` when that `To` names no tag.
+fn shown_tag_of(pending: &PendingRequest) -> Option<String> {
+    To::parse(&SipStr::owned(&pending.source_to)).ok().and_then(|to| to.tag().map(str::to_string))
 }
 /// The headers a response answering the relayed request `pending` states for
 /// its originator (RFC 3261 §8.2.6.2): Via / From / To / Call-ID / CSeq equal

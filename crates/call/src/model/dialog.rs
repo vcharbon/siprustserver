@@ -1,7 +1,10 @@
-//! RFC 3261 §12 dialog state plus the B2BUA-only dialog extensions
-//! ([`B2buaDialogExt`]) — pending transparent relays, cached SDP, the retained
-//! emissions the dialog's retransmission obligations repeat. The enclosing
-//! per-leg record is [`Leg`](crate::model::Leg).
+//! One RFC 3261 §12 dialog of a leg ([`Dialog`]): its identity (the two tags;
+//! the Call-ID is the leg's), its state ([`DialogState`]), the two CSeq
+//! sequences, the remote target and route set, and what the B2BUA keeps on it —
+//! pending transparent relays, cached SDP, the retained emissions its
+//! retransmission obligations repeat. The enclosing record is
+//! [`Leg`](crate::model::Leg); a leg's dialogs are reached through
+//! [`Dialogs`](crate::model::Dialogs).
 
 use serde::{Deserialize, Serialize};
 
@@ -55,28 +58,6 @@ pub struct PendingRequest {
     pub source_timestamp: Option<String>,
 }
 
-/// RFC 3261 §12 dialog state, stack-owned. `localTag` is the B2BUA's tag on this
-/// leg; `remoteTag` is the peer's. `callId`/`localUri`/`remoteUri` are
-/// denormalised from the enclosing leg so generators need no leg context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StackDialog {
-    pub call_id: String,
-    pub local_tag: String,
-    pub remote_tag: String,
-    /// The local address (§12.1.1's local URI) as the dialog-creating INVITE
-    /// stated it, display name included, tag excluded: the From of every
-    /// request this side sends in the dialog.
-    pub local_uri: String,
-    /// The remote address, in the same form: the To of every such request.
-    pub remote_uri: String,
-    /// Peer Contact URI — Request-URI for in-dialog requests (§12.2.1.1).
-    pub remote_target: String,
-    /// Last-sent CSeq on this dialog (§8.1.1.5).
-    pub local_cseq: i64,
-    /// Outbound route set from the dialog-creating response (§12.1.2).
-    pub route_set: Vec<String>,
-}
-
 /// A 2xx to an INVITE this side sent and still awaits the ACK for (RFC 3261
 /// §13.3.1.4), held on the dialog it was sent on: the retained emission its
 /// ladder repeats, with the two wire facts the discharging ACK carries — so
@@ -98,16 +79,107 @@ pub struct Unacked2xx {
     pub emission: RetainedEmission,
 }
 
-/// B2BUA-only dialog extensions that never surface to the SIP stack.
+/// Where a dialog stands (RFC 3261 §12, §15). A dialog record is kept in every
+/// state until its call record is released, so a late message naming it is
+/// answered by what it was, not by its absence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct B2buaDialogExt {
-    /// Remote party's highest CSeq. `None` until first message from remote.
-    pub remote_cseq: Option<i64>,
+#[serde(rename_all = "kebab-case")]
+pub enum DialogState {
+    /// Created by a tagged provisional to the dialog-creating INVITE (§12.1).
+    Early,
+    /// A 2xx to the dialog-creating INVITE established it (§12.1).
+    Confirmed,
+    /// This side sent a BYE that has no final yet (§15.1.1).
+    Ending,
+    /// The dialog is over; how it ended.
+    Ended(DialogEnd),
+    /// An early dialog the call let go of without a BYE: a losing callee fork
+    /// or a caller-facing dialog the answer did not take (§12.1.2).
+    Retired(RetiredDialog),
+}
+
+/// How a dialog ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DialogEnd {
+    /// The dialog-creating INVITE drew this non-2xx final (§12.1, §13.2.2.3).
+    Rejected(u16),
+    /// The peer sent a BYE (§15.1.2).
+    PeerBye,
+    /// This side's BYE completed: `final_status` is its final, `None` when
+    /// its transaction timed out (§15.1.1).
+    OurBye { final_status: Option<u16> },
+}
+
+/// What a retired dialog still carries: the relays it holds open until their
+/// finals reach their originators (§8.1.3.3), and the release this stack sent
+/// when the dialog, as a losing fork, answered with a 2xx anyway (§13.2.2.4).
+/// The dialog's own `our_cseq` stays the sequence that release continues.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetiredDialog {
+    /// Requests relayed into the dialog before it retired, awaiting finals.
+    pub open_relays: Vec<PendingRequest>,
+    /// The ACK and BYE this stack answered the dialog's late 2xx with.
+    pub release: Option<StragglerRelease>,
+}
+
+/// The release of a retired fork's 2xx (RFC 3261 §13.2.2.4): every repeat of
+/// that 2xx re-sends the ACK on `ack_branch`; the BYE on `bye_branch` ends the
+/// dialog, and its final belongs to the release alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StragglerRelease {
+    pub ack_branch: String,
+    pub bye_branch: String,
+}
+
+/// A callee dialog a caller-facing dialog stands for: `leg_id`'s dialog
+/// whose peer tag is `peer_tag`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerDialog {
+    pub leg_id: String,
+    pub peer_tag: String,
+}
+
+/// The two tags that name a dialog within its leg (RFC 3261 §12): with the
+/// leg's Call-ID, the dialog ID.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DialogId {
+    pub our_tag: String,
+    pub peer_tag: String,
+}
+
+/// One dialog of a leg (RFC 3261 §12). Its identity is the leg's Call-ID plus
+/// `our_tag` and `peer_tag`: a request received on it carries `our_tag` as its
+/// To-tag and `peer_tag` as its From-tag; a response, the reverse.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Dialog {
+    /// This stack's tag in the dialog.
+    pub our_tag: String,
+    /// The peer's tag in the dialog.
+    pub peer_tag: String,
+    pub state: DialogState,
+    /// The last CSeq this side sent in the dialog (§12.2.1.1).
+    pub our_cseq: i64,
+    /// The last CSeq the peer sent in the dialog; `None` until it sent one
+    /// (§12.2.2).
+    pub peer_cseq: Option<i64>,
+    /// Peer Contact URI — Request-URI for in-dialog requests (§12.2.1.1).
+    pub remote_target: String,
+    /// Route set from the dialog-creating message (§12.1.1, §12.1.2).
+    pub route_set: Vec<String>,
+    /// On a caller-facing dialog, the callee dialogs it relays, in the order
+    /// they were shown under it: one, or several a masking policy shows the
+    /// caller as one dialog. Empty for a dialog this stack answers itself.
+    pub fronts: Vec<PeerDialog>,
+    /// A provisional this stack sent the caller carried this dialog's
+    /// `our_tag`, so she holds the early dialog it names (§12.1.1): a
+    /// caller-facing dialog only, set once and kept.
+    pub shown: bool,
     /// Pending transparently-relayed inbound requests awaiting response here.
     pub inbound_pending_requests: Vec<PendingRequest>,
     /// Via branch of the first ACK for this dialog's 2xx (§13.2.2.4 re-ACK).
     pub ack_branch: Option<String>,
-    /// In-flight re-INVITE client transaction handle on this dialog.
+    /// In-flight INVITE client transaction handle on this dialog.
     pub pending_invite_txn: Option<InviteTxnHandle>,
     /// Under the `fake-prack` strategy, the description a 2xx without one gives
     /// the caller: the reliable 18x's answer, or her offer answered from the
@@ -129,10 +201,10 @@ pub struct B2buaDialogExt {
     pub awaited_ack_cseq: Option<i64>,
     /// RFC 3261 §13.3.1.4 — the initial-INVITE 2xx this call answered the
     /// caller with, as the exact datagram the retransmit ladder repeats
-    /// ([`Unacked2xx`]; a-leg dialog only). Captured at the one seam every
-    /// a-facing answer is emitted through. `None` until answered, and again
-    /// once the caller's ACK discharges it — retained bytes are never sent
-    /// after that, and a later re-answer through the seam retains its own
+    /// ([`Unacked2xx`]; caller-facing dialog only). Captured at the one seam
+    /// every a-facing answer is emitted through. `None` until answered, and
+    /// again once the caller's ACK discharges it — retained bytes are never
+    /// sent after that, and a later re-answer through the seam retains its own
     /// datagram afresh.
     pub answered_2xx: Option<Unacked2xx>,
     /// RFC 3261 §13.2.2.4 — the ACK emitted on this dialog's current INVITE
@@ -150,16 +222,79 @@ pub struct B2buaDialogExt {
     /// and the one that confirms hands this state to its leg. `None` while the
     /// dialog carries what the leg's opening INVITE stated.
     pub sdp_session: Option<LegSdpSession>,
-    /// A provisional this stack sent the caller carried this dialog's local
-    /// tag, so she holds the early dialog it names (RFC 3261 §12.1.1): a
-    /// caller-facing dialog only, set once and kept.
-    #[serde(default)]
-    pub shown: bool,
 }
 
-/// Composite Dialog = stack §12 state + B2BUA-only extensions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Dialog {
-    pub sip: StackDialog,
-    pub ext: B2buaDialogExt,
+impl Dialog {
+    /// A dialog named by `our_tag` and `peer_tag`, in `state`, whose own
+    /// sequence stands at `our_cseq`; nothing else is known of it yet.
+    pub fn new(
+        our_tag: impl Into<String>,
+        peer_tag: impl Into<String>,
+        state: DialogState,
+        our_cseq: i64,
+    ) -> Dialog {
+        Dialog {
+            our_tag: our_tag.into(),
+            peer_tag: peer_tag.into(),
+            state,
+            our_cseq,
+            peer_cseq: None,
+            remote_target: String::new(),
+            route_set: Vec::new(),
+            fronts: Vec::new(),
+            shown: false,
+            inbound_pending_requests: Vec::new(),
+            ack_branch: None,
+            pending_invite_txn: None,
+            cached_sdp: None,
+            pending_reinvite_2xx: None,
+            awaited_ack_cseq: None,
+            answered_2xx: None,
+            emitted_ack: None,
+            sdp_session: None,
+        }
+    }
+
+    /// The tags that name the dialog.
+    pub fn id(&self) -> DialogId {
+        DialogId { our_tag: self.our_tag.clone(), peer_tag: self.peer_tag.clone() }
+    }
+
+    /// Whether the dialog is early or confirmed, or this side's BYE is in
+    /// flight: the states in which it still carries requests.
+    pub fn is_live(&self) -> bool {
+        matches!(self.state, DialogState::Early | DialogState::Confirmed | DialogState::Ending)
+    }
+
+    /// Whether a 2xx established the dialog and no BYE has completed on it:
+    /// confirmed, or this side's BYE is in flight.
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self.state, DialogState::Confirmed | DialogState::Ending)
+    }
+
+    /// Whether a 2xx established the dialog: confirmed, ending, or ended by a
+    /// BYE since.
+    pub fn was_established(&self) -> bool {
+        self.is_confirmed()
+            || matches!(
+                self.state,
+                DialogState::Ended(DialogEnd::PeerBye | DialogEnd::OurBye { .. })
+            )
+    }
+
+    /// The retired dialog's record; `None` in any other state.
+    pub fn retired(&self) -> Option<&RetiredDialog> {
+        match &self.state {
+            DialogState::Retired(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The retired dialog's record, to update; `None` in any other state.
+    pub fn retired_mut(&mut self) -> Option<&mut RetiredDialog> {
+        match &mut self.state {
+            DialogState::Retired(r) => Some(r),
+            _ => None,
+        }
+    }
 }

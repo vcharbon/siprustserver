@@ -112,7 +112,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 // the RFC 5009 early-media authorization (the promoted answer is
                 // final media, not authorized early media), stamp Allow +
                 // Supported, keep the SDP. RelayFirstBare180 already mints the
-                // a-facing tag + seeds the tag map; here we relay as a 200
+                // a-facing tag + fronts the callee dialog; here we relay as a 200
                 // carrying the body, so we mint the tag via the relay path's
                 // reliable-1xx tracking instead and pre-seed by reusing the
                 // default a-dialog tag continuity.
@@ -270,8 +270,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     actions.push(RuleAction::SetPromotePem { state: None });
                     return ok(actions);
                 }
-                let a_dialog_cseq =
-                    ctx.call.a_leg().dialogs.first().map(|d| d.sip.local_cseq).unwrap_or(0);
+                let a_dialog_cseq = call::helpers::carrying_dialog(ctx.call.a_leg())
+                    .map(|d| d.our_cseq)
+                    .unwrap_or(0);
                 let next_cseq = a_dialog_cseq + 1;
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,

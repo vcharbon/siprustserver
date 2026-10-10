@@ -82,13 +82,15 @@ pub fn callback_key(ctx: &str) -> String {
 
 /// Every index key a call owns.
 pub fn call_index_keys(call: &Call) -> Vec<String> {
-    let mut keys = vec![a_leg_key(&call.a_leg.call_id, &call.a_leg.from_tag)];
+    let mut keys = vec![a_leg_key(&call.a_leg.call_id, &call.a_leg_invite.from_tag)];
     for b in &call.b_legs {
-        keys.push(b_local_key(&b.call_id, &b.from_tag));
+        if let Some(invite) = &b.outbound_invite {
+            keys.push(b_local_key(&b.call_id, &invite.our_tag));
+        }
         keys.push(b_leg_key(&b.call_id));
         for d in &b.dialogs {
-            if !d.sip.remote_tag.is_empty() {
-                keys.push(b_dialog_key(&b.call_id, &d.sip.remote_tag));
+            if !d.peer_tag.is_empty() {
+                keys.push(b_dialog_key(&b.call_id, &d.peer_tag));
             }
         }
     }
@@ -116,25 +118,24 @@ pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
     }
     let mut keys = Vec::new();
 
-    if let Some(a_leg) = obj.get("a_leg") {
-        if let (Some(call_id), Some(from_tag)) =
-            (str_field(a_leg, "call_id"), str_field(a_leg, "from_tag"))
-        {
-            keys.push(a_leg_key(call_id, from_tag));
-        }
+    let caller_tag = obj.get("a_leg_invite").and_then(|i| str_field(i, "from_tag"));
+    if let (Some(call_id), Some(from_tag)) =
+        (obj.get("a_leg").and_then(|a| str_field(a, "call_id")), caller_tag)
+    {
+        keys.push(a_leg_key(call_id, from_tag));
     }
 
     if let Some(b_legs) = obj.get("b_legs").and_then(|v| v.as_array()) {
         for b in b_legs {
             let Some(cid) = str_field(b, "call_id") else { continue };
-            if let Some(local_tag) = str_field(b, "from_tag") {
+            if let Some(local_tag) = b.get("outbound_invite").and_then(|i| str_field(i, "our_tag"))
+            {
                 keys.push(b_local_key(cid, local_tag));
             }
             keys.push(b_leg_key(cid));
             for d in b.get("dialogs").and_then(|v| v.as_array()).into_iter().flatten() {
-                let remote_tag = d.get("sip").and_then(|s| str_field(s, "remote_tag"));
-                if let Some(remote_tag) = remote_tag.filter(|t| !t.is_empty()) {
-                    keys.push(b_dialog_key(cid, remote_tag));
+                if let Some(peer_tag) = str_field(d, "peer_tag").filter(|t| !t.is_empty()) {
+                    keys.push(b_dialog_key(cid, peer_tag));
                 }
             }
         }
@@ -223,11 +224,10 @@ impl IndexLookup<'_> {
         let leg = match kind {
             KeyKind::ALeg => {
                 let a = &call.a_leg;
-                return (a.call_id == call_id && a.from_tag == tag).then_some(a.leg_id.as_str());
+                let caller_tag = &call.a_leg_invite.from_tag;
+                return (a.call_id == call_id && caller_tag == tag).then_some(a.leg_id.as_str());
             }
-            KeyKind::BDialog => {
-                outgoing.find(|b| b.dialogs.iter().any(|d| d.sip.remote_tag == tag))
-            }
+            KeyKind::BDialog => outgoing.find(|b| b.dialogs.iter().any(|d| d.peer_tag == tag)),
             KeyKind::BLeg => outgoing.next(),
             KeyKind::BLocal => None,
         };

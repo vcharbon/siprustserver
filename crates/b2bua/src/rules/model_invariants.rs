@@ -18,14 +18,16 @@
 //! The a-dialog's tag is checked against the 2xx the caller was sent while
 //! that 2xx awaits its ACK (`answered_2xx`), and afterwards against the
 //! message ring's record of it; with the ring off nothing records the 2xx's
-//! To-tag past the ACK, and only the one-dialog half holds.
+//! To-tag past the ACK, and only the one-live-dialog half holds.
 //!
 //! Timer-scope invariants come with the timer scope model.
 
 use std::fmt;
 use std::sync::Mutex;
 
-use call::helpers::{find_leg, holds_retired, unacknowledged_relayed_provisionals, OwedPrack};
+use call::helpers::{
+    callee_dialog, find_b_leg, find_leg, unacknowledged_relayed_provisionals, OwedPrack,
+};
 use call::{Call, Leg, LegDisposition, LegState, MessageDirection};
 
 /// The record before and after one turn.
@@ -42,7 +44,7 @@ pub type Check = fn(&Turn<'_>) -> Result<(), String>;
 /// Every model invariant, by name.
 pub const INVARIANTS: &[(&str, Check)] = &[
     ("confirmed-a-leg-one-dialog", confirmed_a_leg_one_dialog),
-    ("tag-map-names-a-dialog", tag_map_names_a_dialog),
+    ("fronts-name-a-dialog", fronts_name_a_dialog),
     ("dialog-cseq-never-decreases", dialog_cseq_never_decreases),
     ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
@@ -75,22 +77,24 @@ pub fn violations() -> Vec<String> {
     VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// A confirmed a-leg holds exactly one dialog, and its local tag is the
-/// To-tag of the 2xx the caller was sent (RFC 3261 §12.1.1, §13.3.1.4).
+/// A confirmed a-leg holds exactly one live dialog — every other one the
+/// answer retired — and its local tag is the To-tag of the 2xx the caller was
+/// sent (RFC 3261 §12.1.1, §13.3.1.4).
 fn confirmed_a_leg_one_dialog(turn: &Turn<'_>) -> Result<(), String> {
     let a = &turn.after.a_leg;
     if a.state != LegState::Confirmed {
         return Ok(());
     }
-    let [dialog] = a.dialogs.as_slice() else {
+    let live: Vec<_> = a.dialogs.iter().filter(|d| d.is_live()).collect();
+    let [dialog] = live.as_slice() else {
         return Err(format!(
-            "the confirmed a-leg holds {} dialogs (local tags {:?})",
-            a.dialogs.len(),
-            a.dialogs.iter().map(|d| d.sip.local_tag.as_str()).collect::<Vec<_>>()
+            "the confirmed a-leg holds {} live dialogs (local tags {:?})",
+            live.len(),
+            live.iter().map(|d| d.our_tag.as_str()).collect::<Vec<_>>()
         ));
     };
-    let tag = dialog.sip.local_tag.as_str();
-    if let Some(answered) = &dialog.ext.answered_2xx {
+    let tag = dialog.our_tag.as_str();
+    if let Some(answered) = &dialog.answered_2xx {
         if answered.dialog_tag != tag {
             return Err(format!(
                 "the a-dialog's local tag {tag} is not the To-tag {} of the 2xx awaiting its ACK",
@@ -117,65 +121,46 @@ fn confirmed_a_leg_one_dialog(turn: &Turn<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// Every a-facing tag mapping names, on each face, a live dialog or one the
-/// answer retired: on the a-face an a-leg dialog of its a-tag, or a retired
-/// one with relays still open; on the b-face a dialog of its b-tag on its
-/// leg, a retired one with relays still open, or a losing fork the leg's
-/// fork-straggler book keeps (RFC 3261 §12.1.2).
-fn tag_map_names_a_dialog(turn: &Turn<'_>) -> Result<(), String> {
+/// Every callee dialog a caller-facing dialog fronts is a dialog of its leg,
+/// live or retired (RFC 3261 §12.1.2).
+fn fronts_name_a_dialog(turn: &Turn<'_>) -> Result<(), String> {
     let call = turn.after;
-    for m in &call.tag_map {
-        let a = &call.a_leg;
-        let a_face =
-            a.dialogs.iter().any(|d| d.sip.local_tag == m.a_tag) || holds_retired(a, &m.a_tag);
-        let b_face = find_leg(call, &m.b_leg_id).is_some_and(|l| {
-            let book = crate::rules::fork_straggler::Book::of(l);
-            l.dialogs.iter().any(|d| d.sip.remote_tag == m.b_tag)
-                || holds_retired(l, &m.b_tag)
-                || book.forks.contains_key(&m.b_tag)
-                || book.releases(&m.b_tag)
-        });
-        if !(a_face && b_face) {
-            return Err(format!(
-                "tag mapping {} -> {}:{} names no dialog (a-face held: {a_face}, b-face held: \
-                 {b_face})",
-                m.a_tag, m.b_leg_id, m.b_tag
-            ));
+    for d in &call.a_leg.dialogs {
+        for f in &d.fronts {
+            let held = find_b_leg(call, &f.leg_id)
+                .is_some_and(|l| callee_dialog(l, &f.peer_tag).is_some());
+            if !held {
+                return Err(format!(
+                    "caller-facing dialog {} fronts {}:{}, which names no dialog",
+                    d.our_tag, f.leg_id, f.peer_tag
+                ));
+            }
         }
     }
     Ok(())
 }
 
-/// A dialog's local and remote CSeq never go down across a turn (RFC 3261
-/// §12.2.1.1, §12.2.2), the dialog matched by leg and dialog ID.
+/// A dialog's own and peer CSeq never go down across a turn (RFC 3261
+/// §12.2.1.1, §12.2.2), the dialog matched by leg and its two tags.
 fn dialog_cseq_never_decreases(turn: &Turn<'_>) -> Result<(), String> {
     let Some(before) = turn.before else { return Ok(()) };
     for leg in legs(turn.after) {
         let Some(old_leg) = find_leg(before, &leg.leg_id) else { continue };
         for d in &leg.dialogs {
-            let id = (&d.sip.call_id, &d.sip.local_tag, &d.sip.remote_tag);
-            let Some(old) = old_leg
-                .dialogs
-                .iter()
-                .find(|o| (&o.sip.call_id, &o.sip.local_tag, &o.sip.remote_tag) == id)
-            else {
+            let Some(old) = old_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
                 continue;
             };
-            if d.sip.local_cseq < old.sip.local_cseq {
+            if d.our_cseq < old.our_cseq {
                 return Err(format!(
                     "leg {} dialog {}/{}: local CSeq went from {} to {}",
-                    leg.leg_id,
-                    d.sip.local_tag,
-                    d.sip.remote_tag,
-                    old.sip.local_cseq,
-                    d.sip.local_cseq
+                    leg.leg_id, d.our_tag, d.peer_tag, old.our_cseq, d.our_cseq
                 ));
             }
-            if let Some(was) = old.ext.remote_cseq {
-                if d.ext.remote_cseq.is_none_or(|now| now < was) {
+            if let Some(was) = old.peer_cseq {
+                if d.peer_cseq.is_none_or(|now| now < was) {
                     return Err(format!(
                         "leg {} dialog {}/{}: remote CSeq went from {was} to {:?}",
-                        leg.leg_id, d.sip.local_tag, d.sip.remote_tag, d.ext.remote_cseq
+                        leg.leg_id, d.our_tag, d.peer_tag, d.peer_cseq
                     ));
                 }
             }
@@ -217,8 +202,7 @@ fn invite_open(leg: &Leg, invite_cseq: i64) -> bool {
         LegState::Trying | LegState::Early => true,
         LegState::Terminated => false,
         LegState::Confirmed => leg.dialogs.iter().any(|d| {
-            d.ext
-                .inbound_pending_requests
+            d.inbound_pending_requests
                 .iter()
                 .any(|p| p.method == "INVITE" && p.outbound_cseq == invite_cseq)
         }),
@@ -229,10 +213,7 @@ fn invite_open(leg: &Leg, invite_cseq: i64) -> bool {
 /// whose ACK is still awaited: the PRACK carries that ACK's answer.
 fn deferred_to_ack(leg: &Leg, owed: &OwedPrack) -> bool {
     owed.offer.is_some()
-        && leg
-            .dialogs
-            .iter()
-            .any(|d| d.sip.remote_tag == owed.b_tag && d.ext.awaited_ack_cseq.is_some())
+        && leg.dialogs.iter().any(|d| d.peer_tag == owed.b_tag && d.awaited_ack_cseq.is_some())
 }
 
 /// A non-2xx final sent on the caller's INVITE ends every a-dialog it could
@@ -247,7 +228,7 @@ fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
             Err(format!(
                 "the caller's INVITE took {status} but the a-leg is {:?} with dialogs {:?}",
                 a.state,
-                a.dialogs.iter().map(|d| d.sip.local_tag.as_str()).collect::<Vec<_>>()
+                a.dialogs.iter().map(|d| d.our_tag.as_str()).collect::<Vec<_>>()
             ))
         }
         _ => Ok(()),

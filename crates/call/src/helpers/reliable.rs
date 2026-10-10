@@ -470,12 +470,11 @@ pub fn admits_reliable_provisional(pending: &PendingRequest) -> bool {
 
 /// The leg a reliable provisional shown in the `shown_tag` dialog was shown
 /// ON — the leg whose dialog carries that tag as this stack's own. `None` for
-/// a tag no dialog carries: an a-facing fork tag that is only in the tag map,
-/// which is the a-leg's by construction.
+/// a tag no dialog carries.
 pub fn leg_shown<'a>(call: &'a Call, shown_tag: &str) -> Option<&'a str> {
     std::iter::once(&call.a_leg)
         .chain(call.b_legs.iter())
-        .find(|leg| leg.dialogs.iter().any(|d| d.sip.local_tag == shown_tag))
+        .find(|leg| leg.dialogs.iter().any(|d| d.our_tag == shown_tag))
         .map(|leg| leg.leg_id.as_str())
 }
 

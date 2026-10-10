@@ -270,9 +270,6 @@ pub async fn apply_route(
             BodyUpdate::Keep | BodyUpdate::AttachParts(_) => {}
             BodyUpdate::Drop => {
                 draft = draft.without_body();
-                if let Some(d) = leg.dialogs.first_mut() {
-                    d.ext.cached_sdp = None;
-                }
             }
             BodyUpdate::Replace(s) => {
                 draft = draft.with_body(s.clone().into_bytes().into());
@@ -282,13 +279,10 @@ pub async fn apply_route(
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
-        // The client-transaction handles hold the INVITE as it leaves.
-        let image = req.image().to_vec();
-        for handle in leg.dialogs.iter_mut().filter_map(|d| d.ext.pending_invite_txn.as_mut()) {
-            handle.original_invite = image.clone();
-        }
+        // The client-transaction handle holds the INVITE as it leaves; the
+        // leg holds no dialog before a response to it.
         if let Some(handle) = leg.pending_invite_txn.as_mut() {
-            handle.original_invite = image;
+            handle.original_invite = req.image().to_vec();
         }
     }
 

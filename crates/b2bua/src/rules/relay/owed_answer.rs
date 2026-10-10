@@ -19,7 +19,7 @@ use crate::config::SdpFormPolicy;
 pub(crate) fn invite_carried_offer(call: &Call, leg_id: &str, invite_cseq: i64) -> bool {
     let Some(leg) = call::helpers::find_leg(call, leg_id) else { return true };
     std::iter::once(leg.pending_invite_txn.as_ref())
-        .chain(leg.dialogs.iter().map(|d| d.ext.pending_invite_txn.as_ref()))
+        .chain(leg.dialogs.iter().map(|d| d.pending_invite_txn.as_ref()))
         .flatten()
         .filter_map(|h| parse_request(&h.original_invite))
         .find(|r| i64::from(r.cseq().seq()) == invite_cseq)
@@ -50,8 +50,8 @@ pub(crate) fn ack_answer_on_leg(
 ) -> Option<Vec<u8>> {
     let sdp = ack.sdp()?;
     let dialog = call::helpers::find_leg(call, leg_id)
-        .and_then(|l| l.dialogs.first())
-        .map(|d| d.sip.remote_tag.clone());
+        .and_then(|l| l.dialogs.confirmed())
+        .map(|d| d.peer_tag.clone());
     Some(continue_on_leg(
         call,
         leg_id,
@@ -64,14 +64,15 @@ pub(crate) fn ack_answer_on_leg(
     ))
 }
 
-/// Whether `leg` holds a 2xx whose ACK this stack composes alone: the
+/// Whether `leg`'s confirmed dialog holds a 2xx whose ACK this stack composes
+/// alone: the
 /// §13.2.2.4 obligation is armed and undischarged, and the ACK owes no answer
 /// body (RFC 3264 §4) — the INVITE this stack sent carried the offer, or
 /// (`offer_owed`) a reliable provisional carried it and the PRACK this stack
 /// owes carries the answer (RFC 3262 §5).
 pub(crate) fn bare_ack_owed(leg: &Leg, offer_owed: bool) -> bool {
-    leg.dialogs.first().is_some_and(|d| {
-        d.ext.awaited_ack_cseq.is_some() && (offer_owed || acked_invite_carries_offer(d))
+    leg.dialogs.confirmed().is_some_and(|d| {
+        d.awaited_ack_cseq.is_some() && (offer_owed || acked_invite_carries_offer(d))
     })
 }
 

@@ -19,11 +19,11 @@ use sip_message::{Method, SipResponse};
 /// but an INVITE — the 200 to a CANCEL carries the INVITE's number — is never
 /// a copy of one.
 pub(crate) fn retransmitted_2xx(dialog: &Dialog, resp: &SipResponse) -> bool {
-    let taken = dialog.ext.ack_branch.is_some() || dialog.ext.awaited_ack_cseq.is_some();
+    let taken = dialog.ack_branch.is_some() || dialog.awaited_ack_cseq.is_some();
     if !taken || !(200..300).contains(&resp.status()) || resp.cseq().method() != Method::Invite {
         return false;
     }
-    if resp.to().tag().unwrap_or_default() != dialog.sip.remote_tag {
+    if resp.to().tag().unwrap_or_default() != dialog.peer_tag {
         return false;
     }
     let cseq = resp.cseq().seq();

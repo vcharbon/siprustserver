@@ -120,7 +120,7 @@ define_service! {
     rules: [
         // ── suppress-18x — first 18x → bare 180; police the rest ──────────────
         // Wins over CORE `relay-provisional` by SERVICE_LAYER. On the first 18x:
-        // relay a bare 180 (minting the a-facing tag + seeding the tag map, in the
+        // relay a bare 180 (minting the a-facing tag it fronts the fork with, in the
         // `RelayFirstBare180` executor) and advance to `Suppressing`. Later 18x
         // follow the `Relay18xMessages` policy:
         // FIRST (default) suppresses them all; ALL relays each one (downgraded to
@@ -214,7 +214,7 @@ define_service! {
 
                 // First 18x (or a later one the messages policy relays again) —
                 // mint/reuse the a-facing tag + relay as a bare 180 (the
-                // executor owns the IdGen and the tag-map seeding, and flips
+                // executor owns the IdGen and the fronting dialog, and flips
                 // `first_relayed`, which the projection mirrors → `Suppressing`).
                 let mut actions = vec![
                     RuleAction::RelayFirstBare180 {
@@ -288,7 +288,7 @@ define_service! {
                 // THIS machine's bare 180: an a-dialog another service pinned
                 // (an MRF early-media 183) is that service's to re-identify.
                 // A tagless 2xx names no dialog (§12.1.2) and takes the primary.
-                let shown = b_tag.is_empty() || ctx.call.find_by_b_tag(&leg, &b_tag).is_some();
+                let shown = b_tag.is_empty() || ctx.call.fronting_dialog(&leg, &b_tag).is_some();
                 if !shown && ctx.call.relay_first_18x_first_relayed() {
                     actions.push(RuleAction::MapUnshownDialog {
                         b_leg_id: leg.clone(),
@@ -401,11 +401,9 @@ define_service! {
                 // bob is refused (`answer_reoffer_both_ways`).
                 let b_leg = ctx.call.b_legs().iter().find(|l| l.leg_id == leg);
                 let sent = b_leg.and_then(|l| {
-                    l.dialogs
-                        .iter()
-                        .filter(|d| d.sip.remote_tag == b_tag)
-                        .chain(&l.dialogs)
-                        .find_map(relay::acked_invite)
+                    call::helpers::callee_dialog(l, &b_tag)
+                        .and_then(relay::acked_invite)
+                        .or_else(|| relay::dialling_invite(l))
                 });
                 let origin = b_leg.and_then(|l| relay::next_origin_in_dialog(l, &b_tag));
                 let caller = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());

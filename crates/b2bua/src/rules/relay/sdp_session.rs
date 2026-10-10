@@ -151,8 +151,8 @@ pub fn continue_on_leg(
         let exchanges_opened = leg.sdp_session.exchanges_opened;
         let own =
             std::mem::replace(&mut leg.sdp_session, LegSdpSession { exchanges_opened, ..opening });
-        if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag == tag) {
-            d.ext.sdp_session = Some(own);
+        if let Some(d) = call::helpers::callee_dialog_mut(leg, tag) {
+            d.sdp_session = Some(own);
         }
     }
     out
@@ -164,10 +164,10 @@ pub fn continue_on_leg(
 /// dialog.
 fn enter_early_dialog(call: &mut Call, leg_id: &str, tag: &str) -> Option<LegSdpSession> {
     let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
-    let dialog = (leg.state != LegState::Confirmed)
-        .then(|| leg.dialogs.iter_mut().position(|d| d.sip.remote_tag == tag))
-        .flatten()?;
-    let mut own = leg.dialogs[dialog].ext.sdp_session.take();
+    if leg.state == LegState::Confirmed {
+        return None;
+    }
+    let mut own = call::helpers::callee_dialog_mut(leg, tag)?.sdp_session.take();
     if let Some(own) = own.as_mut() {
         own.exchanges_opened = leg.sdp_session.exchanges_opened;
     }
@@ -285,14 +285,17 @@ fn continue_session(
     [&body[..range.start], &out, &body[range.end..]].concat()
 }
 
-/// The session state the early dialog at `dialog` carries, handed to `leg` as
-/// that dialog confirms it; nothing where the dialog carries the opening state.
-/// Whatever that dialog carries, the leg keeps the restatements its other
-/// forks and its own state carried: the call's fact outlives the pruned forks.
-pub fn adopt_confirmed_dialog(leg: &mut Leg, dialog: usize) {
+/// The session state the early dialog with peer tag `peer_tag` carries, handed
+/// to `leg` as that dialog confirms it; nothing where the dialog carries the
+/// opening state. Whatever that dialog carries, the leg keeps the restatements
+/// its other forks and its own state carried: the call's fact outlives the
+/// retired forks.
+pub fn adopt_confirmed_dialog(leg: &mut Leg, peer_tag: &str) {
     let restated = leg.sdp_session.has_restated
-        || leg.dialogs.iter().any(|d| d.ext.sdp_session.as_ref().is_some_and(|s| s.has_restated));
-    if let Some(mut own) = leg.dialogs.get_mut(dialog).and_then(|d| d.ext.sdp_session.take()) {
+        || leg.dialogs.iter().any(|d| d.sdp_session.as_ref().is_some_and(|s| s.has_restated));
+    if let Some(mut own) =
+        call::helpers::callee_dialog_mut(leg, peer_tag).and_then(|d| d.sdp_session.take())
+    {
         own.exchanges_opened = leg.sdp_session.exchanges_opened;
         leg.sdp_session = own;
     }
@@ -305,9 +308,9 @@ pub fn adopt_confirmed_dialog(leg: &mut Leg, dialog: usize) {
 /// next one.
 pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
     let early = (leg.state != LegState::Confirmed)
-        .then(|| leg.dialogs.iter().find(|d| d.sip.remote_tag == remote_tag))
+        .then(|| call::helpers::callee_dialog(leg, remote_tag))
         .flatten()
-        .and_then(|d| d.ext.sdp_session.as_ref());
+        .and_then(|d| d.sdp_session.as_ref());
     let stated = early.unwrap_or(&leg.sdp_session).sent_origin.as_deref()?;
     let line = origin_of(stated)?.next_version_line()?;
     Some(line["o=".len()..].to_string())
@@ -433,10 +436,7 @@ struct Formed<'a> {
 fn has_restated(call: &Call) -> bool {
     std::iter::once(&call.a_leg).chain(&call.b_legs).any(|leg| {
         leg.sdp_session.has_restated
-            || leg
-                .dialogs
-                .iter()
-                .any(|d| d.ext.sdp_session.as_ref().is_some_and(|s| s.has_restated))
+            || leg.dialogs.iter().any(|d| d.sdp_session.as_ref().is_some_and(|s| s.has_restated))
     })
 }
 

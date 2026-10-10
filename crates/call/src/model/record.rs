@@ -1,6 +1,6 @@
 //! The master [`Call`] record and its call-level satellites: lifecycle state,
 //! HA topology hint, active peering, the a-leg INVITE
-//! snapshot, tag mappings, policy overrides, active rules.
+//! snapshot, policy overrides, active rules.
 
 use std::collections::BTreeMap;
 
@@ -18,17 +18,6 @@ use super::services::{
 use super::sm::{MachineId, StateLabel};
 use super::termination::Termination;
 use super::timer::TimerEntry;
-
-/// Maps a B-leg's real tag to the B2BUA-generated tag shown to Alice.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TagMapping {
-    /// B2BUA-generated tag shown to Alice.
-    pub a_tag: String,
-    /// Which B-leg this maps to.
-    pub b_leg_id: String,
-    /// Bob's actual remote tag.
-    pub b_tag: String,
-}
 
 /// One reliable provisional relayed toward the caller (RFC 3262): the a-facing
 /// early dialog it was shown in, the `RSeq` this stack minted for it, and the
@@ -142,6 +131,9 @@ pub struct ALegInviteSnapshot {
     /// The INVITE's CSeq number: what a copy of it carries (RFC 3261
     /// §8.2.2.2), and a new request on its Call-ID and From-tag does not.
     pub cseq: u32,
+    /// The INVITE's From-tag: the caller's tag, the peer tag of every
+    /// caller-facing dialog (RFC 3261 §12.1.1).
+    pub from_tag: String,
 }
 
 /// A rule activated on this call by the HTTP API response.
@@ -223,12 +215,6 @@ pub struct Call {
     pub cdr_events: Vec<CdrEvent>,
     pub state: CallModelState,
     pub created_at: i64,
-    /// Via headers from the most recent non-INVITE a-leg request (for relay).
-    pub a_leg_pending_vias: Option<Vec<String>>,
-    /// CSeq of the most recent non-INVITE a-leg request (echoed on response).
-    pub a_leg_pending_cseq: Option<i64>,
-    /// Maps B-leg remote To-tags to B2BUA-generated tags shown to Alice.
-    pub tag_map: Vec<TagMapping>,
     pub trace_id: Option<String>,
     pub root_span_id: Option<String>,
     pub sampled: Option<bool>,

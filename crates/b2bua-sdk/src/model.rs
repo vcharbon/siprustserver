@@ -10,7 +10,7 @@ use call::helpers::RAckTokens;
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
     Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
-    PromotePemState, StateLabel, TagMapping, TerminationCause, TimerType, TransferState,
+    PromotePemState, StateLabel, TerminationCause, TimerType, TransferState,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -605,11 +605,6 @@ pub enum RuleAction {
         state: LegState,
         disposition: Option<LegDisposition>,
     },
-    AddTagMapping {
-        a_tag: String,
-        b_leg_id: String,
-        b_tag: String,
-    },
     /// Map the callee early dialog `(b_leg_id, b_tag)`, one no provisional
     /// showed the caller, to a FRESH a-facing To-tag, so its 2xx opens a caller
     /// dialog of its own (RFC 3261 §12.1.2). A dialog already mapped keeps its
@@ -839,11 +834,12 @@ pub enum RuleAction {
     /// Bare-180 downgrade relay (`relayFirst18xTo180`): mint an a-facing To-tag
     /// on the FIRST 18x (the executor owns the IdGen) — or reuse the stored one
     /// on a later 18x the `Relay18xMessages` policy relays again (the caller
-    /// keeps ONE stable early-dialog identity) — seed the tag map for this
-    /// b-leg dialog, record `stored_a_tag` + `first_relayed` (+ the upstream
-    /// status value for `ONE_PER_VALUE` dedupe), and relay the current 1xx to
-    /// the caller as a bare 180 (no body / Require / RSeq). The tag is the
-    /// single source the relay path resolves via the tag map.
+    /// keeps ONE stable early-dialog identity) — the caller-facing dialog of
+    /// that tag fronts this b-leg dialog — record `stored_a_tag` +
+    /// `first_relayed` (+ the upstream status value for `ONE_PER_VALUE`
+    /// dedupe), and relay the current 1xx to the caller as a bare 180 (no body
+    /// / Require / RSeq). The fronting dialog is the single source the relay
+    /// path resolves the tag from.
     RelayFirstBare180 {
         leg_id: String,
         b_tag: String,
@@ -851,7 +847,7 @@ pub enum RuleAction {
     // ── promote18xPemTo200 (SERVICE_LAYER) ──────────────────────────────────
     /// Originate a re-INVITE on `leg_id` (here always the a-leg) carrying `body`
     /// as the new offer plus `add_headers` (Allow/Supported), CSeq =
-    /// dialog.localCSeq + 1. Used to resync Alice when bob's final SDP differs
+    /// the dialog's `our_cseq` + 1. Used to resync Alice when bob's final SDP differs
     /// from the early-media SDP that was promoted into the synthetic 200 OK.
     SendReinvite {
         leg_id: String,
@@ -1132,7 +1128,6 @@ impl RuleAction {
             // Bookkeeping — local data writes / async kicks, no wire output.
             RuleAction::ConfirmDialog { .. }
             | RuleAction::UpdateLegState { .. }
-            | RuleAction::AddTagMapping { .. }
             | RuleAction::MapUnshownDialog { .. }
             | RuleAction::AddCdrEvent { .. }
             | RuleAction::DeactivateRule { .. }
@@ -1315,12 +1310,10 @@ impl<'a> RuleCall<'a> {
     pub fn active_peer(&self) -> Option<&'a ActivePeer> {
         self.0.active_peer.as_ref()
     }
-    pub fn tag_map(&self) -> &'a [TagMapping] {
-        &self.0.tag_map
-    }
-    /// The b-leg real-tag ↔ a-facing-tag mapping for a given b-leg dialog.
-    pub fn find_by_b_tag(&self, b_leg_id: &str, b_tag: &str) -> Option<&'a TagMapping> {
-        call::helpers::find_by_b_tag(self.0, b_leg_id, b_tag)
+    /// The caller-facing dialog fronting `b_leg_id`'s dialog with peer tag
+    /// `b_tag` ([`call::Dialog::fronts`]).
+    pub fn fronting_dialog(&self, b_leg_id: &str, b_tag: &str) -> Option<&'a Dialog> {
+        call::helpers::fronting_dialog(self.0, b_leg_id, b_tag)
     }
     /// Both peered leg ids (`active_peer`), or empty when split.
     pub fn all_peered_legs(&self) -> Vec<String> {
@@ -1535,9 +1528,8 @@ impl<'a> RuleContext<'a> {
     /// target in a **relayable** state? `false` exactly when the
     /// relay would go nowhere useful: no peer leg resolves, the peer leg is
     /// `Terminated` (e.g. a failed b-leg whose `/call/failure` reroute is still
-    /// pending), or the target dialog has no remote tag yet (a replacement leg
-    /// still `Trying`). An `Early` peer dialog WITH a remote tag counts as
-    /// relayable (RFC 3311 §5.1 early-dialog UPDATE is the normal case). Uses
+    /// pending), or no target dialog resolves (a replacement leg still
+    /// `Trying`). An `Early` peer dialog counts as relayable (RFC 3311 §5.1 early-dialog UPDATE is the normal case). Uses
     /// the SAME resolver as the executor's relay path
     /// ([`call::helpers::resolve_relay_peer`]), so match and action never
     /// disagree. Exposed on the context (usable from [`Match::filter`]) so a
@@ -1597,7 +1589,8 @@ impl<'a> RuleContext<'a> {
         let tags = self.request_tags();
         if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, tags) {
             GlareRefusal::Unanswered
-        } else if call::helpers::sender_invite_unacknowledged(self.call.0, self.source_leg_id) {
+        } else if call::helpers::sender_invite_unacknowledged(self.call.0, self.source_leg_id, tags)
+        {
             GlareRefusal::Unacknowledged
         } else {
             GlareRefusal::Crossing
@@ -1606,8 +1599,8 @@ impl<'a> RuleContext<'a> {
 
     /// The pending-relay snapshot the current response answers, read through
     /// [`call::helpers::relayed_pending`] as the relay executor reads it: the
-    /// dialog the response's identity tag names, or the relays kept for a
-    /// dialog the answer retired — never another dialog's. `None` for any
+    /// dialog the response's tags name, or the relays kept for a dialog the
+    /// answer retired — never another dialog's. `None` for any
     /// non-response event.
     pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
         let resp = self.response()?;
@@ -1637,10 +1630,17 @@ impl<'a> RuleContext<'a> {
             self.call.b_legs().iter().find(|l| l.leg_id == self.source_leg_id)
         }
     }
-    /// The dialog the event is on (confirmed dialog, else the first).
-    pub fn source_dialog(&self) -> Option<&Dialog> {
+    /// The dialog of the source leg the current message names by its tags:
+    /// a request's To-tag is ours and its From-tag the peer's, a response's
+    /// the reverse (RFC 3261 §12.2). `None` for any other event, and when the
+    /// tags name no dialog of the leg.
+    pub fn dialog(&self) -> Option<&'a Dialog> {
         let leg = self.source_leg()?;
-        call::helpers::confirmed_dialog(leg).or_else(|| leg.dialogs.first())
+        if let Some(r) = self.request() {
+            return leg.dialogs.of_request(r.to().tag(), r.from().tag());
+        }
+        let r = self.response()?;
+        leg.dialogs.of_response(r.to().tag(), r.from().tag())
     }
     /// The To-tag and From-tag of the current request (none for any other event).
     pub fn request_tags(&self) -> call::helpers::RequestTags<'_> {
@@ -1648,18 +1648,11 @@ impl<'a> RuleContext<'a> {
             .map(|r| call::helpers::RequestTags::new(r.to().tag(), r.from().tag()))
             .unwrap_or_default()
     }
-    /// The dialog the current in-dialog request rides on the source leg: the
-    /// one its tags name — each caller-facing dialog and each callee fork keeps
-    /// its own sequence (RFC 3261 §12.1.2, §12.2.1.1). `None` when they name
-    /// none: no other dialog's sequence is the request's.
-    pub fn request_dialog(&self) -> Option<&Dialog> {
-        call::helpers::request_dialog(self.call.0, self.source_leg_id, self.request_tags())
-    }
     /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
     /// regenerated on, resolved with the SAME resolver as the relay executor
     /// ([`call::helpers::relay_peer_dialog`]) so match and action never
     /// disagree. `None` when no peer leg or dialog resolves.
-    pub fn peer_dialog(&self) -> Option<&Dialog> {
+    pub fn peer_dialog(&self) -> Option<&'a Dialog> {
         call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, self.request_tags())
             .map(|(_, d)| d)
     }

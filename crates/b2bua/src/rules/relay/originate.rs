@@ -4,9 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{
-    B2buaDialogExt, Dialog, InviteTxnHandle, Leg, LegDisposition, LegState, RemoteInfo, StackDialog,
-};
+use call::{InviteTxnHandle, Leg, LegDisposition, LegState, RemoteInfo};
 use sip_message::draft::RequestDraft;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
@@ -499,54 +497,27 @@ pub fn build_b_leg(
     let remote_addr = header::To::new(to_addr).to_wire();
     let request_uri = request_uri.text().into_owned();
 
-    let dialog = Dialog {
-        sip: StackDialog {
-            call_id: b_call_id.clone(),
-            local_tag: from_tag.clone(),
-            remote_tag: String::new(),
-            local_uri: local_addr.clone(),
-            remote_uri: remote_addr.clone(),
-            remote_target: request_uri.clone(),
-            local_cseq: 1,
-            route_set: vec![],
-        },
-        ext: B2buaDialogExt {
-            remote_cseq: None,
-            inbound_pending_requests: vec![],
-            ack_branch: None,
-            pending_invite_txn: Some(InviteTxnHandle {
-                branch: branch.clone(),
-                original_invite: invite.image().to_vec(),
-                destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
-            }),
-            cached_sdp: None,
-            pending_reinvite_2xx: None,
-            answered_2xx: None,
-            emitted_ack: None,
-            sdp_session: None,
-            awaited_ack_cseq: None,
-            shown: false,
-        },
-    };
-
-    // Capture the INVITE handle before `dialog` is moved into the leg.
-    let leg_invite_handle = dialog.ext.pending_invite_txn.clone();
+    let leg_invite_handle = Some(InviteTxnHandle {
+        branch: branch.clone(),
+        original_invite: invite.image().to_vec(),
+        destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
+    });
     let leg = Leg {
         leg_id: leg_id.to_string(),
         call_id: b_call_id,
-        from_tag,
         source: RemoteInfo { address: dest.0.clone(), port: dest.1 },
         state: LegState::Trying,
         disposition: LegDisposition::Pending,
-        dialogs: vec![dialog],
+        dialogs: Default::default(),
         no_answer_timeout_sec,
         bye_disposition: None,
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
         invite_request_uri: Some(request_uri),
-        // Also stamp the INVITE handle on the leg: a forked early dialog created
-        // from a later 18x has no per-dialog handle, so ACK-for-2xx / RAck CSeq
-        // fall back to the leg's (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
+        outbound_invite: Some(call::OutboundInvite { our_tag: from_tag, cseq: 1 }),
+        own_tag: None,
+        // Each dialog a response to this INVITE creates inherits the handle,
+        // for its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
         pending_invite_txn: leg_invite_handle,
         ext: None,
         kind: Some(kind.unwrap_or(call::LegKind::Destination)),

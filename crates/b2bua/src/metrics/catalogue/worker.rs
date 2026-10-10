@@ -590,8 +590,11 @@ pub const CENSUS_TIMERS: Family = Family::gauge(
     "sum of serializable timer-intent Vec len across live calls (deduped by id; should be flat per call)",
 );
 
-pub const CENSUS_TAG_MAP: Family =
-    Family::gauge("b2bua_census_tag_map", Labels::None, "sum of tag_map entries across live calls");
+pub const CENSUS_TAG_MAP: Family = Family::gauge(
+    "b2bua_census_tag_map",
+    Labels::None,
+    "sum of callee dialogs fronted by caller-facing dialogs across live calls",
+);
 
 pub const CENSUS_B_LEGS: Family =
     Family::gauge("b2bua_census_b_legs", Labels::None, "sum of b_legs Vec len across live calls");

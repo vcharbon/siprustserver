@@ -3,7 +3,7 @@
 //! the generic in-dialog request (`SendRequestToLeg`). Relaying an *inbound*
 //! request does NOT live here — see [`super::relay_request`].
 
-use call::helpers::{add_cdr_event, add_originated_b_leg, bump_local_cseq};
+use call::helpers::{add_cdr_event, add_originated_b_leg, bump_our_cseq};
 use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
@@ -18,7 +18,7 @@ use crate::rules::capabilities;
 use crate::rules::relay;
 use b2bua_sdk::model::{Body, RuleContext};
 
-use super::select::{dialog_identity_tag, in_dialog_method, leg_at, leg_index};
+use super::select::{in_dialog_method, leg_at, leg_index};
 use super::teardown::terminate_all;
 use super::ActionExecutor;
 
@@ -180,16 +180,16 @@ impl ActionExecutor<'_> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
+        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
             Some(d) => d.clone(),
             None => return,
         };
-        let t_id = dialog_identity_tag(leg_id, &dialog);
-        let outbound_cseq = dialog.sip.local_cseq + 1;
-        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+        let t_id = dialog.id();
+        let outbound_cseq = dialog.our_cseq + 1;
+        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
-        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
@@ -232,7 +232,7 @@ impl ActionExecutor<'_> {
     /// `content_type` (`None`: SDP) and described by `descriptors`, plus
     /// `add_headers` (Allow/Supported), the leg's capability set
     /// ([`capabilities::for_reinvite`]) filling what they leave unstated.
-    /// CSeq = dialog.localCSeq + 1. Used by
+    /// CSeq = the dialog's `our_cseq` + 1. Used by
     /// `promote18xPemTo200` to resync Alice when bob's final SDP differs from the
     /// early-media SDP promoted into the synthetic 200 OK. The response comes back
     /// classified from-a (the B2BUA's stamped Via cr/lg) and is claimed by the
@@ -253,11 +253,11 @@ impl ActionExecutor<'_> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
+        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
             Some(d) => d.clone(),
             None => return,
         };
-        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let t_id = dialog.id();
         // The INVITE that created this leg's dialog: the originator's own on
         // hers, the one the stack sent on a leg it dialled.
         let creating = if leg_id == call.a_leg.leg_id {
@@ -265,11 +265,11 @@ impl ActionExecutor<'_> {
         } else {
             relay::dialling_invite(leg_at(call, idx))
         };
-        let outbound_cseq = dialog.sip.local_cseq + 1;
-        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+        let outbound_cseq = dialog.our_cseq + 1;
+        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
-        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let mut extra: Vec<sip_message::SipHeader> = add_headers
             .iter()
             .map(|e| sip_message::SipHeader {
@@ -301,7 +301,7 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                Some(&dialog.sip.remote_tag),
+                Some(&dialog.peer_tag),
                 author,
                 relay::Carried::InDialog,
                 body.to_vec(),
@@ -330,14 +330,14 @@ impl ActionExecutor<'_> {
         // retained datagram, and any armed ACK obligation: all belonged to the
         // prior CSeq — this new INVITE transaction's 2xx mints/arms its own.
         *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
-            d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
+            d.pending_invite_txn = Some(call::InviteTxnHandle {
                 branch: branch.clone(),
                 original_invite: out_req.image().to_vec(),
                 destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
             });
-            d.ext.ack_branch = None;
-            d.ext.emitted_ack = None;
-            d.ext.awaited_ack_cseq = None;
+            d.ack_branch = None;
+            d.emitted_ack = None;
+            d.awaited_ack_cseq = None;
         });
 
         fx.outbound.push(OutboundSipEffect {
@@ -374,21 +374,15 @@ impl ActionExecutor<'_> {
             Some(i) => i,
             None => return,
         };
-        // Probe the CONFIRMED dialog (non-empty remote tag). A leg can hold an
-        // early/forked dialog with no remote tag as its first entry, and a
-        // failover takeover/reclaim (ADR-0011 X11) can materialise a replica
-        // dialog captured mid-confirm; building an in-dialog `To` from an empty
-        // remote tag yields a tag-less header that panics in `make_request` and
-        // leaks the dialog. Skip when no dialog is confirmed (nothing to probe).
-        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
+        // Probe the dialog the leg's requests ride ([`call::helpers::carrying_dialog`]).
+        // Skip when the leg holds none (nothing to probe).
+        let dialog = match call::helpers::carrying_dialog(leg_at(call, idx)) {
             Some(d) => d.clone(),
             None => {
                 // An early/mid-confirm leg legitimately has no confirmed dialog
-                // yet — skip quietly. A CONFIRMED leg with only tag-less dialogs
-                // is a broken invariant (an established dialog always knows its
-                // peer's tag; a tag-less INVITE is rejected at ingest) that
-                // silently drops every in-dialog request to this leg — never
-                // swallow it.
+                // yet — skip quietly. A CONFIRMED leg with none is a broken
+                // invariant that silently drops every in-dialog request to
+                // this leg — never swallow it.
                 let leg = leg_at(call, idx);
                 if leg.state == call::LegState::Confirmed {
                     tracing::error!(
@@ -396,9 +390,9 @@ impl ActionExecutor<'_> {
                         %leg_id,
                         dialogs = leg.dialogs.len(),
                         %method,
-                        "INVARIANT VIOLATION: leg is Confirmed but has no dialog with a remote \
-                         tag (all tag-less) — cannot originate the in-dialog request, so \
-                         keepalive will never fire and this leg is permanently un-probeable"
+                        "INVARIANT VIOLATION: leg is Confirmed but holds no confirmed dialog — \
+                         cannot originate the in-dialog request, so keepalive will never fire \
+                         and this leg is permanently un-probeable"
                     );
                 }
                 return;
@@ -408,15 +402,15 @@ impl ActionExecutor<'_> {
         // every other in-dialog originator here. Without this the in-dialog
         // keepalive OPTIONS re-derives the same CSeq every cycle and the later
         // relayed BYE collides on it — an RFC 3261 violation a real UAS rejects.
-        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let t_id = dialog.id();
         // `KeepaliveCseqReuse` (the wire-fault seam) emits the keepalive at the
         // CSeq the dialog already used and leaves the dialog un-advanced: the
         // exact defect `cseq-in-dialog-order` gates on, on purpose.
         let reuse = m == InDialogMethod::Options
             && self.wire_faults.is_armed(crate::wire_faults::WireFaultPoint::KeepaliveCseqReuse);
-        let outbound_cseq = if reuse { dialog.sip.local_cseq } else { dialog.sip.local_cseq + 1 };
+        let outbound_cseq = if reuse { dialog.our_cseq } else { dialog.our_cseq + 1 };
         if !reuse {
-            *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+            *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
         }
 
         // Opaque body carrier (MSCML INFO rides here): default the content type
@@ -443,7 +437,7 @@ impl ActionExecutor<'_> {
             .collect();
         relay::describe_body(&mut extra_headers, body, descriptors);
         let branch = self.id_gen.new_branch();
-        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
@@ -451,7 +445,7 @@ impl ActionExecutor<'_> {
             body: relay::continue_on_leg(
                 call,
                 leg_id,
-                Some(&dialog.sip.remote_tag),
+                Some(&dialog.peer_tag),
                 author,
                 relay::Carried::of(&Method::from_wire(method), None, true),
                 body.to_vec(),
@@ -517,19 +511,10 @@ impl ActionExecutor<'_> {
         // fork's To-tag on this fork's RAck (a PRACK the callee rejects with
         // 481, and the fork keeps retransmitting its reliable 1xx). The
         // `ensure_b_early_dialog` seam registers the dialog before this runs.
-        let dialog = {
-            let leg = leg_at(call, idx);
-            match leg.dialogs.iter().find(|d| d.sip.remote_tag == b_tag) {
-                Some(d) => d.clone(),
-                None => return,
-            }
+        let dialog = match call::helpers::dialog_with_peer(leg_at(call, idx), b_tag) {
+            Some(d) => d.clone(),
+            None => return,
         };
-        // No confirmed remote tag (an early/mid-confirm dialog, e.g. a takeover
-        // replica captured before its provisional To-tag landed) → skip rather
-        // than build a tag-less in-dialog PRACK and panic in `make_request`.
-        if dialog.sip.remote_tag.is_empty() {
-            return;
-        }
         let (updated, first) = call::helpers::record_pracked_provisional(
             call.clone(),
             leg_id,
@@ -542,13 +527,13 @@ impl ActionExecutor<'_> {
         if !first {
             return;
         }
-        let t_id = dialog_identity_tag(leg_id, &dialog);
+        let t_id = dialog.id();
         // Per-dialog CSeq (§12.2.1.1): each forked early dialog has its OWN
         // sequence, so its first PRACK is the INVITE CSeq + 1 independent of the
         // other forks — two forks' PRACKs at the same CSeq is correct (distinct
         // dialogs, distinct To-tags), not a collision.
-        let outbound_cseq = dialog.sip.local_cseq + 1;
-        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+        let outbound_cseq = dialog.our_cseq + 1;
+        *call = bump_our_cseq(call.clone(), leg_id, &t_id, 1);
 
         let branch = self.id_gen.new_branch();
         *call = call::helpers::note_own_prack_branch(
@@ -559,7 +544,7 @@ impl ActionExecutor<'_> {
             rseq,
             &branch,
         );
-        let gen_dialog = relay::to_gen_dialog(&dialog.sip);
+        let gen_dialog = relay::to_gen_dialog(leg_at(call, idx), &dialog);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, relay::CallMarks::of(call), leg_id, branch)),
             contact: Some(relay::leg_contact(self.config, relay::CallMarks::of(call), leg_id)),
