@@ -22,8 +22,9 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    `fronting`); no lookup depends on the leg's role and none returns "the
    first" dialog.
 2. **A dialled leg's dialog exists once a tagged response creates it.** The
-   INVITE the leg sent is a leg record (`OutboundInvite`: its From-tag and
-   CSeq); each fork's dialog is minted from it, its own sequence starting at
+   INVITE the leg sent is a leg record (`OutboundInvite`: its From-tag, CSeq,
+   client transaction, the final it took and whether this stack CANCELled
+   it); each fork's dialog is minted from it, its own sequence starting at
    the INVITE's. A caller-facing dialog exists once the stack mints its tag.
 3. **A dialog carries its state**: `Early`, `Confirmed`, `Ending` (our BYE
    of it, or our CANCEL of its INVITE, in flight; the INVITE's final ends a
@@ -80,13 +81,22 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
 8. **The model states its invariants at the end of every turn**
    (`crates/b2bua/src/rules/model_invariants.rs`, on in debug builds and every
    harness): each dialog of a leg is named by exactly one pair of tags; a leg
-   is confirmed exactly when one dialog is confirmed or ending (§12.1), a
-   released leg's BYE in flight reading ending; every `fronts` entry and the
+   holds at most one confirmed or ending dialog (§12.1); every `fronts` entry and the
    leg's own tag name a dialog the call holds; a dialog stays until the call
    is released and its two sequences never decrease (§12.2.1.1, §12.2.2); no
-   dialog is early once its INVITE has its final or its leg ended (§12.1);
+   dialog is early once its INVITE has its final or its leg ended (§12.1),
+   and none this stack is CANCELling outlives that final (§9.1);
    and every in-dialog request but an ACK ends its turn with a final sent or
    its relay recorded (§8.2.6, §8.1.3.3).
+
+9. **A leg's state is read, not stored.** `Leg::state()` reads its dialogs
+   and its INVITE's facts: `Confirmed` while one dialog is, else
+   `Terminated` once a BYE ended or is ending a dialog, its INVITE was
+   CANCELled or took a final, else `Early` while a dialog is early, else
+   `Trying`. A leg released while its BYE or CANCEL is in flight reads
+   `Terminated`; the dialog keeps the in-flight detail. `Leg::end()` and
+   `Leg::disposition()` read the same facts; `TerminateLeg` states what it
+   records (`LegEnd`), never a state to write.
 
 ## Consequences
 
@@ -101,3 +111,7 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
   481; only a BYE crossing ours while it is in flight is answered 200.
 - No gate cell reads the call's state: a call's teardown shows in its
   dialogs, each `Ending` by the BYE or CANCEL this stack sent.
+- No leg state can disagree with its dialogs (decision 9): the setters and
+  their ordering inside a turn are gone; a rule matches the leg as the
+  event finds it, the INVITE's final recorded when a rule acts on it or
+  after the rules.

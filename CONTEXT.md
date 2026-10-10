@@ -775,9 +775,15 @@ dialog the stack answers itself fronts none.
 _Avoid_: "tag map".
 
 **Outbound INVITE**:
-The dialog-creating INVITE a leg sent (its From-tag and CSeq): each dialog a
-response to it creates is minted from it. A dialled leg holds no dialog
-before such a response.
+The dialog-creating INVITE a leg sent (its From-tag, CSeq and client
+transaction, the final it took, whether this stack CANCELled it): each
+dialog a response to it creates is minted from it. A dialled leg holds no
+dialog before such a response.
+
+**Leg state**:
+Read off the leg's dialogs and its INVITE's facts, never stored
+(`Leg::state`): a leg whose BYE or CANCEL is in flight reads `Terminated`.
+_Avoid_: "set the leg state" (`TerminateLeg` records an end, `LegEnd`).
 
 **Dialog gate**:
 The engine step that resolves a message to the dialog it names, before any
