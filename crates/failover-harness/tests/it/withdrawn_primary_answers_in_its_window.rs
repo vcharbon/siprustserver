@@ -182,7 +182,7 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    assert_ne!(call.a_leg.state, LegState::Confirmed, "the survivor holds the ringing a-leg");
+    assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
         .find(|t| t.timer_type == TimerType::NoAnswer)

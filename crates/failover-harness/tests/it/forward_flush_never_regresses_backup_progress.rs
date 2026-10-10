@@ -197,14 +197,14 @@ async fn element_state(
 ) -> Option<(CallModelState, LegState)> {
     let body = backup.get(BAK, primary, call_ref).await?;
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("Element body decodes");
-    Some((call.state, call.a_leg.state))
+    Some((call.state, call.a_leg.state()))
 }
 
 /// The absolute deadline of the replica's per-b-leg `NoAnswer` entry.
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
     let call: call::Call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    assert_ne!(call.a_leg.state, LegState::Confirmed, "the survivor holds the ringing a-leg");
+    assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
         .find(|t| t.timer_type == TimerType::NoAnswer)
@@ -560,7 +560,7 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         fh.advance(Duration::from_secs(1)).await;
         let after = survivor.live_call(&call_ref).expect("the live call survived the flush");
         assert_eq!(after.state, CallModelState::Active, "the live copy is untouched");
-        assert_eq!(after.a_leg.state, LegState::Confirmed, "and still reads the caller answered");
+        assert_eq!(after.a_leg.state(), LegState::Confirmed, "and still reads the caller answered");
         assert_eq!(
             after.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
             before.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),

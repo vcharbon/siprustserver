@@ -111,8 +111,6 @@ pub fn representative_call() -> Call {
         leg_id: "a".into(),
         call_id: "call-id-deadbeef@example.com".into(),
         source: RemoteInfo { address: "10.0.0.5".into(), port: 5060 },
-        state: LegState::Confirmed,
-        disposition: LegDisposition::Bridged,
         dialogs: vec![dialog(
             "b2bua-to-tag-aleg-9876",
             "alice-from-tag-001",
@@ -124,13 +122,11 @@ pub fn representative_call() -> Call {
         )]
         .into(),
         no_answer_timeout_sec: None,
-        bye_disposition: None,
         local_uri: Some("sip:bob@example.com".into()),
         remote_uri: Some("sip:alice@example.com".into()),
         invite_request_uri: None,
         outbound_invite: None,
         own_tag: Some("b2bua-to-tag-aleg-9876".into()),
-        pending_invite_txn: None,
         ext: None,
         kind: None,
         adopted: None,
@@ -162,8 +158,6 @@ pub fn representative_call() -> Call {
         leg_id: "b-1".into(),
         call_id: "b-leg-call-id-fedcba@b2bua".into(),
         source: RemoteInfo { address: "203.0.113.42".into(), port: 5060 },
-        state: LegState::Confirmed,
-        disposition: LegDisposition::Bridged,
         dialogs: vec![dialog(
             "b2bua-from-tag-bleg-5544",
             "bob-to-tag-007",
@@ -175,16 +169,11 @@ pub fn representative_call() -> Call {
         )]
         .into(),
         no_answer_timeout_sec: None,
-        bye_disposition: None,
         local_uri: Some("sip:alice@example.com".into()),
         remote_uri: Some("sip:bob@example.com".into()),
         invite_request_uri: Some("sip:bob@example.com".into()),
-        outbound_invite: Some(OutboundInvite {
-            our_tag: "b2bua-from-tag-bleg-5544".into(),
-            cseq: 1,
-        }),
+        outbound_invite: Some(OutboundInvite::new("b2bua-from-tag-bleg-5544", 1, None)),
         own_tag: None,
-        pending_invite_txn: None,
         ext: None,
         kind: None,
         adopted: None,
@@ -388,33 +377,6 @@ fn arb_invite_handle() -> impl Strategy<Value = InviteTxnHandle> {
     )
 }
 
-fn arb_leg_state() -> impl Strategy<Value = LegState> {
-    prop_oneof![
-        Just(LegState::Trying),
-        Just(LegState::Early),
-        Just(LegState::Confirmed),
-        Just(LegState::Terminated),
-    ]
-}
-fn arb_leg_disposition() -> impl Strategy<Value = LegDisposition> {
-    prop_oneof![
-        Just(LegDisposition::Pending),
-        Just(LegDisposition::Bridged),
-        Just(LegDisposition::Cancelling),
-        Just(LegDisposition::Rejected),
-    ]
-}
-fn arb_bye() -> impl Strategy<Value = ByeDisposition> {
-    prop_oneof![
-        Just(ByeDisposition::ByeSent),
-        Just(ByeDisposition::ByeReceived),
-        Just(ByeDisposition::ByeConfirmed),
-        Just(ByeDisposition::ByeTimeout),
-        Just(ByeDisposition::Cancelled),
-        Just(ByeDisposition::Rejected),
-        Just(ByeDisposition::None),
-    ]
-}
 fn arb_leg_kind() -> impl Strategy<Value = LegKind> {
     prop_oneof![
         Just(LegKind::A),
@@ -668,23 +630,32 @@ fn arb_leg() -> BoxedStrategy<Leg> {
         arb_tag(),
         (
             proptest::option::of(
-                (arb_tag(), any::<i64>())
-                    .prop_map(|(our_tag, cseq)| OutboundInvite { our_tag, cseq }),
+                (
+                    arb_tag(),
+                    any::<i64>(),
+                    proptest::option::of(arb_invite_handle()),
+                    proptest::option::of(100u16..700),
+                    any::<bool>(),
+                )
+                    .prop_map(
+                        |(our_tag, cseq, txn, final_received, cancel_sent)| OutboundInvite {
+                            final_received,
+                            cancel_sent,
+                            ..OutboundInvite::new(our_tag, cseq, txn)
+                        },
+                    ),
             ),
             proptest::option::of(arb_tag()),
         ),
         arb_remote_info(),
-        arb_leg_state(),
-        arb_leg_disposition(),
         proptest::collection::vec(arb_dialog(), 0..3),
-        (proptest::option::of(0i64..600), proptest::option::of(arb_bye())),
+        proptest::option::of(0i64..600),
         (
             proptest::option::of(arb_uri()),
             proptest::option::of(arb_uri()),
             proptest::option::of(arb_uri()),
         ),
         (
-            proptest::option::of(arb_invite_handle()),
             arb_ext(),
             proptest::option::of(arb_leg_kind()),
             proptest::option::of(any::<bool>()),
@@ -700,29 +671,23 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 call_id,
                 (outbound_invite, own_tag),
                 source,
-                state,
-                disposition,
                 dialogs,
-                (no_answer_timeout_sec, bye_disposition),
+                no_answer_timeout_sec,
                 (local_uri, remote_uri, invite_request_uri),
-                (pending_invite_txn, ext, kind, adopted, invite_final_sent, in_session_timer),
+                (ext, kind, adopted, invite_final_sent, in_session_timer),
                 (messages, answer_preempted),
                 sdp_session,
             )| Leg {
                 leg_id,
                 call_id,
                 source,
-                state,
-                disposition,
                 dialogs: dialogs.into(),
                 no_answer_timeout_sec,
-                bye_disposition,
                 local_uri,
                 remote_uri,
                 invite_request_uri,
                 outbound_invite,
                 own_tag,
-                pending_invite_txn,
                 ext,
                 kind,
                 adopted,

@@ -1,17 +1,18 @@
-//! A leg's dialogs moving to the state its teardown records (RFC 3261 §15):
-//! this stack's BYE leaves a dialog `Ending(Bye)`, the peer's BYE or the end of
+//! A leg's dialogs moving to the state a BYE records (RFC 3261 §15): this
+//! stack's BYE leaves a dialog `Ending(Bye)`, the peer's BYE or the end of
 //! this stack's BYE transaction leaves it `Ended`.
 
-use call::{ByeDisposition, Call, DialogEnd, DialogState, EndingBy, Leg};
+use call::{Call, DialogEnd, DialogState, EndingBy, Leg};
 use sip_message::Method as SipMethod;
 
-use b2bua_sdk::model::RuleContext;
+use b2bua_sdk::model::{LegEnd, RuleContext};
 
-/// Move the dialogs of `leg_id` to the state `bye` records. The peer's BYE
-/// ends the dialog it names when the turn's event is that BYE, else the
-/// leg's confirmed dialog; the end of this stack's BYE ends the dialog that
-/// BYE left `Ending`, with the final the turn's event carries.
-pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye: ByeDisposition) {
+/// Move the dialogs of `leg_id` to the state the BYE case `bye` records. The
+/// peer's BYE ends the dialog it names when the turn's event is that BYE,
+/// else the leg's confirmed dialog; the end of this stack's BYE ends the
+/// dialog that BYE left `Ending`, with the final the turn's event carries.
+/// Any other case changes no dialog here.
+pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye: LegEnd) {
     let on_leg = ctx.source_leg_id == leg_id;
     // The dialog the BYE names, as the dialog gate resolved it.
     let bye_dialog = ctx
@@ -25,17 +26,17 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
         .filter(|r| on_leg && r.cseq().method() == SipMethod::Bye && r.status() >= 200)
         .map(|r| r.status());
     *call = call::helpers::update_leg(call.clone(), leg_id, |leg| match bye {
-        ByeDisposition::ByeSent => {
+        LegEnd::OurByeSent => {
             if let Some(d) = leg.dialogs.confirmed_mut() {
                 d.state = DialogState::Ending(EndingBy::Bye);
             }
         }
-        ByeDisposition::ByeReceived => end_one(leg, bye_dialog.clone(), DialogEnd::PeerBye),
-        ByeDisposition::ByeConfirmed => {
+        LegEnd::PeerByeAnswered => end_one(leg, bye_dialog.clone(), DialogEnd::PeerBye),
+        LegEnd::OurByeAnswered => {
             end_one(leg, None, DialogEnd::OurBye { final_status: bye_final });
         }
-        ByeDisposition::ByeTimeout => end_one(leg, None, DialogEnd::OurBye { final_status: None }),
-        ByeDisposition::Cancelled | ByeDisposition::Rejected | ByeDisposition::None => {}
+        LegEnd::OurByeTimedOut => end_one(leg, None, DialogEnd::OurBye { final_status: None }),
+        LegEnd::InviteRejected | LegEnd::Abandon | LegEnd::Settle => {}
     });
 }
 

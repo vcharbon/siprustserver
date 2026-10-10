@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use call::{Call, Dialog, InviteTxnHandle, Leg, LegState, PendingRequest};
+use call::{Call, Dialog, InviteTxnHandle, Leg, PendingRequest};
 use sip_message::header::{self, HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest, SipStr};
@@ -49,7 +49,7 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
         }
     };
 
-    if matches!(call.a_leg.state, LegState::Trying | LegState::Early) {
+    if call.a_leg.invite_final_sent.is_none() {
         let invite = rebuild_a_leg_invite(&call.a_leg_invite);
         push(TxnSeed::ServerInvite {
             branch: invite.top_via().branch().unwrap_or_default().to_string(),
@@ -65,11 +65,12 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
     }
 
     for leg in std::iter::once(&call.a_leg).chain(call.b_legs.iter()) {
-        let initial_in_flight = matches!(leg.state, LegState::Trying | LegState::Early);
-        if initial_in_flight {
-            if let Some(seed) = leg.pending_invite_txn.as_ref().and_then(client_seed) {
-                push(seed);
-            }
+        // The INVITE that dialled the leg is in flight until its final,
+        // its CANCEL sent or not (RFC 3261 §9.1).
+        let initial = leg.outbound_invite.as_ref().filter(|i| i.final_received.is_none());
+        let initial_in_flight = initial.is_some();
+        if let Some(seed) = initial.and_then(|i| i.txn.as_ref()).and_then(client_seed) {
+            push(seed);
         }
         for dialog in &leg.dialogs {
             if let Some(handle) = &dialog.pending_invite_txn {
@@ -187,8 +188,7 @@ fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
 mod tests {
     use super::*;
     use call::{
-        Dialog, DialogState, Direction, HostPort, LegDisposition, LegKind, OutboundInvite,
-        RemoteInfo,
+        Dialog, DialogState, Direction, HostPort, LegKind, LegState, OutboundInvite, RemoteInfo,
     };
     use sip_message::generators::{
         generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -279,17 +279,13 @@ mod tests {
             leg_id: "b-1".into(),
             call_id: "bcid@x".into(),
             source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
-            state,
-            disposition: LegDisposition::Pending,
             dialogs: Default::default(),
             no_answer_timeout_sec: None,
-            bye_disposition: None,
             local_uri: Some("sip:svc@10.0.0.9".into()),
             remote_uri: Some("sip:bob@10.0.0.2".into()),
             invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-            outbound_invite: Some(OutboundInvite { our_tag: "svc".into(), cseq: 1 }),
+            outbound_invite: Some(OutboundInvite::new("svc", 1, handle.clone())),
             own_tag: None,
-            pending_invite_txn: handle.clone(),
             ext: None,
             kind: Some(LegKind::Destination),
             adopted: None,
@@ -302,13 +298,20 @@ mod tests {
         let dialog_state = match state {
             LegState::Confirmed => DialogState::Confirmed,
             LegState::Early => DialogState::Early,
-            LegState::Trying | LegState::Terminated => return leg,
+            LegState::Trying => return leg,
+            LegState::Terminated => {
+                call::testkit::stage_leg(&mut leg, state);
+                return leg;
+            }
         };
         let mut dialog = Dialog::new("svc", "btag", dialog_state, 1);
         dialog.remote_target = "sip:bob@10.0.0.2:5070".into();
         dialog.ack_branch = (state == LegState::Confirmed).then(|| "z9hG4bK-ack".to_string());
         dialog.pending_invite_txn = handle;
         leg.dialogs.insert(dialog);
+        if state == LegState::Confirmed {
+            call::testkit::stage_leg(&mut leg, state);
+        }
         leg
     }
 
@@ -343,7 +346,11 @@ mod tests {
             &sip_txn::IdGen::seeded(1),
             0,
         );
-        call.a_leg.state = a_state;
+        call.a_leg.invite_final_sent = match a_state {
+            LegState::Trying | LegState::Early => None,
+            LegState::Confirmed => Some(200),
+            LegState::Terminated => Some(487),
+        };
         call = call::helpers::add_b_leg(call, b);
         call.active_peer = Some(call::ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });
         call

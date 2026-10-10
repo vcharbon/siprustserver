@@ -5,8 +5,7 @@
 
 use call::helpers::RelayPeer;
 use call::helpers::{
-    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request,
-    set_leg_disposition, set_leg_state, split_leg,
+    add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request, split_leg,
 };
 use call::{Call, CdrEvent};
 
@@ -78,12 +77,6 @@ impl ActionExecutor<'_> {
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm(call, ctx, leg_id);
-            }
-            RuleAction::UpdateLegState { leg_id, state, disposition } => {
-                *call = set_leg_state(call.clone(), leg_id, *state);
-                if let Some(d) = disposition {
-                    *call = set_leg_disposition(call.clone(), leg_id, *d);
-                }
             }
             RuleAction::MapUnshownDialog { b_leg_id, b_tag } => {
                 self.map_unshown_dialog(call, b_leg_id, b_tag);
@@ -160,8 +153,8 @@ impl ActionExecutor<'_> {
             RuleAction::BeginTermination { reason, cause, by_leg } => {
                 self.begin_termination(call, fx, ctx, reason.as_deref(), (*cause, by_leg.clone()));
             }
-            RuleAction::TerminateLeg { leg_id, bye_disposition } => {
-                self.terminate_leg(call, fx, ctx, leg_id, *bye_disposition);
+            RuleAction::TerminateLeg { leg_id, end } => {
+                self.terminate_leg(call, fx, ctx, leg_id, *end);
             }
             RuleAction::AddCdrEvent { event_type, leg_id, status_code, reason } => {
                 *call = add_cdr_event(
@@ -242,7 +235,7 @@ impl ActionExecutor<'_> {
                 // A leg this stack is CANCELling answers a crossing offer here
                 // (RFC 3262 §5); a live setup leaves the answer to its owner.
                 let cancelling = call::helpers::find_leg(call, leg_id)
-                    .is_some_and(|l| l.disposition == call::LegDisposition::Cancelling);
+                    .is_some_and(|l| l.disposition() == call::LegDisposition::Cancelling);
                 let answer = ctx
                     .response()
                     .and_then(|r| r.sdp())

@@ -1,7 +1,7 @@
 //! A callee leg's INVITE provisional that this stack does not show the
 //! originator: when that is so, and what the ringing leg is still owed.
 
-use call::{CdrEventType, LegState};
+use call::CdrEventType;
 use sip_message::header;
 use sip_message::SipResponse;
 
@@ -52,11 +52,6 @@ pub fn absorbed_provisional_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     if !b_tag.is_empty() {
         actions.push(RuleAction::TrackEarlyDialog { leg_id: leg.clone(), b_tag });
     }
-    actions.push(RuleAction::UpdateLegState {
-        leg_id: leg.clone(),
-        state: LegState::Early,
-        disposition: None,
-    });
     actions.extend(prack);
     actions.push(RuleAction::AddCdrEvent {
         event_type: CdrEventType::Provisional,

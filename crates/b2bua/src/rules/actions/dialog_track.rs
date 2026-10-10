@@ -5,9 +5,7 @@
 //! [`super::relay_response`] / [`super::relay_request`].
 
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
-use call::{
-    Call, Dialog, DialogState, EndingBy, LegDisposition, LegState, PeerDialog, RetiredDialog,
-};
+use call::{Call, Dialog, DialogState, EndingBy, LegState, PeerDialog, RetiredDialog};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
@@ -79,15 +77,14 @@ impl ActionExecutor<'_> {
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, source_leg_id);
         // An early dialog opened behind this stack's CANCEL of the INVITE is
         // ending from the start (RFC 3261 §9.1).
-        let state = if leg.disposition == LegDisposition::Cancelling {
+        let state = if leg.cancel_sent() {
             DialogState::Ending(EndingBy::Cancel)
         } else {
             DialogState::Early
         };
         *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
-            leg.state = LegState::Early;
             let mut d = Dialog::new(invite.our_tag, to_tag, state, invite.cseq);
-            d.pending_invite_txn = leg.pending_invite_txn.clone();
+            d.pending_invite_txn = invite.txn;
             d.remote_target = contact;
             d.route_set = route_set;
             leg.dialogs.insert(d);
@@ -112,15 +109,22 @@ impl ActionExecutor<'_> {
     /// the caller-facing dialog fronting it, else one minted and fronting it
     /// now. While the caller's INVITE is in setup a transparent relay mirrors
     /// the callee's early dialogs (every one past the first gets its own tag,
-    /// RFC 3262 §3/§4); a masking policy, or a confirmed a-leg, mints only for
-    /// a second dialog of the same leg and gives a fresh leg the primary.
-    pub(super) fn a_face_tag(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) -> String {
+    /// RFC 3262 §3/§4); a masking policy, a confirmed a-leg, or an `answering`
+    /// response (a 2xx toward her) mints only for a second dialog of the same
+    /// leg and gives a fresh leg the primary.
+    pub(super) fn a_face_tag(
+        &self,
+        call: &mut Call,
+        b_leg_id: &str,
+        b_tag: &str,
+        answering: bool,
+    ) -> String {
         if let Some(d) = fronting_dialog(call, b_leg_id, b_tag) {
             return d.our_tag.clone();
         }
         let primary = self.ensure_a_dialog(call);
         let mirrors_callee_dialogs = call::helpers::relay_first_18x_strategy(call).is_none();
-        let in_setup = call.a_leg.state != LegState::Confirmed;
+        let in_setup = !answering && call.a_leg.state() != LegState::Confirmed;
         let already_published = {
             let mut fronts = call
                 .a_leg

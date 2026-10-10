@@ -1,13 +1,9 @@
 //! Leg-level helpers: role resolution, leg lookup, the dialog of a leg named
-//! by the one tag a caller does not already know, state and disposition
-//! setters, and termination-resolution predicates.
+//! by the one tag a caller does not already know, and termination-resolution
+//! predicates. What a leg's INVITE and dialogs record as they end lives in
+//! [`super::leg_end`].
 
-use crate::model::{
-    ByeDisposition, Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, Leg,
-    LegDisposition, LegKind, LegState, MessageDirection, MessageEntry, RetiredDialog,
-};
-
-use super::lens::update_leg;
+use crate::model::{Call, CallModelState, Dialog, Leg, LegKind, LegState};
 
 /// Resolve a leg's role, defaulting from `legId` when `kind` is absent.
 pub fn leg_kind(leg: &Leg) -> LegKind {
@@ -80,166 +76,20 @@ pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mu
     call.a_leg.dialogs.by_tags_mut(our_tag, &call.a_leg_invite.from_tag)
 }
 
-/// Set the state of a specific leg. A leg brought to `Terminated` lets go of
-/// the early dialogs its INVITE left open: each retires, with the relays
-/// still open in it (RFC 3261 §12.1.2; the INVITE's late final ends nothing
-/// more).
-pub fn set_leg_state(call: Call, leg_id: &str, state: LegState) -> Call {
-    update_leg(call, leg_id, |l| {
-        l.state = state;
-        if state == LegState::Terminated {
-            retire_early_dialogs(l);
-        }
-    })
-}
-
-/// Retire every early dialog of `leg`, its open relays kept for their finals
-/// (RFC 3261 §8.1.3.3).
-pub fn retire_early_dialogs(leg: &mut Leg) {
-    for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
-        let open_relays = std::mem::take(&mut d.inbound_pending_requests);
-        d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
-    }
-}
-
-/// Set the disposition of a specific leg.
-pub fn set_leg_disposition(call: Call, leg_id: &str, disposition: LegDisposition) -> Call {
-    update_leg(call, leg_id, |l| l.disposition = disposition)
-}
-
-/// Note the CANCEL of `leg_id`'s INVITE leaving (RFC 3261 §9.1): each early
-/// dialog that INVITE opened is ending, and ends on the INVITE's final.
-pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
-    update_leg(call, leg_id, |l| {
-        for d in l.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
-            d.state = DialogState::Ending(EndingBy::Cancel);
-        }
-    })
-}
-
-/// Note the final or the timeout of the BYE on `bye_branch` that released a
-/// retired dialog (RFC 3261 §15.1.1): that release is settled.
-pub fn settle_straggler_release(mut call: Call, bye_branch: &str) -> Call {
-    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
-    for d in legs.flat_map(|l| l.dialogs.iter_mut()) {
-        if let DialogState::Retired(RetiredDialog { release: Some(r), .. }) = &mut d.state {
-            if r.bye_branch == bye_branch {
-                r.settled = true;
-            }
-        }
-    }
-    call
-}
-
-/// Set the BYE disposition of a specific leg.
-pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Call {
-    update_leg(call, leg_id, |l| l.bye_disposition = Some(bye))
-}
-
-/// Record the final sent on a leg's initial inbound INVITE
-/// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
-/// carries one is left as is — the transaction took exactly that one final.
-/// A non-2xx final ends every early dialog of the leg (RFC 3261 §12.1).
-pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
-    update_leg(call, leg_id, |l| {
-        if l.invite_final_sent.is_none() && status >= 300 {
-            reject_early_dialogs(l, status);
-        }
-        l.invite_final_sent.get_or_insert(status);
-    })
-}
-
-/// Record the non-2xx final `status` that answered, on `leg_id`, the INVITE
-/// of CSeq `cseq` this stack sent: when it is the INVITE that dialled the leg
-/// ([`Leg::outbound_invite`]), every early dialog it created ends (RFC 3261
-/// §12.1). A final to a re-INVITE changes no dialog's state (§14.1).
-pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, status: u16) -> Call {
-    update_leg(call, leg_id, |l| {
-        if l.outbound_invite.as_ref().is_some_and(|i| i.cseq == cseq) {
-            reject_early_dialogs(l, status);
-        }
-    })
-}
-
-/// End every early dialog of `leg` — its CANCEL in flight or not — under
-/// the non-2xx final `status` its dialog-creating INVITE took (RFC 3261 §12.1).
-pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
-    for d in leg.dialogs.iter_mut().filter(|d| d.awaits_invite_final()) {
-        d.state = DialogState::Ended(DialogEnd::Rejected(status));
-    }
-}
-
-/// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
-/// initial INVITE with (RFC 3261 §9.2). It is the final the wire carries even
-/// when the record already holds a 2xx: one built after the layer's 487, which
-/// the completed transaction never sent. That 2xx is kept as
-/// [`Leg::answer_preempted`], the leg goes back to the early dialog its
-/// provisional opened (no confirmation, no 2xx awaiting its ACK), and its
-/// message ring drops the 2xx entry, so the ring holds only what reached the
-/// wire. Every dialog the INVITE opened, the one the 2xx would have
-/// confirmed included, ends under the 487 (RFC 3261 §12.1).
-pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
-    update_leg(call, leg_id, |l| {
-        if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {
-            l.answer_preempted = Some(answer);
-            l.messages.entries.retain(|e| !is_sent_invite_2xx(e));
-            if l.state == LegState::Confirmed {
-                l.state = LegState::Early;
-            }
-            for d in l.dialogs.iter_mut() {
-                d.answered_2xx = None;
-                d.awaited_ack_cseq = None;
-                if d.state == DialogState::Confirmed {
-                    d.state = DialogState::Early;
-                }
-            }
-        }
-        reject_early_dialogs(l, 487);
-        l.invite_final_sent = Some(487);
-    })
-}
-
-/// A 2xx to an INVITE the stack sent on a leg. Before the leg's initial
-/// INVITE is answered on the wire it is that INVITE's answer: no other INVITE
-/// can be in progress on an unconfirmed leg.
-fn is_sent_invite_2xx(e: &MessageEntry) -> bool {
-    e.direction != MessageDirection::Received
-        && e.method == "INVITE"
-        && e.code.is_some_and(|c| (200..300).contains(&c))
-}
-
-/// Whether a single leg has reached a terminal resolution for termination
-/// bookkeeping. A `trying` leg with no `byeDisposition` never established, so it
-/// is considered resolved.
-///
-/// A leg still in `Cancelling` disposition is **not** resolved even though its
-/// interim `Cancelled` bye disposition reads terminal: an internal CANCEL is in
-/// flight and its transaction has not settled — the callee owes us a `487`, or a
-/// `200 OK` may still be crossing our CANCEL on the wire (RFC 3261 §9.1). Holding
-/// the leg unresolved keeps the call alive until `resolve-cancel-response` (the
-/// 487) or `cancel-200-crossing` (200 → ACK + BYE) reaps the abandoned callee, so
-/// finalization (RemoveCall) never strands a ringing b-leg. Both of those rules —
-/// and the force-terminal reaper/safety paths — clear the `Cancelling`
-/// disposition as they resolve the leg, so this stays unresolved only for the
-/// duration of the in-flight CANCEL (bounded by the terminating safety timer).
+/// Whether the call waits on nothing more from `leg` before its record is
+/// released ([`Leg::is_resolved`]). A leg whose CANCEL is in flight is not:
+/// the callee owes a `487`, or a `200` may still cross the CANCEL (RFC 3261
+/// §9.1), and finalization must not strand a ringing callee.
 pub fn leg_is_resolved(leg: &Leg) -> bool {
-    if leg.disposition == LegDisposition::Cancelling {
-        return false;
-    }
-    match leg.bye_disposition {
-        None => leg.state == LegState::Trying,
-        Some(b) => b.is_terminal(),
-    }
+    leg.is_resolved()
 }
 
 /// Whether a leg — or its whole call — is already going away, so an
 /// asynchronous trigger (a timer fire, a transaction timeout, a failure
 /// result) must drive NO forward progress through it: no failover consult,
 /// no new final on a transaction that already carries one. True when the
-/// call's lifecycle has entered `Terminating`/`Terminated`, when the leg's
-/// CANCEL is in flight (`Cancelling` — the leg's state still reads `Trying`,
-/// so state alone cannot discriminate), or when the leg itself is
-/// `Terminated`.
+/// call's lifecycle has entered `Terminating`/`Terminated`, or when the leg
+/// itself reads `Terminated` (its CANCEL or BYE sent, its INVITE ended).
 ///
 /// Distinct from [`leg_is_resolved`]: a `Cancelling` leg is *unresolved*
 /// (its callee still owes a 487 or a crossing 200, so finalization waits) yet
@@ -247,8 +97,7 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
 /// questions.
 pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
     matches!(call_state, CallModelState::Terminating | CallModelState::Terminated)
-        || leg.disposition == LegDisposition::Cancelling
-        || leg.state == LegState::Terminated
+        || leg.state() == LegState::Terminated
 }
 
 /// Whether all legs of a terminating call have reached a terminal resolution
@@ -287,7 +136,7 @@ pub fn find_b_leg_by_call_id<'a>(call: &'a Call, call_id: &str) -> Option<&'a Le
 /// Whether this stack answered the caller: true from the 2xx onward and still
 /// true once the leg is `Terminated`. It reads the final the a-leg's initial
 /// INVITE server transaction took (`invite_final_sent`, written at the one
-/// a-facing final seam), not `LegState::Confirmed`, which the teardown clears.
+/// a-facing final seam), not `LegState::Confirmed`, which a BYE ends.
 /// One case turns it back to false: a 2xx the transaction layer's CANCEL 487
 /// pre-empted before it reached the wire, which the record then states apart
 /// ([`Leg::answer_preempted`]). Replication reconciliation reads the two

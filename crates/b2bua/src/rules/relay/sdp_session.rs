@@ -164,7 +164,7 @@ pub fn continue_on_leg(
 /// dialog.
 fn enter_early_dialog(call: &mut Call, leg_id: &str, tag: &str) -> Option<LegSdpSession> {
     let leg = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id)?;
-    if leg.state == LegState::Confirmed {
+    if leg.dialogs.confirmed().is_some() {
         return None;
     }
     let mut own = call::helpers::callee_dialog_mut(leg, tag)?.sdp_session.take();
@@ -214,10 +214,10 @@ fn continue_session(
         .map(|o| format!("{} {}", leg.sdp_session.exchanges_opened, o.value()));
     let already_stated = author == Author::Stack
         && carried.in_dialog()
-        && matches!(leg.state, LegState::Trying | LegState::Early)
+        && matches!(leg.state(), LegState::Trying | LegState::Early)
         && stated(leg).is_some_and(|s| states_next_version(sdp, &s.origin));
     let restated = (carried.in_dialog()
-        && match leg.state {
+        && match leg.state() {
             LegState::Confirmed => true,
             LegState::Trying | LegState::Early => leg.sdp_session.restated,
             LegState::Terminated => false,
@@ -307,7 +307,7 @@ pub fn adopt_confirmed_dialog(leg: &mut Leg, peer_tag: &str) {
 /// one up. `None` where the stack stated none there, or the version has no
 /// next one.
 pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
-    let early = (leg.state != LegState::Confirmed)
+    let early = (leg.state() != LegState::Confirmed)
         .then(|| call::helpers::callee_dialog(leg, remote_tag))
         .flatten()
         .and_then(|d| d.sdp_session.as_ref());

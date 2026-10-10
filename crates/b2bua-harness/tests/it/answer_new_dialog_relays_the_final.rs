@@ -39,7 +39,7 @@ mod fork {
         RuleHandleResult, ServiceSeed, Terminal,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegDisposition, LegState, TimerType};
+    use call::{CdrEventType, Direction, LegState, TimerType};
     use sip_message::generators::SourceBody;
 
     define_service! {
@@ -73,11 +73,6 @@ mod fork {
                 let b = ctx.source_leg_id.to_string();
                 let a = ctx.call.a_leg().leg_id.clone();
                 Some(RuleHandleResult::new(vec![
-                    RuleAction::UpdateLegState {
-                        leg_id: b.clone(),
-                        state: LegState::Confirmed,
-                        disposition: Some(LegDisposition::Bridged),
-                    },
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::AnswerALegNewDialog {
                         status: 200,

@@ -72,7 +72,7 @@ fn media_leg_id(call: &RuleCall) -> Option<String> {
     call.b_legs()
         .iter()
         .find(|l| {
-            call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated
+            call::helpers::leg_kind(l) == call::LegKind::Media && l.state() != LegState::Terminated
         })
         .map(|l| l.leg_id.clone())
 }
@@ -175,12 +175,11 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 ///
 /// This path is the whole point of announce-then-reject. The parked media leg is
 /// an **unadopted** `Media` leg, so core `confirm-dialog` does NOT mark the a-leg
-/// `Confirmed` off its 200 — the a-leg is still `Early`. `BeginTermination` sees
-/// the 4xx among the turn's effects and resolves the a-leg
-/// (`ByeDisposition::None` + `Terminated`) — no BYE toward the caller, and no
-/// spurious ADR-0022 503 on a later turn (e.g. a crossing BYE from the media
-/// leg). No un-confirm repair (a wire-silent `TerminateLeg{Rejected}` on the
-/// a-leg) is needed — the generic layer keeps the a-side honest.
+/// `Confirmed` off its 200 — the a-leg is still `Early`. The 4xx this rule
+/// answers her with is her INVITE's final, so her leg reads `Terminated` — no
+/// BYE toward the caller, and no spurious ADR-0022 503 on a later turn (e.g. a
+/// crossing BYE from the media leg). No un-confirm repair is needed — the
+/// generic layer keeps the a-side honest.
 fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
     media_leg_id(&ctx.call)?; // fire only while a parked media leg exists
     let req = ctx.request()?;
@@ -224,14 +223,12 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         },
         // Record the media leg's final on the leg BEFORE begin-termination (the
         // `route-failure` idiom): its INVITE transaction already received a final
-        // response, so it is resolved — NOT still ringing. Without this,
-        // begin-termination sees a `Trying` leg with no bye disposition and
-        // spuriously CANCELs a completed transaction, marking it `Cancelling` and
-        // (per `leg_is_resolved`) holding the call open for a 487 that will never
-        // come.
+        // response, so it reads `Terminated` — NOT still ringing, which
+        // begin-termination would CANCEL, holding the call open for a 487 that
+        // will never come.
         RuleAction::TerminateLeg {
             leg_id: media.clone(),
-            bye_disposition: Some(call::ByeDisposition::Rejected),
+            end: b2bua_sdk::model::LegEnd::InviteRejected,
         },
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination

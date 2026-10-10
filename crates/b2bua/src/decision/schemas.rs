@@ -323,9 +323,9 @@ impl CallSnapshot {
             .chain(call.b_legs.iter())
             .map(|l| LegSnapshot {
                 leg_id: l.leg_id.clone(),
-                state: l.state,
-                disposition: l.disposition,
-                bye_disposition: l.bye_disposition,
+                state: l.state(),
+                disposition: l.disposition(),
+                bye_disposition: l.end(),
                 local_uri: l.local_uri.clone(),
                 remote_uri: l.remote_uri.clone(),
                 invite_request_uri: l.invite_request_uri.clone(),

@@ -473,7 +473,7 @@ fn outlives_the_invite_usage(method: &Method) -> bool {
 /// Whether a BYE ended `leg_id`'s dialog: the peer's BYE answered, or one this
 /// stack sent.
 fn bye_ended(call: &Call, leg_id: &str) -> bool {
-    call::helpers::find_leg(call, leg_id).and_then(|l| l.bye_disposition).is_some_and(|d| {
+    call::helpers::find_leg(call, leg_id).and_then(|l| l.end()).is_some_and(|d| {
         matches!(
             d,
             ByeDisposition::ByeSent

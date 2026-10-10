@@ -59,7 +59,7 @@ impl ActionExecutor<'_> {
                     DialogState::Retired(RetiredDialog::default()),
                     i64::from(invite_cseq),
                 );
-                d.pending_invite_txn = leg.pending_invite_txn.clone();
+                d.pending_invite_txn = leg.outbound_invite.as_ref().and_then(|i| i.txn.clone());
                 d
             }
         };

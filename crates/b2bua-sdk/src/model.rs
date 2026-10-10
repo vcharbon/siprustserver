@@ -20,6 +20,7 @@ use sip_txn::TimeoutKind;
 pub use crate::body::{Body, BodyAuthor};
 use crate::config::B2buaConfig;
 use crate::event::CallEvent;
+pub use crate::leg_end::LegEnd;
 use crate::relayed_final::RelayedFinal;
 
 pub const CORE_LAYER: u8 = 0;
@@ -158,10 +159,14 @@ impl Match {
         self.call_state.get_or_insert_with(Vec::new).push(s);
         self
     }
+    /// The source leg's state ([`call::Leg::state`]), read off its facts as
+    /// the event finds them, is one of `s`.
     pub fn leg_states(mut self, s: &[LegState]) -> Self {
         self.leg_state = Some(s.to_vec());
         self
     }
+    /// The source leg's INVITE outcome ([`call::Leg::disposition`]) is `d`
+    /// (cumulative: one of every `d` given).
     pub fn leg_disposition(mut self, d: LegDisposition) -> Self {
         self.leg_disposition.get_or_insert_with(Vec::new).push(d);
         self
@@ -242,13 +247,13 @@ impl Match {
         }
         if let Some(states) = &self.leg_state {
             match ctx.source_leg() {
-                Some(leg) if states.contains(&leg.state) => {}
+                Some(leg) if states.contains(&leg.state()) => {}
                 _ => return false,
             }
         }
         if let Some(disps) = &self.leg_disposition {
             match ctx.source_leg() {
-                Some(leg) if disps.contains(&leg.disposition) => {}
+                Some(leg) if disps.contains(&leg.disposition()) => {}
                 _ => return false,
             }
         }
@@ -600,11 +605,6 @@ pub enum RuleAction {
     ConfirmDialog {
         leg_id: String,
     },
-    UpdateLegState {
-        leg_id: String,
-        state: LegState,
-        disposition: Option<LegDisposition>,
-    },
     /// Map the callee early dialog `(b_leg_id, b_tag)`, one no provisional
     /// showed the caller, to a FRESH a-facing To-tag, so its 2xx opens a caller
     /// dialog of its own (RFC 3261 §12.1.2). A dialog already mapped keeps its
@@ -732,9 +732,12 @@ pub enum RuleAction {
         cause: TerminationCause,
         by_leg: Option<String>,
     },
+    /// End `leg_id` as `end` records ([`LegEnd`]): its ladders retire, the
+    /// requests relayed toward it are answered by this stack, and the early
+    /// dialogs an ended leg leaves open retire.
     TerminateLeg {
         leg_id: String,
-        bye_disposition: Option<call::ByeDisposition>,
+        end: LegEnd,
     },
     AddCdrEvent {
         event_type: CdrEventType,
@@ -1127,7 +1130,6 @@ impl RuleAction {
             RuleAction::SetState { .. } | RuleAction::ClearState { .. } => EffectKind::CursorMove,
             // Bookkeeping — local data writes / async kicks, no wire output.
             RuleAction::ConfirmDialog { .. }
-            | RuleAction::UpdateLegState { .. }
             | RuleAction::MapUnshownDialog { .. }
             | RuleAction::AddCdrEvent { .. }
             | RuleAction::DeactivateRule { .. }

@@ -29,6 +29,7 @@ pub mod failure_image;
 pub mod fold_payload;
 pub mod header_update;
 pub mod in_dialog_relay;
+pub mod leg_end;
 pub mod model;
 pub mod open_offer;
 pub mod provisional;
@@ -43,6 +44,7 @@ pub mod service;
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
     pub use crate::body::{Body, BodyAuthor};
+    pub use crate::leg_end::LegEnd;
     pub use crate::model::{
         Effect, EffectKind, GlareRefusal, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
         RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER,

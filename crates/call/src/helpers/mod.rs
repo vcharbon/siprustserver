@@ -6,7 +6,8 @@
 //!
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
-//!   - [`leg`] — role, lookup, state/disposition setters, resolution
+//!   - [`leg`] — role, lookup, resolution
+//!   - [`leg_end`] — the INVITE outcome and dialog ends a leg's end records
 //!   - [`resolved`] — what a received message names: its dialog, the relay a
 //!     response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
@@ -29,6 +30,7 @@
 pub mod decision_log;
 pub mod dialog;
 pub mod leg;
+pub mod leg_end;
 pub mod lens;
 pub mod lifecycle;
 pub mod message_ring;
@@ -52,11 +54,13 @@ pub use dialog::{
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
-    cancel_early_dialogs, carrying_dialog, dialog_with_peer, find_b_leg, find_b_leg_by_call_id,
-    find_leg, is_adopted, is_fully_resolved, leg_is_going_away, leg_is_resolved, leg_kind,
-    leg_own_tag, own_dialog, record_cancelled_invite, record_dialling_invite_rejected,
-    record_invite_final, reject_early_dialogs, set_bye_disposition, set_leg_disposition,
-    set_leg_state, settle_straggler_release,
+    carrying_dialog, dialog_with_peer, find_b_leg, find_b_leg_by_call_id, find_leg, is_adopted,
+    is_fully_resolved, leg_is_going_away, leg_is_resolved, leg_kind, leg_own_tag, own_dialog,
+};
+pub use leg_end::{
+    abandon_leg, cancel_early_dialogs, record_cancel_sent, record_cancelled_invite,
+    record_dialled_invite_final, record_dialling_invite_rejected, record_invite_final,
+    reject_early_dialogs, retire_early_dialogs, settle_straggler_release,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};

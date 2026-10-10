@@ -555,9 +555,7 @@ mod tests {
     //! off a stale view — and the direction rule of [`fold_refused_flush`]
     //! itself: who may end a call on a folded body (ADR-0031 D3).
 
-    use call::{
-        Call, CallBodyCodec, CallModelState, CallTopology, LegDisposition, LegState, MsgpackCodec,
-    };
+    use call::{Call, CallBodyCodec, CallModelState, CallTopology, LegState, MsgpackCodec};
 
     use super::{
         fold_refused_flush, reap_expired_replicas, reconcile_reverse_flush,
@@ -587,10 +585,10 @@ mod tests {
     fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
         let mut call = base(p, b);
         call.state = state;
-        call.a_leg.state =
-            if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
-        call.a_leg.disposition = LegDisposition::Pending;
         call.a_leg.invite_final_sent = (state != CallModelState::Active).then_some(480);
+        let a_state =
+            if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
+        call::testkit::stage_leg(&mut call.a_leg, a_state);
         call
     }
 
@@ -600,13 +598,11 @@ mod tests {
     fn answered(p: i64, b: i64, state: CallModelState) -> Call {
         let mut call = base(p, b);
         call.state = state;
-        call.a_leg.state = if state == CallModelState::Active {
-            LegState::Confirmed
-        } else {
-            LegState::Terminated
-        };
-        call.a_leg.disposition = LegDisposition::Bridged;
         call.a_leg.invite_final_sent = Some(200);
+        call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
+        if state != CallModelState::Active {
+            call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
+        }
         call
     }
 

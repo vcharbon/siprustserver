@@ -9,9 +9,7 @@
 //! the typed `Call.promote_pem` slice.
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::{
-    CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TerminationCause, TimerType,
-};
+use call::{CdrEventType, Direction, LegState, PromotePemState, TerminationCause, TimerType};
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
@@ -20,8 +18,8 @@ use sip_message::{SipHeader, SipResponse};
 use super::capabilities::{self, Face};
 use super::relay;
 use b2bua_sdk::model::{
-    Body, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
-    TimerDelay, SERVICE_LAYER,
+    Body, LegEnd, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition,
+    RuleHandleResult, TimerDelay, SERVICE_LAYER,
 };
 use b2bua_sdk::provisional::shown_to_no_one;
 
@@ -128,15 +126,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
                 };
 
+                // The relayed 200 confirms Alice's dialog, so her ACK and
+                // in-dialog flow see a confirmed UAS dialog; b is still early.
                 let mut actions = vec![
-                    // Establish the a-leg confirmed dialog so Alice's ACK +
-                    // in-dialog flow sees a confirmed UAS dialog. Not bridged yet
-                    // (b is still early).
-                    RuleAction::UpdateLegState {
-                        leg_id: "a".to_string(),
-                        state: LegState::Confirmed,
-                        disposition: None,
-                    },
                     RuleAction::RelayToPeer { transform },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,
@@ -228,16 +220,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
 
                 // Confirm b, ACK b locally (no end-to-end ACK; Alice already
                 // ACK'd the synthetic 200), merge a↔b. NO relay-to-peer.
-                actions.push(RuleAction::UpdateLegState {
-                    leg_id: b.clone(),
-                    state: LegState::Confirmed,
-                    disposition: Some(LegDisposition::Bridged),
-                });
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
                 actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: None });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
-                    if other.leg_id != b && other.state != LegState::Terminated {
+                    if other.leg_id != b && other.state() != LegState::Terminated {
                         actions.push(RuleAction::DestroyLeg {
                             leg_id: other.leg_id.clone(),
                             headers: vec![],
@@ -413,10 +400,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         status_code: Some(resp.status() as i64),
                         reason: Some(format!("promote-pem-to-200:b-failed:{reason}")),
                     },
-                    RuleAction::TerminateLeg {
-                        leg_id: b.clone(),
-                        bye_disposition: Some(call::ByeDisposition::Rejected),
-                    },
+                    RuleAction::TerminateLeg { leg_id: b.clone(), end: LegEnd::InviteRejected },
                     RuleAction::SetPromotePem { state: None },
                     RuleAction::BeginTermination {
                         reason: Some(reason),

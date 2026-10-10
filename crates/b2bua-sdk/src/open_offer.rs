@@ -62,7 +62,7 @@ fn relayed(call: &Call, shown: &str, p: &PendingRequest) -> Option<OpenOffer> {
 /// but not by the peer dialog the request would be relayed onto (a reroute's
 /// new leg), this stack's offer to that peer is the open one.
 fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<OpenOffer> {
-    if !matches!(call.a_leg.state, LegState::Trying | LegState::Early) {
+    if !matches!(call.a_leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
     let invite = &call.a_leg_invite;
@@ -74,7 +74,7 @@ fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<Op
         return Some(OpenOffer::Sender);
     }
     let (leg, dialog) = peer?;
-    let pending = matches!(leg.state, LegState::Trying | LegState::Early);
+    let pending = matches!(leg.state(), LegState::Trying | LegState::Early);
     (pending && !responder_answered(call, &leg.leg_id, &dialog.peer_tag, None))
         .then_some(OpenOffer::Stack)
 }
@@ -82,10 +82,10 @@ fn initial(call: &Call, shown: &str, peer: Option<(&Leg, &Dialog)>) -> Option<Op
 /// A callee before its final: the offer this stack dialled it with stays open
 /// on its face until a reliable provisional of its own carries the answer.
 fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
-    if !matches!(leg.state, LegState::Trying | LegState::Early) {
+    if !matches!(leg.state(), LegState::Trying | LegState::Early) {
         return None;
     }
-    let bytes = &leg.pending_invite_txn.as_ref()?.original_invite;
+    let bytes = &leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite;
     let SipMessage::Request(invite) =
         sip_message::CustomParser::new().parse(bytes.as_slice()).ok()?
     else {

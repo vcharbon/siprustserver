@@ -69,7 +69,6 @@ pub(super) fn classify_b2bua_peer(
 mod tests {
     use super::*;
     use crate::initial_invite::build_initial_call;
-    use call::LegState;
 
     #[test]
     fn classify_b2bua_peer_internal_iff_outbound_proxy() {
@@ -166,17 +165,13 @@ mod tests {
             leg_id: leg_id.into(),
             call_id: "cid@x".into(),
             source: call::RemoteInfo { address: "0.0.0.0".into(), port: 0 },
-            state: LegState::Confirmed,
-            disposition: call::LegDisposition::Bridged,
             dialogs: dialogs.into(),
             no_answer_timeout_sec: None,
-            bye_disposition: None,
             local_uri: None,
             remote_uri: None,
             invite_request_uri: None,
             outbound_invite: None,
             own_tag: None,
-            pending_invite_txn: None,
             ext: None,
             kind: None,
             adopted: None,

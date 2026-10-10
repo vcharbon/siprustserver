@@ -4,8 +4,8 @@
 //! retired fork set lets the caller's dialog be re-identified and the ACK
 //! obligation be armed.
 
-use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted, set_leg_state};
-use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, LegState, RetiredDialog};
+use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
+use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, RetiredDialog};
 use sip_message::header;
 use sip_message::SipResponse;
 
@@ -50,15 +50,15 @@ impl ActionExecutor<'_> {
     /// Confirm the dialog whose callee tag the 2xx carries — minted now for a
     /// tag no provisional rang (§12.1.2), with the INVITE-seeded sequence —
     /// learning its target and route set (§12.1.2: the 2xx's Record-Route,
-    /// reversed per recorded route). Its session becomes the leg's; the leg
-    /// is confirmed and bridged. `peer_cseq` stays as the callee's early
+    /// reversed per recorded route). Its session becomes the leg's, and the
+    /// 2xx the final of the leg's INVITE. `peer_cseq` stays as the callee's early
     /// requests left it: the 2xx echoes a number of our own sequence.
     fn promote_winner(&self, call: &mut Call, resp: &SipResponse, leg_id: &str) -> Promoted {
         let winner = resp.to().tag().unwrap_or_default().to_string();
         let crossed_cancel = call
             .b_legs
             .iter()
-            .any(|l| l.leg_id == leg_id && l.disposition == LegDisposition::Cancelling);
+            .any(|l| l.leg_id == leg_id && l.disposition() == LegDisposition::Cancelling);
         let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
             .unwrap_or_default();
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
@@ -84,8 +84,9 @@ impl ActionExecutor<'_> {
             }
             losers =
                 leg.dialogs.iter().filter(|d| d.awaits_invite_final()).map(|d| d.id()).collect();
-            leg.state = LegState::Confirmed;
-            leg.disposition = LegDisposition::Bridged;
+            if let Some(invite) = leg.outbound_invite.as_mut() {
+                invite.record_final(resp.status());
+            }
         }
         Promoted { leg_id: leg_id.to_string(), winner, losers, crossed_cancel }
     }
@@ -101,23 +102,20 @@ impl ActionExecutor<'_> {
         // call's caller is owed her unanswered final, ADR-0022), an adopted
         // leg (a media server behind early media is the service's, ADR-0016),
         // not a 2xx crossing the leg's CANCEL, which is reaped — and nothing
-        // has answered her yet. The a-leg is confirmed before the tag is read:
-        // the relay that follows decides the a-face on a confirmed a-leg.
+        // has answered her yet. The tag is read as an answer's
+        // (`a_face_tag`): the relay that follows decides the a-face alike.
         let adopted = call.b_legs.iter().find(|l| &l.leg_id == leg_id).is_none_or(is_adopted);
         let answers_the_caller = call.state == CallModelState::Active
             && adopted
             && !crossed_cancel
             && call.a_leg.invite_final_sent.is_none();
-        if answers_the_caller {
-            *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
-        }
         // The caller-facing tag of the dialog this 2xx creates: the one its
         // relayed provisional or `MapUnshownDialog` showed, or the one the
         // relay of a live answer takes now (`a_face_tag`).
         let preferred = match fronting_dialog(call, leg_id, winner) {
             Some(d) => Some(d.our_tag.clone()),
             None if answers_the_caller && !winner.is_empty() => {
-                Some(self.a_face_tag(call, leg_id, winner))
+                Some(self.a_face_tag(call, leg_id, winner, true))
             }
             None => None,
         };

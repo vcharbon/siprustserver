@@ -49,7 +49,7 @@ pub fn ack_b_leg(
     // A leg with no 2xx in hand cannot be ACKed — the ACK would acknowledge a
     // final response that does not exist: refuse rather than mint a branch
     // toward a provisional Contact.
-    if !matches!(leg.state, LegState::Confirmed | LegState::Terminated) {
+    if !matches!(leg.state(), LegState::Confirmed | LegState::Terminated) {
         return None;
     }
     let dialog = leg.dialogs.established()?;

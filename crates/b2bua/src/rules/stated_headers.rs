@@ -460,7 +460,8 @@ mod tests {
         let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
         assert_eq!(sent.raw(HeaderName::from("X-Stamp")).collect::<Vec<_>>(), ["s"]);
         let leg = &result.call.b_legs[0];
-        let held = leg.pending_invite_txn.as_ref().expect("the leg's INVITE handle");
+        let held =
+            leg.outbound_invite.as_ref().and_then(|i| i.txn.as_ref()).expect("the INVITE handle");
         assert_eq!(held.original_invite, sent.image().to_vec(), "the handle holds what left");
         for d in &leg.dialogs {
             if let Some(h) = &d.pending_invite_txn {
@@ -505,7 +506,7 @@ mod tests {
             0,
         )
         .expect("the leg is built");
-        leg.state = call::LegState::Terminated;
+        call::testkit::stage_leg(&mut leg, call::LegState::Terminated);
         call.b_legs.push(leg);
         let mut stated = StatedHeaders::default();
         let mut own = StatedHeaders::default();

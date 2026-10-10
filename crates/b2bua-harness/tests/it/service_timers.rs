@@ -32,7 +32,7 @@ mod ringwatch {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegState, TimerType};
+    use call::{CdrEventType, Direction, TimerType};
 
     pub const DEADLINE_SEC: i64 = 5;
     const T18X: TimerType = TimerType::service(RINGWATCH, "deadline18x");
@@ -75,11 +75,6 @@ mod ringwatch {
                 Some(RuleHandleResult::new(vec![
                     // The symmetric disarm: id minted from the ONE recipe.
                     RuleAction::cancel_timer(&T18X, None),
-                    RuleAction::UpdateLegState {
-                        leg_id: b.clone(),
-                        state: LegState::Early,
-                        disposition: None,
-                    },
                     RuleAction::RelayToPeer { transform: Default::default() },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,

@@ -73,7 +73,7 @@ fn traced_call() -> call::Call {
     };
     let src: SocketAddr = "10.0.0.9:5060".parse().expect("fixture address");
     let mut call = build_initial_call(&invite, src, &B2buaConfig::default(), &IdGen::seeded(1), 0);
-    call.a_leg.state = LegState::Early;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     call.sm_cursors.insert(MachineId::new(MACHINE), StateLabel::new("S0"));
     traces()
         .activate(&call.call_ref, b2bua::trace::registry::call_identity(&call), Some(1.0), 0)

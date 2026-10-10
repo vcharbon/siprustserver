@@ -33,11 +33,11 @@ fn described() -> Body {
 /// Alice ↔ b-1, both dialogs confirmed.
 fn bridged() -> call::Call {
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call.a_leg.dialogs = vec![a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
     call.a_leg.own_tag = Some("a-svc".into());
     let mut leg = b_leg_pending();
-    leg.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut leg, LegState::Confirmed);
     with_dialog(&mut leg, "b-tag").pending_invite_txn = Some(InviteTxnHandle {
         branch: "z9hG4bKb1".into(),
         original_invite: invite().image().to_vec(),

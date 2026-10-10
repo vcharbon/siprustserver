@@ -78,7 +78,7 @@ fn call_with_b_leg(
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = b_call_id.into();
-    b.outbound_invite = Some(OutboundInvite { our_tag: b_tag.into(), cseq: 1 });
+    b.outbound_invite = Some(OutboundInvite::new(b_tag, 1, None));
     if !b_peer_tag.is_empty() {
         b.dialogs = vec![Dialog::new(b_tag, b_peer_tag, DialogState::Early, 1)].into();
     }

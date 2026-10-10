@@ -857,6 +857,21 @@ pub(super) fn rule_chain_turn(
     } else {
         HandlerResult { call: call.clone(), effects: HandlerEffects::new() }
     };
+    // The final to the INVITE that dialled the leg is its outcome, recorded
+    // after the rules matched the leg as the response found it: a rule that
+    // acted on it already recorded it, the first final standing (§17.1.1.2).
+    if let CallEvent::Sip { message, .. } = event {
+        if let SipMessage::Response(resp) = message.as_ref() {
+            if resp.status() >= 200 && resp.cseq().method() == Method::Invite {
+                result.call = call::helpers::record_dialled_invite_final(
+                    result.call,
+                    &res.source_leg_id,
+                    i64::from(resp.cseq().seq()),
+                    resp.status(),
+                );
+            }
+        }
+    }
     // A re-ACK leaves the body as the rules read it; a rule that also wrote
     // into it (a CDR event, a disposition) made the turn a write.
     if result.effects.quiet == Some(QuietTurn::ReAck) && result.call != call {
@@ -910,7 +925,7 @@ pub(super) fn rule_chain_turn(
         // limiter) immediately. An answered a-leg (confirmed) takes the BYE
         // path inside begin_termination — no response then.
         let mut cap_actions = Vec::new();
-        if matches!(result.call.a_leg.state, LegState::Trying | LegState::Early) {
+        if matches!(result.call.a_leg.state(), LegState::Trying | LegState::Early) {
             cap_actions.push(RuleAction::RespondToALeg {
                 status: 503,
                 reason: "Service Unavailable".into(),

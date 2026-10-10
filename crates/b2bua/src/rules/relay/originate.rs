@@ -4,7 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{InviteTxnHandle, Leg, LegDisposition, LegState, RemoteInfo};
+use call::{InviteTxnHandle, Leg, RemoteInfo};
 use sip_message::draft::RequestDraft;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
@@ -243,7 +243,7 @@ fn narrow_token_set<K: header::kind::TokenKind>(
 /// route applied), re-parsed from the leg's initial client-transaction handle.
 /// `None` on the originator's leg, which the stack did not dial.
 pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
-    super::ack::parse_request(&leg.pending_invite_txn.as_ref()?.original_invite)
+    super::ack::parse_request(&leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite)
 }
 
 /// Clamp a decision-supplied ring deadline (s) for an originated leg under the
@@ -506,19 +506,15 @@ pub fn build_b_leg(
         leg_id: leg_id.to_string(),
         call_id: b_call_id,
         source: RemoteInfo { address: dest.0.clone(), port: dest.1 },
-        state: LegState::Trying,
-        disposition: LegDisposition::Pending,
         dialogs: Default::default(),
         no_answer_timeout_sec,
-        bye_disposition: None,
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
         invite_request_uri: Some(request_uri),
-        outbound_invite: Some(call::OutboundInvite { our_tag: from_tag, cseq: 1 }),
-        own_tag: None,
-        // Each dialog a response to this INVITE creates inherits the handle,
+        // Each dialog a response to this INVITE creates inherits its handle,
         // for its ACK-for-2xx / RAck CSeq (RFC 3261 §13.2.2.4 / RFC 3262 §7.2).
-        pending_invite_txn: leg_invite_handle,
+        outbound_invite: Some(call::OutboundInvite::new(from_tag, 1, leg_invite_handle)),
+        own_tag: None,
         ext: None,
         kind: Some(kind.unwrap_or(call::LegKind::Destination)),
         // Derive adoption from the kind (don't pin it): Destination ⇒ adopted,

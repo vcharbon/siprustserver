@@ -104,11 +104,6 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             new_state.c_initial_sdp = c_initial_sdp;
 
             let mut actions = vec![
-                RuleAction::UpdateLegState {
-                    leg_id: c_leg_id.clone(),
-                    state: LegState::Confirmed,
-                    disposition: Some(call::LegDisposition::Bridged),
-                },
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
                 RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
             ];
@@ -179,7 +174,7 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
                 });
                 actions.push(RuleAction::TerminateLeg {
                     leg_id: c_leg_id,
-                    bye_disposition: Some(call::ByeDisposition::Rejected),
+                    end: b2bua_sdk::model::LegEnd::InviteRejected,
                 });
             }
             actions.push(RuleAction::SetTransfer { state: None });

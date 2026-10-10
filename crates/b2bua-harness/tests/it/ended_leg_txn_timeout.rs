@@ -30,7 +30,7 @@ mod lingering {
         Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef,
         ServiceSeed, SERVICE_LAYER,
     };
-    use call::{ByeDisposition, Direction};
+    use call::Direction;
 
     fn on_callee_bye(ctx: &RuleContext) -> Option<RuleHandleResult> {
         let leg = ctx.source_leg_id.to_string();
@@ -50,7 +50,7 @@ mod lingering {
             },
             RuleAction::TerminateLeg {
                 leg_id: leg,
-                bye_disposition: Some(ByeDisposition::ByeReceived),
+                end: b2bua_sdk::model::LegEnd::PeerByeAnswered,
             },
         ]))
     }
@@ -129,7 +129,7 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
     let live = b2bua.live_call(&call_ref).expect("the caller's side of the call is live");
     let callee = live.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the callee's leg");
     assert_eq!(
-        callee.bye_disposition,
+        callee.end(),
         Some(ByeDisposition::ByeReceived),
         "a timeout on an ended leg leaves the disposition its BYE gave it",
     );
@@ -193,7 +193,7 @@ async fn a_request_toward_a_leg_a_bye_ended_is_answered_481_here() {
     );
     let live = b2bua.live_call(&call_ref).expect("the caller's side of the call is live");
     let callee = live.b_legs.iter().find(|l| l.leg_id == "b-1").expect("the callee's leg");
-    assert_eq!(callee.bye_disposition, Some(ByeDisposition::ByeReceived));
+    assert_eq!(callee.end(), Some(ByeDisposition::ByeReceived));
 
     let mut alice_bye = alice_dialog.bye().await;
     alice_bye.expect(200).await;

@@ -334,7 +334,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     fh.advance(Duration::from_millis(500)).await;
     let call_ref = find_backed_up_ref(backup, &pri_ord).await;
     let ringing = replica(backup, &pri_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let ringing_p = backup.call_gen(BAK, &pri_ord, &call_ref).expect("the replica has a (p,b)");
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
@@ -347,7 +347,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     bob.receive("ACK").await;
     fh.advance(Duration::from_secs(2)).await;
     let live = primary.live_call(&call_ref).expect("the primary serves the call");
-    assert_eq!(live.a_leg.state, LegState::Confirmed, "the primary answered the caller");
+    assert_eq!(live.a_leg.state(), LegState::Confirmed, "the primary answered the caller");
 
     // ── the fabric: the answer was flushed, nothing crossed ──────────────────
     let report = fh.repl_report();
@@ -367,8 +367,8 @@ async fn partition_delivers_nothing_across_the_cut() {
     );
     let held = replica(backup, &pri_ord, &call_ref).await;
     assert_eq!(
-        (held.state, held.a_leg.state),
-        (ringing.state, ringing.a_leg.state),
+        (held.state, held.a_leg.state()),
+        (ringing.state, ringing.a_leg.state()),
         "the backup replica is still the ringing body while the cut lasts",
     );
     assert_eq!(
@@ -394,7 +394,7 @@ async fn partition_delivers_nothing_across_the_cut() {
     }
     assert!(landed >= staged.len(), "every frame the cut held landed ({landed} frames)");
     let converged = replica(backup, &pri_ord, &call_ref).await;
-    assert_eq!(converged.a_leg.state, LegState::Confirmed, "the replica converged on the heal");
+    assert_eq!(converged.a_leg.state(), LegState::Confirmed, "the replica converged on the heal");
     assert!(
         backup.call_gen(BAK, &pri_ord, &call_ref).is_some_and(|p| p > ringing_p),
         "the replica carries the answered version",
@@ -427,7 +427,7 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
     fh.advance(Duration::from_millis(500)).await;
     let call_ref = find_backed_up_ref(backup, &pri_ord).await;
     let ringing = replica(backup, &pri_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
     // ── the delay, then the primary flushes: the callee answers ──────────────
@@ -471,8 +471,8 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
         );
         let held = replica(backup, &pri_ord, &call_ref).await;
         assert_eq!(
-            (held.state, held.a_leg.state),
-            (ringing.state, ringing.a_leg.state),
+            (held.state, held.a_leg.state()),
+            (ringing.state, ringing.a_leg.state()),
             "at {} ms (flush sent at {sent_at} ms, delay {DELAY_MS} ms) the replica is still \
              the ringing body",
             fh.now_ms(),
@@ -498,7 +498,7 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
     }
     assert!(checked >= 1, "at least one delayed frame landed ({checked} checked)");
     let converged = replica(backup, &pri_ord, &call_ref).await;
-    assert_eq!(converged.a_leg.state, LegState::Confirmed, "the delayed answer version landed");
+    assert_eq!(converged.a_leg.state(), LegState::Confirmed, "the delayed answer version landed");
 
     // ── the call ends end-to-end and the cluster releases it ─────────────────
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;

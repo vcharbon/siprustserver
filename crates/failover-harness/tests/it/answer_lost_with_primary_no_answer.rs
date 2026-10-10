@@ -273,7 +273,7 @@ fn assert_answered_on(node: &ReplicatedB2buaSut, call_ref: &str, what: &str) {
     let live = node
         .live_call(call_ref)
         .unwrap_or_else(|| panic!("{what}: {} serves the call", node.ordinal()));
-    assert_eq!(live.a_leg.state, LegState::Confirmed, "{what}: a-leg Confirmed");
+    assert_eq!(live.a_leg.state(), LegState::Confirmed, "{what}: a-leg Confirmed");
     assert!(
         !live.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
         "{what}: the folded ledger carries no NoAnswer",
@@ -310,7 +310,7 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
     let (ringing_body, ringing) = replica(b2, &primary_ord, &call_ref).await;
-    assert_ne!(ringing.a_leg.state, LegState::Confirmed, "the backup holds the ringing a-leg");
+    assert_ne!(ringing.a_leg.state(), LegState::Confirmed, "the backup holds the ringing a-leg");
     let fire_at = no_answer_deadline(&ringing);
 
     // ── the answer: 2xx to alice, alice ACKs, bob is ACKed — all on the primary
@@ -334,7 +334,7 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
     b2.rewind_replica(BAK, &primary_ord, &call_ref, ringing_body).await;
     let (_, stale) = replica(b2, &primary_ord, &call_ref).await;
     assert_ne!(
-        stale.a_leg.state,
+        stale.a_leg.state(),
         LegState::Confirmed,
         "the backup still reads the call as ringing"
     );

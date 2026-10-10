@@ -26,6 +26,8 @@ pub mod helpers;
 pub mod incarnation;
 pub mod index_key;
 pub mod model;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 
 // callRef derivation + parsing (a-leg identity → replicated key).
 pub use callref::{call_ref_primary, derive_call_ref, parse_call_ref, ParsedCallRef};

@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use call::helpers::{
     callee_dialog, find_b_leg, find_leg, unacknowledged_relayed_provisionals, OwedPrack,
 };
-use call::{Call, DialogState, EndingBy, Leg, LegDisposition, LegState, MessageDirection};
+use call::{Call, DialogState, EndingBy, Leg, LegState, MessageDirection};
 use sip_message::{Method, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
@@ -53,12 +53,13 @@ pub type Check = fn(&Turn<'_>) -> Result<(), String>;
 /// Every model invariant, by name.
 pub const INVARIANTS: &[(&str, Check)] = &[
     ("dialog-named-once", dialog_named_once),
-    ("leg-confirmed-one-confirmed-dialog", leg_confirmed_one_confirmed_dialog),
+    ("one-confirmed-dialog-per-leg", one_confirmed_dialog_per_leg),
     ("confirmed-a-leg-one-dialog", confirmed_a_leg_one_dialog),
     ("fronts-name-a-dialog", fronts_name_a_dialog),
     ("own-tag-names-a-dialog", own_tag_names_a_dialog),
     ("dialog-cseq-never-decreases", dialog_cseq_never_decreases),
     ("no-early-dialog-past-its-invite", no_early_dialog_past_its_invite),
+    ("no-cancelled-dialog-past-its-invites-final", no_cancelled_dialog_past_its_invites_final),
     ("in-dialog-request-answered-or-relayed", in_dialog_request_answered_or_relayed),
     ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
@@ -114,24 +115,18 @@ fn dialog_named_once(turn: &Turn<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// A leg is confirmed exactly when one of its dialogs is confirmed or ending
-/// (a 2xx established it, RFC 3261 §12.1, and no BYE completed on it), and no
-/// leg holds two such dialogs. A released leg reads `Terminated` while its
-/// BYE is in flight: its dialog is `Ending`, never `Confirmed`.
-fn leg_confirmed_one_confirmed_dialog(turn: &Turn<'_>) -> Result<(), String> {
+/// A leg's INVITE confirms one dialog (RFC 3261 §12.1, §13.2.2.4: the other
+/// forks are released): no leg holds two dialogs a 2xx established and no
+/// BYE completed on. The leg's own state reads off that dialog
+/// ([`call::Leg::state`]).
+fn one_confirmed_dialog_per_leg(turn: &Turn<'_>) -> Result<(), String> {
     for leg in legs(turn.after) {
         let confirmed: Vec<_> = leg.dialogs.iter().filter(|d| d.is_confirmed()).collect();
-        let sound = match (leg.state, confirmed.as_slice()) {
-            (LegState::Confirmed, [_]) => true,
-            (LegState::Terminated, [d]) => d.state == DialogState::Ending(EndingBy::Bye),
-            (LegState::Confirmed, _) => false,
-            (_, other) => other.is_empty(),
-        };
-        if !sound {
+        if confirmed.len() > 1 {
             return Err(format!(
-                "leg {} is {:?} with confirmed or ending dialogs {:?}",
+                "leg {} holds {} confirmed or ending dialogs {:?}",
                 leg.leg_id,
-                leg.state,
+                confirmed.len(),
                 confirmed.iter().map(|d| (d.our_tag.as_str(), &d.state)).collect::<Vec<_>>()
             ));
         }
@@ -144,7 +139,7 @@ fn leg_confirmed_one_confirmed_dialog(turn: &Turn<'_>) -> Result<(), String> {
 /// sent (RFC 3261 §12.1.1, §13.3.1.4).
 fn confirmed_a_leg_one_dialog(turn: &Turn<'_>) -> Result<(), String> {
     let a = &turn.after.a_leg;
-    if a.state != LegState::Confirmed {
+    if a.state() != LegState::Confirmed {
         return Ok(());
     }
     let live: Vec<_> = a.dialogs.iter().filter(|d| d.is_live()).collect();
@@ -268,7 +263,12 @@ fn reliable_1xx_acknowledged_at_final(turn: &Turn<'_>) -> Result<(), String> {
             return Err(format!(
                 "leg {} ({:?}, {:?}): reliable 1xx RSeq {} of INVITE CSeq {} on dialog {} is \
                  un-PRACKed",
-                leg.leg_id, leg.state, leg.disposition, owed.rseq, owed.invite_cseq, owed.b_tag
+                leg.leg_id,
+                leg.state(),
+                leg.disposition(),
+                owed.rseq,
+                owed.invite_cseq,
+                owed.b_tag
             ));
         }
     }
@@ -276,13 +276,10 @@ fn reliable_1xx_acknowledged_at_final(turn: &Turn<'_>) -> Result<(), String> {
 }
 
 /// Whether `leg`'s INVITE of CSeq `invite_cseq` still awaits its final and
-/// the leg is neither being cancelled nor ended: the leg's initial INVITE
-/// while it is in setup, a relayed re-INVITE while its relay is open.
+/// the leg is not ended: the leg's initial INVITE while it is in setup, a
+/// relayed re-INVITE while its relay is open on a confirmed leg.
 fn invite_open(leg: &Leg, invite_cseq: i64) -> bool {
-    if matches!(leg.disposition, LegDisposition::Cancelling | LegDisposition::Rejected) {
-        return false;
-    }
-    match leg.state {
+    match leg.state() {
         LegState::Trying | LegState::Early => true,
         LegState::Terminated => false,
         LegState::Confirmed => leg.dialogs.iter().any(|d| {
@@ -301,47 +298,57 @@ fn deferred_to_ack(leg: &Leg, owed: &OwedPrack) -> bool {
 }
 
 /// A non-2xx final sent on the caller's INVITE ends every a-dialog it could
-/// have created (RFC 3261 §12.3, §13.2.2.4): the a-leg is neither early nor
+/// have created (RFC 3261 §12.3, §13.2.2.4): none of her dialogs is early or
 /// confirmed past it.
 fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
     let a = &turn.after.a_leg;
-    match a.invite_final_sent {
-        Some(status)
-            if status >= 300 && matches!(a.state, LegState::Early | LegState::Confirmed) =>
-        {
-            Err(format!(
-                "the caller's INVITE took {status} but the a-leg is {:?} with dialogs {:?}",
-                a.state,
-                a.dialogs.iter().map(|d| d.our_tag.as_str()).collect::<Vec<_>>()
-            ))
-        }
-        _ => Ok(()),
+    let Some(status) = a.invite_final_sent.filter(|s| *s >= 300) else { return Ok(()) };
+    let open = |d: &&call::Dialog| matches!(d.state, DialogState::Early | DialogState::Confirmed);
+    match a.dialogs.iter().find(open) {
+        Some(d) => Err(format!(
+            "the caller's INVITE took {status} but her dialog {} is {:?}",
+            d.our_tag, d.state
+        )),
+        None => Ok(()),
     }
 }
 
 /// No dialog stays early once its INVITE is over (RFC 3261 §12.1, §12.1.2):
-/// past the final sent on the caller's INVITE, on a confirmed leg (the 2xx
-/// retired the other forks), and on an ended leg unless this stack's CANCEL
-/// of that INVITE awaits its final (§9.1).
+/// past that INVITE's final, on a leg a 2xx confirmed (the other forks
+/// retired), and on a leg a BYE or this stack's CANCEL ended.
 fn no_early_dialog_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
     for leg in legs(turn.after) {
-        let over = match leg.state {
-            LegState::Confirmed | LegState::Terminated => Some(format!("{:?}", leg.state)),
-            LegState::Trying | LegState::Early => {
-                leg.invite_final_sent.map(|status| format!("answered {status}"))
-            }
+        let over = match (leg.invite_final(), leg.state()) {
+            (Some(status), _) => format!("answered {status}"),
+            (None, LegState::Confirmed | LegState::Terminated) => format!("{:?}", leg.state()),
+            (None, LegState::Trying | LegState::Early) => continue,
         };
-        let Some(over) = over else { continue };
-        let early = |d: &&call::Dialog| match leg.state {
-            LegState::Terminated => d.state == DialogState::Early,
-            _ => d.awaits_invite_final(),
-        };
-        if let Some(d) = leg.dialogs.iter().find(early) {
+        if let Some(d) = leg.dialogs.iter().find(|d| d.state == DialogState::Early) {
             return Err(format!(
                 "leg {} ({over}) holds early dialog {}/{}",
                 leg.leg_id, d.our_tag, d.peer_tag
             ));
         }
+    }
+    Ok(())
+}
+
+/// An early dialog this stack's CANCEL is ending ends on its INVITE's final
+/// (RFC 3261 §9.1, §12.1): none outlives that final, and none rides an
+/// INVITE no CANCEL was sent for.
+fn no_cancelled_dialog_past_its_invites_final(turn: &Turn<'_>) -> Result<(), String> {
+    for leg in legs(turn.after) {
+        let cancelled = DialogState::Ending(EndingBy::Cancel);
+        let Some(d) = leg.dialogs.iter().find(|d| d.state == cancelled) else { continue };
+        let why = match (leg.invite_final(), leg.cancel_sent()) {
+            (Some(status), _) => format!("its INVITE took {status}"),
+            (None, false) => "no CANCEL of its INVITE was sent".to_string(),
+            (None, true) => continue,
+        };
+        return Err(format!(
+            "leg {}: dialog {}/{} is ending by CANCEL but {why}",
+            leg.leg_id, d.our_tag, d.peer_tag
+        ));
     }
     Ok(())
 }

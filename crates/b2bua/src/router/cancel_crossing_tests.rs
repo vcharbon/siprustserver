@@ -36,7 +36,7 @@ fn relayed_answer_call() -> Call {
     );
     let mut a1 = Dialog::new("a1", call.a_leg_invite.from_tag.clone(), DialogState::Confirmed, 1);
     a1.remote_target = "sip:alice@10.0.0.9:5060".into();
-    call.a_leg.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call.a_leg.invite_final_sent = Some(200);
     let (emission, _) = RetainedEmission::paced(
         b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
@@ -61,7 +61,7 @@ fn relayed_answer_call() -> Call {
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
     b.call_id = "b-cid@10.0.0.2".into();
-    b.outbound_invite = Some(OutboundInvite { our_tag: "b2bua-b-tag".into(), cseq: 1 });
+    b.outbound_invite = Some(OutboundInvite::new("b2bua-b-tag", 1, None));
     b.own_tag = None;
     b.invite_final_sent = None;
     let mut bob = Dialog::new("b2bua-b-tag", "bob-tag", DialogState::Confirmed, 1);
@@ -116,7 +116,7 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
     assert_eq!(requests_to("a"), Vec::<String>::new(), "nothing goes to the caller");
     assert!(requests_to("b-1").iter().any(|m| m == "BYE"), "bob gets his BYE");
     assert_eq!(result.call.a_leg.invite_final_sent, Some(487), "the final the wire carries");
-    assert_eq!(result.call.a_leg.state, LegState::Terminated, "the caller holds no dialog");
+    assert_eq!(result.call.a_leg.state(), LegState::Terminated, "the caller holds no dialog");
     assert!(!call::helpers::caller_answered(&result.call), "the caller was never answered");
     assert!(
         result.call.a_leg.dialogs.iter().all(|d| d.answered_2xx.is_none()),

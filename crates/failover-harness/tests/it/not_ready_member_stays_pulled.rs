@@ -98,7 +98,7 @@ async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> 
 /// The absolute deadline of the survivor's replica per-b-leg `NoAnswer` entry.
 async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> i64 {
     let call = replica(backup, primary, call_ref).await.expect("replica body present");
-    assert_ne!(call.a_leg.state, LegState::Confirmed, "the survivor holds the ringing a-leg");
+    assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
         .find(|t| t.timer_type == TimerType::NoAnswer)
@@ -111,7 +111,7 @@ async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &st
 async fn replica_terminal(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> bool {
     match replica(backup, primary, call_ref).await {
         None => true,
-        Some(c) => c.a_leg.state == LegState::Terminated,
+        Some(c) => c.a_leg.state() == LegState::Terminated,
     }
 }
 

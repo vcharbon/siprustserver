@@ -143,7 +143,7 @@ fn answer_a_leg_if_unanswered(
     now_ms: i64,
     advertisement: &CapabilitySet,
 ) {
-    let unanswered_entering = matches!(before.a_leg.state, LegState::Trying | LegState::Early);
+    let unanswered_entering = matches!(before.a_leg.state(), LegState::Trying | LegState::Early);
     if !unanswered_entering || result.call.a_leg_invite.headers.is_empty() {
         return;
     }

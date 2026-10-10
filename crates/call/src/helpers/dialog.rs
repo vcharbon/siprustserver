@@ -72,10 +72,10 @@ pub fn retain_emitted_ack(call: Call, leg_id: &str, ack: RetainedEmission) -> Ca
 /// flight for it. Only an open round is closed: a handle kept for a taken 2xx
 /// (`ack_branch` / `awaited_ack_cseq` set) stays for the ACK and its re-ACKs,
 /// whatever a later final on the same branch says; the initial INVITE of a leg
-/// still `Trying` / `Early` keeps it for the CANCEL.
+/// holding no confirmed dialog keeps it for the CANCEL.
 pub fn close_rejected_invite_round(call: Call, leg_id: &str, branch: &str) -> Call {
     update_leg(call, leg_id, |leg| {
-        if !matches!(leg.state, crate::model::LegState::Confirmed) {
+        if leg.dialogs.confirmed().is_none() {
             return;
         }
         for d in leg.dialogs.iter_mut() {

@@ -28,7 +28,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, CallModelState, LegDisposition, LegState, MsgpackCodec};
+use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
 use repl_net::transport::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -85,14 +85,12 @@ fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelS
     let mut call =
         build_initial_call(&invite(pri, bak, cid), src(), &config, &sip_txn::IdGen::seeded(1), 0);
     let answered = a_state == LegState::Confirmed;
-    call.a_leg.disposition =
-        if answered { LegDisposition::Bridged } else { LegDisposition::Pending };
     call.a_leg.invite_final_sent = match (answered, state) {
         (true, _) => Some(200),
         (false, CallModelState::Active) => None,
         (false, _) => Some(480),
     };
-    call.a_leg.state = a_state;
+    call::testkit::stage_leg(&mut call.a_leg, a_state);
     call.state = state;
     call
 }
@@ -112,7 +110,7 @@ async fn stored_state(
 ) -> (CallModelState, LegState) {
     let raw = store.get_call(role, primary, call_ref).await.unwrap().expect("Element present");
     let call: Call = MsgpackCodec::new().decode(&raw).expect("Element body decodes");
-    (call.state, call.a_leg.state)
+    (call.state, call.a_leg.state())
 }
 
 /// A → B forward flush at `(p, b)` carrying `call`'s body.
@@ -222,7 +220,7 @@ async fn forward_put_of_a_cancel_that_preempted_the_answer_applies() {
     element(&b.store, &answered, 1, 1).await;
 
     let mut cancelled = call::helpers::record_cancelled_invite(answered.clone(), "a");
-    cancelled.a_leg.state = LegState::Terminated;
+    call::testkit::stage_leg(&mut cancelled.a_leg, LegState::Terminated);
     cancelled.state = CallModelState::Terminating;
     forward(&a.store, &cancelled, 2, 1).await;
     tick(200).await;

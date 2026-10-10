@@ -442,7 +442,8 @@ impl ActionExecutor<'_> {
             && call::helpers::find_b_leg(call, &source_leg_id).is_some()
         {
             self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
-            let a_face = self.a_face_tag(call, &source_leg_id, &to_tag);
+            let answering = (200..300).contains(&status);
+            let a_face = self.a_face_tag(call, &source_leg_id, &to_tag, answering);
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
             let contact =
                 relay::leg_contact(self.config, relay::CallMarks::of(call), &call.a_leg.leg_id);

@@ -30,9 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use call::helpers::record_termination;
-use call::{
-    ByeDisposition, Call, CallModelState, CdrEvent, CdrEventType, LegState, TerminationCause,
-};
+use call::{Call, CallModelState, CdrEvent, CdrEventType, TerminationCause};
 use tokio::sync::mpsc;
 
 use crate::dispatch::{HandlerFailure, InFlight};
@@ -321,7 +319,7 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 }
 
 /// The strike-2 **discharge** (ADR-0020 X6): force the last persisted snapshot
-/// terminal — every unresolved leg gets `ByeDisposition::ByeTimeout`, one
+/// terminal — every unresolved leg is abandoned ([`call::helpers::abandon_leg`]), one
 /// reason-carrying `CdrEvent` is appended, the termination record names the
 /// supervisor where nothing ended the call before, `state = Terminated` — and return
 /// it with EMPTY effects: the caller runs the ordinary
@@ -333,17 +331,8 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
     let a_leg_id = call.a_leg.leg_id.clone();
     for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
-        let resolved = match leg.bye_disposition {
-            None => leg.state == LegState::Trying,
-            Some(b) => b.is_terminal(),
-        };
-        if !resolved {
-            leg.bye_disposition = Some(ByeDisposition::ByeTimeout);
-            // A BYE still in flight ends unanswered (RFC 3261 §15.1.1).
-            let bye = call::DialogState::Ending(call::EndingBy::Bye);
-            for d in leg.dialogs.iter_mut().filter(|d| d.state == bye) {
-                d.state = call::DialogState::Ended(call::DialogEnd::OurBye { final_status: None });
-            }
+        if !leg.is_resolved() {
+            call::helpers::abandon_leg(leg);
         }
     }
     let call = call::helpers::add_cdr_event(

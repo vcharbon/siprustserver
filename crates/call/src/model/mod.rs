@@ -46,6 +46,7 @@ pub mod dialogs;
 pub mod emission;
 pub mod invite_txn;
 pub mod leg;
+pub mod leg_state;
 pub mod limiter;
 pub mod message_ring;
 pub mod obligation;
@@ -66,7 +67,8 @@ pub use dialog::{
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};
-pub use leg::{ByeDisposition, Leg, LegDisposition, LegKind, LegState, RemoteInfo};
+pub use leg::{Leg, LegKind, RemoteInfo};
+pub use leg_state::{ByeDisposition, LegDisposition, LegState};
 pub use limiter::{
     AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
     Replacement, CHANGE_EPOCH,

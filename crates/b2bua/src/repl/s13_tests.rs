@@ -16,8 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::{
-    Call, CallBodyCodec, CallLimiterState, CallModelState, LegDisposition, LegState, LimiterEntry,
-    MsgpackCodec,
+    Call, CallBodyCodec, CallLimiterState, CallModelState, LegState, LimiterEntry, MsgpackCodec,
 };
 use repl_net::transport::SimulatedReplicationNetwork;
 use sip_clock::Clock;
@@ -68,8 +67,7 @@ fn nth(cid: &str, n: u32, state: CallModelState) -> Call {
         CallLimiterState::admitted(key, 1, vec![LimiterEntry { id: "x".into(), limit: 10 }]);
     call.state = state;
     if state != CallModelState::Active {
-        call.a_leg.state = LegState::Terminated;
-        call.a_leg.disposition = LegDisposition::Pending;
+        call::testkit::stage_leg(&mut call.a_leg, LegState::Terminated);
         call.a_leg.invite_final_sent = Some(401);
     }
     call

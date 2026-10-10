@@ -83,7 +83,7 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
         a_leg: CdrLeg {
             call_id: call.a_leg.call_id.clone(),
             from_tag: call.a_leg_invite.from_tag.clone(),
-            state: call.a_leg.state,
+            state: call.a_leg.state(),
         },
         b_legs: call
             .b_legs
@@ -91,8 +91,8 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
             .map(|l| CdrBLeg {
                 leg_id: l.leg_id.clone(),
                 call_id: l.call_id.clone(),
-                state: l.state,
-                disposition: l.disposition,
+                state: l.state(),
+                disposition: l.disposition(),
             })
             .collect(),
         events: call.cdr_events.clone(),

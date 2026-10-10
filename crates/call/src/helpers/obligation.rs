@@ -240,8 +240,9 @@ pub fn restate_retained(call: &mut Call, was: &[u8], now: &[u8]) {
 /// the INVITE they hold left restated.
 pub fn restate_leg_invite(leg: &mut crate::model::Leg, was: &[u8], now: &[u8]) {
     let handles = leg
-        .pending_invite_txn
+        .outbound_invite
         .iter_mut()
+        .filter_map(|i| i.txn.as_mut())
         .chain(leg.dialogs.iter_mut().filter_map(|d| d.pending_invite_txn.as_mut()));
     for handle in handles {
         if handle.original_invite == was {

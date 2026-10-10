@@ -389,7 +389,7 @@ fn repeat_toward(call: &Call, obligation: &Obligation) -> Option<OutboundSipEffe
                 .iter()
                 .find(|r| r.a_tag == *a_tag && r.a_rseq == *a_rseq)
                 .and_then(|r| call::helpers::find_leg(call, &r.b_leg_id))
-                .is_some_and(|l| l.state != LegState::Terminated);
+                .is_some_and(|l| l.state() != LegState::Terminated);
             if !raised_by_live_leg {
                 return None;
             }

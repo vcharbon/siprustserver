@@ -281,7 +281,7 @@ pub async fn apply_route(
         }
         // The client-transaction handle holds the INVITE as it leaves; the
         // leg holds no dialog before a response to it.
-        if let Some(handle) = leg.pending_invite_txn.as_mut() {
+        if let Some(handle) = leg.outbound_invite.as_mut().and_then(|i| i.txn.as_mut()) {
             handle.original_invite = req.image().to_vec();
         }
     }

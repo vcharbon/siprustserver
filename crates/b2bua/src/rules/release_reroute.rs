@@ -41,12 +41,13 @@
 //! from either party still rides `relay-bye` and ends the call.
 
 use call::{
-    ByeDisposition, CdrEventType, Direction, LegDisposition, LegState, MachineId, ReleaseEventKind,
-    ReroutePhase, RerouteState, TerminationCause, TimerType,
+    CdrEventType, Direction, LegState, MachineId, ReleaseEventKind, ReroutePhase, RerouteState,
+    TerminationCause, TimerType,
 };
 
 use b2bua_sdk::model::{
-    Body, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
+    Body, LegEnd, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
+    CORE_LAYER,
 };
 
 /// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
@@ -247,11 +248,6 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 let mut new_state = st;
                 new_state.phase = ReroutePhase::ARealigning;
                 ok(vec![
-                    RuleAction::UpdateLegState {
-                        leg_id: new_leg.clone(),
-                        state: LegState::Confirmed,
-                        disposition: Some(LegDisposition::Bridged),
-                    },
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
                     RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
@@ -292,7 +288,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     },
                     RuleAction::TerminateLeg {
                         leg_id: new_leg.clone(),
-                        bye_disposition: Some(ByeDisposition::Rejected),
+                        end: LegEnd::InviteRejected,
                     },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                 ];

@@ -18,7 +18,9 @@ use crate::config::SdpFormPolicy;
 /// whose INVITE this stack cannot read is never taken for an offer.
 pub(crate) fn invite_carried_offer(call: &Call, leg_id: &str, invite_cseq: i64) -> bool {
     let Some(leg) = call::helpers::find_leg(call, leg_id) else { return true };
-    std::iter::once(leg.pending_invite_txn.as_ref())
+    leg.outbound_invite
+        .iter()
+        .map(|i| i.txn.as_ref())
         .chain(leg.dialogs.iter().map(|d| d.pending_invite_txn.as_ref()))
         .flatten()
         .filter_map(|h| parse_request(&h.original_invite))

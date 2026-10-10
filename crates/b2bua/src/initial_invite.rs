@@ -11,8 +11,7 @@ use std::net::SocketAddr;
 use call::helpers::{add_cdr_event, mark_decision, record_termination};
 use call::{
     ALegInviteSnapshot, Call, CallLimiterState, CallModelState, CallTopology, CdrEvent,
-    CdrEventType, DecisionKind, Leg, LegDisposition, LegKind, LegState, RemoteInfo,
-    TerminationCause,
+    CdrEventType, DecisionKind, Leg, LegKind, RemoteInfo, TerminationCause,
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
@@ -173,17 +172,13 @@ pub fn build_initial_call(
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
         source: RemoteInfo { address: src.ip().to_string(), port: src.port() },
-        state: LegState::Trying,
-        disposition: LegDisposition::Pending,
         dialogs: Default::default(),
         no_answer_timeout_sec: None,
-        bye_disposition: None,
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
         invite_request_uri: Some(invite.request_uri().to_string()),
         outbound_invite: None,
         own_tag: None,
-        pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::A),
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
@@ -517,7 +512,6 @@ pub(crate) fn reject_call(
         );
     }
     call = record_termination(call, now_ms, cause, None);
-    call.a_leg.state = LegState::Terminated;
     call.state = CallModelState::Terminated;
     HandlerResult { call, effects }
 }

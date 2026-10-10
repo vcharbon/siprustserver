@@ -84,7 +84,7 @@ fn is_fake_prack(ctx: &RuleContext) -> bool {
 /// crossing 200 into the being-rejected a-leg, orphaning the callee in a
 /// one-sided established dialog.
 fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
-    ctx.source_leg().map(|l| l.disposition != LegDisposition::Cancelling).unwrap_or(true)
+    ctx.source_leg().map(|l| l.disposition() != LegDisposition::Cancelling).unwrap_or(true)
 }
 
 /// The fake-prack mask is still up: alice holds no committed callee SDP, because
@@ -92,7 +92,7 @@ fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
 /// decides — a b-leg can confirm without facing the caller (an unadopted media
 /// leg answered by the service, a crossing 200 being reaped).
 fn is_fake_prack_masking(ctx: &RuleContext) -> bool {
-    is_fake_prack(ctx) && ctx.call.a_leg().state != LegState::Confirmed
+    is_fake_prack(ctx) && ctx.call.a_leg().state() != LegState::Confirmed
 }
 
 /// fake-prack AND the current UPDATE carries **no body** — the session-refresh

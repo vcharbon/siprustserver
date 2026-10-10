@@ -12,10 +12,10 @@ use b2bua::rules::{
     RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
 };
 use b2bua_sdk::event::CallEvent;
-use b2bua_sdk::model::{Body, BodyAuthor};
+use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
 use call::{
-    CallModelState, Dialog, DialogState, Direction, Leg, LegDisposition, LegKind, LegState,
-    MachineId, OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerType,
+    CallModelState, Dialog, DialogState, Direction, EndingBy, Leg, LegKind, LegState, MachineId,
+    OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerType,
 };
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
@@ -81,6 +81,17 @@ fn call_with_early_a_dialog(a1: &str) -> call::Call {
     call
 }
 
+/// Confirm the caller's leg: her early dialog, else a dialog of hers under
+/// `atag`.
+fn confirm_a(call: &mut call::Call) {
+    if !call.a_leg.dialogs.iter().any(|d| d.state == DialogState::Early) {
+        let d = a_dialog(call, "atag", DialogState::Confirmed);
+        call.a_leg.dialogs.insert(d);
+        call.a_leg.own_tag.get_or_insert_with(|| "atag".into());
+    }
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
+}
+
 /// A dialog of the caller's leg under `tag`, in `state`, both sequences at 1.
 fn a_dialog(call: &call::Call, tag: &str, state: DialogState) -> Dialog {
     let mut d = Dialog::new(tag, call.a_leg_invite.from_tag.clone(), state, 1);
@@ -90,12 +101,14 @@ fn a_dialog(call: &call::Call, tag: &str, state: DialogState) -> Dialog {
 }
 
 /// Give `leg` — dialled under `svc` — the dialog the peer tag `peer_tag`
-/// names, confirmed on a confirmed leg, early otherwise; return it.
+/// names, confirmed on a confirmed leg, early otherwise, in place of a dialog
+/// [`call::testkit::stage_leg`] minted; return it.
 fn with_dialog<'a>(leg: &'a mut Leg, peer_tag: &str) -> &'a mut Dialog {
-    let state = match leg.state {
+    let state = match leg.state() {
         LegState::Confirmed => DialogState::Confirmed,
         _ => DialogState::Early,
     };
+    leg.dialogs.retain(|d| d.peer_tag != "staged-peer");
     let mut d = Dialog::new("svc", peer_tag, state, 1);
     d.remote_target = "sip:bob@10.0.0.2:5070".into();
     leg.dialogs.insert(d);
@@ -174,9 +187,9 @@ fn no_answer_fire_on_a_confirmed_call_absorbs_to_cancel_only() {
     // answered leg must be absorbed: the only action is the scrub of the
     // spent entry.
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut b = b_leg_pending();
-    b.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, b);
     let actions = no_answer_result(&call, "b-1");
     assert!(
@@ -194,9 +207,9 @@ fn no_answer_fire_naming_an_absent_leg_absorbs_to_cancel_only() {
     // crash: firing DestroyLeg + /call/failure against a dead leg id on a
     // possibly-answered call is the same bug class — absorb and scrub.
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut b = b_leg_pending();
-    b.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, b);
     let actions = no_answer_result(&call, "b-ghost");
     assert!(
@@ -215,11 +228,11 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     // body (CDR timeout + DestroyLeg on the fired leg) runs.
     let mut call = test_call();
     let mut confirmed = b_leg_pending();
-    confirmed.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut confirmed, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, confirmed);
     let mut pending = b_leg_pending();
     pending.leg_id = "b-2".into();
-    pending.state = LegState::Trying;
+    call::testkit::stage_leg(&mut pending, LegState::Trying);
     call = call::helpers::add_b_leg(call, pending);
     let actions = no_answer_result(&call, "b-2");
     // No consult here: the caller's 480 and the teardown follow the destroy.
@@ -234,14 +247,13 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
 
 #[test]
 fn no_answer_fire_on_a_cancelling_leg_absorbs_to_cancel_only() {
-    // A caller CANCEL leaves the b-leg at state=Trying, disposition=Cancelling
-    //: state alone reads "still awaiting an answer", but the
-    // leg is already going away — the fire must not consult /call/failure nor
-    // author a second final on the a-leg's completed transaction.
+    // A caller CANCEL leaves the b-leg `Cancelling`: the leg is already going
+    // away — the fire must not consult /call/failure nor author a second
+    // final on the a-leg's completed transaction.
     let mut call = test_call();
     call.callback_context = Some("cb".into());
     let mut b = b_leg_pending();
-    b.disposition = LegDisposition::Cancelling;
+    cancel_sent(&mut b);
     call = call::helpers::add_b_leg(call, b);
     let actions = no_answer_result(&call, "b-1");
     assert!(
@@ -311,14 +323,13 @@ fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
     call.callback_context = Some("cb".into());
     call.state = CallModelState::Terminating;
     let mut b = b_leg_pending();
-    b.disposition = LegDisposition::Cancelling;
+    cancel_sent(&mut b);
     call = call::helpers::add_b_leg(call, b);
     let actions = handle_timeout_result(&call, "b-1");
     assert!(
         matches!(
             actions.as_slice(),
-            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::Cancelled) }]
-                if leg_id == "b-1"
+            [RuleAction::TerminateLeg { leg_id, end: LegEnd::Abandon }] if leg_id == "b-1"
         ),
         "going-away leg resolves locally on its timeout, got {actions:?}",
     );
@@ -362,8 +373,8 @@ fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
 fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
     let mut call = test_call();
     call.state = CallModelState::Terminating;
-    call.a_leg.state = LegState::Confirmed;
-    call.a_leg.bye_disposition = Some(call::ByeDisposition::ByeSent);
+    confirm_a(&mut call);
+    end_dialogs(&mut call.a_leg, DialogState::Ending(EndingBy::Bye));
 
     let actions = a_leg_timeout_result(&call, "OPTIONS");
     assert!(
@@ -375,53 +386,48 @@ fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
     assert!(
         matches!(
             actions.as_slice(),
-            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::ByeTimeout) }]
-                if leg_id == "a"
+            [RuleAction::TerminateLeg { leg_id, end: LegEnd::OurByeTimedOut }] if leg_id == "a"
         ),
         "the BYE's timeout resolves the leg as a BYE timeout, got {actions:?}",
     );
 }
 
-/// A leg a BYE already ended keeps its disposition when a later request's
-/// transaction on it times out (a NOTIFY on a subscription usage that outlived
-/// the dialog, RFC 5057 §5.2): it is re-terminated with no disposition, which
+/// A leg already ended keeps its end when a later request's transaction on
+/// it times out (a NOTIFY on a subscription usage that outlived the dialog,
+/// RFC 5057 §5.2): it is re-terminated with nothing more to record, which
 /// answers what is still pending toward it. A leg whose CANCEL is in flight,
-/// or a going-away leg with no disposition yet, is still settled `Cancelled`.
+/// or a going-away leg with no end yet, is abandoned.
 #[test]
 fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
-    for disposition in [
-        call::ByeDisposition::ByeReceived,
-        call::ByeDisposition::ByeConfirmed,
-        call::ByeDisposition::ByeTimeout,
-        call::ByeDisposition::Cancelled,
-        call::ByeDisposition::Rejected,
-        call::ByeDisposition::None,
+    for ended in [
+        DialogState::Ended(call::DialogEnd::PeerBye),
+        DialogState::Ended(call::DialogEnd::OurBye { final_status: Some(200) }),
+        DialogState::Ended(call::DialogEnd::OurBye { final_status: None }),
+        DialogState::Ended(call::DialogEnd::Rejected(487)),
     ] {
         let mut call = test_call();
-        call.a_leg.state = LegState::Terminated;
-        call.a_leg.bye_disposition = Some(disposition);
+        confirm_a(&mut call);
+        end_dialogs(&mut call.a_leg, ended.clone());
+        if matches!(ended, DialogState::Ended(call::DialogEnd::Rejected(_))) {
+            call.a_leg.invite_final_sent = Some(487);
+        }
         let actions = a_leg_timeout_result(&call, "NOTIFY");
         assert!(
             matches!(
                 actions.as_slice(),
-                [RuleAction::TerminateLeg { leg_id, bye_disposition: None }] if leg_id == "a"
+                [RuleAction::TerminateLeg { leg_id, end: LegEnd::Settle }] if leg_id == "a"
             ),
-            "{disposition:?}: re-terminated, disposition kept, got {actions:?}",
+            "{ended:?}: re-terminated, end kept, got {actions:?}",
         );
     }
     let mut call = test_call();
-    call.a_leg.state = LegState::Terminated;
-    call.a_leg.bye_disposition = Some(call::ByeDisposition::Cancelled);
-    call.a_leg.disposition = LegDisposition::Cancelling;
-    let actions = a_leg_timeout_result(&call, "INVITE");
+    call.state = CallModelState::Terminating;
+    let mut b = b_leg_pending();
+    cancel_sent(&mut b);
+    call = call::helpers::add_b_leg(call, b);
+    let actions = handle_timeout_result(&call, "b-1");
     assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::TerminateLeg {
-                bye_disposition: Some(call::ByeDisposition::Cancelled),
-                ..
-            }]
-        ),
+        matches!(actions.as_slice(), [RuleAction::TerminateLeg { end: LegEnd::Abandon, .. }]),
         "a CANCEL in flight is still settled by the timeout, got {actions:?}",
     );
     let mut call = test_call();
@@ -431,11 +437,22 @@ fn a_timeout_on_an_ended_leg_keeps_its_disposition() {
     assert!(
         matches!(
             actions.as_slice(),
-            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::Cancelled) }]
-                if leg_id == "b-1"
+            [RuleAction::TerminateLeg { leg_id, end: LegEnd::Abandon }] if leg_id == "b-1"
         ),
-        "a going-away pending leg with no disposition ends cancelled, got {actions:?}",
+        "a going-away pending leg with no end is abandoned, got {actions:?}",
     );
+}
+
+/// Record this stack's CANCEL of `leg`'s INVITE: the leg reads `Cancelling`.
+fn cancel_sent(leg: &mut Leg) {
+    leg.outbound_invite.as_mut().expect("a dialled leg").cancel_sent = true;
+}
+
+/// Put every dialog of `leg` in `state`.
+fn end_dialogs(leg: &mut Leg, state: DialogState) {
+    for d in leg.dialogs.iter_mut() {
+        d.state = state.clone();
+    }
 }
 
 #[test]
@@ -523,7 +540,7 @@ fn max_duration_fire_on_a_terminating_call_absorbs_to_cancel_only() {
     // No `call_release` consult (a `reroute` outcome would dial a fresh b-leg),
     // no BeginTermination re-arm — absorb and scrub.
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call.state = CallModelState::Terminating;
     call.callback_context = Some("cb".into());
     call.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
@@ -542,7 +559,7 @@ fn max_duration_fire_on_a_live_subscribed_call_still_consults() {
     // The going-away guard is narrow: an Active answered subscribed call's cap
     // keeps the `call_release` consult.
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call.callback_context = Some("cb".into());
     call.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
     let actions = max_duration_result(&call);
@@ -714,7 +731,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // restore it into the terminating window.
     let mut call = test_call();
     let mut b = b_leg_pending();
-    b.disposition = LegDisposition::Cancelling;
+    cancel_sent(&mut b);
     call = call::helpers::add_b_leg(call, b);
     let no_answer_id = TimerType::NoAnswer.timer_id(Some("b-1"));
     call.timers.push(call::TimerEntry {
@@ -783,7 +800,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
 #[test]
 fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
     let mut call = call_with_early_a_dialog("a1");
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call.a_leg.invite_final_sent = Some(200);
     let call = call::helpers::record_cancelled_invite(call, "a");
     assert_eq!(call.a_leg.invite_final_sent, Some(487), "the wire's final is the layer's 487");
@@ -803,14 +820,14 @@ fn a_2xx_the_cancel_beat_to_the_caller_leaves_her_no_dialog_to_bye() {
         .map(|e| e.label.clone())
         .collect();
     assert!(to_a.is_empty(), "nothing goes to the caller, got {to_a:?}");
-    assert_eq!(result.call.a_leg.state, LegState::Terminated);
+    assert_eq!(result.call.a_leg.state(), LegState::Terminated);
 }
 
 #[test]
 fn in_dialog_bye_selects_relay_bye() {
     let mut call = test_call();
     // An in-dialog BYE (carries a To-tag) on the established call.
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Request(bye)),
@@ -894,7 +911,6 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
 #[test]
 fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
     let mut call = call_with_early_a_dialog("btag");
-    call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
     call.state = CallModelState::Terminating;
     let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::Sip {
@@ -934,10 +950,10 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
 #[test]
 fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut ended = b_leg_pending();
-    ended.state = LegState::Terminated;
-    ended.bye_disposition = Some(call::ByeDisposition::ByeSent);
+    call::testkit::stage_leg(&mut ended, LegState::Confirmed);
+    end_dialogs(&mut ended, DialogState::Ending(EndingBy::Bye));
     call = call::helpers::add_b_leg(call, ended);
     assert_eq!(call.state, CallModelState::Active, "only one leg was released");
 
@@ -975,10 +991,10 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
 #[test]
 fn bye_481_on_a_bye_received_leg_selects_no_teardown() {
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut ended = b_leg_pending();
-    ended.state = LegState::Terminated;
-    ended.bye_disposition = Some(call::ByeDisposition::ByeReceived);
+    call::testkit::stage_leg(&mut ended, LegState::Confirmed);
+    end_dialogs(&mut ended, DialogState::Ended(call::DialogEnd::PeerBye));
     call = call::helpers::add_b_leg(call, ended);
     assert_eq!(call.state, CallModelState::Active, "only one leg was released");
 
@@ -1035,7 +1051,6 @@ fn invariants_append_cleanup_on_terminated() {
     call.state = CallModelState::Terminated;
     // A synthetic terminal states its cause as every live path does.
     call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
-    call.a_leg.state = LegState::Terminated;
     let result = invariants::enforce(
         &b2bua::obligations::ObligationSet::core(),
         &before,
@@ -1083,7 +1098,6 @@ fn the_unanswered_callers_503_carries_the_deployment_advertisement() {
     let before = call.clone();
     call.state = CallModelState::Terminated;
     call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
-    call.a_leg.state = LegState::Terminated;
     let policy = CapabilitySet::stating(
         None,
         None,
@@ -1120,7 +1134,6 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     call.state = CallModelState::Terminated;
     // A synthetic terminal states its cause as every live path does.
     call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
-    call.a_leg.state = LegState::Terminated;
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let mut result = HandlerResult::new(call);
     let effect = b2bua::rules::relay::response_to_a_leg(
@@ -1501,9 +1514,9 @@ fn requests_to(result: &HandlerResult, leg: &str, method: &str) -> usize {
 fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed() {
     // The caller's INVITE carries its 200; a b-leg dialled later rings. The
     // relay rule relays nothing toward her and still gives the ringing leg
-    // its due: `Early` (a teardown then CANCELs it) and the CDR event.
+    // its due: its early dialog (a teardown then CANCELs it) and the CDR event.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call = call::helpers::add_b_leg(call, b_leg_pending());
 
     let (id, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
@@ -1515,9 +1528,9 @@ fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed(
     assert!(
         actions.iter().any(|a| matches!(
             a,
-            RuleAction::UpdateLegState { leg_id, state: LegState::Early, .. } if leg_id == "b-1"
+            RuleAction::TrackEarlyDialog { leg_id, .. } if leg_id == "b-1"
         )),
-        "the ringing leg goes Early: {actions:?}"
+        "the ringing leg's early dialog is tracked: {actions:?}"
     );
     assert!(
         actions.iter().any(|a| matches!(
@@ -1545,7 +1558,7 @@ fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed(
         "the route set is the provisional's recorded route: {:?}",
         dialog.route_set
     );
-    assert_eq!(result.call.b_legs[0].state, LegState::Early);
+    assert_eq!(result.call.b_legs[0].state(), LegState::Early);
 }
 
 #[test]
@@ -1553,7 +1566,7 @@ fn a_reliable_provisional_under_an_answered_caller_is_acknowledged_by_the_stack(
     // The same, reliable: the caller never sees the provisional a PRACK would
     // name, so this stack — the ringing leg's UAC — acknowledges it (RFC 3262 §4).
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call = call::helpers::add_b_leg(call, b_leg_pending());
 
     let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(true));
@@ -1576,7 +1589,7 @@ fn a_relayed_reliable_provisional_after_the_final_is_refused_and_acknowledged() 
     // seam refuses it toward her, and the ringing leg — which saw no PRACK
     // from anyone — is acknowledged by this stack (RFC 3262 §4), once.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call = call::helpers::add_b_leg(call, b_leg_pending());
     let event = b_leg_ringing_event(true);
     let relay = [RuleAction::RelayToPeer { transform: Default::default() }];
@@ -1600,7 +1613,7 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
     // seam before the mask's own bookkeeping — no a-facing tag mapping, the
     // mask still unrelayed.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call = call::helpers::add_b_leg(call, b_leg_pending());
     let event = b_leg_ringing_event(false);
 
@@ -1625,9 +1638,9 @@ fn a_repeated_transfer_target_provisional_is_accounted_once() {
     // notified of: the NOTIFY is deduped and so is the CDR event — the leg's
     // due (Early, a PRACK when reliable) still rides.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut referrer = b_leg_pending();
-    referrer.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut referrer, LegState::Confirmed);
     with_dialog(&mut referrer, "reftag");
     call = call::helpers::add_b_leg(call, referrer);
     let mut target = b_leg_pending();
@@ -1670,9 +1683,9 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
     // took its final: no relay rule claims it, so nothing moves the leg back
     // to Early or rings the caller.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     let mut confirmed = b_leg_pending();
-    confirmed.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut confirmed, LegState::Confirmed);
     with_dialog(&mut confirmed, "bobtag");
     call = call::helpers::add_b_leg(call, confirmed);
 
@@ -1695,12 +1708,13 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
 
 #[test]
 fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
-    // The `Cancelled` turn: the a-leg is still Early (sip-txn sent the 487,
-    // no TU response moved it) but its INVITE carries that final, so
-    // `BeginTermination` records it Terminated — resolved, never re-answered.
+    // The `Cancelled` turn: sip-txn sent the 487 and the record carries that
+    // final, so the a-leg reads Terminated — resolved, never re-answered —
+    // and `BeginTermination` leaves it so.
     let mut call = test_call();
-    call.a_leg.state = LegState::Early;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     let call = call::helpers::record_invite_final(call, "a", 487);
+    assert_eq!(call.a_leg.state(), LegState::Terminated);
     let result = execute_on(
         &call,
         &[RuleAction::BeginTermination {
@@ -1709,13 +1723,14 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
             by_leg: Some("a".into()),
         }],
     );
-    assert_eq!(result.call.a_leg.state, LegState::Terminated);
-    assert_eq!(result.call.a_leg.bye_disposition, Some(call::ByeDisposition::None));
+    assert_eq!(result.call.a_leg.state(), LegState::Terminated);
+    assert_eq!(result.call.a_leg.end(), Some(call::ByeDisposition::Rejected));
+    assert!(result.call.a_leg.is_resolved());
 
     // An a-leg with NO final yet stays Early: the ADR-0022 funnel still owes
     // that caller its 503 at `→ terminated`.
     let mut call = test_call();
-    call.a_leg.state = LegState::Early;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     let result = execute_on(
         &call,
         &[RuleAction::BeginTermination {
@@ -1724,7 +1739,7 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
             by_leg: Some("a".into()),
         }],
     );
-    assert_eq!(result.call.a_leg.state, LegState::Early);
+    assert_eq!(result.call.a_leg.state(), LegState::Early);
 }
 
 // ── ADR-0016: global call machine projection ────────────────────────────────
@@ -1747,8 +1762,7 @@ fn global_call_cursor_projects_lifecycle_states() {
     // Terminating with a still-confirmed a-leg (unresolved → no promotion)
     // → "Terminating".
     call.state = CallModelState::Terminating;
-    call.a_leg.state = LegState::Confirmed;
-    call.a_leg.bye_disposition = None;
+    confirm_a(&mut call);
     let r = invariants::finalize(HandlerResult::new(call.clone()));
     assert_eq!(r.call.state, CallModelState::Terminating, "not promoted while unresolved");
     assert_eq!(cursor(&r).as_deref(), Some("Terminating"));
@@ -2064,17 +2078,13 @@ fn b_leg_pending() -> Leg {
         leg_id: "b-1".into(),
         call_id: "bcid@x".into(),
         source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
-        state: LegState::Trying,
-        disposition: LegDisposition::Pending,
         dialogs: Default::default(),
         no_answer_timeout_sec: None,
-        bye_disposition: None,
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
-        outbound_invite: Some(OutboundInvite { our_tag: "svc".into(), cseq: 1 }),
+        outbound_invite: Some(OutboundInvite::new("svc", 1, None)),
         own_tag: None,
-        pending_invite_txn: None,
         ext: None,
         kind: Some(LegKind::Destination),
         adopted: None,
@@ -2406,7 +2416,7 @@ mod media_primitives {
     fn confirmed_b_leg(leg_id: &str, kind: LegKind) -> Leg {
         let mut leg = super::b_leg_pending();
         leg.leg_id = leg_id.into();
-        leg.state = LegState::Confirmed;
+        call::testkit::stage_leg(&mut leg, LegState::Confirmed);
         leg.kind = Some(kind);
         leg.adopted = None; // derive adoption from the kind
         with_dialog(&mut leg, "bobtag").peer_cseq = Some(1);
@@ -2416,7 +2426,7 @@ mod media_primitives {
     /// Give the a-leg a confirmed dialog so a relayed in-dialog request toward A
     /// has a target dialog to ride.
     fn give_a_leg_dialog(call: &mut call::Call) {
-        call.a_leg.state = LegState::Confirmed;
+        confirm_a(call);
         call.a_leg.dialogs = vec![a_dialog(call, "a-svc", DialogState::Confirmed)].into();
         call.a_leg.own_tag = Some("a-svc".into());
     }
@@ -2840,7 +2850,7 @@ mod answer_a_leg_new_dialog {
             Some(sdp_b.as_slice()),
             "the answer SDP is cached for a §13.3.1.4 un-ACKed-2xx retransmit"
         );
-        assert_eq!(result.call.a_leg.state, LegState::Confirmed, "the a-leg is confirmed");
+        assert_eq!(result.call.a_leg.state(), LegState::Confirmed, "the a-leg is confirmed");
     }
 
     /// Answering the caller ends the setup's reliable provisionals and nothing
@@ -2852,7 +2862,7 @@ mod answer_a_leg_new_dialog {
     fn answering_the_caller_leaves_a_b_legs_pending_reinvite_2xx_ladder_alone() {
         let mut call = call_with_early_a_dialog("A1early");
         let mut b = super::b_leg_pending();
-        b.state = LegState::Confirmed;
+        call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "bobtag").pending_reinvite_2xx = Some(call::Unacked2xx {
             dialog_tag: "svc".into(),
             cseq: 7,
@@ -3279,8 +3289,7 @@ mod ack_leg_body {
     /// A confirmed b-leg (callee tag learned) whose first dialog `AckLeg` addresses.
     fn b_leg_confirmed() -> Leg {
         let mut leg = b_leg_pending();
-        leg.state = LegState::Confirmed;
-        leg.disposition = LegDisposition::Bridged;
+        call::testkit::stage_leg(&mut leg, LegState::Confirmed);
         with_dialog(&mut leg, "bobtag");
         leg
     }
@@ -4683,9 +4692,8 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
 /// the engine must discharge.
 fn call_with_retained_answered_2xx() -> call::Call {
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
     let mut b = b_leg_pending();
-    b.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, b);
     // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
     let mut answered = a_dialog(&call, "btag", DialogState::Confirmed);
@@ -4850,14 +4858,13 @@ mod ladder_give_up {
     /// confirmed and ACKed.
     fn answered_call() -> call::Call {
         let mut call = test_call();
-        call.a_leg.state = LegState::Confirmed;
+        confirm_a(&mut call);
         let mut answered = a_dialog(&call, A_TAG, DialogState::Confirmed);
         answered.answered_2xx = Some(retained_2xx(A_TAG, 1, 5060));
         call.a_leg.dialogs = vec![answered].into();
         call.a_leg.own_tag = Some(A_TAG.into());
         let mut b = super::b_leg_pending();
-        b.state = LegState::Confirmed;
-        b.disposition = LegDisposition::Bridged;
+        call::testkit::stage_leg(&mut b, LegState::Confirmed);
         with_dialog(&mut b, "bobtag").peer_cseq = Some(1);
         call::helpers::add_b_leg(call, b)
     }
@@ -5168,8 +5175,11 @@ mod going_away_gate {
     fn armed_call(state: CallModelState) -> call::Call {
         let mut call = test_call();
         call.state = state;
-        call.a_leg.state = LegState::Early;
-        call = call::helpers::add_b_leg(call, b_leg_pending());
+        call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
+        // A ringing callee holds a terminating call until it is settled.
+        let mut ringing = b_leg_pending();
+        call::testkit::stage_leg(&mut ringing, LegState::Early);
+        call = call::helpers::add_b_leg(call, ringing);
         call.sm_cursors.insert(SVC, StateLabel::new("Armed"));
         call
     }
@@ -5419,7 +5429,7 @@ fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
 
 fn confirmed_call() -> call::Call {
     let mut call = test_call();
-    call.a_leg.state = LegState::Confirmed;
+    confirm_a(&mut call);
     call
 }
 
@@ -5826,7 +5836,7 @@ fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
 fn ringing_call() -> call::Call {
     let mut leg = b_leg_pending();
     // The INVITE this leg is ringing on, which its CANCEL names (RFC 3261 §9.1).
-    leg.pending_invite_txn = Some(call::InviteTxnHandle {
+    leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(call::InviteTxnHandle {
         branch: "z9hG4bK-b1".into(),
         original_invite: invite().image().to_vec(),
         destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
@@ -5834,7 +5844,7 @@ fn ringing_call() -> call::Call {
     let call = call::helpers::add_b_leg(test_call(), leg);
     let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
     let ringing = execute_from_b1(&call, &b_leg_ringing_event(false), &actions).call;
-    assert_eq!(ringing.b_legs[0].state, LegState::Early);
+    assert_eq!(ringing.b_legs[0].state(), LegState::Early);
     ringing
 }
 
@@ -5995,16 +6005,16 @@ mod sdp_body_author {
 #[test]
 fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     let mut call = call_with_early_a_dialog("a1");
-    call.a_leg.state = LegState::Early;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Early);
     call.a_leg_invite
         .headers
         .push(call::SipHeader { name: "Content-Type".into(), value: "application/sdp".into() });
     let mut carol = b_leg_pending();
-    carol.state = LegState::Terminated;
+    call::testkit::stage_leg(&mut carol, LegState::Terminated);
     with_dialog(&mut carol, "c1");
     let mut bob = b_leg_pending();
     bob.leg_id = "b-2".into();
-    bob.state = LegState::Early;
+    call::testkit::stage_leg(&mut bob, LegState::Early);
     with_dialog(&mut bob, "b2");
     call = call::helpers::add_b_leg(call, carol);
     call = call::helpers::add_b_leg(call, bob);
@@ -6110,7 +6120,7 @@ mod charging_in_dialog {
         let mut leg = super::b_leg_pending();
         leg.leg_id = leg_id.into();
         leg.call_id = format!("{leg_id}@x");
-        leg.state = LegState::Confirmed;
+        call::testkit::stage_leg(&mut leg, LegState::Confirmed);
         leg.kind = Some(kind);
         with_dialog(&mut leg, &format!("{leg_id}-tag")).peer_cseq = Some(1);
         let dialled = super::invite()
@@ -6118,7 +6128,7 @@ mod charging_in_dialog {
             .push_raw(HeaderName::from("P-Charging-Vector"), vector.to_string())
             .freeze()
             .expect("the dialling INVITE");
-        leg.pending_invite_txn = Some(InviteTxnHandle {
+        leg.outbound_invite.as_mut().expect("a dialled leg").txn = Some(InviteTxnHandle {
             branch: format!("z9hG4bK{leg_id}"),
             original_invite: dialled.image().to_vec(),
             destination: HostPort { host: "10.0.0.2".into(), port: 5070 },
@@ -6135,7 +6145,7 @@ mod charging_in_dialog {
                 .headers
                 .push(call::SipHeader { name: "P-Charging-Vector".into(), value: own.into() });
         }
-        call.a_leg.state = LegState::Confirmed;
+        confirm_a(&mut call);
         call.a_leg.dialogs = vec![super::a_dialog(&call, "a-svc", DialogState::Confirmed)].into();
         call.a_leg.own_tag = Some("a-svc".into());
         call.b_legs = vec![

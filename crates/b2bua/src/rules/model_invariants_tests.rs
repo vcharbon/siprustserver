@@ -53,7 +53,7 @@ fn call() -> Call {
     b.leg_id = "b-1".into();
     b.call_id = "bcid".into();
     b.own_tag = None;
-    b.outbound_invite = Some(OutboundInvite { our_tag: "own".into(), cseq: 1 });
+    b.outbound_invite = Some(OutboundInvite::new("own", 1, None));
     b.dialogs = vec![dialog("own", "b1")].into();
     call::helpers::add_b_leg(call, b)
 }
@@ -83,7 +83,7 @@ fn a_sound_call_breaks_no_invariant() {
 #[test]
 fn a_confirmed_a_leg_with_two_dialogs_breaks_the_one_dialog_invariant() {
     let mut call = call();
-    call.a_leg.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     call.a_leg.dialogs.insert(dialog("a2", "atag"));
     let err = confirmed_a_leg_one_dialog(&after(&call)).unwrap_err();
     assert!(err.contains("holds 2 live dialogs"), "{err}");
@@ -129,9 +129,9 @@ fn an_unacknowledged_reliable_1xx_on_an_ended_leg_breaks_the_prack_invariant() {
         responder_sdp: false,
         responder_offer: None,
     });
-    call.b_legs[0].state = LegState::Early;
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Early);
     assert_eq!(reliable_1xx_acknowledged_at_final(&after(&call)), Ok(()), "INVITE still open");
-    call.b_legs[0].state = LegState::Terminated;
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Terminated);
     let err = reliable_1xx_acknowledged_at_final(&after(&call)).unwrap_err();
     assert!(err.contains("RSeq 7"), "{err}");
 }
@@ -139,10 +139,9 @@ fn an_unacknowledged_reliable_1xx_on_an_ended_leg_breaks_the_prack_invariant() {
 #[test]
 fn an_early_a_leg_past_a_rejection_breaks_the_ended_dialog_invariant() {
     let mut call = call();
-    call.a_leg.state = LegState::Early;
     call.a_leg.invite_final_sent = Some(486);
     let err = no_a_dialog_past_a_rejection(&after(&call)).unwrap_err();
-    assert!(err.contains("took 486"), "{err}");
+    assert!(err.contains("took 486 but her dialog a1 is Early"), "{err}");
 }
 
 #[test]
@@ -163,39 +162,27 @@ fn a_dialog_without_its_own_tag_breaks_the_naming_invariant() {
 }
 
 #[test]
-fn a_confirmed_leg_without_a_confirmed_dialog_breaks_the_leg_confirmed_invariant() {
+fn a_leg_reads_confirmed_exactly_while_one_of_its_dialogs_is() {
     let mut call = call();
-    call.b_legs[0].state = LegState::Confirmed;
-    let err = leg_confirmed_one_confirmed_dialog(&after(&call)).unwrap_err();
-    assert!(err.contains("leg b-1 is Confirmed"), "{err}");
-}
-
-#[test]
-fn a_confirmed_dialog_on_an_unconfirmed_leg_breaks_the_leg_confirmed_invariant() {
-    let mut call = call();
-    call.b_legs[0].state = LegState::Terminated;
+    assert_eq!(call.b_legs[0].state(), LegState::Early);
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Confirmed);
+    assert_eq!(call.b_legs[0].state(), LegState::Confirmed);
+    assert_eq!(one_confirmed_dialog_per_leg(&after(&call)), Ok(()));
     call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state =
         DialogState::Ending(call::EndingBy::Bye);
-    assert_eq!(
-        leg_confirmed_one_confirmed_dialog(&after(&call)),
-        Ok(()),
-        "a released leg's BYE in flight"
-    );
-    call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state = DialogState::Confirmed;
-    let err = leg_confirmed_one_confirmed_dialog(&after(&call)).unwrap_err();
-    assert!(err.contains("leg b-1 is Terminated"), "{err}");
+    assert_eq!(call.b_legs[0].state(), LegState::Terminated, "a released leg's BYE in flight");
+    assert_eq!(one_confirmed_dialog_per_leg(&after(&call)), Ok(()));
 }
 
 #[test]
-fn two_confirmed_dialogs_on_a_leg_break_the_leg_confirmed_invariant() {
+fn two_confirmed_dialogs_on_a_leg_break_the_one_confirmed_dialog_invariant() {
     let mut call = call();
-    call.b_legs[0].state = LegState::Confirmed;
-    call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state = DialogState::Confirmed;
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Confirmed);
     let mut fork = dialog("own", "b2");
     fork.state = DialogState::Ending(call::EndingBy::Bye);
     call.b_legs[0].dialogs.insert(fork);
-    let err = leg_confirmed_one_confirmed_dialog(&after(&call)).unwrap_err();
-    assert!(err.contains("leg b-1 is Confirmed"), "{err}");
+    let err = one_confirmed_dialog_per_leg(&after(&call)).unwrap_err();
+    assert!(err.contains("leg b-1 holds 2 confirmed or ending dialogs"), "{err}");
 }
 
 #[test]
@@ -242,17 +229,45 @@ fn a_dialog_dropped_from_its_leg_breaks_the_monotonic_invariant() {
 
 #[test]
 fn an_early_dialog_past_its_invite_breaks_the_early_dialog_invariant() {
-    let mut call = call();
-    call.a_leg.state = LegState::Early;
-    call.b_legs[0].state = LegState::Early;
-    assert_eq!(no_early_dialog_past_its_invite(&after(&call)), Ok(()), "both INVITEs open");
-    call.b_legs[0].state = LegState::Terminated;
-    let err = no_early_dialog_past_its_invite(&after(&call)).unwrap_err();
+    let mut rejected = call();
+    assert_eq!(no_early_dialog_past_its_invite(&after(&rejected)), Ok(()), "both INVITEs open");
+    rejected.b_legs[0].outbound_invite.as_mut().unwrap().record_final(486);
+    let err = no_early_dialog_past_its_invite(&after(&rejected)).unwrap_err();
+    assert!(err.contains("leg b-1 (answered 486) holds early dialog own/b1"), "{err}");
+    let mut ended = call_with_b_dialog(DialogState::Ended(call::DialogEnd::PeerBye));
+    ended.b_legs[0].dialogs.insert(dialog("own", "b1"));
+    let err = no_early_dialog_past_its_invite(&after(&ended)).unwrap_err();
     assert!(err.contains("leg b-1 (Terminated) holds early dialog own/b1"), "{err}");
-    call.b_legs[0].state = LegState::Early;
-    call.a_leg.invite_final_sent = Some(486);
-    let err = no_early_dialog_past_its_invite(&after(&call)).unwrap_err();
+    let mut answered = call();
+    answered.a_leg.invite_final_sent = Some(486);
+    let err = no_early_dialog_past_its_invite(&after(&answered)).unwrap_err();
     assert!(err.contains("leg a (answered 486) holds early dialog a1/atag"), "{err}");
+}
+
+#[test]
+fn a_cancelled_early_dialog_past_its_invites_final_breaks_the_cancel_invariant() {
+    let mut call = call();
+    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
+    call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state =
+        DialogState::Ending(call::EndingBy::Cancel);
+    assert_eq!(no_cancelled_dialog_past_its_invites_final(&after(&call)), Ok(()), "awaits 487");
+    call.b_legs[0].outbound_invite.as_mut().unwrap().record_final(487);
+    let err = no_cancelled_dialog_past_its_invites_final(&after(&call)).unwrap_err();
+    assert!(err.contains("dialog own/b1 is ending by CANCEL but its INVITE took 487"), "{err}");
+    call.b_legs[0].outbound_invite.as_mut().unwrap().final_received = None;
+    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = false;
+    let err = no_cancelled_dialog_past_its_invites_final(&after(&call)).unwrap_err();
+    assert!(err.contains("no CANCEL of its INVITE was sent"), "{err}");
+}
+
+/// [`call`] with its callee dialog `own/b2` in `state`.
+fn call_with_b_dialog(state: DialogState) -> Call {
+    let mut call = call();
+    let mut d = dialog("own", "b2");
+    d.state = state;
+    call.b_legs[0].dialogs = vec![d].into();
+    call.a_leg.dialogs.iter_mut().for_each(|a| a.fronts.clear());
+    call
 }
 
 /// The caller's in-dialog MESSAGE under her dialog `a1`, CSeq 2.

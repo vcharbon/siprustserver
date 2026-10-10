@@ -44,7 +44,7 @@ fn call() -> Call {
         &sip_txn::IdGen::seeded(1),
         0,
     );
-    call.a_leg.state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut call.a_leg, LegState::Confirmed);
     for id in ["b-1", "b-2", "b-3"] {
         let mut leg = call.a_leg.clone();
         leg.leg_id = id.into();
@@ -575,8 +575,8 @@ fn a_final_repeating_the_authors_nested_offer_repeats_its_restatement() {
 fn forked() -> Call {
     let mut c = call();
     let leg = &mut c.b_legs[0];
-    leg.state = LegState::Early;
-    leg.outbound_invite = Some(call::OutboundInvite { our_tag: "as".into(), cseq: 1 });
+    call::testkit::stage_leg(leg, LegState::Early);
+    leg.outbound_invite = Some(call::OutboundInvite::new("as", 1, None));
     leg.dialogs = ["f1", "f2"]
         .into_iter()
         .map(|tag| call::Dialog::new("as", tag, call::DialogState::Early, 1))
@@ -646,7 +646,7 @@ fn each_early_dialog_keeps_its_own_session() {
 
     let mut other = c.clone();
     adopt_confirmed_dialog(&mut other.b_legs[0], "f2");
-    other.b_legs[0].state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut other.b_legs[0], LegState::Confirmed);
     let reoffer = sdp("alice 1 2 IN IP4 192.0.2.1", 10002);
     assert_eq!(
         send(&mut other, "b-1", Author::Leg("a"), Carried::InDialog, &reoffer),
@@ -655,7 +655,7 @@ fn each_early_dialog_keeps_its_own_session() {
     );
 
     adopt_confirmed_dialog(&mut c.b_legs[0], "f1");
-    c.b_legs[0].state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut c.b_legs[0], LegState::Confirmed);
     let restated = send(&mut c, "b-1", Author::Leg("a"), Carried::InDialog, &reoffer);
     assert_eq!(
         o_line(&restated),
@@ -895,7 +895,7 @@ fn a_restatement_in_a_losing_fork_stays_the_calls() {
             call::DialogState::Retired(Default::default())
         };
     }
-    c.b_legs[0].state = LegState::Confirmed;
+    call::testkit::stage_leg(&mut c.b_legs[0], LegState::Confirmed);
     assert!(c.b_legs[0].sdp_session.has_restated, "the confirmed leg keeps the call's fact");
     send(
         &mut c,

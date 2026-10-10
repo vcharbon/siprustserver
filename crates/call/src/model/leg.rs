@@ -1,11 +1,11 @@
-//! Per-leg record ([`Leg`]) and its state / disposition / role enums. Dialog
+//! Per-leg record ([`Leg`]) and its role enum; its state is derived in
+//! [`crate::model::leg_state`]. Dialog
 //! internals live in [`crate::model::dialog`]; the enclosing call record in
 //! [`crate::model::record`].
 
 use serde::{Deserialize, Serialize};
 
 use super::dialogs::Dialogs;
-use super::invite_txn::InviteTxnHandle;
 use super::message_ring::MessageRing;
 use super::outbound_invite::OutboundInvite;
 use super::sdp_session::LegSdpSession;
@@ -16,59 +16,6 @@ use super::services::ExtMap;
 pub struct RemoteInfo {
     pub address: String,
     pub port: u16,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LegState {
-    Trying,
-    Early,
-    Confirmed,
-    Terminated,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LegDisposition {
-    Pending,
-    Bridged,
-    Cancelling,
-    Rejected,
-}
-
-/// Per-leg BYE disposition — how each leg was (or will be) torn down.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ByeDisposition {
-    /// We sent BYE, awaiting 200 OK or timeout (non-terminal).
-    ByeSent,
-    /// Remote sent BYE to us (we already replied 200).
-    ByeReceived,
-    /// 200 OK received for our outbound BYE.
-    ByeConfirmed,
-    /// BYE transaction timed out (far side unresponsive).
-    ByeTimeout,
-    /// CANCEL sent (pre-dialog, no BYE needed).
-    Cancelled,
-    /// Far side rejected INVITE (4xx/5xx/6xx, no BYE needed).
-    Rejected,
-    /// Leg never established (e.g. failover replaced it).
-    None,
-}
-
-impl ByeDisposition {
-    /// Terminal dispositions — no more SIP traffic expected for this leg.
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            ByeDisposition::ByeConfirmed
-                | ByeDisposition::ByeReceived
-                | ByeDisposition::ByeTimeout
-                | ByeDisposition::Cancelled
-                | ByeDisposition::Rejected
-                | ByeDisposition::None
-        )
-    }
 }
 
 /// Explicit per-leg role (ADR-0014). Read via [`crate::helpers::leg_kind`],
@@ -88,14 +35,10 @@ pub struct Leg {
     pub leg_id: String,
     pub call_id: String,
     pub source: RemoteInfo,
-    pub state: LegState,
-    pub disposition: LegDisposition,
     /// The leg's dialogs in every state: several while early (forking), one
     /// confirmed at most.
     pub dialogs: Dialogs,
     pub no_answer_timeout_sec: Option<i64>,
-    /// How this leg was torn down. `None` while the call is active.
-    pub bye_disposition: Option<ByeDisposition>,
     /// B2BUA's local address on this leg (§12.1.1's local URI) as the
     /// dialog-creating INVITE stated it, display name included, tag excluded:
     /// the From of every request this side sends in the leg's dialogs.
@@ -113,8 +56,6 @@ pub struct Leg {
     /// set with the leg's first dialog, moved to the dialog a 2xx confirms
     /// (RFC 3261 §8.2.6.2). `None` until the leg holds a dialog.
     pub own_tag: Option<String>,
-    /// In-flight initial-INVITE client transaction handle on this leg.
-    pub pending_invite_txn: Option<InviteTxnHandle>,
     /// Per-service opaque extension slot (ADR-0016).
     pub ext: Option<ExtMap>,
     /// Explicit leg role (ADR-0014); read via [`crate::helpers::leg_kind`].

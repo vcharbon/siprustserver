@@ -120,7 +120,7 @@ pub fn resolve_relay_peer(
         let peer = call
             .b_legs
             .iter()
-            .find(|l| l.state == LegState::Confirmed)
+            .find(|l| l.state() == LegState::Confirmed)
             .or_else(|| call.b_legs.first());
         return match peer {
             Some(l) => toward(&l.leg_id),
@@ -173,7 +173,7 @@ pub fn relay_peer_dialog_ready(
     source: Option<&DialogId>,
 ) -> bool {
     relay_peer_dialog(call, source_leg_id, source)
-        .is_some_and(|(leg, _)| leg.state != LegState::Terminated)
+        .is_some_and(|(leg, _)| leg.state() != LegState::Terminated)
 }
 
 /// The `(leg, dialog)` a relayed in-dialog request from `source_leg_id` would

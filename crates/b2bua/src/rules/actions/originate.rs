@@ -384,7 +384,7 @@ impl ActionExecutor<'_> {
                 // invariant that silently drops every in-dialog request to
                 // this leg — never swallow it.
                 let leg = leg_at(call, idx);
-                if leg.state == call::LegState::Confirmed {
+                if leg.state() == call::LegState::Confirmed {
                     tracing::error!(
                         call_ref = %call.call_ref,
                         %leg_id,
