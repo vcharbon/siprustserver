@@ -339,11 +339,10 @@ async fn the_straggler_bye_crossing_its_release_is_answered_200() {
 
 /// While the release BYE awaits its final the straggler's dialog still
 /// exists (RFC 3261 §15.1.2): an INFO it sends there is answered 200 and
-/// reaches no one. Once the release took its final the dialog is over, and
-/// the straggler's late BYE draws 481; the winning call stays up throughout.
+/// reaches no one, and the winning call stays up.
 #[tokio::test(start_paused = true)]
-async fn a_straggler_request_during_its_release_is_answered_and_after_it_refused() {
-    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+async fn a_straggler_request_during_its_release_is_answered_200() {
+    let (h, alice, bob, b2bua, dialog, mut uas) = bridged(
         "b2bua-fork-straggler-request-during-release",
         (6091, 6092, 6093),
         Some(OFFER),
@@ -358,16 +357,48 @@ async fn a_straggler_request_during_its_release_is_answered_and_after_it_refused
     let mut straggler = uas.dialog();
     straggler.send_request(InDialogMethod::Info).send().await.expect(200).await;
     release.respond(200, "OK").await;
+    hang_up_the_winner(h, alice, bob, b2bua, dialog).await;
+}
+
+/// Once the release BYE took its final the straggler's dialog is over
+/// (RFC 3261 §15.1.2): the straggler's late BYE draws 481, and the winning
+/// call stays up.
+#[tokio::test(start_paused = true)]
+async fn a_straggler_bye_after_its_release_completed_draws_481() {
+    let (h, alice, bob, b2bua, dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-bye-after-release",
+        (6091, 6092, 6093),
+        Some(OFFER),
+        ANSWER_WINNER,
+        None,
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
     h.advance(Duration::from_millis(200)).await;
+    uas.adopt_to_tag(STRAGGLER);
+    let mut straggler = uas.dialog();
     h.allow_violation(
         "mid-dialog-tags",
         "the BYE on a dialog whose BYE completed is the deviation under test (RFC 3261 §15.1.2)",
     );
     straggler.bye().await.expect(481).await;
+    hang_up_the_winner(h, alice, bob, b2bua, dialog).await;
+}
+
+/// Nothing of the straggler reached alice and her call is up: she hangs up
+/// on the winner, and the call reaps clean.
+async fn hang_up_the_winner(
+    h: Harness,
+    alice: scenario_harness::Agent,
+    bob: scenario_harness::Agent,
+    b2bua: B2buaSut,
+    mut dialog: scenario_harness::Dialog,
+) {
     h.advance(Duration::from_millis(200)).await;
     assert_eq!(alice.drain().await, 0, "nothing reached alice: her call is untouched");
     assert_eq!(b2bua.active_calls(), 1, "the bridged call survives the straggler");
-
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
