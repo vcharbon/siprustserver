@@ -2,8 +2,6 @@
 
 use super::*;
 
-// ── the §17 / §13.3.1.4 / RFC 3262 §3 rung family ────────────────────────
-
 /// The same datagram with its From and To rows swapped: every header the
 /// first copy carried, and not the same response.
 fn recomposed(raw: Vec<u8>) -> Vec<u8> {

@@ -247,8 +247,6 @@ fn a_relay_lane_carrying_both_agents_origins_is_not_judged() {
     assert!(live(RuleId::AckBodyAfterCompleteOfferAnswer).check(&evs).is_empty());
 }
 
-// ── the RFC 3264 offer/answer-model rules ───────────────────────────────
-
 /// One audio stream, `sendrecv`, PT 0 bound to PCMU and PT 96 to opus.
 const OFFER_1AUDIO: &str = "v=0\r\n\
 o=alice 1 1 IN IP4 10.0.0.1\r\n\

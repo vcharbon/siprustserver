@@ -39,8 +39,6 @@ fn a_re_invite_with_no_capabilities_is_reported_once_at_the_taker() {
     assert!(live(RuleId::AllowSupportedOnInvite).check_positioned(&advertised).is_empty());
 }
 
-// ---- the §8.2 / §11.2 / §12.2.2 / §16.3 reject-and-capability family ---
-
 /// §8.2.1 at the taker: the lane that TOOK the unknown verb is the lane
 /// charged, and the finding names what it answered instead.
 #[test]

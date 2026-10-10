@@ -2,12 +2,6 @@
 
 use super::*;
 
-// ── the peer seam: one message at one vantage ───────────────────────────
-//
-// What this adapter adds to the per-message bodies: which END of the
-// offending message a finding is reported on, the `{Proxy}` narrowing, the
-// advisory flag, and the wire position a peer finding could never state.
-
 /// A request whose top Via branch carries no magic cookie.
 fn legacy_branch_invite() -> Vec<u8> {
     format!(

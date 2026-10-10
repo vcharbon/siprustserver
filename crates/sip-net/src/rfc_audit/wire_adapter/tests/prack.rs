@@ -98,8 +98,6 @@ fn prack_resp_3262(status: u16, branch: &str) -> Vec<u8> {
     resp(status, 2, "PRACK", "bt", branch)
 }
 
-// ── the obligation half ─────────────────────────────────────────────────
-
 #[test]
 fn a_second_reliable_provisional_waits_for_the_prack_of_the_last() {
     let serialised = vec![
@@ -206,8 +204,6 @@ fn pracking_out_of_order_is_flagged_at_the_prack() {
     assert!(out[0].1.contains("MUST-024"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(3), "offending = the PRACK, not the 1xx");
 }
-
-// ── the §3/§4/§5 negotiation half ───────────────────────────────────────
 
 #[test]
 fn a_plain_18x_against_require_100rel_is_flagged_at_its_wire_position() {
@@ -444,7 +440,6 @@ fn a_bodiless_prack_for_a_1xx_offer_is_named_at_either_end() {
     assert!(live(RuleId::PrackAnswers1xxOffer).check(&standard).is_empty());
 }
 
-// ── rack-without-known-invite (merged, via this adapter) ────────────────
 //
 // The merged rule charges the PRACK's SENDER, so the fixtures are the
 // sender's own lane: the INVITE it opened and the PRACK it then emitted.

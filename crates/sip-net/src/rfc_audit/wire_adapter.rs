@@ -6,15 +6,18 @@
 //! shutdown and drains transit before close, so every view is CLOSED — an
 //! absence at end-of-stream decides immediately, and the rules' capture-side
 //! observability windows collapse. Consumer policy: a finding is
-//! surfaced only when it is `Violated`, charged to the VANTAGE bind itself,
-//! and not relay-attributed — a hop-vantage or undecidable occasion stays
-//! silent, deliberately.
+//! surfaced only when it is `Violated` and not relay-attributed, at the
+//! vantage its rule's row names — an undecidable occasion stays silent.
 //!
 //! Projection reads each arrival's production-time [`WireStamp`](crate::WireStamp)
 //! (parse-once + the §17.2 repeat mark) and dedups SENDS by transaction key
 //! here, at projection — the send-side twin of that stamp. A copy is a repeat
 //! only when the audit view holds an earlier copy: the first copy the view
 //! holds of a chain whose first sighting it does not (modeled loss) is new.
+//!
+//! Each rule is surfaced by its `Live` row: vantage, skipped lanes, roles,
+//! severity and detail line, the detail a fn named after the rule's token. A
+//! rule with no row is surfaced at the emitter with a generic detail line.
 
 use std::collections::{HashMap, HashSet};
 
@@ -376,13 +379,6 @@ fn evidence_to_tag(f: &rfc_rules::Finding) -> &str {
     }
 }
 
-/// RFC 3261 §9.2 live: the merged `no-200-after-cancel` rule
-/// (`rfc_rules::rules::cancel`) at this bind's vantage — the UAS answers a
-/// cancelled INVITE 487, never 2xx.
-///
-/// Live order is exact (the stamps above are strictly monotonic per view), so
-/// the rule's crossing gate reads a genuine race: a 2xx this bind emitted
-/// BEFORE the CANCEL reached it is compliant and surfaces nothing.
 fn no_200_after_cancel(f: &rfc_rules::Finding, cid: &str) -> String {
     let (status, gap_us) = match &f.decision {
         Decision::Violated(rfc_rules::Evidence::Cancelled { status, gap_us, .. }) => {
@@ -399,8 +395,6 @@ fn no_200_after_cancel(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.2.4 live: the merged `no-ack-to-dialog-creating-2xx` rule
-/// (`rfc_rules::rules::ack`) at this bind's vantage — the UAC's half.
 fn no_ack_to_dialog_creating_2xx(f: &rfc_rules::Finding, cid: &str) -> String {
     format!(
         "Took a 2xx confirming the dialog (callId {cid}, To-tag {tt}) to its own \
@@ -411,9 +405,6 @@ fn no_ack_to_dialog_creating_2xx(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.3.1.4 live: the merged `unacked-2xx-not-cleared` rule
-/// (`rfc_rules::rules::ack`) at this bind's vantage — the UAS's half, the
-/// silent answered-call leak.
 fn unacked_2xx_not_cleared(f: &rfc_rules::Finding, cid: &str) -> String {
     format!(
         "Sent a 2xx to an INVITE (callId {cid}, To-tag {tt}) that was never ACKed \
@@ -424,8 +415,6 @@ fn unacked_2xx_not_cleared(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §4 live: the merged `unacked-reliable-provisional` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the UAC's PRACK duty.
 fn unacked_reliable_provisional(f: &rfc_rules::Finding, cid: &str) -> String {
     let (rseq, status) = match &f.decision {
         Decision::Violated(rfc_rules::Evidence::Unacked { rseq, status, .. }) => (*rseq, *status),
@@ -438,9 +427,6 @@ fn unacked_reliable_provisional(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §7.2 live: the merged `rack-without-known-invite` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK sender's
-/// duty to copy the acknowledged provisional's CSeq.
 fn rack_without_known_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::UnknownRack {
         rack_rseq,
@@ -468,9 +454,6 @@ fn rack_without_known_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §3 live: the merged `no-overlapping-reliable-provisionals` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the UAS serialises its
-/// reliable provisionals on the PRACK.
 fn no_overlapping_reliable_provisionals(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::Overlapping { rseq, status, unacked_rseq, .. }) =
         &f.decision
@@ -483,9 +466,6 @@ fn no_overlapping_reliable_provisionals(f: &rfc_rules::Finding, cid: &str) -> St
     )
 }
 
-/// RFC 3262 §3 live: the merged `non-contiguous-rseq` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the UAS allocates the
-/// dialog's RSeq space contiguously.
 fn non_contiguous_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RseqGap { rseq, prior_rseq, .. }) = &f.decision
     else {
@@ -497,9 +477,6 @@ fn non_contiguous_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §4 live: the merged `no-prack-of-out-of-order-rseq` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the UAC PRACKs in RSeq
-/// order.
 fn no_prack_of_out_of_order_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::OutOfOrderRack {
         rack_rseq, expected_rseq, ..
@@ -513,16 +490,6 @@ fn no_prack_of_out_of_order_rseq(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §17.2.1 live: the merged `single-final-per-server-txn` rule
-/// (`rfc_rules::rules::final_response`) at this bind's vantage — a server
-/// transaction answers once, and only a same-status retransmission follows.
-///
-/// The live policy this bind adds to the rule body: subject `{Uas}`, plus a
-/// relay-lane skip, because the rule judges what a lane AUTHORED. A lane that
-/// forwards both directions of one Call-ID relays whatever the upstream
-/// produced — the divergent pair is the upstream's defect and is flagged on the
-/// upstream lane. The skip has RECORDING granularity, not per-call: a lane
-/// classified relay in any dialog slice is unjudged for the whole recording.
 fn single_final_per_server_txn(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::MultipleFinals {
         first_status,
@@ -551,15 +518,6 @@ fn single_final_per_server_txn(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `cancel-route-echoes-invite` rule
-/// (`rfc_rules::rules::cancel`) at this bind's vantage — a CANCEL states the
-/// path its INVITE stated.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// the rule judges what a lane AUTHORED. A lane that forwards both directions
-/// of one Call-ID passes the upstream UAC's CANCEL through, Route set included,
-/// so a divergence there is the upstream's and is flagged on the upstream lane.
-/// The skip has RECORDING granularity, not per-call.
 fn cancel_route_echoes_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::CancelRouteDiverged {
         cancel_routes,
@@ -578,14 +536,6 @@ fn cancel_route_echoes_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `cancel-after-1xx` rule
-/// (`rfc_rules::rules::cancel`) at this bind's vantage — **informational, never
-/// gating** (ADR-0028).
-///
-/// The live policy this bind adds to the rule body: the finding is advisory;
-/// and a `{Proxy}`-only declared lane is skipped, because a transparent relay
-/// forwards the upstream UAC's CANCEL at the upstream's timing. No relay-lane skip beyond that: a
-/// B2BUA/AS authors its own b-leg CANCEL and is judged on it.
 fn cancel_after_1xx(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::EagerCancel { branch, .. }) = &f.decision else {
         return String::new();
@@ -596,15 +546,6 @@ fn cancel_after_1xx(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `no-cancel-after-final` rule
-/// (`rfc_rules::rules::cancel`) at this bind's vantage — this bind does not
-/// CANCEL an INVITE transaction its OWN ACK already completed.
-///
-/// The live policy this bind adds to the rule body: none. The rule already
-/// charges only a CANCEL the emitter sent after ACKing the final (§17.1.1.3),
-/// and a live view's stamps are strictly monotonic, so no crossing reaches it;
-/// and a lane that merely forwards an upstream CANCEL never ACKed the final
-/// itself, so the relay skip the CANCEL siblings carry has nothing to skip.
 fn no_cancel_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::LateCancel {
         final_status, since_final_us, ..
@@ -630,14 +571,6 @@ fn dialog_desc(call_id: &str, from_tag: &str, to_tag: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `cseq-in-dialog-order` rule
-/// (`rfc_rules::rules::cseq`) at this bind's vantage — the far UAC increments
-/// the dialog CSeq by exactly one per new request.
-///
-/// The live policy this bind adds to the rule body: the finding is surfaced at
-/// the TAKER. The rule judges the stream a UAC GENERATED, and the recording is
-/// where that stream is checked at all (the test UAs answer whatever CSeq they
-/// are handed), so the lane that took the stream is the lane that reports it.
 fn cseq_in_dialog_order(f: &rfc_rules::Finding, cid: &str) -> String {
     match &f.decision {
         Decision::Violated(rfc_rules::Evidence::CseqReused {
@@ -690,13 +623,6 @@ fn cseq_in_dialog_order(f: &rfc_rules::Finding, cid: &str) -> String {
     }
 }
 
-/// RFC 3261 §8.1.3.5 live: the merged `response-cseq-matches-transaction` rule
-/// (`rfc_rules::rules::cseq`) at this bind's vantage — a response the bind took
-/// carries the CSeq of the request its transaction opened.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER, the
-/// UAC whose client transaction the response claims to answer — the party a
-/// real stack would drop it at.
 fn response_cseq_matches_transaction(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseCseqUnmatched {
         status,
@@ -719,12 +645,6 @@ fn response_cseq_matches_transaction(f: &rfc_rules::Finding, cid: &str) -> Strin
     )
 }
 
-/// RFC 3261 §13.2.2.4 live: the merged `ack-cseq-matches-invite` rule
-/// (`rfc_rules::rules::cseq`) at this bind's vantage — an ACK the bind took
-/// reuses the CSeq of an INVITE the stream sent it.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER, the
-/// UAS whose INVITE server transaction the ACK fails to match.
 fn ack_cseq_matches_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AckCseqUnmatched {
         ack_cseq,
@@ -745,14 +665,6 @@ fn ack_cseq_matches_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `mid-dialog-uri` rule
-/// (`rfc_rules::rules::dialog`) at this bind's vantage — the in-dialog requests
-/// this bind SENT repeat the URIs its dialog was created with.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// a transparent proxy carries the originator's From/To through unchanged and
-/// per-UA URI stability is not its invariant. The skip has RECORDING
-/// granularity, not per-call.
 fn mid_dialog_uri(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::MidDialogUriChanged {
         method,
@@ -781,12 +693,6 @@ fn mid_dialog_uri(f: &rfc_rules::Finding, _cid: &str) -> String {
     format!("{} — RFC 3261 §12.2.1.1", parts.join("; "))
 }
 
-/// RFC 3261 §12.2.1.1 / §16.12 live: the merged `mid-dialog-route` rule
-/// (`rfc_rules::rules::dialog`) at this bind's vantage — the in-dialog requests
-/// this bind SENT reproduce the dialog route set.
-///
-/// The live policy this bind adds to the rule body: the same relay-lane skip —
-/// a proxy forwards the originator's Route set rather than authoring one.
 fn mid_dialog_route(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::MidDialogRouteDiverged {
         method,
@@ -844,11 +750,6 @@ fn mid_dialog_route(f: &rfc_rules::Finding, _cid: &str) -> String {
     format!("{} — RFC 3261 §16.12", parts.join("; "))
 }
 
-/// RFC 3261 §8.1.2 + RFC 3263 §4 live: the merged `mid-dialog-wire-destination`
-/// rule (`rfc_rules::rules::dialog`) at this bind's vantage — the datagrams this
-/// bind SENT went where their own routing pointed.
-///
-/// The live policy this bind adds to the rule body: the same relay-lane skip.
 fn mid_dialog_wire_destination(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::MidDialogWireTargetDiverged {
         method,
@@ -870,14 +771,6 @@ fn mid_dialog_wire_destination(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.1.1 / §12.2.2 live: the merged `record-route-placement` rule
-/// (`rfc_rules::rules::dialog`) at this bind's vantage — the responses this bind
-/// TOOK carry no Record-Route the route set can no longer absorb.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER, since
-/// the offending response is the PEER's emission and the recording is where a
-/// strict UAC's route-set bookkeeping is checked at all; plus the relay-lane
-/// skip, so a proxy's mixed stream is not judged as one endpoint's dialog.
 fn record_route_placement(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RecordRouteMisplaced {
         status,
@@ -900,12 +793,6 @@ fn record_route_placement(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3581 §4 live: the merged `rport-echo` rule (`rfc_rules::rules::via`) at
-/// this bind's vantage — **informational, never gating**.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER (the
-/// bind that asked is where the missing echo is observed, and the far server is
-/// charged); the finding is advisory; and the relay-lane skip.
 fn rport_echo(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RportNotEchoed {
         status,
@@ -930,20 +817,6 @@ fn rport_echo(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.1 / §20.37 live: the merged `allow-supported-on-invite` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — the re-INVITEs and
-/// INVITE 2xx this bind TOOK advertised what their sender accepts.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER (the
-/// bind that needed the advertisement reports it, the far sender is charged),
-/// plus the relay-lane skip.
-///
-/// ADVISORY, at the strength the text has: both clauses are SHOULDs. A
-/// back-to-back UA states on a relayed re-INVITE exactly what its originator
-/// stated and claims nothing of its own on one it originates, so an absence
-/// here is the originator's choice or the stack's deliberate silence, never
-/// a stripped set — the stripped case is the delta `capability-set-not-relayed`
-/// names on the replay lane, message for message.
 fn allow_supported_on_invite(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::CapabilitiesNotAdvertised {
         missing, status, ..
@@ -968,13 +841,6 @@ fn allow_supported_on_invite(f: &rfc_rules::Finding, _cid: &str) -> String {
         .join("; ")
 }
 
-/// RFC 3261 §16.7 step 5 live: the merged `proxy-100-trying-not-forwarded` rule
-/// (`rfc_rules::rules::proxy`) at this bind's vantage — this bind took at most
-/// one 100 per INVITE it sent on the transaction.
-///
-/// The live policy this bind adds to the rule body: surfaced at the TAKER (the
-/// UAC that observed the extra copy; the hop that forwarded it is charged), plus
-/// the relay-lane skip.
 fn proxy_100_trying_not_forwarded(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ExtraTryingForwarded {
         trying_taken,
@@ -992,15 +858,6 @@ fn proxy_100_trying_not_forwarded(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.2 live: the merged `unknown-dialog-481` rule
-/// (`rfc_rules::rules::dialog`) at this bind's vantage — an in-dialog request
-/// this bind TOOK for a dialog it never confirmed is answered 481.
-///
-/// The live policy this bind adds to the rule body: none. The bind is the
-/// charged party — it took the request and owed the answer — so the finding
-/// surfaces at its emitter, and a relay face that carried both directions of
-/// the call knows both of its peers and is never charged (the rule's peer-tag
-/// key), so no relay skip is needed.
 fn unknown_dialog_481(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::UnknownDialogRequest {
         method,
@@ -1023,12 +880,6 @@ fn unknown_dialog_481(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.2.1 live: the merged `unsupported-method-405-allow` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — an unrecognised
-/// verb this bind TOOK is answered 405 with `Allow`.
-///
-/// The live policy this bind adds to the rule body: none. The bind took the
-/// request and owed the rejection, so it is the charged party.
 fn unsupported_method_405_allow(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RejectionNotIssued {
         method,
@@ -1047,11 +898,6 @@ fn unsupported_method_405_allow(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.2.2 live: the merged `unsupported-extension-420` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — a `Require` this
-/// bind cannot honour is answered 420 with `Unsupported`.
-///
-/// The live policy this bind adds to the rule body: none.
 fn unsupported_extension_420(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RejectionNotIssued {
         method,
@@ -1072,11 +918,6 @@ fn unsupported_extension_420(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.2.3 live: the merged `unsupported-415-accepts` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — a 415 this bind
-/// SENT names the formats it does accept.
-///
-/// The live policy this bind adds to the rule body: none.
 fn unsupported_415_accepts(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseHeadersMissing { branch, .. }) =
         &f.decision
@@ -1090,11 +931,6 @@ fn unsupported_415_accepts(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §21.4.15 live: the merged `unsupported-extension-421` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — a 421 this bind
-/// SENT lists what it demands.
-///
-/// The live policy this bind adds to the rule body: none.
 fn unsupported_extension_421(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseHeadersMissing { branch, .. }) =
         &f.decision
@@ -1107,15 +943,6 @@ fn unsupported_extension_421(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §16.3 live: the merged `no-target-404` rule
-/// (`rfc_rules::rules::proxy`) at this bind's vantage — a request this bind
-/// resolved no target for is answered 404.
-///
-/// The live policy this bind adds to the rule body: subject `{Proxy}`, so the
-/// rule does not run against UA binds at all — a UAS rejecting a call it took
-/// is not a resolution failure; and the finding is advisory, because the B2BUA
-/// worker legitimately answers 403/481/491 without forwarding when the backend
-/// refuses the call.
 fn no_target_404(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::NoTargetFinal { method, branch, status, .. }) =
         &f.decision
@@ -1129,11 +956,6 @@ fn no_target_404(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §11.2 live: the merged `options-response-echoes` rule
-/// (`rfc_rules::rules::capability`) at this bind's vantage — **informational,
-/// never gating**.
-///
-/// The live policy this bind adds to the rule body: the finding is advisory.
 fn options_response_echoes(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseHeadersMissing { branch, .. }) =
         &f.decision
@@ -1146,14 +968,6 @@ fn options_response_echoes(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.2.4 live: the merged `ack-require-subset-of-invite` rule
-/// (`rfc_rules::rules::ack`) at this bind's vantage — an ACK requires no more
-/// than the INVITE it acknowledges did.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// the rule judges what a lane AUTHORED. A lane that forwards both directions
-/// of one Call-ID passes the upstream UAC's ACK through, Require set included,
-/// so an escalation there is the upstream's and is flagged on the upstream lane.
 fn ack_require_subset_of_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AckRequireNotSubset {
         ack_tags,
@@ -1172,12 +986,6 @@ fn ack_require_subset_of_invite(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §17.1.1.3 live: the merged `ack-preserves-invite-route` rule
-/// (`rfc_rules::rules::ack`) at this bind's vantage — the ACK of a non-2xx
-/// final states the path its INVITE stated.
-///
-/// The live policy this bind adds to the rule body: the same relay-lane skip —
-/// a forwarding face passes the upstream's ACK through, Route set included.
 fn ack_preserves_invite_route(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AckRouteDiverged {
         ack_routes,
@@ -1196,13 +1004,6 @@ fn ack_preserves_invite_route(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §16.4 live: the merged `strict-route-rewrite-handled` rule
-/// (`rfc_rules::rules::proxy`) at this bind's vantage — a strict-routed request
-/// is rewritten before it is forwarded.
-///
-/// The live policy this bind adds to the rule body: the `{Proxy}` subject, since
-/// §16.4 is proxy behaviour and a UA that takes a strict-routed request forwards
-/// nothing at all.
 fn strict_route_rewrite_handled(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::StrictRouteNotRewritten {
         branch,
@@ -1221,9 +1022,6 @@ fn strict_route_rewrite_handled(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §10.2 live: the merged `serial-register` rule
-/// (`rfc_rules::rules::register`) at this bind's vantage — one binding change
-/// for an address-of-record at a time.
 fn serial_register(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ConcurrentRegister {
         aor,
@@ -1241,9 +1039,6 @@ fn serial_register(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §10.2 live: the merged `register-no-route-set` rule
-/// (`rfc_rules::rules::register`) at this bind's vantage — a REGISTER states no
-/// route set.
 fn register_no_route_set(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RegisterCarriesRoute { .. }) = &f.decision else {
         return String::new();
@@ -1254,13 +1049,6 @@ fn register_no_route_set(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §14.2 live: the merged `concurrent-re-invite-500-or-491` rule
-/// (`rfc_rules::rules::reinvite`) at this bind's vantage — the UAS serialises
-/// the INVITE transactions of one dialog.
-///
-/// The live policy this bind adds to the rule body: none. A relay face that
-/// takes two racing re-INVITEs and passes both on is itself the UAS of two
-/// server transactions it never serialised, so it is judged like any other.
 fn concurrent_re_invite_500_or_491(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ConcurrentReInvite {
         branch,
@@ -1280,14 +1068,6 @@ fn concurrent_re_invite_500_or_491(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3261 §15 live: the merged `no-bye-outside-or-early-dialog` rule
-/// (`rfc_rules::rules::dialog`) at this bind's vantage — a BYE names a dialog,
-/// and never an early one its sender is the callee of.
-///
-/// The live policy this bind adds to the rule body: none. A lane that relays a
-/// BYE authored upstream carries the same defect on its own wire, and the
-/// merged rule's peer-tag dialog key already keeps a face that saw the dialog
-/// created from being charged for one it never did.
 fn no_bye_outside_or_early_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ByeOffDialog { early_dialog, .. }) = &f.decision
     else {
@@ -1306,14 +1086,6 @@ fn no_bye_outside_or_early_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     }
 }
 
-/// RFC 3261 §14.1 live: the merged `no-re-invite-while-invite-in-progress` rule
-/// (`rfc_rules::rules::reinvite`) at this bind's vantage — one INVITE
-/// outstanding per dialog direction.
-///
-/// The live policy this bind adds to the rule body: none. The merged rule's
-/// ORDERED dialog key already spares a forwarding lane that relays both
-/// parties' crossing re-INVITEs — that is legal glare, one requester per
-/// direction, not one UAC overlapping itself.
 fn no_re_invite_while_invite_in_progress(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::OverlappingReInvite {
         branch,
@@ -1335,13 +1107,6 @@ fn no_re_invite_while_invite_in_progress(f: &rfc_rules::Finding, cid: &str) -> S
     )
 }
 
-/// RFC 3261 §16.7 live: the merged `proxy-100-within-grace` rule
-/// (`rfc_rules::rules::proxy`) at this bind's vantage — a hop that cannot
-/// answer promptly says it is trying.
-///
-/// The live policy this bind adds to the rule body: subject `{Proxy}`, because
-/// §16.7 binds proxies and a UAS answering an INVITE is governed by §8.2.6; and
-/// the finding is **advisory**.
 fn proxy_100_within_grace(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::TryingNotSentInGrace {
         branch,
@@ -1363,18 +1128,6 @@ fn proxy_100_within_grace(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §17.1.1.3 live: the merged `unacked-invite-non-2xx-final` rule
-/// (`rfc_rules::rules::ack`) — a reject was never ACKed back to the UAS that
-/// sent it, charged to the UAC that took it and owed the ACK.
-///
-/// The live policy this bind adds to the rule body: reported at the rejecting
-/// UAS's lane, where the ACK had to arrive, or at the UAC's where the UAS is no
-/// recorded bind — and it GATES. The harness UAC carries the §17.1.1.3
-/// client-transaction behaviour (its INVITE agents auto-ACK any non-2xx final
-/// they surface), so an undischarged obligation on the functional surface is a
-/// genuine defect: an unread reject, a peer that never ACKs, or a final emitted
-/// and never delivered. A test that deliberately models a peer which never ACKs
-/// waives it.
 fn unacked_invite_non_2xx_final(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::UnackedReject { status, branch, .. }) = &f.decision
     else {
@@ -1389,14 +1142,6 @@ fn unacked_invite_non_2xx_final(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §14.1 live: the merged `failed-reinvite-tears-down-dialog` rule
-/// (`rfc_rules::rules::reinvite`) at this bind's vantage — a re-INVITE that
-/// drew a provisional drew a final too.
-///
-/// The live policy this bind adds to the rule body: none. The rule judges the
-/// transaction a lane OPENED, and a lane that relays a re-INVITE opens its own
-/// client transaction on its own branch — the abandoned one on its wire is its
-/// own to answer for.
 fn failed_reinvite_tears_down_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AbandonedReInvite {
         branch,
@@ -1415,15 +1160,6 @@ fn failed_reinvite_tears_down_dialog(f: &rfc_rules::Finding, cid: &str) -> Strin
     )
 }
 
-/// RFC 3261 §13.3.1.1 / §17.2.1 live: the merged `no-1xx-after-final` rule
-/// (`rfc_rules::rules::final_response`) at this bind's vantage — a completed
-/// server transaction emits no further provisionals.
-///
-/// The live policy this bind adds to the rule body: subject `{Uas}`, plus a
-/// relay-lane skip — the same policy its one-final sibling carries, for the same
-/// reason. A B2BUA face forwards its upstream's 1xx rather than originating it,
-/// so a late provisional on a relay lane is the upstream's emission and is
-/// flagged on the upstream lane.
 fn no_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::LateProvisional {
         status,
@@ -1441,15 +1177,6 @@ fn no_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §3 live: the merged `require-reliable-1xx-on-require` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — a UAS handed
-/// `Require: 100rel` answers reliably or rejects the extension.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// the rule judges what a lane AUTHORED. A lane that forwards both directions
-/// of one Call-ID passes the upstream UAS's provisional through, so a plain 18x
-/// there is the upstream's and is flagged on the upstream lane. The skip has
-/// RECORDING granularity, not per-call.
 fn require_reliable_1xx_on_require(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::Unreliable1xx { status, branch, .. }) = &f.decision
     else {
@@ -1462,14 +1189,6 @@ fn require_reliable_1xx_on_require(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3262 §3 live: the merged `reliable-needs-client-opt-in` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK machinery is
-/// negotiated, not imposed.
-///
-/// The live policy this bind adds to the rule body: subject `{Uas}`; a
-/// relay-lane skip; and the finding is **advisory**, because a B2BUA worker may
-/// terminate PRACK on one leg under a `100rel` the OTHER leg's INVITE offered —
-/// the downstream INVITE this rule sees need not carry it.
 fn reliable_needs_client_opt_in(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::UnsolicitedReliable1xx { status, branch, .. }) =
         &f.decision
@@ -1483,12 +1202,6 @@ fn reliable_needs_client_opt_in(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §3 live: the merged `no-reliable-1xx-on-in-dialog` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK machinery is
-/// scoped to the INVITE method, a re-INVITE included.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, for the
-/// reason its `Require`-honouring sibling above carries.
 fn no_reliable_1xx_on_in_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::InDialogReliable1xx {
         status, method, branch, ..
@@ -1503,14 +1216,6 @@ fn no_reliable_1xx_on_in_dialog(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §3 live: the merged `unmatched-prack-proxied` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — a PRACK matching
-/// nothing local is forwarded, not absorbed.
-///
-/// The live policy this bind adds to the rule body: subject `{Proxy}`; a
-/// relay-lane skip; and the finding is **advisory**, because the B2BUA worker
-/// terminates PRACK per leg. The provisional that drew the PRACK went out on
-/// the leg-mate's Call-ID, so the PRACK reads unmatched from this leg's view.
 fn unmatched_prack_proxied(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PrackAbsorbed {
         rack_rseq,
@@ -1534,13 +1239,6 @@ fn unmatched_prack_proxied(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §3 live: the merged `prack-2xx-or-481` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK's answer is
-/// the UAS's own `RSeq` state read back.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// a lane that forwards both directions of one Call-ID relays the upstream
-/// UAS's answer to the PRACK rather than authoring it.
 fn prack_2xx_or_481(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PrackAnsweredWrongly {
         status,
@@ -1565,13 +1263,6 @@ fn prack_2xx_or_481(f: &rfc_rules::Finding, cid: &str) -> String {
     }
 }
 
-/// RFC 3262 §3 live: the merged `delay-2xx-on-unacked-reliable-1xx-with-sdp`
-/// rule (`rfc_rules::rules::prack`) at this bind's vantage — the 2xx waits for
-/// the PRACK of an offer sent reliably.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// a lane that forwards both directions of one Call-ID relays the upstream
-/// UAS's 2xx at the upstream's timing.
 fn delay_2xx_on_unacked_reliable_1xx_with_sdp(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AnsweredOverUnackedOffer {
         unacked_rseqs,
@@ -1588,13 +1279,6 @@ fn delay_2xx_on_unacked_reliable_1xx_with_sdp(f: &rfc_rules::Finding, cid: &str)
     )
 }
 
-/// RFC 3262 §3 live: the merged `no-new-reliable-1xx-after-final` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — no fresh `RSeq` on a
-/// transaction that has answered.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip — the
-/// same policy its general §17.2.1 sibling [`no_1xx_after_final`] carries, for
-/// the same reason.
 fn no_new_reliable_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::Reliable1xxAfterFinal { rseq, .. }) = &f.decision
     else {
@@ -1606,13 +1290,6 @@ fn no_new_reliable_1xx_after_final(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3262 §4 live: the merged `no-prack-of-100-trying` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — a 100 Trying is never
-/// PRACKed, whatever markers it carries.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// a lane that forwards both directions of one Call-ID passes the upstream
-/// UAC's PRACK through rather than authoring it.
 fn no_prack_of_100_trying(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PrackedTrying { rseq, .. }) = &f.decision else {
         return String::new();
@@ -1624,15 +1301,6 @@ fn no_prack_of_100_trying(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3262 §5 live: the merged `prack-answers-1xx-offer` rule
-/// (`rfc_rules::rules::prack`) at this bind's vantage — the PRACK of an offer
-/// carries the answer.
-///
-/// The live policy this bind adds to the rule body: subject `{Uac, Uas}`; a
-/// relay-lane skip; and the finding is surfaced at BOTH ends, because the
-/// occasion is one negotiation and the party that sent the PRACK need not be a
-/// recorded bind at all. It gates: the rule reads each offer within its own
-/// call and early dialog, so the two legs of a B2BUA never meet in it.
 fn prack_answers_1xx_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PrackWithoutAnswer { rack_rseq, .. }) = &f.decision
     else {
@@ -1644,15 +1312,6 @@ fn prack_answers_1xx_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.2.4 live: the merged `ack-body-after-complete-offer-answer`
-/// rule (`rfc_rules::rules::offer_answer`) at this bind's vantage — an ACK
-/// closing a finished round carries no body.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, because
-/// the rule judges what a lane AUTHORED. A lane that forwards both directions
-/// of one Call-ID carries both agents' descriptions and has no offer/answer
-/// state of its own, so a stray ACK body there is the upstream's and is flagged
-/// on the upstream lane. The skip has RECORDING granularity, not per-call.
 fn ack_body_after_complete_offer_answer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AckBodyOnClosedRound { streams, .. }) = &f.decision
     else {
@@ -1668,14 +1327,6 @@ fn ack_body_after_complete_offer_answer(f: &rfc_rules::Finding, cid: &str) -> St
     )
 }
 
-/// RFC 3261 §13.2.1 live: the merged `final-2xx-answers-the-offer` rule
-/// (`rfc_rules::rules::offer_answer`) — the 2xx to a request that carried an
-/// offer carries the answer, unless a reliable provisional already stated one.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// because the negotiation is two-party and an answerer that is not a recorded
-/// bind is still named on the lane that took its silence; plus the relay-lane
-/// skip its ACK-body sibling above carries.
 fn final_2xx_answers_the_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::OfferLeftUnanswered {
         status,
@@ -1699,14 +1350,6 @@ fn final_2xx_answers_the_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.2.4 live: the merged `delayed-offer-answered-in-ack` rule
-/// (`rfc_rules::rules::offer_answer`) — the ACK to a 2xx that carried a
-/// delayed offer carries the answer.
-///
-/// The live policy this bind adds to the rule body: reported once, at the
-/// 2xx's sender where it is a recorded bind and at the ACK's sender otherwise,
-/// charged to the ACK's sender; a relay lane is skipped, as its siblings skip
-/// it — the answer it relays is its peer's.
 fn delayed_offer_answered_in_ack(f: &rfc_rules::Finding, cid: &str) -> String {
     if !f.violated() {
         return String::new();
@@ -1719,14 +1362,6 @@ fn delayed_offer_answered_in_ack(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §13.2.1 live: the merged `second-answer-repeats-the-first` rule
-/// (`rfc_rules::rules::offer_answer`) — one dialog carries one answer, and a
-/// later description on it re-states that answer's transport plan.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// because the negotiation is two-party and an answerer that is not a recorded
-/// bind is still named on the lane that took it; plus the relay-lane skip its
-/// ACK-body sibling above carries.
 fn second_answer_repeats_the_first(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::SecondAnswerDiverged {
         first_plan,
@@ -1747,12 +1382,6 @@ fn second_answer_repeats_the_first(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3264 §6 live: the merged `answer-stream-matches-offer` rule
-/// (`rfc_rules::rules::offer_answer`) at this bind's vantage — an accepted
-/// stream keeps the offer's media type and transport.
-///
-/// The live policy this bind adds to the rule body: a relay-lane skip, for the
-/// reason its ACK-body sibling above carries.
 fn answer_stream_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AnswerStreamRetyped {
         stream_indexes,
@@ -1779,15 +1408,6 @@ fn answer_stream_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 4566 §5.2 / RFC 3264 §8 live: the merged `sdp-origin-continuity` rule
-/// (`rfc_rules::rules::offer_answer`) at this bind's vantage — every
-/// description a lane sends on one call describes the same session.
-///
-/// The live policy this bind adds to the rule body: subject `{Uac, Uas}` plus a
-/// relay-lane skip, because origin continuity is a per-ORIGINATOR invariant — a
-/// transparent proxy's sent stream legitimately interleaves both agents'
-/// origins on one Call-ID. And the finding is **advisory**: a B2BUA re-offers
-/// under an origin of its own.
 fn sdp_origin_continuity(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::SdpOriginDiverged {
         origin_line,
@@ -1840,16 +1460,6 @@ fn stream_rows(
         .join("; ")
 }
 
-/// RFC 3264 §5 live: the merged `no-new-offer-while-offer-pending` rule
-/// (`rfc_rules::rules::offer_answer`) — an agent holds one offer of its own
-/// outstanding at a time.
-///
-/// The live policy this bind adds to the rule body: surfaced at EITHER END,
-/// since the glare is one negotiation and both lanes are places the recording
-/// checks it (the taker-side reading of the same act is MUST-001, the
-/// sender-side one MUST-002 — one obligation, charged to the sender); the
-/// finding is **advisory**, because a B2BUA legitimately re-offers on one leg
-/// before the prior answer arrives on the other; plus the relay-lane skip.
 fn no_new_offer_while_offer_pending(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::OfferWhilePending { pending_offer_cseq, .. }) =
         &f.decision
@@ -1864,13 +1474,6 @@ fn no_new_offer_while_offer_pending(f: &rfc_rules::Finding, cid: &str) -> String
     )
 }
 
-/// RFC 3264 §6 live: the merged `answer-m-line-count-matches-offer` rule
-/// (`rfc_rules::rules::offer_answer`) — the answer holds one `m=` line per
-/// offered stream.
-///
-/// The live policy this bind adds to the rule body: surfaced at EITHER END,
-/// since the offer/answer pair is one negotiation and the answerer is not
-/// always a recorded bind; plus the relay-lane skip.
 fn answer_m_line_count_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AnswerMLineCountDiffers {
         offer_m_lines,
@@ -1893,11 +1496,6 @@ fn answer_m_line_count_matches_offer(f: &rfc_rules::Finding, cid: &str) -> Strin
     )
 }
 
-/// RFC 3264 §6 live: the merged `answer-t-line-equals-offer` rule
-/// (`rfc_rules::rules::offer_answer`) — the answer repeats the offer's `t=`.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// plus the relay-lane skip — its m-line-count sibling's reasons.
 fn answer_t_line_equals_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AnswerTLineDiffers {
         offer_t_line,
@@ -1915,11 +1513,6 @@ fn answer_t_line_equals_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §6.1 live: the merged `answer-media-type-matches-offer` rule
-/// (`rfc_rules::rules::offer_answer`) — streams pair by position.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// plus the relay-lane skip.
 fn answer_media_type_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::AnswerMediaTypeMismatched {
         stream_indexes,
@@ -1942,14 +1535,6 @@ fn answer_media_type_matches_offer(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3264 §6.1 live: the merged `direction-pair-valid` rule
-/// (`rfc_rules::rules::offer_answer`) — the answer's direction is one the
-/// offer's admits.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end; the
-/// finding is **advisory**, because a B2BUA translates direction across legs as
-/// policy (forcing `sendrecv` on one leg while the other holds); plus the
-/// relay-lane skip.
 fn direction_pair_valid(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::DirectionPairInvalid {
         stream_indexes,
@@ -1971,12 +1556,6 @@ fn direction_pair_valid(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §6 live: the merged `rejected-stream-minimal-answer` rule
-/// (`rfc_rules::rules::offer_answer`) — a port-0 rejection still lists a
-/// format.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// plus the relay-lane skip.
 fn rejected_stream_minimal_answer(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RejectedStreamWithoutFormat {
         stream_indexes,
@@ -1999,13 +1578,6 @@ fn rejected_stream_minimal_answer(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §8 live: the merged `re-offer-m-line-count-monotonic` rule
-/// (`rfc_rules::rules::offer_answer`) at this bind's vantage — the stream table
-/// a lane states only ever grows.
-///
-/// The live policy this bind adds to the rule body: the rule judges what a lane
-/// SENT and nothing else, so the vantage charge is exact; plus the relay-lane
-/// skip.
 fn re_offer_m_line_count_monotonic(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ReOfferStreamsDropped {
         m_lines,
@@ -2023,14 +1595,6 @@ fn re_offer_m_line_count_monotonic(f: &rfc_rules::Finding, cid: &str) -> String 
     )
 }
 
-/// RFC 3264 §8 live: the merged `zero-port-propagation` rule
-/// (`rfc_rules::rules::offer_answer`) — a stream offered at port 0 is answered
-/// at port 0.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end; the
-/// finding is **advisory**, because a B2BUA anchors media per leg and assigns
-/// its own ports, so a peer-side disabled stream can legitimately reappear with
-/// the B2BUA's port on the other leg; plus the relay-lane skip.
 fn zero_port_propagation(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ZeroPortResurrected {
         stream_indexes,
@@ -2054,13 +1618,6 @@ fn zero_port_propagation(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §8.3.2 live: the merged `payload-type-mapping-stable` rule
-/// (`rfc_rules::rules::offer_answer`) — a payload type keeps the encoding its
-/// sender first bound it to.
-///
-/// The live policy this bind adds to the rule body: surfaced at either end,
-/// since the peer caches the binding and a remapping sender is not always a
-/// recorded bind; plus the relay-lane skip.
 fn payload_type_mapping_stable(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PayloadTypeRemapped {
         payload_types,
@@ -2086,25 +1643,6 @@ fn payload_type_mapping_stable(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// The PEER seam: per-message obligations, one message at one vantage
-// ---------------------------------------------------------------------------
-//
-// A per-message rule decides ONE message, so its vantage policy is the plain
-// reading of the two the adapter already has. A rule whose subject the sender
-// MINTS is surfaced at the emitter — the bind is charged for what it wrote, and
-// a message it merely took carries its peer's `emitter` and drops out. A rule
-// that correlates a message to the state THIS bind built is surfaced at the
-// taker — the bind is the vantage, the far party is charged, and the recording
-// is the only place that party's stream is checked at all.
-//
-// Subject dispatch and the advisory flag stay per-rule below (the
-// cross-message trait carries both), and the offending wire position falls out
-// of the finding's anchor.
-
-/// RFC 3261 §8.1.1.7 live: the merged `branch-prefix` rule at this bind's
-/// vantage — the sender mints the branch, so the bind is charged for what it
-/// emitted.
 fn branch_prefix(f: &rfc_rules::Finding, _cid: &str) -> String {
     match &f.decision {
         Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { on, value, .. }) => {
@@ -2124,8 +1662,6 @@ fn branch_prefix(f: &rfc_rules::Finding, _cid: &str) -> String {
     }
 }
 
-/// RFC 3261 §8.1.1.6 live: the merged `max-forwards` rule at this bind's
-/// vantage — the sender writes the header, so the bind is charged.
 fn max_forwards(f: &rfc_rules::Finding, _cid: &str) -> String {
     match &f.decision {
         Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) => {
@@ -2153,8 +1689,6 @@ fn max_forwards(f: &rfc_rules::Finding, _cid: &str) -> String {
     }
 }
 
-/// RFC 3261 §20.14 live: the merged `content-length` rule at this bind's
-/// vantage — the sender writes header and body together.
 fn content_length(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { value, expected, .. }) =
         &f.decision
@@ -2167,7 +1701,6 @@ fn content_length(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §7.4.1 live: the merged `content-type` rule at this bind's vantage.
 fn content_type(f: &rfc_rules::Finding, _cid: &str) -> String {
     if !f.violated() {
         return String::new();
@@ -2177,8 +1710,6 @@ fn content_type(f: &rfc_rules::Finding, _cid: &str) -> String {
         .to_string()
 }
 
-/// RFC 3261 §8.1.1.8 live: the merged `contact-presence` rule at this bind's
-/// vantage.
 fn contact_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) = &f.decision
     else {
@@ -2190,8 +1721,6 @@ fn contact_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §15.1 live: the merged `no-contact-on-bye` rule at this bind's
-/// vantage.
 fn no_contact_on_bye(f: &rfc_rules::Finding, _cid: &str) -> String {
     if !f.violated() {
         return String::new();
@@ -2201,8 +1730,6 @@ fn no_contact_on_bye(f: &rfc_rules::Finding, _cid: &str) -> String {
         .to_string()
 }
 
-/// RFC 3261 §8.2.6.2 live: the merged `to-tag-presence` rule at this bind's
-/// vantage — the responding UAS mints the tag.
 fn to_tag_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) = &f.decision
     else {
@@ -2214,8 +1741,6 @@ fn to_tag_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.1.1.3 live: the merged `from-tag-presence` rule at this bind's
-/// vantage — the sending UAC mints the tag.
 fn from_tag_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) = &f.decision
     else {
@@ -2227,11 +1752,6 @@ fn from_tag_presence(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §16.6 live: the merged `no-record-route-from-ua` rule at this
-/// bind's vantage.
-///
-/// The live policy this bind adds to the rule body: subject `{Proxy}`, so only a
-/// lane that may be mistaken for a proxy is judged at all.
 fn no_record_route_from_ua(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent { value, .. }) = &f.decision
     else {
@@ -2243,9 +1763,6 @@ fn no_record_route_from_ua(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.1.3 / §17.1.3 live: the merged `response-echoes-request-via`
-/// rule at this bind's vantage — surfaced at the TAKER, the UAC whose client
-/// transaction the response fails to name.
 fn response_echoes_request_via(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseViaDiverged {
         response_branch,
@@ -2278,8 +1795,6 @@ fn response_echoes_request_via(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.1.3.3 live: the merged `response-correlation` rule at this
-/// bind's vantage — surfaced at the TAKER, the party handed the phantom answer.
 fn response_correlation(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ResponseCseqPhantom {
         response_cseq,
@@ -2298,8 +1813,6 @@ fn response_correlation(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `mid-dialog-tags` rule at this bind's
-/// vantage — surfaced at the TAKER, whose dialog the message fails to name.
 fn mid_dialog_tags(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::DialogTagForeign {
         tag_header,
@@ -2318,8 +1831,6 @@ fn mid_dialog_tags(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `peer-uri-stable` rule at this bind's
-/// vantage — surfaced at the TAKER, whose dialog matching the rewrite breaks.
 fn peer_uri_stable(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::PeerUriRewritten { sent_uri, dialog_uri, .. }) =
         &f.decision
@@ -2332,8 +1843,6 @@ fn peer_uri_stable(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.1 live: the merged `dialog-call-id-stable` rule at this bind's
-/// vantage — surfaced at the TAKER, left holding a dialog nothing matches.
 fn dialog_call_id_stable(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::DialogCallIdChanged {
         call_id,
@@ -2350,8 +1859,6 @@ fn dialog_call_id_stable(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `cancel-request-uri` rule at this bind's
-/// vantage — surfaced at the TAKER, whose server transaction the CANCEL misses.
 fn cancel_request_uri(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::CancelUriDiverged {
         cancel_uri, invite_uri, ..
@@ -2366,9 +1873,6 @@ fn cancel_request_uri(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `cancel-via-branch` rule at this bind's
-/// vantage — surfaced at the TAKER, whose INVITE the orphaned CANCEL leaves
-/// ringing.
 fn cancel_via_branch(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::CancelBranchUnmatched {
         cancel_branch,
@@ -2414,37 +1918,18 @@ fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §17.2.1 / §12.1.1 live: the merged `tag-consistency` rule at this
-/// bind's vantage on a **2xx** final — the UAS mints the tag, so the bind is
-/// charged for its own final.
-///
-/// The live policy this bind adds to the rule body: the finding is ADVISORY. A
-/// forking B2BUA legitimately relays one early dialog's provisional (tag A) and
-/// then answers 2xx off a later early dialog (tag B) on the same upstream INVITE
-/// transaction — §12.1.2 / §13.2.2.4 permit a 2xx establishing a fresh dialog,
-/// and per branch that is indistinguishable from a UAS tag flip. The finding is
-/// recorded for review and never gates.
-///
-/// The waiver reaches no further than its own argument: a NON-2xx final
-/// establishes no dialog, so [`tag_flip_non_2xx`] gates it.
+/// A flip on a 2xx: a forking B2BUA may answer 2xx off a later early dialog
+/// (§12.1.2, §13.2.2.4), which per branch reads as a flip, so this arm advises.
 fn tag_flip_2xx(f: &rfc_rules::Finding) -> bool {
     tag_flip_status(f).is_some_and(|status| (200..300).contains(&status))
 }
 
-/// RFC 3261 §17.2.1 / §12.1.1 live: the same merged `tag-consistency` rule on a
-/// **non-2xx** final, which GATES.
-///
-/// Only a 2xx establishes a dialog (§12.1.1), so the forked-answer waiver
-/// [`tag_flip_2xx`] carries has nothing to say here: a non-2xx final ends
-/// the transaction under a tag no provisional showed, leaving the caller in an
-/// early dialog nothing ever terminates. Reported under the same rule token —
-/// one obligation, two severities.
+/// A flip on a non-2xx final: it establishes no dialog (§12.1.1), so the
+/// caller's early dialog is never terminated, and this arm gates.
 fn tag_flip_non_2xx(f: &rfc_rules::Finding) -> bool {
     tag_flip_status(f).is_some_and(|status| !(200..300).contains(&status))
 }
 
-/// RFC 3262 §4 live: the merged `no-100rel-require-on-non-invite` rule at this
-/// bind's vantage — the sender stamps the option tag, so the bind is charged.
 fn no_100rel_require_on_non_invite(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent { on, .. }) = &f.decision
     else {
@@ -2456,11 +1941,6 @@ fn no_100rel_require_on_non_invite(f: &rfc_rules::Finding, _cid: &str) -> String
     )
 }
 
-/// RFC 3262 §3 live: the merged `reliable-1xx-headers` rule at this bind's
-/// vantage — the responding UAS writes both rows.
-///
-/// The live policy this bind adds to the rule body: subject `{Uas}`, since the
-/// reliable-provisional contract is the answering side's to state.
 fn reliable_1xx_headers(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::Reliable1xx { status, carried, .. }) = &f.decision
     else {
@@ -2483,8 +1963,6 @@ fn reliable_1xx_headers(f: &rfc_rules::Finding, _cid: &str) -> String {
     }
 }
 
-/// RFC 3261 §8.1.1.2 live: the merged `no-to-tag-on-initial-request` rule at
-/// this bind's vantage — the sender writes the To row, so the bind is charged.
 fn no_to_tag_on_initial_request(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent { on, value, .. }) =
         &f.decision
@@ -2497,11 +1975,6 @@ fn no_to_tag_on_initial_request(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `in-dialog-to-tag` rule at this bind's
-/// vantage — the sender mints the header from its own dialog state.
-///
-/// The live policy this bind adds to the rule body: subject `{Uac, Uas}`, since
-/// a declared proxy carries the originator's To through unchanged.
 fn in_dialog_to_tag(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) = &f.decision
     else {
@@ -2513,12 +1986,6 @@ fn in_dialog_to_tag(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §12.2.1.1 live: the merged `in-dialog-from-tag` rule — a request
-/// taken inside a confirmed dialog carries that dialog's remote tag in From.
-///
-/// The live policy this bind adds to the rule body: reported once, at the
-/// taker where it is a recorded bind (the dialog the request fails to name is
-/// its own) and at the sender otherwise, charged to the sender.
 fn in_dialog_from_tag(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::DialogRemoteTagForeign {
         method,
@@ -2539,8 +2006,6 @@ fn in_dialog_from_tag(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §8.2.2.3 live: the merged `no-require-on-cancel-or-ack` rule at
-/// this bind's vantage — the sender writes the demand.
 fn no_require_on_cancel_or_ack(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent {
         on, header, value, ..
@@ -2559,8 +2024,6 @@ fn no_require_on_cancel_or_ack(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §9.1 live: the merged `cancel-cseq-method` rule at this bind's
-/// vantage — the sender writes the CSeq row.
 fn cancel_cseq_method(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { value, .. }) = &f.decision
     else {
@@ -2569,12 +2032,6 @@ fn cancel_cseq_method(f: &rfc_rules::Finding, _cid: &str) -> String {
     format!("CANCEL request carries CSeq method={value} (expected CANCEL) — RFC 3261 §9.1")
 }
 
-/// RFC 3261 §16.6 live: the merged `strict-route-shuffle-on-send` rule at this
-/// bind's vantage — the forwarding hop is the party that runs the swap.
-///
-/// The live policy this bind adds to the rule body: subject `{Proxy}`, since
-/// §16.6 step 6 is a forwarding element's step and a UA states the route set it
-/// learned rather than shuffling one.
 fn strict_route_shuffle_on_send(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { on, value, .. }) =
         &f.decision
@@ -2587,8 +2044,6 @@ fn strict_route_shuffle_on_send(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §5-6 live: the merged `sdp-body-parseable` rule at this bind's
-/// vantage — the sender minted the description.
 fn sdp_body_parseable(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::SdpBodyRejected { sdp_failure, .. }) = &f.decision
     else {
@@ -2600,12 +2055,6 @@ fn sdp_body_parseable(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3264 §6 / §8.4 live: the merged `c0-port-non-zero` rule at this bind's
-/// vantage — the sender wrote both dispositions.
-///
-/// The live policy this bind adds to the rule body: subject `{Uac}`, because an
-/// answerer (a B2BUA included) legitimately rejects a stream with `m=… 0` while
-/// echoing a real, non-unspecified `c=`.
 fn c0_port_non_zero(f: &rfc_rules::Finding, cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::HeldAndRejectedStreams {
         held_stream_indexes,
@@ -2625,16 +2074,6 @@ fn c0_port_non_zero(f: &rfc_rules::Finding, cid: &str) -> String {
     )
 }
 
-/// RFC 3261 §17 / §13.3.1.4, RFC 3262 §3 live: the merged `rung-byte-identical`
-/// rule (`rfc_rules::rules::retransmit`) at this bind's vantage — a
-/// retransmission is the same message, byte for byte (ADR-0032 X3).
-///
-/// The live policy this bind adds to the rule body: none, and it GATES. The
-/// rule judges what a lane put on the wire TWICE, and a relay's rung is its own
-/// re-send whatever it forwarded the first time — so there is no relay-lane
-/// skip and every role is in subject. The SUT retains and repeats an opaque
-/// datagram by construction, so a charge against it is a hole in that
-/// construction, never a tolerance to add here.
 fn rung_byte_identical(f: &rfc_rules::Finding, cid: &str) -> String {
     use rfc_rules::rules::retransmit::Class;
     let Decision::Violated(rfc_rules::Evidence::RungDiverged {
@@ -2682,6 +2121,8 @@ fn rung_byte_identical(f: &rfc_rules::Finding, cid: &str) -> String {
 /// The live surfacing of every rule that has one; [`cross_rules`] gives the
 /// others the default row.
 const LIVE: &[Live] = &[
+    // Live stamps are strictly monotonic, so a 2xx sent before the CANCEL arrived is a race the
+    // rule clears.
     Live::emitter(RuleId::No200AfterCancel, no_200_after_cancel),
     Live::emitter(RuleId::NoAckToDialogCreating2xx, no_ack_to_dialog_creating_2xx),
     Live::emitter(RuleId::Unacked2xxNotCleared, unacked_2xx_not_cleared),
@@ -2695,7 +2136,10 @@ const LIVE: &[Live] = &[
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::CancelRouteEchoesInvite, cancel_route_echoes_invite)
         .skip(Skip::RelayLanes),
+    // Advisory (ADR-0028). A `{Proxy}`-only lane forwards its upstream's CANCEL at the upstream's
+    // timing; a B2BUA authors its own and is judged.
     Live::emitter(RuleId::CancelAfter1xx, cancel_after_1xx).advisory().skip(Skip::ProxyOnlyLanes),
+    // No relay skip: a lane forwarding an upstream CANCEL never ACKed the final itself.
     Live::emitter(RuleId::NoCancelAfterFinal, no_cancel_after_final),
     Live::taker(RuleId::CseqInDialogOrder, cseq_in_dialog_order),
     Live::taker(RuleId::ResponseCseqMatchesTransaction, response_cseq_matches_transaction),
@@ -2706,33 +2150,48 @@ const LIVE: &[Live] = &[
         .skip(Skip::RelayLanes),
     Live::taker(RuleId::RecordRoutePlacement, record_route_placement).skip(Skip::RelayLanes),
     Live::taker(RuleId::RportEcho, rport_echo).advisory().skip(Skip::RelayLanes),
+    // Advisory: both clauses are SHOULDs.
     Live::taker(RuleId::AllowSupportedOnInvite, allow_supported_on_invite)
         .advisory()
         .skip(Skip::RelayLanes),
     Live::taker(RuleId::Proxy100TryingNotForwarded, proxy_100_trying_not_forwarded)
         .skip(Skip::RelayLanes),
+    // No relay skip: a relay face knows both its peers, so the rule's peer-tag key never charges
+    // it.
     Live::emitter(RuleId::UnknownDialog481, unknown_dialog_481),
     Live::emitter(RuleId::UnsupportedMethod405Allow, unsupported_method_405_allow),
     Live::emitter(RuleId::UnsupportedExtension420, unsupported_extension_420),
     Live::emitter(RuleId::Unsupported415Accepts, unsupported_415_accepts),
     Live::emitter(RuleId::UnsupportedExtension421, unsupported_extension_421),
+    // §16.3 is proxy behaviour: a UAS rejecting a call it took is no resolution failure.
     Live::emitter(RuleId::NoTarget404, no_target_404).roles(&[UaRole::Proxy]).advisory(),
+    // Advisory: §11.2's header set is a SHOULD.
     Live::emitter(RuleId::OptionsResponseEchoes, options_response_echoes).advisory(),
     Live::emitter(RuleId::AckRequireSubsetOfInvite, ack_require_subset_of_invite)
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::AckPreservesInviteRoute, ack_preserves_invite_route)
         .skip(Skip::RelayLanes),
+    // §16.4 is proxy behaviour.
     Live::emitter(RuleId::StrictRouteRewriteHandled, strict_route_rewrite_handled)
         .roles(&[UaRole::Proxy]),
     Live::emitter(RuleId::SerialRegister, serial_register),
     Live::emitter(RuleId::RegisterNoRouteSet, register_no_route_set),
+    // No relay skip: a face passing two racing re-INVITEs on is the UAS of two server transactions
+    // it never serialised.
     Live::emitter(RuleId::ConcurrentReInvite500Or491, concurrent_re_invite_500_or_491),
+    // No relay skip: the peer-tag dialog key spares a face that saw the dialog created.
     Live::emitter(RuleId::NoByeOutsideOrEarlyDialog, no_bye_outside_or_early_dialog),
+    // No relay skip: the ordered dialog key spares a lane relaying both parties' crossing re-
+    // INVITEs (glare).
     Live::emitter(RuleId::NoReInviteWhileInviteInProgress, no_re_invite_while_invite_in_progress),
+    // §16.7 binds proxies; a UAS answering an INVITE is under §8.2.6.
     Live::emitter(RuleId::Proxy100WithinGrace, proxy_100_within_grace)
         .roles(&[UaRole::Proxy])
         .advisory(),
+    // Gates: the harness UAC ACKs every non-2xx final (§17.1.1.3); a test modelling a peer that
+    // never ACKs waives it.
     Live::taker_else_emitter(RuleId::UnackedInviteNon2xxFinal, unacked_invite_non_2xx_final),
+    // No relay skip: a relaying lane opens its own client transaction on its own branch.
     Live::emitter(RuleId::FailedReinviteTearsDownDialog, failed_reinvite_tears_down_dialog),
     Live::emitter(RuleId::No1xxAfterFinal, no_1xx_after_final)
         .roles(&[UaRole::Uas])
@@ -2758,6 +2217,8 @@ const LIVE: &[Live] = &[
     Live::emitter(RuleId::NoNewReliable1xxAfterFinal, no_new_reliable_1xx_after_final)
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::NoPrackOf100Trying, no_prack_of_100_trying).skip(Skip::RelayLanes),
+    // Gates: each offer is read within its own call and early dialog, so a B2BUA's two legs never
+    // meet in it.
     Live::either_end(RuleId::PrackAnswers1xxOffer, prack_answers_1xx_offer)
         .roles(&[UaRole::Uac, UaRole::Uas])
         .skip(Skip::RelayLanes),
@@ -2771,6 +2232,7 @@ const LIVE: &[Live] = &[
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::AnswerStreamMatchesOffer, answer_stream_matches_offer)
         .skip(Skip::RelayLanes),
+    // Origin continuity is per originator: a proxy's stream interleaves both agents' origins.
     Live::emitter(RuleId::SdpOriginContinuity, sdp_origin_continuity)
         .roles(&[UaRole::Uac, UaRole::Uas])
         .advisory()
@@ -2815,16 +2277,21 @@ const LIVE: &[Live] = &[
     Live::emitter(RuleId::TagConsistency, tag_flip_detail).advisory().admits(tag_flip_2xx),
     Live::emitter(RuleId::TagConsistency, tag_flip_detail).admits(tag_flip_non_2xx),
     Live::emitter(RuleId::No100relRequireOnNonInvite, no_100rel_require_on_non_invite),
+    // The reliable-provisional rows are the answering side's to write.
     Live::emitter(RuleId::Reliable1xxHeaders, reliable_1xx_headers).roles(&[UaRole::Uas]),
     Live::emitter(RuleId::NoToTagOnInitialRequest, no_to_tag_on_initial_request),
+    // A declared proxy carries the originator's To through unchanged.
     Live::emitter(RuleId::InDialogToTag, in_dialog_to_tag).roles(&[UaRole::Uac, UaRole::Uas]),
     Live::taker_else_emitter(RuleId::InDialogFromTag, in_dialog_from_tag),
     Live::emitter(RuleId::NoRequireOnCancelOrAck, no_require_on_cancel_or_ack),
     Live::emitter(RuleId::CancelCseqMethod, cancel_cseq_method),
+    // §16.6 step 6 is a forwarding element's step.
     Live::emitter(RuleId::StrictRouteShuffleOnSend, strict_route_shuffle_on_send)
         .roles(&[UaRole::Proxy]),
     Live::emitter(RuleId::SdpBodyParseable, sdp_body_parseable),
     Live::emitter(RuleId::C0PortNonZero, c0_port_non_zero).roles(&[UaRole::Uac]),
+    // Gates on every role, no relay skip: a lane's rung is its own re-send whatever it forwarded
+    // first.
     Live::emitter(RuleId::RungByteIdentical, rung_byte_identical),
 ];
 

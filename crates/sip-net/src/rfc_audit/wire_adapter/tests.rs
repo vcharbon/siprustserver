@@ -267,8 +267,6 @@ fn every_merged_rule_has_a_live_adapter() {
     assert_eq!(surfaced, declared);
 }
 
-// ── the §14 / §15 / §16.7 / §17.1.1.3 family ────────────────────────────
-
 /// A request the CALLEE originates: From/To reversed relative to the
 /// establishing INVITE, which is the orientation a callee-initiated BYE or
 /// re-INVITE rides.
@@ -286,7 +284,6 @@ fn from_callee(method: &str, branch: &str, cseq: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-// ── the RFC 3262 family ─────────────────────────────────────────────────
 //
 // Fixtures that can carry the reliable-provisional headers, an `RAck` and a
 // body: the whole family reads those, and the `Content-Length` is what a
@@ -304,8 +301,6 @@ fn body(sdp: bool) -> &'static str {
         ""
     }
 }
-
-// ── the §13.2 / RFC 3264 offer/answer family ────────────────────────────
 
 const AUDIO_OFFER: &str = "v=0\r\n\
 o=alice 424242 1 IN IP4 10.0.0.1\r\n\
