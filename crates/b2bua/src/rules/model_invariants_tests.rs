@@ -346,3 +346,23 @@ fn an_in_dialog_request_neither_answered_nor_relayed_breaks_the_answer_invariant
     let turn = Turn { before: None, after: &relayed, received: Some(&req), sent: &[] };
     assert_eq!(in_dialog_request_answered_or_relayed(&turn), Ok(()), "relayed");
 }
+
+#[test]
+fn a_timer_armed_on_a_terminated_leg_breaks_the_timer_scope_invariant() {
+    let mut call = call();
+    let no_answer = call::TimerType::NoAnswer;
+    call.timers.push(call::TimerEntry {
+        id: no_answer.timer_id(Some("b-1")),
+        timer_type: no_answer,
+        fire_at: 30_000,
+        leg_id: Some("b-1".into()),
+    });
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Early);
+    assert_eq!(no_timer_on_a_terminated_leg(&after(&call)), Ok(()), "leg still ringing");
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Terminated);
+    let err = no_timer_on_a_terminated_leg(&after(&call)).unwrap_err();
+    assert!(err.contains("NoAnswer:b-1 is armed on leg b-1, which is Terminated"), "{err}");
+    call.b_legs.clear();
+    let err = no_timer_on_a_terminated_leg(&after(&call)).unwrap_err();
+    assert!(err.contains("which is gone"), "{err}");
+}

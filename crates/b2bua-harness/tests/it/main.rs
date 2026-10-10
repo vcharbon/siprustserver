@@ -195,6 +195,7 @@ mod teardown_header_relay;
 mod teardown_races;
 mod termination;
 mod timed_out_invite_cancel;
+mod timer_scope;
 mod timestamp_echo;
 mod transaction_outcome_past_bounds;
 mod unacked_2xx_reap;
