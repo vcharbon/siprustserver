@@ -223,6 +223,68 @@ async fn a_caller_request_between_reroute_attempts_is_told_to_retry() {
     let _ = h.finish().await;
 }
 
+/// A fork the B2BUA gave up — its no-answer deadline passed and it was
+/// cancelled while the call reroutes — keeps no early dialog: a request its
+/// callee sends there before the INVITE's 487 draws 481 (RFC 3261 §12.2.2)
+/// and reaches no one; the reroute answers the caller.
+#[tokio::test(start_paused = true)]
+async fn a_request_on_the_early_dialog_of_a_fork_given_up_is_refused_481() {
+    let h = Harness::with_transit_delay("dialog-gate-fork-given-up", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob1 = h.agent_auto("bob1").await;
+    let bob2 = h.agent_auto("bob2").await;
+    let (first, second) = (bob1.addr(), bob2.addr());
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| {
+                let mut r = route_to(&first.ip().to_string(), first.port());
+                r.no_answer_timeout_sec = Some(30);
+                r.callback_context = Some("reroute".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |_req| {
+                CallFailureResponse::Route(route_to(&second.ip().to_string(), second.port()))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_sec = 300;
+            c.keepalive_interval_sec = 3_600;
+        })
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas1 = bob1.receive("INVITE").await;
+    uas1.respond(180, "Ringing").await;
+    call.expect(180).await;
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+    bob1.receive("CANCEL").await.respond(200, "OK").await;
+
+    let mut early = uas1.dialog();
+    early.send_request(InDialogMethod::Info).send().await.expect(481).await;
+    uas1.respond(487, "Request Terminated").await;
+    bob1.receive("ACK").await;
+    assert!(alice.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
+
+    let mut uas2 = bob2.receive("INVITE").await;
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob1.drain().await;
+    bob2.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// The caller's early dialog is a service's own: the callee's provisional
 /// rang no dialog of hers. Her INFO in it has no callee dialog to ride: 500
 /// with `Retry-After`, and the callee's answer completes the call.

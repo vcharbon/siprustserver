@@ -74,6 +74,11 @@ impl ActionExecutor<'_> {
                 if !route_set.is_empty() {
                     d.route_set = route_set;
                 }
+                // A fork its leg's end retired answers anyway: the relays
+                // it held open are the confirmed dialog's again.
+                if let DialogState::Retired(r) = &mut d.state {
+                    d.inbound_pending_requests.append(&mut r.open_relays);
+                }
                 d.state = DialogState::Confirmed;
                 relay::adopt_confirmed_dialog(leg, &winner);
             }
@@ -89,25 +94,27 @@ impl ActionExecutor<'_> {
         Promoted { leg_id: leg_id.to_string(), winner, losers, crossed_cancel }
     }
 
-    /// Give the caller the dialog the 2xx is relayed on (§12.1.1): the a-leg
-    /// is bridged — only for a live answer on an adopted leg — and, when the
-    /// 2xx is the answer to her INVITE, the caller-facing dialog fronting the
-    /// winner (or the one the relay will show it under) is confirmed and the
-    /// others retire. The answer body relayed toward her is kept as that
-    /// dialog's cached SDP.
+    /// Give the caller the dialog the 2xx is relayed on (§12.1.1): when the
+    /// 2xx is the answer to her INVITE, the a-leg is confirmed and the
+    /// caller-facing dialog fronting the winner (or the one the relay will
+    /// show it under) is confirmed, the others retiring. The answer body
+    /// relayed toward her is kept as her dialog's cached SDP.
     fn reidentify_caller_dialog(&self, call: &mut Call, resp: &SipResponse, retired: &Retired) {
         let Retired { leg_id, winner, crossed_cancel } = retired;
-        // A terminating call's a-leg was never answered: confirming it would
-        // read as answered and suppress its unanswered-caller final (ADR-0022).
-        // An unadopted leg (a media server behind early media, ADR-0016) is
-        // answered by the service, not relayed: the caller has no dialog of it.
+        // The answer to her INVITE: relayed — a live call (a terminating
+        // call's caller is owed her unanswered final, ADR-0022), an adopted
+        // leg (a media server behind early media is the service's, ADR-0016),
+        // not a 2xx crossing the leg's CANCEL, which is reaped — and nothing
+        // has answered her yet. The a-leg is confirmed before the tag is read:
+        // the relay that follows decides the a-face on a confirmed a-leg.
         let adopted = call.b_legs.iter().find(|l| &l.leg_id == leg_id).is_none_or(is_adopted);
-        let bridges = call.state == CallModelState::Active && adopted;
-        if bridges {
+        let answers_the_caller = call.state == CallModelState::Active
+            && adopted
+            && !crossed_cancel
+            && call.a_leg.invite_final_sent.is_none();
+        if answers_the_caller {
             *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
         }
-        let answers_the_caller =
-            bridges && !crossed_cancel && call.a_leg.invite_final_sent.is_none();
         // The caller-facing tag of the dialog this 2xx creates: the one its
         // relayed provisional or `MapUnshownDialog` showed, or the one the
         // relay of a live answer takes now (`a_face_tag`).

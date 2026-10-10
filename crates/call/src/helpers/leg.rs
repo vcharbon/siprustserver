@@ -4,7 +4,7 @@
 
 use crate::model::{
     ByeDisposition, Call, CallModelState, Dialog, DialogEnd, DialogState, Leg, LegDisposition,
-    LegKind, LegState, MessageDirection, MessageEntry,
+    LegKind, LegState, MessageDirection, MessageEntry, RetiredDialog,
 };
 
 use super::lens::update_leg;
@@ -80,9 +80,26 @@ pub fn caller_dialog_mut<'a>(call: &'a mut Call, our_tag: &str) -> Option<&'a mu
     call.a_leg.dialogs.by_tags_mut(our_tag, &call.a_leg_invite.from_tag)
 }
 
-/// Set the state of a specific leg.
+/// Set the state of a specific leg. A leg brought to `Terminated` lets go of
+/// the early dialogs its INVITE left open: each retires, with the relays
+/// still open in it (RFC 3261 §12.1.2; the INVITE's late final ends nothing
+/// more).
 pub fn set_leg_state(call: Call, leg_id: &str, state: LegState) -> Call {
-    update_leg(call, leg_id, |l| l.state = state)
+    update_leg(call, leg_id, |l| {
+        l.state = state;
+        if state == LegState::Terminated {
+            retire_early_dialogs(l);
+        }
+    })
+}
+
+/// Retire every early dialog of `leg`, its open relays kept for their finals
+/// (RFC 3261 §8.1.3.3).
+pub fn retire_early_dialogs(leg: &mut Leg) {
+    for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
+        let open_relays = std::mem::take(&mut d.inbound_pending_requests);
+        d.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+    }
 }
 
 /// Set the disposition of a specific leg.
