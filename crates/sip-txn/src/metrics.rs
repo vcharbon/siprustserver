@@ -243,7 +243,7 @@ pub(crate) struct MetricsInner {
     /// Live entries in the internal `DelayQueue` (retransmit / timeout / cleanup /
     /// event-retry timers). Should track ~a small multiple of `active_transactions`;
     /// a climb while txns are flat is a timer/slab leak (orphaned DelayQueue
-    /// entries never removed or fired — the no-chaos RSS-climb suspect).
+    /// entries never removed or fired).
     pub timer_queue_len: AtomicUsize,
     /// Sum of per-txn `retransmit_buf` bytes (the serialized requests held for
     /// retransmission). Sampled in the sweep; a climb vs flat txns = buffers
@@ -285,8 +285,7 @@ pub(crate) struct MetricsInner {
     /// Held CANCELs put on the wire when the first provisional arrived.
     pub held_cancels_flushed: AtomicU64,
     /// Held CANCELs put on the wire pre-1xx when the grace window expired (or
-    /// the call was evicted) with the branch still response-less — ADR-0028:
-    /// every emitted CANCEL reaches the wire.
+    /// the call was evicted) with the branch still response-less.
     pub held_cancels_flushed_pre1xx: AtomicU64,
     /// Grace-sent CANCELs re-sent once on the branch's late first provisional
     /// (the UAS that 481'd the pre-1xx copy has its server txn by then).
