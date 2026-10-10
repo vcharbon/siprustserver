@@ -134,9 +134,8 @@ list stays one file by design, like the `define_service!` index.
   mirrors `rfc-rules::rules`), `rfc-rules/src/verdict.rs` (2339, all code —
   `RuleId` + `Evidence` + the registries are three concerns in one file),
   then the family files whose bulk is their own `#[cfg(test)]` mod (split the
-  tests out first): `rules/prack.rs` (2385/1529 code), `rules/offer_answer.rs`
-  (2392/1335), `rules/dialog.rs` (1850/865), `rules/correlation.rs`
-  (1581/937), `rules/capability.rs` (1330), `rules/proxy.rs` (1168),
+  tests out first): `rules/dialog.rs` (1850/865), `rules/capability.rs`
+  (1330), `rules/proxy.rs` (1168),
   `rules/wellformed.rs` (1159), `rules/ack.rs` (1132), `rules/reinvite.rs`
   (1116), `rules/cseq.rs` (1049).
 - [ ] **5. `crates/failover-harness/src/harness.rs`** — 1782 L (+
