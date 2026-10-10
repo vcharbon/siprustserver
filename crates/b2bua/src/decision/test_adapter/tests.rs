@@ -144,7 +144,7 @@ async fn route_all_to_with_limiter_honors_header_destination() {
         }
         _ => panic!("expected route"),
     }
-    // Empty / absent user → userless R-URI (unchanged behaviour).
+    // Empty / absent user → userless R-URI.
     assert_eq!(
         route_user_from_api_call(&req_with_header(
             "X-Api-Call",
@@ -200,7 +200,7 @@ async fn route_all_to_with_limiter_walks_routes_plan_with_stress() {
         }
         _ => panic!("expected route #2 (bob2)"),
     }
-    // Plan-less call still falls back to DEST (no 404, no regression).
+    // Plan-less call still falls back to DEST (no 404).
     match eng.new_call(req("bob")).await.unwrap() {
         NewCallResponse::Route(d) => assert_eq!(d.destination.host, "127.0.0.1"),
         _ => panic!("expected DEST fallback"),

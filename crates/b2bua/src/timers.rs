@@ -1,8 +1,8 @@
 //! `TimerService` — one `tokio_util::time::DelayQueue` driver holding every
 //! pending B2BUA timer (keepalive, no-answer, max-duration, terminating-safety,
-//! …). Port of `TimerService.ts`, reusing the single-`DelayQueue` shape from
-//! sip-txn (ADR-0007) but with a B2BUA-local driver (sip-txn's queue is private
-//! to its actor). Rides `tokio::time`, so `pause`/`advance` drives it in tests.
+//! …). Reuses the single-`DelayQueue` shape from sip-txn (ADR-0007) but with a
+//! B2BUA-local driver (sip-txn's queue is private to its actor). Rides
+//! `tokio::time`, so `pause`/`advance` drives it in tests.
 //!
 //! On expiry the driver emits a [`CallEvent::Timer`] on its fire channel; the
 //! router selects on that channel and routes it through the per-call dispatcher
@@ -148,10 +148,10 @@ impl TimerService {
     /// - Re-arm is idempotent: any later rule-emitted `ScheduleTimer` for the same
     ///   `(call_ref, id)` supersedes the restored entry via the driver's epoch bump.
     ///
-    /// **Wall-time reliance (now bounded at the replication boundary).** `fire_at`
+    /// **Wall-time reliance (bounded at the replication boundary).** `fire_at`
     /// came from the *dead* node's clock and is compared against *this* node's
     /// `now_ms()`, so the reconstructed deadline is only as accurate as the two
-    /// nodes' wall clocks agree. That residual is now **corrected before restore**:
+    /// nodes' wall clocks agree. That residual is **corrected before restore**:
     /// the router's `sanitize_restored_timers` seam re-anchors every rehydrated
     /// `fire_at` by the `skew_offset_ms` the replication boundary persisted
     /// (`receiver_now − origin_now`), so this driver receives deadlines already in
@@ -164,7 +164,7 @@ impl TimerService {
     /// and one paused `tokio::time` timeline, so `fire_at` and `now_ms()` ride the
     /// *same* `Instant` with zero real skew (the harness exercises the past-due path
     /// deterministically; the failover harness's per-node clock-anchor-offset knob
-    /// now injects deterministic inter-node skew to exercise the re-anchor seam).
+    /// injects deterministic inter-node skew to exercise the re-anchor seam).
     pub async fn restore(&self, entries: Vec<TimerEntry>, call_ref: String, incarnation: &str) {
         for entry in entries {
             self.schedule(entry, call_ref.clone(), Some(incarnation.to_string())).await;
@@ -183,12 +183,9 @@ async fn driver(
     // service is a SINGLE shared driver across every call, but timer ids are
     // per-call and collide across calls (every call's keepalive is `"Keepalive"`,
     // every keepalive-timeout is `"KeepaliveTimeout:a"`/`":b"`, etc.). Keying
-    // `active` by id alone aliased calls: scheduling call N+1's `"Keepalive"`
-    // overwrote the entry for call N's, so call N's queued entry was orphaned and
-    // silently never fired — only the most-recently-scheduled call per id kept
-    // its timers, so at scale keepalives stopped firing and dead-peer calls were
-    // never reaped (active_calls grew unbounded). The `(call_ref, id)` key
-    // isolates each call.
+    // `active` by id alone would alias calls: call N+1's `"Keepalive"` would
+    // overwrite call N's entry, orphaning it so it never fires. The
+    // `(call_ref, id)` key isolates each call.
     //
     // The stored `Key` lets Cancel/CancelAll/reschedule physically `try_remove`
     // the queue entry instead of leaving it to expire as a tombstone — see the

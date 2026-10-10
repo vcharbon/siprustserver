@@ -1,6 +1,5 @@
-//! B2BUA metrics — atomic counters/gauges (the source's `MetricsRegistry`
-//! surface reduced to the counters the ported paths move). Cheap to clone
-//! (one `Arc`); read with the `*_total` accessors.
+//! B2BUA metrics — atomic counters/gauges. Cheap to clone (one `Arc`); read
+//! with the `*_total` accessors.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -96,7 +95,7 @@ struct Inner {
     force_purge: AtomicU64,
     fast_reject_terminating: AtomicU64,
     // call reaper (ADR-0020). `handler_panics` counts dispatcher-observed body
-    // panics (pre-reaper these were swallowed — the zero-CDR leak class);
+    // panics;
     // `reaper_verdicts` counts injected synthetic events (stale + fatal +
     // discharge); `reaper_discharged` is the ALARM — the rules path itself
     // failed twice for a call; expected ~0 in any healthy run.
@@ -194,8 +193,7 @@ struct Inner {
     // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
     // came back to reclaim it (crashed for good, past the replica TTL). The backup
     // is NOT a discharge authority, so its periodic reap releases the call's limiter
-    // hold(s) + frees the replica memory but writes **no CDR** — the CDR accounting
-    // is the accepted loss of the double-failure (primary down AND never returns).
+    // hold(s) + frees the replica memory but writes **no CDR**.
     // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
     // and only climbs when a primary is permanently lost mid-call.
     repl_terminal_lost: AtomicU64,
@@ -250,7 +248,7 @@ struct Inner {
     // Inner CallStore map sizes (bodies/idx) — the idx map is insert-only on
     // put_call, so a call whose index keys change across re-flushes (or whose
     // delete passes the wrong keys) strands `idx:*` entries. store_idx_entries
-    // climbing while store_bodies is flat is THAT leak (the no-chaos RSS climb).
+    // climbing while store_bodies is flat is THAT leak.
     store_bodies: AtomicU64,
     store_idx_entries: AtomicU64,
     store_tombstones: AtomicU64,
@@ -1217,8 +1215,7 @@ impl std::fmt::Debug for UdpTransportMetrics {
 }
 
 impl UdpTransportMetrics {
-    /// Build the shape from its live sources — the registry-side of the TS
-    /// `UdpTransport.layer` (`const metrics: UdpTransportMetrics = { … }`).
+    /// Build the shape from its live sources.
     ///
     ///   - `queue_max`: the bind's configured queue bound (`config.udpQueueMax`).
     ///   - `brake`: the [`IngressBrakeCounters`] the `preIngress` hook holds (so
@@ -1271,9 +1268,8 @@ impl UdpTransportMetrics {
         &self.brake
     }
 
-    /// Render the shape as Prometheus text exposition for the `/metrics` body —
-    /// the registry-visible surface of the TS `registry.udp = metrics`
-    /// assignment. All series use the `b2bua_udp_*` namespace.
+    /// Render the shape as Prometheus text exposition for the `/metrics` body.
+    /// All series use the `b2bua_udp_*` namespace.
     ///
     /// Counters (monotonic): `ingress_brake_emergency_bypassed`, `tail_dropped`,
     /// `send_would_block`, `kernel_rx_dropped`. Gauges (instantaneous):
@@ -1286,8 +1282,7 @@ impl UdpTransportMetrics {
         catalogue::UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED
             .render_value(&mut s, self.ingress_brake_emergency_bypassed());
 
-        // ── Inbound queue state (port of UdpTransportMetrics.queueDepth /
-        //    queueMax / dropsTailDrop — live getters over the endpoint). A
+        // ── Inbound queue state (live getters over the endpoint). A
         //    tail-dropping queue otherwise shows 100% accepted, hiding a burst
         //    collapse. ──
         catalogue::udp::QUEUE_DEPTH.render_value(&mut s, self.queue_depth());

@@ -28,7 +28,7 @@ impl LimiterOp {
     pub const ALL: [LimiterOp; 4] =
         [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Release, LimiterOp::Health];
 
-    /// The metric label.
+    /// The `op` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterOp::Admit => "admit",
@@ -89,7 +89,7 @@ pub enum LimiterFailure {
 }
 
 impl LimiterFailure {
-    /// The metric label.
+    /// The `cause` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterFailure::Timeout => "timeout",
@@ -117,7 +117,7 @@ impl AdmitSite {
     /// Every site, in declaration order.
     pub const ALL: [AdmitSite; 3] = [AdmitSite::Initial, AdmitSite::Fold, AdmitSite::Service];
 
-    /// The metric label.
+    /// The `site` label value.
     pub const fn label(self) -> &'static str {
         match self {
             AdmitSite::Initial => "initial",
@@ -143,7 +143,7 @@ impl ReleaseGiveUp {
     pub const ALL: [ReleaseGiveUp; 3] =
         [ReleaseGiveUp::LeaseExpired, ReleaseGiveUp::Cap, ReleaseGiveUp::Shutdown];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             ReleaseGiveUp::LeaseExpired => "lease_expired",
@@ -169,7 +169,7 @@ impl RefreshGiveUp {
     pub const ALL: [RefreshGiveUp; 3] =
         [RefreshGiveUp::LeaseExpired, RefreshGiveUp::Cap, RefreshGiveUp::Released];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             RefreshGiveUp::LeaseExpired => "lease_expired",
@@ -194,7 +194,7 @@ impl RefreshDiscard {
     /// Every reason, in declaration order.
     pub const ALL: [RefreshDiscard; 2] = [RefreshDiscard::CallGone, RefreshDiscard::Stale];
 
-    /// The metric label.
+    /// The `reason` label value.
     pub const fn label(self) -> &'static str {
         match self {
             RefreshDiscard::CallGone => "call_gone",
@@ -216,7 +216,7 @@ impl LimiterTask {
     pub const ALL: [LimiterTask; 3] =
         [LimiterTask::ReleaseSender, LimiterTask::RefreshSender, LimiterTask::BreakerProbe];
 
-    /// The metric label.
+    /// The `task` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterTask::ReleaseSender => "release_sender",
@@ -454,7 +454,7 @@ impl LimiterCounters {
         self.breaker_open.store(open as u64, Ordering::Relaxed);
     }
 
-    /// Whether the breaker is open.
+    /// Whether the breaker gauge reads open.
     pub fn breaker_open(&self) -> bool {
         get(&self.breaker_open) == 1
     }

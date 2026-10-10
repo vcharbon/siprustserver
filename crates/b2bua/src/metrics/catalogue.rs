@@ -319,7 +319,7 @@ pub const UDP: &[Family] = &[
 pub const OVERLOAD: &[Family] =
     &[OVERLOAD_TOKEN_BUCKET_LEVEL, OVERLOAD_ELU_EWMA, OVERLOAD_GC_FRACTION];
 
-/// The capacity gate.
+/// The capacity gate: its level, RSS, ceiling and the backup replicas it shed.
 pub const CAPACITY: &[Family] = &[
     capacity::CAPACITY_LEVEL,
     capacity::CAPACITY_RSS_BYTES,

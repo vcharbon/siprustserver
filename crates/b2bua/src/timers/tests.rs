@@ -235,7 +235,7 @@ async fn timer_flood_past_old_channel_cap_delivers_every_fire() {
     }
 
     // Cross the single deadline so all N fire in one go, with NO interleaved
-    // draining (the worst case the bounded channel dropped on).
+    // draining (the worst case for a bounded channel).
     tokio::time::advance(Duration::from_millis(1_500)).await;
 
     // Drain, letting the driver flush the DelayQueue between empties. Stop

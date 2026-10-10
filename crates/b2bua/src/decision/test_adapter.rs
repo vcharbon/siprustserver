@@ -117,7 +117,7 @@ impl ScriptedDecisionEngine {
                 // (wired via `.on_failure` below). Each route carries its own
                 // `destination` + identity/`new_ruri`, so a register front-proxy can
                 // resolve a different AOR per attempt (bob1 503 → bob2). The single-
-                // destination + DEST-fallback path below is unchanged for plan-less
+                // destination + DEST-fallback path below serves plan-less
                 // and `{destination}`-only traffic (the sipp/endurance streams).
                 if api_call_has_routes(req) {
                     let mut resp = new_call_from_plan(req);
@@ -176,7 +176,7 @@ impl ScriptedDecisionEngine {
                 NewCallResponse::Route(r)
             })
             // Reroute/failover walker (no-op unless a `routes` plan set a
-            // callback_context above; otherwise returns Relay = the prior default).
+            // callback_context above; otherwise returns Relay).
             .on_failure(failure_from_context)
             // REFER blind-transfer authorization (the deployed cluster engine).
             // Keyed on the REFER's `X-Api-Call` (`refer_key` + `destination`),
@@ -190,10 +190,10 @@ impl ScriptedDecisionEngine {
     }
 
     /// Route every call to `host:port` with LOCAL REFER processing activated,
-    /// and authorize the transfers via the default `X-Api-Call`-keyed behavior
-    /// (port of `mockCallReferBehavior`). This is the common REFER-scenario
-    /// constructor: the two halves belong together — a backend that answers
-    /// `/call/refer` is one whose routes state `features.refer`.
+    /// and authorize the transfers via the default `X-Api-Call`-keyed behavior.
+    /// This is the common REFER-scenario constructor: the two halves belong
+    /// together — a backend that answers `/call/refer` is one whose routes state
+    /// `features.refer`.
     pub fn route_all_with_refer(host: impl Into<String>, port: u16) -> Self {
         let dest = (host.into(), port);
         Self::builder()
@@ -228,7 +228,6 @@ impl ScriptedDecisionEngine {
 
 // ── ADR-0017 numbering-plan walker ──────────────────────────────────────────
 
-/// Parse the inbound `X-Api-Call` header as a JSON plan object.
 fn parse_api_call_plan(req: &NewCallRequest) -> Option<serde_json::Value> {
     let raw = req.sip_header("X-Api-Call")?;
     serde_json::from_str(raw).ok()
@@ -379,8 +378,8 @@ fn new_call_from_plan(req: &NewCallRequest) -> NewCallResponse {
         .cloned()
         .unwrap_or_else(|| serde_json::json!({ "action": "relay" }));
     // Only carry a context when there is something to fail over to (a remaining
-    // route or an explicit exhaustion treatment) — a plain single route keeps the
-    // pre-failover behaviour (relay + terminate on failure).
+    // route or an explicit exhaustion treatment) — a plain single route relays
+    // and terminates on failure.
     let mut r = first;
     if routes.len() > 1 || plan.get("on_exhausted").is_some() {
         r.callback_context = Some(remainder_context(&routes[1..], &on_exhausted));
@@ -414,7 +413,7 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
 }
 
 /// Default scripted `/call/refer` behavior, keyed on the REFER's `X-Api-Call`
-/// JSON header (port of `mockCallReferBehavior`, MockServer.ts:192-244):
+/// JSON header:
 ///   - `refer-reject-403` → reject 403/Forbidden (or payload code/reason)
 ///   - `refer-http-500`   → `Error` (→ router maps to outcome `error`/500)
 ///   - `refer-http-timeout` → `Hang` (HTTP never resolves; sub-expiry fires)
@@ -670,7 +669,8 @@ pub fn route_to_with_18x_messages(
     r
 }
 
-/// A reject decision.
+/// A reject decision: `code` and `reason`, with no header updates, service
+/// slices or label.
 pub fn reject(code: u16, reason: impl Into<String>) -> NewCallResponse {
     NewCallResponse::Reject(RejectDecision {
         reject_code: code,
@@ -747,7 +747,7 @@ impl ScriptedBuilder {
                 .unwrap_or_else(|| Box::new(|_| CallTreatment::Relay { label: None })),
             release: self.release,
             refer: self.refer.unwrap_or_else(|| {
-                // Default: transfer is dormant — reject 501 (the pre-slice stub).
+                // Default: transfer is dormant — reject 501.
                 Box::new(|_| {
                     ReferOutcome::Allow(CallReferResponse::Reject {
                         code: 501,

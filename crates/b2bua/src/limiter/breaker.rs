@@ -132,7 +132,6 @@ impl BreakerLimiter {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether the breaker is open.
     fn is_open(&self) -> bool {
         self.lock().open
     }

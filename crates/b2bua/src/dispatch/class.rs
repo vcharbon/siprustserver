@@ -56,7 +56,7 @@ pub enum DispatchClass {
     /// An INVITE with no To-tag carrying an emergency Resource-Priority
     /// (RFC 4412): the start of a new emergency call.
     EmergencyInvite,
-    /// An INVITE in a dialog.
+    /// An INVITE carrying a To-tag: a request in an existing dialog.
     InDialogInvite,
     /// An ACK, which draws no response.
     Ack,

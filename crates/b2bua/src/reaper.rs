@@ -4,8 +4,7 @@
 //!
 //! Failure classes covered (in-process only; hard-crash windows are out of
 //! scope — HA reclaim owns post-crash recovery):
-//! - **handler panic** — the dispatcher's failure hook reports it (the
-//!   pre-reaper swallow leaked the call forever with zero CDR);
+//! - **handler panic** — the dispatcher's failure hook reports it;
 //! - **dropped event** (a queue-full BYE) / **lost timer** (incl. a lost
 //!   `TerminatingTimeout`) / **wedged Terminating** — the **last-touched
 //!   stamp** freezes and the sweep notices.
@@ -66,8 +65,7 @@ pub const OUTCOME_MESSAGE_CAP: &str = "message-cap";
 pub const OUTCOME_DISCHARGE: &str = "discharge";
 
 /// Sweep pacing: at most this many verdicts per tick, so a mass-wedge (or a
-/// mis-tuned idle threshold) becomes a paced drain, never a teardown storm —
-/// the keepalive-shed lesson.
+/// mis-tuned idle threshold) becomes a paced drain, never a teardown storm.
 const MAX_VERDICTS_PER_SWEEP: usize = 64;
 /// Stale verdicts delivered-but-ineffective before the sweep aborts the
 /// in-flight body (a hung handler holds the worker AND the per-call lock; the

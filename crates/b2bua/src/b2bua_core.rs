@@ -1,8 +1,7 @@
 //! `B2buaCore` — composes the dispatcher + router + call store + transaction
 //! layer + timer service + decision engine + CDR writer over a bound UDP
-//! endpoint, and spawns the router loop. Port of `B2buaCore.ts`'s layer
-//! composition. Construct it over an endpoint (in tests, `Harness::bind_sut`),
-//! then drive SIP at the endpoint's address.
+//! endpoint, and spawns the router loop. Construct it over an endpoint (in
+//! tests, `Harness::bind_sut`), then drive SIP at the endpoint's address.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -131,7 +130,7 @@ pub struct B2buaDeps {
     /// its own ([`crate::admission::ceilings`]) to
     /// reach the backlog refusal without stalling the router.
     pub deferred_ceilings: Option<DeferredBound>,
-    /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
+    /// Opt-in replication. `None` → a non-replicating worker.
     pub replication: Option<ReplicationSetup>,
     /// Shared metrics handle. The host builds this so components it constructs
     /// *before* spawn (notably the CDR writers) record into the SAME registry the
@@ -145,7 +144,7 @@ pub struct B2buaDeps {
     pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
     /// Compose-time selection of which built-in CORE machines participate in the
     /// default rule set (ADR-0016 opt-out seam). `Default` =
-    /// every built-in included (behaviour-preserving). A downstream that ships
+    /// every built-in included. A downstream that ships
     /// its own subscription-gated transfer machine sets
     /// [`ComposeOptions::without_core_refer_transfer`](crate::rules::ComposeOptions::without_core_refer_transfer)
     /// so an in-dialog REFER relays transparently instead of being intercepted.
@@ -160,7 +159,7 @@ pub struct B2buaDeps {
 impl B2buaCore {
     /// Build over an already-bound endpoint and spawn the router loop with no
     /// callflow services registered (the composed rule list is exactly
-    /// `default_rules()` — behaviour-preserving).
+    /// `default_rules()`).
     pub fn spawn(endpoint: Box<dyn UdpEndpoint>, deps: B2buaDeps) -> Self {
         Self::spawn_with_services(endpoint, deps, Vec::new())
     }
@@ -268,7 +267,6 @@ impl B2buaCore {
                     .with_replication(setup.store.clone(), writer)
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
-                // Start the topology-driven puller supervisor over the membership.
                 let supervisor = ReplicationSupervisor::new(
                     self_ordinal.clone(),
                     setup.network.clone(),
@@ -366,7 +364,7 @@ impl B2buaCore {
         };
         // Compose the registered services' state-gated rules above the core
         // defaults (ADR-0016). With an empty `services` this is exactly
-        // `default_rules()` — behaviour-preserving. Note: in-tree `transfer` rides
+        // `default_rules()`. Note: in-tree `transfer` rides
         // `default_rules()` directly (its cursor is a projection), so it is not in
         // this list; `services` here is for `init`-seeded services (e.g. the
         // out-of-tree `announcement` capstone).
@@ -447,8 +445,8 @@ impl B2buaCore {
         //      deferred terminal whose primary never reclaimed it), plus the
         //      resurrection-tombstone prune. **No discharge** — the primary is the
         //      sole discharge authority; an evicted deferred terminal has its
-        //      limiter key released and its CDR counted lost (the accepted
-        //      double-failure). No-op without a replicating store.
+        //      limiter key released and its CDR counted lost. No-op without a
+        //      replicating store.
         // The two gates are independent (reaper `enabled` vs replica store present),
         // so neither disabling the reaper nor running without HA suppresses the
         // other. The harness `advance` drives both under the paused clock.
@@ -879,8 +877,7 @@ impl B2buaCore {
     /// Sample the store + replication map sizes into the memory-attribution
     /// gauges (`b2bua_store_*`, `b2bua_repl_meta_*`, `b2bua_repl_changelog_*`).
     /// Called on a slow cadence by the runner so a RSS climb can be pinned to a
-    /// specific map even when `active_calls` is flat — the lens that would have
-    /// named the leak directly instead of by inference. Cheap: a couple of brief
+    /// specific map even when `active_calls` is flat. Cheap: a couple of brief
     /// locks, off the hot path.
     pub fn sample_gauges(&self) {
         self.ctx.state.sample_store_gauges();

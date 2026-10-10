@@ -73,7 +73,7 @@ struct CallMeta {
     /// reached. A later failover/reclaim re-anchors the call's ABSOLUTE
     /// `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock) by
     /// adding this offset, bounding restore skew to ~replication latency. The
-    /// offset includes one transit latency — acceptable at in-cluster ms scale.
+    /// offset includes one transit latency.
     // FIXME(repl): a local write re-mints the deadlines in this node's frame, so the
     // carried offset re-anchors them wrongly on a later takeover; it should carry "none".
     skew_offset_ms: Option<i64>,

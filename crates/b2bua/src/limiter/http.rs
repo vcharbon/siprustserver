@@ -53,9 +53,7 @@ pub struct HttpCallLimiter {
     endpoint: Arc<Endpoint>,
     /// The admit and health budget.
     timeout: Duration,
-    /// The refresh budget.
     refresh_timeout: Duration,
-    /// The release budget.
     release_timeout: Duration,
 }
 
@@ -333,7 +331,6 @@ impl CallLimiter for HttpCallLimiter {
     }
 }
 
-/// The wire form of `entries`.
 fn to_wire(entries: &[LimiterEntry]) -> Vec<AdmitEntry> {
     entries.iter().map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit }).collect()
 }

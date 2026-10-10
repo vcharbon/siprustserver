@@ -75,7 +75,7 @@ const SERVICE_HTTP_RESULT: &str = "service-http-result";
 pub struct AnswerBudgets {
     /// An HTTP request that states no `timeout_ms` of its own.
     pub http: Duration,
-    /// An admit.
+    /// An admit's budget.
     pub admit: Duration,
     /// A `/call/failure` consult's chain ([`failure_budget`]); `None` when
     /// the consult is unbounded.

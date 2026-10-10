@@ -94,10 +94,9 @@ const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
 /// completeness). The connection is NOT dropped on expiry; it keeps streaming.
 const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 /// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
-/// the wire message set was trimmed to the four-frame `{PullRequest, Data, Noop,
-/// ResetToBootstrap}` form, `PullRequest` lost its `mode`/`chunk` fields (one
-/// socket = one flow, scan-then-tail), and `Op` collapsed to `{Put, Delete}`. A
-/// v3 node cannot interpret a v2 peer's frames — pre-production, so no compat shim.
+/// the four-frame `{PullRequest, Data, Noop, ResetToBootstrap}` form (one
+/// socket = one flow, scan-then-tail), `Op` = `{Put, Delete}`. A v3 node cannot
+/// interpret a v2 peer's frames.
 const PROTO_VER: u16 = 3;
 
 /// How an inbound `Data` frame is reconciled into the local store
@@ -168,8 +167,7 @@ impl PullerConfig {
     /// Test-tier config: short backoff + a 2 s bootstrap hard timeout, so a few
     /// paused-clock advances trip the relevant deadline deterministically. ONE
     /// definition — these values are timing-load-bearing under the paused clock
-    /// (tests advance exactly to a deadline), and the previous per-harness
-    /// copies (ha-harness, b2bua test_support, s5) had already drifted.
+    /// (tests advance exactly to a deadline).
     pub fn fast_test() -> Self {
         Self { backoff_init_ms: 100, backoff_max_ms: 1_000, bootstrap_hard_timeout_ms: 2_000 }
     }
@@ -268,7 +266,7 @@ pub struct Puller {
     /// **reactive reclaim** when a backup reverse-flushes one of our calls
     /// (Reclaim-flow tail `Put`) and the bulk reclaim on bootstrap completion.
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
-    /// store directly), so the existing constructors stay source-compatible.
+    /// store directly).
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
     /// The memory admission gate whose backup ceilings bound the replicas this
     /// node stores for its peers (ADR-0037). `None` stores every replica.
@@ -624,8 +622,8 @@ impl Puller {
         }
         // Bodies imported during the pre-`Noop` bootstrap phase — the
         // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
-        // the same value across reconnects would signal truncation (now
-        // structurally impossible, but the gauge keeps proving it).
+        // the same value across reconnects would signal truncation
+        // (structurally impossible, but the gauge keeps proving it).
         let mut applied_in_bootstrap = 0u64;
 
         loop {
@@ -640,7 +638,7 @@ impl Puller {
                         // for READINESS, materialise whatever partial pre-seed has
                         // arrived (Reclaim flow), then KEEP streaming on the same
                         // socket — the real Noop will complete it for real. No
-                        // apply-gate collision exists to force a disconnect now.
+                        // apply-gate collision exists to force a disconnect.
                         self.mark_bootstrap_complete(
                             applied_in_bootstrap,
                             "hard timeout awaiting the first catch-up Noop",
@@ -777,13 +775,11 @@ impl Puller {
                         s.bootstrap_complete = false;
                         s.reset_gen = s.reset_gen.saturating_add(1);
                     });
-                    // RE-ARM the bootstrap hard deadline (X5): clearing
-                    // `bootstrap_complete` without it left the forced re-bootstrap
-                    // with NO liveness escape — if the peer then went unreachable,
-                    // every retry was ConnectFailed with `deadline == None`, the
-                    // best-effort timer could never fire, and `all_bootstrapped()`
-                    // pinned the node NotReady until the dead peer returned. The
-                    // re-bootstrap gets exactly the bound a cold boot gets.
+                    // RE-ARM the bootstrap hard deadline (X5): without it the forced
+                    // re-bootstrap has NO liveness escape — an unreachable peer
+                    // fails every retry with `deadline == None`, and
+                    // `all_bootstrapped()` pins the node NotReady until it returns.
+                    // The re-bootstrap gets exactly the bound a cold boot gets.
                     *deadline = Some(
                         tokio::time::Instant::now()
                             + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),

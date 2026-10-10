@@ -509,15 +509,13 @@ pub(super) fn spawn_release_callout(
                 .await;
                 match admitted {
                     Ok(admitted) => ("reroute", route_result_payload(route, admitted, None)),
-                    // Divergence from the failover chain, DOCUMENTED: a limiter
-                    // reject here does NOT re-consult the engine — the call was
-                    // going down anyway, so the reject degrades to the release
-                    // default (local teardown) instead of a recursive failover
-                    // walk; the refusal released the call's set, and the fold
-                    // states the call uncounted, owing its release. The answer
-                    // still stands for everything but its route: the release
-                    // is marked under its label and its service slices are
-                    // merged.
+                    // A limiter reject here does NOT re-consult the engine: the
+                    // reject degrades to the release default (local teardown)
+                    // instead of a recursive failover walk; the refusal released
+                    // the call's set, and the fold states the call uncounted,
+                    // owing its release. The answer still stands for everything
+                    // but its route: the release is marked under its label and
+                    // its service slices are merged.
                     Err(report) => {
                         let mut payload = json!({
                             "reason": "limiter_rejected",

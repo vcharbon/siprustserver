@@ -42,7 +42,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
-    // Not-live + non-terminal is the original reactive-straggler path; it manages
+    // Not-live + non-terminal is the reactive-straggler path; it manages
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
     if ctx.state.peek(call_ref).is_none() && replica.state != CallModelState::Terminated {
@@ -185,9 +185,8 @@ async fn discharge_folded_terminal(
         .await;
 }
 
-/// Periodic replica-store maintenance. **No CDR is ever written here** — the
-/// acting-backup terminal contract (ADR-0020 X3) makes the **primary the sole CDR
-/// authority**. But a deferred terminal whose primary never came back to reclaim
+/// Periodic replica-store maintenance. **No CDR is ever written here**
+/// (ADR-0020 X3). A deferred terminal whose primary never came back to reclaim
 /// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
 /// to pin its limiter slot or leak its replica body. `reap_replica` evicts every
 /// expired body and hands back the deferred terminals among them, whichever

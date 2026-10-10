@@ -1,10 +1,10 @@
-//! Initial-INVITE handling — port of `InitialInviteHandler.ts`. Builds the
-//! decision request from the INVITE, calls the decision engine, and applies the
-//! route (b-leg creation) or reject. This is an **async** handler (it calls the
-//! decision backend), so it lives outside the synchronous rule chain; the router
-//! invokes it for out-of-dialog INVITEs and runs the result through the same
-//! invariant finalization as a rule result. A setup its caller CANCELed before
-//! its turn ran asks the decision engine nothing ([`cancelled_setup`]).
+//! Initial-INVITE handling. Builds the decision request from the INVITE, calls
+//! the decision engine, and applies the route (b-leg creation) or reject. This
+//! is an **async** handler (it calls the decision backend), so it lives outside
+//! the synchronous rule chain; the router invokes it for out-of-dialog INVITEs
+//! and runs the result through the same invariant finalization as a rule
+//! result. A setup its caller CANCELed before its turn ran asks the decision
+//! engine nothing ([`cancelled_setup`]).
 
 use std::net::SocketAddr;
 
@@ -313,10 +313,10 @@ pub async fn handle_initial_invite(
     match response {
         Ok(NewCallResponse::Route(route)) => {
             // The route built the Call; now run each service's `init` (ADR-0016
-            // X8) — the source's `call-routed` re-entry point — folding any seed
-            // (cursor + data + initial actions) through the normal executor.
+            // X8), folding any seed (cursor + data + initial actions) through the
+            // normal executor.
             // A dormant service (`init` → `None`) and the empty-service list
-            // (production today) both leave the result untouched.
+            // both leave the result untouched.
             let result = apply_route(
                 call,
                 route,

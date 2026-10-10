@@ -200,13 +200,12 @@ fn sm_cursor_census_renders_and_overwrites() {
 }
 
 // -----------------------------------------------------------------------
-// UdpTransportMetrics shape (port of `UdpTransport.ts` UdpTransportMetrics)
+// UdpTransportMetrics shape
 // -----------------------------------------------------------------------
 
 /// A `UdpTransportMetrics` whose `queueDepth` / `dropsTailDrop` are backed by
 /// caller-held atomics (standing in for a live `UdpEndpoint`), with the real
-/// brake counters. Mirrors the TS shape's
-/// live getters without standing up a fabric — the fabric-proxy facet is
+/// brake counters, without standing up a fabric — the fabric-proxy facet is
 /// covered end-to-end in `tests/it/udp_transport_metrics.rs`.
 fn shape() -> (UdpTransportMetrics, IngressBrakeCounters, Arc<AtomicU64>, Arc<AtomicU64>) {
     let brake = IngressBrakeCounters::new();
@@ -226,8 +225,7 @@ fn shape() -> (UdpTransportMetrics, IngressBrakeCounters, Arc<AtomicU64>, Arc<At
 }
 
 /// Every facet is a LIVE getter: a value changed in the underlying source is
-/// seen by the metrics shape on the next read, never a stale snapshot. This
-/// is the TS `get queueDepth() { return endpoint.queueDepth() }` contract.
+/// seen by the metrics shape on the next read, never a stale snapshot.
 #[test]
 fn udp_transport_metrics_facets_are_live() {
     let (m, brake, depth, tail) = shape();
