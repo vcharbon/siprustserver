@@ -537,6 +537,7 @@ fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
     let end = prop_oneof![
         any::<u16>().prop_map(DialogEnd::Rejected),
         Just(DialogEnd::PeerBye),
+        Just(DialogEnd::EarlyPeerBye),
         proptest::option::of(any::<u16>())
             .prop_map(|final_status| DialogEnd::OurBye { final_status }),
     ];

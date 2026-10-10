@@ -2475,6 +2475,55 @@ mod media_primitives {
         exec.execute(actions, call, &ctx)
     }
 
+    /// The statuses `result` answered with, in order.
+    fn answered(result: &HandlerResult) -> Vec<u16> {
+        result
+            .effects
+            .outbound
+            .iter()
+            .filter_map(|e| match &e.body {
+                b2bua::effects::OutboundBody::Response(r) => Some(r.status()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A caller request toward a peer dialog this stack's BYE is ending draws
+    // the final its method always takes where no relay could ever carry it
+    // (SUBSCRIBE: 489, RFC 6665 §4.2.1.2), and 500 + Retry-After where a
+    // relay could later (INFO, RFC 3261 §14.2).
+    #[test]
+    fn a_request_toward_an_ending_peer_takes_its_methods_final() {
+        let mut call = test_call();
+        give_a_leg_dialog(&mut call);
+        let mut b = confirmed_b_leg("b-1", LegKind::Destination);
+        for d in b.dialogs.iter_mut() {
+            d.state = DialogState::Ending(call::EndingBy::Bye);
+        }
+        call = call::helpers::add_b_leg(call, b);
+        call = call::helpers::merge_leg(call, "a", "b-1");
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        for (method, status) in
+            [(sip_message::Method::Subscribe, 489), (sip_message::Method::Info, 500)]
+        {
+            let event = CallEvent::Sip {
+                message: Box::new(SipMessage::Request(super::in_dialog_request(method.clone()))),
+                src: "127.0.0.1:5060".parse().unwrap(),
+                matched_client_txn: false,
+            };
+            let result = exec_on(
+                &call,
+                &event,
+                "a",
+                &config,
+                &id_gen,
+                &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
+            );
+            assert_eq!(answered(&result), vec![status], "{method:?}");
+        }
+    }
+
     // Relay-to-peer from an unadopted media leg relays nothing — it must NOT
     // fall back to A — and its request is refused 403.
     #[test]
