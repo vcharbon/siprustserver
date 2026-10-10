@@ -762,7 +762,8 @@ A dialog record stays until its call is released.
 
 **Retired dialog**:
 An early dialog the call let go of without a BYE: a losing callee fork, a
-caller-facing dialog the answer did not take. It keeps the relays still open
+caller-facing dialog the answer did not take, an early dialog of a leg ended
+before its INVITE's final. It keeps the relays still open
 in it and, for a fork whose 2xx came late, the ACK and BYE that released it.
 _Avoid_: "pruned"/"dropped" dialog (nothing is removed).
 
