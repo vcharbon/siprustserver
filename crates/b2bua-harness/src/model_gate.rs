@@ -12,9 +12,6 @@
 pub struct Mark(usize);
 
 impl Mark {
-    /// The start of the process: every violation it met.
-    pub const PROCESS: Mark = Mark(0);
-
     /// Now: only the violations recorded from here on.
     pub fn now() -> Mark {
         Mark(b2bua::rules::model_invariants::violations().len())

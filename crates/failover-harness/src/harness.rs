@@ -961,6 +961,9 @@ pub struct FailoverHarness {
     /// `write_unified_report`) disarms it so we never double-write. A `Cell` (not
     /// atomic) is enough — the whole harness lives on one current-thread test task.
     report_on_drop: std::cell::Cell<bool>,
+    /// Where this run starts in the process's record of model-invariant
+    /// violations: its Drop judges only the ones its own workers met.
+    since: b2bua_harness::model_gate::Mark,
     /// Recording decorator over the repl sim fabric (the repl capture sink).
     repl_recording: RecordingReplicationNetwork,
     /// The underlying repl sim fabric — fault controls go here directly.
@@ -1168,6 +1171,7 @@ impl FailoverHarness {
             clock: clock.clone(),
             name: name.to_string(),
             report_on_drop: std::cell::Cell::new(true),
+            since: b2bua_harness::model_gate::Mark::now(),
             repl_recording,
             repl_sim,
             repl_resolver: Arc::new(Mutex::new(repl_addrs.clone())),
@@ -2549,7 +2553,7 @@ impl Drop for FailoverHarness {
         }
 
         // A turn of any worker that broke a model invariant fails the test.
-        b2bua_harness::model_gate::gate_on_drop(b2bua_harness::model_gate::Mark::PROCESS);
+        b2bua_harness::model_gate::gate_on_drop(self.since);
 
         // If the harness was consumed there is nothing to audit — skip (mirrors
         // the write-on-Drop guard).
