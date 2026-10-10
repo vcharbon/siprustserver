@@ -85,7 +85,8 @@ pub enum RelayPeer {
 ///   3. an unadopted leg (parked `media`, un-realigned `transfer-target`) is
 ///      its service's and relays nowhere;
 ///   4. a caller request on a dialog that fronts nothing: the first confirmed
-///      b-leg, else the first b-leg, on the dialog its requests ride;
+///      b-leg, else the first one not ended, on the dialog its requests ride
+///      (none: [`RelayPeer::NoLeg`]);
 ///   5. a callee request: the a-leg.
 ///
 /// Toward the a-leg the dialog is the live caller-facing one fronting the
@@ -121,7 +122,7 @@ pub fn resolve_relay_peer(
             .b_legs
             .iter()
             .find(|l| l.state() == LegState::Confirmed)
-            .or_else(|| call.b_legs.first());
+            .or_else(|| call.b_legs.iter().find(|l| l.state() != LegState::Terminated));
         return match peer {
             Some(l) => toward(&l.leg_id),
             None => RelayPeer::NoLeg,
@@ -147,18 +148,32 @@ fn toward_caller(call: &Call, source_leg_id: &str, source: Option<&DialogId>) ->
     }
 }
 
-/// The callee leg and dialog the caller-facing dialog `face` relays: the
-/// first it fronts whose dialog carries requests, else the first it fronts.
-/// `None` when it fronts none.
+/// The callee leg and dialog the caller-facing dialog `face` relays: of the
+/// callee dialogs it fronts, the one a provisional last showed her under it
+/// whose dialog carries requests, else that last one (her view of the
+/// dialog, RFC 3261 §12.1.1). `None` when it fronts none.
 fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a Dialog>)> {
     let fork = |f: &crate::model::PeerDialog| {
         find_b_leg(call, &f.leg_id).and_then(|l| callee_dialog(l, &f.peer_tag))
     };
-    let first = face.fronts.first()?;
+    let last = face.fronts.last()?;
     face.fronts
         .iter()
+        .rev()
         .find_map(|f| fork(f).filter(|d| d.carries_requests()).map(|d| (f.leg_id.clone(), Some(d))))
-        .or_else(|| Some((first.leg_id.clone(), fork(first))))
+        .or_else(|| Some((last.leg_id.clone(), fork(last))))
+}
+
+/// Note that a provisional of the callee dialog `(b_leg_id, b_tag)` was just
+/// shown to the caller: it becomes the last its caller-facing dialog fronts.
+pub fn note_shown(call: &mut Call, b_leg_id: &str, b_tag: &str) {
+    for d in call.a_leg.dialogs.iter_mut() {
+        let at = d.fronts.iter().position(|f| f.leg_id == b_leg_id && f.peer_tag == b_tag);
+        if let Some(at) = at {
+            let shown = d.fronts.remove(at);
+            d.fronts.push(shown);
+        }
+    }
 }
 
 /// Is the relay target of an in-dialog request from `source_leg_id` in a

@@ -1,7 +1,10 @@
 //! Dialog-level helpers: CSeq bookkeeping, the ACK-branch retention rule,
-//! pending transparent-relay entries and the per-dialog SDP cache.
+//! pending transparent-relay entries, a retired dialog's relays and release,
+//! and the per-dialog SDP cache.
 
-use crate::model::{Call, Dialog, DialogId, Leg, PendingRequest, RetainedEmission};
+use crate::model::{
+    Call, Dialog, DialogId, DialogState, Leg, PendingRequest, RetainedEmission, RetiredDialog,
+};
 
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
@@ -288,4 +291,18 @@ pub fn cached_sdp_for_leg_dialog<'a>(
 ) -> Option<&'a [u8]> {
     let leg = find_leg(call, leg_id)?;
     super::leg::callee_dialog(leg, b_tag)?.cached_sdp.as_deref()
+}
+
+/// Note the final or the timeout of the BYE on `bye_branch` that released a
+/// retired dialog (RFC 3261 §15.1.1): that release is settled.
+pub fn settle_straggler_release(mut call: Call, bye_branch: &str) -> Call {
+    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
+    for d in legs.flat_map(|l| l.dialogs.iter_mut()) {
+        if let DialogState::Retired(RetiredDialog { release: Some(r), .. }) = &mut d.state {
+            if r.bye_branch == bye_branch {
+                r.settled = true;
+            }
+        }
+    }
+    call
 }

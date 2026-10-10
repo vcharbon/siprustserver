@@ -109,11 +109,13 @@ impl ActionExecutor<'_> {
         // emitted on the wire.
         let reason_header = reason.filter(|r| r.trim_start().starts_with("SIP"));
         // a-leg ∪ b-legs, in that order.
-        let legs: Vec<(String, LegState, bool)> = std::iter::once(&call.a_leg)
+        let legs: Vec<(String, LegState, bool, bool)> = std::iter::once(&call.a_leg)
             .chain(call.b_legs.iter())
-            .map(|l| (l.leg_id.clone(), l.state(), l.leg_id == call.a_leg.leg_id))
+            .map(|l| {
+                (l.leg_id.clone(), l.state(), l.invite_ringing(), l.leg_id == call.a_leg.leg_id)
+            })
             .collect();
-        for (id, state, is_a) in legs {
+        for (id, state, ringing, is_a) in legs {
             match state {
                 LegState::Confirmed => {
                     // A 2xx still unACKed is ACKed bare ahead of the BYE
@@ -147,17 +149,18 @@ impl ActionExecutor<'_> {
                         self.reject_pending_non_invites(call, fx, &id);
                     }
                 }
-                LegState::Trying | LegState::Early => {
-                    // A ringing b-leg is CANCELled (§9.1): a 200 crossing the
-                    // CANCEL is reaped by `cancel-200-crossing`.
+                // A b-leg whose INVITE still rings is CANCELled (§9.1), an
+                // early dialog its peer ended aside: a 200 crossing the
+                // CANCEL is reaped by `cancel-200-crossing`.
+                _ if ringing => {
                     let relayed = relayed(&Method::Cancel, &id);
                     self.prack_relayed_unacknowledged(call, fx, &id, None);
                     self.send_cancel(call, fx, &id, &relayed.headers);
                     self.reject_pending_non_invites(call, fx, &id);
                 }
-                // Already ended or being ended: its CANCEL or BYE left, or the
-                // firing rule ended it.
-                LegState::Terminated => {}
+                // Already ended or being ended: its CANCEL or BYE left, its
+                // INVITE took its final.
+                _ => {}
             }
         }
         // Nothing awaits an answer and no service makes progress once the
@@ -196,12 +199,9 @@ impl ActionExecutor<'_> {
                 value: value.clone().into(),
             })
             .collect();
-        let state = call
-            .b_legs
-            .iter()
-            .find(|l| l.leg_id == leg_id)
-            .map(|l| l.state())
-            .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state()));
+        let leg = call::helpers::find_leg(call, leg_id);
+        let state = leg.map(|l| l.state());
+        let ringing = leg.is_some_and(|l| l.invite_ringing());
         match state {
             Some(LegState::Confirmed) => {
                 // A 2xx still unACKed is ACKed bare ahead of the BYE (RFC 3261
@@ -227,7 +227,7 @@ impl ActionExecutor<'_> {
             }
             // The CANCEL leaves the leg `Cancelling`: a 200 OK crossing it
             // matches `cancel-200-crossing` and is ACK+BYE'd.
-            Some(LegState::Trying) | Some(LegState::Early) => {
+            _ if ringing => {
                 self.prack_relayed_unacknowledged(call, fx, leg_id, None);
                 self.send_cancel(call, fx, leg_id, &stated);
             }

@@ -27,20 +27,6 @@ pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
     })
 }
 
-/// Note the final or the timeout of the BYE on `bye_branch` that released a
-/// retired dialog (RFC 3261 §15.1.1): that release is settled.
-pub fn settle_straggler_release(mut call: Call, bye_branch: &str) -> Call {
-    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
-    for d in legs.flat_map(|l| l.dialogs.iter_mut()) {
-        if let DialogState::Retired(RetiredDialog { release: Some(r), .. }) = &mut d.state {
-            if r.bye_branch == bye_branch {
-                r.settled = true;
-            }
-        }
-    }
-    call
-}
-
 /// Record the final sent on a leg's initial inbound INVITE
 /// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
 /// carries one is left as is — the transaction took exactly that one final.
@@ -120,14 +106,9 @@ pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
 }
 
 /// Record the `487` the transaction layer answered a CANCEL of `leg_id`'s
-/// initial INVITE with (RFC 3261 §9.2). It is the final the wire carries even
-/// when the record already holds a 2xx: one built after the layer's 487, which
-/// the completed transaction never sent. That 2xx is kept as
-/// [`Leg::answer_preempted`], the leg goes back to the early dialog its
-/// provisional opened (no confirmation, no 2xx awaiting its ACK), and its
-/// message ring drops the 2xx entry, so the ring holds only what reached the
-/// wire. Every dialog the INVITE opened, the one the 2xx would have
-/// confirmed included, ends under the 487 (RFC 3261 §12.1).
+/// initial INVITE with (RFC 3261 §9.2): the wire's final, over a 2xx built
+/// too late ([`Leg::answer_preempted`]), whose ring entry and ACK obligation
+/// go; every dialog the INVITE opened ends under the 487 (§12.1).
 pub fn record_cancelled_invite(call: Call, leg_id: &str) -> Call {
     update_leg(call, leg_id, |l| {
         if let Some(answer) = l.invite_final_sent.filter(|s| (200..300).contains(s)) {

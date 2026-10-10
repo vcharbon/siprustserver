@@ -309,16 +309,11 @@ impl ServerTxn {
         self.winner = Some(winner);
     }
 
-    /// Form the UAS-side [`Dialog`] for this transaction, so this UA can
-    /// originate in-dialog requests (e.g. the callee sends the BYE). Its local
-    /// tag is that of the response that created it (RFC 3261 §12.1.1): the
-    /// 2xx's or the one [`adopt_to_tag`](Self::adopt_to_tag) pinned, whichever
-    /// came last, else the sticky tag, else the first tagged provisional's; a
-    /// request already naming a dialog names its own. The remote target is the caller's Contact; the route set
-    /// is the request's Record-Route in order (§12.1.1), so in-dialog requests
-    /// route back through any proxy. Its own sequence starts at this UA's
-    /// [`Party::first_cseq`](super::Party::first_cseq). Panics before any
-    /// response created a dialog.
+    /// The UAS-side [`Dialog`] of this transaction (RFC 3261 §12.1.1): its
+    /// local tag the response that created it carried (the request's own
+    /// when it names one), the caller's Contact as target, the Record-Route
+    /// as route set, its sequence from [`Party::first_cseq`](super::Party::first_cseq).
+    /// Panics before any response created a dialog.
     pub fn dialog(&self) -> Dialog {
         let req = &self.request;
         let local_tag = req

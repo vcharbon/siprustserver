@@ -82,6 +82,12 @@ impl Leg {
         self.outbound_invite.as_ref().is_some_and(|i| i.cancel_sent)
     }
 
+    /// Whether the INVITE this stack dialled the leg with still rings: no
+    /// final and no CANCEL of it yet (RFC 3261 §9.1), whatever its dialogs.
+    pub fn invite_ringing(&self) -> bool {
+        self.outbound_invite.as_ref().is_some_and(|i| i.final_received.is_none() && !i.cancel_sent)
+    }
+
     /// The leg's state: `Confirmed` while one of its dialogs is; else
     /// `Terminated` once a BYE ended or is ending one of them, its INVITE was
     /// cancelled or took a final; else `Early` while one of its dialogs is;
@@ -94,7 +100,9 @@ impl Leg {
                 DialogState::Confirmed => return LegState::Confirmed,
                 DialogState::Early => early = true,
                 DialogState::Ending(EndingBy::Bye)
-                | DialogState::Ended(DialogEnd::PeerBye | DialogEnd::OurBye { .. }) => ended = true,
+                | DialogState::Ended(
+                    DialogEnd::PeerBye | DialogEnd::EarlyPeerBye | DialogEnd::OurBye { .. },
+                ) => ended = true,
                 _ => {}
             }
         }
@@ -115,7 +123,9 @@ impl Leg {
         for d in self.dialogs.iter() {
             by_bye = match d.state {
                 DialogState::Ending(EndingBy::Bye) => return Some(ByeDisposition::ByeSent),
-                DialogState::Ended(DialogEnd::PeerBye) => Some(ByeDisposition::ByeReceived),
+                DialogState::Ended(DialogEnd::PeerBye | DialogEnd::EarlyPeerBye) => {
+                    Some(ByeDisposition::ByeReceived)
+                }
                 DialogState::Ended(DialogEnd::OurBye { final_status: Some(_) }) => {
                     Some(ByeDisposition::ByeConfirmed)
                 }

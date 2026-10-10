@@ -42,17 +42,10 @@ impl ActionExecutor<'_> {
     }
 
     /// Mint the early dialog a tagged response to a b-leg's INVITE creates
-    /// (RFC 3261 §12.1.2), so a subsequent in-dialog request (PRACK/UPDATE)
-    /// can target the callee with the right To-tag. One early dialog per
-    /// distinct callee To-tag (downstream forking → several per b-leg), each
-    /// from the leg's INVITE ([`call::Leg::outbound_invite`]): its tag, its
-    /// CSeq as the start of the dialog's own sequence, and its client
-    /// transaction handle (the ACK-for-2xx and RAck CSeq, §13.2.2.4 / RFC 3262
-    /// §7.2). Called from the b-leg 1xx/2xx relay path, from
-    /// [`Self::ensure_b_early_dialog`] (the suppressed-provisional seam), and
-    /// from [`Self::confirm`] (a 2xx answering under a tag that never
-    /// rang). Idempotent per tag; a leg this stack did not dial has no such
-    /// dialogs.
+    /// (RFC 3261 §12.1.2) from the leg's INVITE: its tag, its CSeq as the
+    /// start of the dialog's sequence, its client transaction (§13.2.2.4,
+    /// RFC 3262 §7.2). Idempotent per tag; a leg this stack did not dial has
+    /// none.
     pub(super) fn track_b_early_dialog(
         &self,
         call: &mut Call,

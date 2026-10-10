@@ -41,12 +41,16 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
 }
 
 /// Mark the leg's dialog `id` names — else its confirmed one — `Ended(end)`.
+/// A peer's BYE on a dialog no 2xx established ends it `EarlyPeerBye`; a
+/// dialog already ended keeps the end it took.
 fn end_one(leg: &mut Leg, id: Option<call::DialogId>, end: DialogEnd) {
     let d = match id {
         Some(id) => leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag),
         None => leg.dialogs.confirmed_mut(),
     };
-    if let Some(d) = d {
-        d.state = DialogState::Ended(end);
-    }
+    let Some(d) = d.filter(|d| !matches!(d.state, DialogState::Ended(_))) else { return };
+    d.state = match end {
+        DialogEnd::PeerBye if !d.is_confirmed() => DialogState::Ended(DialogEnd::EarlyPeerBye),
+        end => DialogState::Ended(end),
+    };
 }

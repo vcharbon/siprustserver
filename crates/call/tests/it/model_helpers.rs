@@ -1091,3 +1091,18 @@ fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
     let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
     assert!(kept.retired().is_some_and(|r| r.open_relays.is_empty()));
 }
+
+/// A dialog the peer's BYE ended while early was never established: only
+/// the dialog a 2xx confirmed is (RFC 3261 §12.1, §13.2.2.4).
+#[test]
+fn an_early_dialog_the_peers_bye_ended_was_never_established() {
+    let mut leg = representative_call().b_legs[0].clone();
+    let ours = leg.outbound_invite.clone().expect("a dialled leg").our_tag;
+    leg.dialogs.retain(|_| false);
+    let mut early = Dialog::new(&ours, "fork1", DialogState::Ended(DialogEnd::EarlyPeerBye), 1);
+    early.ack_branch = None;
+    leg.dialogs.insert(early);
+    leg.dialogs.insert(Dialog::new(&ours, "fork2", DialogState::Confirmed, 1));
+    assert_eq!(leg.dialogs.established().map(|d| d.peer_tag.as_str()), Some("fork2"));
+    assert_eq!(leg.state(), LegState::Confirmed);
+}

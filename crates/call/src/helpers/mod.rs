@@ -50,7 +50,7 @@ pub use dialog::{
     find_pending_request, invite_glare, invite_transaction_open, peer_update_pending,
     relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, take_retired_relays, PendingHolder,
+    set_awaited_ack_cseq, settle_straggler_release, take_retired_relays, PendingHolder,
 };
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
@@ -60,7 +60,7 @@ pub use leg::{
 pub use leg_end::{
     abandon_leg, cancel_early_dialogs, record_cancel_sent, record_cancelled_invite,
     record_dialled_invite_final, record_dialling_invite_rejected, record_invite_final,
-    reject_early_dialogs, retire_early_dialogs, settle_straggler_release,
+    reject_early_dialogs, retire_early_dialogs,
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};
@@ -70,8 +70,8 @@ pub use obligation::{
     restate_leg_invite, restate_retained, retained_for, Scope,
 };
 pub use peering::{
-    a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, relay_peer_dialog,
-    relay_peer_dialog_ready, resolve_relay_peer, split_leg, RelayPeer,
+    a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, note_shown,
+    relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg, RelayPeer,
 };
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{

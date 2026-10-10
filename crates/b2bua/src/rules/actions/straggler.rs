@@ -1,13 +1,8 @@
-//! The release of a fork STRAGGLER's 2xx (RFC 3261 §13.2.2.4): a 2xx to a
-//! b-leg's INVITE under a To-tag no live dialog of the leg carries, arriving
-//! once another fork confirmed the leg. The UAC core ACKs every 2xx it
-//! receives and BYEs a dialog it does not want, so this stack does both, once
-//! per straggler dialog: a repeat of that 2xx is re-ACKed with the same ACK and
-//! draws no second BYE. The straggler is a retired dialog of the leg
-//! ([`call::RetiredDialog`]) — the losing fork's own, or one minted from the
-//! leg's INVITE for a tag that never rang — whose BYE continues its own
-//! sequence, and whose release keeps that BYE's final and timeout apart from
-//! the winning dialog.
+//! The release of a fork straggler's 2xx (RFC 3261 §13.2.2.4): a 2xx under a
+//! To-tag no live dialog of an already confirmed b-leg carries is ACKed and
+//! its dialog BYEd, once per straggler; a repeat is re-ACKed with the same ACK.
+//! The straggler is a retired dialog of the leg ([`call::RetiredDialog`]),
+//! whose BYE continues its own sequence.
 
 use call::{Call, Dialog, DialogState, RetiredDialog, StragglerRelease};
 use sip_message::generators::{self, GenerateAckFor2xxOpts};

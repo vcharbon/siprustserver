@@ -28,16 +28,20 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    the INVITE's. A caller-facing dialog exists once the stack mints its tag.
 3. **A dialog carries its state**: `Early`, `Confirmed`, `Ending` (our BYE
    of it, or our CANCEL of its INVITE, in flight; the INVITE's final ends a
-   cancelled one), `Ended(Rejected | PeerBye | OurBye)` and `Retired` — an early
+   cancelled one), `Ended(Rejected | PeerBye | EarlyPeerBye | OurBye)` (an end
+   is written once; only a 2xx-established dialog counts as established) and
+   `Retired` — an early
    dialog the call let go of without a BYE (a losing fork, a caller-facing
    dialog the answer did not take, a leg given up before its INVITE's final),
    holding the relays still open in it and
    the ACK/BYE that released its late 2xx (§13.2.2.4). No record is removed
    before the call is: a late message is answered by what its dialog was.
 4. **A caller-facing dialog states the callee dialogs it relays**
-   (`fronts`): one, or several a masking policy shows the caller as one.
+   (`fronts`): one, or several a masking policy shows the caller as one; her
+   request there goes to the one a provisional last showed her under it.
    Answering the caller confirms the dialog the 2xx names and retires the
-   others; no dialog is renamed.
+   others; no dialog is renamed, save the stack's own early dialog a service
+   names before any response showed it.
 5. **The engine resolves every message's dialog before any rule** (the
    dialog gate), so a rule reads what it was handed (`RuleContext::dialog`,
    `RuleContext::relayed_pending`) and never looks a dialog up again. A
@@ -97,6 +101,10 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    `Terminated`; the dialog keeps the in-flight detail. `Leg::end()` and
    `Leg::disposition()` read the same facts; `TerminateLeg` states what it
    records (`LegEnd`), never a state to write.
+
+Every usage of a dialog ends with its INVITE usage (RFC 5057 §5.2 is not
+modelled): a NOTIFY after the BYE transaction completed draws 481, which ends
+the notifier's subscription (RFC 6665).
 
 ## Consequences
 

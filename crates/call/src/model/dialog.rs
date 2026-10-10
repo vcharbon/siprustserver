@@ -116,8 +116,11 @@ pub enum EndingBy {
 pub enum DialogEnd {
     /// The dialog-creating INVITE drew this non-2xx final (§12.1, §13.2.2.3).
     Rejected(u16),
-    /// The peer sent a BYE (§15.1.2).
+    /// The peer sent a BYE on the dialog a 2xx established (§15.1.2).
     PeerBye,
+    /// The peer sent a BYE on the dialog while it was early: no 2xx ever
+    /// established it (§15; a callee's is a deviation).
+    EarlyPeerBye,
     /// This side's BYE completed: `final_status` is its final, `None` when
     /// its transaction timed out (§15.1.1).
     OurBye { final_status: Option<u16> },
@@ -192,9 +195,10 @@ pub struct Dialog {
     pub remote_target: String,
     /// Route set from the dialog-creating message (§12.1.1, §12.1.2).
     pub route_set: Vec<String>,
-    /// On a caller-facing dialog, the callee dialogs it relays, in the order
-    /// they were shown under it: one, or several a masking policy shows the
-    /// caller as one dialog. Empty for a dialog this stack answers itself.
+    /// On a caller-facing dialog, the callee dialogs it relays, the one a
+    /// provisional last showed under it last: one, or several a masking
+    /// policy shows the caller as one dialog. Empty for a dialog this stack
+    /// answers itself.
     pub fronts: Vec<PeerDialog>,
     /// A provisional this stack sent the caller carried this dialog's
     /// `our_tag`, so she holds the early dialog it names (§12.1.1): a
