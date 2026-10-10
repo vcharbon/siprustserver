@@ -1,19 +1,20 @@
 //! `pivot-schema` — publish the pivot contracts, normalise documents to them and
 //! check what a schema cannot.
 //!
-//! Five subcommands, one product each: `schema` emits the JSON Schema other
+//! Six subcommands, one product each: `schema` emits the JSON Schema other
 //! languages' mirrors are checked against — for the two authored documents and
 //! for the four record kinds a run leaves behind — `fmt` is the normative
 //! canonical formatter, `lint` runs the semantic rules, `tiers` emits the
-//! tier / body-handling data a generator would otherwise reverse-engineer, and
-//! `schedules` the retransmission ladders it would otherwise walk itself.
+//! tier / body-handling data a generator would otherwise reverse-engineer,
+//! `schedules` the retransmission ladders it would otherwise walk itself, and
+//! `rule-copies` rewrites the non-Rust copies of the RFC rule list.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pivot_schema::bundle::{RecordedMessage, RunConfig, RunRfcAudit, RunTiming, RunVerdict};
-use pivot_schema::{canonical, lint, schedules, tiers, PivotV3, RuleFile};
+use pivot_schema::{canonical, lint, rule_copies, schedules, tiers, PivotV3, RuleFile};
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +62,13 @@ enum Command {
     /// Print the retransmission schedule every ladder rides on stdout: per
     /// class, the rung intervals to the give-up, in milliseconds.
     Schedules,
+    /// Name the files outside Rust that restate the RFC rule list and differ
+    /// from the registry; non-zero when one does.
+    RuleCopies {
+        /// Rewrite each stale copy instead.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 /// The contracts this crate owns: the two documents a pipeline authors, and the
@@ -152,6 +160,21 @@ fn run(cli: Cli) -> Result<(), String> {
                 canonical::format(&schedules::schedule_table()).map_err(|e| e.to_string())?
             );
             Ok(())
+        }
+        Command::RuleCopies { write } => {
+            let root = rule_copies::repo_root();
+            for copy in rule_copies::copies(&root)?.iter().filter(|c| c.is_stale()) {
+                if write {
+                    copy.write()?;
+                    println!("wrote {}", copy.path.display());
+                } else {
+                    println!("stale {}", copy.path.display());
+                }
+            }
+            match rule_copies::stale_report(&root)? {
+                Some(report) if !write => Err(report),
+                _ => Ok(()),
+            }
         }
     }
 }

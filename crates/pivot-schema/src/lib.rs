@@ -52,6 +52,7 @@ pub mod msg;
 pub mod must_fail;
 pub mod placement;
 pub mod postcondition;
+pub mod rule_copies;
 pub mod rules;
 pub mod schedules;
 pub mod scoping;
