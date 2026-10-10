@@ -217,7 +217,8 @@ async fn a_direction_that_contradicts_this_nodes_role_folds_nothing() {
 /// terminal it deferred to its dead primary; the body's TTL runs out and a
 /// request for the call reaches the backup before the periodic reap does.
 /// The takeover read finds nothing to serve, and the reap that follows
-/// still releases the call's key, once; a second pass finds nothing.
+/// still releases the call's key and counts its CDR lost, once; a second
+/// pass finds nothing.
 #[tokio::test(start_paused = true)]
 async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_once() {
     let n = node("w1").await;
@@ -273,7 +274,7 @@ async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_onc
 
 /// **A panic in the store's other upkeep never takes the evicted bodies.**
 /// With the replica changelog's lock poisoned, the reap still releases an
-/// expired deferred terminal's key, once.
+/// expired deferred terminal's key and counts its CDR lost, once.
 #[tokio::test(start_paused = true)]
 async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release() {
     let n = node("w1").await;
@@ -394,8 +395,8 @@ async fn a_reverse_reconcile_of_another_stored_call_never_ends_the_live_one() {
 /// **A deferred terminal another call replaced is released by its own
 /// key.** A backup holds the terminal its takeover copy deferred to the
 /// primary; the primary's next write on the ref is a retry, which replaces
-/// it. The reap releases the replaced call's own key, once; the retry's key
-/// is never touched.
+/// it. The reap releases the replaced call's own key and counts its CDR
+/// lost, once; the retry's key is never touched.
 #[tokio::test(start_paused = true)]
 async fn a_deferred_terminal_another_call_replaced_is_released_by_its_own_key() {
     let n = node("w1").await;

@@ -42,9 +42,14 @@
 //! means by it — a ringing refresh, a re-offer — so it opens a new first copy
 //! rather than repeating the old one.
 //!
-//! **One row is masked: the emitter's own `Record-Route`.** The two copies are
-//! compared with every `Record-Route` row whose EVERY hop names the emitter
-//! itself (host and port of the emitting vantage) left out of each;
+//! **One row is masked: the emitter's own `Record-Route`.** A proxy computes
+//! its `Record-Route` per forwarded request (§16.6 step 4) and a stateless one
+//! has no memory of what it stamped last time, while §16.11 fixes its Via
+//! branch so the downstream server transaction absorbs the copy as a
+//! retransmission — and that taker never reads a retransmission's route rows,
+//! its route set having been fixed by the first copy (§12.1.1). So the two
+//! copies are compared with every `Record-Route` row whose EVERY hop names the
+//! emitter itself (host and port of the emitting vantage) left out of each;
 //! every other byte stays in — the top Via, a `Record-Route` naming anyone
 //! else, `CSeq`, the body. A row that folds a foreign hop beside the emitter's
 //! own, or that no reader accepts, is compared whole, and the masked rows pair
