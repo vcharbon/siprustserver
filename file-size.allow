@@ -99,8 +99,6 @@ crates/repl-net/src/transport/simulated.rs 1080
 crates/rfc-rules/src/rules/ack.rs 713
 crates/rfc-rules/src/rules/cancel.rs 666
 crates/rfc-rules/src/rules/capability.rs 648
-crates/rfc-rules/src/rules/correlation.rs 1086
-crates/rfc-rules/src/rules/correlation/tests.rs 1011
 crates/rfc-rules/src/rules/cseq.rs 626
 crates/rfc-rules/src/rules/cseq/tests.rs 874
 crates/rfc-rules/src/rules/dialog.rs 941
