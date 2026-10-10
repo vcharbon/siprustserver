@@ -456,3 +456,84 @@ async fn a_reaped_crossing_200_leaves_the_caller_unanswered_for_the_reroute_fina
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+/// A reaped crossing 200 shows the caller nothing, so the reroute is one
+/// like any other (`reroute_rejection_tag`): in transparent mode the second
+/// attempt's ringing opens her second early dialog under a tag of its own,
+/// and its 200 establishes that dialog. Every caller-facing message of the
+/// second attempt carries that one tag.
+#[tokio::test(start_paused = true)]
+async fn after_a_reaped_crossing_200_the_reroute_rings_and_answers_as_any_reroute() {
+    let h = Harness::with_transit_delay("noanswer-cancel-200-crossing-reroute-rings", 1);
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let carol = h.agent("carol", "127.0.0.1:5076").await; // rings, no-answer'd, answers late
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
+    let bob = h.agent("bob", "127.0.0.1:5077").await; // reroute target, rings then answers
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5076);
+                r.no_answer_timeout_sec = Some(30);
+                r.callback_context = Some("noanswer-ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| match req.failure.failed_leg_id.as_deref() {
+                Some("b-1") => {
+                    let mut r = route_to("127.0.0.1", 5077);
+                    r.callback_context = Some("noanswer-ctx".into());
+                    CallTreatment::Route(r)
+                }
+                _ => CallTreatment::Relay { label: None },
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_sec = 300;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    let first = call.expect(180).await;
+    let first_tag = first.to().tag().expect("the first attempt's caller-facing tag").to_string();
+
+    h.advance(Duration::from_secs(30) + Duration::from_millis(300)).await;
+    carol.receive("CANCEL").await.respond(200, "OK").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    carol.receive("ACK").await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    let ringing = call.expect(180).await;
+    let second_tag = ringing.to().tag().expect("the reroute's caller-facing tag").to_string();
+    assert_ne!(
+        second_tag, first_tag,
+        "transparent mode: the reroute's ring opens the caller's second early dialog"
+    );
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let answer = call.expect(200).await;
+    assert_eq!(answer.to().tag(), Some(second_tag.as_str()), "the answer confirms that dialog");
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
