@@ -148,7 +148,7 @@ impl Obligation for NoNewReliable1xxAfterFinal {
                 }
                 let Some(rseq) = a.rseq else { continue };
                 if !used.insert(rseq) {
-                    continue; // an RSeq this transaction already used
+                    continue;
                 }
                 out.push(Finding {
                     rule: RuleId::NoNewReliable1xxAfterFinal,

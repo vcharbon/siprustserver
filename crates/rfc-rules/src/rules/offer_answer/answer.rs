@@ -19,7 +19,7 @@ fn answer_finding(rule: RuleId, a: &Answered<'_>, decision: Decision) -> Finding
         emitter: a.src.to_string(),
         taker: a.dst.to_string(),
         cseq: a.offer_cseq,
-        relayed: false, // a relay lane is the consumer's to skip
+        relayed: false,
         anchor: a.msg,
         decision,
     }

@@ -74,7 +74,7 @@ struct ConfirmedDialogs {
 }
 
 impl ConfirmedDialogs {
-    /// Forwarding both directions of this Call-ID — see the module doc.
+    /// Forwarding both directions of this Call-ID — see the family doc.
     fn relays(&self) -> bool {
         self.sent_establishing && self.took_establishing
     }

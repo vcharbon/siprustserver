@@ -14,9 +14,8 @@ use super::reading::Reading;
 /// A plain 18x against that demand is neither.
 ///
 /// The occasion is ONE provisional the UAS sent on the demanding transaction.
-/// The 420 discharges the WHOLE transaction wherever on it it went out — a UAS
-/// that rejects the extension owes nothing about the provisionals it already
-/// sent. Charges the UAS.
+/// The 420 discharges the WHOLE transaction wherever on it it went out.
+/// Charges the UAS.
 pub struct RequireReliable1xxOnRequire;
 
 impl Obligation for RequireReliable1xxOnRequire {
@@ -38,7 +37,7 @@ impl Obligation for RequireReliable1xxOnRequire {
                     emitter: key.uas.to_string(),
                     taker: a.taker.to_string(),
                     cseq: a.cseq,
-                    relayed: false, // a lane that only relays is the consumer's to skip
+                    relayed: false,
                     anchor: a.msg,
                     decision: if !a.readable {
                         Decision::Undecidable("the vantage recorded no headers for the response")

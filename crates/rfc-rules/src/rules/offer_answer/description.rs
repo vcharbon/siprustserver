@@ -12,8 +12,9 @@ use super::doc::{stream_row, Doc};
 /// **RFC 3264 §5-6 / RFC 4566 §5 — a body sent as SDP satisfies the
 /// offer/answer grammar.** A real peer 488s a malformed description: no `v=0`
 /// session, two sessions in one body, an `o=` sess-id/version that is not a
-/// digit string, a stream with no `c=` or no port, a non-positive `a=ptime`. A test UA accepts the body and masks the defect, so
-/// the recording is where the offer's own grammar is checked at all.
+/// digit string, a stream with no `c=` or no port, a non-positive `a=ptime`.
+/// A test UA accepts the body and masks the defect, so the recording is where
+/// the offer's own grammar is checked at all.
 ///
 /// **The occasion is one fresh message the endpoint sent DECLARING a
 /// description and carrying bytes** — `application/sdp`, or a `multipart/…`
@@ -70,9 +71,7 @@ impl Obligation for SdpBodyParseable {
 /// is not held at all.
 ///
 /// **One finding per DESCRIPTION**, naming every stream at fault: writing one
-/// body with contradictory dispositions is one act. Charges the sender; scoped
-/// to the offering UAC by consumer policy, since an answerer legitimately
-/// rejects a stream at port 0 while echoing a real address.
+/// body with contradictory dispositions is one act. Charges the sender.
 pub struct C0PortNonZero;
 
 impl Obligation for C0PortNonZero {

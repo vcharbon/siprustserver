@@ -32,16 +32,16 @@
 //! `relayed` false and the consumer skips the lanes it knows to be relays — the
 //! [`super::final_response`] precedent.
 //!
-//! **A body-less vantage decides nothing.** [`Msg::body`](crate::wire::Msg::body) is `None` where the
-//! vantage did not carry the bytes; a rule that needs a body fact there returns
-//! `Undecidable`, never a guess. `Some(&[])` is the opposite — the message
-//! demonstrably carried no body.
+//! **A body-less vantage decides nothing.** [`Msg::body`](crate::wire::Msg::body)
+//! is `None` where the vantage did not carry the bytes; a rule that needs a body
+//! fact there returns `Undecidable`, never a guess. `Some(&[])` is the opposite —
+//! the message demonstrably carried no body.
 //!
 //! **Two of the obligations here need no round at all** —
 //! [`SdpBodyParseable`] and [`C0PortNonZero`] judge ONE description on its own
-//! bytes — and they still live in this file: RFC 3264 is one family, every
+//! bytes — and they still belong to this family: RFC 3264 is one family, every
 //! `sdp_doc` reading in this crate is here, and they charge the sender exactly
-//! as every rule above does.
+//! as every round rule does.
 //!
 //! SDP grammar is [`sip_message::sdp_doc`]'s and [`sip_message::sdp`]'s: this
 //! module reads a description, it never parses one.

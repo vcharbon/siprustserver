@@ -32,7 +32,7 @@ pub(super) struct PeerDialog {
 }
 
 impl PeerDialog {
-    /// Forwarding both directions of this dialog — see the module doc.
+    /// Forwarding both directions of this dialog — see the family doc.
     pub(super) fn relays(&self) -> bool {
         self.sent_invite && self.took_invite
     }

@@ -94,8 +94,8 @@ crate::registry::rules! {
     /// a body is still unPRACKed. Charges that UAS.
     Delay2xxOnUnackedReliable1xxWithSdp = "delay-2xx-on-unacked-reliable-1xx-with-sdp";
     /// RFC 3262 §3: a UAS emits no NEW reliable provisional on an INVITE transaction it has already
-    /// answered. Charges that UAS; the reliable-only sibling of [`RuleId::No1xxAfterFinal`](crate::RuleId::No1xxAfterFinal), keyed
-    /// on `RSeq`.
+    /// answered. Charges that UAS; the reliable-only sibling of
+    /// [`RuleId::No1xxAfterFinal`](crate::RuleId::No1xxAfterFinal), keyed on `RSeq`.
     NoNewReliable1xxAfterFinal = "no-new-reliable-1xx-after-final";
     /// RFC 3262 §4: a 100 Trying is never reliable, so a UAC never PRACKs one whatever `Require:
     /// 100rel` it carries. Charges the PRACK's sender.

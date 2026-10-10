@@ -43,8 +43,6 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
                 }) {
                     offer_1xx_msg.get_or_insert(q.msg);
                     let Some(rseq) = q.rseq else { continue };
-                    // A later copy of an `RSeq` is its retransmission: the
-                    // provisional was judged from its first emission.
                     if !judged.insert(rseq) {
                         continue;
                     }
@@ -57,8 +55,6 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
                         unacked.push(rseq);
                     }
                 }
-                // No offer went out reliably on this transaction: the 2xx owed
-                // nothing and the obligation was never tested.
                 let Some(offer_1xx_msg) = offer_1xx_msg else { continue };
                 out.push(Finding {
                     rule: RuleId::Delay2xxOnUnackedReliable1xxWithSdp,

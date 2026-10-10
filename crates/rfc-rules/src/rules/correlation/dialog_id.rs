@@ -33,8 +33,6 @@ impl Obligation for MidDialogTags {
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if !msg.repeat {
                 if let Some(dlg) = st.taker_of(msg) {
-                    // A request is judged only once the peer's tag has appeared;
-                    // a response's From-tag is the taker's own from the first.
                     let (header, tag) = match &msg.kind {
                         Kind::Request { .. } if !dlg.remote_tagged => ("To", None),
                         Kind::Request { .. } => ("To", msg.to_tag.as_ref()),

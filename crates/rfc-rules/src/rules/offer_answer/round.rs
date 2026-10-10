@@ -34,7 +34,7 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
                 emitter: ack.src.to_string(),
                 taker: ack.dst.to_string(),
                 cseq: ack.cseq,
-                relayed: false, // a relay lane is the consumer's to skip
+                relayed: false,
                 anchor: ack.msg,
                 decision,
             };
@@ -125,7 +125,7 @@ impl Obligation for Final2xxAnswersTheOffer {
                 emitter: due.src.to_string(),
                 taker: due.dst.to_string(),
                 cseq: due.offer_cseq,
-                relayed: false, // a relay lane is the consumer's to skip
+                relayed: false,
                 anchor: due.msg,
                 decision,
             });
@@ -232,7 +232,7 @@ impl Obligation for SecondAnswerRepeatsTheFirst {
                 emitter: r.src.to_string(),
                 taker: r.dst.to_string(),
                 cseq: r.offer_cseq,
-                relayed: false, // a relay lane is the consumer's to skip
+                relayed: false,
                 anchor: r.msg,
                 decision,
             });
@@ -276,7 +276,7 @@ impl Obligation for NoNewOfferWhileOfferPending {
                 emitter: s.src.to_string(),
                 taker: s.dst.to_string(),
                 cseq: s.cseq,
-                relayed: false, // a relay lane is the consumer's to skip
+                relayed: false,
                 anchor: s.msg,
                 decision,
             });

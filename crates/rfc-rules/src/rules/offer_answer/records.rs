@@ -29,8 +29,8 @@ pub(super) struct Round<'a> {
     pub(super) offer_cseq: u32,
     /// The agent SENT the description that opened this round, rather than
     /// taking it — the round is an offer of ITS OWN. Read by
-    /// [`NoNewOfferWhileOfferPending`](super::NoNewOfferWhileOfferPending), which §5 charges only for overtaking
-    /// the agent's own pending offer.
+    /// [`NoNewOfferWhileOfferPending`](super::NoNewOfferWhileOfferPending),
+    /// which §5 charges only for overtaking the agent's own pending offer.
     pub(super) offer_sent: bool,
     /// The early dialog the offer's own message named (its To tag), empty on an
     /// INITIAL request — which every dialog its forks open answers. Two early
@@ -44,7 +44,8 @@ pub(super) struct Round<'a> {
     /// that stated the BINDING answer there — a final, or a reliable
     /// provisional (§13.2.1, RFC 3262 §5). An unreliable provisional's
     /// description is early media the peer may re-latch on and binds nothing,
-    /// so it never enters here. Read by [`SecondAnswerRepeatsTheFirst`](super::SecondAnswerRepeatsTheFirst).
+    /// so it never enters here. Read by
+    /// [`SecondAnswerRepeatsTheFirst`](super::SecondAnswerRepeatsTheFirst).
     pub(super) bound: BTreeMap<&'a str, usize>,
 }
 
@@ -187,6 +188,7 @@ pub(super) struct AgentState<'a> {
     /// a readable `o=` line on this call.
     pub(super) last_origin: Option<usize>,
     /// Indexes into the view's `msgs` of EVERY description this agent sent on
-    /// this call, ascending — the stream [`Reading::sent_streams`](super::reading::Reading::sent_streams) publishes.
+    /// this call, ascending — the stream
+    /// [`Reading::sent_streams`](super::reading::Reading::sent_streams) publishes.
     pub(super) sent_docs: Vec<usize>,
 }

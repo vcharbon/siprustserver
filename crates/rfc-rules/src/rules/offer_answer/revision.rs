@@ -120,7 +120,7 @@ impl Obligation for ReOfferMLineCountMonotonic {
                     emitter: wire.msgs[msg].src.clone(),
                     taker: wire.msgs[msg].dst.clone(),
                     cseq: wire.msgs[msg].cseq,
-                    relayed: false, // a relay lane is the consumer's to skip
+                    relayed: false,
                     anchor: msg,
                     decision,
                 });
@@ -199,7 +199,7 @@ impl Obligation for PayloadTypeMappingStable {
                     emitter: wire.msgs[mi].src.clone(),
                     taker: wire.msgs[mi].dst.clone(),
                     cseq: wire.msgs[mi].cseq,
-                    relayed: false, // a relay lane is the consumer's to skip
+                    relayed: false,
                     anchor: mi,
                     decision,
                 });

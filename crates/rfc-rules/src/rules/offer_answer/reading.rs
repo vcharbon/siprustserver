@@ -74,9 +74,10 @@ pub(super) struct Reading<'a> {
     pub(super) delayed_acks: Vec<DelayedAck<'a>>,
     /// Per agent and call, the indexes into the view's `msgs` of the
     /// descriptions that agent SENT, ascending. Read by
-    /// [`ReOfferMLineCountMonotonic`](super::ReOfferMLineCountMonotonic) (consecutive pairs) and
-    /// [`PayloadTypeMappingStable`](super::PayloadTypeMappingStable) (the payload-type bindings the whole stream
-    /// states).
+    /// [`ReOfferMLineCountMonotonic`](super::ReOfferMLineCountMonotonic)
+    /// (consecutive pairs) and
+    /// [`PayloadTypeMappingStable`](super::PayloadTypeMappingStable) (the
+    /// payload-type bindings the whole stream states).
     pub(super) sent_streams: Vec<Vec<usize>>,
 }
 

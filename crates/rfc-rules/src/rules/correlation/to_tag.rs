@@ -25,10 +25,9 @@ const DIALOG_INITIATING_METHODS: &[&str] =
 /// **The occasion is the FIRST message an endpoint puts on a Call-ID, in either
 /// direction** — that is the point at which nothing yet names a dialog from
 /// that endpoint's seat. Once ANY traffic for the Call-ID has crossed, later
-/// same-Call-ID requests are in-dialog and a To-tag is legitimate; CANCEL and
-/// the other intrinsically in-dialog verbs are no occasion at any point,
-/// CANCEL's tag semantics belonging to the §9.1 rules that pair it with its
-/// INVITE.
+/// same-Call-ID requests are no occasion; CANCEL and the other intrinsically
+/// in-dialog verbs are no occasion at any point, CANCEL's tag semantics
+/// belonging to the §9.1 rules that pair it with its INVITE.
 ///
 /// Every fact is a wire-model one, so the occasion is always DECIDED. Charges
 /// the endpoint that sent the request.
@@ -211,10 +210,11 @@ impl DialogWitness {
 /// 2xx to INVITE answered it, or a To-tagged provisional opened it early and
 /// no non-2xx final has ended it (§12.1), and the peer named the remote tag on
 /// a message the sender received. Beside an early dialog alone, a tag-less
-/// INVITE is a new dialog-creating request, not an occasion. The received tag is what makes the demand
-/// well-founded on either side — a UAS reads its own local tag off the 2xx it
-/// sends, and a caller that minted no tag leaves the remote tag null, which
-/// §12.2.1.1 has the sender express by OMITTING the To tag parameter.
+/// INVITE is a new dialog-creating request, not an occasion. The received tag
+/// is what makes the demand well-founded on either side — a UAS reads its own
+/// local tag off the 2xx it sends, and a caller that minted no tag leaves the
+/// remote tag null, which §12.2.1.1 has the sender express by OMITTING the To
+/// tag parameter.
 ///
 /// The exemptions keep it to genuine sender defects, and each is no occasion
 /// rather than a pass: a request whose To is a verbatim echo of another message

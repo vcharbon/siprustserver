@@ -1,5 +1,5 @@
 //! The family's OWN semantics: what an adapter's event fixtures cannot
-//! state — the closed-observation ruling (D2), the fork partition, and
+//! state — the closed-observation ruling, the fork partition, and
 //! each rule's undecidable gates.
 
 use std::collections::BTreeMap;

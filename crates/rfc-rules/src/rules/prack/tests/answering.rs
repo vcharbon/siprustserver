@@ -3,7 +3,7 @@
 use super::*;
 
 /// The same message crossing the other way — the vantage of a hop that TOOK
-/// what the builders above have it send.
+/// what the fixture builders have it send.
 fn inbound(mut m: Msg) -> Msg {
     std::mem::swap(&mut m.src, &mut m.dst);
     m
