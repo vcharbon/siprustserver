@@ -35,6 +35,7 @@ mod cancel_during_slow_decision;
 mod cancel_on_a_capped_call;
 mod cancel_reinvite_offering_100rel;
 mod cancel_while_waiting_for_a_permit;
+mod cancelled_fork_bye;
 mod capacity_admission;
 mod cdr_write_before_remove;
 mod charging_in_dialog_invites;
