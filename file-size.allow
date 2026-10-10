@@ -107,8 +107,6 @@ crates/rfc-rules/src/rules/dialog.rs 941
 crates/rfc-rules/src/rules/dialog/tests.rs 1212
 crates/rfc-rules/src/rules/offer_answer.rs 1661
 crates/rfc-rules/src/rules/offer_answer/tests.rs 1664
-crates/rfc-rules/src/rules/prack.rs 1546
-crates/rfc-rules/src/rules/prack/tests.rs 1245
 crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/reinvite.rs 670
 crates/rfc-rules/src/rules/retransmit.rs 513
