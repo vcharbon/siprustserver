@@ -47,6 +47,7 @@ mod decision_lands_on_cancelled_call;
 mod decision_log;
 mod destination_allowlist_gate;
 mod destroy_leg_stated_reason;
+mod dialog_gate;
 mod dialog_states;
 mod discarded_invite_and_cancel;
 mod discarded_request_readmitted;

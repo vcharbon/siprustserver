@@ -427,7 +427,7 @@ async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
 /// callee's 180 is answered toward her as a 180 under the B2BUA's own To-tag,
 /// the callee's 183 as a 183 under a To-tag the service states; neither is
 /// relayed.
-mod own_then_stated {
+pub(crate) mod own_then_stated {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
         ServiceSeed, Terminal,

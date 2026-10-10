@@ -300,6 +300,43 @@ async fn the_straggler_bye_answer_leaves_the_winners_bye_pending() {
     let _report = h.finish().await;
 }
 
+/// The straggler hangs up as its release reaches it: its own BYE crosses the
+/// release BYE (RFC 3261 §15.1.2) on the dialog this call retired. It is
+/// answered 200 and nothing of it reaches the winning dialog, which stays up.
+#[tokio::test(start_paused = true)]
+async fn the_straggler_bye_crossing_its_release_is_answered_200() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-crossing-bye",
+        (6091, 6092, 6093),
+        Some(OFFER),
+        ANSWER_WINNER,
+        None,
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    let mut release = bob.receive("BYE").await;
+    assert_eq!(release.request().to().tag(), Some(STRAGGLER));
+    uas.adopt_to_tag(STRAGGLER);
+    let mut straggler = uas.dialog();
+    straggler.bye().await.expect(200).await;
+    release.respond(200, "OK").await;
+    h.advance(Duration::from_millis(200)).await;
+    assert_eq!(alice.drain().await, 0, "nothing reached alice: her call is untouched");
+    assert_eq!(b2bua.active_calls(), 1, "the bridged call survives the straggler's BYE");
+
+    let mut bye = dialog.bye().await;
+    let mut b_bye = bob.receive("BYE").await;
+    assert_eq!(b_bye.request().to().tag(), Some(WINNER), "the hangup ends the winner");
+    b_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
 /// A delayed offer (RFC 3261 §13.2.1): the b-leg INVITE carried none, so the
 /// straggler's 2xx carries an offer, and the ACK MUST carry the answer
 /// (§13.2.2.4). The release answers it rejecting every stream — port 0, the
