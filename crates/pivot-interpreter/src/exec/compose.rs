@@ -35,7 +35,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// un-ACKed INVITE this leg sent, else the newest answering any of them.
     ///
     /// LEG STATE names the transaction, never the step's captured `cseq` (§6.3)
-    /// — the same resolution `Stack::ack_for` composes against, fallback
+    /// — the same resolution `LegStack::ack_for` composes against, fallback
     /// included. RFC 3261 §14.1 leaves one INVITE outstanding per dialog, so a
     /// compliant peer offers one candidate. A captured peer that pipelined a
     /// second re-INVITE before ACKing the first's 2xx offers two, and each ACK
