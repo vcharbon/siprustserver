@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use call::{Call, CallModelState, TimerKey, TimerType};
+use call::{Call, CallModelState, TimerKey};
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, HandlerResult};
 use crate::obligations::ObligationSet;
@@ -290,8 +290,8 @@ pub(super) fn check_declared_transition(
 /// so a handler targeting a dynamically-named leg still satisfies a `LegMessage`
 /// declaration; cursor moves (`SetState`/`ClearState`) and bookkeeping are
 /// auto-allowed (`EffectKind::is_tracked` is false). A timer the rule arms or
-/// cancels is held to its declared `GuardTimer`s by type, a service timer by
-/// its owning service ([`declares_timer`]). Core (machine-less) rules declare
+/// cancels is held to its declared `GuardTimer`s by type and scope kind
+/// ([`declares_timer`]). Core (machine-less) rules declare
 /// no effects and are not checked. Debug builds panic (a test failure);
 /// release builds log and proceed — an authoring gap must never panic a live
 /// worker. Mirrors [`check_declared_transition`].
@@ -331,21 +331,13 @@ pub(super) fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleActio
     }
 }
 
-/// Whether `rule` declares a `GuardTimer` naming `key`: the same type (for a
-/// service timer, one of the same owning service) under the same kind of
-/// scope.
+/// Whether `rule` declares a `GuardTimer` naming `key`: the same timer type
+/// (a service timer by its owning service and its key) under the same kind
+/// of scope.
 fn declares_timer(rule: &RuleDefinition, key: &TimerKey) -> bool {
-    rule.effects.iter().any(|e| match (e, &key.timer_type) {
-        (
-            Effect::GuardTimer {
-                timer: TimerType::Service { service_id: declared, .. },
-                scope,
-                ..
-            },
-            TimerType::Service { service_id, .. },
-        ) => declared == service_id && *scope == key.scope.kind(),
-        (Effect::GuardTimer { timer, scope, .. }, timer_type) => {
-            timer == timer_type && *scope == key.scope.kind()
+    rule.effects.iter().any(|e| match e {
+        Effect::GuardTimer { timer, scope, .. } => {
+            *timer == key.timer_type && *scope == key.scope.kind()
         }
         _ => false,
     })

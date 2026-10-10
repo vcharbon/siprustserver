@@ -354,3 +354,17 @@ fn a_timer_armed_under_another_scope_than_declared_is_an_authoring_bug() {
         )]))
     });
 }
+
+/// A service timer is declared by its owning service and its key: another
+/// key of the same service is an undeclared timer.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "emitted an undeclared timer")]
+fn a_service_timer_of_another_key_than_declared_is_an_authoring_bug() {
+    let _ = run_watching(|_| {
+        Some(RuleHandleResult::new(vec![RuleAction::cancel(TimerKey::call(TimerType::service(
+            MachineId::new(TEST_MACHINE),
+            "other",
+        )))]))
+    });
+}

@@ -24,7 +24,8 @@ use b2bua_sdk::event::CallEvent;
 ///   - Keepalive audit timer: fail OPEN — skip this probe cycle but RE-ARM the
 ///     timer so liveness detection resumes next interval; a store fault alone
 ///     must never tear down an established call (protected-calls invariant,
-///     docs/testing/ha-acceptance.md). A fire the resident copy no longer
+///     docs/testing/ha-acceptance.md). A fire of a call no longer resident
+///     passes on, the router dropping it; one the resident copy no longer
 ///     holds at its generation is stale and dropped, the live one left armed.
 ///   - everything else (responses, CANCEL/timeout/internal events) is
 ///     deliberately un-probed: those paths owe no store-derived answer, and
@@ -50,13 +51,13 @@ pub(super) async fn in_dialog_store_fault_gate(
             return false;
         }
         if ctx.store_faults.check(StoreFaultPoint::LiveAudit).is_err() {
-            // A fire the resident copy no longer holds is stale: re-arming it
-            // would displace the live instance from the driver.
-            let stale = ctx
-                .state
-                .peek(call_ref)
-                .is_some_and(|call| !call::helpers::holds_timer(&call, key, *generation));
-            if stale {
+            // A fire of a call no longer here is the router's to drop with the
+            // call's ephemera, never re-armed; one its resident copy no longer
+            // holds is stale: re-arming it would displace the live instance.
+            let Some(resident) = ctx.state.peek(call_ref) else {
+                return false;
+            };
+            if !call::helpers::holds_timer(&resident, key, *generation) {
                 tracing::debug!(%call_ref, timer = ?key, generation, "stale keepalive fire dropped");
                 return true;
             }

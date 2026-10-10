@@ -657,8 +657,9 @@ _Avoid_: re-listing the global machine's downstream BYEs as service leg messages
 **Guard timer**:
 A **tracked side effect**: a service safety/watchdog timer the rule **arms** (or
 cancels) — e.g. the REFER re-INVITE-answer watchdog. Declared by its `TimerType`
-and the kind of **timer scope** its key guards; every key the rule arms or
-cancels is held to a declaration. ("Armed" is the canonical verb, per the HA
+(a service timer: its owning service and its key) and the kind of **timer
+scope** its key guards; every key the rule arms or cancels is held to a
+declaration. ("Armed" is the canonical verb, per the HA
 glossary above.)
 
 **Machine deactivation**:
@@ -765,9 +766,10 @@ route (dialled by the core or by the service its routing deferred to), a
 setup failover, an established call's reroute, a transfer target. Each has a
 **cause**, the decision ordinal it opened under, its legs, the ring deadline
 its answer states, and once ended an **outcome**: answered, failed (every leg
-ended), superseded (the next attempt opened while a leg still rang or was
-being cancelled), call ended, or refused (admission refused its route; it
-dialled nothing). A dialled leg names its attempt; a media leg names none.
+ended), superseded (the next attempt opened while its legs were still being
+cancelled), call ended, or refused (admission refused its route; it dialled
+nothing). An attempt with a leg still ringing stays open beside the next. A
+dialled leg names its attempt; a media leg names none.
 _Avoid_: "attempt" for a retransmission or a re-send (a **rung** of a
 **ladder**); "try"; "route" alone for the attempt (the route is its answer).
 

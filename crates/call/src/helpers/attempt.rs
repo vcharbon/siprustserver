@@ -18,8 +18,10 @@ pub fn find_attempt(call: &Call, id: AttemptId) -> Option<&Attempt> {
 }
 
 /// Open the next attempt for `cause` under the call's current decision. An
-/// attempt still open ends first: `Failed` when every leg it dialled has
-/// ended, else `Superseded`. The new attempt's id, and the attempts it ended.
+/// attempt still open whose legs no longer ring ends first: `Failed` when
+/// every leg it dialled has ended, `Superseded` when one is still being
+/// cancelled. One with a leg still ringing, not being cancelled, stays open
+/// beside the new one. The new attempt's id, and the attempts it ended.
 pub fn open_attempt(
     call: &mut Call,
     cause: AttemptCause,
@@ -27,7 +29,7 @@ pub fn open_attempt(
 ) -> (AttemptId, Vec<AttemptId>) {
     let mut ended = Vec::new();
     for at in 0..call.attempts.len() {
-        if !call.attempts[at].is_open() {
+        if !call.attempts[at].is_open() || rings(call, &call.attempts[at]) {
             continue;
         }
         let outcome = if all_legs_ended(call, &call.attempts[at]) {
@@ -106,6 +108,12 @@ pub fn dialled_leg_ended(leg: &Leg) -> bool {
     leg.state() == LegState::Terminated
         && leg.disposition() != LegDisposition::Cancelling
         && leg.end() != Some(crate::model::ByeDisposition::ByeSent)
+}
+
+/// Whether a leg of `attempt` is live: neither ended nor being cancelled (a
+/// cancelled leg reads `Terminated` from its CANCEL on).
+fn rings(call: &Call, attempt: &Attempt) -> bool {
+    attempt.legs.iter().filter_map(|id| b_leg(call, id)).any(|l| l.state() != LegState::Terminated)
 }
 
 fn all_legs_ended(call: &Call, attempt: &Attempt) -> bool {

@@ -6,7 +6,8 @@
 //! [`MatchKind::Lifecycle`]; its handler may arm or cancel its own service
 //! timers, move its own machine's cursor and write call ext. A machine the
 //! turn deactivated, or one on a call the turn terminated, still hears the
-//! events the turn caused, for its ext writes alone.
+//! events the turn caused, for its ext writes alone; those reach the call's
+//! CDR, which is written from the call as the turn lands, after this close.
 
 use std::collections::BTreeMap;
 

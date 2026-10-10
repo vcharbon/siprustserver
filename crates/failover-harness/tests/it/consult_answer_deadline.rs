@@ -410,6 +410,9 @@ async fn release_cell(name: &str, recovery: Recovery) {
         resent_at <= served_at.max(deadline) + STEP.as_millis() as i64,
         "the copy re-sent the release consult at its answer deadline, or as it was served past it"
     );
+    if served_at < deadline {
+        assert!(resent_at >= deadline, "served before the deadline, the copy waited for it");
+    }
     c.alice.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     c.bob.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult once");

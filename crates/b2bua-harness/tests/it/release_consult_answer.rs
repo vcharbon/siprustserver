@@ -3,9 +3,10 @@
 //! The duration cap raises the consult; the consult's answer deadline is the
 //! decision deadline plus the reroute's admit budget plus the margin, so a
 //! reroute answered late in its decision budget whose admit runs long still
-//! lands before the cap fires again. A release fold no consult awaits — a
-//! duplicate, or one landing on a reroute already in progress — reaches no
-//! rule: the call dials one replacement leg.
+//! lands before the cap fires again. A release fold whose consult is no
+//! longer awaited reaches no rule and moves nothing of the call; a reroute
+//! fold landing on a reroute already in progress dials nothing. The
+//! deadline's expiry on the node serving the call re-sends the consult.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -174,12 +175,12 @@ async fn a_reroute_whose_admit_runs_long_is_answered_by_the_consults_deadline() 
     let _ = h.finish().await;
 }
 
-/// A release fold landing while the reroute it would start is already in
-/// progress — a duplicate answer of the call's consult — reaches no rule:
-/// the reroute in progress completes and no second replacement leg is
-/// dialled.
+/// A reroute fold naming no consult (an unbounded one's) that lands while
+/// the reroute it would start is already in progress dials nothing: the
+/// `release-result-reroute` rule's guard absorbs it, the reroute in progress
+/// completes and no second replacement leg is dialled.
 #[tokio::test(start_paused = true)]
-async fn a_release_fold_no_consult_awaits_reaches_no_rule() {
+async fn a_reroute_fold_landing_on_a_reroute_in_progress_dials_nothing() {
     const CALL_ID: &str = "release-fold-duplicate@127.0.0.1";
     let h = Harness::new("release-fold-duplicate");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -234,4 +235,148 @@ async fn a_release_fold_no_consult_awaits_reaches_no_rule() {
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// Answers the first `call_release` consult `first_delay` late with a reroute
+/// toward 5090 holding `y`, every later one at once toward 5091 holding `z`.
+struct TwoReleases {
+    first_delay: Duration,
+    releases: Arc<AtomicUsize>,
+    inner: Arc<dyn CallDecisionEngine>,
+}
+
+#[async_trait]
+impl CallDecisionEngine for TwoReleases {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        self.inner.new_call(req).await
+    }
+    async fn call_failure(
+        &self,
+        req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        self.inner.call_failure(req).await
+    }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.inner.call_refer(req).await
+    }
+    async fn call_release(
+        &self,
+        _req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        let first = self.releases.fetch_add(1, Ordering::SeqCst) == 0;
+        let (port, id) = if first { (5090, "y") } else { (5091, "z") };
+        if first {
+            tokio::time::sleep(self.first_delay).await;
+        }
+        let mut r = route_to("127.0.0.1", port);
+        r.call_limiter = vec![LimiterEntry { id: id.into(), limit: 10 }];
+        Ok(CallReleaseResponse::Route(r))
+    }
+}
+
+/// What a call whose first release consult outlived its deadline left: the
+/// consults sent once the deadline expired, the call's record after both
+/// answers landed, and whether the first answer's destination was dialled.
+struct TwoAnswers {
+    resent: usize,
+    record: call::Call,
+    first_dialled: bool,
+}
+
+/// The cap raises consult #1, answered 4 s late; its deadline expires on the
+/// serving node first (the driver's fire, posted), consult #2 goes out and
+/// its reroute is applied; then #1's answer lands.
+async fn release_answer_expired_then_both_answers_land(name: &str) -> TwoAnswers {
+    let call_id = format!("{name}@127.0.0.1");
+    let h = Harness::new(name);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let media1 = h.agent("media1", "127.0.0.1:5090").await;
+    let media2 = h.agent("media2", "127.0.0.1:5091").await;
+    let releases = Arc::new(AtomicUsize::new(0));
+    let decision = Arc::new(TwoReleases {
+        first_delay: Duration::from_secs(4),
+        releases: releases.clone(),
+        inner: rerouting(Duration::ZERO, Arc::new(AtomicUsize::new(0))),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(admit_all())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let call_ref = call::derive_call_ref("w0", &call_id, FROM_TAG);
+    let mut dialog = established(&alice, &bob, &b2bua, &call_id).await;
+    h.advance(Duration::from_secs(CAP_SEC as u64 + 1)).await;
+    settle_until(|| releases.load(Ordering::SeqCst) == 1).await;
+
+    // ── consult #1's deadline expires on this node ─────────────────────────
+    let live = b2bua.live_call(&call_ref).expect("the call is live");
+    let deadline = live
+        .timers
+        .iter()
+        .find(|t| matches!(t.timer_type(), call::TimerType::ReleaseAnswer { .. }))
+        .expect("consult #1's answer deadline is armed")
+        .clone();
+    b2bua.post_event(b2bua::CallEvent::Timer {
+        key: deadline.key,
+        generation: deadline.generation,
+        call_ref: call_ref.clone(),
+        incarnation: None,
+    });
+    h.advance(Duration::from_millis(200)).await;
+    let resent = releases.load(Ordering::SeqCst);
+
+    // ── #2's reroute toward media2 completes; #1's answer lands later ──────
+    let mut media_uas = media2.receive("INVITE").await;
+    media_uas.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
+    media2.receive("ACK").await;
+    let mut realign = alice.receive("INVITE").await;
+    realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    h.advance(Duration::from_secs(5)).await;
+    let first_dialled = media1.try_receive_tolerating("INVITE", &[]).await.is_some();
+    let record = b2bua.live_call(&call_ref).expect("the call is live");
+
+    let mut bye = dialog.bye().await;
+    media2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+    TwoAnswers { resent, record, first_dialled }
+}
+
+/// The deadline of a release consult expiring on the node serving the call
+/// is the release event again: the consult is re-sent there.
+#[tokio::test(start_paused = true)]
+async fn a_release_answer_expiry_re_sends_the_consult_on_the_serving_node() {
+    let two = release_answer_expired_then_both_answers_land("release-answer-expiry").await;
+    assert_eq!(two.resent, 2, "the expiry re-sent the consult");
+}
+
+/// A release fold whose consult is no longer awaited reaches no rule and
+/// moves nothing of the call: no second replacement leg, no decision mark of
+/// its own, and the call still runs on the applied reroute's set.
+#[tokio::test(start_paused = true)]
+async fn a_release_fold_no_consult_awaits_moves_nothing() {
+    let two = release_answer_expired_then_both_answers_land("release-fold-unawaited").await;
+    assert!(!two.first_dialled, "the stale answer dials nothing");
+    let marks: Vec<call::DecisionKind> = two.record.decision_log.iter().map(|m| m.kind).collect();
+    assert_eq!(
+        marks,
+        vec![call::DecisionKind::Route, call::DecisionKind::ReleaseRoute],
+        "one mark for the applied answer"
+    );
+    assert_eq!(
+        two.record.limiter.runs_on(),
+        Some(&[LimiterEntry { id: "z".into(), limit: 10 }][..]),
+        "the call runs on the applied reroute's set"
+    );
 }

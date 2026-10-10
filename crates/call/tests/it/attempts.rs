@@ -30,17 +30,21 @@ fn an_attempt_names_its_legs_and_its_legs_name_it() {
 }
 
 #[test]
-fn the_next_attempt_supersedes_one_whose_leg_still_rings_or_cancels() {
-    for cancelling in [false, true] {
-        let mut call = call_with_attempt(LegState::Early);
-        if cancelling {
-            call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
-        }
-        let (id, ended) = open_attempt(&mut call, AttemptCause::Failover, Deadline::Off);
-        assert_eq!((id, ended), (AttemptId(1), vec![AttemptId(0)]));
-        assert_eq!(call.attempts[0].outcome, Some(AttemptOutcome::Superseded), "{cancelling}");
-        assert!(call.attempts[1].is_open());
-    }
+fn the_next_attempt_supersedes_one_whose_leg_is_being_cancelled() {
+    let mut call = call_with_attempt(LegState::Early);
+    call.b_legs[0].outbound_invite.as_mut().unwrap().cancel_sent = true;
+    let (id, ended) = open_attempt(&mut call, AttemptCause::Failover, Deadline::Off);
+    assert_eq!((id, ended), (AttemptId(1), vec![AttemptId(0)]));
+    assert_eq!(call.attempts[0].outcome, Some(AttemptOutcome::Superseded));
+    assert!(call.attempts[1].is_open());
+}
+
+#[test]
+fn an_attempt_whose_leg_still_rings_stays_open_beside_the_next() {
+    let mut call = call_with_attempt(LegState::Early);
+    let (id, ended) = open_attempt(&mut call, AttemptCause::Transfer, Deadline::Off);
+    assert_eq!((id, ended), (AttemptId(1), vec![]));
+    assert!(call.attempts[0].is_open() && call.attempts[1].is_open());
 }
 
 #[test]

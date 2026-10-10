@@ -67,8 +67,8 @@ pub enum Effect {
     /// it then generates.
     LifecycleCommand { label: &'static str },
     /// **Guard timer** — a watchdog timer the rule arms or cancels: its type
-    /// (a service timer: its owning service) and the kind of scope its key
-    /// names.
+    /// (a service timer: its owning service and its key) and the kind of
+    /// scope its key names.
     GuardTimer { timer: TimerType, scope: TimerScopeKind, label: &'static str },
 }
 

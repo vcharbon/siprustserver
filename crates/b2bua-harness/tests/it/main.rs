@@ -82,6 +82,7 @@ mod keepalive_long_call_cap;
 mod keepalive_reap_both_directions;
 mod keepalive_timeout;
 mod keepalive_via_proxy;
+mod lifecycle_terminal_turn;
 mod lifetime_message_cap;
 mod limit_cases;
 mod limiter;

@@ -41,8 +41,8 @@ pub enum AttemptOutcome {
     Answered,
     /// Every leg it dialled ended unanswered.
     Failed,
-    /// The next attempt opened while one of its legs was still ringing or
-    /// being cancelled.
+    /// The next attempt opened while one of its legs was still being
+    /// cancelled.
     Superseded,
     /// The call's termination began while it was open.
     CallEnded,

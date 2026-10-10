@@ -135,20 +135,33 @@ impl TimerType {
 impl PartialEq for TimerType {
     fn eq(&self, other: &Self) -> bool {
         use TimerType::*;
-        match (self, other) {
-            (ServiceHttpAnswer { correlation_id: a }, ServiceHttpAnswer { correlation_id: b }) => {
-                a == b
+        match self {
+            NoAnswer => matches!(other, NoAnswer),
+            SetupTimeout => matches!(other, SetupTimeout),
+            GlobalDuration => matches!(other, GlobalDuration),
+            LimiterRefresh => matches!(other, LimiterRefresh),
+            Keepalive => matches!(other, Keepalive),
+            KeepaliveTimeout => matches!(other, KeepaliveTimeout),
+            Rung => matches!(other, Rung),
+            RepeatGiveUp => matches!(other, RepeatGiveUp),
+            TerminatingTimeout => matches!(other, TerminatingTimeout),
+            ReferSubscriptionExpiry => matches!(other, ReferSubscriptionExpiry),
+            ReferReinviteAnswer => matches!(other, ReferReinviteAnswer),
+            ReferOverallSafety => matches!(other, ReferOverallSafety),
+            RerouteGuard => matches!(other, RerouteGuard),
+            ServiceHttpAnswer { correlation_id: a } => {
+                matches!(other, ServiceHttpAnswer { correlation_id: b } if a == b)
             }
-            (
-                ServiceAdmitAnswer { correlation_id: a, change: x },
-                ServiceAdmitAnswer { correlation_id: b, change: y },
-            ) => a == b && x == y,
-            (FailureAnswer { change: a, .. }, FailureAnswer { change: b, .. })
-            | (ReleaseAnswer { change: a }, ReleaseAnswer { change: b }) => a == b,
-            (Service { service_id: a, key: k }, Service { service_id: b, key: l }) => {
-                a == b && k == l
+            ServiceAdmitAnswer { correlation_id: a, change: x } => {
+                matches!(other, ServiceAdmitAnswer { correlation_id: b, change: y } if a == b && x == y)
             }
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+            FailureAnswer { change: a, .. } => {
+                matches!(other, FailureAnswer { change: b, .. } if a == b)
+            }
+            ReleaseAnswer { change: a } => matches!(other, ReleaseAnswer { change: b } if a == b),
+            Service { service_id: a, key: k } => {
+                matches!(other, Service { service_id: b, key: l } if a == b && k == l)
+            }
         }
     }
 }

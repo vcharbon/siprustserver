@@ -90,12 +90,14 @@ pub(crate) fn admit_report_of(event: &CallEvent) -> Option<AdmitReport> {
 /// carries is applied to `call` when it names the call's key. A service's
 /// admit result applies as an admit ([`call::CallLimiterState::apply_admit`]);
 /// a route fold applies as a fold ([`call::CallLimiterState::apply_fold`]),
-/// running its route when it is one of `RUNS_ROUTE`. One naming another key
+/// running its route when it is one of `RUNS_ROUTE` and its consult is
+/// `awaited` (a fold no consult awaits moves no route onto the call). One naming another key
 /// (an earlier call under the same `call_ref`) leaves the call alone and
 /// queues that key's release on `fx` when owed. The report applied, if any.
 pub(crate) fn apply_to_call(
     call: &mut Call,
     event: &CallEvent,
+    awaited: bool,
     fx: &mut HandlerEffects,
 ) -> Option<AdmitReport> {
     let report = admit_report_of(event)?;
@@ -108,7 +110,11 @@ pub(crate) fn apply_to_call(
     match event {
         CallEvent::InternalEvent { topic, outcome, .. } if topic != LimiterAdmitResult::TOPIC => {
             let runs_route = RUNS_ROUTE.iter().any(|(t, o)| t == topic && o == outcome);
-            call.limiter.apply_fold(&report, runs_route);
+            if awaited {
+                call.limiter.apply_fold(&report, runs_route);
+            } else {
+                call.limiter.apply_admit(&report);
+            }
         }
         _ => call.limiter.apply_admit(&report),
     }
@@ -191,7 +197,7 @@ mod tests {
     fn a_report_of_the_call_s_key_is_applied_before_the_rules() {
         let mut call = call_holding_x();
         let mut fx = HandlerEffects::new();
-        assert_eq!(apply_to_call(&mut call, &fold(report()), &mut fx), Some(report()));
+        assert_eq!(apply_to_call(&mut call, &fold(report()), true, &mut fx), Some(report()));
         assert_eq!(call.limiter.held_set().change, 3);
         assert_eq!(call.limiter.number_admit().0, 4, "the next admit is numbered above it");
         assert!(fx.soft.is_empty(), "nothing to release");
@@ -209,9 +215,9 @@ mod tests {
             correlation_id: "svc:1".into(),
             report: AdmitReport { outcome: AdmitOutcome::Unavailable, ..report() },
         };
-        apply_to_call(&mut call, &result.into_event(), &mut fx);
+        apply_to_call(&mut call, &result.into_event(), true, &mut fx);
         assert!(call.limiter.runs_on().is_some() && call.limiter.runs_uncounted());
-        apply_to_call(&mut call, &fold(report()), &mut fx);
+        apply_to_call(&mut call, &fold(report()), true, &mut fx);
         assert_eq!(call.limiter.runs_on(), Some(&report().entries[..]));
         assert!(!call.limiter.runs_uncounted(), "the route's set is held");
     }
@@ -254,11 +260,21 @@ mod tests {
             incarnation: None,
         };
         let mut fx = HandlerEffects::new();
+        let mut stale = call.clone();
+        apply_to_call(&mut stale, &reroute("reroute"), false, &mut fx);
+        assert_eq!(
+            stale.limiter.runs_on(),
+            call.limiter.runs_on(),
+            "a reroute no consult awaits leaves the set the call runs on"
+        );
         let mut moved = call.clone();
-        apply_to_call(&mut moved, &reroute("reroute"), &mut fx);
+        apply_to_call(&mut moved, &reroute("reroute"), true, &mut fx);
         assert_eq!(moved.limiter.runs_on(), Some(&[entry("r")][..]), "the call runs on the route");
+        let mut kept = moved.clone();
+        apply_to_call(&mut kept, &reroute("release"), false, &mut fx);
+        assert_eq!(kept.limiter.runs_on(), Some(&[entry("r")][..]), "an unawaited fold keeps it");
         assert!(moved.limiter.runs_uncounted(), "held is [t]: r is not counted");
-        apply_to_call(&mut call, &reroute("release"), &mut fx);
+        apply_to_call(&mut call, &reroute("release"), true, &mut fx);
         assert_eq!(call.limiter.runs_on(), None, "a release runs no route");
     }
 
@@ -268,7 +284,7 @@ mod tests {
         let before = call.limiter.clone();
         let mut fx = HandlerEffects::new();
         let earlier = AdmitReport { key: "c#earlier".into(), ..report() };
-        assert_eq!(apply_to_call(&mut call, &fold(earlier.clone()), &mut fx), None);
+        assert_eq!(apply_to_call(&mut call, &fold(earlier.clone()), true, &mut fx), None);
         assert_eq!(call.limiter, before, "the resident call is untouched");
         assert!(matches!(
             &fx.soft[..],
@@ -276,7 +292,7 @@ mod tests {
         ));
         let mut fx = HandlerEffects::new();
         let unsent = AdmitReport { outcome: AdmitOutcome::NotSent, ..earlier };
-        apply_to_call(&mut call, &fold(unsent), &mut fx);
+        apply_to_call(&mut call, &fold(unsent), true, &mut fx);
         assert!(fx.soft.is_empty(), "an unsent admit owes nothing");
     }
 }

@@ -52,8 +52,9 @@ next leg id was predicted as `b-{len+1}` wherever a rule needed it.
    that ends at once `Refused`; a fold computed off the call's turn carries the
    routes refused on its way for the engine to record. An attempt ends once:
    `Answered` (a leg answered), `Failed` (every leg ended and waits on
-   nothing), `Superseded` (the next attempt opened while a leg still rang or
-   was being cancelled), `CallEnded`, `Refused`. A destination `CreateLeg`
+   nothing), `Superseded` (the next attempt opened while its legs were still
+   being cancelled), `CallEnded`, `Refused`. An attempt with a leg still
+   ringing stays open beside the next one. A destination `CreateLeg`
    opens its attempt (`AttemptOpening`); one engine function opens them all.
    The next leg id is the engine's (`next_b_leg_id`).
 5. **Lifecycle events replace observer rules.** At the end of each turn the
@@ -73,10 +74,11 @@ next leg id was predicted as `b-{len+1}` wherever a rule needed it.
    hold that no armed timer names a terminated leg, an ended attempt or a
    service machine without a cursor, and the trace records `timer.arm`,
    `timer.cancel`, `timer.fire` and `timer.drop` per call (ADR-0026). A
-   machine-bound rule's guard-timer declaration names the timer's type and
-   the kind of scope its key guards (`TimerScopeKind`); the executor holds
-   every key the rule arms or cancels to it, where both the rule and its
-   actions are known — the record the invariants read names neither.
+   machine-bound rule's guard-timer declaration names the timer's type — a
+   service timer by its owning service and its key — and the kind of scope
+   its key guards (`TimerScopeKind`); the executor holds every key the rule
+   arms or cancels to one declaration, where both the rule and its actions
+   are known — the record the invariants read names neither.
 
 ## Consequences
 

@@ -562,19 +562,17 @@ pub(super) fn rule_chain_turn(
             crate::rules::relay::note_request(&mut call, &res.source_leg_id, req, source);
         }
     }
-    // The routes admission refused before a decision folding back are
-    // attempts that dialled nothing, recorded ahead of the decision; a fold
-    // no consult awaits records none.
+    // A decision folding back while its consult is awaited records the routes
+    // admission refused before it, then its mark, whichever rule claims it.
     if rules_read {
         crate::attempts::record_refused_routes(&mut call, &mut ladder_fx, event);
+        call = crate::decision_log::fold_decided(call, event, now_ms);
     }
-    // A decision folding back is marked before the rules apply it, whichever
-    // rule claims the fold.
-    call = crate::decision_log::fold_decided(call, event, now_ms);
     // An admit sent off the call's turn is applied before the rules read its
-    // event, whichever rule claims it. A report naming another key (an
-    // earlier call under this call_ref) releases that key when owed.
-    if let Some(report) = crate::limiter::report::apply_to_call(&mut call, event, &mut ladder_fx) {
+    // event (an unawaited fold's route is not the call's); one of another key
+    // (an earlier call under this call_ref) releases that key when owed.
+    let fx = &mut ladder_fx;
+    if let Some(report) = crate::limiter::report::apply_to_call(&mut call, event, rules_read, fx) {
         if crate::trace::sampled(&call) {
             let what = format!("{:?} -> {:?}", report.entries, report.outcome);
             crate::trace::emit::limiter(&call, now_ms, "admit", &what);

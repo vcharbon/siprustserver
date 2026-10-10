@@ -537,3 +537,176 @@ async fn a_fold_landing_on_a_call_going_away_records_no_refused_route() {
     );
     let _ = h.finish().await;
 }
+
+/// A service that, a second into the call, dials carol as an attempt of its
+/// own beside the route's.
+mod dialer {
+    use b2bua::rules::{
+        AttemptOpening, Effect, Match, RouteAnswer, RuleAction, RuleCall, RuleContext,
+        RuleHandleResult, ServiceSeed, TimerDelay,
+    };
+    use b2bua::{define_service, sm_rule};
+    use call::{AttemptCause, TimerKey, TimerType};
+    use sip_message::Method;
+
+    const DIAL: TimerType = TimerType::service(DIALER, "dial");
+
+    define_service! {
+        id: "attempt-dialer",
+        machine: DIALER,
+        states: DialerState { Waiting, Dialled },
+        init: |_call: &RuleCall| {
+            Some(ServiceSeed::new(DialerState::Waiting.label()).with_actions(vec![
+                RuleAction::arm(TimerKey::call(DIAL), TimerDelay::secs(1)),
+            ]))
+        },
+        rules: [ dial() ],
+    }
+
+    fn dial() -> b2bua::rules::RuleDefinition {
+        sm_rule! {
+            id: "attempt-dialer-dial",
+            machine: DIALER,
+            active: [ DialerState::Waiting ],
+            transitions: [ DialerState::Waiting => DialerState::Dialled ],
+            effects: [
+                Effect::Originate { method: Method::Invite, label: "INVITE → carol" },
+            ],
+            matcher: Match::timer().service_timers(DIALER),
+            handle: |_ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::CreateLeg {
+                        destination: ("127.0.0.1".into(), 5071),
+                        new_ruri: None,
+                        new_from: None,
+                        new_to: None,
+                        no_answer: call::Deadline::Off,
+                        callback_context: None,
+                        body_override: None,
+                        header_updates: vec![],
+                        header_adds: vec![],
+                        kind: None,
+                        attempt: Some(AttemptOpening::new(
+                            AttemptCause::Transfer,
+                            RouteAnswer::default(),
+                        )),
+                    },
+                    RuleAction::SetState { machine: DIALER, to: DialerState::Dialled.label() },
+                ]))
+            },
+        }
+    }
+}
+
+/// An attempt opening while the current one's leg still rings, not being
+/// cancelled, leaves it open beside the new one: its scoped watchdog stands.
+#[tokio::test(start_paused = true)]
+async fn an_attempt_whose_leg_still_rings_stays_open_beside_the_next() {
+    const CALL_ID: &str = "attempts-beside@127.0.0.1";
+    let h = Harness::new("attempts-beside");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| NewCallResponse::Route(route_to("127.0.0.1", 5070)))
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .services(vec![probe::service_def(), dialer::service_def()])
+        .keep_terminated_calls()
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    let live = b2bua.live_call(&call_ref).expect("the call is live");
+    assert_eq!(
+        live.attempts.iter().map(|a| a.outcome).collect::<Vec<_>>(),
+        vec![None, None],
+        "the route's attempt stays open beside the next",
+    );
+    assert_eq!(watched(&live), vec![AttemptId(0), AttemptId(1)], "both watchdogs stand");
+
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    carol.receive("CANCEL").await.respond(200, "OK").await;
+    bob_uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    carol_uas.respond(487, "Request Terminated").await;
+    carol.receive("ACK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let record = terminated(&b2bua, &call_ref);
+    assert_eq!(
+        record.attempts.iter().map(|a| a.outcome).collect::<Vec<_>>(),
+        vec![Some(AttemptOutcome::CallEnded), Some(AttemptOutcome::CallEnded)],
+    );
+    let _ = h.finish().await;
+}
+
+/// A failure fold naming a consult the call no longer awaits reaches no rule
+/// and records none of the routes it lists as refused.
+#[tokio::test(start_paused = true)]
+async fn an_unawaited_fold_records_no_refused_route() {
+    const CALL_ID: &str = "attempts-unawaited-refused@127.0.0.1";
+    let h = Harness::new("attempts-unawaited-refused");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let b2bua = B2buaSut::builder(failing_over(5070, 5071, None))
+        .keep_terminated_calls()
+        .tune(|c| c.keepalive_interval_sec = 3_600)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    b2bua.post_event(b2bua::CallEvent::InternalEvent {
+        call_ref: call_ref.clone(),
+        topic: "call-failure-result".into(),
+        outcome: "reject".into(),
+        payload: serde_json::json!({
+            "code": 486,
+            "failed_leg_id": "b-1",
+            "consult_change": 999,
+            "refused_routes": [{ "label": null, "service_ext": {}, "no_answer_ms": null }],
+        }),
+        body: Vec::new(),
+        incarnation: None,
+    });
+    h.advance(Duration::from_millis(200)).await;
+    let live = b2bua.live_call(&call_ref).expect("the call is live");
+    assert_eq!(attempts(&live), vec![(AttemptCause::Route, vec!["b-1".to_string()], None)]);
+
+    let mut cancel = call.cancel().await;
+    cancel.expect(200).await;
+    call.expect(487).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}

@@ -91,7 +91,12 @@ second request while the first is awaited merges their deadlines.
   as much as a copy — so the consult is re-sent, and ends within its own
   decision deadline (unanswered: the local teardown). The consult is at least
   once: after a node loss, or an answer past its deadline, the decision layer
-  may see the same release event twice; one answer applies.
+  may see the same release event twice; one answer applies — a fold no
+  consult awaits writes no decision mark and moves no route onto the call,
+  its admit report applied as an admit. With the decision deadline off
+  (`call_control_timeout_ms` 0) the consult has no deadline and is never
+  re-sent: a takeover while it is in flight leaves the call without its
+  cap.
 - The core's REFER authorization needs no deadline; something already in the
   call's replicated timer list bounds it:
   - a REFER's authorization (`ReferAsyncHttp`): its subscription's expiry
@@ -116,7 +121,10 @@ second request while the first is awaited merges their deadlines.
   `failover-harness/tests/it/consult_answer_deadline.rs` (a node crashing with
   each core consult in flight: a `/call/failure` consult's final relayed at
   its deadline on reclaim and takeover; the release consult re-sent by the
-  copy at its answer deadline;
+  copy at its answer deadline; the REFER's authorization ended at the
+  subscription's expiry),
   `b2bua-harness/tests/it/release_consult_answer.rs` (a reroute whose admit
-  runs long answers by the consult's deadline; a release fold no consult
-  awaits reaches no rule); the REFER's authorization ended at the subscription's expiry).
+  runs long answers by the consult's deadline; the deadline's expiry
+  re-sends the consult on the node serving the call; a release fold whose
+  consult is no longer awaited reaches no rule and moves nothing of the
+  call).
