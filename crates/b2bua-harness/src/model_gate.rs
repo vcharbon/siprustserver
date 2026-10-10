@@ -12,9 +12,10 @@
 pub struct Mark(usize);
 
 impl Mark {
-    /// Now: only the violations recorded from here on.
+    /// Now: only the violations recorded from here on, the first of them
+    /// with the call's dump.
     pub fn now() -> Mark {
-        Mark(b2bua::rules::model_invariants::violations().len())
+        Mark(b2bua::rules::model_invariants::mark())
     }
 }
 

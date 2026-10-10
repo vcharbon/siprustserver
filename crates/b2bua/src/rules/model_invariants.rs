@@ -68,30 +68,82 @@ pub const INVARIANTS: &[(&str, Check)] = &[
 ];
 
 /// Check every invariant on `turn`; panics on the first violated, naming
-/// it and `label`, with the call's dump. The violation is also kept in the
-/// process's record ([`violations`]): the dispatcher isolates a turn's
-/// panic, so a harness reads the record to fail the run.
+/// it and `label`. The violation is also kept in the process's record
+/// ([`violations`]): the dispatcher isolates a turn's panic, so a harness
+/// reads the record to fail the run. The first violation recorded since the
+/// last [`mark`] carries the call's dump; a later one is its one line, kept
+/// once per invariant and detail, at most [`KEPT_AFTER_FIRST`] of them. A
+/// repeat of a violation already kept unwinds without the panic hook, so a
+/// turn retried in a loop prints its violation once.
 pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync)) {
     for (name, check) in INVARIANTS {
         if let Err(detail) = check(turn) {
-            let violation = format!(
-                "model invariant {name} violated after {label}: {detail}\n{:#?}",
-                turn.after
-            );
-            VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner()).push(violation.clone());
-            panic!("{violation}");
+            let head = format!("model invariant {name} violated after {label}: {detail}");
+            match record(format!("{name}: {detail}"), head, || format!("{:#?}", turn.after)) {
+                Kept::New(violation) => panic!("{violation}"),
+                Kept::Repeat(head) => std::panic::resume_unwind(Box::new(head)),
+            }
         }
     }
 }
 
-/// Every violation [`check`] met in this process, in order. Process-wide:
-/// exact under a runner that gives each test its own process.
-static VIOLATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// A violation as [`record`] kept it.
+enum Kept {
+    /// Not met since the mark: the message its panic states.
+    New(String),
+    /// Already met since the mark: its one line.
+    Repeat(String),
+}
 
-/// The violations [`check`] met in this process so far, each its panic
+/// How many one-line violations the record keeps past the first since a
+/// [`mark`].
+pub const KEPT_AFTER_FIRST: usize = 32;
+
+/// The process's record of violations: each kept one as `(invariant and
+/// detail, message)`, and where the last [`mark`] was taken.
+struct Record {
+    kept: Vec<(String, String)>,
+    mark: usize,
+}
+
+/// Every violation [`check`] kept in this process, in order. Process-wide:
+/// exact under a runner that gives each test its own process.
+static VIOLATIONS: Mutex<Record> = Mutex::new(Record { kept: Vec::new(), mark: 0 });
+
+/// Keep the violation `what` (its invariant and detail) headed `head`: with
+/// the call's `dump` for the first since the mark, as `head` alone for a later
+/// one, and not again for one already kept.
+fn record(what: String, head: String, dump: impl FnOnce() -> String) -> Kept {
+    let mut record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let since = record.mark;
+    if record.kept.len() == since {
+        let message = format!("{head}\n{}", dump());
+        record.kept.push((what, message.clone()));
+        return Kept::New(message);
+    }
+    let later = &record.kept[since..];
+    if later.iter().any(|(w, _)| *w == what) {
+        return Kept::Repeat(head);
+    }
+    if later.len() <= KEPT_AFTER_FIRST {
+        record.kept.push((what, head.clone()));
+    }
+    Kept::New(head)
+}
+
+/// A point in the process's record: the number of violations kept so far.
+/// The first violation kept after it carries the call's dump.
+pub fn mark() -> usize {
+    let mut record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    record.mark = record.kept.len();
+    record.mark
+}
+
+/// The violations [`check`] kept in this process so far, each its panic
 /// message.
 pub fn violations() -> Vec<String> {
-    VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let record = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    record.kept.iter().map(|(_, message)| message.clone()).collect()
 }
 
 /// Every dialog of a leg is reachable by exactly one name: its own tag is set
