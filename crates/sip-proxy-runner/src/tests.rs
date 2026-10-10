@@ -1,17 +1,14 @@
-//! Port of `tests/sip-front-proxy/config-validation.test.ts`.
-//!
 //! The validator is a pure boot-time guard (no clock, no `tokio`, no I/O), so
-//! these are plain `#[test]`s driven with literal config values exactly as the
-//! TS `vitest` suite is — no paused runtime needed (default lane, sub-ms).
+//! these are plain `#[test]`s driven with literal config values — no paused
+//! runtime needed (default lane, sub-ms).
 use super::*;
 
 /// The Helm chart's production-shape probe timings. Acts as the canonical
 /// "real deployment" fixture: cycle = 2000 + 1500 = 3500 ms. If a test breaks
 /// because the chart changes its defaults, that is the signal to revisit the
-/// calibration (mirrors the TS `HELM_PROBE`).
+/// calibration.
 const HELM_PROBE: ProbeTimingConfig = ProbeTimingConfig { interval_ms: 2000, timeout_ms: 1500 };
 
-/// `defaultWorkerLoadObserverConfig` + the given overrides (TS `withObserver`).
 fn with_observer(f: impl FnOnce(&mut LoadObserverConfig)) -> LoadObserverConfig {
     let mut cfg = LoadObserverConfig::default();
     f(&mut cfg);
@@ -63,10 +60,9 @@ fn accepts_the_shipped_default_of_8000_ms() {
 }
 
 // ── value-positivity guards ─────────────────────────────────────────────
-// NOTE: the TS NaN / negative-interval / negative-timeout cases are
-// unrepresentable here — probe timings are `u64`, so only the `== 0` arm of
-// the TS positivity guard is reachable for interval/timeout. payload_stale_ms
-// is `i64`, so its negative case IS exercised below.
+// Probe timings are `u64`, so only the `== 0` arm is reachable for
+// interval/timeout. payload_stale_ms is `i64`, so its negative case IS
+// exercised below.
 
 #[test]
 fn rejects_interval_ms_zero() {
@@ -311,7 +307,6 @@ fn env_overrides_present_replace_fields_and_stay_coherent() {
     assert_valid_config(HELM_PROBE, &cfg);
 }
 
-/// A malformed value is IGNORED (the default field is kept) — never aborts.
 #[test]
 fn env_overrides_malformed_value_is_ignored() {
     let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

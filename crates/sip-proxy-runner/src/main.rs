@@ -171,7 +171,7 @@ fn parse_f64(key: &str, default: f64) -> f64 {
 }
 
 /// Depth-watermark selective intake shed: the LAST-line guard below the
-/// admission layer (the self-gate, 063, is the first-line brake). At or above
+/// admission layer (the self-gate is the first-line brake). At or above
 /// `watermark` queued datagrams the socket pump drops only what
 /// [`sip_message::sniff::is_sheddable_new_invite`] classifies as a NEW
 /// non-emergency INVITE; in-dialog traffic, responses, ACK/BYE/CANCEL,
@@ -232,15 +232,14 @@ fn parse_ext_face_cidrs(
 
 /// Subset of [`HealthProbeConfig`] timings the cross-component preflight needs.
 /// Kept as a bare pair (not the full config) so [`validate_config`] stays
-/// decoupled from probe-layer construction — mirrors the TS `ProbeTimingConfig`.
+/// decoupled from probe-layer construction.
 #[derive(Debug, Clone, Copy)]
 struct ProbeTimingConfig {
     interval_ms: u64,
     timeout_ms: u64,
 }
 
-/// Cross-component config validation for the SIP front proxy (pure port of
-/// `src/sip-front-proxy/config-validation.ts`).
+/// Cross-component config validation for the SIP front proxy.
 ///
 /// Some invariants live BETWEEN components (`HealthProbe` ↔ `WorkerLoadObserver`)
 /// and cannot be enforced by either component's own defaults in isolation: by the
@@ -268,9 +267,7 @@ fn validate_config(
     let mut violations: Vec<String> = Vec::new();
 
     // Each timing individually positive — guards a typo (e.g. 0 ms timeout) that
-    // would otherwise produce confusing downstream behaviour. `u64` interval/
-    // timeout cannot be NaN/negative/infinite (unlike the TS `number`), so only
-    // the `== 0` arm of the TS positivity guard is reachable here.
+    // would otherwise produce confusing downstream behaviour.
     if probe.interval_ms == 0 {
         violations.push(format!(
             "health_probe.interval_ms must be a positive number (got {}).",
@@ -365,7 +362,7 @@ fn validate_config(
 /// Boot-time assertion: panics (→ non-zero exit → `CrashLoopBackOff`) when the
 /// config is invalid, so a misconfigured pod exits instead of booting unhealthy.
 /// The message is structured for log scraping — each violation on its own line
-/// after a fixed prefix (port of the TS `assertValidProxyConfig`). Called from
+/// after a fixed prefix. Called from
 /// `main` before any socket bind.
 fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) {
     if let Err(violations) = validate_config(probe, observer) {
@@ -377,8 +374,6 @@ fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) 
 
 /// Read an `f64` env override: `Some(v)` iff the var is set AND parses to a
 /// finite number, else `None` (unset OR malformed — both leave the default).
-/// A malformed value is logged (so a typo is visible) but does NOT abort boot;
-/// the coherence preflight is what rejects an incoherent *combination*.
 fn env_f64_opt(key: &str) -> Option<f64> {
     match env::var(key) {
         Ok(raw) => match raw.trim().parse::<f64>() {
@@ -587,7 +582,7 @@ async fn main() {
     // A second UDP socket on the external (caller) plane. PROXY_FACE_INT_CIDRS
     // is REQUIRED with it (fail-fast); PROXY_ADVERTISE_EXT defaults to the
     // external listen addr under the same unspecified→loopback rule as the
-    // internal pair. Unset → single-face, behaviour identical to before.
+    // internal pair. Unset → single-face.
     let listen_ext: Option<String> =
         env::var("PROXY_LISTEN_EXT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let ext_cidrs = parse_ext_face_cidrs(
@@ -618,7 +613,7 @@ async fn main() {
         (sa, adv, ext_cidrs.clone().expect("CIDRs present when PROXY_LISTEN_EXT is set"))
     });
 
-    // Cross-component config preflight (port of config-validation.ts). Resolve
+    // Cross-component config preflight. Resolve
     // the HealthProbe timings + the WorkerLoadObserver config here so the
     // BETWEEN-component invariants (payload_stale_ms ≥ 2× probe cycle, cap floor/
     // initial/ceiling ordering, ELU band ordering + hysteresis bounds, cooldown ≥
@@ -1056,7 +1051,7 @@ async fn main() {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(g.sampler_interval());
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tick.tick().await; // skip the immediate first tick (TS first fire is +interval)
+            tick.tick().await; // skip the immediate first tick
             loop {
                 tick.tick().await;
                 g.sample();
