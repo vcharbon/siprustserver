@@ -63,7 +63,6 @@ struct Inner {
     drain_seconds_count: AtomicU64,
     // The worker's view of its call limiter (ADR-0040).
     limiter: LimiterCounters,
-    // dispatcher
     past_bound_depth: AtomicU64,
     past_bound_cap: AtomicU64,
     overflow_refused: AtomicU64,
