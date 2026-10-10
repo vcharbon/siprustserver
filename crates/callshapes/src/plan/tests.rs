@@ -37,9 +37,9 @@ fn shipped_catalog_validates() {
     }
 }
 
-/// C6: an N-cycle re-INVITE script is now valid for any `n >= 1` (the
-/// per-cycle reneg counter serializes it — the `n != 1` guardrail is gone);
-/// only `n == 0` (a no-op script) is rejected.
+/// C6: an N-cycle re-INVITE script is valid for any `n >= 1` (the
+/// per-cycle reneg counter serializes it); only `n == 0` (a no-op script) is
+/// rejected.
 #[test]
 fn reinvite_n_validates_and_rejects_zero() {
     shapes::reinvite_n(shapes::default_binder(), "reinvite10", 10)

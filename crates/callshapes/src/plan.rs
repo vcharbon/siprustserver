@@ -205,8 +205,7 @@ pub enum Transfer {
     BlindDeclined { refer_key: String, code: u16 },
 }
 
-/// A dwell knob resolved against the per-call env (the realistic-timing
-/// sleeps every dwell in the historic bodies came from).
+/// A dwell knob resolved against the per-call env.
 #[derive(Debug, Clone, Copy)]
 pub enum DwellKnob {
     None,
@@ -350,7 +349,6 @@ impl Build {
         }
     }
 
-    /// The goal list of `role`.
     pub(crate) fn goals_mut(&mut self, role: &'static str) -> &mut Vec<Goal> {
         if role == "alice" {
             &mut self.caller_goals
