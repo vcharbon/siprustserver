@@ -143,5 +143,6 @@ slow_slice!(callee_bye_unrung_fork, Ending::CalleeBye, Some(Winner::Unrung));
 slow_slice!(cancel_before_1xx, Ending::Cancel(CancelAt::BeforeProvisional), None);
 slow_slice!(cancel_crossing_1xx, Ending::Cancel(CancelAt::CrossingProvisional), None);
 slow_slice!(cancel_after_1xx, Ending::Cancel(CancelAt::AfterProvisional), None);
+slow_slice!(cancel_then_early_bye, Ending::Cancel(CancelAt::AfterProvisionalThenEarlyBye), None);
 slow_slice!(cancel_crossing_final, Ending::Cancel(CancelAt::CrossingFinal), None);
 slow_slice!(cancel_after_final, Ending::Cancel(CancelAt::AfterFinal), None);

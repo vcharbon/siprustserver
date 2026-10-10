@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use scenario_harness::actor::{
-    phase, ActorSpec, Barrier, Branch, CtxFeed, Disposition, Expect, Goal, GoalStep, LegPhase,
-    MediaState,
+    phase, ActorSpec, Barrier, BodyExpect, Branch, CtxFeed, Disposition, Expect, Goal, GoalStep,
+    LegPhase, MediaState,
 };
 use scenario_harness::realcall::CallEnv;
 use scenario_harness::{Agent, ANSWER_SDP};
@@ -128,7 +128,9 @@ pub(crate) fn compile_cancel(env: &CallEnv<'_>, b: &mut Build, at: CancelAt) {
     let (guard, dwell, expect) = match at {
         CancelAt::BeforeProvisional => (trying, TRANSIT, Expect::one(Branch::ABANDONED)),
         CancelAt::CrossingProvisional => (trying, TRANSIT * 3 / 2, Expect::one(Branch::ABANDONED)),
-        CancelAt::AfterProvisional => (b.gate.clone(), TRANSIT * 3, Expect::one(Branch::ABANDONED)),
+        CancelAt::AfterProvisional | CancelAt::AfterProvisionalThenEarlyBye => {
+            (b.gate.clone(), TRANSIT * 3, Expect::one(Branch::ABANDONED))
+        }
         CancelAt::CrossingFinal => {
             const ENDINGS: &[Branch] = &[Branch::ABANDONED, Branch::ANSWERED_DESPITE_CANCEL];
             (b.gate.clone(), ring - TRANSIT * 3 / 2, Expect::of(ENDINGS))
@@ -138,6 +140,26 @@ pub(crate) fn compile_cancel(env: &CallEnv<'_>, b: &mut Build, at: CancelAt) {
         }
     };
     b.caller_goals.push(Goal::new(guard, GoalStep::Cancel { stated: Vec::new() }).after(dwell));
+    if at == CancelAt::AfterProvisionalThenEarlyBye {
+        // The SUT's 487 leaves it when the CANCEL arrives, a hop after it
+        // left the caller; a BYE half a hop behind the CANCEL crosses it.
+        let bye = GoalStep::EarlyRequest { method: InDialogMethod::Bye, fork: None };
+        b.caller_goals.push(Goal::new(Barrier::None, bye).after(TRANSIT / 2));
+        // The 487 ended the early dialog the BYE names: 481 (RFC 3261 §12.3,
+        // §12.2.2). Pending, this reception also keeps the goals the 487 ends
+        // the call with.
+        b.caller_goals.push(Goal::new(
+            Barrier::None,
+            GoalStep::ExpectResponse {
+                status: 481,
+                cseq_method: Some("BYE".to_string()),
+                body: BodyExpect::Any,
+                early: None,
+                ack_body: None,
+                matcher: None,
+            },
+        ));
+    }
     // An answer that crossed the CANCEL confirmed the call: hang up (RFC 3261
     // §15). After a 487 the accepted ending drops this goal.
     let answered_or_ended =

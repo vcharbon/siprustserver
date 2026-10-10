@@ -273,6 +273,11 @@ pub enum CancelAt {
     CrossingProvisional,
     /// While the callee rings: the CANCEL reaches it well before its answer.
     AfterProvisional,
+    /// As [`AfterProvisional`](Self::AfterProvisional), then the caller BYEs
+    /// the early dialog (RFC 3261 §15) half a hop later, so the BYE crosses
+    /// the SUT's 487 to her INVITE. That 487 ended the early dialog, so the
+    /// SUT answers the BYE 481 (§12.3, §12.2.2).
+    AfterProvisionalThenEarlyBye,
     /// Reaching the callee just after it sent its 2xx, which reaches the SUT
     /// after the CANCEL did.
     CrossingFinal,

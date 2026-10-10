@@ -107,12 +107,13 @@ const AFTERS: [AfterAnswer; 4] =
     [AfterAnswer::Reinvite, AfterAnswer::Update, AfterAnswer::Options, AfterAnswer::Bye];
 const WINNERS: [Winner; 4] = [Winner::Sole, Winner::First, Winner::Later, Winner::Unrung];
 const RELIABLES: [bool; 2] = [false, true];
-const ENDINGS: [Ending; 7] = [
+const ENDINGS: [Ending; 8] = [
     Ending::CallerBye,
     Ending::CalleeBye,
     Ending::Cancel(CancelAt::BeforeProvisional),
     Ending::Cancel(CancelAt::CrossingProvisional),
     Ending::Cancel(CancelAt::AfterProvisional),
+    Ending::Cancel(CancelAt::AfterProvisionalThenEarlyBye),
     Ending::Cancel(CancelAt::CrossingFinal),
     Ending::Cancel(CancelAt::AfterFinal),
 ];
@@ -334,6 +335,7 @@ impl fmt::Display for Cell {
             Ending::Cancel(CancelAt::BeforeProvisional) => "cancel-before-1xx",
             Ending::Cancel(CancelAt::CrossingProvisional) => "cancel-crossing-1xx",
             Ending::Cancel(CancelAt::AfterProvisional) => "cancel-after-1xx",
+            Ending::Cancel(CancelAt::AfterProvisionalThenEarlyBye) => "cancel-then-early-bye",
             Ending::Cancel(CancelAt::CrossingFinal) => "cancel-crossing-final",
             Ending::Cancel(CancelAt::AfterFinal) => "cancel-after-final",
         };
@@ -358,7 +360,7 @@ mod tests {
     #[test]
     fn every_compatible_cell_is_a_valid_plan() {
         let all = cells();
-        assert_eq!(all.len(), 2 * 3 * 4 * 4 * 2 * 7 * 2);
+        assert_eq!(all.len(), 2 * 3 * 4 * 4 * 2 * 8 * 2);
         for cell in all.iter().filter(|c| compatible(c).is_ok()) {
             plan(cell, default_binder()).validate().unwrap_or_else(|e| panic!("{cell}: {e:?}"));
         }
