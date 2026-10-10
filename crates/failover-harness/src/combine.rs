@@ -357,7 +357,7 @@ fn build_lanes(
 
     let mut lanes: Vec<Lane> = Vec::new();
     // The orchestrator gets a column only when it acted (withdraw / readmit /
-    // replacement) — a run it never touched renders exactly as before.
+    // replacement).
     if views.iter().any(|v| v.observer == ORCHESTRATOR) {
         lanes.push(Lane::new(ORCHESTRATOR, ORCHESTRATOR, LaneKind::Sut));
     }
@@ -384,7 +384,7 @@ fn build_lanes(
         lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
     }
 
-    let _ = name_of; // reserved for richer worker captions; SIP addr suffices now
+    let _ = name_of;
     lanes
 }
 
