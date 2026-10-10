@@ -13,6 +13,7 @@ use crate::plan::CompiledStep;
 use crate::preserve;
 use crate::render::{self};
 use crate::resolve::Resolver;
+use crate::stack::reason_for;
 
 impl<'a, 'p> Runner<'a, 'p> {
     /// Keep one INVITE final per transaction on its leg, in arrival order. A
@@ -298,26 +299,4 @@ fn preserved_block(
             detail,
         })
     })
-}
-
-/// The reason phrase a status carries when the document states none. A document
-/// that states one wins; this is only the fallback for a status the flow
-/// invented.
-pub(super) fn reason_for(status: u16) -> &'static str {
-    match status {
-        100 => "Trying",
-        180 => "Ringing",
-        183 => "Session Progress",
-        200 => "OK",
-        202 => "Accepted",
-        404 => "Not Found",
-        480 => "Temporarily Unavailable",
-        481 => "Call/Transaction Does Not Exist",
-        486 => "Busy Here",
-        487 => "Request Terminated",
-        488 => "Not Acceptable Here",
-        491 => "Request Pending",
-        603 => "Decline",
-        _ => "Response",
-    }
 }

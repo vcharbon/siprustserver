@@ -150,3 +150,25 @@ impl LegStack {
         }
     }
 }
+
+/// The reason phrase a status carries when the document states none. A document
+/// that states one wins; this is only the fallback for a status the flow
+/// invented.
+pub(crate) fn reason_for(status: u16) -> &'static str {
+    match status {
+        100 => "Trying",
+        180 => "Ringing",
+        183 => "Session Progress",
+        200 => "OK",
+        202 => "Accepted",
+        404 => "Not Found",
+        480 => "Temporarily Unavailable",
+        481 => "Call/Transaction Does Not Exist",
+        486 => "Busy Here",
+        487 => "Request Terminated",
+        488 => "Not Acceptable Here",
+        491 => "Request Pending",
+        603 => "Decline",
+        _ => "Response",
+    }
+}

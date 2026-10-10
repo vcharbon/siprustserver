@@ -5,13 +5,12 @@ use pivot_schema::bundle::{Dir, Failure};
 use scenario_harness::dialogs::DialogVerdict;
 use sip_message::SipMessage;
 
-use super::compose::reason_for;
 use super::Runner;
 use crate::close::{self, Owed, FOREIGN_DIALOG, FOREIGN_DIALOG_481};
 use crate::gate::{self, Inbound};
 use crate::plan::{CompiledStep, Discriminator};
 use crate::scripted_final;
-use crate::stack::via_target;
+use crate::stack::{reason_for, via_target};
 
 /// The site an emission the FLOW never scripted is attributed to: it belongs to
 /// no step, because no step is what it answers.

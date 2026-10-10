@@ -24,6 +24,7 @@ mod request;
 mod respond;
 
 pub use error::StackError;
+pub(crate) use respond::reason_for;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;

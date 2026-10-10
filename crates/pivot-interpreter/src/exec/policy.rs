@@ -4,10 +4,9 @@ use pivot_schema::bundle::{Dir, Failure};
 use sip_message::SipMessage;
 use tokio::time::Instant;
 
-use super::compose::reason_for;
 use super::Runner;
 use crate::gate::{self, Inbound};
-use crate::stack::via_target;
+use crate::stack::{reason_for, via_target};
 
 impl<'a, 'p> Runner<'a, 'p> {
     /// Whether the FLOW is waiting for this datagram on `leg`: a frontier

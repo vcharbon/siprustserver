@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use pivot_schema::bundle::{Abandoned, CloseAct, Dir, Failure};
 use sip_message::{Method, SipMessage};
 
-use super::compose::reason_for;
 use super::Runner;
 use crate::close::{self, Owed};
+use crate::stack::reason_for;
 
 impl<'a, 'p> Runner<'a, 'p> {
     /// A run that CANNOT GO ON ends its SCRIPT (§11.2), whatever its polarity.
