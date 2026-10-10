@@ -152,7 +152,7 @@ async fn replica(
 fn no_answer_deadline(call: &call::Call) -> i64 {
     call.timers
         .iter()
-        .find(|t| t.timer_type == TimerType::NoAnswer)
+        .find(|t| *t.timer_type() == TimerType::NoAnswer)
         .map(|t| t.fire_at)
         .expect("the replica carries the route-time NoAnswer")
 }
@@ -275,7 +275,7 @@ fn assert_answered_on(node: &ReplicatedB2buaSut, call_ref: &str, what: &str) {
         .unwrap_or_else(|| panic!("{what}: {} serves the call", node.ordinal()));
     assert_eq!(live.a_leg.state(), LegState::Confirmed, "{what}: a-leg Confirmed");
     assert!(
-        !live.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
+        !live.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer),
         "{what}: the folded ledger carries no NoAnswer",
     );
 }

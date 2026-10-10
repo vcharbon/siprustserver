@@ -42,7 +42,7 @@
 
 use call::{
     CdrEventType, Direction, LegState, MachineId, ReleaseEventKind, ReroutePhase, RerouteState,
-    TerminationCause, TimerType,
+    TerminationCause, TimerKey, TimerType,
 };
 
 use b2bua_sdk::model::{
@@ -54,8 +54,8 @@ use b2bua_sdk::model::{
 pub const RELEASE_REROUTE_MACHINE: MachineId = MachineId::new("release-reroute");
 const GUARD_KEY: &str = "guard";
 
-fn guard_timer() -> TimerType {
-    TimerType::service(RELEASE_REROUTE_MACHINE, GUARD_KEY)
+fn guard_timer() -> TimerKey {
+    TimerKey::call(TimerType::service(RELEASE_REROUTE_MACHINE, GUARD_KEY))
 }
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
@@ -84,7 +84,7 @@ fn is_new_leg(ctx: &RuleContext) -> bool {
 /// for could not complete.
 fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
     vec![
-        RuleAction::cancel_timer(&guard_timer(), None),
+        RuleAction::cancel(guard_timer()),
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: ctx.call.a_leg().leg_id.clone(),
@@ -191,17 +191,18 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 // `new_leg_id` names the leg CreateLeg is about to mint.
                 let new_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
                 let old_leg_id = ctx.call.active_peer().map(|p| p.leg_b.clone());
-                let no_answer =
-                    fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
-
-                let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
+                // The duration cap stood as the consult's answer deadline;
+                // the reroute's features re-arm it where their anchor says.
+                let mut actions =
+                    vec![RuleAction::cancel(TimerKey::call(TimerType::GlobalDuration))];
+                actions.extend(super::defaults::route_fold_parity_actions(&fold, ctx));
                 let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
                     new_from: fold.new_from,
                     new_to: fold.new_to,
-                    no_answer_timeout_sec: no_answer,
+                    no_answer: fold.no_answer,
                     callback_context: fold.callback_context,
                     body_override: leg_body,
                     header_updates: fold.header_updates,
@@ -219,11 +220,10 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 // One overall guard bounding the whole treatment (dial +
                 // realign + old-leg BYE) — a wedged reroute must never extend
                 // the call past its cap.
-                actions.push(RuleAction::ScheduleTimer {
-                    timer_type: guard_timer(),
-                    delay: TimerDelay::secs(ctx.config.release_reroute_guard_sec),
-                    leg_id: None,
-                });
+                actions.push(RuleAction::arm(
+                    guard_timer(),
+                    TimerDelay::secs(ctx.config.release_reroute_guard_sec),
+                ));
                 ok(actions)
             },
         ),
@@ -250,7 +250,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
                     RuleAction::AckLeg { leg_id: new_leg.clone(), body: None },
-                    RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
+                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &new_leg)),
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
                         body: Some(
@@ -290,7 +290,6 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         leg_id: new_leg.clone(),
                         end: LegEnd::InviteRejected,
                     },
-                    RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                 ];
                 actions.extend(fail_teardown(ctx, "release-reroute-failed"));
                 ok(actions)
@@ -303,12 +302,8 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             "reroute-b-no-answer",
             &["no-answer"],
             Match::timer().timer_type(TimerType::NoAnswer).filter(|ctx| {
-                let timer_leg = match ctx.event {
-                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
-                    _ => None,
-                };
-                ctx.call.reroute_state().map(|r| r.new_leg_id.as_str()).is_some()
-                    && ctx.call.reroute_state().map(|r| r.new_leg_id.as_str()) == timer_leg
+                let timer_leg = ctx.timer_key().and_then(TimerKey::leg_id);
+                ctx.call.reroute_state().is_some_and(|r| Some(r.new_leg_id.as_str()) == timer_leg)
             }),
             |ctx| {
                 let st = ctx.call.reroute_state()?.clone();
@@ -343,7 +338,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 let st = ctx.call.reroute_state()?.clone();
                 let mut actions = vec![
                     RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
-                    RuleAction::cancel_timer(&guard_timer(), None),
+                    RuleAction::cancel(guard_timer()),
                     RuleAction::Merge { leg_a: "a".to_string(), leg_b: st.new_leg_id.clone() },
                 ];
                 if let Some(old) = st.old_leg_id.clone() {

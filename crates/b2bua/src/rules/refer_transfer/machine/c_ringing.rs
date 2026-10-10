@@ -7,13 +7,14 @@ use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
-use super::{state, timer_id, Phase, TRANSFER_MACHINE};
+use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
 use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use call::TimerKey;
 
 /// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped). The referrer's
 /// peer is answered, so C's provisional is shown to no one: C keeps what it is
@@ -106,13 +107,12 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             ];
             actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
             actions.extend([
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::NoAnswer, Some(&c_leg_id)) },
-                RuleAction::ScheduleTimer {
-                    timer_type: call::TimerType::ReferReinviteAnswer,
-                    delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
-                    leg_id: Some(c_leg_id.clone()),
-                },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+                RuleAction::cancel(TimerKey::leg(call::TimerType::NoAnswer, &c_leg_id)),
+                RuleAction::arm(
+                    TimerKey::leg(call::TimerType::ReferReinviteAnswer, &c_leg_id),
+                    TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
+                ),
                 RuleAction::SendReinvite {
                     leg_id: c_leg_id.clone(),
                     body: Some(a_offer),
@@ -141,7 +141,8 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated (C failed) → referrer" },
             Effect::Originate { method: Method::Bye, label: "BYE → C (terminate failed leg)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + overall + C no-answer" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -158,11 +159,10 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
             let mut actions = Vec::new();
             actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
             actions.extend([
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
             ]);
             if let Some(c_leg_id) = st.c_leg_id.clone() {
-                actions.push(RuleAction::CancelTimer { id: timer_id(call::TimerType::NoAnswer, Some(&c_leg_id)) });
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Reject,
                     leg_id: c_leg_id.clone(),
@@ -190,15 +190,13 @@ pub(super) fn c_no_answer() -> RuleDefinition {
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY terminated;timeout → referrer" },
             Effect::Originate { method: Method::Bye, label: "BYE → C (no answer)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::NoAnswer)
             .filter(|ctx| {
-                let timer_leg = match ctx.event {
-                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
-                    _ => None,
-                };
+                let timer_leg = ctx.timer_key().and_then(TimerKey::leg_id);
                 state(ctx).and_then(|s| s.c_leg_id.as_deref()).is_some()
                     && state(ctx).and_then(|s| s.c_leg_id.as_deref()) == timer_leg
             }),
@@ -215,8 +213,8 @@ pub(super) fn c_no_answer() -> RuleDefinition {
                     reason: Some("no_answer_timeout".to_string()),
                 },
                 RuleAction::DestroyLeg { leg_id: c_leg_id, headers: vec![] },
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::SetTransfer { state: None },
             ]);
             ok(actions)

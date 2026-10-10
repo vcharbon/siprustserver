@@ -92,7 +92,7 @@ impl ActionExecutor<'_> {
                 new_ruri,
                 new_from,
                 new_to,
-                no_answer_timeout_sec,
+                no_answer,
                 callback_context,
                 body_override,
                 header_updates,
@@ -107,7 +107,7 @@ impl ActionExecutor<'_> {
                     new_ruri.as_deref(),
                     new_from.as_deref(),
                     new_to.as_deref(),
-                    *no_answer_timeout_sec,
+                    *no_answer,
                     callback_context.as_deref(),
                     body_override.as_ref(),
                     header_updates,
@@ -135,13 +135,10 @@ impl ActionExecutor<'_> {
                     *call = remove_pending_request(call.clone(), leg_id, &t_id, *outbound_cseq);
                 }
             }
-            RuleAction::ScheduleTimer { timer_type, delay, leg_id } => {
-                self.schedule(call, fx, timer_type.clone(), delay.as_millis(), leg_id.clone());
+            RuleAction::ScheduleTimer { key, delay } => {
+                self.schedule(call, fx, key.clone(), delay.as_millis());
             }
-            RuleAction::CancelTimer { id } => {
-                call.timers.retain(|t| &t.id != id);
-                fx.critical.push(CriticalStateEffect::CancelTimer { id: id.clone() });
-            }
+            RuleAction::CancelTimer { key } => self.disarm(call, fx, key),
             RuleAction::CancelAllTimers => {
                 call.timers.clear();
                 fx.critical.push(CriticalStateEffect::CancelAllTimers);

@@ -42,6 +42,7 @@ mod responses;
 mod restore_hygiene;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod timer_screen;
 mod turn;
 mod turn_label;
 mod unroutable;

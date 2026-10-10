@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
-use call::{Call, CallModelState, LegState, TerminationCause, TimerEntry, TimerType};
+use call::{Call, CallModelState, LegState, Obligation, TerminationCause, TimerEntry, TimerType};
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{Method, SipMessage};
 
@@ -18,7 +18,7 @@ use super::interpret::process_result;
 use sip_txn::Reoffer;
 
 use super::materialise::{materialise, reoffer_trigger, Materialised, Origin, Reason};
-use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
+use super::peer_metrics::record_keepalive_timeout_peer;
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
@@ -142,6 +142,12 @@ pub(super) async fn process(
             maybe_reject_orphan(ctx, &event).await;
             return;
         }
+        // A timer fire reaches the call only while its ledger holds the fired
+        // instance, which leaves the ledger as it is delivered.
+        let mut call = call;
+        if super::timer_screen::screen(&mut call, &event, now_ms).is_err() {
+            return;
+        }
         // Traced call: the message as it arrived, raw (ADR-0026), before any
         // answer to it — the re-offer's or the stray-CANCEL 481 — so the
         // datagram that triggered a takeover is in the trace. `image()` is the
@@ -193,7 +199,7 @@ pub(super) async fn process(
         }
         // The limiter-refresh timer marks the call due on the worker's refresh
         // batch outside the rule chain; the call never waits on the limiter.
-        if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
+        if fired(&event, &TimerType::LimiterRefresh) {
             let before = call.clone();
             let res = crate::limiter::call::on_refresh_due(&ctx.limiter, call, &call_ref, now_ms);
             crate::rules::invariants::enforce(
@@ -552,21 +558,24 @@ async fn in_dialog_store_fault_gate(
             }
         }
     }
-    if let CallEvent::Timer { timer_type: TimerType::Keepalive, .. } = event {
+    if let CallEvent::Timer { key, generation, .. } = event {
+        if key.timer_type != TimerType::Keepalive {
+            return false;
+        }
         if ctx.store_faults.check(StoreFaultPoint::LiveAudit).is_err() {
             ctx.metrics.bump_store_fault_audit_skipped();
             // Re-arm at the config cadence — the same interval the `keepalive`
             // rule re-arms with, read from config because the call body is what
             // we could not fetch, and held to the same ledger ceiling. Runtime
             // driver only: the serialized `call.timers` intent stays untouched
-            // (the call is untouched), which is safe — a later HA restore
-            // sanitizes past-due entries.
+            // (the call is untouched) and still holds the fired instance, so the
+            // re-arm keeps its generation and its fire reaches the call; a later
+            // HA restore sanitizes past-due entries.
             let interval_ms = ctx.config.keepalive_interval_sec * 1000;
             let entry = TimerEntry {
-                id: TimerType::Keepalive.timer_id(None),
-                timer_type: TimerType::Keepalive,
+                key: key.clone(),
+                generation: *generation,
                 fire_at: cap_keepalive_fire_at(now_ms + interval_ms, now_ms, interval_ms),
-                leg_id: None,
             };
             let incarnation = event.incarnation().map(str::to_string);
             ctx.timers.schedule(entry, call_ref.to_string(), incarnation).await;
@@ -721,12 +730,12 @@ pub(super) fn rule_chain_turn(
     // probes plus a bounded trickle — never consumes the defense meant for
     // runaway peers. A lifetime reading tore down every hour-long keepalive
     // call around message 200, BYEing a healthy dialog mid-call.
-    let bumped = match event {
-        CallEvent::Timer { timer_type: TimerType::Keepalive, .. } => 0,
-        CallEvent::Timer { timer_type: TimerType::Rung { .. }, .. } => {
-            call.message_count.unwrap_or(0)
-        }
-        _ => call.message_count.unwrap_or(0) + 1,
+    let bumped = if fired(event, &TimerType::Keepalive) {
+        0
+    } else if fired(event, &TimerType::Rung) {
+        call.message_count.unwrap_or(0)
+    } else {
+        call.message_count.unwrap_or(0) + 1
     };
     call.message_count = Some(bumped);
     let cap_exceeded = bumped > ctx.config.max_messages_per_call as i64
@@ -758,7 +767,7 @@ pub(super) fn rule_chain_turn(
         Screened::Unawaited => (event, false),
         Screened::Awaited | Screened::Other => (event, true),
     };
-    if let CallEvent::Timer { timer_type: TimerType::Rung { obligation }, .. } = event {
+    if let Some(obligation) = fired_obligation(event, &TimerType::Rung) {
         let before = call.clone();
         exec.repeat(&mut call, &mut ladder_fx, obligation);
         ladder_fx.quiet = Some(QuietTurn::OwnRung);
@@ -810,7 +819,7 @@ pub(super) fn rule_chain_turn(
     if let CallEvent::Cancelled { in_dialog: false, .. } = event {
         call = call::helpers::record_cancelled_invite(call, &res.source_leg_id);
     }
-    if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
+    if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         ctx.metrics.record_repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
@@ -880,7 +889,7 @@ pub(super) fn rule_chain_turn(
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;
-    if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
+    if let Some(obligation) = fired_obligation(event, &TimerType::RepeatGiveUp) {
         let before = result.call.clone();
         let settled = exec.settle_give_up(result, obligation, &rule_ctx);
         result = crate::rules::invariants::enforce(
@@ -960,34 +969,16 @@ pub(super) fn rule_chain_turn(
     result
 }
 
-/// Per-peer keepalive-timeout attribution (observability only;
-/// `b2bua_peer_failures_total{...,kind="keepalive_timeout"}`). The genuine
-/// no-200 keepalive timeout is the `KeepaliveTimeout` timer firing for a
-/// specific leg L (`leg_id`): the `keepalive-timeout` rule ends the call and
-/// BYEs BOTH legs. So we MUST NOT attribute to an outbound BYE's destination
-/// (the first is the a-leg's hop, often the healthy one, and mis-classifies
-/// internal/external). Attribute to the FAILED leg L's OWN egress-aware next
-/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog
-/// can't be resolved we record nothing (no fabricated address). Distinct from
-/// the reclaim-time stale drop (`restore_hygiene`), which never reaches this
-/// event path.
-fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call) {
-    if let CallEvent::Timer { timer_type: TimerType::KeepaliveTimeout, leg_id, .. } = event {
-        if let Some((host, port)) = keepalive_timeout_peer(&ctx.config, call, leg_id.as_deref()) {
-            use std::net::ToSocketAddrs;
-            if let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() {
-                if let Some(dest) = addrs.next() {
-                    ctx.metrics.record_peer_failure(
-                        &dest,
-                        classify_b2bua_peer(&ctx.config, &dest),
-                        crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
-                    );
-                    // Aggregated per hop: a dead peer is one episode, however
-                    // many calls it takes with it (ADR-0026).
-                    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
-                }
-            }
-        }
+/// Whether `event` is a fire of a timer of type `timer_type`.
+fn fired(event: &CallEvent, timer_type: &TimerType) -> bool {
+    matches!(event, CallEvent::Timer { key, .. } if &key.timer_type == timer_type)
+}
+
+/// The obligation of a fired `timer_type` ladder timer.
+fn fired_obligation<'a>(event: &'a CallEvent, timer_type: &TimerType) -> Option<&'a Obligation> {
+    match event {
+        CallEvent::Timer { key, .. } if &key.timer_type == timer_type => key.obligation_of(),
+        _ => None,
     }
 }
 

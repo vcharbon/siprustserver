@@ -123,7 +123,6 @@ Content-Length: 0\r\n\r\n";
             new_ruri,
             new_from,
             new_to,
-            None,
             &B2buaConfig::default(),
             &IdGen::seeded(0x055),
             None,

@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use crate::model::{Call, Obligation, RetainedEmission, Unacked2xx};
 
-/// Which obligations a retirement covers.
+/// What a retirement covers: the obligations it ends, and for a leg or the
+/// call, the timers that guard it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope<'a> {
     /// Exactly this one — the discharging ACK or PRACK arrived, or a spent

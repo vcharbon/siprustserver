@@ -19,7 +19,7 @@ use crate::obligations::ObligationSet;
 use super::actions::ActionExecutor;
 use super::invariants;
 use b2bua_sdk::model::{
-    EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+    Effect, EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
 };
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
@@ -231,12 +231,12 @@ fn is_own_bookkeeping(rule: &RuleDefinition, action: &RuleAction) -> bool {
         RuleAction::SetState { machine: m, .. } | RuleAction::ClearState { machine: m } => {
             m == machine
         }
-        RuleAction::ScheduleTimer { timer_type: TimerType::Service { service_id, .. }, .. } => {
-            service_id == machine
-        }
-        RuleAction::CancelTimer { id } => {
-            // Every id of the machine's service timers starts with this recipe's.
-            id.starts_with(&TimerType::service_owned(machine.clone(), String::new()).timer_id(None))
+        RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key } => {
+            let owner = match &key.timer_type {
+                TimerType::Service { service_id, .. } => Some(service_id),
+                _ => None,
+            };
+            owner == Some(machine)
         }
         _ => false,
     }
@@ -387,8 +387,10 @@ fn check_declared_transition(
 /// in its `effects` (ADR-0016 X9). The check is **by category** ([`EffectKind`]),
 /// so a handler targeting a dynamically-named leg still satisfies a `LegMessage`
 /// declaration; cursor moves (`SetState`/`ClearState`) and bookkeeping are
-/// auto-allowed (`EffectKind::is_tracked` is false). Core (machine-less) rules
-/// declare no effects and are not checked. Debug builds panic (a test failure);
+/// auto-allowed (`EffectKind::is_tracked` is false). A timer the rule arms or
+/// cancels is held to its declared `GuardTimer`s by type, a service timer by
+/// its owning service ([`declares_timer`]). Core (machine-less) rules declare
+/// no effects and are not checked. Debug builds panic (a test failure);
 /// release builds log and proceed — an authoring gap must never panic a live
 /// worker. Mirrors [`check_declared_transition`].
 fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
@@ -398,16 +400,44 @@ fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
     let declared: HashSet<EffectKind> = rule.effects.iter().map(|e| e.kind()).collect();
     for action in emitted {
         let kind = action.effect_kind();
-        if kind.is_tracked() && !declared.contains(&kind) {
-            if cfg!(debug_assertions) {
-                panic!(
-                    "rule '{}' emitted an undeclared {:?} side effect \
-                     (declare it in the rule's `effects`)",
-                    rule.id, kind,
-                );
-            } else {
-                tracing::warn!(rule = %rule.id, effect = ?kind, "rule emitted an undeclared side effect");
+        let undeclared = if kind.is_tracked() && !declared.contains(&kind) {
+            Some(format!("{kind:?}"))
+        } else {
+            match action {
+                RuleAction::ScheduleTimer { key, .. } | RuleAction::CancelTimer { key }
+                    if !declares_timer(rule, &key.timer_type) =>
+                {
+                    Some(format!("timer {:?}", key.timer_type))
+                }
+                _ => None,
             }
+        };
+        let Some(what) = undeclared else { continue };
+        if cfg!(debug_assertions) {
+            panic!(
+                "rule '{}' emitted an undeclared {what} side effect \
+                 (declare it in the rule's `effects`)",
+                rule.id,
+            );
+        } else {
+            tracing::warn!(
+                rule = %rule.id,
+                effect = %what,
+                "rule emitted an undeclared side effect"
+            );
         }
     }
+}
+
+/// Whether `rule` declares a `GuardTimer` of `timer_type`: the same type, or
+/// for a service timer, one of the same owning service.
+fn declares_timer(rule: &RuleDefinition, timer_type: &TimerType) -> bool {
+    rule.effects.iter().any(|e| match (e, timer_type) {
+        (
+            Effect::GuardTimer { timer: TimerType::Service { service_id: declared, .. }, .. },
+            TimerType::Service { service_id, .. },
+        ) => declared == service_id,
+        (Effect::GuardTimer { timer, .. }, _) => timer == timer_type,
+        _ => false,
+    })
 }

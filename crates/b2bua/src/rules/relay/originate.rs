@@ -4,7 +4,7 @@
 //! (Call-ID, tags, CSeq space, Contact) is minted fresh — nothing
 //! dialog-identifying is copied from the a-leg.
 
-use call::{InviteTxnHandle, Leg, RemoteInfo};
+use call::{Deadline, InviteTxnHandle, Leg, RemoteInfo};
 use sip_message::draft::RequestDraft;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope, SourceBody,
@@ -246,23 +246,25 @@ pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
     super::ack::parse_request(&leg.outbound_invite.as_ref()?.txn.as_ref()?.original_invite)
 }
 
-/// Clamp a decision-supplied ring deadline (s) for an originated leg under the
+/// Clamp a decision-supplied ring deadline for an originated leg under the
 /// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_sec`),
 /// with the per-call `debug!` note on a clamp — the ONE clamp site both
 /// `NoAnswer` arming paths (`decision::apply_route`, `actions::create_leg`)
-/// funnel through.
-pub(crate) fn clamp_no_answer(config: &B2buaConfig, call_ref: &str, requested: i64) -> i64 {
-    let clamped = config.clamp_no_answer_sec(requested);
-    if clamped != requested {
-        tracing::debug!(
-            %call_ref,
-            requested_sec = requested,
-            clamped_sec = clamped,
-            invite_txn_timeout_sec = config.invite_txn_timeout_sec,
-            "no_answer_timeout clamped under the INVITE transaction bound"
-        );
+/// funnel through. A deadline that is off stays off.
+pub(crate) fn clamp_no_answer(config: &B2buaConfig, call_ref: &str, ask: Deadline) -> Deadline {
+    let Some(requested_ms) = ask.millis() else { return Deadline::Off };
+    let clamped_ms = config.clamp_no_answer_ms(requested_ms);
+    if clamped_ms == requested_ms {
+        return ask;
     }
-    clamped
+    tracing::debug!(
+        %call_ref,
+        requested_ms,
+        clamped_ms,
+        invite_txn_timeout_sec = config.invite_txn_timeout_sec,
+        "no_answer_timeout clamped under the INVITE transaction bound"
+    );
+    Deadline::of_millis(Some(clamped_ms))
 }
 
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
@@ -283,7 +285,6 @@ pub fn build_b_leg(
     // `None` keeps the relayed a-leg URI. The basic path passes `(None, None)`.
     new_from: Option<&str>,
     new_to: Option<&str>,
-    no_answer_timeout_sec: Option<i64>,
     config: &B2buaConfig,
     id_gen: &IdGen,
     // Body override: replaces the cloned a-leg body (held SDP, or empty =
@@ -507,7 +508,6 @@ pub fn build_b_leg(
         call_id: b_call_id,
         source: RemoteInfo { address: dest.0.clone(), port: dest.1 },
         dialogs: Default::default(),
-        no_answer_timeout_sec,
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
         invite_request_uri: Some(request_uri),

@@ -84,11 +84,12 @@ second request while the first is awaited merges their deadlines.
 - The core's two other consults need no deadline; something already in the
   call's replicated timer list bounds each:
   - a release event's consult (`ReleaseAsyncHttp`, the subscribed maximum
-    duration): the rule sending it leaves the fired `GlobalDuration` in the
-    ledger, so the copy that serves the call fires it again and re-sends the
-    consult, which ends within its own decision deadline (unanswered: the
-    local teardown). The consult is at least once: after a node loss the
-    decision layer may see the same release event twice;
+    duration): the rule sending it re-arms `GlobalDuration` at the consult's
+    decision deadline plus the margin, so the copy that serves the call fires
+    it again there and re-sends the consult, which ends within its own
+    decision deadline (unanswered: the local teardown). The consult is at
+    least once: after a node loss the decision layer may see the same release
+    event twice;
   - a REFER's authorization (`ReferAsyncHttp`): its subscription's expiry
     (`ReferSubscriptionExpiry`) ends the wait and tells the referrer the
     transfer failed (NOTIFY `terminated`, 500).
@@ -111,4 +112,4 @@ second request while the first is awaited merges their deadlines.
   `failover-harness/tests/it/consult_answer_deadline.rs` (a node crashing with
   each core consult in flight: a `/call/failure` consult's final relayed at
   its deadline on reclaim and takeover; the release consult re-sent by the
-  copy; the REFER's authorization ended at the subscription's expiry).
+  copy at its answer deadline; the REFER's authorization ended at the subscription's expiry).

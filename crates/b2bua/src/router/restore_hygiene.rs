@@ -27,7 +27,7 @@ use call::{TimerEntry, TimerType};
 /// loses nothing. Purely local timer hygiene — no clock/settle, no `(p,b)`
 /// interaction (ADR-0014 untouched).
 fn drop_stale_keepalive_timeout(timers: &mut Vec<TimerEntry>) {
-    timers.retain(|t| !matches!(t.timer_type, TimerType::KeepaliveTimeout));
+    timers.retain(|t| *t.timer_type() != TimerType::KeepaliveTimeout);
 }
 
 /// Deterministic per-`callRef` hash (FNV-1a, 64-bit) used to de-correlate a
@@ -70,7 +70,7 @@ fn smooth_keepalives(
     cap_ms: Option<i64>,
 ) {
     for t in timers.iter_mut() {
-        if !matches!(t.timer_type, TimerType::Keepalive) {
+        if *t.timer_type() != TimerType::Keepalive {
             continue;
         }
         let l = now_ms - t.fire_at;
@@ -97,7 +97,7 @@ fn smooth_keepalives(
 /// so no settle or handback is introduced (ADR-0014 untouched).
 fn cap_future_keepalives(timers: &mut [TimerEntry], now_ms: i64, keepalive_interval_ms: i64) {
     for t in timers.iter_mut() {
-        if matches!(t.timer_type, TimerType::Keepalive) {
+        if *t.timer_type() == TimerType::Keepalive {
             t.fire_at = cap_keepalive_fire_at(t.fire_at, now_ms, keepalive_interval_ms);
         }
     }
@@ -161,7 +161,7 @@ pub(super) fn reanchor_timers(timers: &mut [TimerEntry], skew_offset_ms: i64) {
 ///    keepalive after correction is a normal catch-up and fires promptly (probe
 ///    the recovered peer) — this is what keeps the single-clock harness
 ///    transparent (skew is a known 0, so reclaim keeps the source's OPTIONS
-///    timing token-for-token). Deterministic per `(call_ref, timer id)` so a
+///    timing token-for-token). Deterministic per `(call_ref, timer key)` so a
 ///    reboot re-pass is idempotent.
 /// 5. **Cohort smoothing** ([`smooth_keepalives`]) when `smoothing` is requested
 ///    (the bulk reboot sweep).
@@ -188,12 +188,12 @@ pub(super) fn sanitize_restored_timers(
     //    promptly (single-clock transparency).
     if skew_offset_ms.is_none() && keepalive_interval_ms > 0 {
         for t in timers.iter_mut() {
-            if !matches!(t.timer_type, TimerType::Keepalive) {
+            if *t.timer_type() != TimerType::Keepalive {
                 continue;
             }
             if now_ms - t.fire_at >= keepalive_interval_ms {
-                let jitter =
-                    (stable_jitter(call_ref) ^ stable_jitter(&t.id)) % keepalive_interval_ms as u64;
+                let jitter = (stable_jitter(call_ref) ^ stable_jitter(&format!("{:?}", t.key)))
+                    % keepalive_interval_ms as u64;
                 t.fire_at = now_ms + jitter as i64;
             }
         }

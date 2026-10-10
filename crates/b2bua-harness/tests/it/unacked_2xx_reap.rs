@@ -302,7 +302,7 @@ mod parking {
         Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Obligation, TimerType};
+    use call::{CdrEventType, Obligation, TimerKey, TimerType};
 
     define_service! {
         id: "parking",
@@ -313,10 +313,11 @@ mod parking {
     }
 
     fn is_2xx_give_up(ctx: &RuleContext) -> bool {
-        matches!(
-            ctx.timer_type(),
-            Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } })
-        )
+        ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
+            && matches!(
+                ctx.timer_key().and_then(TimerKey::obligation_of),
+                Some(Obligation::AckOf2xx { .. })
+            )
     }
 
     fn park_the_give_up() -> RuleDefinition {

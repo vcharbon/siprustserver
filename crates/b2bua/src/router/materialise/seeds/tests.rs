@@ -90,7 +90,6 @@ fn b_leg(state: LegState, handle: Option<InviteTxnHandle>) -> Leg {
         call_id: "bcid@x".into(),
         source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
         dialogs: Default::default(),
-        no_answer_timeout_sec: None,
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),

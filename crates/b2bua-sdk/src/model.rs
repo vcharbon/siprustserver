@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::helpers::RAckTokens;
 use call::{
-    ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
+    ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Deadline, Dialog,
     Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
-    PromotePemState, StateLabel, TerminationCause, TimerType, TransferState,
+    PromotePemState, StateLabel, TerminationCause, TimerKey, TimerType, TransferState,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -627,7 +627,7 @@ pub enum RuleAction {
         /// (the from/to numbers); tags stay B2BUA-owned. `None` keeps A's URIs.
         new_from: Option<String>,
         new_to: Option<String>,
-        no_answer_timeout_sec: Option<i64>,
+        no_answer: Deadline,
         callback_context: Option<String>,
         /// Body override for the C INVITE (REFER transfer held SDP). `None`
         /// keeps A's INVITE body (its peer's); `Some(body)` replaces it, empty
@@ -692,24 +692,20 @@ pub enum RuleAction {
         leg_id: String,
         outbound_cseq: i64,
     },
-    /// Arm (or re-arm — same derived id supersedes) a per-call timer. The
-    /// persisted id is `timer_type.timer_id(leg_id)`; a service arms its own
-    /// watchdog with a [`TimerType::Service`] `(service_id, key)`.
+    /// Arm (or re-arm, replacing the key's instance) a per-call timer; a
+    /// service arms its own watchdog under a [`TimerType::Service`] key.
     ///
     /// A [`TimerType::Keepalive`] is held to one `keepalive_interval_sec`
     /// (`call::helpers::cap_keepalive_fire_at`): a larger `delay` trips a debug
     /// assertion and is clamped in release. Every other timer type keeps its
     /// full `delay`.
     ScheduleTimer {
-        timer_type: TimerType,
+        key: TimerKey,
         delay: TimerDelay,
-        leg_id: Option<String>,
     },
-    /// Disarm a per-call timer by persisted id. Mint the id with
-    /// [`TimerType::timer_id`] (or use [`RuleAction::cancel_timer`]) so it can
-    /// never drift from the schedule recipe.
+    /// Disarm the per-call timer `key`.
     CancelTimer {
-        id: String,
+        key: TimerKey,
     },
     CancelAllTimers,
     /// Hard-terminate every leg and the call, no wire traffic: the firing
@@ -1076,11 +1072,13 @@ pub enum RuleAction {
 }
 
 impl RuleAction {
-    /// [`RuleAction::CancelTimer`] with the id minted from the canonical
-    /// schedule recipe ([`TimerType::timer_id`]) — the symmetric disarm for any
-    /// `ScheduleTimer { timer_type, leg_id }` (core or service-owned).
-    pub fn cancel_timer(timer_type: &TimerType, leg_id: Option<&str>) -> Self {
-        RuleAction::CancelTimer { id: timer_type.timer_id(leg_id) }
+    /// Arm `key` after `delay` ([`RuleAction::ScheduleTimer`]).
+    pub fn arm(key: TimerKey, delay: TimerDelay) -> Self {
+        RuleAction::ScheduleTimer { key, delay }
+    }
+    /// Disarm `key` ([`RuleAction::CancelTimer`]).
+    pub fn cancel(key: TimerKey) -> Self {
+        RuleAction::CancelTimer { key }
     }
 
     /// The single [`EffectKind`] this action contributes (ADR-0016 X9). Total by
@@ -1463,8 +1461,12 @@ impl<'a> RuleContext<'a> {
         }
     }
     pub fn timer_type(&self) -> Option<&TimerType> {
+        self.timer_key().map(|key| &key.timer_type)
+    }
+    /// For a timer fire: the key of the timer that fired.
+    pub fn timer_key(&self) -> Option<&TimerKey> {
         match self.event {
-            CallEvent::Timer { timer_type, .. } => Some(timer_type),
+            CallEvent::Timer { key, .. } => Some(key),
             _ => None,
         }
     }
@@ -1473,10 +1475,8 @@ impl<'a> RuleContext<'a> {
     /// a rule that funnels several watchdog keys through one
     /// [`Match::service_timers`] matcher.
     pub fn service_timer_key(&self) -> Option<(&MachineId, &str)> {
-        match self.event {
-            CallEvent::Timer { timer_type: TimerType::Service { service_id, key }, .. } => {
-                Some((service_id, key))
-            }
+        match self.timer_type() {
+            Some(TimerType::Service { service_id, key }) => Some((service_id, key)),
             _ => None,
         }
     }

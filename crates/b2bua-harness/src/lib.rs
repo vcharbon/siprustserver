@@ -1000,10 +1000,10 @@ impl B2buaSut {
         self._core.active_calls()
     }
 
-    /// Cancel `id` in the SUT's timer driver, the record untouched: a stand-in
-    /// for a fire the per-call queue dropped.
-    pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
-        self._core.cancel_driver_timer(call_ref, id).await;
+    /// Cancel `key` in the SUT's timer driver, the record untouched: a
+    /// stand-in for a fire the per-call queue dropped.
+    pub async fn cancel_driver_timer(&self, call_ref: &str, key: &call::TimerKey) {
+        self._core.cancel_driver_timer(call_ref, key).await;
     }
 
     /// Post `event` to the SUT's router as its timer driver or a callout

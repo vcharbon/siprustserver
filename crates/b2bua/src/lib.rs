@@ -53,6 +53,7 @@ pub mod rules;
 pub mod stack_identity;
 pub mod store;
 pub(crate) mod sweep;
+pub(crate) mod timer_arm;
 pub mod timers;
 pub mod trace;
 pub mod wire_faults;

@@ -241,9 +241,9 @@ async fn an_answer_travels_to_its_call_as_an_internal_event() {
     };
     assert_eq!(RefreshAnswered::of(&answer.clone().into_event()), Some(answer));
     let other = CallEvent::Timer {
-        timer_type: call::TimerType::LimiterRefresh,
+        key: call::TimerKey::call(call::TimerType::LimiterRefresh),
+        generation: 1,
         call_ref: "c".into(),
-        leg_id: None,
         incarnation: None,
     };
     assert_eq!(RefreshAnswered::of(&other), None);

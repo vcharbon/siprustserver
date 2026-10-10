@@ -807,8 +807,8 @@ impl B2buaCore {
 
     /// Cancel a timer in this node's driver, the record untouched: a test's
     /// stand-in for a fire the per-call queue dropped.
-    pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
-        self.ctx.timers.cancel(call_ref.to_string(), id.to_string()).await;
+    pub async fn cancel_driver_timer(&self, call_ref: &str, key: &call::TimerKey) {
+        self.ctx.timers.cancel(call_ref.to_string(), key.clone()).await;
     }
 
     /// Post `event` to the router as a timer driver or a callout posts one: a

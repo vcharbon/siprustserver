@@ -126,7 +126,8 @@ pub enum BodyUpdate {
     AttachParts(Vec<sip_message::MultipartPart>),
 }
 
-/// A "route" decision — bridge the call to `destination`.
+/// A "route" decision — bridge the call to `destination`. Its ring deadline
+/// is read through [`RouteDecision::no_answer`].
 #[derive(Debug, Clone, Serialize)]
 pub struct RouteDecision {
     pub destination: SipDestination,
@@ -160,6 +161,13 @@ pub struct RouteDecision {
     /// An opaque string the decision layer may attach to the decision,
     /// recorded on the call's decision log and read by nothing here.
     pub label: Option<String>,
+}
+
+impl RouteDecision {
+    /// The ring deadline the route states for the leg it dials.
+    pub fn no_answer(&self) -> call::Deadline {
+        super::no_answer_deadline(self.no_answer_timeout_sec, Some(&self.features))
+    }
 }
 
 /// A "reject" decision — answer the INVITE with a failure response the decision

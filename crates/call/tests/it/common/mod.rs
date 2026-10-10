@@ -121,7 +121,6 @@ pub fn representative_call() -> Call {
             "call-id-deadbeef@example.com",
         )]
         .into(),
-        no_answer_timeout_sec: None,
         local_uri: Some("sip:bob@example.com".into()),
         remote_uri: Some("sip:alice@example.com".into()),
         invite_request_uri: None,
@@ -168,7 +167,6 @@ pub fn representative_call() -> Call {
             "b-leg-call-id-fedcba@b2bua",
         )]
         .into(),
-        no_answer_timeout_sec: None,
         local_uri: Some("sip:alice@example.com".into()),
         remote_uri: Some("sip:bob@example.com".into()),
         invite_request_uri: Some("sip:bob@example.com".into()),
@@ -224,18 +222,17 @@ pub fn representative_call() -> Call {
         ),
         timers: vec![
             TimerEntry {
-                id: "timer-no-answer-a".into(),
-                timer_type: TimerType::NoAnswer,
+                key: TimerKey::leg(TimerType::NoAnswer, "a"),
+                generation: 1,
                 fire_at: 1_779_440_045_000,
-                leg_id: Some("a".into()),
             },
             TimerEntry {
-                id: "timer-global-duration".into(),
-                timer_type: TimerType::GlobalDuration,
+                key: TimerKey::call(TimerType::GlobalDuration),
+                generation: 2,
                 fire_at: 1_779_443_642_000,
-                leg_id: None,
             },
         ],
+        timer_generation: 2,
         cdr_events: vec![
             CdrEvent {
                 event_type: CdrEventType::InviteReceived,
@@ -650,7 +647,6 @@ fn arb_leg() -> BoxedStrategy<Leg> {
         ),
         arb_remote_info(),
         proptest::collection::vec(arb_dialog(), 0..3),
-        proptest::option::of(0i64..600),
         (
             proptest::option::of(arb_uri()),
             proptest::option::of(arb_uri()),
@@ -673,7 +669,6 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 (outbound_invite, own_tag),
                 source,
                 dialogs,
-                no_answer_timeout_sec,
                 (local_uri, remote_uri, invite_request_uri),
                 (ext, kind, adopted, invite_final_sent, in_session_timer),
                 (messages, answer_preempted),
@@ -683,7 +678,6 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 call_id,
                 source,
                 dialogs: dialogs.into(),
-                no_answer_timeout_sec,
                 local_uri,
                 remote_uri,
                 invite_request_uri,
@@ -879,9 +873,11 @@ fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
 }
 
 fn arb_timer() -> impl Strategy<Value = TimerEntry> {
-    (arb_tag(), arb_timer_type(), any::<i64>(), proptest::option::of(arb_tag())).prop_map(
-        |(id, timer_type, fire_at, leg_id)| TimerEntry { id, timer_type, fire_at, leg_id },
-    )
+    let scope = proptest::option::of(arb_tag());
+    (arb_timer_type(), scope, any::<u64>(), any::<i64>()).prop_map(|(t, leg, g, at)| {
+        let key = leg.map_or_else(|| TimerKey::call(t.clone()), |l| TimerKey::leg(t.clone(), l));
+        TimerEntry { key, generation: g, fire_at: at }
+    })
 }
 fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
     (
@@ -1168,6 +1164,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             a_leg_invite,
             limiter,
             timers,
+            timer_generation: 0,
             cdr_events,
             state,
             created_at,

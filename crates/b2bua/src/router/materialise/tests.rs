@@ -3,7 +3,7 @@
 //! simulated fabric) so the post-materialise list runs for real. Each test
 //! holds the per-call lock across the call, as every caller does.
 
-use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec, TimerEntry, TimerType};
+use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec, TimerEntry, TimerKey, TimerType};
 use sip_clock::Clock;
 
 use super::{materialise, Materialised, Origin, Reason};
@@ -28,10 +28,9 @@ fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock
         call = call::helpers::record_termination(call, 0, call::TerminationCause::Supervisor, None);
     }
     call.timers.push(TimerEntry {
-        id: format!("keepalive-{cid}"),
-        timer_type: TimerType::Keepalive,
+        key: TimerKey::call(TimerType::Keepalive),
+        generation: 1,
         fire_at: clock.now_ms() + 300_000,
-        leg_id: None,
     });
     call
 }

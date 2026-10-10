@@ -1,19 +1,15 @@
 use super::*;
 use crate::timers::TimerService;
 use b2bua_sdk::event::CallEvent;
+use call::TimerKey;
 use sip_clock::Clock;
 use std::time::Duration;
 
 fn keepalive(fire_at: i64) -> TimerEntry {
-    TimerEntry { id: "Keepalive".into(), timer_type: TimerType::Keepalive, fire_at, leg_id: None }
+    TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at }
 }
 fn keepalive_timeout(leg: &str, fire_at: i64) -> TimerEntry {
-    TimerEntry {
-        id: format!("KeepaliveTimeout:{leg}"),
-        timer_type: TimerType::KeepaliveTimeout,
-        fire_at,
-        leg_id: Some(leg.into()),
-    }
+    TimerEntry { key: TimerKey::leg(TimerType::KeepaliveTimeout, leg), generation: 2, fire_at }
 }
 
 // The reclaim/takeover hygiene: a snapshot caught mid-keepalive-round-trip
@@ -29,23 +25,22 @@ fn drop_stale_keepalive_timeout_strips_only_the_timeout() {
         keepalive_timeout("a", 35_000),
         keepalive_timeout("b-1", 35_000),
         TimerEntry {
-            id: "GlobalDuration".into(),
-            timer_type: TimerType::GlobalDuration,
+            key: TimerKey::call(TimerType::GlobalDuration),
+            generation: 1,
             fire_at: 3_600_000,
-            leg_id: None,
         },
     ];
     drop_stale_keepalive_timeout(&mut timers);
     assert!(
-        timers.iter().all(|t| !matches!(t.timer_type, TimerType::KeepaliveTimeout)),
+        timers.iter().all(|t| !matches!(t.timer_type(), TimerType::KeepaliveTimeout)),
         "every KeepaliveTimeout is stripped from the reclaimed snapshot",
     );
     assert!(
-        timers.iter().any(|t| matches!(t.timer_type, TimerType::Keepalive)),
+        timers.iter().any(|t| matches!(t.timer_type(), TimerType::Keepalive)),
         "the Keepalive (re-probe) timer is kept — the call re-probes on its own schedule",
     );
     assert!(
-        timers.iter().any(|t| matches!(t.timer_type, TimerType::GlobalDuration)),
+        timers.iter().any(|t| matches!(t.timer_type(), TimerType::GlobalDuration)),
         "unrelated timers (GlobalDuration) are kept",
     );
 }
@@ -63,18 +58,13 @@ fn service_timer_survives_restore_hygiene_and_is_reanchored() {
     let skew = 45_000; // receiver_now − origin_now (clears the deadband)
     let raw_fire_at = now - skew + 5_000; // origin-frame deadline
     let mut timers = vec![
-        TimerEntry {
-            id: svc.timer_id(None),
-            timer_type: svc.clone(),
-            fire_at: raw_fire_at,
-            leg_id: None,
-        },
+        TimerEntry { key: TimerKey::call(svc.clone()), generation: 1, fire_at: raw_fire_at },
         keepalive_timeout("b-1", now - skew + 1_000),
     ];
     let smoothing = Some(Smoothing { now_ms: now, l_max: 0, speedup: 10, cap_ms: None });
     sanitize_restored_timers(&mut timers, "w1|svc|svc", now, Some(skew), 300_000, smoothing);
     assert_eq!(timers.len(), 1, "service timer kept; stale KeepaliveTimeout stripped");
-    assert_eq!(timers[0].timer_type, svc);
+    assert_eq!(*timers[0].timer_type(), svc);
     assert_eq!(
         timers[0].fire_at,
         now + 5_000,
@@ -101,8 +91,8 @@ async fn past_due_keepalive_timeout_fires_on_restore_without_the_fix() {
     tokio::time::advance(Duration::from_millis(1)).await;
     let fired = fire_rx.recv().await.unwrap();
     match fired {
-        CallEvent::Timer { timer_type, .. } => assert_eq!(
-            timer_type,
+        CallEvent::Timer { key, .. } => assert_eq!(
+            key.timer_type,
             TimerType::KeepaliveTimeout,
             "BUG: the stale past-due KeepaliveTimeout fires on reclaim → spurious BYE",
         ),
@@ -182,10 +172,9 @@ fn restored_keepalive_is_capped_at_one_interval() {
     let mut t = vec![
         keepalive(deadline),
         TimerEntry {
-            id: TimerType::GlobalDuration.timer_id(None),
-            timer_type: TimerType::GlobalDuration,
+            key: TimerKey::call(TimerType::GlobalDuration),
+            generation: 1,
             fire_at: duration_at,
-            leg_id: None,
         },
     ];
     sanitize_restored_timers(&mut t, "w1|mixed|mixed", now, Some(0), interval, None);
@@ -326,7 +315,7 @@ fn seam_reanchor_keeps_future_cohort_out_of_the_catchup_band() {
 /// The defensive floor. When the offset is UNKNOWN (`None`, a path that
 /// could not re-anchor), a keepalive past-due by ≥ 1× interval is re-based
 /// to within one interval of `now` (not fired immediately, which would race a
-/// failed-over transaction). Deterministic per (call_ref, timer id).
+/// failed-over transaction). Deterministic per (call_ref, timer key).
 #[test]
 fn defensive_floor_rebases_deep_past_due_keepalive_within_one_interval() {
     let now = 1_000_000;
@@ -379,10 +368,9 @@ fn setup_timeout_is_reanchored_not_reaped_early_or_extended() {
     // Model the restored entry as it arrives on the takeover node, whose `now`
     // is 100 s past the (origin-frame) ring start.
     let setup = |fire_at: i64| TimerEntry {
-        id: format!("{:?}", TimerType::SetupTimeout),
-        timer_type: TimerType::SetupTimeout,
+        key: TimerKey::call(TimerType::SetupTimeout),
+        generation: 1,
         fire_at,
-        leg_id: None,
     };
 
     // ── skew-AHEAD (+40 s): the takeover node's clock is 40 s ahead of the

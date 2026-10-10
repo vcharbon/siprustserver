@@ -24,7 +24,7 @@
 //!   - [`decision_log`] — the decision-log append and its ordinal
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`termination`] — the termination record and its message-ring cut
-//!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap,
+//!   - [`timer`] — the timer ledger (`arm_timer`, `disarm_timer`, terminating cap,
 //!     the keepalive one-interval ceiling)
 
 pub mod decision_log;
@@ -93,4 +93,7 @@ pub use services::{
     set_transfer, transfer_active, transfer_state,
 };
 pub use termination::{record_termination, seal_termination_seq};
-pub use timer::{cap_keepalive_fire_at, replace_timer_by_id, TERMINATING_TIMEOUT_MS};
+pub use timer::{
+    arm_timer, cap_keepalive_fire_at, disarm_timer, holds_timer, retire_timers,
+    TERMINATING_TIMEOUT_MS,
+};

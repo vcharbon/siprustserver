@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 
-use call::{Call, CallModelState};
+use call::{Call, CallModelState, TimerEntry, TimerKey};
 use observe::TraceEvent;
 
 use super::registry::{traces, RoundTripSide};
@@ -94,6 +94,39 @@ pub fn limiter(call: &Call, at_ms: i64, action: &'static str, detail: &str) {
         return;
     }
     record(call, "limiter", at_ms, &format!("{action}: {detail}"), b"");
+}
+
+/// A timer armed: its key, the generation it was armed under, its deadline.
+pub fn timer_arm(call: &Call, at_ms: i64, entry: &TimerEntry) {
+    if !sampled(call) {
+        return;
+    }
+    let detail = format!("{:?} gen {} at {}", entry.key, entry.generation, entry.fire_at);
+    record(call, "timer.arm", at_ms, &detail, b"");
+}
+
+/// A timer disarmed before its fire.
+pub fn timer_cancel(call: &Call, at_ms: i64, key: &TimerKey) {
+    if !sampled(call) {
+        return;
+    }
+    record(call, "timer.cancel", at_ms, &format!("{key:?}"), b"");
+}
+
+/// A timer's fire delivered to the call: the ledger held its instance.
+pub fn timer_fire(call: &Call, at_ms: i64, key: &TimerKey, generation: u64) {
+    if !sampled(call) {
+        return;
+    }
+    record(call, "timer.fire", at_ms, &format!("{key:?} gen {generation}"), b"");
+}
+
+/// A timer's fire dropped before any rule read it, and why.
+pub fn timer_drop(call: &Call, at_ms: i64, key: &TimerKey, generation: u64, reason: &str) {
+    if !sampled(call) {
+        return;
+    }
+    record(call, "timer.drop", at_ms, &format!("{key:?} gen {generation}: {reason}"), b"");
 }
 
 /// One outbound HTTP round trip as a child span carrying both bodies.

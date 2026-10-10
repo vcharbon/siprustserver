@@ -31,7 +31,7 @@ use b2bua_harness::limiter::doubles::{answers_released, spy};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
-use call::ReleaseEventKind;
+use call::{ReleaseEventKind, TimerKey, TimerType};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
 use scenario_harness::{Harness, Party};
@@ -754,7 +754,7 @@ async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
 
     // ── the driver loses the refresh fire; the set lapses ──────────────────
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
-    b2bua.cancel_driver_timer(&call_ref, "LimiterRefresh").await;
+    b2bua.cancel_driver_timer(&call_ref, &TimerKey::call(TimerType::LimiterRefresh)).await;
     for _ in 0..22 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();

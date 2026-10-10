@@ -31,7 +31,9 @@
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
 //!     and the key that discharges it (ADR-0032)
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
-//!   - [`timer`] — serializable timer intents ([`TimerType`] / [`TimerEntry`])
+//!   - [`timer`] — serializable timer intents ([`TimerType`], [`TimerScope`],
+//!     [`TimerKey`], [`TimerEntry`])
+//!   - [`deadline`] — a configured wait that may be off ([`Deadline`])
 //!   - [`cdr`] — CDR event records
 //!   - [`decision_log`] — the applied decisions, in order
 //!   - [`message_ring`] — the capped per-leg history of distinct SIP messages
@@ -40,6 +42,7 @@
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
 pub mod cdr;
+pub mod deadline;
 pub mod decision_log;
 pub mod dialog;
 pub mod dialogs;
@@ -59,6 +62,7 @@ pub mod termination;
 pub mod timer;
 
 pub use cdr::{CdrEvent, CdrEventType};
+pub use deadline::Deadline;
 pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{
     Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, PendingRequest,
@@ -87,4 +91,4 @@ pub use services::{
 };
 pub use sm::{MachineId, StateLabel};
 pub use termination::{Termination, TerminationCause, TimeoutKind};
-pub use timer::{TimerEntry, TimerType};
+pub use timer::{TimerEntry, TimerKey, TimerScope, TimerType};

@@ -155,14 +155,14 @@ fn disabled_setup_deadline_skips_the_ordering_check() {
 fn clamps_no_answer_above_the_margin_ceiling() {
     let c = B2buaConfig { invite_txn_timeout_sec: 200, ..Default::default() };
     // Above `bound − margin` → held to the ceiling; at/under it → untouched.
-    assert_eq!(c.clamp_no_answer_sec(250), 192);
-    assert_eq!(c.clamp_no_answer_sec(200), 192);
+    assert_eq!(c.clamp_no_answer_ms(250_000), 192_000);
+    assert_eq!(c.clamp_no_answer_ms(200_000), 192_000);
     // Inside the margin band (192 < 195 < 200): equally clamped — a value
     // there would strand the CANCEL→487 exchange just the same.
-    assert_eq!(c.clamp_no_answer_sec(195), 192);
-    assert_eq!(c.clamp_no_answer_sec(192), 192);
-    assert_eq!(c.clamp_no_answer_sec(191), 191);
-    assert_eq!(c.clamp_no_answer_sec(30), 30);
+    assert_eq!(c.clamp_no_answer_ms(195_000), 192_000);
+    assert_eq!(c.clamp_no_answer_ms(192_000), 192_000);
+    assert_eq!(c.clamp_no_answer_ms(191_000), 191_000);
+    assert_eq!(c.clamp_no_answer_ms(30_000), 30_000);
 }
 
 #[test]

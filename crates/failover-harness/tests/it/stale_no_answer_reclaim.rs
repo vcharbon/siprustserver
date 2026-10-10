@@ -85,7 +85,7 @@ async fn replica_carries_no_answer(
         return false;
     };
     let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
-    call.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer)
+    call.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer)
 }
 
 /// Answer any pending keepalive OPTIONS on either peer (the reclaim sweep

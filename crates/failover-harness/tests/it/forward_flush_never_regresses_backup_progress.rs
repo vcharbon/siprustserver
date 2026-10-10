@@ -207,7 +207,7 @@ async fn ring_deadline(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &st
     assert_ne!(call.a_leg.state(), LegState::Confirmed, "the survivor holds the ringing a-leg");
     call.timers
         .iter()
-        .find(|t| t.timer_type == TimerType::NoAnswer)
+        .find(|t| *t.timer_type() == TimerType::NoAnswer)
         .map(|t| t.fire_at)
         .expect("the replica carries the route-time NoAnswer")
 }
@@ -562,8 +562,16 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         assert_eq!(after.state, CallModelState::Active, "the live copy is untouched");
         assert_eq!(after.a_leg.state(), LegState::Confirmed, "and still reads the caller answered");
         assert_eq!(
-            after.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
-            before.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
+            after
+                .timers
+                .iter()
+                .map(|t| (t.key.clone(), t.generation, t.fire_at))
+                .collect::<Vec<_>>(),
+            before
+                .timers
+                .iter()
+                .map(|t| (t.key.clone(), t.generation, t.fire_at))
+                .collect::<Vec<_>>(),
             "a refused flush carries no progress: the ledger is not resynced",
         );
         assert!(

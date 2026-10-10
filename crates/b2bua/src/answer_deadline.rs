@@ -15,14 +15,14 @@
 //!   is not (it expired) reaches none, its admit report still applied; so does
 //!   an admit report under another limiter key (an earlier call under the
 //!   same `call_ref`), which leaves the call's own deadline awaited. The
-//!   deadline's expiry is the request's answer with nothing usable — an HTTP
-//!   request's `error` result ([`NO_ANSWER`]), an admit's `unavailable`
-//!   report, a failure consult's unanswered `terminate` fold — and one whose
-//!   answer came first reaches none.
+//!   deadline's expiry — a fire the router's timer screen delivered, so its
+//!   answer had not come first — is the request's answer with nothing usable:
+//!   an HTTP request's `error` result ([`NO_ANSWER`]), an admit's
+//!   `unavailable` report, a failure consult's unanswered `terminate` fold.
 
 use std::time::Duration;
 
-use call::{Call, CallModelState, TimerEntry, TimerType};
+use call::{Call, CallModelState, TimerKey, TimerType};
 
 use crate::config::B2buaConfig;
 use crate::decision_log::FAILURE_TOPIC;
@@ -99,17 +99,13 @@ pub fn arm(mut result: HandlerResult, budgets: &AnswerBudgets, now_ms: i64) -> H
         }
     }
     for (timer_type, budget) in deadlines {
-        let entry = TimerEntry {
-            id: timer_type.timer_id(None),
-            timer_type,
-            fire_at: now_ms + (budget + MARGIN).as_millis() as i64,
-            leg_id: None,
-        };
-        result.call.timers = call::helpers::replace_timer_by_id(
-            std::mem::take(&mut result.call.timers),
-            entry.clone(),
+        let fire_at = now_ms + (budget + MARGIN).as_millis() as i64;
+        crate::timer_arm::arm(
+            &mut result.call,
+            &mut result.effects,
+            TimerKey::call(timer_type),
+            fire_at,
         );
-        result.effects.critical.push(CriticalStateEffect::ScheduleTimer(entry));
     }
     result
 }
@@ -144,7 +140,8 @@ fn deadline_of(fx: &FireAndForgetEffect, budgets: &AnswerBudgets) -> Option<(Tim
 }
 
 /// The deadline a service request's answer closes: its result naming its
-/// correlation id.
+/// correlation id. An admit's deadline is matched on its correlation id alone
+/// ([`closes`]).
 fn answered(event: &CallEvent) -> Option<TimerType> {
     let CallEvent::InternalEvent { topic, payload, .. } = event else {
         return None;
@@ -160,9 +157,9 @@ fn answered(event: &CallEvent) -> Option<TimerType> {
     }
 }
 
-/// The id of the deadline a `/call/failure` fold closes: its consult's first
-/// change number ([`CONSULT_CHANGE`]).
-fn failure_answered(event: &CallEvent) -> Option<String> {
+/// The deadline a `/call/failure` fold closes: its consult's first change
+/// number ([`CONSULT_CHANGE`]), matched on that alone ([`closes`]).
+fn failure_answered(event: &CallEvent) -> Option<TimerType> {
     let CallEvent::InternalEvent { topic, payload, .. } = event else {
         return None;
     };
@@ -170,9 +167,28 @@ fn failure_answered(event: &CallEvent) -> Option<String> {
         return None;
     }
     let change = payload.get(CONSULT_CHANGE)?.as_u64()?;
-    // The id names the change alone.
-    let unanswered = serde_json::Value::Null;
-    Some(TimerType::FailureAnswer { change, unanswered }.timer_id(None))
+    Some(TimerType::FailureAnswer { change, unanswered: serde_json::Value::Null })
+}
+
+/// Whether the armed deadline `armed` is the one `answer` closes: an HTTP
+/// request's by its correlation id, an admit's by its correlation id, a
+/// failure consult's by its change number.
+fn closes(armed: &TimerType, answer: &TimerType) -> bool {
+    match (armed, answer) {
+        (
+            TimerType::ServiceHttpAnswer { correlation_id: a },
+            TimerType::ServiceHttpAnswer { correlation_id: b },
+        )
+        | (
+            TimerType::ServiceAdmitAnswer { correlation_id: a, .. },
+            TimerType::ServiceAdmitAnswer { correlation_id: b, .. },
+        ) => a == b,
+        (
+            TimerType::FailureAnswer { change: a, .. },
+            TimerType::FailureAnswer { change: b, .. },
+        ) => a == b,
+        _ => false,
+    }
 }
 
 /// What an event is to the requests the call awaits answers to.
@@ -186,43 +202,41 @@ pub enum Screened {
     /// A deadline expired: the rules read this event, the request's answer
     /// with nothing usable.
     Expired(CallEvent),
-    /// An answer whose deadline expired, an admit report under another
-    /// limiter key, or a deadline whose answer came first: no rule reads it.
+    /// An answer whose deadline expired, or an admit report under another
+    /// limiter key: no rule reads it.
     Unawaited,
 }
 
-/// Screen `event` against the call's pending deadlines, taking the one it
-/// closes off `call`'s ledger (and cancelling it on `fx` for an answer).
+/// Screen `event` against the call's pending deadlines: a delivered deadline
+/// fire (the timer screen already took it off the ledger) is read as its lost
+/// answer; an answer takes the deadline it closes off `call`'s ledger and
+/// cancels it on `fx`.
 pub fn screen(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) -> Screened {
-    if let CallEvent::Timer { timer_type, .. } = event {
-        let lost = match timer_type {
+    if let CallEvent::Timer { key, .. } = event {
+        return match &key.timer_type {
             TimerType::ServiceHttpAnswer { correlation_id } => {
-                lost_http_answer(call, correlation_id)
+                Screened::Expired(lost_http_answer(call, correlation_id))
             }
             TimerType::ServiceAdmitAnswer { correlation_id, change } => {
-                lost_admit_answer(call, correlation_id, *change)
+                Screened::Expired(lost_admit_answer(call, correlation_id, *change))
             }
-            TimerType::FailureAnswer { unanswered, .. } => lost_failure_answer(call, unanswered),
-            _ => return Screened::Other,
+            TimerType::FailureAnswer { unanswered, .. } => {
+                Screened::Expired(lost_failure_answer(call, unanswered))
+            }
+            _ => Screened::Other,
         };
-        if !take(call, &timer_type.timer_id(None)) {
-            return Screened::Unawaited;
-        }
-        return Screened::Expired(lost);
     }
-    let Some(id) = answered(event)
-        .map(|timer_type| timer_type.timer_id(None))
-        .or_else(|| failure_answered(event))
-    else {
+    let Some(answer) = answered(event).or_else(|| failure_answered(event)) else {
         return Screened::Other;
     };
     if of_another_call(call, event) {
         return Screened::Unawaited;
     }
-    if !take(call, &id) {
+    let Some(entry) = call::helpers::retire_timers(call, |t| closes(t.timer_type(), &answer)).pop()
+    else {
         return Screened::Unawaited;
-    }
-    fx.critical.push(CriticalStateEffect::CancelTimer { id });
+    };
+    fx.critical.push(CriticalStateEffect::CancelTimer { key: entry.key });
     Screened::Awaited
 }
 
@@ -230,13 +244,6 @@ pub fn screen(call: &mut Call, fx: &mut HandlerEffects, event: &CallEvent) -> Sc
 /// under the same `call_ref`, whose correlation ids may repeat this call's?
 fn of_another_call(call: &Call, event: &CallEvent) -> bool {
     crate::limiter::report::admit_report_of(event).is_some_and(|r| r.key != call.limiter.key())
-}
-
-/// Take the ledger entry `id` off `call`; whether it was there.
-fn take(call: &mut Call, id: &str) -> bool {
-    let before = call.timers.len();
-    call.timers.retain(|t| t.id != id);
-    call.timers.len() != before
 }
 
 /// The `error` result of the HTTP request `correlation_id` names.

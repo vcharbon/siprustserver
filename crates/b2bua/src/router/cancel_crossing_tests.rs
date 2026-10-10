@@ -9,7 +9,7 @@
 
 use call::{
     Call, Dialog, DialogState, Direction, LegState, Obligation, OutboundInvite, Repeated,
-    RetainedEmission, TimerEntry, TimerType, Unacked2xx,
+    RetainedEmission, TimerKey, TimerType, Unacked2xx,
 };
 use sip_retransmit::Class;
 
@@ -48,15 +48,9 @@ fn relayed_answer_call() -> Call {
     call.a_leg.dialogs = vec![a1].into();
     call.a_leg.own_tag = Some("a1".into());
     let obligation = Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "a1".into(), cseq: 1 };
-    for timer_type in
-        [TimerType::Rung { obligation: obligation.clone() }, TimerType::RepeatGiveUp { obligation }]
-    {
-        call.timers.push(TimerEntry {
-            id: timer_type.timer_id(None),
-            timer_type,
-            fire_at: 1_500,
-            leg_id: None,
-        });
+    for timer_type in [TimerType::Rung, TimerType::RepeatGiveUp] {
+        let key = TimerKey::obligation(timer_type, obligation.clone());
+        call::helpers::arm_timer(&mut call, key, 1_500);
     }
     let mut b = call.a_leg.clone();
     b.leg_id = "b-1".into();
@@ -126,8 +120,8 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         .call
         .timers
         .iter()
-        .filter(|t| matches!(t.timer_type, TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. }))
-        .map(|t| t.id.clone())
+        .filter(|t| matches!(t.timer_type(), TimerType::Rung | TimerType::RepeatGiveUp))
+        .map(|t| format!("{:?}", t.key))
         .collect();
     assert_eq!(ladders, Vec::<String>::new(), "no ladder repeats a 2xx that never left");
     assert_eq!(

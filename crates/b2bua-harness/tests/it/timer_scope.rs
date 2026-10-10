@@ -9,9 +9,10 @@
 //!   service's deadline re-armed by its own rule, each run on the instance
 //!   the ledger holds.
 //!
-//! The stale fires are posted with [`B2buaSut::post_event`]: the driver
-//! drops a superseded instance it still queues, so the fire under test is
-//! one that left the driver before the turn that re-armed it ran.
+//! The stale fires are posted with [`B2buaSut::post_event`], naming the
+//! generation the replaced instance was armed under: the driver drops a
+//! superseded instance it still queues, so the fire under test is one that
+//! left the driver before the turn that re-armed it ran.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +26,7 @@ use b2bua::decision::{
 };
 use b2bua::CallEvent;
 use b2bua_harness::{settle_until, B2buaSut};
-use call::{Call, TimerType};
+use call::{Call, TimerKey, TimerType};
 use scenario_harness::{Agent, ClientInvite, Harness};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -87,12 +88,16 @@ fn failing_over(bob: u16, carol: u16, no_answer_sec: i64) -> Arc<SlowFailure> {
 
 /// The armed timers of `call` that name leg `leg`.
 fn timers_on_leg(call: &Call, leg: &str) -> Vec<String> {
-    call.timers.iter().filter(|t| t.leg_id.as_deref() == Some(leg)).map(|t| t.id.clone()).collect()
+    call.timers.iter().filter(|t| t.leg_id() == Some(leg)).map(|t| format!("{:?}", t.key)).collect()
 }
 
 /// The armed timers of `call` of type `timer_type`.
 fn timers_of_type(call: &Call, timer_type: &TimerType) -> Vec<String> {
-    call.timers.iter().filter(|t| &t.timer_type == timer_type).map(|t| t.id.clone()).collect()
+    call.timers
+        .iter()
+        .filter(|t| t.timer_type() == timer_type)
+        .map(|t| format!("{:?}", t.key))
+        .collect()
 }
 
 /// Carol, the failover callee, answers; alice hangs up; the call is reaped
@@ -100,6 +105,7 @@ fn timers_of_type(call: &Call, timer_type: &TimerType) -> Vec<String> {
 async fn failover_answered_then_hung_up(call: &mut ClientInvite, carol: &Agent, b2bua: &B2buaSut) {
     let mut carol_uas = carol.receive("INVITE").await;
     carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
     carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -137,7 +143,7 @@ async fn a_refused_legs_ring_deadline_leaves_the_ledger_with_the_leg() {
         .await;
     let mut bob_uas = bob.receive("INVITE").await;
     let ringing = b2bua.live_call(&call_ref).expect("the call is live");
-    assert_eq!(timers_on_leg(&ringing, "b-1"), vec!["NoAnswer:b-1"], "bob's ring deadline");
+    assert_eq!(timers_on_leg(&ringing, "b-1"), vec!["NoAnswer on leg b-1"], "bob's ring deadline");
 
     bob_uas.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
@@ -211,7 +217,10 @@ async fn a_duration_cap_fire_queued_behind_its_rearm_leaves_the_call_up() {
         .await;
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
     let cap = |c: &Call| {
-        c.timers.iter().find(|t| t.timer_type == TimerType::GlobalDuration).map(|t| t.fire_at)
+        c.timers
+            .iter()
+            .find(|t| *t.timer_type() == TimerType::GlobalDuration)
+            .map(|t| (t.fire_at, t.generation))
     };
 
     let mut call = alice
@@ -225,7 +234,7 @@ async fn a_duration_cap_fire_queued_behind_its_rearm_leaves_the_call_up() {
     bob_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     let setup = b2bua.live_call(&call_ref).expect("the call is live");
-    let setup_cap = cap(&setup).expect("the setup arms the duration cap");
+    let (setup_cap, setup_generation) = cap(&setup).expect("the setup arms the duration cap");
 
     h.advance(Duration::from_secs(2)).await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -234,14 +243,14 @@ async fn a_duration_cap_fire_queued_behind_its_rearm_leaves_the_call_up() {
     bob.receive("ACK").await;
     let answered = b2bua.live_call(&call_ref).expect("the call is live");
     assert!(
-        cap(&answered).expect("the answer re-arms the duration cap") > setup_cap,
+        cap(&answered).expect("the answer re-arms the duration cap").0 > setup_cap,
         "the answer's instance replaced the setup's",
     );
 
     b2bua.post_event(CallEvent::Timer {
-        timer_type: TimerType::GlobalDuration,
+        key: TimerKey::call(TimerType::GlobalDuration),
+        generation: setup_generation,
         call_ref: call_ref.clone(),
-        leg_id: None,
         incarnation: Some(answered.incarnation().to_string()),
     });
     h.advance(Duration::from_secs(1)).await;
@@ -268,7 +277,7 @@ mod ring_deadline {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, TimerType};
+    use call::{CdrEventType, Direction, TimerKey, TimerType};
 
     pub const SETUP_SEC: i64 = 5;
     pub const RINGING_SEC: i64 = 10;
@@ -280,11 +289,7 @@ mod ring_deadline {
         states: RdState { Waiting, Ringing },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(RdState::Waiting.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: DEADLINE,
-                    delay: TimerDelay::secs(SETUP_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(TimerKey::call(DEADLINE), TimerDelay::secs(SETUP_SEC)),
             ]))
         },
         rules: [ extend_on_ring(), fail_on_deadline() ],
@@ -311,11 +316,7 @@ mod ring_deadline {
                         status_code: ctx.response().map(|r| r.status() as i64),
                         reason: None,
                     },
-                    RuleAction::ScheduleTimer {
-                        timer_type: DEADLINE,
-                        delay: TimerDelay::secs(RINGING_SEC),
-                        leg_id: None,
-                    },
+                    RuleAction::arm(TimerKey::call(DEADLINE), TimerDelay::secs(RINGING_SEC)),
                     RuleAction::SetState {
                         machine: RING_DEADLINE,
                         to: RdState::Ringing.label(),
@@ -373,7 +374,10 @@ async fn a_service_deadline_fire_queued_behind_its_rearm_reaches_no_rule() {
         .await;
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
     let deadline = |c: &Call| {
-        c.timers.iter().find(|t| t.timer_type == ring_deadline::DEADLINE).map(|t| t.fire_at)
+        c.timers
+            .iter()
+            .find(|t| *t.timer_type() == ring_deadline::DEADLINE)
+            .map(|t| (t.fire_at, t.generation))
     };
 
     let mut call = alice
@@ -385,21 +389,22 @@ async fn a_service_deadline_fire_queued_behind_its_rearm_reaches_no_rule() {
         .await;
     let mut bob_uas = bob.receive("INVITE").await;
     let setup = b2bua.live_call(&call_ref).expect("the call is live");
-    let setup_deadline = deadline(&setup).expect("the service arms its deadline at setup");
+    let (setup_deadline, setup_generation) =
+        deadline(&setup).expect("the service arms its deadline at setup");
 
     h.advance(Duration::from_secs(1)).await;
     bob_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     let ringing = b2bua.live_call(&call_ref).expect("the call is live");
     assert!(
-        deadline(&ringing).expect("the ring re-arms the deadline") > setup_deadline,
+        deadline(&ringing).expect("the ring re-arms the deadline").0 > setup_deadline,
         "the ring's instance replaced the setup's",
     );
 
     b2bua.post_event(CallEvent::Timer {
-        timer_type: ring_deadline::DEADLINE,
+        key: TimerKey::call(ring_deadline::DEADLINE),
+        generation: setup_generation,
         call_ref: call_ref.clone(),
-        leg_id: None,
         incarnation: Some(ringing.incarnation().to_string()),
     });
     h.advance(Duration::from_secs(1)).await;

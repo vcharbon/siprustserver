@@ -7,11 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 /// The obligation a dialog-level ladder repeats its retained emission under.
-/// Rides in [`super::TimerType`], so it is replicated with the call, and its
-/// `Debug` form is a segment of the persisted timer id: the RFC 3261 §25.1
-/// `token` grammar of a tag and the digits of a sequence number exclude `:`,
-/// the id-recipe separator, whoever minted them.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The scope of the ladder's timers ([`super::TimerScope::Obligation`]), so it
+/// is replicated with the call.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Obligation {
     /// RFC 3261 §13.3.1.4 — a 2xx to an INVITE (the initial one or a

@@ -19,7 +19,7 @@ use alloc_counter::{measure, CountingAlloc};
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::trace;
-use call::{Call, CallModelState};
+use call::{Call, CallModelState, TimerEntry, TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
@@ -84,7 +84,8 @@ fn an_unsampled_call_allocates_nothing_for_tracing() {
     // Every guarded site the b2bua drives per event, in the shape the router
     // calls it. `black_box` on the call keeps the optimizer from proving the
     // flag constant and deleting the whole site.
-    let sites: [Site<'_>; 9] = [
+    let timer = TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at: 0 };
+    let sites: [Site<'_>; 13] = [
         ("sampled", Box::new(|| assert!(!trace::sampled(std::hint::black_box(&call))))),
         ("sip.in", Box::new(|| trace::emit::sip_in(std::hint::black_box(&call), 0, peer, WIRE))),
         ("sip.out", Box::new(|| trace::emit::sip_out(std::hint::black_box(&call), 0, peer, WIRE))),
@@ -119,6 +120,21 @@ fn an_unsampled_call_allocates_nothing_for_tracing() {
         (
             "limiter",
             Box::new(|| trace::emit::limiter(std::hint::black_box(&call), 0, "admit", "trunk-1")),
+        ),
+        ("timer.arm", Box::new(|| trace::emit::timer_arm(std::hint::black_box(&call), 0, &timer))),
+        (
+            "timer.cancel",
+            Box::new(|| trace::emit::timer_cancel(std::hint::black_box(&call), 0, &timer.key)),
+        ),
+        (
+            "timer.fire",
+            Box::new(|| trace::emit::timer_fire(std::hint::black_box(&call), 0, &timer.key, 1)),
+        ),
+        (
+            "timer.drop",
+            Box::new(|| {
+                trace::emit::timer_drop(std::hint::black_box(&call), 0, &timer.key, 1, "stale")
+            }),
         ),
         (
             "http round trip",

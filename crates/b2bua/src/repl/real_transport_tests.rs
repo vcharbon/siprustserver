@@ -39,7 +39,7 @@ use topology::{Peer, SimulatedMembership};
 // landed in the store"; this reaches "call live + routable + keepalive re-armed".
 use std::collections::HashMap;
 
-use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
+use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_net::{BindUdpOpts, RealSignalingNetwork, SignalingNetwork};
@@ -122,13 +122,9 @@ fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (Strin
         &sip_txn::IdGen::seeded(1),
         0,
     );
-    call.timers.push(TimerEntry {
-        id: format!("keepalive-{cid}"),
-        timer_type: TimerType::Keepalive,
-        // +5 min: restored into the DelayQueue but never fires during the test.
-        fire_at: clock.now_ms() + 300_000,
-        leg_id: None,
-    });
+    // +5 min: restored into the DelayQueue but never fires during the test.
+    let fire_at = clock.now_ms() + 300_000;
+    call::helpers::arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), fire_at);
     let body = MsgpackCodec::new().encode(&call);
     (call.call_ref.clone(), body)
 }

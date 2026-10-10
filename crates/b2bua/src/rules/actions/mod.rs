@@ -12,7 +12,8 @@
 //!   NOTIFY, PRACK, in-dialog probes)
 //! - `respond` — response synthesis toward a leg (finals, provisionals)
 //! - `ladder` — the dialog-level retransmission ladders the framework owns
-//!   (ADR-0032 X4): arm / repeat / discharge / retire, keyed by obligation
+//!   (ADR-0032 X4): arm / repeat / discharge, keyed by obligation
+//! - `retire` — leaving a scope: its ladders end and its timers are disarmed
 //! - `teardown` — termination policy + BYE/CANCEL builders
 //! - `select` — shared leg/dialog selection views
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
@@ -26,13 +27,14 @@ mod originate;
 mod relay_request;
 mod relay_response;
 mod respond;
+mod retire;
 mod select;
 mod straggler;
 mod teardown;
 mod unrelayed;
 
-use call::helpers::{cap_keepalive_fire_at, replace_timer_by_id};
-use call::{Call, TimerEntry, TimerType};
+use call::helpers::{cap_keepalive_fire_at, disarm_timer, retire_timers};
+use call::{Call, TimerEntry, TimerKey, TimerType};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
@@ -62,45 +64,35 @@ impl ActionExecutor<'_> {
         HandlerResult { call, effects: fx }
     }
 
-    /// Arm (or re-arm) a persisted per-call timer. The ONE persisted-id recipe
-    /// (`TimerType::timer_id`); every cancel site mints from the same method so
-    /// schedule/cancel can never drift. A `Keepalive` is additionally held to the
-    /// ledger's one-interval ceiling ([`cap_keepalive_fire_at`]) — the arming half
-    /// of the invariant `router::restore_hygiene` enforces on hydrated deadlines.
-    fn schedule(
-        &self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        timer_type: TimerType,
-        delay_ms: i64,
-        leg_id: Option<String>,
-    ) {
-        let id = timer_type.timer_id(leg_id.as_deref());
-        let entry = TimerEntry {
-            id,
-            fire_at: self.capped_fire_at(&timer_type, self.now_ms + delay_ms),
-            timer_type,
-            leg_id,
-        };
-        call.timers = replace_timer_by_id(std::mem::take(&mut call.timers), entry.clone());
-        fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+    /// Arm (or re-arm) the persisted per-call timer `key`, replacing the
+    /// instance it held under the call's next generation. A `Keepalive` is
+    /// additionally held to the ledger's one-interval ceiling
+    /// ([`cap_keepalive_fire_at`]) — the arming half of the invariant
+    /// `router::restore_hygiene` enforces on hydrated deadlines.
+    fn schedule(&self, call: &mut Call, fx: &mut HandlerEffects, key: TimerKey, delay_ms: i64) {
+        let fire_at = self.capped_fire_at(&key.timer_type, self.now_ms + delay_ms);
+        crate::timer_arm::arm(call, fx, key, fire_at);
+    }
+
+    /// Disarm `key`: off the replicated ledger and the live driver. A key the
+    /// ledger does not hold is not in the driver either, so nothing is
+    /// cancelled twice.
+    fn disarm(&self, call: &mut Call, fx: &mut HandlerEffects, key: &TimerKey) {
+        if let Some(entry) = disarm_timer(call, key) {
+            fx.critical.push(CriticalStateEffect::CancelTimer { key: entry.key });
+        }
     }
 
     /// Remove every ledger entry `spent` selects from the replicated ledger AND
-    /// the live driver — one `CancelTimer` per removed id, minted from the id
-    /// the entry was scheduled under. A timer the ledger does not hold is not
-    /// in the driver either, so nothing is cancelled twice.
+    /// the live driver — one `CancelTimer` per removed key.
     fn scrub_where(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         spent: impl Fn(&TimerEntry) -> bool,
     ) {
-        let (gone, kept): (Vec<TimerEntry>, Vec<TimerEntry>) =
-            std::mem::take(&mut call.timers).into_iter().partition(|t| spent(t));
-        call.timers = kept;
-        for t in gone {
-            fx.critical.push(CriticalStateEffect::CancelTimer { id: t.id });
+        for t in retire_timers(call, spent) {
+            fx.critical.push(CriticalStateEffect::CancelTimer { key: t.key });
         }
     }
 

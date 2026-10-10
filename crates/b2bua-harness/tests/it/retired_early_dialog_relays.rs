@@ -136,7 +136,7 @@ mod fresh_tag {
         RuleHandleResult, ServiceSeed, Terminal,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, LegState, TimerType};
+    use call::{CdrEventType, Direction, LegState, TimerKey, TimerType};
     use sip_message::generators::SourceBody;
 
     define_service! {
@@ -155,7 +155,8 @@ mod fresh_tag {
             transitions: [ FreshState::Waiting => Terminal ],
             effects: [
                 Effect::Respond { status: 200, label: "200 under a fresh To-tag" },
-                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "disarm the setup timers" },
+                Effect::GuardTimer { timer: TimerType::NoAnswer, label: "disarm the ring timer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "disarm the setup timer" },
                 Effect::LifecycleCommand { label: "bridge caller and callee" },
             ],
             matcher: Match::response()
@@ -192,8 +193,8 @@ mod fresh_tag {
                         status_code: Some(200),
                         reason: None,
                     },
-                    RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
-                    RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
+                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
                     RuleAction::Merge { leg_a: a, leg_b: b },
                     RuleAction::ClearState { machine: FRESH },
                 ]))

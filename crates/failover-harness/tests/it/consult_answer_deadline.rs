@@ -7,9 +7,10 @@
 //!   answer as lost at the deadline — not when it was served again — and
 //!   relays the callee's final to the caller, as for an unanswered consult;
 //! - a release event's consult (the subscribed maximum duration): the
-//!   duration timer stays in the call's replicated timer list, so the copy
-//!   fires it again and re-sends the consult; the call ends within that
-//!   consult's own decision deadline (here unanswered: the local teardown);
+//!   duration timer is re-armed as the consult's answer deadline in the
+//!   call's replicated timer list, so the copy fires it again at that
+//!   deadline and re-sends the consult; the call ends within that consult's
+//!   own decision deadline (here unanswered: the local teardown);
 //! - a REFER's authorization: its subscription's expiry, a timer of the
 //!   call's own; the referrer is told the transfer failed.
 //!
@@ -388,24 +389,30 @@ async fn take_over(c: &mut Cluster, call: &mut Established) {
 
 /// The subscribed maximum duration fires and its release consult is lost
 /// with the primary. The copy that serves the call fires the duration timer
-/// again and re-sends the consult (the decision layer sees the release event
+/// again at the consult's answer deadline — at once when it is served past
+/// it — and re-sends the consult (the decision layer sees the release event
 /// twice); unanswered within its decision deadline, it ends the call locally.
 async fn release_cell(name: &str, recovery: Recovery) {
     let mut c = cluster(name, SHORT_DURATION_SEC).await;
     let mut call = establish(&mut c).await;
-    consults_sent(&mut c, 1).await;
+    let asked_at = consults_sent(&mut c, 1).await;
     let primary = call.primary.clone();
     crash(&mut c, &primary).await;
     match recovery {
         Recovery::Reclaim => reboot_and_reclaim(&mut c, &primary).await,
         Recovery::Takeover => take_over(&mut c, &mut call).await,
     }
-    // The copy re-sent the consult when it was materialised, at the latest now.
     let served_at = c.fh.now_ms();
+    let deadline = asked_at + (CONSULT_BUDGET + MARGIN).as_millis() as i64;
+    let resent_at = consults_sent(&mut c, 2).await;
+    assert!(
+        resent_at <= served_at.max(deadline) + STEP.as_millis() as i64,
+        "the copy re-sent the release consult at its answer deadline, or as it was served past it"
+    );
     c.alice.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
     c.bob.receive_absorbing("BYE", &["INFO"]).await.respond(200, "OK").await;
-    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult");
-    let ended_by = served_at + (CONSULT_BUDGET + STEP).as_millis() as i64;
+    assert_eq!(c.asked.load(Ordering::SeqCst), 2, "the copy re-sent the release consult once");
+    let ended_by = resent_at + (CONSULT_BUDGET + STEP).as_millis() as i64;
     assert!(c.fh.now_ms() <= ended_by, "the call ended within the re-sent consult's deadline");
     if let Recovery::Takeover = recovery {
         copy_lets_go_then_reboot(&mut c, &primary, &call.call_ref).await;

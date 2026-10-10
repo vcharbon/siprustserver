@@ -6,7 +6,7 @@
 
 use call::{
     AdmitOutcome, AdmitReport, Call, CallLimiterState, Direction, LimiterEntry, StateLabel,
-    TimerEntry, TimerType,
+    TimerKey, TimerType,
 };
 
 use super::process::rule_chain_turn;
@@ -94,12 +94,7 @@ fn entry(id: &str) -> LimiterEntry {
 }
 
 fn awaiting(mut call: Call, timer_type: TimerType) -> Call {
-    call.timers.push(TimerEntry {
-        id: timer_type.timer_id(None),
-        timer_type,
-        fire_at: NOW - 1,
-        leg_id: None,
-    });
+    call::helpers::arm_timer(&mut call, TimerKey::call(timer_type), NOW - 1);
     call
 }
 
@@ -136,18 +131,26 @@ fn admit_answer(call: &Call, key: &str) -> CallEvent {
     .into_event()
 }
 
+/// The fire of `timer_type`'s deadline under the generation the ledger holds
+/// it at (`0`, a stale fire, when the ledger holds none).
 fn fired(call: &Call, timer_type: TimerType) -> CallEvent {
+    let generation =
+        call.timers.iter().find(|t| *t.timer_type() == timer_type).map_or(0, |t| t.generation);
     CallEvent::Timer {
-        timer_type,
+        key: TimerKey::call(timer_type),
+        generation,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     }
 }
 
-/// One turn of `call` on `event`: the handler result (the call it leaves and
-/// the effects).
-fn turn(node: &Node, call: Call, event: &CallEvent) -> crate::effects::HandlerResult {
+/// One turn of `call` on `event` as the router runs it — the timer screen,
+/// then the rule chain: the handler result (the call it leaves and the
+/// effects).
+fn turn(node: &Node, mut call: Call, event: &CallEvent) -> crate::effects::HandlerResult {
+    if super::timer_screen::screen(&mut call, event, NOW).is_err() {
+        return crate::effects::HandlerResult::new(call);
+    }
     let res = Resolution {
         call_ref: Some(call.call_ref.clone()),
         source_leg_id: call.a_leg.leg_id.clone(),
@@ -175,7 +178,8 @@ async fn an_awaited_answer_reaches_the_rules_and_cancels_its_deadline() {
     assert!(result.call.timers.is_empty(), "the deadline is off the ledger");
     assert!(result.effects.critical.iter().any(|e| matches!(
         e,
-        CriticalStateEffect::CancelTimer { id } if id == "ServiceHttpAnswer:probe:1"
+        CriticalStateEffect::CancelTimer { key }
+            if format!("{:?}", key.timer_type) == "ServiceHttpAnswer:probe:1"
     )));
 }
 
@@ -293,7 +297,10 @@ async fn an_expired_failure_deadline_relays_the_failed_final_and_ends_the_call()
     assert!(ending(&result.call), "the unanswered consult ends the call");
     let termination = result.call.termination.as_ref().expect("a termination record");
     assert_eq!(termination.cause, call::TerminationCause::RemoteFinal);
-    assert!(result.call.timers.iter().all(|t| t.id != "FailureAnswer:4"), "off the ledger");
+    assert!(
+        result.call.timers.iter().all(|t| format!("{:?}", t.timer_type()) != "FailureAnswer:4"),
+        "off the ledger"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -330,6 +337,7 @@ async fn an_awaited_failure_answer_reaches_the_rules_and_cancels_its_deadline() 
     assert!(ending(&result.call), "the terminate fold ends the call");
     assert!(result.effects.critical.iter().any(|e| matches!(
         e,
-        CriticalStateEffect::CancelTimer { id } if id == "FailureAnswer:4"
+        CriticalStateEffect::CancelTimer { key }
+            if format!("{:?}", key.timer_type) == "FailureAnswer:4"
     )));
 }

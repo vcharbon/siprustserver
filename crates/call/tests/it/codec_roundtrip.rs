@@ -28,37 +28,35 @@ fn representative_round_trips() {
 /// A service-owned timer (`TimerType::Service`, the ADR-0016 watchdog seam)
 /// rides the replicated `call.timers` ledger like any core timer: the borrowed
 /// `Cow<'static, str>` declaration form encodes and decodes back as an owned,
-/// **equal** value (the HA takeover-restore path), and the persisted id recipe
-/// (`TimerType::timer_id` == `Debug`) is stable per `(service_id, key)` [+ leg].
+/// **equal** key (the HA takeover-restore path), keeping its scope and
+/// generation; distinct service keys are distinct timer keys.
 #[test]
-fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
-    use call::{TimerEntry, TimerType};
+fn service_timer_entry_round_trips_with_its_key_and_generation() {
+    use call::{TimerEntry, TimerKey, TimerType};
 
     let t = TimerType::service(MachineId::new("routing"), "deadline18x");
-    assert_eq!(t.timer_id(None), "Service:routing:deadline18x");
-    assert_eq!(t.timer_id(Some("b-1")), "Service:routing:deadline18x:b-1");
-    // Distinct keys mint distinct ids (no collision in the driver's
-    // (call_ref, id) keyspace); same key re-derives the same id (supersede).
     assert_ne!(
-        TimerType::service(MachineId::new("routing"), "prack-guard").timer_id(None),
-        t.timer_id(None),
+        TimerKey::call(TimerType::service(MachineId::new("routing"), "prack-guard")),
+        TimerKey::call(t.clone()),
     );
+    assert_ne!(TimerKey::leg(t.clone(), "b-1"), TimerKey::call(t.clone()));
 
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
     call.timers.push(TimerEntry {
-        id: t.timer_id(None),
-        timer_type: t.clone(),
+        key: TimerKey::leg(t.clone(), "b-1"),
+        generation: 7,
         fire_at: 1_234_567,
-        leg_id: None,
     });
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "service timer survives the replication codec");
     let restored = decoded.timers.last().unwrap();
     assert_eq!(
-        restored.timer_type, t,
+        restored.key,
+        TimerKey::leg(t, "b-1"),
         "owned-Cow deserialisation compares equal to the borrowed declaration"
     );
+    assert_eq!(restored.generation, 7);
 }
 
 /// Replication sanity: the release-event `subscriptions` and

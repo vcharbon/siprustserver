@@ -60,9 +60,11 @@ pub use model::{
 pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
 // Timers, CDR events, the message ring, the decision log and the termination
 // record on the replicated body.
+pub use model::Deadline;
 pub use model::{
     CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
-    MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerType,
+    MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerKey, TimerScope,
+    TimerType,
 };
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{

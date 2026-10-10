@@ -65,11 +65,37 @@ fn http_result(correlation_id: &str) -> CallEvent {
 }
 
 fn fired(timer_type: TimerType) -> CallEvent {
-    CallEvent::Timer { timer_type, call_ref: "c".into(), leg_id: None, incarnation: None }
+    CallEvent::Timer {
+        key: TimerKey::call(timer_type),
+        generation: 1,
+        call_ref: "c".into(),
+        incarnation: None,
+    }
+}
+
+/// The armed deadline the ledger names `id`, as its `Debug` states it.
+fn armed(call: &Call, id: &str) -> Option<call::TimerEntry> {
+    call.timers.iter().find(|t| format!("{:?}", t.timer_type()) == id).cloned()
 }
 
 fn deadline(call: &Call, id: &str) -> Option<i64> {
-    call.timers.iter().find(|t| t.id == id).map(|t| t.fire_at)
+    armed(call, id).map(|t| t.fire_at)
+}
+
+/// The fire of the deadline the ledger names `id` (generation 0 when none is
+/// armed), as the router delivers it: through the timer screen, which drops a
+/// fire the ledger no longer holds, then through [`screen`].
+fn deliver(
+    call: &mut Call,
+    fx: &mut HandlerEffects,
+    id: &str,
+    timer_type: TimerType,
+) -> Option<Screened> {
+    let generation = armed(call, id).map_or(0, |t| t.generation);
+    let key = armed(call, id).map_or(TimerKey::call(timer_type), |t| t.key);
+    let event = CallEvent::Timer { key, generation, call_ref: "c".into(), incarnation: None };
+    crate::router::timer_screen::screen(call, &event, NOW).ok()?;
+    Some(screen(call, fx, &event))
 }
 
 #[test]
@@ -135,7 +161,8 @@ fn an_awaited_answer_cancels_its_deadline_and_reaches_the_rules() {
     assert_eq!(deadline(&call, "ServiceHttpAnswer:a"), None, "off the ledger");
     assert!(matches!(
         fx.critical.as_slice(),
-        [CriticalStateEffect::CancelTimer { id }] if id == "ServiceHttpAnswer:a"
+        [CriticalStateEffect::CancelTimer { key }]
+            if format!("{:?}", key.timer_type) == "ServiceHttpAnswer:a"
     ));
 }
 
@@ -143,8 +170,9 @@ fn an_awaited_answer_cancels_its_deadline_and_reaches_the_rules() {
 fn an_answer_past_its_deadline_reaches_no_rule() {
     let mut call = arm(sending(call(), vec![http_request("a", None)]), &BUDGETS, NOW).call;
     let mut fx = HandlerEffects::new();
-    let expiry = fired(TimerType::ServiceHttpAnswer { correlation_id: "a".into() });
-    assert!(matches!(screen(&mut call, &mut fx, &expiry), Screened::Expired(_)));
+    let http = TimerType::ServiceHttpAnswer { correlation_id: "a".into() };
+    let expired = deliver(&mut call, &mut fx, "ServiceHttpAnswer:a", http);
+    assert!(matches!(expired, Some(Screened::Expired(_))));
     assert!(matches!(screen(&mut call, &mut fx, &http_result("a")), Screened::Unawaited));
     assert!(fx.critical.is_empty(), "nothing to cancel");
 }
@@ -154,17 +182,20 @@ fn a_deadline_whose_answer_came_first_reaches_no_rule() {
     let mut call = arm(sending(call(), vec![http_request("a", None)]), &BUDGETS, NOW).call;
     let mut fx = HandlerEffects::new();
     assert!(matches!(screen(&mut call, &mut fx, &http_result("a")), Screened::Awaited));
-    let expiry = fired(TimerType::ServiceHttpAnswer { correlation_id: "a".into() });
-    assert!(matches!(screen(&mut call, &mut fx, &expiry), Screened::Unawaited));
+    let http = TimerType::ServiceHttpAnswer { correlation_id: "a".into() };
+    assert!(
+        deliver(&mut call, &mut fx, "ServiceHttpAnswer:a", http).is_none(),
+        "the timer screen drops the fire of a deadline off the ledger"
+    );
 }
 
 #[test]
 fn an_expired_http_deadline_is_the_request_s_error_result() {
     let mut call = arm(sending(call(), vec![http_request("a", None)]), &BUDGETS, NOW).call;
     let mut fx = HandlerEffects::new();
-    let expiry = fired(TimerType::ServiceHttpAnswer { correlation_id: "a".into() });
-    let Screened::Expired(CallEvent::InternalEvent { topic, outcome, payload, body, .. }) =
-        screen(&mut call, &mut fx, &expiry)
+    let http = TimerType::ServiceHttpAnswer { correlation_id: "a".into() };
+    let Some(Screened::Expired(CallEvent::InternalEvent { topic, outcome, payload, body, .. })) =
+        deliver(&mut call, &mut fx, "ServiceHttpAnswer:a", http)
     else {
         panic!("an expired deadline is read as the request's answer");
     };
@@ -288,9 +319,8 @@ fn an_unbounded_failure_consult_arms_no_deadline() {
 fn an_expired_failure_deadline_is_the_consult_s_unanswered_terminate_fold() {
     let mut call = arm(sending(call(), vec![failure_consult(4)]), &BUDGETS, NOW).call;
     let mut fx = HandlerEffects::new();
-    let entry = call.timers.iter().find(|t| t.id == "FailureAnswer:4").cloned().unwrap();
-    let Screened::Expired(CallEvent::InternalEvent { topic, outcome, payload, .. }) =
-        screen(&mut call, &mut fx, &fired(entry.timer_type))
+    let Some(Screened::Expired(CallEvent::InternalEvent { topic, outcome, payload, .. })) =
+        deliver(&mut call, &mut fx, "FailureAnswer:4", failure_deadline(4))
     else {
         panic!("an expired deadline is read as the consult's answer");
     };
@@ -316,10 +346,13 @@ fn a_failure_fold_naming_its_consult_cancels_the_deadline() {
     assert!(matches!(screen(&mut call, &mut fx, &failure_fold(Some(4))), Screened::Awaited));
     assert!(matches!(
         fx.critical.as_slice(),
-        [CriticalStateEffect::CancelTimer { id }] if id == "FailureAnswer:4"
+        [CriticalStateEffect::CancelTimer { key }]
+            if format!("{:?}", key.timer_type) == "FailureAnswer:4"
     ));
-    let expiry = fired(failure_deadline(4));
-    assert!(matches!(screen(&mut call, &mut fx, &expiry), Screened::Unawaited));
+    assert!(
+        deliver(&mut call, &mut fx, "FailureAnswer:4", failure_deadline(4)).is_none(),
+        "the timer screen drops the fire of a deadline off the ledger"
+    );
     assert!(matches!(screen(&mut call, &mut fx, &failure_fold(Some(4))), Screened::Unawaited));
 }
 

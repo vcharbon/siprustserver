@@ -198,7 +198,7 @@ pub struct Call {
     /// Deterministic: derived from a-leg call-id + from-tag (+ primary ordinal).
     pub call_ref: String,
     pub a_leg: Leg,
-    /// Ordered by attempt ("b-1", "b-2", …).
+    /// The legs this stack dialled, in creation order ("b-1", "b-2", …).
     pub b_legs: Vec<Leg>,
     /// Active peering — the typed pair makes N↔N unrepresentable. `None` = 1↔0.
     pub active_peer: Option<ActivePeer>,
@@ -210,8 +210,12 @@ pub struct Call {
     pub a_leg_invite: ALegInviteSnapshot,
     /// The call's admission state on the call limiter, under its own key.
     pub limiter: CallLimiterState,
-    /// Serializable timer intents (not runtime fibers).
+    /// Serializable timer intents (not runtime fibers): at most one entry per
+    /// key.
     pub timers: Vec<TimerEntry>,
+    /// The last generation a timer was armed under: each arming takes the
+    /// next, so a fire names the one instance it belongs to.
+    pub timer_generation: u64,
     pub cdr_events: Vec<CdrEvent>,
     pub state: CallModelState,
     pub created_at: i64,

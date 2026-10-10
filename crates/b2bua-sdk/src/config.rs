@@ -873,16 +873,16 @@ impl B2buaConfig {
         u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
     }
 
-    /// Clamp a route-supplied `NoAnswer` deadline (s) under the transaction
+    /// Clamp a route-supplied `NoAnswer` deadline (ms) under the transaction
     /// bound: any value above `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
     /// — including one merely inside the margin band, which would equally
     /// strand the CANCEL→487 exchange — is held to that ceiling so the
     /// exchange completes inside the live b-leg client transaction. Values at
     /// or under the ceiling pass through unchanged; the caller compares the
     /// result to detect (and `debug!`-note) a clamp.
-    pub fn clamp_no_answer_sec(&self, requested: i64) -> i64 {
+    pub fn clamp_no_answer_ms(&self, requested_ms: i64) -> i64 {
         let ceiling = self.invite_txn_timeout_sec - Self::NO_ANSWER_CANCEL_MARGIN_SEC;
-        requested.min(ceiling)
+        requested_ms.min(ceiling.saturating_mul(1000))
     }
 
     /// The handler permits turns of normal initial INVITEs may hold at once:

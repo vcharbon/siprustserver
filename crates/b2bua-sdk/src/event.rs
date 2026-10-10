@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use call::TimerType;
+use call::TimerKey;
 use sip_message::{SipHeader, SipMessage};
 use sip_txn::{TimeoutKind, TransactionEvent};
 
@@ -23,11 +23,13 @@ pub enum CallEvent {
         /// for a request.
         matched_client_txn: bool,
     },
-    /// A B2BUA timer fired (keepalive, no-answer, max-duration, …).
+    /// A B2BUA timer fired (keepalive, no-answer, max-duration, …): its key
+    /// and the generation it was armed under. The router delivers it only
+    /// while the call's ledger holds that key under that generation.
     Timer {
-        timer_type: TimerType,
+        key: TimerKey,
+        generation: u64,
         call_ref: String,
-        leg_id: Option<String>,
         /// The incarnation of the call that scheduled it ([`Self::incarnation`]).
         incarnation: Option<String>,
     },

@@ -83,7 +83,7 @@ mod stalerestore {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When the probe injects the stale entry (after the caller's CANCEL,
     /// inside the 32 s terminating window).
@@ -97,11 +97,10 @@ mod stalerestore {
         states: SrState { Waiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(SrState::Waiting.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(STALERESTORE, "inject"),
-                    delay: TimerDelay::secs(INJECT_AT_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(STALERESTORE, "inject")),
+                    TimerDelay::secs(INJECT_AT_SEC),
+                ),
             ]))
         },
         rules: [ inject_stale_entry() ],
@@ -133,11 +132,10 @@ mod stalerestore {
                     .leg_id
                     .clone();
                 Some(RuleHandleResult::new(vec![
-                    RuleAction::ScheduleTimer {
-                        timer_type: TimerType::NoAnswer,
-                        delay: TimerDelay::secs(STALE_FIRE_SEC),
-                        leg_id: Some(b),
-                    },
+                    RuleAction::arm(
+                        TimerKey::leg(TimerType::NoAnswer, b),
+                        TimerDelay::secs(STALE_FIRE_SEC),
+                    ),
                     RuleAction::ClearState { machine: STALERESTORE },
                 ]))
             },

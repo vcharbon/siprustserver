@@ -47,7 +47,7 @@ mod admitset {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::{LimiterEntry, TimerType};
+    use call::{LimiterEntry, TimerKey, TimerType};
 
     use super::{Read, READS};
 
@@ -61,11 +61,10 @@ mod admitset {
         states: AsState { Working, Awaiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(AsState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(ADMITSET, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(ADMITSET, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), next(), result() ],
@@ -169,11 +168,10 @@ mod admitset {
                     let read: Read = (corr, outcome.clone(), held, ctx.call_ref.to_string());
                     READS.lock().unwrap().entry(user(ctx)).or_default().push(read);
                     if next {
-                        return Some(RuleHandleResult::new(vec![RuleAction::ScheduleTimer {
-                            timer_type: NEXT,
-                            delay: TimerDelay::secs(2),
-                            leg_id: None,
-                        }]));
+                        return Some(RuleHandleResult::new(vec![RuleAction::arm(
+                            TimerKey::call(NEXT),
+                            TimerDelay::secs(2),
+                        )]));
                     }
                 }
                 Some(RuleHandleResult::new(vec![]))

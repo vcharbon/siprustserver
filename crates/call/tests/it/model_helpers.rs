@@ -260,33 +260,22 @@ fn dialog_constructor() {
 }
 
 #[test]
-fn timer_replace_by_id() {
-    let existing = representative_call().timers;
-    let n = existing.len();
-    let replaced = replace_timer_by_id(
-        existing,
-        TimerEntry {
-            id: "timer-no-answer-a".into(),
-            timer_type: TimerType::NoAnswer,
-            fire_at: 9_999,
-            leg_id: Some("a".into()),
-        },
-    );
-    assert_eq!(replaced.len(), n); // replaced, not appended
-    let t = replaced.iter().find(|t| t.id == "timer-no-answer-a").unwrap();
-    assert_eq!(t.fire_at, 9_999);
+fn arming_a_key_replaces_its_instance_under_the_next_generation() {
+    let mut call = representative_call();
+    let n = call.timers.len();
+    let no_answer = TimerKey::leg(TimerType::NoAnswer, "a");
+    let rearmed = arm_timer(&mut call, no_answer.clone(), 9_999);
+    assert_eq!(call.timers.len(), n, "replaced, not appended");
+    assert_eq!(rearmed.generation, 3, "the call's next generation");
+    assert!(holds_timer(&call, &no_answer, 3));
+    assert!(!holds_timer(&call, &no_answer, 1), "the replaced instance is gone");
 
-    // A brand-new id appends.
-    let appended = replace_timer_by_id(
-        replaced,
-        TimerEntry {
-            id: "timer-new".into(),
-            timer_type: TimerType::Keepalive,
-            fire_at: 1,
-            leg_id: None,
-        },
-    );
-    assert_eq!(appended.len(), n + 1);
+    // A brand-new key appends.
+    let keepalive = arm_timer(&mut call, TimerKey::call(TimerType::Keepalive), 1);
+    assert_eq!(call.timers.len(), n + 1);
+    assert_eq!(keepalive.generation, 4);
+    assert_eq!(disarm_timer(&mut call, &keepalive.key), Some(keepalive));
+    assert_eq!(call.timers.len(), n);
 }
 
 #[test]

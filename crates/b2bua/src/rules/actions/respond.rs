@@ -6,7 +6,7 @@
 //! [`super::ladder`].
 
 use call::helpers::Scope;
-use call::{Call, TimerType};
+use call::{Call, TimerKey, TimerType};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts, RelayDirection, RelaySituation};
 use sip_message::header::{HeaderClass, HeaderName};
@@ -556,9 +556,8 @@ impl ActionExecutor<'_> {
                 self.schedule(
                     call,
                     fx,
-                    TimerType::GlobalDuration,
+                    TimerKey::call(TimerType::GlobalDuration),
                     platform.max_duration_sec * 1000,
-                    None,
                 );
             }
         }

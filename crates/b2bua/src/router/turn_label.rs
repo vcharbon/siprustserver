@@ -29,8 +29,8 @@ impl fmt::Display for EventSummary<'_> {
                     r.cseq().seq()
                 )?,
             },
-            CallEvent::Timer { timer_type, leg_id, .. } => {
-                write!(f, "timer {timer_type:?} on {}", leg_id.as_deref().unwrap_or("the call"))?
+            CallEvent::Timer { key, generation, .. } => {
+                write!(f, "timer {key:?} gen {generation}")?
             }
             CallEvent::Cancelled { invite_cseq, .. } => {
                 write!(f, "CANCEL of INVITE CSeq {invite_cseq:?}")?

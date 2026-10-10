@@ -421,8 +421,8 @@ async fn resync_timers(
     skew_offset_ms: i64,
     now_ms: i64,
 ) {
-    for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.id == t.id)) {
-        ctx.timers.cancel(call_ref.to_string(), stale.id.clone()).await;
+    for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.key == t.key)) {
+        ctx.timers.cancel(call_ref.to_string(), stale.key.clone()).await;
     }
     sanitize_restored_timers(
         &mut folded.timers,
@@ -472,7 +472,7 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let l_max = calls
         .iter()
         .flat_map(|(c, _)| c.timers.iter())
-        .filter(|t| matches!(t.timer_type, TimerType::Keepalive))
+        .filter(|t| *t.timer_type() == TimerType::Keepalive)
         .map(|t| (now_ms - t.fire_at).max(0))
         .max()
         .unwrap_or(0);

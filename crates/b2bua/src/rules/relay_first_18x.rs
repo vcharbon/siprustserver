@@ -46,7 +46,7 @@
 use b2bua_sdk::provisional::{absorbed_provisional_actions, shown_to_no_one};
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
-use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
+use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerKey, TimerType};
 use sip_message::{answer_reoffer_both_ways, Method};
 
 use super::relay;
@@ -269,6 +269,7 @@ define_service! {
                 Effect::Relay { label: "200 OK → A (shown dialog: the 180's To-tag; unshown: a fresh one; fake-prack: inject cached SDP)" },
                 Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
                 Effect::GuardTimer { timer: TimerType::NoAnswer, label: "cancel B no-answer" },
+                Effect::GuardTimer { timer: TimerType::SetupTimeout, label: "cancel the setup deadline" },
                 Effect::GuardTimer { timer: TimerType::GlobalDuration, label: "arm max-duration" },
                 Effect::GuardTimer { timer: TimerType::Keepalive, label: "arm keepalive" },
             ],
@@ -532,18 +533,10 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     // the masking service changes who the caller sees, never whose ACK the
     // callee gets.
     actions.extend(vec![
-        RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
-        RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
-        RuleAction::ScheduleTimer {
-            timer_type: TimerType::GlobalDuration,
-            delay: TimerDelay::secs(max_duration),
-            leg_id: None,
-        },
-        RuleAction::ScheduleTimer {
-            timer_type: TimerType::Keepalive,
-            delay: TimerDelay::secs(keepalive),
-            leg_id: None,
-        },
+        RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+        RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
+        RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(max_duration)),
+        RuleAction::arm(TimerKey::call(TimerType::Keepalive), TimerDelay::secs(keepalive)),
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Answer,
             leg_id: b,

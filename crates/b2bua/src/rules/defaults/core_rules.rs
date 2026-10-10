@@ -9,7 +9,7 @@
 use call::helpers::RAckTokens;
 use call::{
     ByeDisposition, CallModelState, CdrEventType, DialogState, Direction, LegDisposition, LegState,
-    Obligation, TerminationCause, TimeoutKind, TimerType,
+    Obligation, TerminationCause, TimeoutKind, TimerKey, TimerType,
 };
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
@@ -142,6 +142,20 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+}
+/// The obligation of a fired ladder give-up.
+fn fired_give_up<'a>(ctx: &'a RuleContext) -> Option<&'a Obligation> {
+    (ctx.timer_type() == Some(&TimerType::RepeatGiveUp))
+        .then(|| ctx.timer_key().and_then(TimerKey::obligation_of))
+        .flatten()
+}
+/// How long a release consult's answer is awaited before the duration cap
+/// fires again: the decision deadline plus the answer margin (ADR-0039);
+/// `None` when the decision deadline is off and the consult unbounded.
+fn release_consult_deadline(ctx: &RuleContext) -> Option<TimerDelay> {
+    let decision = ctx.config.call_control_timeout_ms;
+    let margin = crate::answer_deadline::MARGIN.as_millis() as i64;
+    (decision > 0).then(|| TimerDelay::millis(decision + margin))
 }
 /// What ended the call when a failure consult lets the failure stand (the
 /// `terminate` fold): the failed leg's final where it drew one, else the
@@ -577,18 +591,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // relayed when it arrives (`confirm_dialog` arms the obligation).
                 // Nothing is composed here.
                 actions.extend(vec![
-                    RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
-                    RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
-                    RuleAction::ScheduleTimer {
-                        timer_type: TimerType::GlobalDuration,
-                        delay: TimerDelay::secs(max_duration(ctx)),
-                        leg_id: None,
-                    },
-                    RuleAction::ScheduleTimer {
-                        timer_type: TimerType::Keepalive,
-                        delay: TimerDelay::secs(keepalive_interval(ctx)),
-                        leg_id: None,
-                    },
+                    RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
+                    RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
+                    RuleAction::arm(
+                        TimerKey::call(TimerType::GlobalDuration),
+                        TimerDelay::secs(max_duration(ctx)),
+                    ),
+                    RuleAction::arm(
+                        TimerKey::call(TimerType::Keepalive),
+                        TimerDelay::secs(keepalive_interval(ctx)),
+                    ),
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Answer,
                         leg_id: b,
@@ -792,26 +804,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // re-arm), service_ext, subscriptions, update_body, and the
                 // limiter state (the route's admitted set replaced the call's).
                 let fold = parse_route_fold(payload)?;
-                let failed_leg_id =
-                    payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
-
-                let mut actions = Vec::new();
-                // Cancel the failed leg's no-answer timer (a reject can beat it;
-                // for the no-answer trigger the timer already fired — harmless).
-                if !failed_leg_id.is_empty() {
-                    actions
-                        .push(RuleAction::CancelTimer { id: format!("NoAnswer:{failed_leg_id}") });
-                }
-                let no_answer =
-                    fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
-                actions.extend(route_fold_parity_actions(&fold, ctx));
+                let mut actions = route_fold_parity_actions(&fold, ctx);
                 let leg_body = fold.leg_body(ctx);
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
                     new_ruri: fold.new_ruri,
                     new_from: fold.new_from,
                     new_to: fold.new_to,
-                    no_answer_timeout_sec: no_answer,
+                    no_answer: fold.no_answer,
                     callback_context: fold.callback_context,
                     body_override: leg_body,
                     header_updates: fold.header_updates,
@@ -1105,7 +1105,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }),
             |ctx| {
                 let leg = ctx.source_leg_id.to_string();
-                ok(vec![RuleAction::CancelTimer { id: format!("KeepaliveTimeout:{leg}") }])
+                ok(vec![RuleAction::cancel(TimerKey::leg(TimerType::KeepaliveTimeout, leg))])
             },
         ),
         rule(
@@ -1639,33 +1639,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // The three setup/duration deadlines are teardown rules: on a
         // terminating call they run to scrub their spent ledger entry.
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
-            // NoAnswer is armed PER B-LEG: a fire for leg X is spent iff X is
-            // no longer awaiting an answer — Confirmed, absent from the call
-            // (reclaim can restore a stale entry whose cancel died with the
-            // crashed node), or already going away (`leg_is_going_away`: a
-            // caller-CANCELed leg still reads `Trying` while its disposition is
-            // `Cancelling`, and a terminating call makes no forward progress —
-            // no /call/failure consult, no new final on the a-leg's completed
-            // transaction) — or the CALLER is answered: the a-leg's INVITE
-            // transaction took its 2xx (from X or a sibling X's fire cannot
-            // see), so no final may be authored on it (RFC 3261 §17.2.1). A
-            // sibling b-leg's `Confirmed` alone is not that: an MRF media leg
-            // answers while the callee still rings, and its fire must stand.
-            // Absorb and scrub so a later reclaim cannot re-fire it.
-            let caller_answered = ctx.call.a_leg().state() == LegState::Confirmed;
-            let spent = caller_answered
-                || match ctx.source_leg() {
-                    Some(leg) => {
-                        leg.state() == LegState::Confirmed
-                            || call::helpers::leg_is_going_away(ctx.call.state(), leg)
-                    }
-                    None => true,
-                };
-            if spent {
-                return ok(vec![RuleAction::cancel_timer(
-                    &TimerType::NoAnswer,
-                    Some(ctx.source_leg_id),
-                )]);
+            // NoAnswer is armed PER B-LEG and retired with it; the router
+            // delivers only the instance the ledger holds. The fire stands
+            // unless the CALLER is answered: the a-leg's INVITE transaction
+            // took its 2xx (from a sibling of X), so no final may be authored
+            // on it (RFC 3261 §17.2.1). A sibling b-leg's `Confirmed` alone is
+            // not that: a media leg may answer while the callee still rings,
+            // and its fire must stand.
+            if ctx.call.a_leg().state() == LegState::Confirmed {
+                return ok(vec![]);
             }
             let leg = ctx.source_leg_id.to_string();
             let mut actions = vec![
@@ -1740,9 +1722,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     CallModelState::Terminating | CallModelState::Terminated
                 );
             if spent {
-                return ok(vec![RuleAction::CancelTimer {
-                    id: format!("{:?}", TimerType::SetupTimeout),
-                }]);
+                return ok(vec![]);
             }
             ok(vec![
                 RuleAction::AddCdrEvent {
@@ -1795,9 +1775,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // absorb, and scrub the entry so a later reclaim cannot re-fire it.
             if matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
             {
-                return ok(vec![RuleAction::CancelTimer {
-                    id: format!("{:?}", TimerType::GlobalDuration),
-                }]);
+                return ok(vec![]);
             }
             let answered = ctx.call.a_leg().state() == LegState::Confirmed;
             if answered
@@ -1805,15 +1783,23 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 && ctx.call.subscribed(call::ReleaseEventKind::MaxCallDuration)
             {
                 if let Some(cbctx) = ctx.call.callback_context() {
-                    // GlobalDuration stays in the ledger while the consult is
-                    // awaited: a copy served elsewhere fires it again and
-                    // re-sends the consult (ADR-0039).
-                    return ok(vec![RuleAction::ReleaseAsyncHttp {
+                    // The cap is re-armed as the consult's answer deadline: a
+                    // copy served elsewhere fires it again and re-sends the
+                    // consult (ADR-0039); the answer's own turn ends or
+                    // re-arms it.
+                    let mut actions = vec![RuleAction::ReleaseAsyncHttp {
                         request: serde_json::json!({
                             "callback_context": cbctx,
                             "event": "max_call_duration",
                         }),
-                    }]);
+                    }];
+                    if let Some(deadline) = release_consult_deadline(ctx) {
+                        actions.push(RuleAction::arm(
+                            TimerKey::call(TimerType::GlobalDuration),
+                            deadline,
+                        ));
+                    }
+                    return ok(actions);
                 }
             }
             ok(vec![
@@ -1844,17 +1830,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         body: None,
                         headers: vec![],
                     });
-                    actions.push(RuleAction::ScheduleTimer {
-                        timer_type: TimerType::KeepaliveTimeout,
-                        delay: TimerDelay::secs(keepalive_timeout(ctx)),
-                        leg_id: Some(leg_id),
-                    });
+                    actions.push(RuleAction::arm(
+                        TimerKey::leg(TimerType::KeepaliveTimeout, leg_id),
+                        TimerDelay::secs(keepalive_timeout(ctx)),
+                    ));
                 }
-                actions.push(RuleAction::ScheduleTimer {
-                    timer_type: TimerType::Keepalive,
-                    delay: TimerDelay::secs(keepalive_interval(ctx)),
-                    leg_id: None,
-                });
+                actions.push(RuleAction::arm(
+                    TimerKey::call(TimerType::Keepalive),
+                    TimerDelay::secs(keepalive_interval(ctx)),
+                ));
                 ok(actions)
             },
         ),
@@ -1899,13 +1883,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &[],
             Match::timer().call_state(CallModelState::Active).filter(|ctx| {
                 matches!(
-                    ctx.timer_type(),
-                    Some(TimerType::RepeatGiveUp { obligation: o @ Obligation::AckOf2xx { .. } })
-                        if ctx.call.answers_initial_invite(o)
+                    fired_give_up(ctx),
+                    Some(o @ Obligation::AckOf2xx { .. }) if ctx.call.answers_initial_invite(o)
                 )
             }),
             |ctx| {
-                let Some(TimerType::RepeatGiveUp { obligation }) = ctx.timer_type() else {
+                let Some(obligation) = fired_give_up(ctx) else {
                     return ok(vec![]);
                 };
                 ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
@@ -1920,13 +1903,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &[],
             Match::timer().call_state(CallModelState::Active).filter(|ctx| {
                 matches!(
-                    ctx.timer_type(),
-                    Some(TimerType::RepeatGiveUp { obligation: o @ Obligation::AckOf2xx { .. } })
-                        if !ctx.call.answers_initial_invite(o)
+                    fired_give_up(ctx),
+                    Some(o @ Obligation::AckOf2xx { .. }) if !ctx.call.answers_initial_invite(o)
                 )
             }),
             |ctx| {
-                let Some(TimerType::RepeatGiveUp { obligation }) = ctx.timer_type() else {
+                let Some(obligation) = fired_give_up(ctx) else {
                     return ok(vec![]);
                 };
                 ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
@@ -1950,17 +1932,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "unacked-reliable-1xx-give-up",
             &[],
-            Match::timer().call_state(CallModelState::Active).filter(|ctx| {
-                matches!(
-                    ctx.timer_type(),
-                    Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } })
-                )
-            }),
+            Match::timer()
+                .call_state(CallModelState::Active)
+                .filter(|ctx| matches!(fired_give_up(ctx), Some(Obligation::PrackOf { .. }))),
             |ctx| {
-                let Some(TimerType::RepeatGiveUp {
-                    obligation: Obligation::PrackOf { a_tag, a_rseq },
-                }) = ctx.timer_type()
-                else {
+                let Some(Obligation::PrackOf { a_tag, a_rseq }) = fired_give_up(ctx) else {
                     return ok(vec![]);
                 };
                 // A re-INVITE's provisional: §3's reject answers that transaction

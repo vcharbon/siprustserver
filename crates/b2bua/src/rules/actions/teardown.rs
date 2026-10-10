@@ -7,7 +7,7 @@ use call::helpers::{
     abandon_leg, record_dialled_invite_final, record_termination, retire_early_dialogs, Scope,
     TERMINATING_TIMEOUT_MS,
 };
-use call::{Call, Dialog, DialogId, Leg, LegKind, LegState, TerminationCause, TimerType};
+use call::{Call, Dialog, DialogId, Leg, LegKind, LegState, TerminationCause, TimerKey, TimerType};
 use sip_message::generators::{
     self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle, RelayScope,
     RelaySituation, RelayedMessage,
@@ -175,20 +175,20 @@ impl ActionExecutor<'_> {
                 &self.config.minted_final_advertisement,
             );
         }
-        // Nothing awaits an answer and no service makes progress once the
-        // call is terminating: every per-leg `NoAnswer` entry — including a
-        // leg the loop skipped as already `Cancelling` — and every service
-        // watchdog leaves the ledger and the driver.
-        self.scrub_where(call, fx, |t| {
-            matches!(t.timer_type, TimerType::NoAnswer | TimerType::Service { .. })
-        });
-        // Nothing is repeated into a terminating call either: every ladder
-        // ends with the setup (a caller who CANCELled must not keep receiving
-        // rungs), so a reclaim cannot restore one into it.
+        // Nothing awaits an answer, no service makes progress and nothing is
+        // repeated once the call is terminating: the call's scope retires —
+        // every leg's timers, every service watchdog and every ladder (a
+        // caller who CANCELled must not keep receiving rungs), so a reclaim
+        // cannot restore one into it.
         self.retire(call, fx, Scope::Call);
         deactivate_service_machines(call);
         call.state = call::CallModelState::Terminating;
-        self.schedule(call, fx, TimerType::TerminatingTimeout, TERMINATING_TIMEOUT_MS, None);
+        self.schedule(
+            call,
+            fx,
+            TimerKey::call(TimerType::TerminatingTimeout),
+            TERMINATING_TIMEOUT_MS,
+        );
     }
 
     /// End `leg_id` ([`b2bua_sdk::model::RuleAction::DestroyLeg`]): BYE a

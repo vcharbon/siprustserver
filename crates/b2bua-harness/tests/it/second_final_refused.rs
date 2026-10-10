@@ -31,7 +31,7 @@ mod latereject {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     pub const DEADLINE_SEC: i64 = 8;
     const DEADLINE: TimerType = TimerType::service(LATEREJECT, "deadline");
@@ -42,11 +42,10 @@ mod latereject {
         states: LrState { Armed },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(LrState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(LATEREJECT, "deadline"),
-                    delay: TimerDelay::secs(DEADLINE_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(LATEREJECT, "deadline")),
+                    TimerDelay::secs(DEADLINE_SEC),
+                ),
             ]))
         },
         rules: [ reject_on_deadline() ],

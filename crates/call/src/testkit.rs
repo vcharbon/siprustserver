@@ -64,7 +64,6 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         call_id: format!("{leg_id}-call-id"),
         source: RemoteInfo { address: "127.0.0.1".into(), port: 5060 },
         dialogs: Default::default(),
-        no_answer_timeout_sec: None,
         local_uri: None,
         remote_uri: None,
         invite_request_uri: None,

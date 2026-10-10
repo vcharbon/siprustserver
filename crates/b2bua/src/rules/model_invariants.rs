@@ -449,11 +449,14 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
 /// Terminated or no longer in the record.
 fn no_timer_on_a_terminated_leg(turn: &Turn<'_>) -> Result<(), String> {
     for timer in &turn.after.timers {
-        let Some(leg_id) = timer.leg_id.as_deref() else { continue };
+        let Some(leg_id) = timer.leg_id() else { continue };
         let state = find_leg(turn.after, leg_id).map(Leg::state);
         if matches!(state, None | Some(LegState::Terminated)) {
             let state = state.map_or("gone".to_string(), |s| format!("{s:?}"));
-            return Err(format!("timer {} is armed on leg {leg_id}, which is {state}", timer.id));
+            let timer_type = timer.timer_type();
+            return Err(format!(
+                "timer {timer_type:?}:{leg_id} is armed on leg {leg_id}, which is {state}"
+            ));
         }
     }
     Ok(())

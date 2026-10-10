@@ -8,7 +8,7 @@
 //! at all and the CORE `relay-refer` forwards it to the peer leg like any other
 //! in-dialog method, Refer-To or not (RFC 3515 rides end to end).
 
-use call::{Direction, LegState, TransferPhase, TransferState};
+use call::{Direction, LegState, TimerKey, TransferPhase, TransferState};
 use sip_message::header::{HeaderName, ReferTo};
 
 use super::notify::{notify, SUB_STATE_ACTIVE_60};
@@ -206,16 +206,14 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                         content_type: None,
                     },
                     RuleAction::SetTransfer { state: Some(seed) },
-                    RuleAction::ScheduleTimer {
-                        timer_type: call::TimerType::ReferSubscriptionExpiry,
-                        delay: TimerDelay::secs(ctx.config.refer_subscription_expiry_sec),
-                        leg_id: None,
-                    },
-                    RuleAction::ScheduleTimer {
-                        timer_type: call::TimerType::ReferOverallSafety,
-                        delay: TimerDelay::secs(ctx.config.refer_overall_safety_sec),
-                        leg_id: None,
-                    },
+                    RuleAction::arm(
+                        TimerKey::call(call::TimerType::ReferSubscriptionExpiry),
+                        TimerDelay::secs(ctx.config.refer_subscription_expiry_sec),
+                    ),
+                    RuleAction::arm(
+                        TimerKey::call(call::TimerType::ReferOverallSafety),
+                        TimerDelay::secs(ctx.config.refer_overall_safety_sec),
+                    ),
                 ];
                 actions.extend(first_notify);
                 actions.push(RuleAction::ReferAsyncHttp {

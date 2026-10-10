@@ -32,7 +32,7 @@ mod ringwatch {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, Direction, TimerType};
+    use call::{CdrEventType, Direction, TimerKey, TimerType};
 
     pub const DEADLINE_SEC: i64 = 5;
     const T18X: TimerType = TimerType::service(RINGWATCH, "deadline18x");
@@ -45,11 +45,10 @@ mod ringwatch {
         // delay from its routing decision).
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(RwState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(RINGWATCH, "deadline18x"),
-                    delay: TimerDelay::secs(DEADLINE_SEC),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(RINGWATCH, "deadline18x")),
+                    TimerDelay::secs(DEADLINE_SEC),
+                ),
             ]))
         },
         rules: [ disarm_on_18x(), reap_on_deadline() ],
@@ -74,7 +73,7 @@ mod ringwatch {
                 let status = ctx.response().map(|r| r.status() as i64);
                 Some(RuleHandleResult::new(vec![
                     // The symmetric disarm: id minted from the ONE recipe.
-                    RuleAction::cancel_timer(&T18X, None),
+                    RuleAction::cancel(TimerKey::call(T18X)),
                     RuleAction::RelayToPeer { transform: Default::default() },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Provisional,
@@ -138,25 +137,23 @@ mod dualkeys {
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::{CdrEventType, TimerType};
+    use call::{CdrEventType, TimerKey, TimerType};
 
     define_service! {
         id: "dualkeys",
         machine: DUALKEYS,
         states: DkState { Watching },
-        // Two distinct keys → two distinct timers (distinct persisted ids).
+        // Two distinct keys → two distinct timers.
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(DkState::Watching.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(DUALKEYS, "fast"),
-                    delay: TimerDelay::secs(3),
-                    leg_id: None,
-                },
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(DUALKEYS, "slow"),
-                    delay: TimerDelay::secs(6),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(DUALKEYS, "fast")),
+                    TimerDelay::secs(3),
+                ),
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(DUALKEYS, "slow")),
+                    TimerDelay::secs(6),
+                ),
             ]))
         },
         rules: [ on_any_key() ],
@@ -190,11 +187,10 @@ mod dualkeys {
                             status_code: None,
                             reason: Some("dual_fast".into()),
                         },
-                        RuleAction::ScheduleTimer {
-                            timer_type: TimerType::service(DUALKEYS, "fast"),
-                            delay: TimerDelay::secs(2),
-                            leg_id: None,
-                        },
+                        RuleAction::arm(
+                            TimerKey::call(TimerType::service(DUALKEYS, "fast")),
+                            TimerDelay::secs(2),
+                        ),
                     ])),
                     "slow" => Some(RuleHandleResult::new(vec![
                         RuleAction::AddCdrEvent {

@@ -26,7 +26,7 @@ mod fork_out {
         ServiceSeed, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use sip_message::Method;
 
     pub const AT_SEC: i64 = 5;
@@ -38,7 +38,7 @@ mod fork_out {
         states: ForkOutState { Armed, Dialled },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(ForkOutState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer { timer_type: DEADLINE, delay: TimerDelay::secs(AT_SEC), leg_id: None },
+                RuleAction::arm(TimerKey::call(DEADLINE), TimerDelay::secs(AT_SEC)),
             ]))
         },
         rules: [ dial_on_deadline() ],
@@ -59,7 +59,7 @@ mod fork_out {
                         new_ruri: None,
                         new_from: None,
                         new_to: None,
-                        no_answer_timeout_sec: None,
+                        no_answer: call::Deadline::Off,
                         callback_context: None,
                         body_override: None,
                         header_updates: vec![],

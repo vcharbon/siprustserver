@@ -7,9 +7,10 @@
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};
 
-use super::{state, timer_id, Phase, TRANSFER_MACHINE};
+use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;
 use b2bua_sdk::model::{Effect, Match, RuleAction, RuleDefinition};
+use call::TimerKey;
 
 /// transfer-reject-second-refer — a second REFER while active → 491.
 pub(super) fn reject_second_refer() -> RuleDefinition {
@@ -98,24 +99,27 @@ pub(super) fn overall_timeout() -> RuleDefinition {
         active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry + both re-INVITE watchdogs" },
+            Effect::GuardTimer { timer: call::TimerType::ReferSubscriptionExpiry, label: "cancel subscription-expiry" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel both re-INVITE watchdogs" },
             Effect::LifecycleCommand { label: "terminate (overall-safety watchdog rollback)" },
         ],
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferOverallSafety),
         handle: |ctx| {
             let st = state(ctx)?.clone();
-            let mut actions = vec![RuleAction::CancelTimer {
-                id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
-            }];
+            let mut actions = vec![RuleAction::cancel(TimerKey::call(
+                call::TimerType::ReferSubscriptionExpiry,
+            ))];
             if let Some(c_leg_id) = st.c_leg_id.clone() {
-                actions.push(RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
-                });
+                actions.push(RuleAction::cancel(TimerKey::leg(
+                    call::TimerType::ReferReinviteAnswer,
+                    &c_leg_id,
+                )));
             }
-            actions.push(RuleAction::CancelTimer {
-                id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
-            });
+            actions.push(RuleAction::cancel(TimerKey::leg(
+                call::TimerType::ReferReinviteAnswer,
+                "a",
+            )));
             actions.push(RuleAction::AddCdrEvent {
                 event_type: CdrEventType::Timeout,
                 leg_id: "a".to_string(),

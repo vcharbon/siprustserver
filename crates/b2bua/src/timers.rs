@@ -7,15 +7,16 @@
 //! On expiry the driver emits a [`CallEvent::Timer`] on its fire channel; the
 //! router selects on that channel and routes it through the per-call dispatcher
 //! exactly like an inbound message — so timer handling shares the per-call FIFO.
-//! The fire carries the incarnation of the call that scheduled it, so a fire
-//! already on the channel when that call ended reaches no later call on its
-//! `call_ref` (the router drops it).
+//! The fire carries the timer's key, the generation it was armed under and the
+//! incarnation of the call that scheduled it: the router drops a fire whose
+//! key and generation the call's ledger no longer holds, and one of an
+//! earlier call on its `call_ref`.
 //!
 //! ## Cancellation: epoch correctness **+** physical `Key` removal
 //!
 //! A `DelayQueue` `Key` is a bare slab index with no generation stamp: when an
 //! entry expires or is removed, its slot is freed and the **next insert reuses
-//! it, yielding the same `Key` value**. A *stale* `id → Key` map therefore
+//! it, yielding the same `Key` value**. A *stale* `timer → Key` map therefore
 //! aliases, and `try_remove(stale_key)` then evicts whatever *live* timer now
 //! occupies that slot — a silent, catastrophic wrong-timer cancel (e.g. a
 //! keepalive-timeout cancel killing the rescheduled keepalive). See
@@ -55,23 +56,22 @@ use sip_clock::Clock;
 use tokio::sync::mpsc;
 use tokio_util::time::{delay_queue::Key, DelayQueue};
 
-use call::{TimerEntry, TimerType};
+use call::{TimerEntry, TimerKey};
 
 use crate::metrics::B2buaMetrics;
 use b2bua_sdk::event::CallEvent;
 
 struct Fired {
-    id: String,
+    key: TimerKey,
+    generation: u64,
     epoch: u64,
-    timer_type: TimerType,
     call_ref: String,
-    leg_id: Option<String>,
     incarnation: Option<String>,
 }
 
 enum TimerCmd {
     Schedule { entry: TimerEntry, call_ref: String, incarnation: Option<String> },
-    Cancel { call_ref: String, id: String },
+    Cancel { call_ref: String, key: TimerKey },
     CancelAll { call_ref: String },
 }
 
@@ -118,8 +118,9 @@ impl TimerService {
         let _ = self.cmd_tx.send(TimerCmd::Schedule { entry, call_ref, incarnation }).await;
     }
 
-    pub async fn cancel(&self, call_ref: String, id: String) {
-        let _ = self.cmd_tx.send(TimerCmd::Cancel { call_ref, id }).await;
+    /// Disarm the call's timer `key`.
+    pub async fn cancel(&self, call_ref: String, key: TimerKey) {
+        let _ = self.cmd_tx.send(TimerCmd::Cancel { call_ref, key }).await;
     }
 
     pub async fn cancel_all(&self, call_ref: String) {
@@ -146,7 +147,9 @@ impl TimerService {
     ///   (keepalive re-arms its next interval; a duration/no-answer cap reaps the
     ///   call). Nothing is dropped or recomputed.
     /// - Re-arm is idempotent: any later rule-emitted `ScheduleTimer` for the same
-    ///   `(call_ref, id)` supersedes the restored entry via the driver's epoch bump.
+    ///   `(call_ref, key)` supersedes the restored entry via the driver's epoch
+    ///   bump. A restored entry keeps its key and generation, so a fire of an
+    ///   instance the ledger replaced meanwhile is still told stale.
     ///
     /// **Wall-time reliance (bounded at the replication boundary).** `fire_at`
     /// came from the *dead* node's clock and is compared against *this* node's
@@ -179,13 +182,12 @@ async fn driver(
     metrics: B2buaMetrics,
 ) {
     let mut queue: DelayQueue<Fired> = DelayQueue::new();
-    // The live `(epoch, Key)` per timer, keyed by `(call_ref, id)`. The timer
-    // service is a SINGLE shared driver across every call, but timer ids are
-    // per-call and collide across calls (every call's keepalive is `"Keepalive"`,
-    // every keepalive-timeout is `"KeepaliveTimeout:a"`/`":b"`, etc.). Keying
-    // `active` by id alone would alias calls: call N+1's `"Keepalive"` would
-    // overwrite call N's entry, orphaning it so it never fires. The
-    // `(call_ref, id)` key isolates each call.
+    // The live `(epoch, Key)` per timer, keyed by `(call_ref, timer key)`. The
+    // timer service is a SINGLE shared driver across every call, but timer keys
+    // are per-call and collide across calls (every call's keepalive is the same
+    // call-scoped `Keepalive`). Keying `active` by timer key alone would alias
+    // calls: call N+1's keepalive would overwrite call N's entry, orphaning it
+    // so it never fires. The `(call_ref, key)` key isolates each call.
     //
     // The stored `Key` lets Cancel/CancelAll/reschedule physically `try_remove`
     // the queue entry instead of leaving it to expire as a tombstone — see the
@@ -193,10 +195,10 @@ async fn driver(
     // queue membership (an entry is removed from `active` in the same turn it
     // fires), so a stored `Key` never points at a reused slot. The `epoch` stays
     // as a backstop: a `Fired` whose epoch no longer matches `active` is dropped,
-    // so even a missed removal can never mis-fire. `by_call` indexes ids for
+    // so even a missed removal can never mis-fire. `by_call` indexes keys for
     // `CancelAll`.
-    let mut active: HashMap<(String, String), (u64, Key)> = HashMap::new();
-    let mut by_call: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut active: HashMap<(String, TimerKey), (u64, Key)> = HashMap::new();
+    let mut by_call: HashMap<String, HashSet<TimerKey>> = HashMap::new();
     let mut next_epoch: u64 = 0;
 
     // The gauges are written at the end of every loop iteration, but the driver
@@ -217,16 +219,16 @@ async fn driver(
                 Some(TimerCmd::Schedule { entry, call_ref, incarnation }) => {
                     next_epoch += 1;
                     let epoch = next_epoch;
-                    let akey = (call_ref.clone(), entry.id.clone());
+                    let akey = (call_ref.clone(), entry.key.clone());
                     // Re-arm: physically drop the previous queue entry for this
-                    // (call_ref, id) so it can't linger. `try_remove` is safe —
+                    // (call_ref, key) so it can't linger. `try_remove` is safe —
                     // the stored Key is for a still-queued entry (active mirrors
                     // the queue), so it cannot alias a reused slot. The epoch bump
                     // still supersedes it logically as a backstop.
                     if let Some(&(_, old_key)) = active.get(&akey) {
                         queue.try_remove(&old_key);
                     }
-                    by_call.entry(call_ref.clone()).or_default().insert(entry.id.clone());
+                    by_call.entry(call_ref.clone()).or_default().insert(entry.key.clone());
                     // Rebuild the monotonic delay from the absolute wall deadline.
                     // Within a process this cancels — the rule minted `fire_at`
                     // from this same `now_ms()`, so delay == the original delay_ms
@@ -237,25 +239,24 @@ async fn driver(
                     let delay = (entry.fire_at - clock.now_ms()).max(0) as u64;
                     let key = queue.insert(
                         Fired {
-                            id: entry.id,
+                            key: entry.key,
+                            generation: entry.generation,
                             epoch,
-                            timer_type: entry.timer_type,
                             call_ref,
-                            leg_id: entry.leg_id,
                             incarnation,
                         },
                         Duration::from_millis(delay),
                     );
                     active.insert(akey, (epoch, key));
                 }
-                Some(TimerCmd::Cancel { call_ref, id }) => {
+                Some(TimerCmd::Cancel { call_ref, key: timer }) => {
                     // Physical cancel: forget this call's timer AND reclaim its
                     // queue slot now, so it never lingers as a tombstone.
-                    if let Some((_, key)) = active.remove(&(call_ref.clone(), id.clone())) {
+                    if let Some((_, key)) = active.remove(&(call_ref.clone(), timer.clone())) {
                         queue.try_remove(&key);
                     }
                     if let Some(ids) = by_call.get_mut(&call_ref) {
-                        ids.remove(&id);
+                        ids.remove(&timer);
                         // Don't leave an empty set keyed by a now-timerless call:
                         // only CancelAll reaps `by_call`, so a call that only ever
                         // individual-Cancels would strand an empty entry forever.
@@ -285,19 +286,19 @@ async fn driver(
                 // cancellation a surviving tombstone is rare (a removal missed),
                 // but the epoch backstop still drops it. (Not a `continue`: the
                 // gauge update below must run on every iteration.)
-                let akey = (expired.call_ref.clone(), expired.id.clone());
+                let akey = (expired.call_ref.clone(), expired.key.clone());
                 if active.get(&akey).map(|&(e, _)| e) == Some(expired.epoch) {
                     active.remove(&akey);
                     if let Some(ids) = by_call.get_mut(&expired.call_ref) {
-                        ids.remove(&expired.id);
+                        ids.remove(&expired.key);
                         if ids.is_empty() {
                             by_call.remove(&expired.call_ref);
                         }
                     }
                     let event = CallEvent::Timer {
-                        timer_type: expired.timer_type,
+                        key: expired.key,
+                        generation: expired.generation,
                         call_ref: expired.call_ref,
-                        leg_id: expired.leg_id,
                         incarnation: expired.incarnation,
                     };
                     // Unbounded: only fails if the router (receiver) is gone — i.e.

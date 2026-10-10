@@ -352,10 +352,9 @@ fn a_timer_armed_on_a_terminated_leg_breaks_the_timer_scope_invariant() {
     let mut call = call();
     let no_answer = call::TimerType::NoAnswer;
     call.timers.push(call::TimerEntry {
-        id: no_answer.timer_id(Some("b-1")),
-        timer_type: no_answer,
+        key: call::TimerKey::leg(no_answer, "b-1"),
+        generation: 1,
         fire_at: 30_000,
-        leg_id: Some("b-1".into()),
     });
     call::testkit::stage_leg(&mut call.b_legs[0], LegState::Early);
     assert_eq!(no_timer_on_a_terminated_leg(&after(&call)), Ok(()), "leg still ringing");

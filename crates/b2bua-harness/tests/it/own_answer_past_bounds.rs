@@ -117,7 +117,7 @@ mod slowprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When the request leaves, from the call's setup.
     pub const KICK_AFTER: Duration = Duration::from_secs(59);
@@ -133,11 +133,10 @@ mod slowprobe {
         states: SpState { Working, Awaiting, Done },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(SpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(SLOWPROBE, "kick"),
-                    delay: TimerDelay::secs(KICK_AFTER.as_secs() as i64),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(SLOWPROBE, "kick")),
+                    TimerDelay::secs(KICK_AFTER.as_secs() as i64),
+                ),
             ]))
         },
         rules: [ kick(), result() ],
@@ -203,7 +202,7 @@ mod ticker {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
 
     /// When both timers come due, from the call's setup.
     pub const DUE_AFTER: Duration = Duration::from_secs(1);
@@ -218,8 +217,8 @@ mod ticker {
         init: |_call: &RuleCall| {
             let due = TimerDelay::secs(DUE_AFTER.as_secs() as i64);
             Some(ServiceSeed::new(TkState::Ticking.label()).with_actions(vec![
-                RuleAction::ScheduleTimer { timer_type: TICK_A, delay: due, leg_id: None },
-                RuleAction::ScheduleTimer { timer_type: TICK_B, delay: due, leg_id: None },
+                RuleAction::arm(TimerKey::call(TICK_A), due),
+                RuleAction::arm(TimerKey::call(TICK_B), due),
             ]))
         },
         rules: [ tick_a(), tick_b() ],

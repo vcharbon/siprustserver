@@ -73,13 +73,8 @@ fn timer_ledger(calls: &[call::Call], now_ms: i64) -> Vec<String> {
             } else {
                 format!("overdue by {}ms", -due)
             };
-            let leg = match t.leg_id.as_deref() {
-                Some(leg) => format!("leg {leg}"),
-                None => "call-level".to_string(),
-            };
-            let kind = format!("{:?}", t.timer_type);
-            let kind = if t.id.starts_with(&kind) { String::new() } else { format!(" [{kind}]") };
-            lines.push(format!("  {}{kind} {when}, {leg}", t.id));
+            let (timer_type, scope) = (t.timer_type(), &t.key.scope);
+            lines.push(format!("  {timer_type:?} {when}, {scope:?}, gen {}", t.generation));
         }
     }
     lines

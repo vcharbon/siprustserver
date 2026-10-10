@@ -40,7 +40,7 @@ use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
-use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
+use call::{CallBodyCodec, MsgpackCodec, TimerKey, TimerType};
 
 use ha_harness::{Marker, ReplReport};
 use repl_net::transport::{
@@ -465,12 +465,7 @@ impl ReplicatedB2buaSut {
         let codec = MsgpackCodec::new();
         let mut call = codec.decode(&body).expect("replica body decodes");
         let leg = call.b_legs.first().expect("replicated call has a b-leg").leg_id.clone();
-        call.timers.push(TimerEntry {
-            id: format!("{:?}:{leg}", TimerType::NoAnswer),
-            timer_type: TimerType::NoAnswer,
-            fire_at: fire_at_ms,
-            leg_id: Some(leg.clone()),
-        });
+        call::helpers::arm_timer(&mut call, TimerKey::leg(TimerType::NoAnswer, &leg), fire_at_ms);
         let (p, b) =
             self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
         self.store

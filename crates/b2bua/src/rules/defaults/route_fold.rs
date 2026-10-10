@@ -6,7 +6,7 @@
 //! other or from the initial `apply_route`. The admit a fold carries is the
 //! router's to apply before any rule reads it (`crate::limiter::report`).
 
-use call::{CallModelState, TimerType};
+use call::{CallModelState, TimerKey, TimerType};
 
 use b2bua_sdk::header_update::{payload_adds, payload_lines};
 use b2bua_sdk::model::{Body, RuleAction, RuleContext, TimerDelay};
@@ -36,7 +36,8 @@ pub(crate) struct RouteFold {
     pub new_ruri: Option<String>,
     pub new_from: Option<String>,
     pub new_to: Option<String>,
-    pub no_answer: Option<i64>,
+    /// The ring deadline of the leg the fold dials.
+    pub no_answer: call::Deadline,
     pub callback_context: Option<String>,
     pub header_updates: Vec<(String, Option<String>)>,
     /// The adds of the payload's `update_headers`, yielding to the INVITE as
@@ -72,19 +73,24 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
     // construction — it is the reader's contract, not a live branch.
     let port =
         crate::decision::read_stated_port(payload.get("destination").and_then(|d| d.get("port")))?;
+    let features: Option<call::features::FeatureActivations> =
+        payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok());
     Some(RouteFold {
         destination: (host, port),
         new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
         new_from: payload.get("new_from").and_then(|v| v.as_str()).map(str::to_string),
         new_to: payload.get("new_to").and_then(|v| v.as_str()).map(str::to_string),
-        no_answer: payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
+        no_answer: crate::decision::no_answer_deadline(
+            payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
+            features.as_ref(),
+        ),
         callback_context: payload
             .get("callback_context")
             .and_then(|v| v.as_str())
             .map(str::to_string),
         header_updates: parse_header_updates(payload),
         header_adds: payload_adds(payload.get("update_headers")),
-        features: payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok()),
+        features,
         service_ext: parse_service_ext(payload),
         subscriptions: payload
             .get("subscriptions")
@@ -155,11 +161,10 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // anchor: with the cap anchored at the answer, the answer this fold leads
         // to arms it (`MaxDurationAnchor`).
         if f.platform.arms_cap_at_creation(ctx.config.setup_timeout_sec) {
-            actions.push(RuleAction::ScheduleTimer {
-                timer_type: TimerType::GlobalDuration,
-                delay: TimerDelay::secs(f.platform.max_duration_sec),
-                leg_id: None,
-            });
+            actions.push(RuleAction::arm(
+                TimerKey::call(TimerType::GlobalDuration),
+                TimerDelay::secs(f.platform.max_duration_sec),
+            ));
         }
         actions.push(RuleAction::SetFeatures { features: f.clone() });
     }

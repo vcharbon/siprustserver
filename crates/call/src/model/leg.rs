@@ -38,7 +38,6 @@ pub struct Leg {
     /// The leg's dialogs in every state: several while early (forking), one
     /// confirmed at most.
     pub dialogs: Dialogs,
-    pub no_answer_timeout_sec: Option<i64>,
     /// B2BUA's local address on this leg (§12.1.1's local URI) as the
     /// dialog-creating INVITE stated it, display name included, tag excluded:
     /// the From of every request this side sends in the leg's dialogs.

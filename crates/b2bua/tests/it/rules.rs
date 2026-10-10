@@ -15,7 +15,7 @@ use b2bua_sdk::event::CallEvent;
 use b2bua_sdk::model::{Body, BodyAuthor, LegEnd};
 use call::{
     CallModelState, Dialog, DialogState, Direction, EndingBy, Leg, LegKind, LegState, MachineId,
-    OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerType,
+    OutboundInvite, PeerDialog, RemoteInfo, StateLabel, TerminationCause, TimerKey, TimerType,
 };
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
@@ -119,9 +119,9 @@ fn with_dialog<'a>(leg: &'a mut Leg, peer_tag: &str) -> &'a mut Dialog {
 fn timer_global_duration_selects_max_duration() {
     let call = test_call();
     let event = CallEvent::Timer {
-        timer_type: TimerType::GlobalDuration,
+        key: TimerKey::call(TimerType::GlobalDuration),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -159,9 +159,9 @@ fn rule_call_reads_the_current_decision_ordinal() {
 /// The `no-answer` rule's output for a fire naming `fired_leg_id` on `call`.
 fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
     let event = CallEvent::Timer {
-        timer_type: TimerType::NoAnswer,
+        key: TimerKey::leg(TimerType::NoAnswer, fired_leg_id),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: Some(fired_leg_id.into()),
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -182,43 +182,30 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
 }
 
 #[test]
-fn no_answer_fire_on_a_confirmed_call_absorbs_to_cancel_only() {
-    // A reclaim-restored stale `NoAnswer` ledger entry firing on its own
-    // answered leg must be absorbed: the only action is the scrub of the
-    // spent entry.
+fn no_answer_fire_on_an_answered_caller_is_absorbed() {
+    // The caller's INVITE took its 2xx: no final may be authored on it. The
+    // fire is absorbed with no action — the fired instance already left the
+    // ledger at its delivery.
     let mut call = test_call();
     confirm_a(&mut call);
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, b);
     let actions = no_answer_result(&call, "b-1");
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
-        ),
-        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
-    );
+    assert!(actions.is_empty(), "absorbed, got {actions:?}");
 }
 
 #[test]
-fn no_answer_fire_naming_an_absent_leg_absorbs_to_cancel_only() {
-    // A restored stale entry can name a leg displaced/destroyed before the
-    // crash: firing DestroyLeg + /call/failure against a dead leg id on a
-    // possibly-answered call is the same bug class — absorb and scrub.
+fn no_answer_fire_naming_an_absent_leg_on_an_answered_caller_is_absorbed() {
+    // The caller is answered: whatever leg the fire names, no final may be
+    // authored on her INVITE.
     let mut call = test_call();
     confirm_a(&mut call);
     let mut b = b_leg_pending();
     call::testkit::stage_leg(&mut b, LegState::Confirmed);
     call = call::helpers::add_b_leg(call, b);
     let actions = no_answer_result(&call, "b-ghost");
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-ghost"
-        ),
-        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
-    );
+    assert!(actions.is_empty(), "absorbed, got {actions:?}");
 }
 
 #[test]
@@ -245,42 +232,60 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     }
 }
 
-#[test]
-fn no_answer_fire_on_a_cancelling_leg_absorbs_to_cancel_only() {
-    // A caller CANCEL leaves the b-leg `Cancelling`: the leg is already going
-    // away — the fire must not consult /call/failure nor author a second
-    // final on the a-leg's completed transaction.
-    let mut call = test_call();
-    call.callback_context = Some("cb".into());
-    let mut b = b_leg_pending();
-    cancel_sent(&mut b);
-    call = call::helpers::add_b_leg(call, b);
-    let actions = no_answer_result(&call, "b-1");
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
-        ),
-        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
-    );
+/// The executor applying `actions` to `call` on a caller-side event.
+fn executed(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
+    let event = CallEvent::Cancelled {
+        call_id: call.a_leg.call_id.clone(),
+        from_tag: call.a_leg_invite.from_tag.clone(),
+        invite_cseq: None,
+        in_dialog: false,
+        headers: vec![],
+        to_tag: None,
+    };
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
+    };
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    exec.execute(actions, call, &ctx)
 }
 
 #[test]
-fn no_answer_fire_on_a_terminating_call_absorbs_to_cancel_only() {
-    // Call-scoped discriminator: once the call is Terminating, no leg awaits an
-    // answer — a fire (e.g. a reclaim-restored stale entry) is spent even when
-    // the named leg's own disposition never recorded the CANCEL.
+fn cancelling_a_leg_retires_its_timers() {
+    // A CANCELled leg awaits no answer: its ring deadline and every other
+    // timer it guards leave the ledger and the driver with the CANCEL, and
+    // the call's own timers stay.
     let mut call = test_call();
-    call.callback_context = Some("cb".into());
-    call.state = CallModelState::Terminating;
     call = call::helpers::add_b_leg(call, b_leg_pending());
-    let actions = no_answer_result(&call, "b-1");
+    let no_answer = TimerKey::leg(TimerType::NoAnswer, "b-1");
+    let duration = TimerKey::call(TimerType::GlobalDuration);
+    call::helpers::arm_timer(&mut call, no_answer.clone(), 5_000);
+    call::helpers::arm_timer(&mut call, duration.clone(), 3_600_000);
+    let result = executed(&call, &[RuleAction::CancelLeg { leg_id: "b-1".into() }]);
+    let keys: Vec<_> = result.call.timers.iter().map(|t| t.key.clone()).collect();
+    assert_eq!(keys, vec![duration], "only the call's timer stays");
     assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
-        ),
-        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
+        result
+            .effects
+            .critical
+            .iter()
+            .any(|e| matches!(e, CriticalStateEffect::CancelTimer { key } if *key == no_answer)),
+        "the live NoAnswer fiber is cancelled, got {:?}",
+        result.effects.critical,
     );
 }
 
@@ -470,15 +475,15 @@ fn invite_timeout_on_a_live_pending_leg_still_consults() {
 }
 
 #[test]
-fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
+fn setup_timeout_fire_on_a_terminating_call_is_absorbed() {
     // A terminating call authors no new final on the a-leg's completed
-    // transaction: the fire is spent — absorb and scrub, no 408.
+    // transaction: the fire is absorbed, no 408.
     let mut call = test_call();
     call.state = CallModelState::Terminating;
     let event = CallEvent::Timer {
-        timer_type: TimerType::SetupTimeout,
+        key: TimerKey::call(TimerType::SetupTimeout),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -497,21 +502,15 @@ fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
     let setup_timeout =
         ranked.iter().find(|r| r.id == "setup-timeout").expect("setup-timeout is a candidate");
     let actions = (setup_timeout.handle)(&ctx).expect("setup-timeout handles its timer").actions;
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "SetupTimeout"
-        ),
-        "absorb: exactly the spent-entry scrub, got {actions:?}",
-    );
+    assert!(actions.is_empty(), "absorbed: no 408, got {actions:?}");
 }
 
 /// The `max-duration` rule's output for a `GlobalDuration` fire on `call`.
 fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
     let event = CallEvent::Timer {
-        timer_type: TimerType::GlobalDuration,
+        key: TimerKey::call(TimerType::GlobalDuration),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -533,25 +532,19 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
 }
 
 #[test]
-fn max_duration_fire_on_a_terminating_call_absorbs_to_cancel_only() {
+fn max_duration_fire_on_a_terminating_call_is_absorbed() {
     // The cap crossing the terminating window (caller BYE'd just before it, or
     // a reclaim restored a stale entry): even the consult-eligible shape —
     // answered, subscribed, callback_context — is spent on a going-away call.
     // No `call_release` consult (a `reroute` outcome would dial a fresh b-leg),
-    // no BeginTermination re-arm — absorb and scrub.
+    // no BeginTermination re-arm — absorbed.
     let mut call = test_call();
     confirm_a(&mut call);
     call.state = CallModelState::Terminating;
     call.callback_context = Some("cb".into());
     call.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
     let actions = max_duration_result(&call);
-    assert!(
-        matches!(
-            actions.as_slice(),
-            [RuleAction::CancelTimer { id }] if id == "GlobalDuration"
-        ),
-        "absorb: exactly the spent-entry scrub, got {actions:?}",
-    );
+    assert!(actions.is_empty(), "absorbed, got {actions:?}");
 }
 
 #[test]
@@ -733,13 +726,8 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
     let mut b = b_leg_pending();
     cancel_sent(&mut b);
     call = call::helpers::add_b_leg(call, b);
-    let no_answer_id = TimerType::NoAnswer.timer_id(Some("b-1"));
-    call.timers.push(call::TimerEntry {
-        id: no_answer_id.clone(),
-        timer_type: TimerType::NoAnswer,
-        fire_at: 5_000,
-        leg_id: Some("b-1".into()),
-    });
+    let no_answer = TimerKey::leg(TimerType::NoAnswer, "b-1");
+    call::helpers::arm_timer(&mut call, no_answer.clone(), 5_000);
     let event = CallEvent::Cancelled {
         call_id: call.a_leg.call_id.clone(),
         from_tag: call.a_leg_invite.from_tag.clone(),
@@ -777,7 +765,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         &ctx,
     );
     assert!(
-        !result.call.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
+        !result.call.timers.iter().any(|t| *t.timer_type() == TimerType::NoAnswer),
         "no NoAnswer entry survives BeginTermination: {:?}",
         result.call.timers,
     );
@@ -786,7 +774,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
             .effects
             .critical
             .iter()
-            .any(|e| matches!(e, CriticalStateEffect::CancelTimer { id } if *id == no_answer_id)),
+            .any(|e| matches!(e, CriticalStateEffect::CancelTimer { key } if *key == no_answer)),
         "the live NoAnswer fiber is cancelled, got {:?}",
         result.effects.critical,
     );
@@ -2079,7 +2067,6 @@ fn b_leg_pending() -> Leg {
         call_id: "bcid@x".into(),
         source: RemoteInfo { address: "10.0.0.2".into(), port: 5070 },
         dialogs: Default::default(),
-        no_answer_timeout_sec: None,
         local_uri: Some("sip:svc@10.0.0.9".into()),
         remote_uri: Some("sip:bob@10.0.0.2".into()),
         invite_request_uri: Some("sip:bob@10.0.0.2:5070".into()),
@@ -2313,7 +2300,6 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         None,
         None,
         None,
-        None,
         &config,
         &id_gen,
         None,
@@ -2344,9 +2330,9 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
 
     // CancelLeg is action-driven and does not read the event; any event works.
     let event = CallEvent::Timer {
-        timer_type: TimerType::NoAnswer,
+        key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: Some("b-1".to_string()),
         incarnation: None,
     };
     let ctx = RuleContext {
@@ -2941,18 +2927,13 @@ mod answer_a_leg_new_dialog {
             responder_offer: None,
         });
         let provisional = call::Obligation::PrackOf { a_tag: "A1early".into(), a_rseq: 1 };
-        for (timer_type, fire_at) in [
-            (TimerType::Rung { obligation: reinvite_2xx.clone() }, 500),
-            (TimerType::RepeatGiveUp { obligation: reinvite_2xx.clone() }, 32_000),
-            (TimerType::Rung { obligation: provisional.clone() }, 500),
-            (TimerType::RepeatGiveUp { obligation: provisional.clone() }, 32_000),
+        for (key, fire_at) in [
+            (TimerKey::obligation(TimerType::Rung, reinvite_2xx.clone()), 500),
+            (TimerKey::obligation(TimerType::RepeatGiveUp, reinvite_2xx.clone()), 32_000),
+            (TimerKey::obligation(TimerType::Rung, provisional.clone()), 500),
+            (TimerKey::obligation(TimerType::RepeatGiveUp, provisional.clone()), 32_000),
         ] {
-            call.timers.push(call::TimerEntry {
-                id: timer_type.timer_id(None),
-                timer_type,
-                fire_at,
-                leg_id: None,
-            });
+            call::helpers::arm_timer(&mut call, key, fire_at);
         }
 
         let event = some_event();
@@ -2980,13 +2961,7 @@ mod answer_a_leg_new_dialog {
             "the b-leg's re-INVITE 2xx still awaits its ACK: marker kept",
         );
         let ladder_timers = |o: &call::Obligation| {
-            result
-                .call
-                .timers
-                .iter()
-                .filter(|t| matches!(&t.timer_type,
-                    TimerType::Rung { obligation } | TimerType::RepeatGiveUp { obligation } if obligation == o))
-                .count()
+            result.call.timers.iter().filter(|t| t.key.obligation_of() == Some(o)).count()
         };
         assert_eq!(
             ladder_timers(&reinvite_2xx),
@@ -3003,18 +2978,18 @@ mod answer_a_leg_new_dialog {
                 || result.call.reliable_provisionals[0].emission.is_none(),
             "the provisional repeats nothing more",
         );
-        let cancelled: Vec<&str> = result
+        let cancelled: Vec<String> = result
             .effects
             .critical
             .iter()
             .filter_map(|e| match e {
-                CriticalStateEffect::CancelTimer { id } => Some(id.as_str()),
+                CriticalStateEffect::CancelTimer { key } => Some(format!("{key:?}")),
                 _ => None,
             })
             .collect();
         assert_eq!(
             cancelled,
-            vec!["Rung:PrackOf:A1early:1", "RepeatGiveUp:PrackOf:A1early:1"],
+            vec!["Rung on PrackOf:A1early:1", "RepeatGiveUp on PrackOf:A1early:1"],
             "only the provisional's timers leave the driver",
         );
         assert!(
@@ -3350,9 +3325,9 @@ mod ack_leg_body {
         let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
         let config = B2buaConfig::default();
         let event = CallEvent::Timer {
-            timer_type: TimerType::NoAnswer,
+            key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: Some("b-1".to_string()),
             incarnation: None,
         };
         let ctx = RuleContext {
@@ -3448,9 +3423,9 @@ mod ack_leg_body {
     fn ack_exec(call: &call::Call, body: Vec<u8>, content_type: Option<String>) -> HandlerResult {
         let config = B2buaConfig::default();
         let event = CallEvent::Timer {
-            timer_type: TimerType::NoAnswer,
+            key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: Some("b-1".to_string()),
             incarnation: None,
         };
         let ctx = RuleContext {
@@ -3616,7 +3591,7 @@ mod create_leg_admission {
             new_ruri: None,
             new_from: None,
             new_to: None,
-            no_answer_timeout_sec: None,
+            no_answer: call::Deadline::Off,
             callback_context: None,
             body_override: None,
             header_updates: vec![],
@@ -3783,7 +3758,7 @@ mod default_sdp_create_leg {
             new_ruri: None,
             new_from: None,
             new_to: None,
-            no_answer_timeout_sec: None,
+            no_answer: call::Deadline::Off,
             callback_context: None,
             body_override: config.default_sdp.clone().map(|sdp| Body::own(sdp, None)),
             header_updates: vec![],
@@ -3886,7 +3861,7 @@ mod header_update_removal_withholds_a_relayed_name {
             new_ruri: None,
             new_from: None,
             new_to: None,
-            no_answer_timeout_sec: None,
+            no_answer: call::Deadline::Off,
             callback_context: None,
             body_override: None,
             header_updates,
@@ -4060,10 +4035,9 @@ mod enforce_equivalence {
             after.limiter = limiter;
             after.timers = (0..timer_count)
                 .map(|i| TimerEntry {
-                    id: format!("Keepalive:{i}"),
-                    timer_type: TimerType::Keepalive,
+                    key: TimerKey::call(TimerType::Keepalive),
+                    generation: 1,
                     fire_at: 1_000 + i as i64,
-                    leg_id: None,
                 })
                 .collect();
 
@@ -4074,7 +4048,9 @@ mod enforce_equivalence {
             if pre_remove_call {
                 effects.critical.push(CriticalStateEffect::RemoveCall);
             }
-            effects.critical.push(CriticalStateEffect::CancelTimer { id: "NoAnswer:b-1".into() });
+            effects.critical.push(CriticalStateEffect::CancelTimer {
+                key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+            });
             effects.soft.extend(pre_releases);
             if pre_write_cdr {
                 effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
@@ -4344,7 +4320,7 @@ mod service_timers {
     const SVC: MachineId = MachineId::new("svc-a");
 
     fn schedule(t: TimerType, secs: i64) -> RuleAction {
-        RuleAction::ScheduleTimer { timer_type: t, delay: TimerDelay::secs(secs), leg_id: None }
+        RuleAction::arm(TimerKey::call(t), TimerDelay::secs(secs))
     }
 
     #[test]
@@ -4365,11 +4341,11 @@ mod service_timers {
         let slow = TimerType::service(SVC, "slow");
         let result =
             exec.execute(&[schedule(fast.clone(), 3), schedule(slow.clone(), 6)], &call, &ctx);
-        let ids: Vec<&str> = result.call.timers.iter().map(|t| t.id.as_str()).collect();
+        let ids: Vec<String> = result.call.timers.iter().map(|t| format!("{:?}", t.key)).collect();
         assert_eq!(
             ids,
-            vec!["Service:svc-a:fast", "Service:svc-a:slow"],
-            "two keys → two distinct ledger entries (distinct persisted ids)",
+            vec!["Service:svc-a:fast on call", "Service:svc-a:slow on call"],
+            "two keys → two distinct ledger entries",
         );
 
         // Re-arm the SAME key: replaced in place, not appended.
@@ -4380,17 +4356,18 @@ mod service_timers {
             .call
             .timers
             .iter()
-            .find(|t| t.id == "Service:svc-a:fast")
+            .find(|t| *t.timer_type() == fast)
             .expect("fast entry present");
         assert_eq!(entry.fire_at, 1_000 + 10_000, "the re-arm's deadline won");
-        assert_eq!(entry.timer_type, fast);
+        assert_eq!(*entry.timer_type(), fast);
 
-        // Recipe-minted cancel removes exactly its own entry.
+        // A cancel of the key removes exactly its own entry.
         let ctx3 = ctx_at(&rearmed.call, &event, &config);
         let cancelled =
-            exec.execute(&[RuleAction::cancel_timer(&fast, None)], &rearmed.call, &ctx3);
-        let ids: Vec<&str> = cancelled.call.timers.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["Service:svc-a:slow"], "cancel hits only its own key");
+            exec.execute(&[RuleAction::cancel(TimerKey::call(fast))], &rearmed.call, &ctx3);
+        let ids: Vec<String> =
+            cancelled.call.timers.iter().map(|t| format!("{:?}", t.key)).collect();
+        assert_eq!(ids, vec!["Service:svc-a:slow on call"], "cancel hits only its own key");
     }
 
     /// Matcher scoping: a core timer rule never sees a service fire; a
@@ -4403,21 +4380,21 @@ mod service_timers {
 
         let mine = TimerType::service(SVC, "fast");
         let service_fire = CallEvent::Timer {
-            timer_type: mine.clone(),
+            key: TimerKey::call(mine.clone()),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         };
         let core_fire = CallEvent::Timer {
-            timer_type: TimerType::GlobalDuration,
+            key: TimerKey::call(TimerType::GlobalDuration),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         };
         let foreign_fire = CallEvent::Timer {
-            timer_type: TimerType::service(MachineId::new("svc-b"), "fast"),
+            key: TimerKey::call(TimerType::service(MachineId::new("svc-b"), "fast")),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         };
 
@@ -4440,9 +4417,9 @@ mod service_timers {
         }
         // Exact-key is exact: same service, different key → no match.
         let other_key_fire = CallEvent::Timer {
-            timer_type: TimerType::service(SVC, "slow"),
+            key: TimerKey::call(TimerType::service(SVC, "slow")),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         };
         let ctx = ctx_at(&call, &other_key_fire, &config);
@@ -4452,9 +4429,9 @@ mod service_timers {
 
     fn info_like_event(call: &call::Call) -> CallEvent {
         CallEvent::Timer {
-            timer_type: TimerType::service(SVC, "fast"),
+            key: TimerKey::call(TimerType::service(SVC, "fast")),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         }
     }
@@ -4507,7 +4484,6 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         "b-1",
         &a_invite,
         ("10.0.0.2".to_string(), 5070),
-        None,
         None,
         None,
         None,
@@ -4589,9 +4565,9 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
     let interval_ms = config.keepalive_interval_sec * 1000;
     let call = test_call();
     let event = CallEvent::Timer {
-        timer_type: TimerType::Keepalive,
+        key: TimerKey::call(TimerType::Keepalive),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
@@ -4599,11 +4575,8 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
     let ranked = pick_ranked(&rules, &call, &ctx);
     let keepalive = ranked.iter().find(|r| r.id == "keepalive").expect("keepalive is a candidate");
     let mut actions = (keepalive.handle)(&ctx).expect("keepalive handles its own timer").actions;
-    actions.push(RuleAction::ScheduleTimer {
-        timer_type: TimerType::GlobalDuration,
-        delay: TimerDelay::secs(3600),
-        leg_id: None,
-    });
+    actions
+        .push(RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(3600)));
 
     let id_gen = IdGen::seeded(0x65);
     let exec = ActionExecutor {
@@ -4618,7 +4591,7 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .call
         .timers
         .iter()
-        .find(|t| t.timer_type == TimerType::Keepalive)
+        .find(|t| *t.timer_type() == TimerType::Keepalive)
         .expect("the rule re-arms the probe");
     assert_eq!(
         armed.fire_at,
@@ -4629,7 +4602,7 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .call
         .timers
         .iter()
-        .find(|t| t.timer_type == TimerType::GlobalDuration)
+        .find(|t| *t.timer_type() == TimerType::GlobalDuration)
         .expect("the policy timer is armed");
     assert_eq!(
         duration.fire_at,
@@ -4641,7 +4614,7 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .critical
         .iter()
         .find_map(|e| match e {
-            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::Keepalive => {
+            CriticalStateEffect::ScheduleTimer(t) if *t.timer_type() == TimerType::Keepalive => {
                 Some(t)
             }
             _ => None,
@@ -4664,9 +4637,9 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
     let config = B2buaConfig::default();
     let call = test_call();
     let event = CallEvent::Timer {
-        timer_type: TimerType::Keepalive,
+        key: TimerKey::call(TimerType::Keepalive),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
@@ -4678,11 +4651,10 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     exec.execute(
-        &[RuleAction::ScheduleTimer {
-            timer_type: TimerType::Keepalive,
-            delay: TimerDelay::secs(config.keepalive_interval_sec * 2),
-            leg_id: None,
-        }],
+        &[RuleAction::arm(
+            TimerKey::call(TimerType::Keepalive),
+            TimerDelay::secs(config.keepalive_interval_sec * 2),
+        )],
         &call,
         &ctx,
     );
@@ -4699,9 +4671,9 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
     let config = B2buaConfig::default();
     let call = test_call();
     let event = CallEvent::Timer {
-        timer_type: TimerType::Keepalive,
+        key: TimerKey::call(TimerType::Keepalive),
+        generation: 0,
         call_ref: call.call_ref.clone(),
-        leg_id: None,
         incarnation: None,
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
@@ -4713,11 +4685,10 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let result = exec.execute(
-        &[RuleAction::ScheduleTimer {
-            timer_type: TimerType::Keepalive,
-            delay: TimerDelay::secs(config.keepalive_interval_sec * 2),
-            leg_id: None,
-        }],
+        &[RuleAction::arm(
+            TimerKey::call(TimerType::Keepalive),
+            TimerDelay::secs(config.keepalive_interval_sec * 2),
+        )],
         &call,
         &ctx,
     );
@@ -4725,7 +4696,7 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         .call
         .timers
         .iter()
-        .find(|t| t.timer_type == TimerType::Keepalive)
+        .find(|t| *t.timer_type() == TimerType::Keepalive)
         .expect("the probe is armed");
     assert_eq!(
         armed.fire_at,
@@ -4760,16 +4731,11 @@ fn call_with_retained_answered_2xx() -> call::Call {
     call.a_leg.dialogs.insert(answered);
     call.a_leg.own_tag = Some("btag".into());
     let obligation = answered_obligation();
-    for (timer_type, fire_at) in [
-        (TimerType::Rung { obligation: obligation.clone() }, 500),
-        (TimerType::RepeatGiveUp { obligation }, 32_000),
+    for (key, fire_at) in [
+        (TimerKey::obligation(TimerType::Rung, obligation.clone()), 500),
+        (TimerKey::obligation(TimerType::RepeatGiveUp, obligation), 32_000),
     ] {
-        call.timers.push(call::TimerEntry {
-            id: timer_type.timer_id(None),
-            timer_type,
-            fire_at,
-            leg_id: None,
-        });
+        call::helpers::arm_timer(&mut call, key, fire_at);
     }
     call
 }
@@ -4820,25 +4786,22 @@ fn caller_ack_discharges_the_retained_answered_2xx() {
         "the retained datagram is discharged from the replicated body",
     );
     assert!(
-        after.timers.iter().all(|t| !matches!(
-            t.timer_type,
-            TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. }
-        )),
+        after.timers.iter().all(|t| t.key.obligation_of().is_none()),
         "both ladder timers leave the ledger, got {:?}",
         after.timers,
     );
-    let cancelled: Vec<&str> = fx
+    let cancelled: Vec<String> = fx
         .critical
         .iter()
         .filter_map(|e| match e {
-            CriticalStateEffect::CancelTimer { id } => Some(id.as_str()),
+            CriticalStateEffect::CancelTimer { key } => Some(format!("{key:?}")),
             _ => None,
         })
         .collect();
     assert_eq!(
         cancelled,
-        vec!["Rung:AckOf2xx:a:btag:1", "RepeatGiveUp:AckOf2xx:a:btag:1"],
-        "both ladder timers leave the driver under the one id recipe",
+        vec!["Rung on AckOf2xx:a:btag:1", "RepeatGiveUp on AckOf2xx:a:btag:1"],
+        "both ladder timers leave the driver under their keys",
     );
 }
 
@@ -4934,25 +4897,27 @@ mod ladder_give_up {
 
     fn give_up_of(call: &call::Call, obligation: &Obligation) -> CallEvent {
         CallEvent::Timer {
-            timer_type: TimerType::RepeatGiveUp { obligation: obligation.clone() },
+            key: TimerKey::obligation(TimerType::RepeatGiveUp, obligation.clone()),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         }
     }
 
     fn is_2xx_give_up(ctx: &RuleContext) -> bool {
-        matches!(
-            ctx.timer_type(),
-            Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } })
-        )
+        ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
+            && matches!(
+                ctx.timer_key().and_then(TimerKey::obligation_of),
+                Some(Obligation::AckOf2xx { .. })
+            )
     }
 
     fn is_prack_give_up(ctx: &RuleContext) -> bool {
-        matches!(
-            ctx.timer_type(),
-            Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } })
-        )
+        ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
+            && matches!(
+                ctx.timer_key().and_then(TimerKey::obligation_of),
+                Some(Obligation::PrackOf { .. })
+            )
     }
 
     /// A service rule that answers the give-up and deliberately declines to
@@ -5235,9 +5200,9 @@ mod going_away_gate {
 
     fn deadline_fire(call: &call::Call) -> CallEvent {
         CallEvent::Timer {
-            timer_type: DEADLINE,
+            key: TimerKey::call(DEADLINE),
+            generation: 0,
             call_ref: call.call_ref.clone(),
-            leg_id: None,
             incarnation: None,
         }
     }
@@ -5337,19 +5302,16 @@ mod going_away_gate {
 
     #[test]
     fn begin_termination_disarms_service_watchdogs_and_deactivates_machines() {
-        // Entering `terminating` takes every service watchdog out of the
-        // ledger and the driver — beside the per-leg NoAnswer entries — and
-        // removes every service machine's cursor; the call-level deadline and
-        // the lifecycle projection stay.
+        // Entering `terminating` retires the call's scope: every service
+        // watchdog, every per-leg NoAnswer entry and the call-level cap leave
+        // the ledger and the driver, and every service machine's cursor goes;
+        // the teardown's own safety net and the lifecycle projection stay.
         let mut call = armed_call(CallModelState::Active);
-        let no_answer_id = TimerType::NoAnswer.timer_id(Some("b-1"));
-        let deadline_id = DEADLINE.timer_id(None);
-        for (id, timer_type, leg_id) in [
-            (no_answer_id.clone(), TimerType::NoAnswer, Some("b-1".to_string())),
-            (deadline_id.clone(), DEADLINE, None),
-            (TimerType::GlobalDuration.timer_id(None), TimerType::GlobalDuration, None),
-        ] {
-            call.timers.push(call::TimerEntry { id, timer_type, fire_at: 5_000, leg_id });
+        let no_answer = TimerKey::leg(TimerType::NoAnswer, "b-1");
+        let deadline = TimerKey::call(DEADLINE);
+        let duration = TimerKey::call(TimerType::GlobalDuration);
+        for key in [no_answer.clone(), deadline.clone(), duration.clone()] {
+            call::helpers::arm_timer(&mut call, key, 5_000);
         }
         call.sm_cursors
             .insert(b2bua::rules::invariants::GLOBAL_CALL_MACHINE, StateLabel::new("Active"));
@@ -5379,18 +5341,19 @@ mod going_away_gate {
             &call,
             &ctx,
         );
-        let ledger: Vec<&str> = result.call.timers.iter().map(|t| t.id.as_str()).collect();
+        let ledger: Vec<&TimerType> = result.call.timers.iter().map(|t| t.timer_type()).collect();
         assert_eq!(
             ledger,
-            vec!["GlobalDuration", "TerminatingTimeout"],
-            "NoAnswer and the service watchdog left the ledger; the call-level cap stays",
+            vec![&TimerType::TerminatingTimeout],
+            "the call's timers left the ledger; the teardown's safety net is armed",
         );
-        for id in [&no_answer_id, &deadline_id] {
+        for key in [&no_answer, &deadline, &duration] {
             assert!(
-                result.effects.critical.iter().any(
-                    |e| matches!(e, CriticalStateEffect::CancelTimer { id: cancelled } if cancelled == id)
-                ),
-                "the live fiber {id} is cancelled, got {:?}",
+                result.effects.critical.iter().any(|e| matches!(
+                    e,
+                    CriticalStateEffect::CancelTimer { key: cancelled } if cancelled == key
+                )),
+                "the live fiber {key:?} is cancelled, got {:?}",
                 result.effects.critical,
             );
         }
@@ -5582,7 +5545,7 @@ static WATCH_EFFECTS: [Effect; 1] = [Effect::GuardTimer { timer: WATCH, label: "
 /// cursor S0 → S1 and writes its slice.
 fn observe_bye_arming(_ctx: &RuleContext) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::observe(vec![
-        RuleAction::ScheduleTimer { timer_type: WATCH, delay: TimerDelay::secs(5), leg_id: None },
+        RuleAction::arm(TimerKey::call(WATCH), TimerDelay::secs(5)),
         RuleAction::SetState { machine: MachineId::new(TEST_MACHINE), to: StateLabel::new("S1") },
         ext_write("seen", serde_json::json!({"bye": true})),
     ]))
@@ -5590,20 +5553,18 @@ fn observe_bye_arming(_ctx: &RuleContext) -> Option<RuleHandleResult> {
 
 /// Observes the BYE and arms a core timer, which is no machine's own.
 fn observe_bye_arming_a_core_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::ScheduleTimer {
-        timer_type: TimerType::NoAnswer,
-        delay: TimerDelay::secs(5),
-        leg_id: None,
-    }]))
+    Some(RuleHandleResult::observe(vec![RuleAction::arm(
+        TimerKey::call(TimerType::NoAnswer),
+        TimerDelay::secs(5),
+    )]))
 }
 
 /// Observes the BYE and arms another machine's guard timer.
 fn observe_bye_arming_a_foreign_timer(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-    Some(RuleHandleResult::observe(vec![RuleAction::ScheduleTimer {
-        timer_type: TimerType::service(MachineId::new("other-machine"), "watch"),
-        delay: TimerDelay::secs(5),
-        leg_id: None,
-    }]))
+    Some(RuleHandleResult::observe(vec![RuleAction::arm(
+        TimerKey::call(TimerType::service(MachineId::new("other-machine"), "watch")),
+        TimerDelay::secs(5),
+    )]))
 }
 
 /// Observes the BYE and moves its cursor along an edge it did not declare.
@@ -5649,12 +5610,9 @@ fn confirmed_call_in_s0() -> call::Call {
 }
 
 fn watch_scheduled_at(result: &HandlerResult) -> Option<usize> {
-    let id = WATCH.timer_id(None);
-    result
-        .effects
-        .critical
-        .iter()
-        .position(|e| matches!(e, CriticalStateEffect::ScheduleTimer(t) if t.id == id))
+    result.effects.critical.iter().position(
+        |e| matches!(e, CriticalStateEffect::ScheduleTimer(t) if *t.timer_type() == WATCH),
+    )
 }
 
 /// An observer arms its own guard timer and moves its own cursor on an event
@@ -5665,7 +5623,7 @@ fn an_observer_keeps_its_own_machine_in_step_with_an_event_it_does_not_claim() {
     let result = run_bye(&rules, &confirmed_call_in_s0());
     assert_eq!(finals_to_a(&result), vec![200], "the claimer answered the BYE");
     assert!(
-        result.call.timers.iter().any(|t| t.id == WATCH.timer_id(None)),
+        result.call.timers.iter().any(|t| *t.timer_type() == WATCH),
         "the observer's timer is on the ledger: {:?}",
         result.call.timers,
     );
@@ -5686,16 +5644,17 @@ fn an_observers_timer_is_cancelled_by_the_claimers_teardown() {
     rules.extend(default_rules());
     let result = run_bye(&rules, &confirmed_call_in_s0());
     assert_eq!(finals_to_a(&result), vec![200], "relay-bye answered the BYE");
-    let id = WATCH.timer_id(None);
     let armed = watch_scheduled_at(&result).expect("the observer armed its timer");
     let cancelled = result
         .effects
         .critical
         .iter()
-        .position(|e| matches!(e, CriticalStateEffect::CancelTimer { id: c } if *c == id))
+        .position(
+            |e| matches!(e, CriticalStateEffect::CancelTimer { key } if key.timer_type == WATCH),
+        )
         .expect("the teardown cancelled it");
     assert!(armed < cancelled, "arming precedes the teardown's cancel");
-    assert!(result.call.timers.iter().all(|t| t.id != id), "nothing left armed");
+    assert!(result.call.timers.iter().all(|t| *t.timer_type() != WATCH), "nothing left armed");
 }
 
 /// An event no rule claims keeps the observer's bookkeeping.
@@ -5742,7 +5701,7 @@ fn an_observers_undeclared_move_is_an_authoring_bug() {
 mod limiter_refresh_armed {
     use super::*;
     use b2bua::effects::{CriticalStateEffect, HandlerResult};
-    use call::{CallLimiterState, TimerEntry, TimerType};
+    use call::{CallLimiterState, TimerEntry, TimerKey, TimerType};
 
     /// The turn's refresh arming under a `period_ms` refresh period.
     fn arm(result: HandlerResult, now_ms: i64, period_ms: u64) -> HandlerResult {
@@ -5754,12 +5713,7 @@ mod limiter_refresh_armed {
     }
 
     fn refresh_timer(fire_at: i64) -> TimerEntry {
-        TimerEntry {
-            id: format!("{:?}", TimerType::LimiterRefresh),
-            timer_type: TimerType::LimiterRefresh,
-            fire_at,
-            leg_id: None,
-        }
+        TimerEntry { key: TimerKey::call(TimerType::LimiterRefresh), generation: 1, fire_at }
     }
 
     fn scheduled(result: &HandlerResult) -> Vec<i64> {
@@ -5769,7 +5723,7 @@ mod limiter_refresh_armed {
             .iter()
             .filter_map(|e| match e {
                 CriticalStateEffect::ScheduleTimer(t)
-                    if t.timer_type == TimerType::LimiterRefresh =>
+                    if *t.timer_type() == TimerType::LimiterRefresh =>
                 {
                     Some(t.fire_at)
                 }
@@ -5791,20 +5745,22 @@ mod limiter_refresh_armed {
 
     #[test]
     fn a_dropped_fire_is_re_armed_on_the_next_turn() {
-        // The ledger still carries the fired entry (past due) and the driver
-        // has nothing: the turn re-arms one refresh ahead, on the record too.
+        // The ledger still carries an entry past due — a fire the per-call
+        // queue dropped, or a copy's restored one its first turn supersedes:
+        // the turn re-arms it due now, on the record too, so the refresh it
+        // owes runs at once.
         let mut call = counted_active();
         call.timers = vec![refresh_timer(9_000)];
         let result = arm(HandlerResult::new(call), 10_000, 40_000);
-        assert_eq!(scheduled(&result), vec![50_000]);
+        assert_eq!(scheduled(&result), vec![10_000]);
         let armed: Vec<i64> = result
             .call
             .timers
             .iter()
-            .filter(|t| t.timer_type == TimerType::LimiterRefresh)
+            .filter(|t| *t.timer_type() == TimerType::LimiterRefresh)
             .map(|t| t.fire_at)
             .collect();
-        assert_eq!(armed, vec![50_000], "one entry, replaced");
+        assert_eq!(armed, vec![10_000], "one entry, replaced");
 
         // No entry at all: armed as well.
         let result = arm(HandlerResult::new(counted_active()), 10_000, 40_000);
@@ -5931,7 +5887,8 @@ fn an_overflow_verdict_on_a_terminating_call_changes_nothing() {
     assert!(
         !result.effects.critical.iter().any(|e| matches!(
             e,
-            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::TerminatingTimeout
+            CriticalStateEffect::ScheduleTimer(t)
+                if *t.timer_type() == TimerType::TerminatingTimeout
         )),
         "the terminating timer is not re-armed"
     );

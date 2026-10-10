@@ -6,7 +6,7 @@ use call::TransferPhase;
 use sip_message::header::{HeaderValue, ReferTo};
 use sip_message::{Method, SipStr};
 
-use super::{state, timer_id, Phase, TRANSFER_MACHINE};
+use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::defaults::parse_header_updates;
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
@@ -16,6 +16,7 @@ use crate::rules::{relay, Terminal};
 use b2bua_sdk::model::{
     Body, Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
 };
+use call::TimerKey;
 
 /// Reduce a Refer-To to the bare `sip:user@host:port;params` URI a
 /// Request-URI may carry: the display name and the `?headers` list drop
@@ -48,8 +49,8 @@ fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleH
         &format!("Unreadable Transfer Target ({field})"),
     ));
     actions.extend([
-        RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
-        RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+        RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+        RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
         RuleAction::SetTransfer { state: None },
     ]);
     Some(RuleHandleResult::new(actions).with_diagnostic(RuleDiagnostic::unreadable(field, reason)))
@@ -101,8 +102,8 @@ pub(super) fn http_reject() -> RuleDefinition {
             let mut actions = Vec::new();
             actions.extend(notify(st, SUB_STATE_TERMINATED_NORESOURCE, code, &reason));
             actions.extend([
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferSubscriptionExpiry)),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::SetTransfer { state: None },
             ]);
             ok(actions)
@@ -152,7 +153,10 @@ pub(super) fn http_allow() -> RuleDefinition {
                     )
                 }
             };
-            let no_answer = payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
+            let no_answer = crate::decision::no_answer_deadline(
+                payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
+                None,
+            );
             let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
             let new_refer_to = payload.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
             let header_updates = parse_header_updates(payload);
@@ -195,7 +199,7 @@ pub(super) fn http_allow() -> RuleDefinition {
                     new_ruri: Some(effective),
                     new_from: None,
                     new_to: None,
-                    no_answer_timeout_sec: no_answer,
+                    no_answer,
                     callback_context,
                     body_override,
                     header_updates,
@@ -226,7 +230,7 @@ pub(super) fn http_timeout() -> RuleDefinition {
             let mut actions = Vec::new();
             actions.extend(notify(st, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"));
             actions.extend([
-                RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::SetTransfer { state: None },
             ]);
             ok(actions)

@@ -21,17 +21,6 @@ mod c_ringing;
 mod guards;
 mod realign;
 
-// ── Timer-id minting (must match `ActionExecutor::schedule`) ─────────────────
-// `schedule` builds `format!("{:?}", t)` (no leg) / `format!("{:?}:{}", t, leg)`.
-// Mint cancel ids from the same recipe so they can never drift (CLAUDE.md timer-
-// aliasing hazard).
-fn timer_id(t: call::TimerType, leg: Option<&str>) -> String {
-    match leg {
-        Some(l) => format!("{t:?}:{l}"),
-        None => format!("{t:?}"),
-    }
-}
-
 fn state<'a>(ctx: &'a RuleContext<'a>) -> Option<&'a TransferState> {
     ctx.call.transfer_state()
 }

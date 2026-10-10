@@ -90,7 +90,7 @@ mod binprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use std::sync::Mutex;
 
     use super::{req_a, req_b, CORR_A, CORR_B, ENDPOINT};
@@ -108,11 +108,10 @@ mod binprobe {
         // seam the ringwatch/dualkeys service-timer tests use).
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(BpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(BINPROBE, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(BINPROBE, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), result() ],
@@ -208,7 +207,7 @@ mod errprobe {
         TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use std::sync::Mutex;
 
     use super::ENDPOINT;
@@ -225,11 +224,10 @@ mod errprobe {
         states: EpState { Working, Awaiting },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(EpState::Working.label()).with_actions(vec![
-                RuleAction::ScheduleTimer {
-                    timer_type: TimerType::service(ERRPROBE, "kick"),
-                    delay: TimerDelay::secs(1),
-                    leg_id: None,
-                },
+                RuleAction::arm(
+                    TimerKey::call(TimerType::service(ERRPROBE, "kick")),
+                    TimerDelay::secs(1),
+                ),
             ]))
         },
         rules: [ kick(), result() ],

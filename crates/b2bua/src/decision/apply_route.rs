@@ -3,22 +3,23 @@
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
 use call::helpers::{add_originated_b_leg, mark_decision};
-use call::{Call, DecisionKind, TerminationCause, TimerEntry, TimerType};
+use call::{Call, Deadline, DecisionKind, TerminationCause, TimerKey, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::{
-    header_lines, CallDecisionEngine, CallDecisionError, CallFailureRequest, CallTreatment,
-    FailureInfo,
+    header_lines, no_answer_deadline, CallDecisionEngine, CallDecisionError, CallFailureRequest,
+    CallTreatment, FailureInfo,
 };
 use crate::destination_allowlist::{classify_admission, AdmissionVerdict};
-use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
+use crate::effects::{HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterWorker};
 use crate::metrics::AdmitSite;
 use crate::rules::capabilities;
 use crate::rules::relay;
+use crate::timer_arm::arm;
 
 use super::schemas::{BodyUpdate, RouteDecision};
 
@@ -180,10 +181,8 @@ pub async fn apply_route(
     // A route-supplied ring deadline above `bound − margin` is held under the
     // configured transaction bound so the CANCEL→487 exchange still completes
     // inside the live b-leg client transaction (`relay::clamp_no_answer`).
-    let no_answer = route
-        .no_answer_timeout_sec
-        .or(route.features.no_answer_timeout_sec)
-        .map(|secs| relay::clamp_no_answer(config, &call.call_ref, secs));
+    let ring = no_answer_deadline(route.no_answer_timeout_sec, Some(&route.features));
+    let no_answer = relay::clamp_no_answer(config, &call.call_ref, ring);
     // The decision's header statements (sets of one or more lines, removals).
     // Structural From/To/R-URI go through the typed fields below, never this
     // map (ADR-0017 X2).
@@ -218,7 +217,6 @@ pub async fn apply_route(
         route.new_ruri.as_deref(),
         route.new_from.as_deref(),
         route.new_to.as_deref(),
-        no_answer,
         config,
         id_gen,
         attached.as_ref(),
@@ -296,16 +294,9 @@ pub async fn apply_route(
     call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
 
-    // No-answer ring timer (cancelled by confirm-dialog).
-    if let Some(secs) = no_answer {
-        let entry = TimerEntry {
-            id: format!("NoAnswer:{leg_id}"),
-            timer_type: TimerType::NoAnswer,
-            fire_at: now_ms + secs * 1000,
-            leg_id: Some(leg_id.to_string()),
-        };
-        call.timers.push(entry.clone());
-        fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+    // The leg's ring deadline, retired with the leg.
+    if let Some(ms) = no_answer.millis() {
+        arm(&mut call, &mut fx, TimerKey::leg(TimerType::NoAnswer, leg_id), now_ms + ms);
     }
 
     // Global-duration backstop, armed at *call creation* (not just at answer).
@@ -323,10 +314,10 @@ pub async fn apply_route(
     //
     // Arming GlobalDuration here gives every call the absolute duration cap as a
     // backstop. `confirm-dialog` (and the promote/18x confirm paths) re-arm the
-    // same `GlobalDuration` id at answer with the same `max_duration_sec`, so an
-    // answered call is unaffected (the re-arm supersedes via the driver's epoch
-    // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
-    // reaped at the cap by the existing `max-duration` rule.
+    // same `GlobalDuration` key at answer with the same `max_duration_sec`, so
+    // an answered call is unaffected (the re-arm replaces the instance); a
+    // stuck-in-setup call is now reaped at the cap by the existing
+    // `max-duration` rule.
     //
     // Under the `Answer` anchor (`MaxDurationAnchor`) the cap bounds the
     // established call only, so it is armed at the answer alone whenever the
@@ -579,55 +570,37 @@ fn record_failure_round_trip(
     );
 }
 
-/// Arm the GlobalDuration absolute-cap backstop on the call (idempotent by id).
-/// Factored out so the deferred-routing path arms it too.
+/// Arm the GlobalDuration absolute-cap backstop on the call, replacing the
+/// instance it held. Factored out so the deferred-routing path arms it too.
 fn arm_global_duration(
     call: &mut Call,
     fx: &mut HandlerEffects,
     max_duration_sec: i64,
     now_ms: i64,
 ) {
-    let global = TimerEntry {
-        id: format!("{:?}", TimerType::GlobalDuration),
-        timer_type: TimerType::GlobalDuration,
-        fire_at: now_ms + max_duration_sec * 1000,
-        leg_id: None,
-    };
-    call.timers =
-        call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
-    fx.critical.push(CriticalStateEffect::ScheduleTimer(global));
+    let fire_at = now_ms + max_duration_sec * 1000;
+    arm(call, fx, TimerKey::call(TimerType::GlobalDuration), fire_at);
 }
 
-/// Arm the call-level a-leg setup deadline (`SetupTimeout`) — armed once at
-/// route time, **arm-if-absent** so a reroute (the limiter-failover recursion
-/// re-enters `apply_route`) never extends the caller's total wait. Cancelled
-/// at answer (`confirm-dialog` and the promote/18x confirm paths); fired by
-/// the CORE `setup-timeout` rule (408 to A, CANCEL pending b-legs). Lives in
-/// `call.timers`, so a reclaimed mid-setup call still carries its deadline —
-/// the configured sip-txn initial-INVITE bound dies with a crashed node and
-/// would leave such calls holding their limiter slots for the full
-/// GlobalDuration. `setup_timeout_sec <= 0` disables.
+/// Arm the call-level a-leg setup deadline (`SetupTimeout`), once: the
+/// initial route's turn is the one turn that runs this, whichever route of
+/// its limiter-failover chain lands, so no later attempt extends the caller's
+/// total wait. Cancelled at answer (`confirm-dialog` and the promote/18x
+/// confirm paths); fired by the CORE `setup-timeout` rule (408 to A, CANCEL
+/// pending b-legs). Lives in `call.timers`, so a reclaimed mid-setup call
+/// still carries its deadline — the configured sip-txn initial-INVITE bound
+/// dies with a crashed node and would leave such calls holding their limiter
+/// slots for the full GlobalDuration. A non-positive `setup_timeout_sec` is
+/// off.
 fn arm_setup_timeout(
     call: &mut Call,
     fx: &mut HandlerEffects,
     setup_timeout_sec: i64,
     now_ms: i64,
 ) {
-    if setup_timeout_sec <= 0 {
-        return;
+    if let Some(ms) = Deadline::of_secs(Some(setup_timeout_sec)).millis() {
+        arm(call, fx, TimerKey::call(TimerType::SetupTimeout), now_ms + ms);
     }
-    let id = format!("{:?}", TimerType::SetupTimeout);
-    if call.timers.iter().any(|t| t.id == id) {
-        return;
-    }
-    let entry = TimerEntry {
-        id,
-        timer_type: TimerType::SetupTimeout,
-        fire_at: now_ms + setup_timeout_sec * 1000,
-        leg_id: None,
-    };
-    call.timers.push(entry.clone());
-    fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
 }
 
 /// Whether any service-ext slice asks the framework to defer normal destination

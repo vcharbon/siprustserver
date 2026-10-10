@@ -9,7 +9,9 @@
 //! the typed `Call.promote_pem` slice.
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::{CdrEventType, Direction, LegState, PromotePemState, TerminationCause, TimerType};
+use call::{
+    CdrEventType, Direction, LegState, PromotePemState, TerminationCause, TimerKey, TimerType,
+};
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
@@ -231,19 +233,16 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         });
                     }
                 }
-                actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{b}") });
-                actions
-                    .push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) });
-                actions.push(RuleAction::ScheduleTimer {
-                    timer_type: TimerType::GlobalDuration,
-                    delay: TimerDelay::secs(max_duration(ctx)),
-                    leg_id: None,
-                });
-                actions.push(RuleAction::ScheduleTimer {
-                    timer_type: TimerType::Keepalive,
-                    delay: TimerDelay::secs(keepalive_interval(ctx)),
-                    leg_id: None,
-                });
+                actions.push(RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)));
+                actions.push(RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)));
+                actions.push(RuleAction::arm(
+                    TimerKey::call(TimerType::GlobalDuration),
+                    TimerDelay::secs(max_duration(ctx)),
+                ));
+                actions.push(RuleAction::arm(
+                    TimerKey::call(TimerType::Keepalive),
+                    TimerDelay::secs(keepalive_interval(ctx)),
+                ));
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Answer,
                     leg_id: b.clone(),

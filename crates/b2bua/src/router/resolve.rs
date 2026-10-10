@@ -188,8 +188,8 @@ fn resolve_call(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
                 indexed: None,
             }
         }
-        CallEvent::Timer { call_ref, leg_id, .. } => {
-            let leg = leg_id.clone().unwrap_or_else(|| "a".into());
+        CallEvent::Timer { call_ref, key, .. } => {
+            let leg = key.leg_id().unwrap_or("a").to_string();
             Resolution {
                 direction: leg_direction(&leg),
                 call_ref: Some(call_ref.clone()),

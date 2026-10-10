@@ -7,20 +7,21 @@
 //! as a re-entrant event and is applied on the call's own turn (ADR-0040).
 //! `LimiterObligations` is the release a call owes at termination.
 
-use call::{Call, CallModelState, RefreshApplied, TimerEntry, TimerType};
+use call::{Call, CallModelState, RefreshApplied, TimerKey, TimerType};
 
-use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult, SoftBoundedEffect};
+use crate::effects::{HandlerEffects, HandlerResult, SoftBoundedEffect};
 use crate::limiter::refresh_batch::RefreshAnswered;
 use crate::limiter::LimiterWorker;
 use crate::metrics::{B2buaMetrics, RefreshDiscard};
 use crate::obligations::{Obligation, ObligationKind};
 
 /// A counted Active call carries a live `LimiterRefresh` timer due within one
-/// refresh `period` of the learnt lease. A missing or past-due entry (the
-/// turn's own admit, the refresh turn whose entry just fired, a fire the
-/// per-call queue dropped, a copy materialised with a stale ledger) and one
-/// due later than `now_ms + period` (armed under a longer period) are
-/// re-armed at `now_ms + period`, on the record and as a `ScheduleTimer`.
+/// refresh `period` of the learnt lease. A missing entry (the turn's own
+/// admit, the refresh turn whose entry fired) and one due later than
+/// `now_ms + period` (armed under a longer period) are re-armed at
+/// `now_ms + period`; a past-due one (a copy materialised with a stale
+/// ledger, a fire the per-call queue dropped) is re-armed due now, so the
+/// refresh it owes runs at once. Each on the record and as a `ScheduleTimer`.
 pub fn arm_refresh(
     mut result: HandlerResult,
     now_ms: i64,
@@ -31,21 +32,13 @@ pub fn arm_refresh(
         return result;
     }
     let due_by = now_ms + period.as_millis() as i64;
-    let live = call.timers.iter().any(|t| {
-        t.timer_type == TimerType::LimiterRefresh && t.fire_at > now_ms && t.fire_at <= due_by
-    });
-    if live {
-        return result;
-    }
-    let entry = TimerEntry {
-        id: format!("{:?}", TimerType::LimiterRefresh),
-        timer_type: TimerType::LimiterRefresh,
-        fire_at: due_by,
-        leg_id: None,
+    let refresh = TimerKey::call(TimerType::LimiterRefresh);
+    let fire_at = match call.timers.iter().find(|t| t.key == refresh).map(|t| t.fire_at) {
+        Some(at) if at > now_ms && at <= due_by => return result,
+        Some(at) if at <= now_ms => now_ms,
+        _ => due_by,
     };
-    result.call.timers =
-        call::helpers::replace_timer_by_id(std::mem::take(&mut result.call.timers), entry.clone());
-    result.effects.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+    crate::timer_arm::arm(&mut result.call, &mut result.effects, refresh, fire_at);
     result
 }
 
@@ -233,20 +226,14 @@ mod tests {
         assert_eq!(ctx.dispatcher.queue_count(), 0, "no per-call queue left");
     }
 
-    /// The refresh turn as the router runs it: the fire, then the turn's
-    /// refresh arming.
+    /// The refresh turn as the router runs it: the fire, which the timer
+    /// screen took off the ledger, then the turn's refresh arming.
     #[tokio::test(start_paused = true)]
     async fn a_counted_call_marks_its_refresh_and_re_arms_without_waiting() {
         let n = node("w0").await;
         let ctx = n.core.router_ctx();
         let period = ctx.limiter.refresh_period();
-        let mut fired = counted_call();
-        fired.timers = vec![TimerEntry {
-            id: format!("{:?}", TimerType::LimiterRefresh),
-            timer_type: TimerType::LimiterRefresh,
-            fire_at: 1_000,
-            leg_id: None,
-        }];
+        let fired = counted_call();
         let result = arm_refresh(on_refresh_due(&ctx.limiter, fired, "c", 1_000), 1_000, period);
         assert_eq!(ctx.limiter.refreshes_due(), 1, "marked due on the batch");
         let refresh = period.as_millis() as i64;
@@ -254,7 +241,7 @@ mod tests {
             .call
             .timers
             .iter()
-            .any(|t| t.timer_type == TimerType::LimiterRefresh && t.fire_at == 1_000 + refresh));
+            .any(|t| *t.timer_type() == TimerType::LimiterRefresh && t.fire_at == 1_000 + refresh));
         let mut uncounted = counted_call();
         uncounted.limiter = CallLimiterState::uncounted("c#k".into());
         on_refresh_due(&ctx.limiter, uncounted, "c", 1_000);

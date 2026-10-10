@@ -5,9 +5,45 @@
 
 use std::net::SocketAddr;
 
-use call::Call;
+use call::{Call, TimerType};
 
+use super::RouterCtx;
 use crate::config::B2buaConfig;
+use b2bua_sdk::event::CallEvent;
+
+/// Per-peer keepalive-timeout attribution (observability only;
+/// `b2bua_peer_failures_total{...,kind="keepalive_timeout"}`). The genuine
+/// no-200 keepalive timeout is the `KeepaliveTimeout` timer firing for a
+/// specific leg L (`leg_id`): the `keepalive-timeout` rule ends the call and
+/// BYEs BOTH legs. So we MUST NOT attribute to an outbound BYE's destination
+/// (the first is the a-leg's hop, often the healthy one, and mis-classifies
+/// internal/external). Attribute to the FAILED leg L's OWN egress-aware next
+/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog
+/// can't be resolved we record nothing (no fabricated address). Distinct from
+/// the reclaim-time stale drop (`restore_hygiene`), which never reaches this
+/// event path.
+pub(super) fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call) {
+    if let CallEvent::Timer { key, .. } = event {
+        if key.timer_type != TimerType::KeepaliveTimeout {
+            return;
+        }
+        if let Some((host, port)) = keepalive_timeout_peer(&ctx.config, call, key.leg_id()) {
+            use std::net::ToSocketAddrs;
+            if let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() {
+                if let Some(dest) = addrs.next() {
+                    ctx.metrics.record_peer_failure(
+                        &dest,
+                        classify_b2bua_peer(&ctx.config, &dest),
+                        crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
+                    );
+                    // Aggregated per hop: a dead peer is one episode, however
+                    // many calls it takes with it (ADR-0026).
+                    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
+                }
+            }
+        }
+    }
+}
 
 /// Resolve the egress-aware next hop of the leg a `KeepaliveTimeout` fired for —
 /// the hop the unanswered OPTIONS used — for the per-peer keepalive-timeout metric.
@@ -16,7 +52,7 @@ use crate::config::B2buaConfig;
 /// nothing) when the leg or its confirmed dialog can't be resolved — never a fabricated
 /// address. The returned `(host, port)` may be a hostname (the outbound proxy); the
 /// caller resolves it to a `SocketAddr` before recording.
-pub(super) fn keepalive_timeout_peer(
+fn keepalive_timeout_peer(
     config: &B2buaConfig,
     call: &Call,
     leg_id: Option<&str>,
@@ -166,7 +202,6 @@ mod tests {
             call_id: "cid@x".into(),
             source: call::RemoteInfo { address: "0.0.0.0".into(), port: 0 },
             dialogs: dialogs.into(),
-            no_answer_timeout_sec: None,
             local_uri: None,
             remote_uri: None,
             invite_request_uri: None,

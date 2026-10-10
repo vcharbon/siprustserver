@@ -22,7 +22,7 @@ mod release {
         ServiceSeed, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
-    use call::TimerType;
+    use call::{TimerKey, TimerType};
     use sip_message::Method;
 
     pub const AT_SEC: i64 = 10;
@@ -34,7 +34,7 @@ mod release {
         states: ReleaseState { Armed, Released },
         init: |_call: &RuleCall| {
             Some(ServiceSeed::new(ReleaseState::Armed.label()).with_actions(vec![
-                RuleAction::ScheduleTimer { timer_type: DEADLINE, delay: TimerDelay::secs(AT_SEC), leg_id: None },
+                RuleAction::arm(TimerKey::call(DEADLINE), TimerDelay::secs(AT_SEC)),
             ]))
         },
         rules: [ release_on_deadline() ],

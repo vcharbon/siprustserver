@@ -730,8 +730,7 @@ fn route_result_payload(
     admitted: AdmitReport,
     failed_leg_id: Option<String>,
 ) -> serde_json::Value {
-    let no_answer_timeout_sec =
-        route.no_answer_timeout_sec.or(route.features.no_answer_timeout_sec);
+    let no_answer_timeout_sec = route.no_answer().millis().map(|ms| ms / 1000);
     to_payload(RoutePayload {
         destination: RouteDestinationPayload {
             host: route.destination.host,

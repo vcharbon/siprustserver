@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use call::helpers::{RAckTokens, Scope};
 use call::{
-    Call, CallModelState, LegState, Obligation, Repeated, RetainedEmission, TimerType, Unacked2xx,
+    Call, CallModelState, LegState, Obligation, Repeated, RetainedEmission, TimerKey, TimerType,
+    Unacked2xx,
 };
 use sip_message::header::RAck;
 use sip_message::{Method, SipMessage, SipResponse};
@@ -95,16 +96,14 @@ impl ActionExecutor<'_> {
         self.schedule(
             call,
             fx,
-            TimerType::Rung { obligation: obligation.clone() },
+            TimerKey::obligation(TimerType::Rung, obligation.clone()),
             first.as_millis() as i64,
-            None,
         );
         self.schedule(
             call,
             fx,
-            TimerType::RepeatGiveUp { obligation },
+            TimerKey::obligation(TimerType::RepeatGiveUp, obligation),
             self.ack_give_up_deadline().as_millis() as i64,
-            None,
         );
     }
 
@@ -147,16 +146,14 @@ impl ActionExecutor<'_> {
         self.schedule(
             call,
             fx,
-            TimerType::Rung { obligation: obligation.clone() },
+            TimerKey::obligation(TimerType::Rung, obligation.clone()),
             first.as_millis() as i64,
-            None,
         );
         self.schedule(
             call,
             fx,
-            TimerType::RepeatGiveUp { obligation },
+            TimerKey::obligation(TimerType::RepeatGiveUp, obligation),
             Schedule::rfc(Class::ReliableProvisional).give_up_after().as_millis() as i64,
-            None,
         );
     }
 
@@ -175,7 +172,7 @@ impl ActionExecutor<'_> {
     /// a spent fire cancels a ledger entry, and the router reads that as the
     /// write it is.
     pub fn repeat(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
-        let rung = TimerType::Rung { obligation: obligation.clone() };
+        let rung = TimerKey::obligation(TimerType::Rung, obligation.clone());
         let effect = (call.state == CallModelState::Active)
             .then(|| repeat_toward(call, obligation))
             .flatten();
@@ -191,14 +188,14 @@ impl ActionExecutor<'_> {
         let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
         *call = updated;
         match next {
-            Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64, None),
+            Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
                 // here, but the give-up stands — the peer's silence is answered
                 // at the deadline instead of merely falling quiet. A 2xx stays
                 // retained until then: it is also the RFC 6026 *Accepted*
                 // marker `reinvite-glare` reads.
-                self.scrub_timer(call, fx, &rung);
+                self.disarm(call, fx, &rung);
                 if let Obligation::PrackOf { .. } = obligation {
                     *call = call::helpers::clear_retained(call.clone(), obligation);
                 }
@@ -298,7 +295,7 @@ impl ActionExecutor<'_> {
                 let obligation =
                     Obligation::PrackOf { a_tag: dialog_tag.to_string(), a_rseq: tokens.rseq };
                 let live = call::helpers::retained_for(call, &obligation).is_some()
-                    || call.timers.iter().any(|t| ladder_of(&t.timer_type) == Some(&obligation));
+                    || call.timers.iter().any(|t| t.key.obligation_of() == Some(&obligation));
                 if !live {
                     return None;
                 }
@@ -310,45 +307,16 @@ impl ActionExecutor<'_> {
         Some(obligation)
     }
 
-    // ── retiring ───────────────────────────────────────────────────────────
-
-    /// End every ladder in `scope`: its rung and give-up leave the ledger and
-    /// the live driver, and what it repeated stops riding the replicated body.
-    /// Keyed by the books, so a ladder that already ceased still loses the
-    /// give-up it left armed; at `Scope::Call` a ledger entry the books no
-    /// longer name goes too.
-    pub(super) fn retire(&self, call: &mut Call, fx: &mut HandlerEffects, scope: Scope<'_>) {
-        let mut obligations = call::helpers::obligations_in(call, &scope);
-        if scope == Scope::Call {
-            for o in call.timers.iter().filter_map(|t| ladder_of(&t.timer_type)) {
-                if !obligations.contains(o) {
-                    obligations.push(o.clone());
-                }
-            }
-        }
-        for obligation in obligations {
-            self.scrub_timers(call, fx, &obligation);
-            *call = call::helpers::clear_retained(call.clone(), &obligation);
-        }
-    }
-
     /// Remove BOTH of one obligation's timers — the rung and the give-up — so
     /// a retirement never leaves the bound running under a ladder that is
     /// gone.
-    fn scrub_timers(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
-        for timer_type in [
-            TimerType::Rung { obligation: obligation.clone() },
-            TimerType::RepeatGiveUp { obligation: obligation.clone() },
-        ] {
-            self.scrub_timer(call, fx, &timer_type);
-        }
-    }
-
-    /// Remove one ladder timer from the replicated ledger AND the live driver
-    /// (the one schedule/cancel id recipe, `TimerType::timer_id`).
-    fn scrub_timer(&self, call: &mut Call, fx: &mut HandlerEffects, timer_type: &TimerType) {
-        let id = timer_type.timer_id(None);
-        self.scrub_where(call, fx, |t| t.id == id);
+    pub(super) fn scrub_timers(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        obligation: &Obligation,
+    ) {
+        self.scrub_where(call, fx, |t| t.key.obligation_of() == Some(obligation));
     }
 
     /// The bound of a §13.3.1.4 ladder — no rung is scheduled at or past it:
@@ -402,14 +370,6 @@ fn repeat_toward(call: &Call, obligation: &Obligation) -> Option<OutboundSipEffe
         }
     };
     Some(repeat_of(emission, label, &leg))
-}
-
-/// The obligation a ladder timer carries — `None` for every other timer.
-fn ladder_of(timer_type: &TimerType) -> Option<&Obligation> {
-    match timer_type {
-        TimerType::Rung { obligation } | TimerType::RepeatGiveUp { obligation } => Some(obligation),
-        _ => None,
-    }
 }
 
 /// A 2xx retained on the `Final2xx` ladder with the key its ACK carries —

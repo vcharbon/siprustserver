@@ -403,7 +403,7 @@ async fn a_call_s_first_refresh_falls_due_one_learnt_period_after_its_admit() {
     let refresh = live
         .timers
         .iter()
-        .find(|t| t.timer_type == TimerType::LimiterRefresh)
+        .find(|t| *t.timer_type() == TimerType::LimiterRefresh)
         .expect("the counted call has its refresh armed");
     assert_eq!(
         refresh.fire_at - admitted_at,

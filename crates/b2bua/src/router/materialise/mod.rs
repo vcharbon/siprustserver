@@ -8,8 +8,8 @@
 //! call; a copy materialised from a replica arrives with no live timers here,
 //! and its serialised intents (`call.timers`, which IS replicated) re-arm into
 //! the local driver exactly once, on the materialisation that created the copy.
-//! Re-arming is idempotent: a later rule-emitted `ScheduleTimer` for the same
-//! id supersedes the restored entry through the driver's epoch bump.
+//! Each entry re-arms under its key and generation; a later rule-emitted
+//! `ScheduleTimer` for the same key supersedes the restored entry.
 //!
 //! The caller holds the per-call lock. In order:
 //! 1. residency — a call already live is handed back untouched

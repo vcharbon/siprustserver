@@ -7,10 +7,11 @@ use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, TransferPhase};
 use sip_message::Method;
 
-use super::{state, timer_id, Phase, TRANSFER_MACHINE};
+use super::{state, Phase, TRANSFER_MACHINE};
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
 use b2bua_sdk::model::{Body, Effect, Match, RuleAction, RuleDefinition, TimerDelay};
+use call::TimerKey;
 
 /// transfer-c-realign-200 — C answers the c-realign re-INVITE (200).
 /// Distinguished from `transfer-c-200-initial` by `legState: confirmed`
@@ -50,14 +51,11 @@ pub(super) fn c_realign_200() -> RuleDefinition {
 
             ok(vec![
                 RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: None },
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
-                },
-                RuleAction::ScheduleTimer {
-                    timer_type: call::TimerType::ReferReinviteAnswer,
-                    delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
-                    leg_id: Some("a".to_string()),
-                },
+                RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, &c_leg_id)),
+                RuleAction::arm(
+                    TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a"),
+                    TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
+                ),
                 RuleAction::SendReinvite {
                     leg_id: "a".to_string(),
                     body: Some(
@@ -83,7 +81,8 @@ pub(super) fn c_realign_fail() -> RuleDefinition {
         active: [ Phase::CRealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel re-INVITE watchdog + overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel the re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
             Effect::LifecycleCommand { label: "terminate (c-realign rollback — BYE A/B/C)" },
         ],
         matcher: Match::response()
@@ -100,13 +99,12 @@ pub(super) fn c_realign_fail() -> RuleDefinition {
             let resp = ctx.response()?;
             let mut actions = vec![];
             if let Some(c_leg_id) = st.c_leg_id.clone() {
-                actions.push(RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferReinviteAnswer, Some(&c_leg_id)),
-                });
+                actions.push(RuleAction::cancel(TimerKey::leg(
+                    call::TimerType::ReferReinviteAnswer,
+                    &c_leg_id,
+                )));
             }
-            actions.push(RuleAction::CancelTimer {
-                id: timer_id(call::TimerType::ReferOverallSafety, None),
-            });
+            actions.push(RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)));
             if let Some(c_leg_id) = st.c_leg_id.clone() {
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Reject,
@@ -143,9 +141,9 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
             .timer_type(call::TimerType::ReferReinviteAnswer),
         handle: |ctx| {
             let st = state(ctx)?.clone();
-            let mut actions = vec![RuleAction::CancelTimer {
-                id: timer_id(call::TimerType::ReferOverallSafety, None),
-            }];
+            let mut actions = vec![RuleAction::cancel(TimerKey::call(
+                call::TimerType::ReferOverallSafety,
+            ))];
             if let Some(c_leg_id) = st.c_leg_id.clone() {
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,
@@ -178,7 +176,8 @@ pub(super) fn a_realign_200() -> RuleDefinition {
         transitions: [ Phase::ARealigning => Terminal ],
         effects: [
             Effect::Originate { method: Method::Ack, label: "ACK → A (a-realign answered)" },
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog + overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
             Effect::LifecycleCommand { label: "merge A↔C (transfer complete)" },
         ],
         matcher: Match::response()
@@ -191,12 +190,8 @@ pub(super) fn a_realign_200() -> RuleDefinition {
             let c_leg_id = st.c_leg_id.clone()?;
             ok(vec![
                 RuleAction::AckLeg { leg_id: "a".to_string(), body: None },
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
-                },
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferOverallSafety, None),
-                },
+                RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a")),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::Merge {
                     leg_a: "a".to_string(),
                     leg_b: c_leg_id,
@@ -223,7 +218,8 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
         active: [ Phase::ARealigning ],
         transitions: [],
         effects: [
-            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog + overall" },
+            Effect::GuardTimer { timer: call::TimerType::ReferReinviteAnswer, label: "cancel A re-INVITE watchdog" },
+            Effect::GuardTimer { timer: call::TimerType::ReferOverallSafety, label: "cancel overall" },
             Effect::LifecycleCommand { label: "terminate (a-realign rollback — BYE A/B/C)" },
         ],
         matcher: Match::response()
@@ -236,12 +232,8 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
         handle: |ctx| {
             let resp = ctx.response()?;
             ok(vec![
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferReinviteAnswer, Some("a")),
-                },
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferOverallSafety, None),
-                },
+                RuleAction::cancel(TimerKey::leg(call::TimerType::ReferReinviteAnswer, "a")),
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Reject,
                     leg_id: "a".to_string(),
@@ -275,17 +267,12 @@ pub(super) fn a_realign_timeout() -> RuleDefinition {
         matcher: Match::timer()
             .timer_type(call::TimerType::ReferReinviteAnswer)
             .filter(|ctx| {
-                let timer_leg = match ctx.event {
-                    b2bua_sdk::event::CallEvent::Timer { leg_id, .. } => leg_id.as_deref(),
-                    _ => None,
-                };
+                let timer_leg = ctx.timer_key().and_then(TimerKey::leg_id);
                 timer_leg == Some("a")
             }),
         handle: |_ctx| {
             ok(vec![
-                RuleAction::CancelTimer {
-                    id: timer_id(call::TimerType::ReferOverallSafety, None),
-                },
+                RuleAction::cancel(TimerKey::call(call::TimerType::ReferOverallSafety)),
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,
                     leg_id: "a".to_string(),

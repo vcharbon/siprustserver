@@ -173,7 +173,6 @@ pub fn build_initial_call(
         call_id: invite.call_id().to_string(),
         source: RemoteInfo { address: src.ip().to_string(), port: src.port() },
         dialogs: Default::default(),
-        no_answer_timeout_sec: None,
         local_uri: Some(local_addr),
         remote_uri: Some(remote_addr),
         invite_request_uri: Some(invite.request_uri().to_string()),
@@ -211,6 +210,7 @@ pub fn build_initial_call(
         a_leg_invite,
         limiter,
         timers: vec![],
+        timer_generation: 0,
         cdr_events: vec![CdrEvent {
             event_type: CdrEventType::InviteReceived,
             timestamp: now_ms,

@@ -26,7 +26,7 @@ mod lategate {
         Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceDef,
         ServiceSeed, TimerDelay, SERVICE_LAYER,
     };
-    use call::{CdrEventType, Direction, MachineId, TimerType};
+    use call::{CdrEventType, Direction, MachineId, TimerKey, TimerType};
 
     const LATEGATE: MachineId = MachineId::new("lategate");
     const DEADLINE: TimerType = TimerType::service(LATEGATE, "late");
@@ -34,11 +34,10 @@ mod lategate {
     pub const CDR_SCRUBBED: &str = "lategate:scrubbed";
 
     fn arm_on_cancel_200(_ctx: &RuleContext) -> Option<RuleHandleResult> {
-        Some(RuleHandleResult::new(vec![RuleAction::ScheduleTimer {
-            timer_type: DEADLINE,
-            delay: TimerDelay::secs(DEADLINE_SEC),
-            leg_id: None,
-        }]))
+        Some(RuleHandleResult::new(vec![RuleAction::arm(
+            TimerKey::call(DEADLINE),
+            TimerDelay::secs(DEADLINE_SEC),
+        )]))
     }
 
     fn reject_on_deadline(_ctx: &RuleContext) -> Option<RuleHandleResult> {

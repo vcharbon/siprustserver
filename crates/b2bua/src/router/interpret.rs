@@ -35,7 +35,7 @@ fn quiet_class(result: &HandlerResult) -> Option<QuietTurn> {
     let critical_is_own = match (kind, fx.critical.as_slice()) {
         (QuietTurn::ReAck, []) => true,
         (QuietTurn::OwnRung, [CriticalStateEffect::ScheduleTimer(entry)]) => {
-            matches!(entry.timer_type, TimerType::Rung { .. })
+            entry.key.timer_type == TimerType::Rung
         }
         _ => false,
     };
@@ -182,11 +182,17 @@ pub(super) async fn process_result(
     for eff in &result.effects.critical {
         match eff {
             CriticalStateEffect::ScheduleTimer(entry) => {
+                if crate::trace::sampled(&result.call) {
+                    crate::trace::emit::timer_arm(&result.call, now_ms, entry);
+                }
                 let incarnation = Some(result.call.incarnation().to_string());
                 ctx.timers.schedule(entry.clone(), call_ref.to_string(), incarnation).await;
             }
-            CriticalStateEffect::CancelTimer { id } => {
-                ctx.timers.cancel(call_ref.to_string(), id.clone()).await
+            CriticalStateEffect::CancelTimer { key } => {
+                if crate::trace::sampled(&result.call) {
+                    crate::trace::emit::timer_cancel(&result.call, now_ms, key);
+                }
+                ctx.timers.cancel(call_ref.to_string(), key.clone()).await
             }
             CriticalStateEffect::CancelAllTimers => {
                 ctx.timers.cancel_all(call_ref.to_string()).await

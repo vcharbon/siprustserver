@@ -1,4 +1,5 @@
 use super::*;
+use call::TimerType;
 
 #[tokio::test(start_paused = true)]
 async fn fires_after_delay_under_paused_clock() {
@@ -7,10 +8,9 @@ async fn fires_after_delay_under_paused_clock() {
     timers
         .schedule(
             TimerEntry {
-                id: "t1".into(),
-                timer_type: TimerType::NoAnswer,
+                key: TimerKey::leg(TimerType::NoAnswer, "b-1"),
+                generation: 4,
                 fire_at: 5_000,
-                leg_id: Some("b-1".into()),
             },
             "w0|cid|tag".into(),
             Some("w0|cid|tag#k".into()),
@@ -23,10 +23,10 @@ async fn fires_after_delay_under_paused_clock() {
     tokio::time::advance(Duration::from_millis(1_500)).await;
     let ev = fire_rx.recv().await.unwrap();
     match ev {
-        CallEvent::Timer { timer_type, call_ref, leg_id, incarnation } => {
-            assert_eq!(timer_type, TimerType::NoAnswer);
+        CallEvent::Timer { key, generation, call_ref, incarnation } => {
+            assert_eq!(key, TimerKey::leg(TimerType::NoAnswer, "b-1"));
+            assert_eq!(generation, 4, "the fire names the instance it was armed under");
             assert_eq!(call_ref, "w0|cid|tag");
-            assert_eq!(leg_id.as_deref(), Some("b-1"));
             assert_eq!(incarnation.as_deref(), Some("w0|cid|tag#k"), "the scheduler's");
         }
         _ => panic!("expected timer event"),
@@ -39,17 +39,12 @@ async fn cancel_prevents_fire() {
     let (timers, mut fire_rx) = TimerService::spawn(clock);
     timers
         .schedule(
-            TimerEntry {
-                id: "t1".into(),
-                timer_type: TimerType::Keepalive,
-                fire_at: 1_000,
-                leg_id: None,
-            },
+            TimerEntry { key: TimerKey::call(TimerType::Keepalive), generation: 1, fire_at: 1_000 },
             "c".into(),
             None,
         )
         .await;
-    timers.cancel("c".into(), "t1".into()).await;
+    timers.cancel("c".into(), TimerKey::call(TimerType::Keepalive)).await;
     tokio::time::advance(Duration::from_millis(2_000)).await;
     // Give the driver a tick to process.
     tokio::task::yield_now().await;
@@ -71,10 +66,9 @@ async fn reschedule_survives_aliasing_cancel() {
     timers
         .schedule(
             TimerEntry {
-                id: "keepalive".into(),
-                timer_type: TimerType::Keepalive,
+                key: TimerKey::call(TimerType::Keepalive),
+                generation: 1,
                 fire_at: 30_000,
-                leg_id: None,
             },
             cref.clone(),
             None,
@@ -84,7 +78,7 @@ async fn reschedule_survives_aliasing_cancel() {
     assert!(
         matches!(
             fire_rx.recv().await,
-            Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })
+            Some(CallEvent::Timer { ref key, .. }) if key.timer_type == TimerType::Keepalive
         ),
         "first keepalive fires at 30s",
     );
@@ -93,10 +87,9 @@ async fn reschedule_survives_aliasing_cancel() {
     timers
         .schedule(
             TimerEntry {
-                id: "KeepaliveTimeout:a".into(),
-                timer_type: TimerType::KeepaliveTimeout,
+                key: TimerKey::leg(TimerType::KeepaliveTimeout, "a"),
+                generation: 1,
                 fire_at: 35_000,
-                leg_id: Some("a".into()),
             },
             cref.clone(),
             None,
@@ -106,23 +99,25 @@ async fn reschedule_survives_aliasing_cancel() {
     timers
         .schedule(
             TimerEntry {
-                id: "keepalive".into(),
-                timer_type: TimerType::Keepalive,
+                key: TimerKey::call(TimerType::Keepalive),
+                generation: 1,
                 fire_at: 60_000,
-                leg_id: None,
             },
             cref.clone(),
             None,
         )
         .await;
     // 4. ... and cancel the timeout (the aliasing trigger).
-    timers.cancel(cref.clone(), "KeepaliveTimeout:a".into()).await;
+    timers.cancel(cref.clone(), TimerKey::leg(TimerType::KeepaliveTimeout, "a")).await;
 
     // The cancelled timeout must NOT fire; the rescheduled keepalive MUST.
     tokio::time::advance(Duration::from_millis(30_000)).await; // → t=60s
     let ev = fire_rx.recv().await;
     assert!(
-        matches!(ev, Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })),
+        ev.as_ref().is_some_and(|e| matches!(
+            e,
+            CallEvent::Timer { key, .. } if key.timer_type == TimerType::Keepalive
+        )),
         "rescheduled keepalive survives the aliasing cancel and fires at 60s, got {ev:?}",
     );
     // Nothing else pending (the timeout was a dropped tombstone).
@@ -153,10 +148,9 @@ async fn cancel_physically_reclaims_the_queue_slot() {
     timers
         .schedule(
             TimerEntry {
-                id: "GlobalDuration".into(),
-                timer_type: TimerType::GlobalDuration,
+                key: TimerKey::call(TimerType::GlobalDuration),
+                generation: 1,
                 fire_at: 3_600_000,
-                leg_id: None,
             },
             "c".into(),
             None,
@@ -190,10 +184,9 @@ async fn reschedule_does_not_accumulate_tombstones() {
         timers
             .schedule(
                 TimerEntry {
-                    id: "keepalive".into(),
-                    timer_type: TimerType::Keepalive,
+                    key: TimerKey::call(TimerType::Keepalive),
+                    generation: 1,
                     fire_at: 300_000 + round,
-                    leg_id: None,
                 },
                 "c".into(),
                 None,
@@ -223,10 +216,9 @@ async fn timer_flood_past_old_channel_cap_delivers_every_fire() {
         timers
             .schedule(
                 TimerEntry {
-                    id: format!("t{i}"),
-                    timer_type: TimerType::Keepalive,
+                    key: TimerKey::call(TimerType::Keepalive),
+                    generation: 1,
                     fire_at: 1_000,
-                    leg_id: None,
                 },
                 format!("call-{i}"),
                 None,
@@ -270,17 +262,16 @@ async fn colliding_timer_ids_across_calls_both_fire() {
     let clock = Clock::test_at(0);
     let (timers, mut fire_rx) = TimerService::spawn(clock);
 
-    // Two distinct calls, IDENTICAL timer id — the production shape.
+    // Two distinct calls, IDENTICAL timer key — the production shape.
     let call_a = "w0|call-a|tag-a".to_string();
     let call_b = "w0|call-b|tag-b".to_string();
     for cref in [&call_a, &call_b] {
         timers
             .schedule(
                 TimerEntry {
-                    id: "Keepalive".into(),
-                    timer_type: TimerType::Keepalive,
+                    key: TimerKey::call(TimerType::Keepalive),
+                    generation: 1,
                     fire_at: 30_000,
-                    leg_id: None,
                 },
                 cref.clone(),
                 None,
@@ -293,7 +284,9 @@ async fn colliding_timer_ids_across_calls_both_fire() {
     let mut fired: Vec<String> = Vec::new();
     for _ in 0..2 {
         match fire_rx.recv().await {
-            Some(CallEvent::Timer { timer_type: TimerType::Keepalive, call_ref, .. }) => {
+            Some(CallEvent::Timer { key, call_ref, .. })
+                if key.timer_type == TimerType::Keepalive =>
+            {
                 fired.push(call_ref)
             }
             other => panic!("expected a keepalive fire, got {other:?}"),
@@ -320,10 +313,9 @@ async fn cancel_is_scoped_to_its_call() {
         timers
             .schedule(
                 TimerEntry {
-                    id: "Keepalive".into(),
-                    timer_type: TimerType::Keepalive,
+                    key: TimerKey::call(TimerType::Keepalive),
+                    generation: 1,
                     fire_at: 30_000,
-                    leg_id: None,
                 },
                 cref.clone(),
                 None,
@@ -331,13 +323,13 @@ async fn cancel_is_scoped_to_its_call() {
             .await;
     }
     // Cancel only call A's keepalive.
-    timers.cancel(call_a.clone(), "Keepalive".into()).await;
+    timers.cancel(call_a.clone(), TimerKey::call(TimerType::Keepalive)).await;
 
     tokio::time::advance(Duration::from_millis(30_000)).await;
 
     // Exactly call B's keepalive must fire.
     match fire_rx.recv().await {
-        Some(CallEvent::Timer { timer_type: TimerType::Keepalive, call_ref, .. }) => {
+        Some(CallEvent::Timer { key, call_ref, .. }) if key.timer_type == TimerType::Keepalive => {
             assert_eq!(call_ref, call_b, "call B's keepalive survives call A's cancel");
         }
         other => panic!("expected call B's keepalive, got {other:?}"),

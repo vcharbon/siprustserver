@@ -1,4 +1,4 @@
-use call::TimerType;
+use call::{TimerKey, TimerType};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
 
@@ -107,8 +107,8 @@ fn every_timer_fire_is_the_nodes_own_work() {
         TimerType::LimiterRefresh,
         TimerType::Keepalive,
         TimerType::KeepaliveTimeout,
-        TimerType::Rung { obligation: ack.clone() },
-        TimerType::RepeatGiveUp { obligation: ack },
+        TimerType::Rung,
+        TimerType::RepeatGiveUp,
         TimerType::TerminatingTimeout,
         TimerType::ReferSubscriptionExpiry,
         TimerType::ReferReinviteAnswer,
@@ -119,9 +119,9 @@ fn every_timer_fire_is_the_nodes_own_work() {
         TimerType::service(call::MachineId::new("svc"), "key"),
     ] {
         let fire = CallEvent::Timer {
-            timer_type: timer_type.clone(),
+            key: TimerKey::obligation(timer_type.clone(), ack.clone()),
+            generation: 0,
             call_ref: "c".into(),
-            leg_id: Some("b".into()),
             incarnation: None,
         };
         assert_eq!(DispatchClass::of(&fire), Some(DispatchClass::Timer), "{timer_type:?}");

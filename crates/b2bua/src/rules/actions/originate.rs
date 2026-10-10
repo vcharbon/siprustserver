@@ -4,7 +4,7 @@
 //! request does NOT live here — see [`super::relay_request`].
 
 use call::helpers::{add_cdr_event, add_originated_b_leg, bump_our_cseq};
-use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
+use call::{Call, CdrEvent, Deadline, LegKind, TerminationCause, TimerKey, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::HeaderName;
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
@@ -41,7 +41,7 @@ impl ActionExecutor<'_> {
         new_ruri: Option<&str>,
         new_from: Option<&str>,
         new_to: Option<&str>,
-        no_answer_timeout_sec: Option<i64>,
+        no_answer: Deadline,
         callback_context: Option<&str>,
         body_override: Option<&Body>,
         header_updates: &[(String, Option<String>)],
@@ -74,8 +74,7 @@ impl ActionExecutor<'_> {
         // completes inside the live b-leg client transaction. After the
         // admission gate: a rejected leg is never armed, so it takes no
         // clamp note either.
-        let no_answer_timeout_sec = no_answer_timeout_sec
-            .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
+        let no_answer = relay::clamp_no_answer(self.config, &call.call_ref, no_answer);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let offers_sdp = relay::mints_offer(&a_invite, body_override);
         // The originator's `Accept` states what she takes; a media leg answers
@@ -101,7 +100,6 @@ impl ActionExecutor<'_> {
             new_ruri,
             new_from,
             new_to,
-            no_answer_timeout_sec,
             self.config,
             self.id_gen,
             body_override,
@@ -155,8 +153,8 @@ impl ActionExecutor<'_> {
         }
         *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
         fx.outbound.push(effect);
-        if let Some(secs) = no_answer_timeout_sec {
-            self.schedule(call, fx, TimerType::NoAnswer, secs * 1000, Some(leg_id));
+        if let Some(ms) = no_answer.millis() {
+            self.schedule(call, fx, TimerKey::leg(TimerType::NoAnswer, leg_id), ms);
         }
     }
 
