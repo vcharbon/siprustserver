@@ -644,7 +644,10 @@ impl ActionExecutor<'_> {
     /// not PRACK it any more, and the CANCEL does not end the transaction, so
     /// this stack — the leg's UAC — owes the acknowledgement (RFC 3262 §4),
     /// answering an offer one carried rejecting every stream (§5). `None`
-    /// reads every INVITE of the leg (a leg still ringing has one).
+    /// reads every INVITE of the leg (a leg still ringing has one). One whose
+    /// dialog a BYE ended or the call retired is owed nothing on the wire
+    /// (RFC 3261 §15.1.2): it is recorded acknowledged, so the caller's late
+    /// PRACK is answered here.
     pub(super) fn prack_relayed_unacknowledged(
         &self,
         call: &mut Call,
@@ -654,6 +657,21 @@ impl ActionExecutor<'_> {
     ) {
         let owed = call::helpers::unacknowledged_relayed_provisionals(call, leg_id, invite_cseq);
         for o in owed {
+            let live = call::helpers::find_leg(call, leg_id)
+                .and_then(|l| call::helpers::dialog_with_peer(l, &o.b_tag))
+                .is_some_and(|d| d.is_live());
+            if !live {
+                let (updated, _) = call::helpers::record_pracked_provisional(
+                    call.clone(),
+                    leg_id,
+                    &o.b_tag,
+                    o.invite_cseq,
+                    o.rseq,
+                    o.responder_sdp,
+                );
+                *call = updated;
+                continue;
+            }
             let answer = o.offer.as_deref().and_then(|offer| self.rejecting_answer(offer));
             self.send_prack_to_leg(
                 call,

@@ -43,6 +43,11 @@ impl ActionExecutor<'_> {
             return;
         }
         match why {
+            // A method no relay ever carries takes its permanent final, not
+            // a retry that cannot succeed.
+            Unrelayed::NotNow if super::select::in_dialog_method(req.method()).is_none() => {
+                self.refuse_unrelayable(call, fx, ctx, req);
+            }
             Unrelayed::NotNow => {
                 let retry_after = SipHeader {
                     name: SipStr::owned(HeaderName::RetryAfter.as_wire_str()),

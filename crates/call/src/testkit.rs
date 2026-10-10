@@ -1,7 +1,9 @@
-//! Fixture support: give a hand-built [`Leg`] the facts its derived state
+//! Fixture support: a bare dialled [`Leg`], and the facts its derived state
 //! reads ([`Leg::state`]), for tests that start a call mid-flight.
 
-use crate::model::{Dialog, DialogEnd, DialogState, Leg, LegState};
+use crate::model::{
+    Dialog, DialogEnd, DialogState, Leg, LegKind, LegState, OutboundInvite, RemoteInfo,
+};
 
 /// Give `leg` the facts that make it read `state`, touching only what that
 /// takes. `Early`: an early dialog. `Confirmed`: its first early dialog
@@ -52,4 +54,29 @@ fn staged_dialog(leg: &Leg, state: DialogState) -> Dialog {
     let mut d = Dialog::new(ours, "staged-peer", state, cseq);
     d.remote_target = "sip:staged-peer@staged.invalid".into();
     d
+}
+
+/// A leg this stack dialled as `leg_id` under From-tag `our_tag`, holding no
+/// dialog, its INVITE (CSeq 1) unanswered.
+pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
+    Leg {
+        leg_id: leg_id.to_string(),
+        call_id: format!("{leg_id}-call-id"),
+        source: RemoteInfo { address: "127.0.0.1".into(), port: 5060 },
+        dialogs: Default::default(),
+        no_answer_timeout_sec: None,
+        local_uri: None,
+        remote_uri: None,
+        invite_request_uri: None,
+        outbound_invite: Some(OutboundInvite::new(our_tag, 1, None)),
+        own_tag: None,
+        ext: None,
+        kind: Some(LegKind::Destination),
+        in_session_timer: None,
+        adopted: None,
+        invite_final_sent: None,
+        answer_preempted: None,
+        messages: Default::default(),
+        sdp_session: Default::default(),
+    }
 }

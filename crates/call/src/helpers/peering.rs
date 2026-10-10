@@ -85,8 +85,8 @@ pub enum RelayPeer {
 ///   3. an unadopted leg (parked `media`, un-realigned `transfer-target`) is
 ///      its service's and relays nowhere;
 ///   4. a caller request on a dialog that fronts nothing: the first confirmed
-///      b-leg, else the first one not ended, on the dialog its requests ride
-///      (none: [`RelayPeer::NoLeg`]);
+///      adopted b-leg, else the first one not ended, on the dialog its
+///      requests ride (none: [`RelayPeer::NoLeg`]);
 ///   5. a callee request: the a-leg.
 ///
 /// Toward the a-leg the dialog is the live caller-facing one fronting the
@@ -118,11 +118,10 @@ pub fn resolve_relay_peer(
                 return RelayPeer::Leg { leg_id, dialog: fork.map(Dialog::id) };
             }
         }
-        let peer = call
-            .b_legs
-            .iter()
+        let adopted = || call.b_legs.iter().filter(|l| is_adopted(l));
+        let peer = adopted()
             .find(|l| l.state() == LegState::Confirmed)
-            .or_else(|| call.b_legs.iter().find(|l| l.state() != LegState::Terminated));
+            .or_else(|| adopted().find(|l| l.state() != LegState::Terminated));
         return match peer {
             Some(l) => toward(&l.leg_id),
             None => RelayPeer::NoLeg,

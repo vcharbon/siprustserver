@@ -115,7 +115,9 @@ impl ActionExecutor<'_> {
                 (l.leg_id.clone(), l.state(), l.invite_ringing(), l.leg_id == call.a_leg.leg_id)
             })
             .collect();
+        let mut ended_leg_ringing = false;
         for (id, state, ringing, is_a) in legs {
+            ended_leg_ringing |= ringing && state == LegState::Terminated;
             match state {
                 LegState::Confirmed => {
                     // A 2xx still unACKed is ACKed bare ahead of the BYE
@@ -162,6 +164,16 @@ impl ActionExecutor<'_> {
                 // INVITE took its final.
                 _ => {}
             }
+        }
+        // A leg a fork's early BYE ended holds the call only for its INVITE's
+        // 487: the caller is answered now, owed nothing from that CANCEL.
+        if ended_leg_ringing {
+            crate::rules::invariants::answer_unanswered_caller(
+                call,
+                fx,
+                self.now_ms,
+                &self.config.minted_final_advertisement,
+            );
         }
         // Nothing awaits an answer and no service makes progress once the
         // call is terminating: every per-leg `NoAnswer` entry — including a

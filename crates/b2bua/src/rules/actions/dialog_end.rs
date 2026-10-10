@@ -54,3 +54,7 @@ fn end_one(leg: &mut Leg, id: Option<call::DialogId>, end: DialogEnd) {
         end => DialogState::Ended(end),
     };
 }
+
+#[cfg(test)]
+#[path = "dialog_end_tests.rs"]
+mod tests;

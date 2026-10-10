@@ -260,18 +260,19 @@ impl ActionExecutor<'_> {
             );
             return;
         }
-        // A peer dialog a BYE ended or is ending carries no more requests
-        // (RFC 3261 §15.1.2; every usage ends with the INVITE usage), while
-        // the sender's own dialog lives: it is told to retry, never 481,
-        // which would end its dialog (§12.2.1.2). A BYE crosses it.
-        if bye_ended(call, target_leg) && *req.method() != Method::Bye {
-            self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
-            return;
-        }
         let Some(method) = in_dialog_method(req.method()) else {
             self.refuse_unrelayable(call, fx, ctx, req);
             return;
         };
+        // A relayable request toward a peer dialog a BYE ended or is ending
+        // finds no usage left (RFC 3261 §15.1.2; every usage ends with the
+        // INVITE usage) while the sender's own dialog lives: it is told to
+        // retry, never 481, which would end its dialog (§12.2.1.2). A BYE
+        // crosses it.
+        if bye_ended(call, target_leg) && *req.method() != Method::Bye {
+            self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
+            return;
+        }
         // The dialog the resolver named — the callee fork toward a b-leg, the
         // caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1: each
         // early dialog is independent). One that carries requests takes it;
@@ -440,7 +441,7 @@ impl ActionExecutor<'_> {
     /// event package (RFC 6665 §4.2.1.2); any other method `405` with the
     /// node's `Allow` (§8.2.1), the node's answer to a method it does not
     /// serve.
-    fn refuse_unrelayable(
+    pub(super) fn refuse_unrelayable(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,

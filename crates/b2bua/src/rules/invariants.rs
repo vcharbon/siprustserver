@@ -9,7 +9,9 @@
 use call::helpers::is_fully_resolved;
 use call::{Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, StateLabel};
 
-use crate::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
+use crate::effects::{
+    BufferedObservabilityEffect, CriticalStateEffect, HandlerEffects, HandlerResult,
+};
 use crate::obligations::ObligationSet;
 use sip_message::generators::CapabilitySet;
 
@@ -143,23 +145,34 @@ fn answer_a_leg_if_unanswered(
     now_ms: i64,
     advertisement: &CapabilitySet,
 ) {
-    let unanswered_entering = matches!(before.a_leg.state(), LegState::Trying | LegState::Early);
-    if !unanswered_entering || result.call.a_leg_invite.headers.is_empty() {
+    if matches!(before.a_leg.state(), LegState::Trying | LegState::Early) {
+        answer_unanswered_caller(&mut result.call, &mut result.effects, now_ms, advertisement);
+    }
+}
+
+/// Answer the caller's INVITE `503` when it carries no final yet and a
+/// snapshot to answer exists, recording it on the CDR: the funnel above, and
+/// a teardown whose release waits on a callee's CANCEL (the caller is owed
+/// nothing from it).
+pub(crate) fn answer_unanswered_caller(
+    call: &mut Call,
+    effects: &mut HandlerEffects,
+    now_ms: i64,
+    advertisement: &CapabilitySet,
+) {
+    if call.a_leg_invite.headers.is_empty() || call.a_leg.invite_final_sent.is_some() {
         return;
     }
-    if result.call.a_leg.invite_final_sent.is_some() {
-        return;
-    }
-    let a_leg_id = before.a_leg.leg_id.as_str();
-    let a_invite = super::relay::rebuild_a_leg_invite(&result.call.a_leg_invite);
+    let a_leg_id = call.a_leg.leg_id.clone();
+    let a_invite = super::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     // Reuse the a-leg's own tag when an 18x already pinned one (Early);
     // otherwise `generate_response`'s deterministic fallback tag applies.
-    let to_tag = result.call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
+    let to_tag = call.a_leg.own_tag.clone().filter(|t| !t.is_empty());
     let mut own = Vec::new();
     super::capabilities::stamp_own_advertisement(advertisement, |_| false, &mut own);
     let Some(mut effect) = super::relay::response_to_a_leg(
-        &mut result.call,
-        &mut result.effects,
+        call,
+        effects,
         &a_invite,
         503,
         "Service Unavailable",
@@ -175,14 +188,14 @@ fn answer_a_leg_if_unanswered(
         return;
     };
     effect.label = "503 (terminated unanswered) → a-leg".to_string();
-    result.effects.outbound.push(effect);
+    effects.outbound.push(effect);
     // Before `obligations.settle` reads the snapshot, so the CDR carries it.
-    result.call.cdr_events.push(CdrEvent {
+    call.cdr_events.push(CdrEvent {
         event_type: CdrEventType::Reject,
         timestamp: now_ms,
-        leg_id: a_leg_id.to_string(),
+        leg_id: a_leg_id,
         status_code: Some(503),
         reason: Some("unanswered_at_termination".to_string()),
-        decision_ordinal: result.call.decision_ordinal,
+        decision_ordinal: call.decision_ordinal,
     });
 }

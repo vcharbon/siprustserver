@@ -78,7 +78,8 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 /// [`PRACK_WINDOW_US`], before which the stop is truncation.
 ///
 /// A provisional out of its dialog's `RSeq` order is owed nothing: §4 forbids
-/// PRACKing it.
+/// PRACKing it. Nor is one whose early dialog its responder then ended with a
+/// BYE: nothing rides that dialog after it (RFC 3261 §15.1.2).
 ///
 /// Repeats collapse on the RSeq: one PRACK answers every retransmission of one
 /// reliable provisional (§3), so an obligation is keyed by its early dialog's
@@ -112,6 +113,13 @@ impl Obligation for UnackedReliableProvisional {
             let final_us = seen.final_at.get(&(uac, call, cseq)).copied();
             if final_us.is_some_and(|at| at <= p.ts_us) {
                 continue; // the final came first: nothing was left to PRACK
+            }
+            let byed_early = seen
+                .byed_at
+                .get(&(uac, call, dialog))
+                .is_some_and(|at| *at >= p.ts_us && final_us.is_none_or(|final_at| *at < final_at));
+            if byed_early {
+                continue; // its responder's BYE ended the early dialog under it
             }
             let arrivals: Vec<&Reliable<'_>> = seen
                 .taken
@@ -1058,6 +1066,10 @@ struct Reading<'a> {
     /// (UAC, Call-ID, INVITE CSeq number) → when the INVITE's first final
     /// reached the UAC. A CANCEL ends nothing (RFC 3262 §4).
     final_at: BTreeMap<(&'a str, &'a str, u32), u64>,
+    /// (UAC, Call-ID, dialog's To tag) → when the responder's BYE on that
+    /// dialog first reached the UAC: before the INVITE's final, it ended the
+    /// early dialog, and nothing rides it after (RFC 3261 §15.1.2).
+    byed_at: BTreeMap<(&'a str, &'a str, &'a str), u64>,
     /// The last timestamp on this view's own stream: after it, an absence is
     /// the observation's rather than the wire's.
     last_ts_us: u64,
@@ -1301,6 +1313,13 @@ impl<'a> Reading<'a> {
             self.invite
                 .entry((msg.src.as_str(), msg.cseq))
                 .or_insert(Invite { offers_100rel: head.is_some_and(offers_100rel) });
+        } else if msg.is_request("BYE") {
+            let dialog = msg.from_tag.as_deref().unwrap_or_default();
+            let at = self
+                .byed_at
+                .entry((msg.dst.as_str(), msg.call_id.as_str(), dialog))
+                .or_insert(msg.at_us);
+            *at = (*at).min(msg.at_us);
         } else if msg.is_request("PRACK") {
             let rack = head.and_then(rack_of);
             let dialog = msg.to_tag.as_deref().unwrap_or_default();
@@ -1683,6 +1702,36 @@ mod tests {
             );
             assert_eq!(f[0].emitter, UAC);
         }
+    }
+
+    /// The responder BYEs the early dialog its reliable 180 rode (a callee's
+    /// deviation, RFC 3261 §15): nothing rides that dialog after it
+    /// (§15.1.2), so no PRACK is owed; the 487 that follows changes nothing.
+    #[test]
+    fn a_responders_bye_on_the_early_dialog_leaves_its_provisional_owed_nothing() {
+        let bye_head = "BYE sip:a@h SIP/2.0\r\nFrom: <sip:b@h>;tag=tb\r\nTo: <sip:a@h>;tag=fa\r\n\
+                        CSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n"
+            .to_string();
+        let mut bye = msg(
+            1_110_000,
+            UAS,
+            UAC,
+            Kind::Request { method: "BYE".to_string() },
+            1,
+            Some("fa"),
+            bye_head,
+        );
+        bye.cseq_method = "BYE".to_string();
+        bye.from_tag = Some("tb".to_string());
+        let msgs = vec![
+            invite(1_000_000, UAC, UAS, 1),
+            reliable(1_100_000, UAS, UAC, 180, 1, 5, "tb"),
+            bye,
+            final_status(1_200_000, 487, 1, "tb"),
+        ];
+        let o = obs(&msgs, true);
+        let f = UnackedReliableProvisional.eval(&WireView { msgs: &msgs, obs: &o });
+        assert!(f.is_empty(), "no occasion: {f:?}");
     }
 
     /// A PRACK the UAC sent before the final reached it may be seen after that
