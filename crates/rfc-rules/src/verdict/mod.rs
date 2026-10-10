@@ -10,6 +10,8 @@ use crate::wire::Endpoint;
 /// under-reports (no hit), a live gate may still refuse to pass — and the
 /// population contract keeps that policy's cost visible.
 #[derive(Debug, Clone)]
+// Evidence is matched in place by every consumer; a box per hit buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Decision {
     Violated(Evidence),
     Compliant,
