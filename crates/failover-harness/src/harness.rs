@@ -433,6 +433,11 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().and_then(|c| c.live_call(call_ref))
     }
 
+    /// Post an in-flight `event` to this node's router; nothing while crashed.
+    pub fn post_event(&self, event: b2bua::CallEvent) {
+        let _ = self.core.as_ref().map(|core| core.post_event(event));
+    }
+
     /// HARNESS SURGERY (see `B2buaCore::drop_live_copy`): drop the live
     /// in-memory copy of `call_ref` with NO store mutation — the deterministic
     /// recreation of the rebooted-primary "imported into `pri:{self}` but not

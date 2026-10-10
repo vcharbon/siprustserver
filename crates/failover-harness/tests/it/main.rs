@@ -43,6 +43,7 @@ mod silent_callee_no_answer_via_lb;
 mod spiral_takeover;
 mod stale_no_answer_reclaim;
 mod takeover_request_uri_rewritten;
+mod timer_generation_takeover;
 mod transparent_v1;
 mod via_lb_reroute_glare;
 mod withdrawn_endpoint_replacement;
