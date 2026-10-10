@@ -15,10 +15,10 @@ use super::records::{
 /// Whether the description a response carries BINDS as the round's answer on
 /// its dialog: a final does (§13.2.1), and so does a reliable provisional — one
 /// carrying BOTH `Require: 100rel` and an `RSeq` (RFC 3262 §5, the
-/// [`super::prack`](super::super::prack) reading). An unreliable provisional's description is early
-/// media the peer may re-latch on and states no answer; a vantage that carried
-/// no header bytes cannot tell, and the conservative reading is that it binds
-/// nothing.
+/// [`prack`](super::super::prack) reading). An unreliable provisional's
+/// description is early media the peer may re-latch on and states no answer; a
+/// vantage that carried no header bytes cannot tell, and the conservative
+/// reading is that it binds nothing.
 fn binds(status: u16, msg: &Msg) -> bool {
     if status >= 200 {
         return true;
