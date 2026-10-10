@@ -172,3 +172,6 @@ pub(crate) fn reason_for(status: u16) -> &'static str {
         _ => "Response",
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -92,7 +92,6 @@ crates/pivot-interpreter/src/gate.rs 610
 crates/pivot-interpreter/src/plan.rs 1620
 crates/pivot-interpreter/src/render/tests.rs 901
 crates/pivot-interpreter/src/retransmit.rs 684
-crates/pivot-interpreter/src/stack/tests.rs 1616
 crates/pivot-schema/src/bundle/verdict.rs 677
 crates/pivot-schema/src/lint/flow_rules.rs 788
 crates/pivot-schema/src/lint/references.rs 505

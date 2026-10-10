@@ -335,3 +335,6 @@ fn in_dialog_method(method: &Method) -> Option<InDialogMethod> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests;

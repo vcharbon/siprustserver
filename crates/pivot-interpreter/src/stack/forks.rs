@@ -67,3 +67,6 @@ impl LegStack {
         self.early.iter().map(|(tag, _)| tag.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests;

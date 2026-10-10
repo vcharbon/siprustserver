@@ -135,3 +135,6 @@ fn establishes_dialog(response: &SipResponse) -> bool {
     let creating = matches!(response.cseq().method(), Method::Invite | Method::Subscribe);
     creating && (101..300).contains(&status)
 }
+
+#[cfg(test)]
+mod tests;
