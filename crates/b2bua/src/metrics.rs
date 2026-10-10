@@ -46,6 +46,7 @@ fn retransmit_row(ladder: &str, method: &str, code: Option<u16>) -> RetransmitRo
 
 #[derive(Debug, Default)]
 struct Inner {
+    plain: catalogue::plain::PlainCounters,
     // The semi-open families (per-method traffic, repeats and give-ups,
     // unroutable messages, replication per stream, the cursor census), one
     // row per observed label set.
@@ -63,9 +64,6 @@ struct Inner {
     // The worker's view of its call limiter (ADR-0040).
     limiter: LimiterCounters,
     // dispatcher
-    queue_drops: AtomicU64,
-    cap_drops: AtomicU64,
-    release_discards: AtomicU64,
     past_bound_depth: AtomicU64,
     past_bound_cap: AtomicU64,
     overflow_refused: AtomicU64,
@@ -74,82 +72,12 @@ struct Inner {
     invite_discard_answered_at_cap: AtomicU64,
     invite_discard_answered_released: AtomicU64,
     invite_discard_answered_capped: AtomicU64,
-    capped_refusals: AtomicU64,
-    capped_request_answered: AtomicU64,
     calls_near_lifetime_cap: std::sync::atomic::AtomicI64,
-    saturation: AtomicU64,
-    new_call_share_waits: AtomicU64,
-    // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
-    // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop),
-    // so no call processes unbounded in-dialog events.
-    message_cap_terminated: AtomicU64,
-    // Calls that crossed their lifetime message cap (the work bound).
-    message_cap_lifetime_crossed: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
     removals_terminated: AtomicU64,
     removals_self_release: AtomicU64,
     removals_orphan: AtomicU64,
-    // router / handler
-    handler_timeouts: AtomicU64,
-    force_purge: AtomicU64,
-    fast_reject_terminating: AtomicU64,
-    // call reaper (ADR-0020). `handler_panics` counts dispatcher-observed body
-    // panics;
-    // `reaper_verdicts` counts injected synthetic events (stale + fatal +
-    // discharge); `reaper_discharged` is the ALARM — the rules path itself
-    // failed twice for a call; expected ~0 in any healthy run.
-    handler_panics: AtomicU64,
-    reaper_sweeps: AtomicU64,
-    reaper_sweep_panics: AtomicU64,
-    replica_reap_panics: AtomicU64,
-    reaper_verdicts: AtomicU64,
-    reaper_discharged: AtomicU64,
-    // cdr
-    cdr_written: AtomicU64,
-    cdr_dropped: AtomicU64,
-    // Decision-application drop guard: a `/call/new` decision result (route
-    // or reject) that landed on a call whose initial INVITE the caller already
-    // CANCELed — dropped whole: no b-leg launch, no second final on the a-leg's
-    // completed transaction. A non-zero rate measures the caller-gives-up-
-    // during-routing race, not a fault.
-    decision_dropped_cancelled: AtomicU64,
-    // Second-final refusal (RFC 3261 §17.2.1): a final the call layer authored
-    // toward the a-leg's initial INVITE while that transaction already carried
-    // one — refused at the a-leg response seam, never built. A rule made
-    // progress on a call already answered or going away; expected 0 in any
-    // healthy run.
-    second_final_refused: AtomicU64,
-    // Late-provisional refusal (RFC 3261 §13.3.1.1 / §17.2.1): a provisional
-    // the call layer authored toward the a-leg's initial INVITE while that
-    // transaction already sent its final — refused at the a-leg response
-    // seam, never built. A rule showed a ringing leg to an answered caller;
-    // expected 0 in any healthy run.
-    provisional_after_final_refused: AtomicU64,
-    // Calls reaching Terminated with no termination record (expected 0).
-    termination_unrecorded: AtomicU64,
-    // Going-away gate: an asynchronous trigger (timer fire, transaction
-    // timeout, internal-event fold) that landed on a Terminating/Terminated
-    // call and matched a rule that is not a teardown rule — absorbed before
-    // it ran. Measures the race between a call's own clocks and its teardown,
-    // not a fault; a rule named here on a live call would have made progress.
-    going_away_absorbed: AtomicU64,
-    // PRACKs answered 200 after their call's release (RFC 3262 §3).
-    late_prack_answered: AtomicU64,
-    // Another incarnation's event: a timer fire, transaction timeout,
-    // callout result or late message of an earlier call on the same
-    // callRef, dropped before the live call's rules read it. Measures the
-    // race between a call's end and a retry born on its callRef, not a fault.
-    other_incarnation_dropped: AtomicU64,
-    // Injectable store-fault seam (ADR-0023): `store_fault_rejected` = live
-    // lookups that failed CLOSED with a 500 final (initial-INVITE dialog-
-    // existence check or in-dialog request fetch); `store_fault_audit_skipped`
-    // = keepalive/audit cycles skipped FAIL-OPEN (call kept up, timer re-armed
-    // so liveness detection resumes next interval — a store fault alone never
-    // tears down an established call). Both stay 0 unless a `StoreFaults`
-    // handle is armed (tests) or a future fallible store is wired.
-    store_fault_rejected: AtomicU64,
-    store_fault_audit_skipped: AtomicU64,
     // timer service (gauges): physical DelayQueue size (live entries + not-yet-
     // expired tombstones from cancelled/rescheduled timers) vs. the live
     // schedulable timer count. `queue_len - live` is the lingering-tombstone
@@ -168,35 +96,6 @@ struct Inner {
     // replication-boundary re-anchor, not a clock rewrite (timestamps stay
     // monotonic).
     clock_wall_divergence_ms: AtomicU64,
-    // replication (peer-to-peer HA; separate namespace `b2bua_repl_*`). These
-    // localise an HA failure to a layer: `flush_propagated` rising on the PRIMARY
-    // proves it is attempting to replicate (the proxy cookie stamped
-    // `topology.bak`); the per-stream `applied` breakdown (below) proves the
-    // replica actually arrived; `takeover_resolved`/`hydrated` prove a failed-over
-    // in-dialog request found + loaded the replica on the backup. The TRUE resident
-    // backup count is the sampled `repl_meta_backup` gauge (not a counter-derived
-    // estimate).
-    repl_flush_propagated: AtomicU64,
-    repl_takeover_resolved: AtomicU64,
-    repl_takeover_hydrated: AtomicU64,
-    // Refusals of a `Terminated` replica; the rule is `router::materialise`.
-    repl_takeover_refused_terminated: AtomicU64,
-    // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
-    repl_reverse_flush_refused: AtomicU64,
-    // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
-    // re-materialised into its live map (active reclaim); `self_release` = acting-
-    // backup takeover copies the backup *self-released* once the transaction(s) it
-    // served reached a terminal state (ADR-0014). After a kill_worker+reclaim,
-    // `self_release` ≈ takeover copies shed and the active/sipp gap reaps to ~0.
-    repl_reclaimed: AtomicU64,
-    repl_self_release: AtomicU64,
-    // Model Y (ADR-0020 X3): a backup-held deferred terminal whose primary never
-    // came back to reclaim it (crashed for good, past the replica TTL). The backup
-    // is NOT a discharge authority, so its periodic reap releases the call's limiter
-    // hold(s) + frees the replica memory but writes **no CDR**.
-    // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
-    // and only climbs when a primary is permanently lost mid-call.
-    repl_terminal_lost: AtomicU64,
     // Re-hydration diagnostics. How a rebooted primary's bootstrap passes
     // terminate: `seeded` = a pass reached the first catch-up `Noop` (the peer
     // streamed the full `bak:{me}` keyset); `stalled` = a pass hit the bootstrap
@@ -208,8 +107,6 @@ struct Inner {
     // peer-side stall), not just the materialisation — and a longer hard deadline
     // alone would not help. If `seeded` bumps and `repl_reclaimed_total` ≈ the
     // held count, re-hydration is whole.
-    repl_bootstrap_seeded: AtomicU64,
-    repl_bootstrap_stalled: AtomicU64,
     repl_bootstrap_last_applied: AtomicU64,
     // Reboot-reclaim completeness. Per the MOST RECENT bulk reclaim pass
     // (`router::reclaim_all`): `scanned` = bodies found in `pri:{self}` (the
@@ -447,15 +344,6 @@ impl B2buaMetrics {
         &self.new_calls
     }
 
-    counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
-    counter!(
-        bump_message_cap_lifetime_crossed,
-        message_cap_lifetime_crossed_total,
-        message_cap_lifetime_crossed
-    );
-    counter!(bump_capped_refusal, capped_refusals_total, capped_refusals);
-    counter!(bump_capped_request_answered, capped_request_answered_total, capped_request_answered);
-
     /// Move the gauge of live calls near their lifetime cap by `delta`.
     pub fn add_calls_near_lifetime_cap(&self, delta: i64) {
         self.inner.calls_near_lifetime_cap.fetch_add(delta, Ordering::Relaxed);
@@ -465,9 +353,6 @@ impl B2buaMetrics {
     pub fn calls_near_lifetime_cap(&self) -> i64 {
         self.inner.calls_near_lifetime_cap.load(Ordering::Relaxed)
     }
-    counter!(bump_queue_drop, queue_drops_total, queue_drops);
-    counter!(bump_cap_drop, cap_drops_total, cap_drops);
-    counter!(bump_release_discard, release_discards_total, release_discards);
     counter!(bump_overflow_refused, overflow_refused_total, overflow_refused);
 
     /// Move the gauge of items waiting in per-call overflows by `delta`.
@@ -479,8 +364,6 @@ impl B2buaMetrics {
     pub fn overflow_depth(&self) -> i64 {
         self.inner.overflow_depth.load(Ordering::Relaxed)
     }
-    counter!(bump_saturation, saturation_total, saturation);
-    counter!(bump_new_call_share_wait, new_call_share_waits_total, new_call_share_waits);
     counter!(bump_creation, creations_total, creations);
     counter!(bump_removal, removals_total, removals);
 
@@ -546,46 +429,10 @@ impl B2buaMetrics {
             RemovalClass::Orphan => &self.inner.removals_orphan,
         }
     }
-    counter!(bump_handler_timeout, handler_timeouts_total, handler_timeouts);
-    counter!(bump_force_purge, force_purge_total, force_purge);
-    counter!(bump_fast_reject_terminating, fast_reject_terminating_total, fast_reject_terminating);
-    counter!(bump_cdr_written, cdr_written_total, cdr_written);
-    counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
     // Decision-application drop guard.
-    counter!(
-        bump_decision_dropped_cancelled,
-        decision_dropped_cancelled_total,
-        decision_dropped_cancelled
-    );
     // Second-final refusal (RFC 3261 §17.2.1) and the going-away gate.
-    counter!(bump_second_final_refused, second_final_refused_total, second_final_refused);
-    counter!(
-        bump_provisional_after_final_refused,
-        provisional_after_final_refused_total,
-        provisional_after_final_refused
-    );
-    counter!(bump_termination_unrecorded, termination_unrecorded_total, termination_unrecorded);
-    counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
-    counter!(bump_late_prack_answered, late_prack_answered_total, late_prack_answered);
-    counter!(
-        bump_other_incarnation_dropped,
-        other_incarnation_dropped_total,
-        other_incarnation_dropped
-    );
     // Injectable store-fault seam (ADR-0023).
-    counter!(bump_store_fault_rejected, store_fault_rejected_total, store_fault_rejected);
-    counter!(
-        bump_store_fault_audit_skipped,
-        store_fault_audit_skipped_total,
-        store_fault_audit_skipped
-    );
     // --- call reaper (ADR-0020) ---
-    counter!(bump_handler_panic, handler_panics_total, handler_panics);
-    counter!(bump_reaper_sweep, reaper_sweeps_total, reaper_sweeps);
-    counter!(bump_reaper_sweep_panic, reaper_sweep_panics_total, reaper_sweep_panics);
-    counter!(bump_replica_reap_panic, replica_reap_panics_total, replica_reap_panics);
-    counter!(bump_reaper_verdict, reaper_verdicts_total, reaper_verdicts);
-    counter!(bump_reaper_discharged, reaper_discharged_total, reaper_discharged);
 
     /// Count one catch-up/idle `Noop` SENT on a serve-side stream, for
     /// `b2bua_repl_noops_sent_total{flow,peer}` (ADR-0014). `flow` is the stream
@@ -744,7 +591,6 @@ impl B2buaMetrics {
     }
 
     // --- replication ---
-    counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
 
     /// Count one quiet turn of `kind`, for `b2bua_repl_quiet_turns_total{kind}`.
     pub fn record_quiet_turn(&self, kind: &str) {
@@ -755,23 +601,6 @@ impl B2buaMetrics {
     pub fn repl_quiet_turns_total(&self, kind: &str) -> u64 {
         self.inner.rows.repl_quiet_turns.get(&[kind])
     }
-    counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
-    counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
-    counter!(
-        bump_repl_reverse_flush_refused,
-        repl_reverse_flush_refused_total,
-        repl_reverse_flush_refused
-    );
-    counter!(
-        bump_repl_takeover_refused_terminated,
-        repl_takeover_refused_terminated_total,
-        repl_takeover_refused_terminated
-    );
-    counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
-    counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
-    counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
-    counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
-    counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
     /// Record how many bodies the most recent bootstrap pass imported (gauge).
     pub fn set_repl_bootstrap_last_applied(&self, n: u64) {
@@ -961,78 +790,11 @@ impl B2buaMetrics {
         let removals = self.removals_total();
         let active = creations.saturating_sub(removals);
         let mut s = String::with_capacity(2048);
-        catalogue::worker::MESSAGE_CAP_LIFETIME_CROSSED
-            .render_value(&mut s, self.message_cap_lifetime_crossed_total());
-        catalogue::DISPATCH_CAPPED_REFUSALS.render_value(&mut s, self.capped_refusals_total());
-        catalogue::DISPATCH_CAPPED_REQUEST_ANSWERED
-            .render_value(&mut s, self.capped_request_answered_total());
-        catalogue::worker::MESSAGE_CAP_TERMINATED
-            .render_value(&mut s, self.message_cap_terminated_total());
-        catalogue::DISPATCH_QUEUE_DROPS.render_value(&mut s, self.queue_drops_total());
-        catalogue::DISPATCH_CAP_DROPS.render_value(&mut s, self.cap_drops_total());
-        catalogue::DISPATCH_RELEASE_DISCARDS.render_value(&mut s, self.release_discards_total());
-        catalogue::DISPATCH_SATURATION.render_value(&mut s, self.saturation_total());
-        catalogue::DISPATCH_NEW_CALL_SHARE_WAITS
-            .render_value(&mut s, self.new_call_share_waits_total());
+        catalogue::plain::render(self, &mut s);
         catalogue::worker::CALL_CREATIONS.render_value(&mut s, creations);
         catalogue::worker::CALL_REMOVALS.render_value(&mut s, removals);
-        catalogue::worker::HANDLER_TIMEOUTS.render_value(&mut s, self.handler_timeouts_total());
-        catalogue::worker::FORCE_PURGE.render_value(&mut s, self.force_purge_total());
-        catalogue::worker::FAST_REJECT_TERMINATING
-            .render_value(&mut s, self.fast_reject_terminating_total());
-        catalogue::worker::CDR_WRITTEN.render_value(&mut s, self.cdr_written_total());
-        catalogue::worker::CDR_DROPPED.render_value(&mut s, self.cdr_dropped_total());
-        // ── decision-application drop guard ──
-        catalogue::worker::DECISION_DROPPED_CANCELLED
-            .render_value(&mut s, self.decision_dropped_cancelled_total());
-        // ── a call already going away authors no further progress ──
-        catalogue::worker::TERMINATION_UNRECORDED
-            .render_value(&mut s, self.termination_unrecorded_total());
-        catalogue::worker::SECOND_FINAL_REFUSED
-            .render_value(&mut s, self.second_final_refused_total());
-        catalogue::worker::PROVISIONAL_AFTER_FINAL_REFUSED
-            .render_value(&mut s, self.provisional_after_final_refused_total());
-        catalogue::worker::GOING_AWAY_ABSORBED
-            .render_value(&mut s, self.going_away_absorbed_total());
-        catalogue::worker::LATE_PRACK_ANSWERED
-            .render_value(&mut s, self.late_prack_answered_total());
-        catalogue::worker::OTHER_INCARNATION_DROPPED
-            .render_value(&mut s, self.other_incarnation_dropped_total());
-        // ── injectable store-fault seam (ADR-0023) ──
-        catalogue::worker::STORE_FAULT_REJECTED
-            .render_value(&mut s, self.store_fault_rejected_total());
-        catalogue::worker::STORE_FAULT_AUDIT_SKIPPED
-            .render_value(&mut s, self.store_fault_audit_skipped_total());
-        // ── call reaper (ADR-0020) ──
-        catalogue::worker::HANDLER_PANICS.render_value(&mut s, self.handler_panics_total());
-        catalogue::worker::REAPER_SWEEPS.render_value(&mut s, self.reaper_sweeps_total());
-        catalogue::worker::REAPER_SWEEP_PANICS
-            .render_value(&mut s, self.reaper_sweep_panics_total());
-        catalogue::worker::REPLICA_REAP_PANICS
-            .render_value(&mut s, self.replica_reap_panics_total());
         catalogue::worker::STORE_POISONED_LOCK_RECOVERIES
             .render_value(&mut s, crate::store::poisoned_lock_recoveries());
-        catalogue::worker::REAPER_VERDICTS.render_value(&mut s, self.reaper_verdicts_total());
-        catalogue::worker::REAPER_DISCHARGED.render_value(&mut s, self.reaper_discharged_total());
-        // ── replication (peer-to-peer HA) — own namespace, distinct from the
-        // data-path counters above so an HA failure can be localised by layer. ──
-        catalogue::worker::REPL_FLUSH_PROPAGATED
-            .render_value(&mut s, self.repl_flush_propagated_total());
-        catalogue::worker::REPL_TAKEOVER_RESOLVED
-            .render_value(&mut s, self.repl_takeover_resolved_total());
-        catalogue::worker::REPL_TAKEOVER_HYDRATED
-            .render_value(&mut s, self.repl_takeover_hydrated_total());
-        catalogue::worker::REPL_REVERSE_FLUSH_REFUSED
-            .render_value(&mut s, self.repl_reverse_flush_refused_total());
-        catalogue::worker::REPL_TAKEOVER_REFUSED_TERMINATED
-            .render_value(&mut s, self.repl_takeover_refused_terminated_total());
-        catalogue::worker::REPL_RECLAIMED.render_value(&mut s, self.repl_reclaimed_total());
-        catalogue::worker::REPL_SELF_RELEASE.render_value(&mut s, self.repl_self_release_total());
-        catalogue::worker::REPL_TERMINAL_LOST.render_value(&mut s, self.repl_terminal_lost_total());
-        catalogue::worker::REPL_BOOTSTRAP_SEEDED
-            .render_value(&mut s, self.repl_bootstrap_seeded_total());
-        catalogue::worker::REPL_BOOTSTRAP_STALLED
-            .render_value(&mut s, self.repl_bootstrap_stalled_total());
 
         // Per-method SIP traffic, the repeats and give-ups, replication per
         // stream, the drains.

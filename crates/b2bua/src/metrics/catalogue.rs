@@ -1,12 +1,14 @@
-//! The worker's catalogued metric families. Here: the dispatch drop counts,
-//! the overload signal's inputs, the ingress brake's emergency
-//! bypass, and the new-call outcome every admission refusal is counted on;
-//! the other sources' families sit in the submodules. Each renderer writes
+//! The worker's catalogued metric families. Here: the dispatch's answered
+//! INVITE discards, the overload signal's inputs, the ingress brake's
+//! emergency bypass, and the new-call outcome every admission refusal is
+//! counted on; the dispatch drop counts are plain counters ([`plain`]), and
+//! the other sources' families sit in the other submodules. Each renderer writes
 //! its families from these entries; [`SECTIONS`] lists them all, in
 //! `/metrics` order.
 
 pub mod capacity;
 pub mod limiter;
+pub mod plain;
 pub mod udp;
 pub mod worker;
 
@@ -57,48 +59,6 @@ assert_exposition_order!(
 assert_exposition_order!(Class: Normal, Emergency, InDialog);
 
 // ── Per-call dispatcher ──
-
-pub const DISPATCH_CAPPED_REFUSALS: Family = Family::counter(
-    "b2bua_dispatch_capped_refusals_total",
-    Labels::None,
-    "events refused on a call past its lifetime cap: a BYE is answered 200 where refused, any other request but ACK 481 (a CANCEL matching no transaction statelessly); responses and Cancelled notices keep their room and are never refused; a new INVITE is counted on b2bua_new_calls_total instead",
-);
-
-pub const DISPATCH_CAPPED_REQUEST_ANSWERED: Family = Family::counter(
-    "b2bua_dispatch_capped_request_answered_total",
-    Labels::None,
-    "non-INVITE requests refused on a call past its lifetime cap and answered where refused: BYE 200, any other 481",
-);
-
-pub const DISPATCH_QUEUE_DROPS: Family = Family::counter(
-    "b2bua_dispatch_queue_drops_total",
-    Labels::None,
-    "events dropped: per-call queue full (a non-INVITE request's transaction is forgotten so its retransmission is admitted again; an in-dialog INVITE is answered with a Retry-After); a new INVITE is counted on b2bua_new_calls_total instead",
-);
-
-pub const DISPATCH_CAP_DROPS: Family = Family::counter(
-    "b2bua_dispatch_cap_drops_total",
-    Labels::None,
-    "events hitting the global call cap with no queue for their call: a non-INVITE request's transaction is forgotten so its retransmission is admitted again, an in-dialog INVITE is answered 500 with a Retry-After; a new INVITE is counted on b2bua_new_calls_total instead",
-);
-
-pub const DISPATCH_RELEASE_DISCARDS: Family = Family::counter(
-    "b2bua_dispatch_release_discards_total",
-    Labels::None,
-    "events offered behind a call's release with no new call waiting there, discarded unrun; a new INVITE, and every event after it, waits for the call's next queue instead",
-);
-
-pub const DISPATCH_SATURATION: Family = Family::counter(
-    "b2bua_dispatch_saturation_total",
-    Labels::None,
-    "handler bodies that waited for a permit of the shared pool (global handler concurrency)",
-);
-
-pub const DISPATCH_NEW_CALL_SHARE_WAITS: Family = Family::counter(
-    "b2bua_dispatch_new_call_share_waits_total",
-    Labels::None,
-    "new-call handler bodies that waited for a permit of the new-call share",
-);
 
 pub const DISPATCH_INVITE_DISCARD_ANSWERED: Family = Family::counter(
     "b2bua_dispatch_invite_discard_answered_total",
@@ -156,50 +116,17 @@ pub const NEW_CALL_REFUSED_COPIES: Family = Family::counter(
     "Copies answered with a refusal and never counted as a new call: a copy of a refused new INVITE answered that refusal again at the ingress brake or the transaction layer, or a copy of a call already here (live, or admitted and not born yet: same Call-ID, From-tag and CSeq) that the router answered 482 or discarded unrun.",
 );
 
-/// The core counter set, as `B2buaMetrics::prometheus_text` writes it.
-pub const WORKER: &[Family] = &[
-    worker::MESSAGE_CAP_LIFETIME_CROSSED,
-    DISPATCH_CAPPED_REFUSALS,
-    DISPATCH_CAPPED_REQUEST_ANSWERED,
-    worker::MESSAGE_CAP_TERMINATED,
-    DISPATCH_QUEUE_DROPS,
-    DISPATCH_CAP_DROPS,
-    DISPATCH_RELEASE_DISCARDS,
-    DISPATCH_SATURATION,
-    DISPATCH_NEW_CALL_SHARE_WAITS,
+/// The core counter set, as `B2buaMetrics::prometheus_text` writes it: the
+/// plain counters first, in row order, then the rest.
+pub const WORKER: &[Family] = &WORKER_FAMILIES;
+
+const WORKER_FAMILIES: [Family; plain::FAMILIES.len() + WORKER_REST.len()] =
+    concat(plain::FAMILIES, WORKER_REST);
+
+const WORKER_REST: &[Family] = &[
     worker::CALL_CREATIONS,
     worker::CALL_REMOVALS,
-    worker::HANDLER_TIMEOUTS,
-    worker::FORCE_PURGE,
-    worker::FAST_REJECT_TERMINATING,
-    worker::CDR_WRITTEN,
-    worker::CDR_DROPPED,
-    worker::DECISION_DROPPED_CANCELLED,
-    worker::TERMINATION_UNRECORDED,
-    worker::SECOND_FINAL_REFUSED,
-    worker::PROVISIONAL_AFTER_FINAL_REFUSED,
-    worker::GOING_AWAY_ABSORBED,
-    worker::LATE_PRACK_ANSWERED,
-    worker::OTHER_INCARNATION_DROPPED,
-    worker::STORE_FAULT_REJECTED,
-    worker::STORE_FAULT_AUDIT_SKIPPED,
-    worker::HANDLER_PANICS,
-    worker::REAPER_SWEEPS,
-    worker::REAPER_SWEEP_PANICS,
-    worker::REPLICA_REAP_PANICS,
     worker::STORE_POISONED_LOCK_RECOVERIES,
-    worker::REAPER_VERDICTS,
-    worker::REAPER_DISCHARGED,
-    worker::REPL_FLUSH_PROPAGATED,
-    worker::REPL_TAKEOVER_RESOLVED,
-    worker::REPL_TAKEOVER_HYDRATED,
-    worker::REPL_REVERSE_FLUSH_REFUSED,
-    worker::REPL_TAKEOVER_REFUSED_TERMINATED,
-    worker::REPL_RECLAIMED,
-    worker::REPL_SELF_RELEASE,
-    worker::REPL_TERMINAL_LOST,
-    worker::REPL_BOOTSTRAP_SEEDED,
-    worker::REPL_BOOTSTRAP_STALLED,
     worker::REQUESTS,
     worker::REQUESTS_OVERFLOW,
     worker::RESPONSES,
@@ -282,6 +209,17 @@ pub const WORKER: &[Family] = &[
     worker::PEER_FAILURES_OVERFLOW,
 ];
 
+/// `a` then `b`.
+const fn concat<const N: usize>(a: &[Family], b: &[Family]) -> [Family; N] {
+    let mut out = [a[0]; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = if i < a.len() { a[i] } else { b[i - a.len()] };
+        i += 1;
+    }
+    out
+}
+
 /// The transaction layer, as the worker renders it.
 pub const TXN: &[Family] = &[
     txn::ACTIVE_TRANSACTIONS,
@@ -334,13 +272,13 @@ pub const NEW_CALL_OUTCOMES: &[Family] = &[NEW_CALLS, NEW_CALL_REFUSED_COPIES];
 /// bypass, the overload signal and every new call's outcome — what a new
 /// INVITE's admission or refusal can move.
 pub const ADMISSION: &[Family] = &[
-    DISPATCH_CAPPED_REFUSALS,
-    DISPATCH_CAPPED_REQUEST_ANSWERED,
-    DISPATCH_QUEUE_DROPS,
-    DISPATCH_CAP_DROPS,
-    DISPATCH_RELEASE_DISCARDS,
-    DISPATCH_SATURATION,
-    DISPATCH_NEW_CALL_SHARE_WAITS,
+    plain::DISPATCH_CAPPED_REFUSALS,
+    plain::DISPATCH_CAPPED_REQUEST_ANSWERED,
+    plain::DISPATCH_QUEUE_DROPS,
+    plain::DISPATCH_CAP_DROPS,
+    plain::DISPATCH_RELEASE_DISCARDS,
+    plain::DISPATCH_SATURATION,
+    plain::DISPATCH_NEW_CALL_SHARE_WAITS,
     DISPATCH_INVITE_DISCARD_ANSWERED,
     UDP_INGRESS_BRAKE_EMERGENCY_BYPASSED,
     OVERLOAD_TOKEN_BUCKET_LEVEL,

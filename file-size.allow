@@ -31,9 +31,8 @@ crates/b2bua/src/decision/test_adapter.rs 819
 crates/b2bua/src/initial_invite.rs 583
 crates/b2bua/src/limiter/refresh_batch.rs 520
 crates/b2bua/src/limiter/release_queue.rs 513
-crates/b2bua/src/metrics/catalogue/worker.rs 648
 crates/b2bua/src/metrics/limiter.rs 554
-crates/b2bua/src/metrics.rs 1298
+crates/b2bua/src/metrics.rs 1060
 crates/b2bua/src/repl/changelog.rs 640
 crates/b2bua/src/repl/puller.rs 1154
 crates/b2bua/src/repl/real_transport_tests.rs 1230

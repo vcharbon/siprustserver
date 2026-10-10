@@ -1,6 +1,6 @@
-//! The core counter set's families: dispatch and call lifecycle, router
-//! and reaper, replication, the per-method SIP traffic, the drain, the
-//! store and call-census gauges, the per-peer failures.
+//! The core counter set's families beyond its plain counters
+//! ([`super::plain`]): call lifecycle, the per-method SIP traffic, the drain,
+//! the store and call-census gauges, the per-peer failures.
 
 use call::model::ObligationKind;
 use metric_catalogue::{assert_exposition_order, label_values, Dim, Family, Labels};
@@ -91,18 +91,6 @@ assert_exposition_order!(
 /// The upper bounds (seconds) of the `b2bua_drain_seconds` buckets, ascending.
 pub const DRAIN_BUCKETS: [f64; 8] = [0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0];
 
-pub const MESSAGE_CAP_LIFETIME_CROSSED: Family = Family::counter(
-    "b2bua_message_cap_lifetime_crossed_total",
-    Labels::None,
-    "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch until the call's release is queued; each is sent one verdict that ends it",
-);
-
-pub const MESSAGE_CAP_TERMINATED: Family = Family::counter(
-    "b2bua_message_cap_terminated_total",
-    Labels::None,
-    "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)",
-);
-
 pub const CALL_CREATIONS: Family = Family::counter(
     "b2bua_call_creations_total",
     Labels::None,
@@ -115,184 +103,10 @@ pub const CALL_REMOVALS: Family = Family::counter(
     "B2BUA calls this worker stopped serving (one per call_ref teardown). Matched 1:1 with creations.",
 );
 
-pub const HANDLER_TIMEOUTS: Family = Family::counter(
-    "b2bua_handler_timeouts_total",
-    Labels::None,
-    "handler executions that timed out",
-);
-
-pub const FORCE_PURGE: Family =
-    Family::counter("b2bua_force_purge_total", Labels::None, "calls force-purged (loop guard)");
-
-pub const FAST_REJECT_TERMINATING: Family = Family::counter(
-    "b2bua_fast_reject_terminating_total",
-    Labels::None,
-    "requests fast-rejected on a terminating call",
-);
-
-pub const CDR_WRITTEN: Family = Family::counter(
-    "b2bua_cdr_written_total",
-    Labels::None,
-    "CDRs the sink delivered (for a broker sink: acked by the broker)",
-);
-
-pub const CDR_DROPPED: Family = Family::counter(
-    "b2bua_cdr_dropped_total",
-    Labels::None,
-    "CDRs dropped (submit-queue overflow, or a record the sink did not deliver)",
-);
-
-pub const DECISION_DROPPED_CANCELLED: Family = Family::counter(
-    "b2bua_decision_dropped_cancelled_total",
-    Labels::None,
-    "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)",
-);
-
-pub const TERMINATION_UNRECORDED: Family = Family::counter(
-    "b2bua_termination_unrecorded_total",
-    Labels::None,
-    "calls that reached Terminated with no termination record (a path to terminal states no cause) — expected 0",
-);
-
-pub const SECOND_FINAL_REFUSED: Family = Family::counter(
-    "b2bua_second_final_refused_total",
-    Labels::None,
-    "finals toward the a-leg's initial INVITE refused because that transaction already carries one (RFC 3261 §17.2.1); a rule made progress on an answered or going-away call — expected 0",
-);
-
-pub const PROVISIONAL_AFTER_FINAL_REFUSED: Family = Family::counter(
-    "b2bua_provisional_after_final_refused_total",
-    Labels::None,
-    "provisionals toward the a-leg's initial INVITE refused because that transaction already sent its final (RFC 3261 §13.3.1.1 / §17.2.1); a rule showed a ringing leg to an answered caller — expected 0",
-);
-
-pub const LATE_PRACK_ANSWERED: Family = Family::counter(
-    "b2bua_late_prack_answered_total",
-    Labels::None,
-    "PRACKs that reached this node after their call's release and named a reliable provisional it showed, answered 200 (RFC 3262 §3); the caller's PRACK crossing the final",
-);
-
-pub const GOING_AWAY_ABSORBED: Family = Family::counter(
-    "b2bua_going_away_absorbed_total",
-    Labels::None,
-    "asynchronous triggers (timer fire / transaction timeout / internal-event fold) absorbed on a Terminating or Terminated call because the rule they matched is not a teardown rule; the race between a call's own clocks and its teardown, not a fault",
-);
-
-pub const OTHER_INCARNATION_DROPPED: Family = Family::counter(
-    "b2bua_other_incarnation_dropped_total",
-    Labels::None,
-    "events of an earlier call on the same callRef (timer fire / transaction timeout / callout result / late message) dropped before the live call's rules read them; the race between a call's end and a retry born on its callRef, not a fault",
-);
-
-pub const STORE_FAULT_REJECTED: Family = Family::counter(
-    "b2bua_store_fault_rejected_total",
-    Labels::None,
-    "live store lookups that failed CLOSED (a 500 final to the initial INVITE or in-dialog request; a faulted ACK is dropped un-answered; 0 unless a fault is armed)",
-);
-
-pub const STORE_FAULT_AUDIT_SKIPPED: Family = Family::counter(
-    "b2bua_store_fault_audit_skipped_total",
-    Labels::None,
-    "keepalive/audit cycles skipped FAIL-OPEN on a store fault (call kept up, timer re-armed; 0 unless a fault is armed)",
-);
-
-pub const HANDLER_PANICS: Family = Family::counter(
-    "b2bua_handler_panics_total",
-    Labels::None,
-    "handler bodies that panicked (dispatcher-observed; each becomes a reaper strike instead of a silent call leak)",
-);
-
-pub const REAPER_SWEEPS: Family =
-    Family::counter("b2bua_reaper_sweeps_total", Labels::None, "reaper sweep ticks executed");
-
-pub const REAPER_SWEEP_PANICS: Family = Family::counter(
-    "b2bua_reaper_sweep_panics_total",
-    Labels::None,
-    "reaper sweep steps that panicked; the next pass runs one interval later — expected 0",
-);
-
-pub const REPLICA_REAP_PANICS: Family = Family::counter(
-    "b2bua_replica_reap_panics_total",
-    Labels::None,
-    "replica reap steps that panicked; the next pass runs one interval later — expected 0",
-);
-
 pub const STORE_POISONED_LOCK_RECOVERIES: Family = Family::counter(
     "b2bua_store_poisoned_lock_recoveries_total",
     Labels::None,
     "store locks a panic poisoned, taken as they stood and cleared (process-wide) — expected 0",
-);
-
-pub const REAPER_VERDICTS: Family = Family::counter(
-    "b2bua_reaper_verdicts_total",
-    Labels::None,
-    "reaper verdicts injected (stale + fatal-error + discharge synthetic events)",
-);
-
-pub const REAPER_DISCHARGED: Family = Family::counter(
-    "b2bua_reaper_discharged_total",
-    Labels::None,
-    "strike-2 discharges: the rules path itself failed for a call and the snapshot was forced terminal directly (ALARM: expected ~0)",
-);
-
-pub const REPL_FLUSH_PROPAGATED: Family = Family::counter(
-    "b2bua_repl_flush_propagated_total",
-    Labels::None,
-    "primary flushes that propagated to a backup peer (topology.bak set)",
-);
-
-pub const REPL_TAKEOVER_RESOLVED: Family = Family::counter(
-    "b2bua_repl_takeover_resolved_total",
-    Labels::None,
-    "in-dialog requests whose callRef was recovered from the replica index (acting-backup)",
-);
-
-pub const REPL_TAKEOVER_HYDRATED: Family = Family::counter(
-    "b2bua_repl_takeover_hydrated_total",
-    Labels::None,
-    "calls hydrated from a backup replica to serve a failed-over request",
-);
-
-pub const REPL_REVERSE_FLUSH_REFUSED: Family = Family::counter(
-    "b2bua_repl_reverse_flush_refused_total",
-    Labels::None,
-    "a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold (ADR-0014): the primary kept its own copy",
-);
-
-pub const REPL_TAKEOVER_REFUSED_TERMINATED: Family = Family::counter(
-    "b2bua_repl_takeover_refused_terminated_total",
-    Labels::None,
-    "backup-replica lookups refused because the body is Terminated (a released takeover copy): the message falls to the orphan 481/drop instead of re-serving a call that already ended",
-);
-
-pub const REPL_RECLAIMED: Family = Family::counter(
-    "b2bua_repl_reclaimed_total",
-    Labels::None,
-    "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)",
-);
-
-pub const REPL_SELF_RELEASE: Family = Family::counter(
-    "b2bua_repl_self_release_total",
-    Labels::None,
-    "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)",
-);
-
-pub const REPL_TERMINAL_LOST: Family = Family::counter(
-    "b2bua_repl_terminal_lost_total",
-    Labels::None,
-    "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)",
-);
-
-pub const REPL_BOOTSTRAP_SEEDED: Family = Family::counter(
-    "b2bua_repl_bootstrap_seeded_total",
-    Labels::None,
-    "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)",
-);
-
-pub const REPL_BOOTSTRAP_STALLED: Family = Family::counter(
-    "b2bua_repl_bootstrap_stalled_total",
-    Labels::None,
-    "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)",
 );
 
 pub const REQUESTS: Family = Family::counter(

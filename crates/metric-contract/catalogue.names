@@ -7,8 +7,6 @@ b2bua-runner b2bua_dispatch_cap_drops_total counter fixed {}
 b2bua-runner b2bua_dispatch_release_discards_total counter fixed {}
 b2bua-runner b2bua_dispatch_saturation_total counter fixed {}
 b2bua-runner b2bua_dispatch_new_call_share_waits_total counter fixed {}
-b2bua-runner b2bua_call_creations_total counter fixed {}
-b2bua-runner b2bua_call_removals_total counter fixed {}
 b2bua-runner b2bua_handler_timeouts_total counter fixed {}
 b2bua-runner b2bua_force_purge_total counter fixed {}
 b2bua-runner b2bua_fast_reject_terminating_total counter fixed {}
@@ -27,7 +25,6 @@ b2bua-runner b2bua_handler_panics_total counter fixed {}
 b2bua-runner b2bua_reaper_sweeps_total counter fixed {}
 b2bua-runner b2bua_reaper_sweep_panics_total counter fixed {}
 b2bua-runner b2bua_replica_reap_panics_total counter fixed {}
-b2bua-runner b2bua_store_poisoned_lock_recoveries_total counter fixed {}
 b2bua-runner b2bua_reaper_verdicts_total counter fixed {}
 b2bua-runner b2bua_reaper_discharged_total counter fixed {}
 b2bua-runner b2bua_repl_flush_propagated_total counter fixed {}
@@ -40,6 +37,9 @@ b2bua-runner b2bua_repl_self_release_total counter fixed {}
 b2bua-runner b2bua_repl_terminal_lost_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_seeded_total counter fixed {}
 b2bua-runner b2bua_repl_bootstrap_stalled_total counter fixed {}
+b2bua-runner b2bua_call_creations_total counter fixed {}
+b2bua-runner b2bua_call_removals_total counter fixed {}
+b2bua-runner b2bua_store_poisoned_lock_recoveries_total counter fixed {}
 b2bua-runner b2bua_requests_total counter capped:256 {method}
 b2bua-runner b2bua_requests_overflow_total counter fixed {}
 b2bua-runner b2bua_responses_total counter capped:256 {method,code}
