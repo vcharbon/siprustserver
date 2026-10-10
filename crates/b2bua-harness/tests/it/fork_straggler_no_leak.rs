@@ -337,6 +337,47 @@ async fn the_straggler_bye_crossing_its_release_is_answered_200() {
     let _report = h.finish().await;
 }
 
+/// While the release BYE awaits its final the straggler's dialog still
+/// exists (RFC 3261 §15.1.2): an INFO it sends there is answered 200 and
+/// reaches no one. Once the release took its final the dialog is over, and
+/// the straggler's late BYE draws 481; the winning call stays up throughout.
+#[tokio::test(start_paused = true)]
+async fn a_straggler_request_during_its_release_is_answered_and_after_it_refused() {
+    let (h, alice, bob, b2bua, mut dialog, mut uas) = bridged(
+        "b2bua-fork-straggler-request-during-release",
+        (6091, 6092, 6093),
+        Some(OFFER),
+        ANSWER_WINNER,
+        None,
+    )
+    .await;
+    uas.respond(200, "OK").with_to_tag(STRAGGLER).with_sdp(ANSWER_STRAGGLER).await;
+    bob.receive("ACK").await;
+    let mut release = bob.receive("BYE").await;
+    uas.adopt_to_tag(STRAGGLER);
+    let mut straggler = uas.dialog();
+    straggler.send_request(InDialogMethod::Info).send().await.expect(200).await;
+    release.respond(200, "OK").await;
+    h.advance(Duration::from_millis(200)).await;
+    h.allow_violation(
+        "mid-dialog-tags",
+        "the BYE on a dialog whose BYE completed is the deviation under test (RFC 3261 §15.1.2)",
+    );
+    straggler.bye().await.expect(481).await;
+    h.advance(Duration::from_millis(200)).await;
+    assert_eq!(alice.drain().await, 0, "nothing reached alice: her call is untouched");
+    assert_eq!(b2bua.active_calls(), 1, "the bridged call survives the straggler");
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    alice.drain().await;
+    bob.drain().await;
+    let _report = h.finish().await;
+}
+
 /// A delayed offer (RFC 3261 §13.2.1): the b-leg INVITE carried none, so the
 /// straggler's 2xx carries an offer, and the ACK MUST carry the answer
 /// (§13.2.2.4). The release answers it rejecting every stream — port 0, the

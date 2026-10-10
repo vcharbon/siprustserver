@@ -1,8 +1,8 @@
 //! Every in-dialog request is answered by what its dialog is (RFC 3261 §12.2.2,
 //! §15): a To-tag and From-tag naming no dialog the B2BUA holds on the leg the
-//! request arrived on draw 481, whatever the leg; a dialog this stack is ending
-//! takes the BYE that crosses its own and refuses the rest; a dialog whose BYE
-//! completed takes nothing more, not even a BYE.
+//! request arrived on draw 481, whatever the leg; a dialog whose BYE
+//! completed takes nothing more, not even a BYE. A dialog this stack is
+//! ending answers in itself (`ending_dialog`).
 //!
 //! A request whose dialog exists but whose relay has nowhere to go yet is
 //! answered too, never left to its sender's Timer F: a peer leg with no dialog
@@ -137,31 +137,6 @@ async fn an_early_callee_request_under_an_unknown_from_tag_is_refused_481() {
     s.finish().await;
 }
 
-/// This stack's BYE leaves the caller's dialog ending (RFC 3261 §15.1.1): her
-/// INFO crossing it is refused 481, her own BYE crossing it is answered 200,
-/// and her 200 to this stack's BYE ends the dialog.
-#[tokio::test(start_paused = true)]
-async fn an_ending_dialog_refuses_an_info_and_takes_the_crossing_bye() {
-    let s = scene("dialog-gate-ending-dialog", route_to_bob).await;
-    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
-    let mut uas = s.bob.receive("INVITE").await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut alice_dialog = call.ack().await;
-    s.bob.receive("ACK").await;
-    let mut bob_dialog = uas.dialog();
-
-    let mut b_bye = bob_dialog.bye().await;
-    b_bye.expect(200).await;
-    let mut ours = s.alice.receive("BYE").await;
-
-    alice_dialog.send_request(InDialogMethod::Info).send().await.expect(481).await;
-    let mut a_bye = alice_dialog.bye().await;
-    a_bye.expect(200).await;
-    ours.respond(200, "OK").await;
-    s.finish().await;
-}
-
 /// Between two attempts of a reroute the caller's early dialog fronts a
 /// callee dialog the rejection ended and the next attempt has none yet: her
 /// INFO is answered 500 with `Retry-After` (RFC 3261 §14.2), her UPDATE 491
@@ -224,11 +199,12 @@ async fn a_caller_request_between_reroute_attempts_is_told_to_retry() {
 }
 
 /// A fork the B2BUA gave up — its no-answer deadline passed and it was
-/// cancelled while the call reroutes — keeps no early dialog: a request its
-/// callee sends there before the INVITE's 487 draws 481 (RFC 3261 §12.2.2)
-/// and reaches no one; the reroute answers the caller.
+/// cancelled while the call reroutes — keeps its early dialog until the
+/// INVITE's final (RFC 3261 §9.1, §15.1.2): an INFO its callee sends there
+/// is answered 200 and an UPDATE 487, neither reaching anyone; once the 487
+/// ended the dialog an INFO draws 481. The reroute answers the caller.
 #[tokio::test(start_paused = true)]
-async fn a_request_on_the_early_dialog_of_a_fork_given_up_is_refused_481() {
+async fn a_fork_being_cancelled_answers_its_early_dialog_until_the_invites_final() {
     let h = Harness::with_transit_delay("dialog-gate-fork-given-up", 1);
     let alice = h.agent_auto("alice").await;
     let bob1 = h.agent_auto("bob1").await;
@@ -263,10 +239,15 @@ async fn a_request_on_the_early_dialog_of_a_fork_given_up_is_refused_481() {
     bob1.receive("CANCEL").await.respond(200, "OK").await;
 
     let mut early = uas1.dialog();
-    early.send_request(InDialogMethod::Info).send().await.expect(481).await;
+    early.send_request(InDialogMethod::Info).send().await.expect(200).await;
+    early.send_request(InDialogMethod::Update).send().await.expect(487).await;
     uas1.respond(487, "Request Terminated").await;
     bob1.receive("ACK").await;
-    assert!(alice.try_receive_tolerating("INFO", &[]).await.is_none(), "nothing crossed");
+    allow_a_request_past_the_rejection(&h);
+    early.send_request(InDialogMethod::Info).send().await.expect(481).await;
+    h.advance(Duration::from_millis(100)).await;
+    assert!(alice.try_receive_tolerating("INFO", &[]).await.is_none(), "no INFO crossed");
+    assert!(alice.try_receive_tolerating("UPDATE", &[]).await.is_none(), "no UPDATE crossed");
 
     let mut uas2 = bob2.receive("INVITE").await;
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
@@ -283,6 +264,15 @@ async fn a_request_on_the_early_dialog_of_a_fork_given_up_is_refused_481() {
     bob2.drain().await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
+}
+
+/// A request on an early dialog its INVITE's non-2xx final ended is the
+/// deviation `mid-dialog-tags` judges (RFC 3261 §12.1).
+fn allow_a_request_past_the_rejection(h: &Harness) {
+    h.allow_violation(
+        "mid-dialog-tags",
+        "the INFO on an early dialog the 487 ended is the deviation under test (RFC 3261 §12.1)",
+    );
 }
 
 /// The caller's early dialog is a service's own: the callee's provisional

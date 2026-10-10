@@ -54,6 +54,7 @@ mod discarded_request_readmitted;
 mod duplicate_ack_absorbed;
 mod early_dialog_bye;
 mod ended_leg_txn_timeout;
+mod ending_dialog;
 mod failure;
 mod failure_consult_bounds;
 mod failure_dump;
