@@ -1,9 +1,11 @@
 //! The run ladder: a compiled plan driven over a real B2BUA on a paused clock,
 //! producing a complete run bundle.
 //!
-//! One rung per shape, simplest first. Each rung proves the same three things —
-//! the flow ran, the run SETTLED, and the bundle on disk holds every datagram —
-//! and adds one construct.
+//! This module holds the fixtures every rung shares: the demo lane and its URI
+//! composition, the scenes, the replay entry points, and the readers and
+//! assertions over the bundle on disk. Each child module is one scenario family,
+//! and each of its rungs proves the flow ran, the run SETTLED, and the bundle
+//! holds every datagram.
 
 mod background;
 mod bodies;
