@@ -90,7 +90,7 @@ fn violated(f: &Finding) -> &Evidence {
     }
 }
 
-/// The violation the ticket names: a 2xx whose repeat was re-composed — the
+/// The violation: a 2xx whose repeat was re-composed — the
 /// same headers, two of them swapped — is not the same response.
 #[test]
 fn a_re_composed_2xx_rung_is_violated() {
@@ -518,9 +518,6 @@ const OWN_COOKIE_NONE: &str = "Record-Route: <sip:10.0.0.9:5080;w_pri=b1;w_bak=\
 const OWN_OUTBOUND: &str = "Record-Route: <sip:10.0.0.9:5080;outbound;lr>";
 const FOREIGN: &str = "Record-Route: <sip:10.0.0.7:5060;lr>";
 
-/// The proxy's own §16.6 stamp is the one row a rung may re-render: the
-/// backup named in the cookie changed between two Timer-A copies of one
-/// INVITE, and nothing else did.
 #[test]
 fn a_proxys_own_record_route_row_may_differ_between_rungs() {
     let first = forwarded_invite(&[OWN_OUTBOUND, OWN_COOKIE_B2, FOREIGN]);

@@ -538,8 +538,7 @@ impl Obligation for ReliableNeedsClientOptIn {
 ///
 /// The occasion is ONE provisional carrying `Require: 100rel` that the UAS sent
 /// to a non-INVITE request. A request this vantage never carried leaves it
-/// undecidable. Charges the UAS. The serde token is a persisted identity
-/// (census, replay verdict registry) and does not track the rule's reading.
+/// undecidable. Charges the UAS.
 pub struct NoReliable1xxOnInDialog;
 
 impl Obligation for NoReliable1xxOnInDialog {
@@ -1175,7 +1174,6 @@ impl Answer<'_> {
         self.answers("INVITE") && (101..200).contains(&self.status) && self.requires_100rel
     }
 
-    /// It answers a transaction of `method`.
     fn answers(&self, method: &str) -> bool {
         self.method.eq_ignore_ascii_case(method)
     }
@@ -1491,7 +1489,6 @@ impl<'a> Reading<'a> {
         self.invite.keys().filter(|(ep, _)| *ep == endpoint).map(|(_, cseq)| *cseq).collect()
     }
 
-    /// Whether `r` was PRACKed before `ts_us`.
     fn pracked_before(&self, r: &Reliable<'a>, dialog: &'a str, ts_us: u64) -> bool {
         self.acked_at.get(&(r.cseq, dialog, r.rseq)).is_some_and(|at| *at < ts_us)
     }

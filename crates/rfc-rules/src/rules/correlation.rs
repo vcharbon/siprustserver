@@ -709,14 +709,6 @@ const DIALOG_INITIATING_METHODS: &[&str] =
 /// CANCEL's tag semantics belonging to the §9.1 rules that pair it with its
 /// INVITE.
 ///
-/// **"First sighting" is what a vantage can see of "outside a dialog", and the
-/// two part company on a vantage that JOINS one.** An endpoint that adopts a
-/// dialog it never watched open — an HA worker reclaiming a call across a
-/// reboot, a capture started mid-call — puts an in-dialog request on a Call-ID
-/// it has no history of, and nothing in the stream tells that apart from a
-/// genuine out-of-dialog request. Consumer policy scopes such a lane out; the
-/// rule states what its vantage proves.
-///
 /// Every fact is a wire-model one, so the occasion is always DECIDED. Charges
 /// the endpoint that sent the request.
 pub struct NoToTagOnInitialRequest;

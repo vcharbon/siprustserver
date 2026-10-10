@@ -460,9 +460,8 @@ impl Obligation for FromTagPresence {
 /// URI.
 ///
 /// The occasion is one fresh request the endpoint sent. Only a row carrying a
-/// B2BUA leg marker (`callRef=` / `leg=`) is judged — a genuine proxy's own
-/// Record-Route is its right, and consumer policy narrows the rule to lanes that
-/// declared themselves proxies. Charges the endpoint that inserted the row.
+/// B2BUA leg marker (`callRef=` / `leg=`) is judged. Charges the endpoint that
+/// inserted the row.
 pub struct NoRecordRouteFromUa;
 
 impl Obligation for NoRecordRouteFromUa {

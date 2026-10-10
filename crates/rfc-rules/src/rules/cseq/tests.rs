@@ -148,7 +148,7 @@ fn the_repeat_mark_changes_no_verdict() {
     assert!(marked.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{marked:?}");
 }
 
-/// The production bug: an OPTIONS keepalive at CSeq 2, then a BYE that
+/// An OPTIONS keepalive at CSeq 2, then a BYE that
 /// reuses CSeq 2 on a NEW branch — a new transaction whose dialog CSeq
 /// never advanced, which §17.2.3 cannot fold away.
 #[test]

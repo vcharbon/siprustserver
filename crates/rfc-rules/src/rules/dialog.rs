@@ -137,12 +137,7 @@ impl Obligation for MidDialogUri {
 /// ACK and CANCEL are §17/§9.1 hop-by-hop and not governed by the set.
 ///
 /// **The loose comparison weighs the routing-significant `host:port`, not the
-/// whole URI.** A record-routing proxy legitimately rewrites Record-Route URI
-/// PARAMETERS per direction (a signed stateful cookie toward one leg, a bare
-/// `;outbound` toward the other), so demanding verbatim parameter equality
-/// would false-fire on every stateful proxy. What §12.2.1.1 asks — the set
-/// reproduced in order to the same hops, with none dropped, reordered or
-/// re-aimed — is exactly what `host:port` in sequence captures.
+/// whole URI.**
 pub struct MidDialogRoute;
 
 impl Obligation for MidDialogRoute {

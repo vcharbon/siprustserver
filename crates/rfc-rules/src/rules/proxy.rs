@@ -113,10 +113,8 @@ pub const PROXY_100_GRACE_US: u64 = 200_000;
 /// endpoint; a 100 on the transaction discharges it, and so does any final
 /// within [`PROXY_100_GRACE_US`] of the INVITE.
 ///
-/// **Advisory and proxy-scoped by consumer policy.** §16.7 binds proxies — a
-/// UAS answering an INVITE is governed by §8.2.6 — and under a paused test clock
-/// a fixture may advance far past the grace in VIRTUAL time before answering,
-/// which is no real-world latency at all.
+/// **Proxy-scoped by consumer policy.** §16.7 binds proxies — a UAS answering
+/// an INVITE is governed by §8.2.6.
 pub struct Proxy100WithinGrace;
 
 impl Obligation for Proxy100WithinGrace {
@@ -236,10 +234,6 @@ struct Taken<'a> {
 /// that same final status on the same Call-ID + CSeq, it did resolve a target
 /// and the target said no — even when the forwarded leg itself rode a different
 /// vantage.
-///
-/// A B2BUA worker legitimately rejects 403/481/491 without forwarding when the
-/// backend refuses the call, which is why the live consumer takes this rule as
-/// advisory and scopes it to declared proxies.
 pub struct NoTarget404;
 
 impl Obligation for NoTarget404 {
@@ -561,9 +555,7 @@ impl<'a> Reading<'a> {
 /// carried it (the received top-Via branch in the sent Via stack): the swap
 /// ran when the sent Request-URI is the one that request owed — the first
 /// strict Route left once §16.4 processed it.
-/// Otherwise a topmost strict route either means the swap never ran, or that
-/// the next hop is itself a strict-route target that survived it; both are
-/// worth surfacing, and the sender is the party that would have run the swap.
+/// Otherwise the sender, the party that would have run the swap, is charged.
 ///
 /// The occasion is one fresh request the endpoint SENT that states a Route set
 /// at all — a request with none is not routed through anything.

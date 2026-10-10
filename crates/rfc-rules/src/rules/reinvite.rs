@@ -461,12 +461,9 @@ impl Obligation for NoReInviteWhileInviteInProgress {
 /// timeout, not a §14.1 prior-state breach. Charges the sender; any final on
 /// the branch discharges it.
 ///
-/// **"Absent another cause."** An independent teardown — a max-duration timer,
-/// a keepalive give-up, an ACK watchdog, a peer BYE — abandons any in-flight
-/// re-INVITE as a SIDE EFFECT, and is itself signalled by a BYE on the dialog,
-/// which is a legitimate §15 teardown for a different reason. So a BYE anywhere
-/// on that call at that endpoint discharges the occasion; the violation is the
-/// re-INVITE that died on a dialog nothing ever ended.
+/// **"Absent another cause."** A BYE anywhere on that call at that endpoint
+/// discharges the occasion; the violation is the re-INVITE that died on a
+/// dialog nothing ever ended.
 ///
 /// **The silent-destroy shape has no BYE to key on**, which is exactly why this
 /// rule keys on the abandoned transaction instead: the buggy path emits nothing

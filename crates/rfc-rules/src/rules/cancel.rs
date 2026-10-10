@@ -145,7 +145,6 @@ impl<'a> Reading<'a> {
         seen
     }
 
-    /// Absorb one message.
     fn absorb(&mut self, mi: usize, msg: &'a Msg) {
         if msg.repeat {
             return;
@@ -193,10 +192,6 @@ impl<'a> Reading<'a> {
 /// One INVITE transaction as ONE endpoint saw it: the call it rides, the
 /// top-Via branch that names it, and which endpoint is its UAS side. Spelled
 /// out as a struct so the three parts can never swap places.
-///
-/// §17.2.3 also matches the top Via's sent-by. The wire model carries none, and
-/// it would only separate two senders colliding on one branch within one call
-/// at one UAS, so the branch stands alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TxnKey<'a> {
     /// The endpoint judged: the UAS that TOOK the INVITE and emits its answers.
@@ -358,12 +353,6 @@ pub const CANCEL_GRACE_FLOOR_US: u64 = 900_000;
 /// it, so a provisional that confirmed the dialog and the CANCEL that followed
 /// it are always read together: order in the view is the whole of the "before"
 /// test.
-///
-/// Known blind spots of the timing test, tolerable because the finding is
-/// advisory and the layer tests carry the real regression protection: a
-/// teardown flush inside the grace window sends under the floor on correct
-/// behaviour and is noted; and an endpoint with no hold machinery at all that
-/// happens to CANCEL past the floor is accepted without a finding.
 ///
 /// Charges the CANCEL's sender.
 pub struct CancelAfter1xx;
@@ -615,7 +604,6 @@ struct SentAck<'a> {
 }
 
 impl<'a> UacReading<'a> {
-    /// Whether `emitter` sent an INVITE on `branch` of `call_id`.
     fn sent_invite_on(&self, emitter: &str, call_id: &str, branch: &str) -> bool {
         self.txns
             .get(&UacKey { emitter, call_id, branch })

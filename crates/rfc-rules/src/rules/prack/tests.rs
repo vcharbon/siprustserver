@@ -1229,8 +1229,8 @@ fn a_bodiless_prack_answering_a_1xx_offer_charges_its_sender() {
     );
 }
 
-/// The extension is invisible to the obligation half: the five rules ported
-/// before it decide the same shape the same way, whether or not the new
+/// The server-transaction half is invisible to the obligation half: the
+/// obligation rules decide the same shape the same way, whether or not the
 /// server-transaction facts are collected alongside.
 #[test]
 fn the_server_transaction_half_changes_no_obligation_verdict() {

@@ -536,8 +536,7 @@ fn two_forks_each_owe_their_own_dialog_an_answer() {
 
 // ---- second-answer-repeats-the-first --------------------------------
 
-/// The same media set as [`AUDIO_ANSWER`] at another address and port —
-/// the shape 11 of the corpus's 59 two-dialog reroutes differ by.
+/// The same media set as [`AUDIO_ANSWER`] at another address and port.
 const MOVED_ANSWER: &str = "v=0\r\n\
 o=bob 117241 0 IN IP4 10.0.0.2\r\n\
 s=-\r\n\
@@ -545,8 +544,7 @@ c=IN IP4 10.0.0.3\r\n\
 t=0 0\r\n\
 m=audio 41000 RTP/AVP 8\r\n";
 
-/// A media set [`AUDIO_ANSWER`]'s is not — the shape the other 48 differ
-/// by.
+/// A media set [`AUDIO_ANSWER`]'s is not.
 const WIDER_ANSWER: &str = "v=0\r\n\
 o=bob 117241 0 IN IP4 10.0.0.2\r\n\
 s=-\r\n\

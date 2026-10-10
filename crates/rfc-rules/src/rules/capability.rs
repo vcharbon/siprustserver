@@ -359,9 +359,6 @@ impl Obligation for UnsupportedExtension421 {
 /// carried — the request is required, so a 2xx whose OPTIONS this vantage never
 /// saw settles nothing and is not an occasion. Charges the sender. Any ONE of
 /// the three headers meets it.
-///
-/// A transport-health OPTIONS probe answers deliberately bare, which is why the
-/// live consumer takes this rule as advisory rather than gating.
 pub struct OptionsResponseEchoes;
 
 impl Obligation for OptionsResponseEchoes {
