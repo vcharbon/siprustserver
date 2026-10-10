@@ -1,4 +1,4 @@
-//! Reroute and no-answer hunting, and how this lane arms a ring timer.
+//! Retargeting after a failure and no-answer hunting, and how this lane arms a ring timer.
 
 use super::*;
 
