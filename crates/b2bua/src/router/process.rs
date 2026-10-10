@@ -207,7 +207,14 @@ pub(super) async fn process(
     record_keepalive_timeout_peer(ctx, &event, &result.call);
 
     let turn = super::turn_label::EventSummary { call_ref: &call_ref, event: &event };
-    process_result(ctx, &call_ref, result, now_ms, &turn).await;
+    let received = match &event {
+        CallEvent::Sip { message, .. } => match message.as_ref() {
+            SipMessage::Request(r) => Some(r),
+            SipMessage::Response(_) => None,
+        },
+        _ => None,
+    };
+    process_result(ctx, &call_ref, result, now_ms, &turn, received).await;
 }
 
 /// How a pre-handler gate resolved the event.

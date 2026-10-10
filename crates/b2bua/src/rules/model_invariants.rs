@@ -7,7 +7,8 @@
 //! [`INVARIANTS`] is the list: one line per invariant, its name and its check.
 //! A check reads the record as the turn left it and, for the monotonic ones,
 //! the record as the previous turn landed it (`None` for a call's first
-//! landing).
+//! landing); the answer check also reads the request the turn handled and
+//! what the turn sends.
 //!
 //! Not covered: the turns that land a record without `process_result` — a
 //! request refused before the rules (foreign dialog, stray CANCEL, CSeq below
@@ -28,14 +29,22 @@ use std::sync::Mutex;
 use call::helpers::{
     callee_dialog, find_b_leg, find_leg, unacknowledged_relayed_provisionals, OwedPrack,
 };
-use call::{Call, Leg, LegDisposition, LegState, MessageDirection};
+use call::{Call, DialogState, Leg, LegDisposition, LegState, MessageDirection};
+use sip_message::{Method, SipRequest};
 
-/// The record before and after one turn.
+use crate::effects::{OutboundBody, OutboundSipEffect};
+
+/// The record before and after one turn, with the request the turn handled
+/// and what it sent.
 pub struct Turn<'a> {
     /// The record as the previous turn landed it.
     pub before: Option<&'a Call>,
     /// The record this turn lands.
     pub after: &'a Call,
+    /// The request the turn handled, when its event is one.
+    pub received: Option<&'a SipRequest>,
+    /// What the turn sends.
+    pub sent: &'a [OutboundSipEffect],
 }
 
 /// One invariant's check: `Err` carries the detail of the violation.
@@ -43,9 +52,14 @@ pub type Check = fn(&Turn<'_>) -> Result<(), String>;
 
 /// Every model invariant, by name.
 pub const INVARIANTS: &[(&str, Check)] = &[
+    ("dialog-named-once", dialog_named_once),
+    ("leg-confirmed-one-confirmed-dialog", leg_confirmed_one_confirmed_dialog),
     ("confirmed-a-leg-one-dialog", confirmed_a_leg_one_dialog),
     ("fronts-name-a-dialog", fronts_name_a_dialog),
+    ("own-tag-names-a-dialog", own_tag_names_a_dialog),
     ("dialog-cseq-never-decreases", dialog_cseq_never_decreases),
+    ("no-early-dialog-past-its-invite", no_early_dialog_past_its_invite),
+    ("in-dialog-request-answered-or-relayed", in_dialog_request_answered_or_relayed),
     ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
 ];
@@ -75,6 +89,54 @@ static VIOLATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// message.
 pub fn violations() -> Vec<String> {
     VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Every dialog of a leg is reachable by exactly one name: its own tag is set
+/// and no other dialog of the leg carries the same two tags (RFC 3261 §12).
+fn dialog_named_once(turn: &Turn<'_>) -> Result<(), String> {
+    for leg in legs(turn.after) {
+        let mut seen = std::collections::HashSet::new();
+        for d in &leg.dialogs {
+            if d.our_tag.is_empty() {
+                return Err(format!(
+                    "leg {}: a dialog toward {} has no own tag",
+                    leg.leg_id, d.peer_tag
+                ));
+            }
+            if !seen.insert((d.our_tag.as_str(), d.peer_tag.as_str())) {
+                return Err(format!(
+                    "leg {}: two dialogs are named {}/{}",
+                    leg.leg_id, d.our_tag, d.peer_tag
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A leg is confirmed exactly when one of its dialogs is confirmed or ending
+/// (a 2xx established it, RFC 3261 §12.1, and no BYE completed on it), and no
+/// leg holds two such dialogs. A released leg reads `Terminated` while its
+/// BYE is in flight: its dialog is `Ending`, never `Confirmed`.
+fn leg_confirmed_one_confirmed_dialog(turn: &Turn<'_>) -> Result<(), String> {
+    for leg in legs(turn.after) {
+        let confirmed: Vec<_> = leg.dialogs.iter().filter(|d| d.is_confirmed()).collect();
+        let sound = match (leg.state, confirmed.as_slice()) {
+            (LegState::Confirmed, [_]) => true,
+            (LegState::Terminated, [d]) => d.state == DialogState::Ending,
+            (LegState::Confirmed, _) => false,
+            (_, other) => other.is_empty(),
+        };
+        if !sound {
+            return Err(format!(
+                "leg {} is {:?} with confirmed or ending dialogs {:?}",
+                leg.leg_id,
+                leg.state,
+                confirmed.iter().map(|d| (d.our_tag.as_str(), &d.state)).collect::<Vec<_>>()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A confirmed a-leg holds exactly one live dialog — every other one the
@@ -140,15 +202,37 @@ fn fronts_name_a_dialog(turn: &Turn<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// A dialog's own and peer CSeq never go down across a turn (RFC 3261
-/// §12.2.1.1, §12.2.2), the dialog matched by leg and its two tags.
+/// The tag a leg answers its INVITE under ([`Leg::own_tag`]) names one of
+/// its dialogs, and a leg whose INVITE this stack received names one as soon
+/// as it holds a dialog.
+fn own_tag_names_a_dialog(turn: &Turn<'_>) -> Result<(), String> {
+    for leg in legs(turn.after) {
+        match leg.own_tag.as_deref() {
+            Some(own) if !leg.dialogs.iter().any(|d| d.our_tag == own) => {
+                return Err(format!("leg {}: its own tag {own} names no dialog", leg.leg_id));
+            }
+            None if leg.outbound_invite.is_none() && !leg.dialogs.is_empty() => {
+                return Err(format!("leg {} holds dialogs but no own tag", leg.leg_id));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A dialog stays on its leg until the call record is released, and its own
+/// and peer CSeq never go down across a turn (RFC 3261 §12.2.1.1, §12.2.2),
+/// the dialog matched by leg and its two tags.
 fn dialog_cseq_never_decreases(turn: &Turn<'_>) -> Result<(), String> {
     let Some(before) = turn.before else { return Ok(()) };
-    for leg in legs(turn.after) {
-        let Some(old_leg) = find_leg(before, &leg.leg_id) else { continue };
-        for d in &leg.dialogs {
-            let Some(old) = old_leg.dialogs.by_tags(&d.our_tag, &d.peer_tag) else {
-                continue;
+    for old_leg in legs(before) {
+        let Some(leg) = find_leg(turn.after, &old_leg.leg_id) else { continue };
+        for old in &old_leg.dialogs {
+            let Some(d) = leg.dialogs.by_tags(&old.our_tag, &old.peer_tag) else {
+                return Err(format!(
+                    "leg {} dialog {}/{} is gone",
+                    leg.leg_id, old.our_tag, old.peer_tag
+                ));
             };
             if d.our_cseq < old.our_cseq {
                 return Err(format!(
@@ -233,6 +317,66 @@ fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// No dialog stays early once its INVITE is over (RFC 3261 §12.1, §12.1.2):
+/// past the final sent on the caller's INVITE, on a confirmed leg (the 2xx
+/// retired the other forks), and on an ended leg.
+fn no_early_dialog_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
+    for leg in legs(turn.after) {
+        let over = match leg.state {
+            LegState::Confirmed | LegState::Terminated => Some(format!("{:?}", leg.state)),
+            LegState::Trying | LegState::Early => {
+                leg.invite_final_sent.map(|status| format!("answered {status}"))
+            }
+        };
+        let Some(over) = over else { continue };
+        if let Some(d) = leg.dialogs.iter().find(|d| d.state == DialogState::Early) {
+            return Err(format!(
+                "leg {} ({over}) holds early dialog {}/{}",
+                leg.leg_id, d.our_tag, d.peer_tag
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// An in-dialog request the turn handled — an ACK aside, which takes no
+/// answer (§17.1.1.3) — ends the turn answered or relayed: a final sent on
+/// its transaction (§8.2.6), or its relay recorded on the dialog it went into,
+/// whose final answers it there (§8.1.3.3).
+fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> {
+    let Some(req) = turn.received else { return Ok(()) };
+    let method = req.method();
+    if req.to().tag().is_none() || matches!(method, Method::Ack | Method::Cancel) {
+        return Ok(());
+    }
+    let cseq = req.cseq().seq();
+    let branch = req.top_via().branch();
+    let answered = turn.sent.iter().any(|e| match &e.body {
+        OutboundBody::Response(r) => {
+            r.status() >= 200
+                && r.cseq().seq() == cseq
+                && r.cseq().method() == *method
+                && r.top_via().branch() == branch
+        }
+        _ => false,
+    });
+    let relayed = legs(turn.after)
+        .flat_map(|l| l.dialogs.iter())
+        .flat_map(|d| {
+            let retired = d.retired().map(|r| r.open_relays.as_slice()).unwrap_or_default();
+            d.inbound_pending_requests.iter().chain(retired)
+        })
+        .any(|p| {
+            p.method.eq_ignore_ascii_case(method.as_str())
+                && p.inbound_cseq == i64::from(cseq)
+                && p.source_call_id == req.call_id().as_str()
+        });
+    if answered || relayed {
+        return Ok(());
+    }
+    Err(format!("{method} CSeq {cseq} ends the turn neither answered nor relayed"))
 }
 
 fn legs(call: &Call) -> impl Iterator<Item = &Leg> {

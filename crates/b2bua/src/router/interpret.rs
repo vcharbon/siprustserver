@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use call::helpers::{seal_termination_seq, seal_turn};
 use call::{CallModelState, TimerType};
-use sip_message::Method;
+use sip_message::{Method, SipRequest};
 use sip_txn::TxnKind;
 
 use super::callouts;
@@ -61,13 +61,15 @@ fn answer_budgets(ctx: &RouterCtx) -> crate::answer_deadline::AnswerBudgets {
 }
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
-/// `turn` names what the turn handled, for a model-invariant violation.
+/// `turn` names what the turn handled, for a model-invariant violation, and
+/// `received` is the request it handled, when its event is one.
 pub(super) async fn process_result(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     result: HandlerResult,
     now_ms: i64,
     turn: &(dyn std::fmt::Display + Sync),
+    received: Option<&SipRequest>,
 ) {
     // Every request sent off the call's turn has its answer's deadline on
     // the record the turn lands (ADR-0039).
@@ -101,8 +103,12 @@ pub(super) async fn process_result(
     // one the previous turn landed.
     if ctx.config.model_invariants {
         let before = ctx.state.peek(call_ref);
-        let turn_record =
-            crate::rules::model_invariants::Turn { before: before.as_ref(), after: &result.call };
+        let turn_record = crate::rules::model_invariants::Turn {
+            before: before.as_ref(),
+            after: &result.call,
+            received,
+            sent: &result.effects.outbound,
+        };
         crate::rules::model_invariants::check(&turn_record, turn);
     }
     // Persist first (state lands before effects run). A quiet turn replaces
