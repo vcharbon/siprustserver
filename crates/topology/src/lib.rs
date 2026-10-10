@@ -136,7 +136,7 @@ pub trait Membership: Send + Sync {
     /// vacuous-truth decisions over the peer set (the b2bua readiness gates: an
     /// empty set is "ready" ONLY if the empty view is real) MUST check this —
     /// treating the informer's pre-sync empty snapshot as a peerless cluster
-    /// let a rebooting node latch Ready before a single reclaim puller existed.
+    /// lets a rebooting node latch Ready before a single reclaim puller existed.
     fn synced(&self) -> bool {
         true
     }
@@ -443,9 +443,8 @@ impl Membership for StaticMembership {
 
 /// A membership whose peer set is driven imperatively by a test. Cheap to clone
 /// — clones share the same underlying state + delta channel. Clock-injected
-/// (mirrors the proxy's `SimulatedWorkerRegistry`); the clock is for future
-/// timestamp needs and to keep the seam uniform with the proxy's simulated
-/// registry — membership mutations themselves carry no behavioural time.
+/// (mirrors the proxy's `SimulatedWorkerRegistry`); membership mutations
+/// themselves carry no behavioural time.
 #[derive(Clone)]
 pub struct SimulatedMembership {
     state: Arc<MembershipState>,
