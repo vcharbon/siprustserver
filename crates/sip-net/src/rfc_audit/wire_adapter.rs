@@ -3675,6 +3675,37 @@ impl CrossMessageAuditRule for ToTagPresenceRule {
     }
 }
 
+/// RFC 3261 §8.1.1.3 live: the merged `from-tag-presence` rule at this bind's
+/// vantage — the sending UAC mints the tag.
+pub struct FromTagPresenceRule;
+
+impl CrossMessageAuditRule for FromTagPresenceRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::FromTagPresence.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        surfaced(events, &rfc_rules::rules::wellformed::FromTagPresence, |f, _cid| {
+            let Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) =
+                &f.decision
+            else {
+                return String::new();
+            };
+            format!(
+                "{on} request is missing a From-tag — RFC 3261 §8.1.1.3 requires a UAC to add a \
+                 From-tag to every request (the peer cannot dialog-match it)"
+            )
+        })
+    }
+}
+
 /// RFC 3261 §16.6 live: the merged `no-record-route-from-ua` rule at this
 /// bind's vantage.
 ///
@@ -4616,6 +4647,7 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(ContactPresenceRule),
         std::sync::Arc::new(NoContactOnByeRule),
         std::sync::Arc::new(ToTagPresenceRule),
+        std::sync::Arc::new(FromTagPresenceRule),
         std::sync::Arc::new(NoRecordRouteFromUaRule),
         std::sync::Arc::new(ResponseEchoesRequestViaRule),
         std::sync::Arc::new(ResponseCorrelationRule),

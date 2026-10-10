@@ -98,6 +98,7 @@ pub fn all_rules() -> Vec<Box<dyn rules::Obligation>> {
         Box::new(rules::wellformed::ContactPresence),
         Box::new(rules::wellformed::NoContactOnBye),
         Box::new(rules::wellformed::ToTagPresence),
+        Box::new(rules::wellformed::FromTagPresence),
         Box::new(rules::wellformed::NoRecordRouteFromUa),
         Box::new(rules::correlation::ResponseEchoesRequestVia),
         Box::new(rules::correlation::ResponseCorrelation),

@@ -366,6 +366,10 @@ pub enum RuleId {
     /// the peer can dialog-match it. Charges the responding UAS.
     #[serde(rename = "to-tag-presence")]
     ToTagPresence,
+    /// RFC 3261 §8.1.1.3: a UAC adds a From-tag to every request it sends, its
+    /// half of the dialog identifier. Charges the sender.
+    #[serde(rename = "from-tag-presence")]
+    FromTagPresence,
     /// RFC 3261 §16.6: Record-Route is a PROXY mechanism, so a UA (a B2BUA
     /// included) inserts none. Charges the endpoint that inserted it; scoped to
     /// declared proxies by consumer policy.
@@ -548,6 +552,7 @@ impl RuleId {
         RuleId::ContactPresence,
         RuleId::NoContactOnBye,
         RuleId::ToTagPresence,
+        RuleId::FromTagPresence,
         RuleId::NoRecordRouteFromUa,
         RuleId::ResponseEchoesRequestVia,
         RuleId::ResponseCorrelation,
@@ -662,6 +667,7 @@ impl RuleId {
             RuleId::ContactPresence => "contact-presence",
             RuleId::NoContactOnBye => "no-contact-on-bye",
             RuleId::ToTagPresence => "to-tag-presence",
+            RuleId::FromTagPresence => "from-tag-presence",
             RuleId::NoRecordRouteFromUa => "no-record-route-from-ua",
             RuleId::ResponseEchoesRequestVia => "response-echoes-request-via",
             RuleId::ResponseCorrelation => "response-correlation",

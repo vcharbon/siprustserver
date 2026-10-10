@@ -21,7 +21,8 @@
 //!   - [`NoToTagOnInitialRequest`] (§8.1.1.2) — the FIRST request an endpoint
 //!     puts on a Call-ID names no peer, so it states no To-tag.
 //!   - [`InDialogToTag`] (§12.2.1.1) — once the endpoint has watched a dialog
-//!     confirm, the requests it sends on it carry that dialog's remote tag.
+//!     form, early or confirmed, the requests it sends on it carry that
+//!     dialog's remote tag.
 //!   - [`InDialogFromTag`] (§12.2.1.1) — a request the endpoint takes inside a
 //!     dialog it confirmed carries that dialog's remote tag in From.
 //!
@@ -767,6 +768,9 @@ struct DialogWitness {
     /// A To-tagged 2xx to INVITE crossed in either direction — the INVITE is
     /// answered, so a dialog exists.
     answered: bool,
+    /// A To-tagged provisional to INVITE crossed and no non-2xx final ended
+    /// the INVITE since: an early dialog exists (§12.1).
+    early: bool,
     /// The peer's dialog tag as this endpoint RECEIVED it: the From-tag of a
     /// request sent to it, the To-tag of a response to a request it sent. Empty
     /// until the peer names itself — a 2xx this endpoint sends carries its own
@@ -802,11 +806,20 @@ impl DialogWitness {
         self.answered && !self.remote_tag.is_empty()
     }
 
+    /// An early dialog exists and its remote tag is known.
+    fn early_named(&self) -> bool {
+        self.early && !self.remote_tag.is_empty()
+    }
+
     /// The verdict on a request this endpoint sends, or `None` where no
     /// obligation arises at all.
     fn decision(&self, msg: &Msg, mi: usize) -> Option<Decision> {
         let Kind::Request { method } = &msg.kind else { return None };
-        if !self.confirmed() || self.relays() || method.eq_ignore_ascii_case("CANCEL") {
+        // Beside an early dialog only, a tag-less INVITE is a new dialog-creating
+        // request (a credentials retry §22.2, a redirect's recursion §8.1.3.4).
+        let in_dialog =
+            self.confirmed() || (self.early_named() && !method.eq_ignore_ascii_case("INVITE"));
+        if !in_dialog || self.relays() || method.eq_ignore_ascii_case("CANCEL") {
             return None;
         }
         let branch = msg.via_branch.as_deref();
@@ -858,11 +871,16 @@ impl DialogWitness {
                 }
             }
             Kind::Response { status } => {
-                if msg.cseq_method.eq_ignore_ascii_case("INVITE")
-                    && (200..300).contains(status)
-                    && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty())
-                {
+                let invite = msg.cseq_method.eq_ignore_ascii_case("INVITE");
+                let tagged = msg.to_tag.as_deref().is_some_and(|t| !t.is_empty());
+                if invite && (200..300).contains(status) && tagged {
                     self.answered = true;
+                }
+                if invite && (101..200).contains(status) && tagged {
+                    self.early = true;
+                }
+                if invite && (300..700).contains(status) {
+                    self.early = false;
                 }
                 if (300..700).contains(status) {
                     if let Some(b) = &msg.via_branch {
@@ -880,9 +898,11 @@ impl DialogWitness {
 /// mints the header out of its own dialog state, so its SENT requests are what
 /// this judges.
 ///
-/// **The occasion needs the dialog CONFIRMED from the sender's own seat**: a
-/// To-tagged 2xx to INVITE answered it, and the peer named the remote tag on a
-/// message the sender received. The received tag is what makes the demand
+/// **The occasion needs a dialog from the sender's own seat**: a To-tagged
+/// 2xx to INVITE answered it, or a To-tagged provisional opened it early and
+/// no non-2xx final has ended it (§12.1), and the peer named the remote tag on
+/// a message the sender received. Beside an early dialog alone, a tag-less
+/// INVITE is a new dialog-creating request, not an occasion. The received tag is what makes the demand
 /// well-founded on either side — a UAS reads its own local tag off the 2xx it
 /// sends, and a caller that minted no tag leaves the remote tag null, which
 /// §12.2.1.1 has the sender express by OMITTING the To tag parameter.
@@ -895,7 +915,7 @@ impl DialogWitness {
 /// INVITE (same branch) is still the tag-less initial request
 /// [`NoToTagOnInitialRequest`] governs; and a relay forwarding a peer's headers
 /// unchanged states nothing, so the finding lands on the UA that wrote the
-/// header. Requests inside an EARLY dialog are out of scope.
+/// header.
 ///
 /// Every fact is a wire-model one, so the occasion is always DECIDED. Charges
 /// the endpoint that sent the request.
@@ -1905,6 +1925,45 @@ mod tests {
         ));
         let f = charged(run(&InDialogToTag, &msgs), A);
         assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
+    }
+
+    /// The caller's seat after INVITE / 180(tag=bt): an early dialog.
+    fn early() -> Vec<Msg> {
+        vec![
+            req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
+            resp(2_000, B, A, 180, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
+        ]
+    }
+
+    /// The caller's `method` at `cseq` on a fresh branch, To-tag `to`.
+    fn caller_request(method: &str, cseq: u32, to: Option<&str>) -> Msg {
+        req(4_000, A, B, method, "sip:bob@h", cseq, "z9hG4bK-n", "sip:alice@h", "at", to, 1)
+    }
+
+    #[test]
+    fn a_tagless_request_in_an_early_dialog_is_violated() {
+        let mut msgs = early();
+        msgs.push(caller_request("UPDATE", 2, None));
+        let f = charged(run(&InDialogToTag, &msgs), A);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].violated(), "{:?}", f[0].decision);
+        let mut msgs = early();
+        msgs.push(caller_request("UPDATE", 2, Some("bt")));
+        let f = charged(run(&InDialogToTag, &msgs), A);
+        assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
+    }
+
+    /// Beside an early dialog a tag-less INVITE creates a new one, and once a
+    /// non-2xx final ended the INVITE no early dialog is left to name.
+    #[test]
+    fn a_new_invite_or_a_request_after_a_rejection_is_no_early_occasion() {
+        let mut msgs = early();
+        msgs.push(caller_request("INVITE", 2, None));
+        assert!(run(&InDialogToTag, &msgs).is_empty(), "a new dialog-creating INVITE");
+        let mut msgs = early();
+        msgs.push(resp(3_000, B, A, 486, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1));
+        msgs.push(caller_request("OPTIONS", 2, None));
+        assert!(run(&InDialogToTag, &msgs).is_empty(), "the rejection ended the early dialog");
     }
 
     /// The 2xx ACK is a fresh transaction the sender builds from dialog state —

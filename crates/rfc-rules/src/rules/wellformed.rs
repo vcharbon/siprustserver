@@ -1,6 +1,6 @@
 //! What ONE message must state on its own — the obligations an endpoint
 //! discharges by writing the message correctly, with no other message involved.
-//! ELEVEN of them, every one charging the endpoint that EMITTED the message:
+//! TWELVE of them, every one charging the endpoint that EMITTED the message:
 //!
 //!   - [`BranchPrefix`] (§8.1.1.7) — a request's top Via states a `branch`
 //!     beginning with the magic cookie `z9hG4bK`.
@@ -13,6 +13,7 @@
 //!     target later in-dialog requests go to.
 //!   - [`NoContactOnBye`] (§15.1) — a BYE states none: it ends the dialog.
 //!   - [`ToTagPresence`] (§8.2.6.2) — a response above 100 carries a To-tag.
+//!   - [`FromTagPresence`] (§8.1.1.3) — a request carries a From-tag.
 //!   - [`NoRecordRouteFromUa`] (§16.6) — a UA inserts no Record-Route.
 //!   - [`CancelCseqMethod`] (§9.1) — a CANCEL's CSeq method token is `CANCEL`.
 //!   - [`No100relRequireOnNonInvite`] (RFC 3262 §4) — only an INVITE may
@@ -406,6 +407,47 @@ impl Obligation for ToTagPresence {
                 Decision::Compliant
             };
             out.push(charge(RuleId::ToTagPresence, msg, mi, decision));
+        }
+        out
+    }
+}
+
+/// **§8.1.1.3 — a UAC tags the From of every request.** The From-tag is the
+/// UAC's half of the §12 dialog identifier; a request without one, or with an
+/// empty one, names no dialog the peer can match, inside a dialog or out. A
+/// CANCEL and an ACK copy the From of the request they follow, tag included.
+///
+/// The occasion is one fresh request the endpoint sent, read off the raw From
+/// row. A vantage with no header block opens no occasion.
+///
+/// Charges the sender, which mints the tag.
+pub struct FromTagPresence;
+
+impl Obligation for FromTagPresence {
+    fn id(&self) -> RuleId {
+        RuleId::FromTagPresence
+    }
+
+    fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (mi, msg) in wire.msgs.iter().enumerate() {
+            if msg.repeat {
+                continue;
+            }
+            let Kind::Request { method } = &msg.kind else { continue };
+            let Some(head) = msg.head.as_deref() else { continue };
+            let decision = if sniff::from_tag(head).is_empty() {
+                Decision::Violated(Evidence::RequiredHeaderAbsent {
+                    absent_msg: mi,
+                    absent_hop: msg.hop,
+                    absent_ts_us: msg.at_us,
+                    on: method.clone(),
+                    header: "From;tag".to_string(),
+                })
+            } else {
+                Decision::Compliant
+            };
+            out.push(charge(RuleId::FromTagPresence, msg, mi, decision));
         }
         out
     }
@@ -995,6 +1037,53 @@ mod tests {
     fn a_100_and_a_request_are_no_occasion() {
         assert!(run(&ToTagPresence, &[response(100, None)]).is_empty());
         assert!(run(&ToTagPresence, &[request("INVITE", "Content-Length: 0", b"")]).is_empty());
+    }
+
+    // ── from-tag-presence ───────────────────────────────────────────────────
+
+    /// The request with `from` as its From row.
+    fn request_from(from: &str) -> Msg {
+        let head = format!(
+            "INFO sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-1\r\n\
+             From: {from}\r\n\
+             To: <sip:bob@h>;tag=bt\r\n\
+             Call-ID: c1\r\n\
+             CSeq: 2 INFO\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let mut m = request("INFO", "Content-Length: 0", b"");
+        m.head = Some(head.into_bytes());
+        m
+    }
+
+    #[test]
+    fn a_request_with_a_from_tag_is_compliant() {
+        let f = run(&FromTagPresence, &[request_from("<sip:alice@h>;tag=at")]);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
+    }
+
+    /// No tag and an empty tag both leave the request naming no dialog.
+    #[test]
+    fn a_request_without_a_from_tag_or_with_an_empty_one_is_violated() {
+        for from in ["<sip:alice@h>", "<sip:alice@h>;tag="] {
+            let f = run(&FromTagPresence, &[request_from(from)]);
+            assert!(
+                matches!(
+                    &f[0].decision,
+                    Decision::Violated(Evidence::RequiredHeaderAbsent { header, on, .. })
+                        if header == "From;tag" && on == "INFO"
+                ),
+                "{from}: {:?}",
+                f[0].decision
+            );
+        }
+    }
+
+    #[test]
+    fn a_response_is_no_from_tag_occasion() {
+        assert!(run(&FromTagPresence, &[response(180, Some("bt"))]).is_empty());
     }
 
     // ── no-record-route-from-ua ─────────────────────────────────────────────

@@ -93,6 +93,7 @@ export const RFC_RULES = [
   "contact-presence",
   "no-contact-on-bye",
   "to-tag-presence",
+  "from-tag-presence",
   "no-record-route-from-ua",
   "response-echoes-request-via",
   "response-correlation",
