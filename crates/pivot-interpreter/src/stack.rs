@@ -263,10 +263,7 @@ impl LegStack {
         )
     }
 
-    /// Where this leg's next request goes. The lane's route target: an
-    /// out-of-dialog request is addressed at the system under test, and an
-    /// in-dialog one carries its Route set so the R-URI reaches the target
-    /// through the same hop.
+    /// Where this leg's next request goes: the lane's route target.
     pub fn next_hop(&self) -> SocketAddr {
         self.route_target
     }

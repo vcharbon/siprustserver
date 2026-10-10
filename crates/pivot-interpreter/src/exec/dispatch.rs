@@ -141,7 +141,6 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 }
 
-/// The step outcome a message contributes to the `${step:…}` namespace.
 /// Whether `inbound` is an initial INVITE: no To-tag yet, so no dialog the
 /// leg could be found by before a claim names it (RFC 3261 §12.1).
 pub(super) fn opens_dialog(inbound: &Inbound) -> bool {

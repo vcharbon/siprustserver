@@ -302,7 +302,7 @@ async fn the_ack_to_a_reject_no_step_scripts_is_the_transactions_own() {
     scene.finish().await;
 }
 
-/// The same ACK, scripted: the document's `expect` takes it as today.
+/// The same ACK, scripted: the document's `expect` takes it.
 #[tokio::test(start_paused = true)]
 async fn the_ack_to_a_reject_a_step_scripts_is_that_steps() {
     let scene = api_scene("pivot-cancelled-reinvite-ack-scripted").await;

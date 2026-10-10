@@ -218,8 +218,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // The interpreter owns §17.2 (see [`Absorption`]): the agents must not
         // absorb beneath it, or the retransmissions never reach the recording.
         // It owns the dialog verdicts too: each UA's table judges what it
-        // sights, and the run reads the verdict where it dispatches. A CSeq that
-        // goes backwards is taken as it comes.
+        // sights, and the run reads the verdict where it dispatches.
         for agent in lane.agents.values() {
             agent.drop_to_raw_wire();
             agent.hand_dialogs_to_driver(BackwardsCseq::Accept);

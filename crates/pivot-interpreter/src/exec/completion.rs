@@ -126,6 +126,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 }
 
+/// The step outcome a message contributes to the `${step:…}` namespace.
 pub(super) fn outcome_of(inbound: &Inbound) -> StepOutcome {
     StepOutcome {
         status: inbound.status,

@@ -214,8 +214,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 timed_out = true;
                 break;
             }
-            // A ladder outliving the flow keeps its own clock here: `drive`
-            // counts the rungs only after settle for exactly this reason.
+            // A ladder outliving the flow keeps its own clock here.
             if !self.drain_repeats().await {
                 break;
             }
