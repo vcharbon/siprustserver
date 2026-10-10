@@ -15,7 +15,7 @@ use call::{
 /// deliberately **no `Deref` and no raw escape hatch** to the underlying
 /// `Call`, so framework internals are not part of the rule-author interface
 /// and can change freely. The write side is unchanged: rules mutate only by
-/// returning [`RuleAction`]s through the executor.
+/// returning [`RuleAction`](crate::model::RuleAction)s through the executor.
 ///
 /// Hidden by design (the framework-internal fields — do not add accessors for
 /// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
@@ -151,8 +151,8 @@ impl<'a> RuleCall<'a> {
     pub fn b_legs(&self) -> &'a [Leg] {
         &self.0.b_legs
     }
-    /// The id the next leg this stack dials takes — the one a
-    /// [`RuleAction::CreateLeg`] emitted now mints.
+    /// The id the next leg this stack dials takes — the one a `CreateLeg`
+    /// ([`crate::model::RuleAction::CreateLeg`]) emitted now mints.
     pub fn next_b_leg_id(&self) -> String {
         call::helpers::next_b_leg_id(self.0)
     }
@@ -193,8 +193,8 @@ impl<'a> RuleCall<'a> {
     // ── admission ──────────────────────────────────────────────────────────
     /// The set the call limiter last stated it holds for the call: what a
     /// service computes its next replacement from
-    /// ([`RuleAction::ReplaceAdmissionSet`]), never from an admit whose
-    /// answer it has not seen.
+    /// ([`crate::model::RuleAction::ReplaceAdmissionSet`]), never from an admit
+    /// whose answer it has not seen.
     pub fn limiter_held(&self) -> &'a [call::LimiterEntry] {
         self.0.limiter.held()
     }
