@@ -424,9 +424,8 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
 
 /// The offset just past the empty line that ends the header block (RFC 3261
 /// §7), `None` where the datagram has none. CRLF is the line terminator
-/// (§25.1); a bare CR or LF is accepted as the parser accepts it — a stated
-/// leniency, so a capture normalised to LF still reads and the parser and
-/// this reader end the head at the same byte.
+/// (§25.1); a bare CR or LF is accepted as the parser accepts it, so the
+/// parser and this reader end the head at the same byte.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
     let mut i = 0;
     loop {
@@ -657,9 +656,9 @@ pub fn via_rport(raw: &[u8]) -> ViaRport {
 /// so the bottom one is the originator's as it sent the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginVia {
-    /// Its sent-by.
+    /// The bottom Via's sent-by: the originator's, as it sent the request.
     pub sent_by: crate::header::SentBy,
-    /// Its `branch`, or `None` where it carries none.
+    /// The bottom Via's `branch`, or `None` where it carries none.
     pub branch: Option<String>,
     /// How many Via values the request carried: one per hop it crossed.
     pub depth: usize,

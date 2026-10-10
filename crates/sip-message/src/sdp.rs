@@ -1,5 +1,4 @@
 //! Minimal SDP helpers for the REFER / blind-transfer and hold flows.
-//! Port of `src/sip/SdpUtils.ts`.
 //!
 //! Deliberately string-based — no external SDP library, not a full parser:
 //! only the fields the B2BUA needs. Two tolerance levels coexist:
@@ -252,7 +251,7 @@ fn ip6_is_unspecified(addr: &str) -> bool {
 }
 
 // ===========================================================================
-// Codec profile extraction + held SDP construction (SdpUtils.ts)
+// Codec profile extraction + held SDP construction
 // ===========================================================================
 
 /// Codec profile extracted from the first audio m-line of an SDP body.

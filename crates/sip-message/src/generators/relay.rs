@@ -344,7 +344,6 @@ fn conceals_identity(headers: &[SipHeader], scope: RelayScope<'_>) -> bool {
     scope.identity == IdentityPrivacy::Conceal && privacy_conceals_identity(headers)
 }
 
-/// True iff `name` is one of the [`ASSERTED_IDENTITY`] headers.
 fn asserts_identity(name: &str) -> bool {
     ASSERTED_IDENTITY.iter().any(|n| n.matches(name))
 }

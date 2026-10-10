@@ -53,7 +53,7 @@
 //! `preserve_order` so a caller can request original absolute ordering, but v1
 //! honours it only for casing + duplicate-header layout (always preserved for
 //! frozen headers regardless) — it does NOT yet restore the original interleaving
-//! of frozen and regenerated headers. The flag is threaded for API stability.
+//! of frozen and regenerated headers.
 
 pub use crate::header::HeaderClass;
 use crate::header::HeaderName;
@@ -278,10 +278,7 @@ impl MessageTemplate {
     /// v1 boundary — mixed-form duplicate rows collapse: the map is keyed by
     /// canonical name and [`apply_name_forms`] rewrites EVERY row of a matching
     /// header, so a regenerated header captured in mixed forms across duplicate
-    /// rows (`Via:` + `v:`) replays entirely under the one compact form. This is
-    /// intrinsic to regenerating these headers (the stack emits its own count,
-    /// not the capture's rows) and is invisible to the parsed-value repro differ
-    /// (which compares canonicalized values). Per-row name-forms are deferred.
+    /// rows (`Via:` + `v:`) replays entirely under the one compact form.
     pub fn regenerated_name_forms(&self) -> Vec<(String, String)> {
         self.headers
             .iter()
@@ -326,11 +323,6 @@ pub struct EmitOpts {
     pub preserve_order: bool,
 }
 
-/// Rewrite each header whose canonical name matches a `(canonical, wire)` entry
-/// to the mapped wire name-form (compact-name replay of the stack-regenerated
-/// headers). Non-matching headers pass through unchanged; an empty map is the
-/// identity (full names). Values are untouched. Used by the template
-/// emission path to write `v:`/`f:`/… for a capture that used compact names.
 /// Render `msg` under the header block the template lane states for it — the
 /// captured wire names ([`apply_name_forms`]), the remote-target host:port
 /// rewrite ([`apply_remote_target_emits`]) and any §7.3.1 fold the replayed UA
@@ -351,6 +343,11 @@ pub fn emitted_wire(msg: &SipMessage, headers: &[SipHeader]) -> Vec<u8> {
     }
 }
 
+/// Rewrite each header whose canonical name matches a `(canonical, wire)` entry
+/// to the mapped wire name-form (compact-name replay of the stack-regenerated
+/// headers). Non-matching headers pass through unchanged; an empty map is the
+/// identity (full names). Values are untouched. Used by the template
+/// emission path to write `v:`/`f:`/… for a capture that used compact names.
 pub fn apply_name_forms(headers: &[SipHeader], forms: &[(String, String)]) -> Vec<SipHeader> {
     if forms.is_empty() {
         return headers.to_vec();

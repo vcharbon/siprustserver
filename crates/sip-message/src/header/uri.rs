@@ -420,10 +420,6 @@ impl Uri {
 
         let mut headers = Vec::new();
         if after_params < len && bytes[after_params] == b'?' {
-            // §19.1.1 spells the pair `hname "=" hvalue`, so a bare name is
-            // malformed — but this stack does not own the field, and passing
-            // the name through beats deleting part of a URI it is only
-            // carrying.
             for pair in value.as_str()[after_params + 1..].split('&') {
                 match pair.find('=') {
                     Some(eq) => headers

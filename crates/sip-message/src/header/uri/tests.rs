@@ -94,8 +94,6 @@ fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
     assert_eq!(uri(text).scheme(), "sip");
 }
 
-// An escaped-header name written without its value is malformed under
-// §19.1.1, and passes through as the name it is rather than vanishing.
 #[test]
 fn an_escaped_header_with_no_value_survives_a_render() {
     let one = uri("sip:a@h?X-Trace").normalized();
