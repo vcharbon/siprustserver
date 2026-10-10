@@ -22,6 +22,12 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3581 §4: a server that took a request advertising a bare `;rport` echoes
+    /// `rport=<source-port>` on the response's top Via. Charges the server.
+    RportEcho = "rport-echo";
+}
+
 /// **RFC 3581 §4 — a server that takes `rport` echoes `rport=<source-port>`.**
 /// When a request's top Via advertises a bare `;rport`, the response's top Via
 /// carries `rport=N` with the source port the server observed. Dropping the
@@ -37,10 +43,6 @@ use super::Obligation;
 pub struct RportEcho;
 
 impl Obligation for RportEcho {
-    fn id(&self) -> RuleId {
-        RuleId::RportEcho
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Branches on which an endpoint's own SENT request advertised a bare
         // `;rport`, with the method that asked — built as the walk goes, so a

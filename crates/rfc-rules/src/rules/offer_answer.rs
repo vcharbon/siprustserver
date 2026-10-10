@@ -56,6 +56,65 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §13.2.2.4: an ACK closing a completed offer/answer exchange carries no body — the
+    /// round has both halves and the ACK has no answer left to deliver. Charges the ACK's sender.
+    AckBodyAfterCompleteOfferAnswer = "ack-body-after-complete-offer-answer", relayable;
+    /// RFC 3261 §13.2.1 / RFC 3264 §6: the non-failure final to a request that carried an offer
+    /// carries the answer, unless a reliable provisional already stated one on that dialog. Charges
+    /// the answerer.
+    Final2xxAnswersTheOffer = "final-2xx-answers-the-offer", relayable;
+    /// RFC 3261 §13.2.2.4 / §13.2.1: an ACK to a 2xx that carried a delayed offer carries the
+    /// answer. Charges the ACK's sender.
+    DelayedOfferAnsweredInAck = "delayed-offer-answered-in-ack";
+    /// RFC 3261 §13.2.1: one dialog carries ONE answer — a later description on that dialog
+    /// re-states the transport plan the first stated, never another one. Charges the answerer.
+    SecondAnswerRepeatsTheFirst = "second-answer-repeats-the-first";
+    /// RFC 3264 §6: the `m=` line an answer sends back for an offered stream re-states that
+    /// stream's media type and transport — rejecting it means port 0, never re-typing it. Charges
+    /// the answerer.
+    AnswerStreamMatchesOffer = "answer-stream-matches-offer";
+    /// RFC 4566 §5.2 / RFC 3264 §8: every session description an agent sends on one call keeps the
+    /// `o=` identity and moves `sess-version` by exactly what changed. Charges the description's
+    /// sender.
+    SdpOriginContinuity = "sdp-origin-continuity";
+    /// RFC 3264 §5: an agent holds one offer of its own outstanding at a time on a call — the next
+    /// waits for the answer to the last. Charges the offer's sender.
+    NoNewOfferWhileOfferPending = "no-new-offer-while-offer-pending";
+    /// RFC 3264 §6: an answer holds exactly one `m=` line per offered stream — a rejected stream
+    /// keeps its slot at port 0, it never disappears. Charges the answerer.
+    AnswerMLineCountMatchesOffer = "answer-m-line-count-matches-offer";
+    /// RFC 3264 §6: an answer repeats the offer's `t=` line — the two ends state one session time.
+    /// Charges the answerer.
+    AnswerTLineEqualsOffer = "answer-t-line-equals-offer";
+    /// RFC 3264 §6.1: the answer's `m=` line at each offered position states that position's media
+    /// type — the per-stream pairing both ends index on. Charges the answerer.
+    AnswerMediaTypeMatchesOffer = "answer-media-type-matches-offer";
+    /// RFC 3264 §6.1: an answer's direction attribute is one the offer's admits — `sendonly` draws
+    /// `recvonly`/`inactive`, `inactive` draws `inactive`. Charges the answerer.
+    DirectionPairValid = "direction-pair-valid";
+    /// RFC 3264 §6: an answer rejecting a stream still lists a media format on its `m=` line — a
+    /// bare `m=audio 0 RTP/AVP` is no description at all. Charges the answerer.
+    RejectedStreamMinimalAnswer = "rejected-stream-minimal-answer";
+    /// RFC 3264 §8: an agent's later description on a call carries at least as many `m=` lines as
+    /// the one before — a removed stream keeps its slot at port 0. Charges the description's
+    /// sender.
+    ReOfferMLineCountMonotonic = "re-offer-m-line-count-monotonic";
+    /// RFC 3264 §8: a stream offered at port 0 is answered at port 0 — a disabled stream stays
+    /// disabled. Charges the answerer.
+    ZeroPortPropagation = "zero-port-propagation";
+    /// RFC 3264 §8.3.2: once an agent's description binds a payload type to an encoding, its later
+    /// descriptions on that call keep the binding — the peer caches it. Charges the description's
+    /// sender.
+    PayloadTypeMappingStable = "payload-type-mapping-stable", relayable;
+    /// RFC 3264 §5-6 / RFC 4566 §5: a body sent as `application/sdp` satisfies the offer/answer
+    /// grammar. Charges the sender that minted it.
+    SdpBodyParseable = "sdp-body-parseable";
+    /// RFC 3264 §6 / §8.4: a stream held at `c=0.0.0.0` is not ALSO rejected at port 0 — the two
+    /// together state no disposition a peer can act on. Charges the sender.
+    C0PortNonZero = "c0-port-non-zero";
+}
+
 // ---------------------------------------------------------------------------
 // The shared reading
 // ---------------------------------------------------------------------------
@@ -692,10 +751,6 @@ impl<'a> Reading<'a> {
 pub struct AckBodyAfterCompleteOfferAnswer;
 
 impl Obligation for AckBodyAfterCompleteOfferAnswer {
-    fn id(&self) -> RuleId {
-        RuleId::AckBodyAfterCompleteOfferAnswer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -768,10 +823,6 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
 pub struct Final2xxAnswersTheOffer;
 
 impl Obligation for Final2xxAnswersTheOffer {
-    fn id(&self) -> RuleId {
-        RuleId::Final2xxAnswersTheOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -830,10 +881,6 @@ impl Obligation for Final2xxAnswersTheOffer {
 pub struct DelayedOfferAnsweredInAck;
 
 impl Obligation for DelayedOfferAnsweredInAck {
-    fn id(&self) -> RuleId {
-        RuleId::DelayedOfferAnsweredInAck
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out: Vec<Finding> = seen
@@ -895,10 +942,6 @@ impl Obligation for DelayedOfferAnsweredInAck {
 pub struct SecondAnswerRepeatsTheFirst;
 
 impl Obligation for SecondAnswerRepeatsTheFirst {
-    fn id(&self) -> RuleId {
-        RuleId::SecondAnswerRepeatsTheFirst
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -955,10 +998,6 @@ impl Obligation for SecondAnswerRepeatsTheFirst {
 pub struct AnswerStreamMatchesOffer;
 
 impl Obligation for AnswerStreamMatchesOffer {
-    fn id(&self) -> RuleId {
-        RuleId::AnswerStreamMatchesOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1017,10 +1056,6 @@ impl Obligation for AnswerStreamMatchesOffer {
 pub struct SdpOriginContinuity;
 
 impl Obligation for SdpOriginContinuity {
-    fn id(&self) -> RuleId {
-        RuleId::SdpOriginContinuity
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1089,10 +1124,6 @@ impl Obligation for SdpOriginContinuity {
 pub struct NoNewOfferWhileOfferPending;
 
 impl Obligation for NoNewOfferWhileOfferPending {
-    fn id(&self) -> RuleId {
-        RuleId::NoNewOfferWhileOfferPending
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1136,10 +1167,6 @@ impl Obligation for NoNewOfferWhileOfferPending {
 pub struct AnswerMLineCountMatchesOffer;
 
 impl Obligation for AnswerMLineCountMatchesOffer {
-    fn id(&self) -> RuleId {
-        RuleId::AnswerMLineCountMatchesOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1181,10 +1208,6 @@ impl Obligation for AnswerMLineCountMatchesOffer {
 pub struct AnswerTLineEqualsOffer;
 
 impl Obligation for AnswerTLineEqualsOffer {
-    fn id(&self) -> RuleId {
-        RuleId::AnswerTLineEqualsOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1225,10 +1248,6 @@ impl Obligation for AnswerTLineEqualsOffer {
 pub struct AnswerMediaTypeMatchesOffer;
 
 impl Obligation for AnswerMediaTypeMatchesOffer {
-    fn id(&self) -> RuleId {
-        RuleId::AnswerMediaTypeMatchesOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1294,10 +1313,6 @@ fn answer_valid_for_offer(offer: SdpDirection, answer: SdpDirection) -> bool {
 pub struct DirectionPairValid;
 
 impl Obligation for DirectionPairValid {
-    fn id(&self) -> RuleId {
-        RuleId::DirectionPairValid
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1350,10 +1365,6 @@ impl Obligation for DirectionPairValid {
 pub struct RejectedStreamMinimalAnswer;
 
 impl Obligation for RejectedStreamMinimalAnswer {
-    fn id(&self) -> RuleId {
-        RuleId::RejectedStreamMinimalAnswer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1403,10 +1414,6 @@ impl Obligation for RejectedStreamMinimalAnswer {
 pub struct ReOfferMLineCountMonotonic;
 
 impl Obligation for ReOfferMLineCountMonotonic {
-    fn id(&self) -> RuleId {
-        RuleId::ReOfferMLineCountMonotonic
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1463,10 +1470,6 @@ impl Obligation for ReOfferMLineCountMonotonic {
 pub struct ZeroPortPropagation;
 
 impl Obligation for ZeroPortPropagation {
-    fn id(&self) -> RuleId {
-        RuleId::ZeroPortPropagation
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1542,10 +1545,6 @@ fn same_binding(media_type: &str, one: &str, other: &str) -> bool {
 pub struct PayloadTypeMappingStable;
 
 impl Obligation for PayloadTypeMappingStable {
-    fn id(&self) -> RuleId {
-        RuleId::PayloadTypeMappingStable
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -1626,10 +1625,6 @@ impl Obligation for PayloadTypeMappingStable {
 pub struct SdpBodyParseable;
 
 impl Obligation for SdpBodyParseable {
-    fn id(&self) -> RuleId {
-        RuleId::SdpBodyParseable
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -1680,10 +1675,6 @@ impl Obligation for SdpBodyParseable {
 pub struct C0PortNonZero;
 
 impl Obligation for C0PortNonZero {
-    fn id(&self) -> RuleId {
-        RuleId::C0PortNonZero
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {

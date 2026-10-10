@@ -53,6 +53,18 @@ use crate::wire::{Kind, Msg, WireView};
 use super::branch::BranchReading;
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §14.2: a re-INVITE overtaking its sender's own INVITE in progress draws 500 with
+    /// `Retry-After`; one crossing the taker's own INVITE draws 491. Charges the UAS.
+    ConcurrentReInvite500Or491 = "concurrent-re-invite-500-or-491";
+    /// RFC 3261 §14.1: a UAC holds one INVITE transaction outstanding per dialog DIRECTION (RFC
+    /// 6026 for a 2xx). Charges the UAC that sent the overtaking INVITE.
+    NoReInviteWhileInviteInProgress = "no-re-invite-while-invite-in-progress";
+    /// RFC 3261 §14.1 / §17.1.1.2: a re-INVITE that drew a provisional draws a final too. Charges
+    /// the re-INVITE's sender.
+    FailedReinviteTearsDownDialog = "failed-reinvite-tears-down-dialog";
+}
+
 /// How long an OPEN observation must keep running past a racing re-INVITE
 /// before "the taker answered it nothing" reads as silence rather than
 /// truncation. One second — the §17.2 reasoning of
@@ -93,10 +105,6 @@ pub const REINVITE_FINAL_WINDOW_US: u64 = 180_000_000;
 pub struct ConcurrentReInvite500Or491;
 
 impl Obligation for ConcurrentReInvite500Or491 {
-    fn id(&self) -> RuleId {
-        RuleId::ConcurrentReInvite500Or491
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per endpoint's view of a dialog: the branches of the INVITE
         // transactions still in progress at it. Built as the walk goes, so a
@@ -283,10 +291,6 @@ impl Obligation for ConcurrentReInvite500Or491 {
 pub struct NoReInviteWhileInviteInProgress;
 
 impl Obligation for NoReInviteWhileInviteInProgress {
-    fn id(&self) -> RuleId {
-        RuleId::NoReInviteWhileInviteInProgress
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per requester (endpoint + dialog + DIRECTION): the branches of its own
         // INVITE transactions still outstanding.
@@ -474,10 +478,6 @@ impl Obligation for NoReInviteWhileInviteInProgress {
 pub struct FailedReinviteTearsDownDialog;
 
 impl Obligation for FailedReinviteTearsDownDialog {
-    fn id(&self) -> RuleId {
-        RuleId::FailedReinviteTearsDownDialog
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         // The calls each endpoint saw a BYE on, in either direction — the

@@ -37,7 +37,8 @@ impl RuleCopy {
 
 /// The repository root this crate was built from.
 pub fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    root.canonicalize().unwrap_or(root)
 }
 
 /// Every copy under `root`, with the content [`RfcRule::ALL`] gives it.

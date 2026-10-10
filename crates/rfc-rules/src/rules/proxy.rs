@@ -33,6 +33,26 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §16.7 step 5: a stateful proxy absorbs the downstream 100 Trying, so a UAC takes at
+    /// most one 100 per INVITE it sent on the transaction. Charges the endpoint that forwarded the
+    /// extra 100.
+    Proxy100TryingNotForwarded = "proxy-100-trying-not-forwarded";
+    /// RFC 3261 §16.3: a proxy that resolves no target for the Request-URI answers 404. Charges the
+    /// proxy.
+    NoTarget404 = "no-target-404";
+    /// RFC 3261 §16.4: a proxy forwarding a request whose topmost Route is strict swaps that URI
+    /// into the Request-URI. Charges the proxy that took the request.
+    StrictRouteRewriteHandled = "strict-route-rewrite-handled";
+    /// RFC 3261 §16.7: a proxy that cannot answer an INVITE promptly emits 100 Trying within its
+    /// grace window. Charges the endpoint that took the INVITE.
+    Proxy100WithinGrace = "proxy-100-within-grace";
+    /// RFC 3261 §16.6 step 6: a request forwarded through a strict-route next hop has had the
+    /// Request-URI / Route swap applied, so its topmost Route is no longer a strict one. Charges
+    /// the forwarding hop.
+    StrictRouteShuffleOnSend = "strict-route-shuffle-on-send";
+}
+
 /// **RFC 3261 §16.7 step 5 — a stateful proxy absorbs the downstream 100.** A
 /// proxy generates its OWN 100 toward the UAC and does not forward the one the
 /// next hop emits, so a UAC observes at most one 100 per INVITE it sent on the
@@ -52,10 +72,6 @@ use super::Obligation;
 pub struct Proxy100TryingNotForwarded;
 
 impl Obligation for Proxy100TryingNotForwarded {
-    fn id(&self) -> RuleId {
-        RuleId::Proxy100TryingNotForwarded
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -118,10 +134,6 @@ pub const PROXY_100_GRACE_US: u64 = 200_000;
 pub struct Proxy100WithinGrace;
 
 impl Obligation for Proxy100WithinGrace {
-    fn id(&self) -> RuleId {
-        RuleId::Proxy100WithinGrace
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per (taker, call, branch): the INVITE it took, whether it said it was
         // trying, and its earliest final on the transaction.
@@ -237,10 +249,6 @@ struct Taken<'a> {
 pub struct NoTarget404;
 
 impl Obligation for NoTarget404 {
-    fn id(&self) -> RuleId {
-        RuleId::NoTarget404
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per endpoint: the transactions it forwarded, the finals it took, the
         // request it took first on each server transaction, and the first final
@@ -349,10 +357,6 @@ impl Obligation for NoTarget404 {
 pub struct StrictRouteRewriteHandled;
 
 impl Obligation for StrictRouteRewriteHandled {
-    fn id(&self) -> RuleId {
-        RuleId::StrictRouteRewriteHandled
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -565,10 +569,6 @@ impl<'a> Reading<'a> {
 pub struct StrictRouteShuffleOnSend;
 
 impl Obligation for StrictRouteShuffleOnSend {
-    fn id(&self) -> RuleId {
-        RuleId::StrictRouteShuffleOnSend
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {

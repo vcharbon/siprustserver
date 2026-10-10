@@ -112,6 +112,18 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §12.2.1.1: within a dialog a UAC increments the CSeq by exactly one per new request
+    /// (ACK and CANCEL excepted). Charges that UAC; read at the endpoint that TOOK the stream.
+    CseqInDialogOrder = "cseq-in-dialog-order";
+    /// RFC 3261 §8.1.3.5: a response copies its request's CSeq verbatim. Charges the UAS that sent
+    /// the response.
+    ResponseCseqMatchesTransaction = "response-cseq-matches-transaction";
+    /// RFC 3261 §13.2.2.4: an ACK reuses the CSeq number of the INVITE it acknowledges. Charges the
+    /// UAC that sent the ACK.
+    AckCseqMatchesInvite = "ack-cseq-matches-invite";
+}
+
 /// **§12.2.1.1 — in-dialog request sequencing.** See the module doc.
 ///
 /// The occasion is ONE new in-dialog request as the taker accounted it (after
@@ -127,10 +139,6 @@ use super::Obligation;
 pub struct CseqInDialogOrder;
 
 impl Obligation for CseqInDialogOrder {
-    fn id(&self) -> RuleId {
-        RuleId::CseqInDialogOrder
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -183,10 +191,6 @@ impl Obligation for CseqInDialogOrder {
 pub struct ResponseCseqMatchesTransaction;
 
 impl Obligation for ResponseCseqMatchesTransaction {
-    fn id(&self) -> RuleId {
-        RuleId::ResponseCseqMatchesTransaction
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -242,10 +246,6 @@ impl Obligation for ResponseCseqMatchesTransaction {
 pub struct AckCseqMatchesInvite;
 
 impl Obligation for AckCseqMatchesInvite {
-    fn id(&self) -> RuleId {
-        RuleId::AckCseqMatchesInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();

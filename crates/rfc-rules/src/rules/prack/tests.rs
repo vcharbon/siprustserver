@@ -1097,7 +1097,7 @@ fn a_prack_after_the_final_draws_what_its_match_decides() {
         prack_answer(1_250_000, 481),
     ];
     for rule in crate::all_rules() {
-        let charged: Vec<_> = decide(rule.as_ref(), &unmatched)
+        let charged: Vec<_> = decide(rule.body, &unmatched)
             .into_iter()
             .filter(|f| f.violated() && f.anchor == 2)
             .collect();

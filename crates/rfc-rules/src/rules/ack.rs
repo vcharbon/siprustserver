@@ -59,6 +59,25 @@ use crate::wire::{Kind, Msg, WireView};
 use super::branch::BranchReading;
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §13.2.2.4: a UAC that took a dialog-creating 2xx to its own INVITE answers it with
+    /// an ACK on that dialog. Charges the UAC; a BYE is corroboration that the dialog died
+    /// unconfirmed, never a discharge.
+    NoAckToDialogCreating2xx = "no-ack-to-dialog-creating-2xx";
+    /// RFC 3261 §13.3.1.4: a UAS whose 2xx to an INVITE is never ACKed clears the dialog with a
+    /// BYE. Charges the UAS; the ACK or any BYE on the dialog discharges it.
+    Unacked2xxNotCleared = "unacked-2xx-not-cleared";
+    /// RFC 3261 §13.2.2.4: an ACK requires only option tags the INVITE it acknowledges required.
+    /// Charges the ACK's sender.
+    AckRequireSubsetOfInvite = "ack-require-subset-of-invite";
+    /// RFC 3261 §17.1.1.3: the ACK of a non-2xx final carries its INVITE's Route values — the two
+    /// ride one transaction. Charges the ACK's sender.
+    AckPreservesInviteRoute = "ack-preserves-invite-route";
+    /// RFC 3261 §17.1.1.3: a non-2xx INVITE final is ACKed, and the ACK reaches the UAS that sent
+    /// it. Charges the UAC that took the final and owed the ACK.
+    UnackedInviteNon2xxFinal = "unacked-invite-non-2xx-final";
+}
+
 /// How long an open observation must have kept running after the 2xx before
 /// its unanswered arrival is charged to the UAC.
 ///
@@ -91,10 +110,6 @@ pub const REJECT_ACK_WINDOW_US: u64 = 33_000_000;
 pub struct NoAckToDialogCreating2xx;
 
 impl Obligation for NoAckToDialogCreating2xx {
-    fn id(&self) -> RuleId {
-        RuleId::NoAckToDialogCreating2xx
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -170,10 +185,6 @@ impl Obligation for NoAckToDialogCreating2xx {
 pub struct Unacked2xxNotCleared;
 
 impl Obligation for Unacked2xxNotCleared {
-    fn id(&self) -> RuleId {
-        RuleId::Unacked2xxNotCleared
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -250,10 +261,6 @@ impl Obligation for Unacked2xxNotCleared {
 pub struct UnackedInviteNon2xxFinal;
 
 impl Obligation for UnackedInviteNon2xxFinal {
-    fn id(&self) -> RuleId {
-        RuleId::UnackedInviteNon2xxFinal
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per (UAS, call, branch): the INVITE it took, the reject it sent, and
         // whether the ACK came back. Built as the walk goes, so the order the
@@ -588,10 +595,6 @@ impl<'a> Reading<'a> {
 pub struct AckRequireSubsetOfInvite;
 
 impl Obligation for AckRequireSubsetOfInvite {
-    fn id(&self) -> RuleId {
-        RuleId::AckRequireSubsetOfInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         let mut out = Vec::new();
@@ -661,10 +664,6 @@ impl Obligation for AckRequireSubsetOfInvite {
 pub struct AckPreservesInviteRoute;
 
 impl Obligation for AckPreservesInviteRoute {
-    fn id(&self) -> RuleId {
-        RuleId::AckPreservesInviteRoute
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         let mut out = Vec::new();

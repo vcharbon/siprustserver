@@ -79,22 +79,21 @@ use crate::wire::{endpoint_addr, Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §17 / §13.3.1.4, RFC 3262 §3: a retransmission is the same message, byte for byte.
+    RungByteIdentical = "rung-byte-identical";
+}
+
 /// 64·T1, RFC 3261 §17: the envelope inside which a copy is a rung of the same
 /// transaction rather than a fresh emission under a reused key.
 const ENVELOPE_US: u64 = 32_000_000;
 
 /// **RFC 3261 §17 / §13.3.1.4, RFC 3262 §3 — a rung is byte-identical to the
-/// emission it repeats.** See the module doc.
-///
-/// Charges the endpoint that sent the divergent copy. Repeating the same bytes
-/// — or emitting once — discharges it.
+/// emission it repeats** (see the module doc). Charges the sender of the
+/// divergent copy; repeating the same bytes, or emitting once, discharges it.
 pub struct RungByteIdentical;
 
 impl Obligation for RungByteIdentical {
-    fn id(&self) -> RuleId {
-        RuleId::RungByteIdentical
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut ladders: BTreeMap<Identity<'_>, Ladder<'_>> = BTreeMap::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {

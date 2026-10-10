@@ -39,6 +39,30 @@ use crate::wire::{Kind, Msg, WireView};
 use super::branch::{BranchKey, BranchReading};
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §13.2.1 / §20.37: a re-INVITE and a 2xx to an INVITE advertise Allow and Supported.
+    /// Charges the endpoint that sent the message.
+    AllowSupportedOnInvite = "allow-supported-on-invite";
+    /// RFC 3261 §8.2.1: a UAS that does not recognise a request's method answers 405 carrying an
+    /// `Allow` header. Charges that UAS.
+    UnsupportedMethod405Allow = "unsupported-method-405-allow";
+    /// RFC 3261 §8.2.2: a UAS handed a `Require` option tag it does not support answers 420
+    /// carrying `Unsupported`. Charges that UAS.
+    UnsupportedExtension420 = "unsupported-extension-420";
+    /// RFC 3261 §8.2.3: a 415 names the formats its sender does accept, via `Accept` /
+    /// `Accept-Encoding` / `Accept-Language`. Charges the sender.
+    Unsupported415Accepts = "unsupported-415-accepts";
+    /// RFC 3261 §21.4.15: a 421 lists the extensions it demands of the UAC in a `Require` header.
+    /// Charges the endpoint that sent it.
+    UnsupportedExtension421 = "unsupported-extension-421";
+    /// RFC 3261 §11.2: a 2xx to OPTIONS describes the sender's capabilities (`Allow` / `Supported`
+    /// / `Accept`). Charges the sender.
+    OptionsResponseEchoes = "options-response-echoes";
+    /// RFC 3261 §8.2.2.3: a CANCEL, and the ACK of a non-2xx final, state no `Require` /
+    /// `Proxy-Require` — a transaction-management request imposes no extension. Charges the sender.
+    NoRequireOnCancelOrAck = "no-require-on-cancel-or-ack";
+}
+
 /// How long an OPEN observation must keep running past a request before "it was
 /// never answered" reads as an absence rather than a truncation.
 ///
@@ -115,10 +139,6 @@ struct Answer {
 pub struct AllowSupportedOnInvite;
 
 impl Obligation for AllowSupportedOnInvite {
-    fn id(&self) -> RuleId {
-        RuleId::AllowSupportedOnInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The first INVITE branch each endpoint took per call — the one that
         // opened the negotiation, and the branch its retransmissions repeat.
@@ -206,10 +226,6 @@ impl Obligation for AllowSupportedOnInvite {
 pub struct UnsupportedMethod405Allow;
 
 impl Obligation for UnsupportedMethod405Allow {
-    fn id(&self) -> RuleId {
-        RuleId::UnsupportedMethod405Allow
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let taken = |msg: &Msg| match &msg.kind {
             Kind::Request { method } => {
@@ -250,10 +266,6 @@ impl Obligation for UnsupportedMethod405Allow {
 pub struct UnsupportedExtension420;
 
 impl Obligation for UnsupportedExtension420 {
-    fn id(&self) -> RuleId {
-        RuleId::UnsupportedExtension420
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let taken = |msg: &Msg| {
             matches!(msg.kind, Kind::Request { .. }) && !unsupported_require(msg).is_empty()
@@ -312,10 +324,6 @@ fn unsupported_require(msg: &Msg) -> Vec<String> {
 pub struct Unsupported415Accepts;
 
 impl Obligation for Unsupported415Accepts {
-    fn id(&self) -> RuleId {
-        RuleId::Unsupported415Accepts
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         sent_response_owes(
             wire,
@@ -336,10 +344,6 @@ impl Obligation for Unsupported415Accepts {
 pub struct UnsupportedExtension421;
 
 impl Obligation for UnsupportedExtension421 {
-    fn id(&self) -> RuleId {
-        RuleId::UnsupportedExtension421
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         sent_response_owes(
             wire,
@@ -362,10 +366,6 @@ impl Obligation for UnsupportedExtension421 {
 pub struct OptionsResponseEchoes;
 
 impl Obligation for OptionsResponseEchoes {
-    fn id(&self) -> RuleId {
-        RuleId::OptionsResponseEchoes
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The OPTIONS transactions each endpoint took — a 2xx is judged only on
         // one of them.
@@ -585,10 +585,6 @@ fn response_finding(rule: RuleId, mi: usize, msg: &Msg, owed: &[&str]) -> Findin
 pub struct NoRequireOnCancelOrAck;
 
 impl Obligation for NoRequireOnCancelOrAck {
-    fn id(&self) -> RuleId {
-        RuleId::NoRequireOnCancelOrAck
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let branches = BranchReading::of(wire.msgs);
         let mut out = Vec::new();

@@ -47,6 +47,53 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3262 §4: a UAC that took a reliable provisional answers it with a PRACK whose RAck names
+    /// that provisional.
+    UnackedReliableProvisional = "unacked-reliable-provisional";
+    /// RFC 3262 §7.2: a PRACK's `RAck` CSeq-num names the INVITE whose RSeq space the acknowledged
+    /// provisional belongs to. Charges the PRACK's sender.
+    RackWithoutKnownInvite = "rack-without-known-invite";
+    /// RFC 3262 §3: a UAS holds one reliable provisional outstanding at a time on a dialog — the
+    /// next waits for the PRACK of the last. Charges the UAS; a retransmission of an RSeq already
+    /// sent is not a second provisional.
+    NoOverlappingReliableProvisionals = "no-overlapping-reliable-provisionals";
+    /// RFC 3262 §3: each subsequent reliable provisional on a dialog carries `RSeq = prior + 1`.
+    /// Charges the UAS.
+    NonContiguousRseq = "non-contiguous-rseq";
+    /// RFC 3262 §4: a UAC PRACKs reliable provisionals in RSeq order — one that arrived out of
+    /// order waits for the gap to fill. Charges the UAC.
+    NoPrackOfOutOfOrderRseq = "no-prack-of-out-of-order-rseq";
+    /// RFC 3262 §3: a UAS handed an INVITE requiring `100rel` answers every non-100 provisional
+    /// reliably, or rejects the INVITE 420 naming `100rel` Unsupported. Charges that UAS.
+    RequireReliable1xxOnRequire = "require-reliable-1xx-on-require";
+    /// RFC 3262 §3: a UAS sends a reliable provisional only where the INVITE opted into `100rel`,
+    /// in `Require` or in `Supported`. Charges that UAS.
+    ReliableNeedsClientOptIn = "reliable-needs-client-opt-in";
+    /// RFC 3262 §3: the PRACK machinery is scoped to the INVITE METHOD — no reliable provisional
+    /// answers a non-INVITE request; a re-INVITE is an INVITE. Charges the UAS that sent it.
+    NoReliable1xxOnInDialog = "no-reliable-1xx-on-in-dialog";
+    /// RFC 3262 §3: a proxy forwards a PRACK matching no reliable provisional of its own rather
+    /// than absorbing it. Charges the endpoint that took the PRACK.
+    UnmatchedPrackProxied = "unmatched-prack-proxied";
+    /// RFC 3262 §3: a PRACK naming an `RSeq` its taker sent reliably draws a 2xx; one naming no
+    /// such `RSeq` draws a 481. Charges the endpoint that answered the PRACK.
+    Prack2xxOr481 = "prack-2xx-or-481";
+    /// RFC 3262 §3: a UAS holds the INVITE 2xx while a reliable provisional of its own that carried
+    /// a body is still unPRACKed. Charges that UAS.
+    Delay2xxOnUnackedReliable1xxWithSdp = "delay-2xx-on-unacked-reliable-1xx-with-sdp";
+    /// RFC 3262 §3: a UAS emits no NEW reliable provisional on an INVITE transaction it has already
+    /// answered. Charges that UAS; the reliable-only sibling of [`RuleId::No1xxAfterFinal`], keyed
+    /// on `RSeq`.
+    NoNewReliable1xxAfterFinal = "no-new-reliable-1xx-after-final";
+    /// RFC 3262 §4: a 100 Trying is never reliable, so a UAC never PRACKs one whatever `Require:
+    /// 100rel` it carries. Charges the PRACK's sender.
+    NoPrackOf100Trying = "no-prack-of-100-trying";
+    /// RFC 3262 §5: the PRACK of a reliable provisional that carried an OFFER carries the answer.
+    /// Charges the PRACK's sender.
+    PrackAnswers1xxOffer = "prack-answers-1xx-offer";
+}
+
 /// How long an OPEN observation must run past an unPRACKed reliable
 /// provisional, with no final seen, before the absence is charged rather than
 /// read as truncation.
@@ -87,10 +134,6 @@ pub const PRACK_WINDOW_US: u64 = 1_000_000;
 pub struct UnackedReliableProvisional;
 
 impl Obligation for UnackedReliableProvisional {
-    fn id(&self) -> RuleId {
-        RuleId::UnackedReliableProvisional
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
 
@@ -184,10 +227,6 @@ impl Obligation for UnackedReliableProvisional {
 pub struct RackWithoutKnownInvite;
 
 impl Obligation for RackWithoutKnownInvite {
-    fn id(&self) -> RuleId {
-        RuleId::RackWithoutKnownInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -240,10 +279,6 @@ impl Obligation for RackWithoutKnownInvite {
 pub struct NoOverlappingReliableProvisionals;
 
 impl Obligation for NoOverlappingReliableProvisionals {
-    fn id(&self) -> RuleId {
-        RuleId::NoOverlappingReliableProvisionals
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -297,10 +332,6 @@ impl Obligation for NoOverlappingReliableProvisionals {
 pub struct NonContiguousRseq;
 
 impl Obligation for NonContiguousRseq {
-    fn id(&self) -> RuleId {
-        RuleId::NonContiguousRseq
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -355,10 +386,6 @@ impl Obligation for NonContiguousRseq {
 pub struct NoPrackOfOutOfOrderRseq;
 
 impl Obligation for NoPrackOfOutOfOrderRseq {
-    fn id(&self) -> RuleId {
-        RuleId::NoPrackOfOutOfOrderRseq
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -433,10 +460,6 @@ fn rseq_order(arrivals: &[&Reliable<'_>]) -> (u64, BTreeSet<u64>) {
 pub struct RequireReliable1xxOnRequire;
 
 impl Obligation for RequireReliable1xxOnRequire {
-    fn id(&self) -> RuleId {
-        RuleId::RequireReliable1xxOnRequire
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -491,10 +514,6 @@ impl Obligation for RequireReliable1xxOnRequire {
 pub struct ReliableNeedsClientOptIn;
 
 impl Obligation for ReliableNeedsClientOptIn {
-    fn id(&self) -> RuleId {
-        RuleId::ReliableNeedsClientOptIn
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -542,10 +561,6 @@ impl Obligation for ReliableNeedsClientOptIn {
 pub struct NoReliable1xxOnInDialog;
 
 impl Obligation for NoReliable1xxOnInDialog {
-    fn id(&self) -> RuleId {
-        RuleId::NoReliable1xxOnInDialog
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -600,10 +615,6 @@ impl Obligation for NoReliable1xxOnInDialog {
 pub struct UnmatchedPrackProxied;
 
 impl Obligation for UnmatchedPrackProxied {
-    fn id(&self) -> RuleId {
-        RuleId::UnmatchedPrackProxied
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -666,10 +677,6 @@ impl Obligation for UnmatchedPrackProxied {
 pub struct Prack2xxOr481;
 
 impl Obligation for Prack2xxOr481 {
-    fn id(&self) -> RuleId {
-        RuleId::Prack2xxOr481
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -737,10 +744,6 @@ impl Obligation for Prack2xxOr481 {
 pub struct Delay2xxOnUnackedReliable1xxWithSdp;
 
 impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
-    fn id(&self) -> RuleId {
-        RuleId::Delay2xxOnUnackedReliable1xxWithSdp
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -815,10 +818,6 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
 pub struct NoNewReliable1xxAfterFinal;
 
 impl Obligation for NoNewReliable1xxAfterFinal {
-    fn id(&self) -> RuleId {
-        RuleId::NoNewReliable1xxAfterFinal
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -877,10 +876,6 @@ impl Obligation for NoNewReliable1xxAfterFinal {
 pub struct NoPrackOf100Trying;
 
 impl Obligation for NoPrackOf100Trying {
-    fn id(&self) -> RuleId {
-        RuleId::NoPrackOf100Trying
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -942,10 +937,6 @@ impl Obligation for NoPrackOf100Trying {
 pub struct PrackAnswers1xxOffer;
 
 impl Obligation for PrackAnswers1xxOffer {
-    fn id(&self) -> RuleId {
-        RuleId::PrackAnswers1xxOffer
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per call: whether an INVITE carried the offer, and where each
         // offer-bearing reliable provisional's `RSeq` was first seen.

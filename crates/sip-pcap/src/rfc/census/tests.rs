@@ -102,11 +102,11 @@ fn every_rule_in_one_document_is_tallied_separately() {
         })
         .collect();
     assert_eq!(three.len(), 3);
-    let json = serde_json::to_value(three[1]).unwrap();
+    let json = serde_json::to_value(three[2]).unwrap();
     assert_eq!(json["rule"], "unacked-reliable-provisional");
     assert_eq!(json["emitter"], A, "the UAC that owed the PRACK");
     assert_eq!(json["rseq"], 1);
-    let ack = serde_json::to_value(three[2]).unwrap();
+    let ack = serde_json::to_value(three[1]).unwrap();
     assert_eq!(ack["rule"], "no-ack-to-dialog-creating-2xx");
     assert_eq!(ack["emitter"], A, "the UAC that owed the ACK");
     assert_eq!(ack["to_tag"], "tb");

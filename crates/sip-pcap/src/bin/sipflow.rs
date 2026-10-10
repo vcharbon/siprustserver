@@ -529,13 +529,11 @@ fn rule_set(words: &[String]) -> Result<Vec<rfc_rules::RuleId>, String> {
     for word in words {
         match word.as_str() {
             "wire" => {}
-            "all" => out.extend(rfc_rules::all_rules().iter().map(|r| r.id())),
+            "all" => out.extend(rfc_rules::RuleId::ALL),
             token => {
-                let id = rfc_rules::all_rules()
-                    .iter()
-                    .map(|r| r.id())
-                    .find(|id| id.token() == token)
-                    .ok_or_else(|| format!("--rfc-rules: unknown rule {token:?}"))?;
+                let id = token
+                    .parse::<rfc_rules::RuleId>()
+                    .map_err(|_| format!("--rfc-rules: unknown rule {token:?}"))?;
                 out.push(id);
             }
         }

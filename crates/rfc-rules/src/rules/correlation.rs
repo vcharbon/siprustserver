@@ -55,6 +55,45 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §8.1.3 / §17.1.3: a response reproduces its request's Via stack unchanged, top
+    /// branch included, so the UAC can match it to the client transaction. Charges the endpoint
+    /// that sent the response; read at the endpoint whose transaction it claims.
+    ResponseEchoesRequestVia = "response-echoes-request-via";
+    /// RFC 3261 §8.1.3.3: a response's `CSeq` echoes one of a request its taker actually sent — a
+    /// `(number, method)` no sent request produced answers a phantom. Charges the endpoint that
+    /// sent the response.
+    ResponseCorrelation = "response-correlation";
+    /// RFC 3261 §12.2.1.1: an in-dialog message names the taker's own dialog — a request's To-tag
+    /// and a response's From-tag are tags the taker minted. Charges the endpoint that sent it.
+    MidDialogTags = "mid-dialog-tags";
+    /// RFC 3261 §12.2.1.1: a peer's From URI on its in-dialog requests stays the URI its
+    /// dialog-creating INVITE stated. Charges the endpoint that rewrote it.
+    PeerUriStable = "peer-uri-stable";
+    /// RFC 3261 §12.1: the Call-ID of a dialog is immutable, so every later in-dialog message
+    /// carries the one its dialog-creating INVITE established. Charges the endpoint that changed
+    /// it.
+    DialogCallIdStable = "dialog-call-id-stable";
+    /// RFC 3261 §9.1: a CANCEL's Request-URI equals that of the INVITE it cancels. Charges the
+    /// CANCEL's sender.
+    CancelRequestUri = "cancel-request-uri";
+    /// RFC 3261 §9.1: a CANCEL's top Via branch is the branch of an INVITE its taker has open, so
+    /// it reaches that server transaction. Charges the CANCEL's sender.
+    CancelViaBranch = "cancel-via-branch";
+    /// RFC 3261 §17.2.1 / §12.1.1: a UAS that committed a To-tag on a provisional carries that same
+    /// tag on the final of the transaction. Charges that UAS.
+    TagConsistency = "tag-consistency";
+    /// RFC 3261 §8.1.1.2: a request outside any dialog carries no To-tag — there is no peer yet to
+    /// name. Charges the sender.
+    NoToTagOnInitialRequest = "no-to-tag-on-initial-request";
+    /// RFC 3261 §12.2.1.1: a request sent inside a confirmed dialog carries that dialog's remote
+    /// tag in To. Charges the sender that omitted it.
+    InDialogToTag = "in-dialog-to-tag";
+    /// RFC 3261 §12.2.1.1 / §12.1.2: a request an endpoint takes inside a dialog it confirmed
+    /// carries that dialog's remote tag in From. Charges the sender.
+    InDialogFromTag = "in-dialog-from-tag";
+}
+
 // ---------------------------------------------------------------------------
 // The per-endpoint dialog state the family reads
 // ---------------------------------------------------------------------------
@@ -206,10 +245,6 @@ struct SentVia {
 }
 
 impl Obligation for ResponseEchoesRequestVia {
-    fn id(&self) -> RuleId {
-        RuleId::ResponseEchoesRequestVia
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut sent: HashMap<(String, String), Vec<SentVia>> = HashMap::new();
         let mut out = Vec::new();
@@ -288,10 +323,6 @@ impl Obligation for ResponseEchoesRequestVia {
 pub struct ResponseCorrelation;
 
 impl Obligation for ResponseCorrelation {
-    fn id(&self) -> RuleId {
-        RuleId::ResponseCorrelation
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut st = PeerDialogs::default();
         let mut out = Vec::new();
@@ -345,10 +376,6 @@ impl Obligation for ResponseCorrelation {
 pub struct MidDialogTags;
 
 impl Obligation for MidDialogTags {
-    fn id(&self) -> RuleId {
-        RuleId::MidDialogTags
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut st = PeerDialogs::default();
         let mut out = Vec::new();
@@ -408,10 +435,6 @@ impl Obligation for MidDialogTags {
 pub struct PeerUriStable;
 
 impl Obligation for PeerUriStable {
-    fn id(&self) -> RuleId {
-        RuleId::PeerUriStable
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut st = PeerDialogs::default();
         let mut out = Vec::new();
@@ -469,10 +492,6 @@ impl Obligation for PeerUriStable {
 pub struct DialogCallIdStable;
 
 impl Obligation for DialogCallIdStable {
-    fn id(&self) -> RuleId {
-        RuleId::DialogCallIdStable
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // (taker, From-tag) -> the Call-ID its dialog-creating INVITE established.
         let mut dialogs: HashMap<(String, String), String> = HashMap::new();
@@ -521,10 +540,6 @@ impl Obligation for DialogCallIdStable {
 pub struct CancelRequestUri;
 
 impl Obligation for CancelRequestUri {
-    fn id(&self) -> RuleId {
-        RuleId::CancelRequestUri
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut st = PeerDialogs::default();
         let mut out = Vec::new();
@@ -581,10 +596,6 @@ impl Obligation for CancelRequestUri {
 pub struct CancelViaBranch;
 
 impl Obligation for CancelViaBranch {
-    fn id(&self) -> RuleId {
-        RuleId::CancelViaBranch
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut st = PeerDialogs::default();
         let mut out = Vec::new();
@@ -636,10 +647,6 @@ impl Obligation for CancelViaBranch {
 pub struct TagConsistency;
 
 impl Obligation for TagConsistency {
-    fn id(&self) -> RuleId {
-        RuleId::TagConsistency
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // (emitter, branch, CSeq method) -> the tags its provisionals established,
         // in order.
@@ -714,10 +721,6 @@ const DIALOG_INITIATING_METHODS: &[&str] =
 pub struct NoToTagOnInitialRequest;
 
 impl Obligation for NoToTagOnInitialRequest {
-    fn id(&self) -> RuleId {
-        RuleId::NoToTagOnInitialRequest
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // The (endpoint, Call-ID) pairs the view has already carried traffic for.
         let mut carried: HashMap<(String, String), ()> = HashMap::new();
@@ -914,10 +917,6 @@ impl DialogWitness {
 pub struct InDialogToTag;
 
 impl Obligation for InDialogToTag {
-    fn id(&self) -> RuleId {
-        RuleId::InDialogToTag
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut by: HashMap<(String, String), DialogWitness> = HashMap::new();
         let mut out = Vec::new();
@@ -963,10 +962,6 @@ pub const EARLY_DIALOG_WINDOW_US: u64 = 32_000_000;
 pub struct InDialogFromTag;
 
 impl Obligation for InDialogFromTag {
-    fn id(&self) -> RuleId {
-        RuleId::InDialogFromTag
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut by: HashMap<(String, String), ConfirmedDialogs> = HashMap::new();
         let mut out = Vec::new();

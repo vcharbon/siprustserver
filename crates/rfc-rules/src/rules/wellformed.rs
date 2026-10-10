@@ -43,6 +43,45 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §8.1.1.7: a request's top Via carries a `branch` beginning with the magic cookie
+    /// `z9hG4bK`. Charges the sender that minted it.
+    BranchPrefix = "branch-prefix";
+    /// RFC 3261 §8.1.1.6: a request carries a Max-Forwards in `0..=255`, and no higher than the
+    /// recommended initial 70 — above it the count was minted, not decremented. Charges the sender.
+    MaxForwards = "max-forwards";
+    /// RFC 3261 §20.14: a message's Content-Length equals the byte count of the body it carried.
+    /// Charges the sender that wrote both.
+    ContentLength = "content-length";
+    /// RFC 3261 §7.4.1: a message carrying a body names its format in Content-Type. Charges the
+    /// sender.
+    ContentType = "content-type";
+    /// RFC 3261 §8.1.1.8: a dialog-establishing request (INVITE, SUBSCRIBE) carries a Contact — the
+    /// dialog's remote target. Charges the sender.
+    ContactPresence = "contact-presence";
+    /// RFC 3261 §15.1: a BYE carries no Contact — it ends the dialog, so target-refresh means
+    /// nothing on it. Charges the sender.
+    NoContactOnBye = "no-contact-on-bye";
+    /// RFC 3261 §8.2.6.2: a UAS adds a To-tag to every response above 100, so the peer can
+    /// dialog-match it. Charges the responding UAS.
+    ToTagPresence = "to-tag-presence";
+    /// RFC 3261 §8.1.1.3: a UAC adds a From-tag to every request it sends, its half of the dialog
+    /// identifier. Charges the sender.
+    FromTagPresence = "from-tag-presence";
+    /// RFC 3261 §16.6: Record-Route is a PROXY mechanism, so a UA (a B2BUA included) inserts none.
+    /// Charges the endpoint that inserted it.
+    NoRecordRouteFromUa = "no-record-route-from-ua";
+    /// RFC 3262 §4: `Require: 100rel` rides an INVITE and nothing else — the reliable-provisional
+    /// contract is the INVITE transaction's. Charges the sender that stamped it.
+    No100relRequireOnNonInvite = "no-100rel-require-on-non-invite";
+    /// RFC 3262 §3: a 100 (Trying) carries no reliability marker, and a reliable 1xx carries an
+    /// `RSeq` in `1..=2^31-1`. Charges the responding UAS, which writes both rows.
+    Reliable1xxHeaders = "reliable-1xx-headers";
+    /// RFC 3261 §9.1: a CANCEL's CSeq method token is `CANCEL`, whatever request it cancels.
+    /// Charges the sender.
+    CancelCseqMethod = "cancel-cseq-method";
+}
+
 /// The RFC 3261 §8.1.1.7 magic cookie every `branch` begins with.
 const MAGIC_COOKIE: &str = "z9hG4bK";
 
@@ -79,10 +118,6 @@ fn charge(rule: RuleId, msg: &Msg, mi: usize, decision: Decision) -> Finding {
 pub struct BranchPrefix;
 
 impl Obligation for BranchPrefix {
-    fn id(&self) -> RuleId {
-        RuleId::BranchPrefix
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -134,10 +169,6 @@ impl Obligation for BranchPrefix {
 pub struct MaxForwards;
 
 impl Obligation for MaxForwards {
-    fn id(&self) -> RuleId {
-        RuleId::MaxForwards
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -196,10 +227,6 @@ impl Obligation for MaxForwards {
 pub struct ContentLength;
 
 impl Obligation for ContentLength {
-    fn id(&self) -> RuleId {
-        RuleId::ContentLength
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -253,10 +280,6 @@ impl Obligation for ContentLength {
 pub struct ContentType;
 
 impl Obligation for ContentType {
-    fn id(&self) -> RuleId {
-        RuleId::ContentType
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -294,10 +317,6 @@ impl Obligation for ContentType {
 pub struct ContactPresence;
 
 impl Obligation for ContactPresence {
-    fn id(&self) -> RuleId {
-        RuleId::ContactPresence
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -333,10 +352,6 @@ impl Obligation for ContactPresence {
 pub struct NoContactOnBye;
 
 impl Obligation for NoContactOnBye {
-    fn id(&self) -> RuleId {
-        RuleId::NoContactOnBye
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -380,10 +395,6 @@ impl Obligation for NoContactOnBye {
 pub struct ToTagPresence;
 
 impl Obligation for ToTagPresence {
-    fn id(&self) -> RuleId {
-        RuleId::ToTagPresence
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -424,10 +435,6 @@ impl Obligation for ToTagPresence {
 pub struct FromTagPresence;
 
 impl Obligation for FromTagPresence {
-    fn id(&self) -> RuleId {
-        RuleId::FromTagPresence
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -465,10 +472,6 @@ impl Obligation for FromTagPresence {
 pub struct NoRecordRouteFromUa;
 
 impl Obligation for NoRecordRouteFromUa {
-    fn id(&self) -> RuleId {
-        RuleId::NoRecordRouteFromUa
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -512,10 +515,6 @@ impl Obligation for NoRecordRouteFromUa {
 pub struct CancelCseqMethod;
 
 impl Obligation for CancelCseqMethod {
-    fn id(&self) -> RuleId {
-        RuleId::CancelCseqMethod
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -553,10 +552,6 @@ impl Obligation for CancelCseqMethod {
 pub struct No100relRequireOnNonInvite;
 
 impl Obligation for No100relRequireOnNonInvite {
-    fn id(&self) -> RuleId {
-        RuleId::No100relRequireOnNonInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
@@ -603,10 +598,6 @@ const RSEQ_MAX: u64 = 2_147_483_647;
 pub struct Reliable1xxHeaders;
 
 impl Obligation for Reliable1xxHeaders {
-    fn id(&self) -> RuleId {
-        RuleId::Reliable1xxHeaders
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {

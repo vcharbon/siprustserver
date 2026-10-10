@@ -29,6 +29,21 @@ use crate::wire::{Kind, Msg, WireView};
 use super::branch::BranchReading;
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §9.2: a UAS that has taken a CANCEL for an INVITE answers that INVITE 487, never
+    /// 2xx.
+    No200AfterCancel = "no-200-after-cancel";
+    /// RFC 3261 §9.1: a CANCEL carries the same Route values as the INVITE it cancels — the two
+    /// take the same path. Charges the CANCEL's sender.
+    CancelRouteEchoesInvite = "cancel-route-echoes-invite";
+    /// RFC 3261 §9.1, bounded by ADR-0028: a UAC CANCELs only once it has taken a provisional, or
+    /// once its own grace window has run out. Charges the UAC.
+    CancelAfter1xx = "cancel-after-1xx";
+    /// RFC 3261 §9.1: a UAC CANCELs only a client transaction still in flight — after its final
+    /// (§17.1.1.2) a CANCEL reaches no transaction (481, §9.2). Charges the CANCEL's sender.
+    NoCancelAfterFinal = "no-cancel-after-final";
+}
+
 /// **RFC 3261 §9.2 — no 2xx after a CANCEL.**
 ///
 /// **The occasion is the cancelled TRANSACTION, as ONE endpoint saw it**: the
@@ -62,10 +77,6 @@ use super::Obligation;
 pub struct No200AfterCancel;
 
 impl Obligation for No200AfterCancel {
-    fn id(&self) -> RuleId {
-        RuleId::No200AfterCancel
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -272,10 +283,6 @@ struct Answer<'a> {
 pub struct CancelRouteEchoesInvite;
 
 impl Obligation for CancelRouteEchoesInvite {
-    fn id(&self) -> RuleId {
-        RuleId::CancelRouteEchoesInvite
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         let mut out = Vec::new();
@@ -358,10 +365,6 @@ pub const CANCEL_GRACE_FLOOR_US: u64 = 900_000;
 pub struct CancelAfter1xx;
 
 impl Obligation for CancelAfter1xx {
-    fn id(&self) -> RuleId {
-        RuleId::CancelAfter1xx
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = BranchReading::of(wire.msgs);
         let mut out = Vec::new();
@@ -437,10 +440,6 @@ impl Obligation for CancelAfter1xx {
 pub struct NoCancelAfterFinal;
 
 impl Obligation for NoCancelAfterFinal {
-    fn id(&self) -> RuleId {
-        RuleId::NoCancelAfterFinal
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = UacReading::of(wire.msgs);
         let mut out = Vec::new();

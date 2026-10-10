@@ -56,6 +56,29 @@ use crate::wire::{Kind, Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §12.2.1.1: an in-dialog request repeats the dialog's peer URIs — the From/To URIs
+    /// learned when the dialog was created. Charges the UAC that sent it.
+    MidDialogUri = "mid-dialog-uri";
+    /// RFC 3261 §12.2.1.1 / §16.12: an in-dialog request reproduces the dialog route set — as Route
+    /// rows behind a loose first route, or in the Request-URI behind a strict one. Charges the UAC
+    /// that sent it.
+    MidDialogRoute = "mid-dialog-route";
+    /// RFC 3261 §8.1.2 + RFC 3263 §4: an in-dialog request's bytes go to the destination its
+    /// topmost Route (or, with an empty route set, its Request-URI) resolves to. Charges the UAC
+    /// that sent it.
+    MidDialogWireDestination = "mid-dialog-wire-destination";
+    /// RFC 3261 §12.1.1 / §12.2.2: Record-Route rides dialog-CREATING responses only — never a 100,
+    /// never a response to an in-dialog request. Charges the endpoint that sent the response.
+    RecordRoutePlacement = "record-route-placement";
+    /// RFC 3261 §12.2.2: a UAS that takes an in-dialog request naming a dialog it never confirmed
+    /// answers 481. Charges that UAS.
+    UnknownDialog481 = "unknown-dialog-481";
+    /// RFC 3261 §15: a BYE names a dialog that exists, and a callee does not BYE an early one — it
+    /// CANCELs or answers 4xx/5xx/6xx. Charges the BYE's sender.
+    NoByeOutsideOrEarlyDialog = "no-bye-outside-or-early-dialog";
+}
+
 /// **§12.2.1.1 — an in-dialog request repeats the dialog's peer URIs.** The
 /// From and To URIs of every in-dialog request a UAC sends are the local and
 /// remote URIs the dialog was created with; rewriting either mid-dialog breaks
@@ -72,10 +95,6 @@ use super::Obligation;
 pub struct MidDialogUri;
 
 impl Obligation for MidDialogUri {
-    fn id(&self) -> RuleId {
-        RuleId::MidDialogUri
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -146,10 +165,6 @@ impl Obligation for MidDialogUri {
 pub struct MidDialogRoute;
 
 impl Obligation for MidDialogRoute {
-    fn id(&self) -> RuleId {
-        RuleId::MidDialogRoute
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -236,10 +251,6 @@ impl Obligation for MidDialogRoute {
 pub struct MidDialogWireDestination;
 
 impl Obligation for MidDialogWireDestination {
-    fn id(&self) -> RuleId {
-        RuleId::MidDialogWireDestination
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -322,10 +333,6 @@ pub(super) fn wire_addr(endpoint: &str) -> Option<(String, u16)> {
 pub struct RecordRoutePlacement;
 
 impl Obligation for RecordRoutePlacement {
-    fn id(&self) -> RuleId {
-        RuleId::RecordRoutePlacement
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Requests each endpoint SENT, by transaction, with whether they were
         // in-dialog when they went out — built as the walk goes, so a response
@@ -437,10 +444,6 @@ pub const UNKNOWN_DIALOG_WINDOW_US: u64 = 1_000_000;
 pub struct UnknownDialog481;
 
 impl Obligation for UnknownDialog481 {
-    fn id(&self) -> RuleId {
-        RuleId::UnknownDialog481
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per endpoint: the peer tags whose dialog it has seen CONFIRMED on a
         // call, and whether that call ever carried a dialog-creating response
@@ -617,10 +620,6 @@ pub const BYE_CROSSING_WINDOW_US: u64 = 1_000_000;
 pub struct NoByeOutsideOrEarlyDialog;
 
 impl Obligation for NoByeOutsideOrEarlyDialog {
-    fn id(&self) -> RuleId {
-        RuleId::NoByeOutsideOrEarlyDialog
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();

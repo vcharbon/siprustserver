@@ -49,6 +49,17 @@ use crate::wire::{Msg, WireView};
 
 use super::Obligation;
 
+crate::registry::rules! {
+    /// RFC 3261 §17.2.1: a server transaction emits exactly one final response — after the first,
+    /// only a same-status retransmission is legal (§13.3.1.4 for a 2xx). Charges the transaction's
+    /// UAS side.
+    SingleFinalPerServerTxn = "single-final-per-server-txn";
+    /// RFC 3261 §13.3.1.1 / §17.2.1: a server transaction that has answered emits no NEW
+    /// provisional afterwards. Charges the transaction's UAS side; the general sibling of
+    /// [`RuleId::SingleFinalPerServerTxn`].
+    No1xxAfterFinal = "no-1xx-after-final";
+}
+
 /// **RFC 3261 §17.2.1 — one final per server transaction.** See the module doc.
 ///
 /// Charges the endpoint that sent the finals. Answering once — or repeating
@@ -56,10 +67,6 @@ use super::Obligation;
 pub struct SingleFinalPerServerTxn;
 
 impl Obligation for SingleFinalPerServerTxn {
-    fn id(&self) -> RuleId {
-        RuleId::SingleFinalPerServerTxn
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
@@ -156,10 +163,6 @@ impl Obligation for SingleFinalPerServerTxn {
 pub struct No1xxAfterFinal;
 
 impl Obligation for No1xxAfterFinal {
-    fn id(&self) -> RuleId {
-        RuleId::No1xxAfterFinal
-    }
-
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         // Per (emitter, call, branch): the final that completed it, and the
         // early dialogs whose provisional this vantage has already carried.
