@@ -71,10 +71,8 @@ fn retransmits_on_a_timer(m: &MsgJson) -> bool {
 ///
 /// `retx` is the same-transaction half: the relation holds AND the top Via
 /// branch matches. Identical bytes carry an identical branch, so the two halves
-/// now coincide and the field says what it always meant. It is decided here,
-/// never at ingest — the two must not be able to disagree, because a consumer
-/// reading `retx` where `repeat_of` is absent falls back to a criterion this
-/// one replaced.
+/// coincide. It is decided here, never at ingest — the two must not be able to
+/// disagree.
 pub fn mark_repeats(leg: &mut LegJson) {
     for i in 0..leg.msgs.len() {
         let anchor = if retransmits_on_a_timer(&leg.msgs[i]) {

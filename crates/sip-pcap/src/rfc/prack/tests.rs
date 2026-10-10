@@ -438,10 +438,6 @@ fn an_rseq_another_socket_pracked_on_the_leg_is_answered() {
     );
 }
 
-/// The RED PROOF, and the detector's remaining vantage limit stated as a
-/// test: with the PRACK gone there is nothing left on the wire that says
-/// the proxy is a hop, so the hop is charged. `emitter_role` and the
-/// registry's SUT-side guard are what a human rules on next.
 #[test]
 fn without_the_prack_the_only_visible_opener_is_charged() {
     let hits = detect(&doc_of(past_the_proxy("vy", false)));

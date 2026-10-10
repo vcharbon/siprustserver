@@ -110,11 +110,9 @@ fn leg(msgs: Vec<MsgJson>) -> LegJson {
 }
 
 /// A peer that re-ACKs each retransmitted final mints a fresh branch every
-/// time, so its ACKs are not the same datagram and none of them repeats.
-/// A former reading collapsed them onto one count to stop a ladder being encoded
-/// twice; the byte bound withdraws that, because a count replays copies of
-/// ONE stored ACK and these differ on the wire. The platform's own 200s,
-/// re-sent unchanged, still repeat.
+/// time, so its ACKs are not the same datagram and none of them repeats: a
+/// count replays copies of ONE stored ACK and these differ on the wire. The
+/// platform's own 200s, re-sent unchanged, still repeat.
 #[test]
 fn a_fresh_branch_re_ack_is_not_the_ack_before_it() {
     let mut l = leg(vec![

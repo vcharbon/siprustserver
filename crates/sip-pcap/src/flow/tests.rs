@@ -257,7 +257,7 @@ fn a_probe_pair_inside_the_dedup_window_is_not_rebased() {
 }
 
 /// Fewer shared datagrams than an offset can be estimated from: the copies
-/// survive as today, and no offset is stated.
+/// survive, and no offset is stated.
 #[test]
 fn a_probe_pair_sharing_too_few_datagrams_is_not_aligned() {
     let inv = sip_request("INVITE", "few-1", 1, "b1", "");
@@ -591,7 +591,7 @@ fn header_param_strategy_pairs_b2bua_legs_on_icid() {
     assert_eq!(legs, &vec![0, 1]);
 }
 
-/// Gap 2: a multi-hop relayed a-leg only reaches the AS host at its LAST
+/// A multi-hop relayed a-leg only reaches the AS host at its LAST
 /// observed hop, and the b-leg departs the AS from an ephemeral port —
 /// the first-observed socket pairs do not cross, so any-hop (IP-level)
 /// crossing is what pairs them.
