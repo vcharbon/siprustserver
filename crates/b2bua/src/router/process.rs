@@ -159,7 +159,7 @@ pub(super) async fn process(
         let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res).await {
             super::dialog_gate::Gate::Pass(resolved) => resolved,
             super::dialog_gate::Gate::Refused(answer) => {
-                record_refusal(ctx, call, &res.source_leg_id, &event, answer.as_ref(), now_ms);
+                record_refusal(ctx, call, &res.source_leg_id, &event, answer.as_deref(), now_ms);
                 return;
             }
             super::dialog_gate::Gate::Dropped => return,

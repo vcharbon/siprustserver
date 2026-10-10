@@ -37,7 +37,7 @@ pub(super) enum Gate {
     /// The event reaches the rules, its message resolved.
     Pass(Resolved),
     /// A request refused here, with the answer sent (none for an ACK).
-    Refused(Option<SipResponse>),
+    Refused(Option<Box<SipResponse>>),
     /// A response that answers nothing of this stack's, dropped unread.
     Dropped,
 }
@@ -67,7 +67,7 @@ pub(super) async fn admit(
     let mut refusal = refusal;
     crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal);
     let _ = ctx.txn.send_response(refusal.clone(), *src).await;
-    Gate::Refused(Some(refusal))
+    Gate::Refused(Some(Box::new(refusal)))
 }
 
 /// The gate's reading of a request.

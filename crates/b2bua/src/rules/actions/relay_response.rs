@@ -194,7 +194,7 @@ impl ActionExecutor<'_> {
         // may carry the same CSeq, and a final delivered to a transaction it
         // does not answer — or regenerated below as an INVITE response —
         // would turn a `200 (PRACK)` into a spurious `200 (INVITE)`.
-        let relayed = ctx.resolved.relay.clone();
+        let relayed = ctx.resolved.relay.as_deref().cloned();
         if let Some((holder, pending)) = relayed {
             // §18.2.2: a relayed response goes to the originator's top Via
             // sent-by, and the snapshot holds that Via verbatim. A Via no

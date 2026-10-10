@@ -17,7 +17,7 @@ pub struct Resolved {
     /// The dialog of the source leg the message names.
     pub dialog: Option<DialogId>,
     /// The relayed request a response answers and where it is kept.
-    pub relay: Option<(PendingHolder, PendingRequest)>,
+    pub relay: Option<Box<(PendingHolder, PendingRequest)>>,
 }
 
 /// The resolution of an event that names no dialog.
@@ -61,7 +61,8 @@ pub fn response_origin(call: &Call, leg_id: &str, facts: ResponseFacts<'_>) -> R
     };
     if let Some(d) = named {
         let relay = relayed_pending(call, leg_id, facts.to, facts.from, facts.cseq)
-            .filter(|(_, p)| p.method.eq_ignore_ascii_case(facts.method));
+            .filter(|(_, p)| p.method.eq_ignore_ascii_case(facts.method))
+            .map(Box::new);
         return ResponseOrigin::Dialog(Resolved { dialog: Some(d.id()), relay });
     }
     let Some(from) = facts.from.filter(|f| holds_our_tag(leg, f)) else {

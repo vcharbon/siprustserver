@@ -1609,7 +1609,7 @@ impl<'a> RuleContext<'a> {
     /// event.
     pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
         self.response()?;
-        self.resolved.relay.as_ref().map(|(_, p)| p.clone())
+        self.resolved.relay.as_deref().map(|(_, p)| p.clone())
     }
 
     /// Does the current response answer a request THIS STACK RELAYED
