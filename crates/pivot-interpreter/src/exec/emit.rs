@@ -113,7 +113,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         let message = match self.compose(step, &effects, answering) {
             Ok(message) => message,
             Err(failure) => {
-                self.instance.fail(failure);
+                self.instance.fail(*failure);
                 return false;
             }
         };

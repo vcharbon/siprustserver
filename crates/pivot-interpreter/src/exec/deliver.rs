@@ -163,108 +163,9 @@ impl<'a, 'p> Runner<'a, 'p> {
                 _ => None,
             });
         let Some(step) = matched.cloned() else {
-            // Charged to the expect of the transaction the datagram rides
-            // (RFC 3261 §17.1.3), else to the step it came CLOSEST to: one whose
-            // discriminator matched and whose content did not says exactly what
-            // is wrong, where an unordered group's first member would describe a
-            // step the datagram was never for (`progress`).
-            let ladder = self.instance.recording().legs().remove(&leg).unwrap_or_default();
-            let (closest, own_transaction, retired, released, ends) = {
-                let cursor = self.instance.cursor();
-                let items = &self.instance.plan().program().items;
-                let armed: Vec<progress::Armed<'_>> = gated
-                    .iter()
-                    .map(|step| progress::Armed {
-                        step,
-                        opener: cursor.opening_send(&step.id),
-                        retirable: items[step.loc.item].kind == ItemKind::Message,
-                    })
-                    .collect();
-                let unmatched = progress::unmatched(&inbound, &armed, &ladder, confirmed_before)
-                    .expect("the leg has an armed expect");
-                (
-                    unmatched.charged.clone(),
-                    unmatched.own_transaction,
-                    unmatched.retired,
-                    unmatched.released,
-                    unmatched.ends,
-                )
-            };
-            let reason = match gate::discriminates(&closest, &inbound) {
-                GateVerdict::Rejects(why) => why,
-                GateVerdict::Matches => match self.rides_fork(&closest, &inbound) {
-                    GateVerdict::Rejects(why) => why,
-                    GateVerdict::Matches => {
-                        match gate::content_holds(&closest, &inbound, &scope, &resolver) {
-                            GateVerdict::Rejects(why) => why,
-                            GateVerdict::Matches => "no armed expect matched".into(),
-                        }
-                    }
-                },
-            };
-            let reason = if own_transaction {
-                format!(
-                    "{reason}; on the {} transaction {} waits on",
-                    inbound.cseq_method, closest.id
-                )
-            } else {
-                reason
-            };
-            let also_armed: Vec<&str> =
-                gated.iter().map(|s| s.id.as_str()).filter(|id| *id != closest.id).collect();
-            let reason = if also_armed.is_empty() {
-                reason
-            } else {
-                format!("{reason}; also armed: {}", also_armed.join(", "))
-            };
-            let step = closest.id.clone();
-            self.instance.fail(Failure::UnmatchedDatagram {
-                step: step.clone(),
-                leg: leg.clone(),
-                gated_on: (&closest.discriminator).into(),
-                reason,
-                arrived: inbound.arrived(),
-            });
-            // What the leg owes for this datagram is the scripted tail's where
-            // the run goes on past a retired step; otherwise it is composed here,
-            // as for any arrival the flow refused.
-            if retired.is_empty() || ends {
-                self.answer_unscripted(&leg, &message).await;
-            }
-            // A final ended the transaction the charged step waits on: the step
-            // is retired, the tolerated absences on that transaction released,
-            // and what stands behind them measures from now. No timing note and
-            // no outcome: the step took nothing.
-            let now = Instant::now();
-            for id in &released {
-                if self.instance.release_step(id) {
-                    self.completed_at.insert(id.clone(), now);
-                }
-            }
-            for id in &retired {
-                if self.instance.retire_step(id) {
-                    self.completed_at.insert(id.clone(), now);
-                }
-            }
-            if !retired.is_empty() || !released.is_empty() {
-                if let Some(seq) = seq {
-                    let note = format!(
-                        "the final of the transaction {step} waits on: {} where the step names {}; {step} {}",
-                        inbound.status.unwrap_or(0),
-                        closest.discriminator,
-                        if retired.is_empty() { "released" } else { "retired" }
-                    );
-                    self.instance.recording().renote(&leg, seq, &note);
-                }
-                self.settle_blocks(now);
-            }
-            // The run goes on unless this arrival left the leg with nothing it
-            // can still be satisfied by (§11.2).
-            if !ends {
-                return true;
-            }
-            self.end_script(Some(&leg), Some(&step));
-            return false;
+            return self
+                .charge_unmatched(&leg, &inbound, &message, &gated, confirmed_before, seq)
+                .await;
         };
 
         // A better candidate for the step that was holding one out: the held
@@ -324,5 +225,120 @@ impl<'a, 'p> Runner<'a, 'p> {
         self.run_checks(&step, &inbound);
         self.complete(&step);
         true
+    }
+
+    /// Charge a datagram no armed expect on `leg` matched: to the expect of the
+    /// transaction it rides, else to the step it came closest to. `false` once
+    /// the arrival leaves the leg nothing it can still be satisfied by.
+    async fn charge_unmatched(
+        &mut self,
+        leg: &str,
+        inbound: &Inbound,
+        message: &SipMessage,
+        gated: &[CompiledStep],
+        confirmed_before: bool,
+        seq: Option<u64>,
+    ) -> bool {
+        let scope = self.instance.scope();
+        let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
+        // Charged to the expect of the transaction the datagram rides
+        // (RFC 3261 §17.1.3), else to the step it came CLOSEST to: one whose
+        // discriminator matched and whose content did not says exactly what
+        // is wrong, where an unordered group's first member would describe a
+        // step the datagram was never for (`progress`).
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        let (closest, own_transaction, retired, released, ends) = {
+            let cursor = self.instance.cursor();
+            let items = &self.instance.plan().program().items;
+            let armed: Vec<progress::Armed<'_>> = gated
+                .iter()
+                .map(|step| progress::Armed {
+                    step,
+                    opener: cursor.opening_send(&step.id),
+                    retirable: items[step.loc.item].kind == ItemKind::Message,
+                })
+                .collect();
+            let unmatched = progress::unmatched(inbound, &armed, &ladder, confirmed_before)
+                .expect("the leg has an armed expect");
+            (
+                unmatched.charged.clone(),
+                unmatched.own_transaction,
+                unmatched.retired,
+                unmatched.released,
+                unmatched.ends,
+            )
+        };
+        let reason = match gate::discriminates(&closest, inbound) {
+            GateVerdict::Rejects(why) => why,
+            GateVerdict::Matches => match self.rides_fork(&closest, inbound) {
+                GateVerdict::Rejects(why) => why,
+                GateVerdict::Matches => {
+                    match gate::content_holds(&closest, inbound, &scope, &resolver) {
+                        GateVerdict::Rejects(why) => why,
+                        GateVerdict::Matches => "no armed expect matched".into(),
+                    }
+                }
+            },
+        };
+        let reason = if own_transaction {
+            format!("{reason}; on the {} transaction {} waits on", inbound.cseq_method, closest.id)
+        } else {
+            reason
+        };
+        let also_armed: Vec<&str> =
+            gated.iter().map(|s| s.id.as_str()).filter(|id| *id != closest.id).collect();
+        let reason = if also_armed.is_empty() {
+            reason
+        } else {
+            format!("{reason}; also armed: {}", also_armed.join(", "))
+        };
+        let step = closest.id.clone();
+        self.instance.fail(Failure::UnmatchedDatagram {
+            step: step.clone(),
+            leg: leg.to_string(),
+            gated_on: (&closest.discriminator).into(),
+            reason,
+            arrived: inbound.arrived(),
+        });
+        // What the leg owes for this datagram is the scripted tail's where
+        // the run goes on past a retired step; otherwise it is composed here,
+        // as for any arrival the flow refused.
+        if retired.is_empty() || ends {
+            self.answer_unscripted(leg, message).await;
+        }
+        // A final ended the transaction the charged step waits on: the step
+        // is retired, the tolerated absences on that transaction released,
+        // and what stands behind them measures from now. No timing note and
+        // no outcome: the step took nothing.
+        let now = Instant::now();
+        for id in &released {
+            if self.instance.release_step(id) {
+                self.completed_at.insert(id.clone(), now);
+            }
+        }
+        for id in &retired {
+            if self.instance.retire_step(id) {
+                self.completed_at.insert(id.clone(), now);
+            }
+        }
+        if !retired.is_empty() || !released.is_empty() {
+            if let Some(seq) = seq {
+                let note = format!(
+                    "the final of the transaction {step} waits on: {} where the step names {}; {step} {}",
+                    inbound.status.unwrap_or(0),
+                    closest.discriminator,
+                    if retired.is_empty() { "released" } else { "retired" }
+                );
+                self.instance.recording().renote(leg, seq, &note);
+            }
+            self.settle_blocks(now);
+        }
+        // The run goes on unless this arrival left the leg with nothing it
+        // can still be satisfied by (§11.2).
+        if !ends {
+            return true;
+        }
+        self.end_script(Some(leg), Some(&step));
+        false
     }
 }

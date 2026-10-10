@@ -67,7 +67,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         step: &CompiledStep,
         effects: &StepEffects,
         answering: Option<(u32, Option<&str>)>,
-    ) -> Result<SipMessage, Failure> {
+    ) -> Result<SipMessage, Box<Failure>> {
         let site = format!("step {:?}", step.id);
         // The lane's per-call directives (§4.3) reach exactly one step: the
         // INVITE that opens this call's caller leg. Every other send carries the
@@ -165,12 +165,12 @@ impl<'a, 'p> Runner<'a, 'p> {
                 step.msg.method.as_deref(),
             );
             if let Some(reason) = owned {
-                return Err(Failure::CseqOverrideRefused {
+                return Err(Box::new(Failure::CseqOverrideRefused {
                     step: step.id.clone(),
                     leg: step.leg.clone(),
                     deviation: deviation.clone(),
                     reason: reason.to_string(),
-                });
+                }));
             }
         }
         let cseq_override = cseq_override.map(|(_, value)| value);
@@ -245,11 +245,11 @@ impl<'a, 'p> Runner<'a, 'p> {
                 .map(|(what, _)| *what)
                 .collect();
                 if !missing.is_empty() {
-                    return Err(fail(format!(
+                    return Err(Box::new(fail(format!(
                         "the dialog-opening {method} states no {}; the document's tier-2 refs \
                          resolve to nothing the lane can address",
                         missing.join(", ")
-                    )));
+                    ))));
                 }
                 let addresses = crate::stack::Addresses {
                     ruri: rendered.ruri.as_deref().unwrap_or_default(),
@@ -288,15 +288,15 @@ fn preserved_block(
     effects: &StepEffects,
     rendered: &render::Rendered,
     message: &SipMessage,
-) -> Result<(), Failure> {
+) -> Result<(), Box<Failure>> {
     let Some(deviation) = effects.preserve_stored_block.first() else { return Ok(()) };
     preserve::verify(rendered.template.headers(), message.headers()).map_err(|detail| {
-        Failure::EmissionNotPreserved {
+        Box::new(Failure::EmissionNotPreserved {
             step: step.id.clone(),
             leg: step.leg.clone(),
             deviation: deviation.clone(),
             detail,
-        }
+        })
     })
 }
 

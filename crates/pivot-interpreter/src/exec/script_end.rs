@@ -71,7 +71,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Ok(composed) => composed,
                 Err(failure) => {
                     self.close_refused.insert(leg);
-                    self.instance.fail(failure);
+                    self.instance.fail(*failure);
                     continue;
                 }
             };
@@ -112,7 +112,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         leg: &str,
         owed: &Owed,
         site: &str,
-    ) -> Result<(Vec<u8>, std::net::SocketAddr), Failure> {
+    ) -> Result<(Vec<u8>, std::net::SocketAddr), Box<Failure>> {
         let fail = |detail: String| Failure::SendFailed {
             step: site.to_string(),
             leg: leg.to_string(),
@@ -157,7 +157,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             // Nothing to compose: the caller filtered these out by asking for the
             // act first, and a match without them would be a wildcard.
             Owed::Nothing | Owed::AwaitFinal | Owed::AwaitTeardown => {
-                return Err(fail(format!("{owed} puts no message on the wire")))
+                return Err(Box::new(fail(format!("{owed} puts no message on the wire"))))
             }
         };
         Ok((sip_message::serialize(&message), dst))

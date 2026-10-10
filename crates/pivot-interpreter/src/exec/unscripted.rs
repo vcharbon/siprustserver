@@ -202,7 +202,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             let (wire, dst) = match self.compose_close(leg, &owed, UNSCRIPTED) {
                 Ok(composed) => composed,
                 Err(failure) => {
-                    self.instance.fail(failure);
+                    self.instance.fail(*failure);
                     return;
                 }
             };
