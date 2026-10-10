@@ -100,8 +100,9 @@ paces it. A ladder belongs either to a **transaction** (Timer A/E/G, the CANCEL
 sub-ladder — the transaction layer drives them and its consumers never see
 them) or to a **dialog-level obligation** (RFC 3261 §13.3.1.4, RFC 3262 §3 —
 replicated with the call, visible to rules only as its give-up). See ADR-0032.
-_Avoid_: "retry", "attempt" (they carry HTTP retry semantics elsewhere in the
-workspace), "cadence" for the schedule as a whole.
+_Avoid_: "retry" (it carries HTTP retry semantics elsewhere in the workspace),
+"attempt" (a routing answer's dial, see **Attempt**), "cadence" for the
+schedule as a whole.
 
 **Rung**:
 One step of a ladder. Rung 0 is the original send, rung 1 the first re-send,
@@ -669,6 +670,17 @@ the diagram and not something an author declares.
 _Avoid_: "clear state" in prose for the *concept* (say a machine **deactivates**
 / reaches its **terminal** state); `ClearState` is the action that realises it.
 
+**Lifecycle event** (ADR-0042):
+What the engine tells every active service at the end of a turn, whichever
+rule claimed the turn: an **attempt** started (with the routing answer it
+dials) or ended (with its outcome), a leg ended (with how). A service hears
+one through a machine-bound rule matching it; its handler may write call ext,
+move its own machine's cursor and arm or cancel its own service timers,
+nothing else. A machine the turn deactivated still hears the events the turn
+caused, for its ext writes.
+_Avoid_: "observer rule" (the rule that ran beside a claim, which lifecycle
+events replace); "callback".
+
 **K8sMembership**:
 The real `topology::Membership` source: a kube EndpointSlice informer over
 the headless worker Service. Every endpoint in the slice → `Peer{ordinal = pod
@@ -742,6 +754,29 @@ before; the limiter refuses one not above the number it knows for the key
 The call runs on an id held lacks: it runs fail open, or on a set a service
 or a route moved it onto that held does not name. Restated on every write of
 the call, so the next statement that holds the set ends it.
+
+## Call model vocabulary
+
+**Attempt** (ADR-0042, `Call.attempts`):
+One routing answer that dials and the destination legs it dials: the initial
+route (dialled by the core or by the service its routing deferred to), a
+setup failover, an established call's reroute, a transfer target. Each has a
+**cause**, the decision ordinal it opened under, its legs, the ring deadline
+its answer states, and once ended an **outcome**: answered, failed (every leg
+ended), superseded (the next attempt opened while a leg still rang or was
+being cancelled), call ended, or refused (admission refused its route; it
+dialled nothing). A dialled leg names its attempt; a media leg names none.
+_Avoid_: "attempt" for a retransmission or a re-send (a **rung** of a
+**ladder**); "try"; "route" alone for the attempt (the route is its answer).
+
+**Timer scope** (ADR-0042, `TimerScope`):
+What a timer guards — the call, an attempt, a leg, or a retransmission
+obligation — and so when it dies: leaving the scope retires every timer of
+it, with no rule cancelling one. A timer is named by its type and its scope
+(`TimerKey`) and armed under the call's next **generation**; a fire the
+ledger no longer holds under that generation is stale and reaches no rule.
+_Avoid_: "timer id" (there is no string name); "cancel" for what a scope's
+end does (it **retires** the scope).
 
 ## Dialog model vocabulary
 
