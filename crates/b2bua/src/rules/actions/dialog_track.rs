@@ -1,13 +1,11 @@
 //! Dialog establishment and tracking: b-leg early dialogs (per callee To-tag,
-//! forking-aware, minted from the leg's INVITE), 2xx confirmation, the
-//! caller-facing dialog fronting each callee dialog, and the a-leg UAS
-//! dialogs with their B2BUA-minted tags. Relay itself does NOT live here — see
+//! forking-aware, minted from the leg's INVITE), the caller-facing dialog
+//! fronting each callee dialog, and the a-leg UAS dialogs with their
+//! B2BUA-minted tags. A 2xx's confirmation is [`super::confirm`]. Relay itself does NOT live here — see
 //! [`super::relay_response`] / [`super::relay_request`].
 
-use call::helpers::{
-    callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog, set_leg_state,
-};
-use call::{Call, Dialog, DialogState, LegDisposition, LegState, PeerDialog, RetiredDialog};
+use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
+use call::{Call, Dialog, DialogState, LegState, PeerDialog, RetiredDialog};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
@@ -52,7 +50,7 @@ impl ActionExecutor<'_> {
     /// transaction handle (the ACK-for-2xx and RAck CSeq, §13.2.2.4 / RFC 3262
     /// §7.2). Called from the b-leg 1xx/2xx relay path, from
     /// [`Self::ensure_b_early_dialog`] (the suppressed-provisional seam), and
-    /// from [`Self::confirm_dialog`] (a 2xx answering under a tag that never
+    /// from [`Self::confirm`] (a 2xx answering under a tag that never
     /// rang). Idempotent per tag; a leg this stack did not dial has no such
     /// dialogs.
     pub(super) fn track_b_early_dialog(
@@ -87,171 +85,10 @@ impl ActionExecutor<'_> {
         });
     }
 
-    /// Confirm a b-leg dialog from the 2xx response event (learn remote tag /
-    /// target / CSeq), mark it confirmed+bridged, and ensure the a-leg dialog
-    /// exists.
-    pub(super) fn confirm_dialog(&self, call: &mut Call, ctx: &RuleContext, leg_id: &str) {
-        let resp = match ctx.response() {
-            Some(r) => r,
-            None => return,
-        };
-        let remote_tag = resp.to().tag().unwrap_or_default().to_string();
-        // A 2xx crossing this leg's CANCEL is reaped (`cancel-200-crossing`),
-        // never relayed: it names no dialog the caller is shown.
-        let reaped = call
-            .b_legs
-            .iter()
-            .any(|l| l.leg_id == leg_id && l.disposition == LegDisposition::Cancelling);
-        let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
-            .unwrap_or_default();
-        // §12.1.2: the b-leg is a UAC dialog, so its route set is the
-        // dialog-creating 2xx's Record-Route values in *reverse* order (the
-        // a-leg/UAS path keeps the INVITE's Record-Route forward). We must reverse
-        // *individual route URIs*, not header lines: the front proxy double-record-
-        // routes (a `;outbound` half + a cookie half), and on the wire those two
-        // arrive comma-combined in a single Record-Route header (RFC 3261 §7.3.1).
-        // Reversing per-header would be a no-op on that single value and leave the
-        // cookie on top — so the worker→callee keepalive carries the cookie first,
-        // the proxy decodes it (`w_pri`) and bounces the request back to a worker
-        // after a reboot onto a new pod IP the registry has not yet learned (the
-        // long-call-loss class). Reading the recorded routes as individual
-        // entries puts the proxy's own `;outbound` half on top, so direction is
-        // intrinsic to its Record-Route — no `;outbound` worker-stamp and no
-        // Via/registry rescue.
-        let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
-        // The CSeq the caller's §13.2.2.4 ACK will carry — its own INVITE's.
-        let awaited_ack_cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
-        // §12.1.2: a 2xx whose To-tag no provisional ever carried answers on a
-        // dialog of its OWN — an accepting branch that never rang. Track it
-        // before promotion (idempotent for a known tag) so it exists with the
-        // INVITE-seeded CSeq and inherited pending-INVITE handle, instead of
-        // inheriting another fork's already-advanced record (§12.2.1.1 skip).
-        if !remote_tag.is_empty() {
-            self.track_b_early_dialog(call, leg_id, resp, &remote_tag);
-        }
-        let offered_reliably = call::helpers::offered_in_reliable_provisional(
-            call,
-            leg_id,
-            &remote_tag,
-            i64::from(resp.cseq().seq()),
-        );
-        if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-            // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
-            // dialog — the one whose callee tag it carries, with the sequence
-            // its early PRACK/UPDATE advanced. Every other early dialog retires
-            // with its sequence (the BYE releasing a late 2xx of it continues
-            // it, §12.2.1.1) and the relays still open in it, whose finals
-            // still reach their originators (§8.1.3.3).
-            if let Some(d) = call::helpers::callee_dialog_mut(leg, &remote_tag) {
-                if !remote_target.is_empty() {
-                    d.remote_target = remote_target;
-                }
-                if !route_set.is_empty() {
-                    d.route_set = route_set;
-                }
-                // The 2xx echoes our INVITE's CSeq, a number of our own
-                // sequence: `peer_cseq` keeps the callee's, as its early
-                // requests left it (RFC 3261 §12.2.1.1, §12.2.2).
-                d.state = DialogState::Confirmed;
-                // The session it carries becomes the leg's.
-                relay::adopt_confirmed_dialog(leg, &remote_tag);
-            }
-            for lost in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
-                let open_relays = std::mem::take(&mut lost.inbound_pending_requests);
-                lost.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
-            }
-            leg.state = LegState::Confirmed;
-            leg.disposition = LegDisposition::Bridged;
-            // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own,
-            // relayed — arm the obligation for the CSeq that ACK will carry.
-            // Its emission mints the ACK's client transaction and retains the
-            // branch every later copy of the 2xx is re-ACKed on
-            // (`re-ack-retransmitted-2xx`), so no branch exists until then.
-            if let Some(d) = leg.dialogs.confirmed_mut() {
-                d.awaited_ack_cseq = Some(awaited_ack_cseq);
-            }
-            // A delayed offer: the INVITE this stack sent carried none, so the
-            // 2xx's description is the offer the ACK MUST answer (§13.2.2.4) —
-            // unless a reliable provisional of this dialog carried the offer
-            // first, whose PRACK carries the answer (RFC 3262 §5).
-            let delayed = !offered_reliably
-                && leg.dialogs.confirmed().is_some_and(|d| !relay::acked_invite_carries_offer(d));
-            if let Some(offer) = resp.sdp().filter(|_| delayed) {
-                crate::rules::delayed_offer::note(leg, awaited_ack_cseq, offer);
-            }
-        }
-        // Bridge the a-leg only for a live answer that actually faces the caller,
-        // and before its tag is read: the 2xx's a-face is decided as the relay
-        // that follows decides it, on a confirmed a-leg. Two guards, both
-        // load-bearing:
-        //
-        // 1. `call.state == Active`. `cancel-200-crossing` reuses `confirm_dialog`
-        //    to learn the crossing 200's dialog so it can ACK + BYE the abandoned
-        //    callee, but on the reject/no-failover teardown the call is already
-        //    `Terminating` and the a-leg was never answered — resurrecting it to
-        //    `Confirmed` would read as "answered" and suppress the ADR-0022
-        //    unanswered-a-leg final (`invariants::enforce`), stranding the caller
-        //    with no response. Leave it as-is (Trying/Early) so the caller still
-        //    gets its final when the deferred termination finalizes. The failover
-        //    crossing-200 reap runs while the call is still `Active` (awaiting
-        //    `/call/failure`), so it keeps confirming the a-leg as before.
-        //
-        // 2. The confirmed leg is *adopted*. An unadopted `media` leg (an MRF
-        //    parked behind early media, ADR-0016) is answered by the *service*,
-        //    not relayed to alice — its 2xx surfaced to the caller only as a 183,
-        //    so RFC-wise there is no confirmed a-dialog. Confirming the a-leg off
-        //    such a 2xx would let a later `BeginTermination` BYE a dialog the
-        //    caller never established (undeliverable BYE → the call strands in
-        //    `Terminating`, its CDR never flushes). The a-leg is confirmed only
-        //    by an a-facing final 2xx — core relay, `RespondToALeg`, or
-        //    `AnswerALegNewDialog`. Adopted destination legs (incl. the REFER
-        //    transfer target and the failover crossing-200 callee) are unaffected.
-        let confirmed_leg_adopted =
-            call.b_legs.iter().find(|l| l.leg_id == leg_id).is_none_or(call::helpers::is_adopted);
-        let bridges = call.state == call::CallModelState::Active && confirmed_leg_adopted;
-        if bridges {
-            *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
-        }
-        // The 2xx that becomes the final to the caller's INVITE: relayed, not
-        // reaped, and nothing has answered her yet.
-        let answers_the_caller = bridges && !reaped && call.a_leg.invite_final_sent.is_none();
-        // The a-facing tag of the dialog this 2xx creates (§12.1.2): the one its
-        // relayed provisional minted, the one `MapUnshownDialog` gave a dialog
-        // the caller was never shown, or — for a live answer no caller-facing
-        // dialog fronts yet and the relay will carry — the one that relay takes
-        // (`a_face_tag`).
-        let preferred = match fronting_dialog(call, leg_id, &remote_tag) {
-            Some(d) => Some(d.our_tag.clone()),
-            None if answers_the_caller && !remote_tag.is_empty() => {
-                Some(self.a_face_tag(call, leg_id, &remote_tag))
-            }
-            None => None,
-        };
-        self.ensure_a_dialog_with(call, preferred.clone());
-        // The a-leg may hold dialogs under other tags (an earlier fork's
-        // provisional); the 2xx confirms the one the caller sees on it, and
-        // retires the others. Only the answer to her INVITE confirms her dialog.
-        if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
-            adopt_a_tag(call, &pref);
-        }
-        // Keep the answer SDP relayed toward alice on the 2xx as the a-dialog's
-        // `cached_sdp` (the relayFirst18x / fake-PRACK cache). The §13.3.1.4
-        // repeat does not read it — it re-sends the retained datagram. Mirror
-        // the relay body choice (policy override else the callee's 200 body).
-        let answer_body = match call.policy_update_body.clone() {
-            Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
-            _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
-            _ => None,
-        };
-        if let (Some(body), Some(d)) = (answer_body, own_a_dialog_mut(call)) {
-            d.cached_sdp = Some(body);
-        }
-    }
-
     /// Show a callee early dialog no provisional showed the caller under a
     /// fresh a-facing To-tag ([`b2bua_sdk::model::RuleAction::MapUnshownDialog`]):
     /// its 2xx then opens a caller dialog of its own (RFC 3261 §12.1.2) — the
-    /// relay reads the tag off the fronting dialog, `confirm_dialog` adopts it.
+    /// relay reads the tag off the fronting dialog, `confirm` adopts it.
     /// A dialog already fronted keeps the tag it was shown under; a tagless one
     /// names no dialog (§12.1.2 requires the tag) and is left to the primary.
     pub(super) fn map_unshown_dialog(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) {

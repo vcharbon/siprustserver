@@ -1,0 +1,173 @@
+//! The confirmation a 2xx to a callee leg's INVITE makes (RFC 3261 §12.1.2,
+//! §13.2.2.4): one chain of steps whose order the types carry. The winner is
+//! promoted ([`Promoted`]), the losers retire ([`Retired`]), and only a
+//! retired fork set lets the caller's dialog be re-identified and the ACK
+//! obligation be armed.
+
+use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted, set_leg_state};
+use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, LegState, RetiredDialog};
+use sip_message::header;
+use sip_message::SipResponse;
+
+use crate::rules::relay;
+use b2bua_sdk::model::RuleContext;
+
+use super::dialog_track::{adopt_a_tag, contact_uri, own_a_dialog_mut, uac_route_set};
+use super::ActionExecutor;
+
+/// The callee dialog the 2xx carries is confirmed; the leg's other early
+/// dialogs, `losers`, are still early.
+struct Promoted {
+    leg_id: String,
+    /// The callee tag the 2xx carries; empty for a tagless 2xx, which names
+    /// no dialog.
+    winner: String,
+    losers: Vec<DialogId>,
+    /// The 2xx crossed this leg's CANCEL: it is reaped, never relayed.
+    crossed_cancel: bool,
+}
+
+/// The callee leg holds one live dialog, the winner's: every loser retired.
+struct Retired {
+    leg_id: String,
+    winner: String,
+    crossed_cancel: bool,
+}
+
+impl ActionExecutor<'_> {
+    /// Confirm the callee dialog the turn's 2xx answers on `leg_id`, retire
+    /// the leg's other forks, give the caller the dialog that 2xx is relayed
+    /// on, and arm the ACK the 2xx owes. Nothing happens without a response
+    /// event.
+    pub(super) fn confirm(&self, call: &mut Call, ctx: &RuleContext, leg_id: &str) {
+        let Some(resp) = ctx.response() else { return };
+        let promoted = self.promote_winner(call, resp, leg_id);
+        let retired = retire_losers(call, promoted);
+        self.reidentify_caller_dialog(call, resp, &retired);
+        arm_ack_obligation(call, resp, retired);
+    }
+
+    /// Confirm the dialog whose callee tag the 2xx carries — minted now for a
+    /// tag no provisional rang (§12.1.2), with the INVITE-seeded sequence —
+    /// learning its target and route set (§12.1.2: the 2xx's Record-Route,
+    /// reversed per recorded route). Its session becomes the leg's; the leg
+    /// is confirmed and bridged. `peer_cseq` stays as the callee's early
+    /// requests left it: the 2xx echoes a number of our own sequence.
+    fn promote_winner(&self, call: &mut Call, resp: &SipResponse, leg_id: &str) -> Promoted {
+        let winner = resp.to().tag().unwrap_or_default().to_string();
+        let crossed_cancel = call
+            .b_legs
+            .iter()
+            .any(|l| l.leg_id == leg_id && l.disposition == LegDisposition::Cancelling);
+        let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
+            .unwrap_or_default();
+        let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
+        if !winner.is_empty() {
+            self.track_b_early_dialog(call, leg_id, resp, &winner);
+        }
+        let mut losers = Vec::new();
+        if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+            if let Some(d) = callee_dialog_mut(leg, &winner) {
+                if !remote_target.is_empty() {
+                    d.remote_target = remote_target;
+                }
+                if !route_set.is_empty() {
+                    d.route_set = route_set;
+                }
+                d.state = DialogState::Confirmed;
+                relay::adopt_confirmed_dialog(leg, &winner);
+            }
+            losers = leg
+                .dialogs
+                .iter()
+                .filter(|d| d.state == DialogState::Early)
+                .map(|d| d.id())
+                .collect();
+            leg.state = LegState::Confirmed;
+            leg.disposition = LegDisposition::Bridged;
+        }
+        Promoted { leg_id: leg_id.to_string(), winner, losers, crossed_cancel }
+    }
+
+    /// Give the caller the dialog the 2xx is relayed on (§12.1.1): the a-leg
+    /// is bridged — only for a live answer on an adopted leg — and, when the
+    /// 2xx is the answer to her INVITE, the caller-facing dialog fronting the
+    /// winner (or the one the relay will show it under) is confirmed and the
+    /// others retire. The answer body relayed toward her is kept as that
+    /// dialog's cached SDP.
+    fn reidentify_caller_dialog(&self, call: &mut Call, resp: &SipResponse, retired: &Retired) {
+        let Retired { leg_id, winner, crossed_cancel } = retired;
+        // A terminating call's a-leg was never answered: confirming it would
+        // read as answered and suppress its unanswered-caller final (ADR-0022).
+        // An unadopted leg (a media server behind early media, ADR-0016) is
+        // answered by the service, not relayed: the caller has no dialog of it.
+        let adopted = call.b_legs.iter().find(|l| &l.leg_id == leg_id).is_none_or(is_adopted);
+        let bridges = call.state == CallModelState::Active && adopted;
+        if bridges {
+            *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
+        }
+        let answers_the_caller =
+            bridges && !crossed_cancel && call.a_leg.invite_final_sent.is_none();
+        // The caller-facing tag of the dialog this 2xx creates: the one its
+        // relayed provisional or `MapUnshownDialog` showed, or the one the
+        // relay of a live answer takes now (`a_face_tag`).
+        let preferred = match fronting_dialog(call, leg_id, winner) {
+            Some(d) => Some(d.our_tag.clone()),
+            None if answers_the_caller && !winner.is_empty() => {
+                Some(self.a_face_tag(call, leg_id, winner))
+            }
+            None => None,
+        };
+        self.ensure_a_dialog_with(call, preferred.clone());
+        if let Some(pref) = preferred.filter(|p| !p.is_empty() && answers_the_caller) {
+            adopt_a_tag(call, &pref);
+        }
+        // The relayFirst18x / fake-PRACK cache: the body the relay carries
+        // toward the caller, the policy override else the callee's.
+        let answer_body = match call.policy_update_body.clone() {
+            Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
+            _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
+            _ => None,
+        };
+        if let (Some(body), Some(d)) = (answer_body, own_a_dialog_mut(call)) {
+            d.cached_sdp = Some(body);
+        }
+    }
+}
+
+/// Retire every loser (§12.1.2): with its sequence, which the BYE releasing
+/// a late 2xx of it continues (§12.2.1.1), and the relays still open in it,
+/// whose finals still reach their originators (§8.1.3.3).
+fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
+    let Promoted { leg_id, winner, losers, crossed_cancel } = promoted;
+    if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
+        for id in &losers {
+            if let Some(lost) = leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag) {
+                let open_relays = std::mem::take(&mut lost.inbound_pending_requests);
+                lost.state = DialogState::Retired(RetiredDialog { open_relays, release: None });
+            }
+        }
+    }
+    Retired { leg_id, winner, crossed_cancel }
+}
+
+/// Arm the ACK the 2xx owes (§13.2.2.4): the caller's own, relayed, carrying
+/// her INVITE's CSeq. The ACK's emission mints its client transaction and the
+/// branch every repeat of the 2xx is re-ACKed on. A delayed offer — the
+/// INVITE this stack sent carried none, and no reliable provisional of the
+/// dialog carried one first (RFC 3262 §5) — makes the 2xx's description the
+/// offer that ACK answers.
+fn arm_ack_obligation(call: &mut Call, resp: &SipResponse, retired: Retired) {
+    let Retired { leg_id, winner, .. } = retired;
+    let awaited_ack_cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+    let invite_cseq = i64::from(resp.cseq().seq());
+    let offered_reliably =
+        call::helpers::offered_in_reliable_provisional(call, &leg_id, &winner, invite_cseq);
+    let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) else { return };
+    let Some(d) = leg.dialogs.confirmed_mut() else { return };
+    d.awaited_ack_cseq = Some(awaited_ack_cseq);
+    let delayed = !offered_reliably && !relay::acked_invite_carries_offer(d);
+    if let Some(offer) = resp.sdp().filter(|_| delayed) {
+        crate::rules::delayed_offer::note(leg, awaited_ack_cseq, offer);
+    }
+}

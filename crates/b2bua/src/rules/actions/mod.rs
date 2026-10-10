@@ -17,6 +17,7 @@
 //! - `select` — shared leg/dialog selection views
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
+mod confirm;
 mod dialog_end;
 mod dialog_track;
 mod dispatch;

@@ -77,7 +77,7 @@ impl ActionExecutor<'_> {
                 self.release_straggler(call, fx, ctx, leg_id);
             }
             RuleAction::ConfirmDialog { leg_id } => {
-                self.confirm_dialog(call, ctx, leg_id);
+                self.confirm(call, ctx, leg_id);
             }
             RuleAction::UpdateLegState { leg_id, state, disposition } => {
                 *call = set_leg_state(call.clone(), leg_id, *state);
