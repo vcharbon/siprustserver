@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """File-size budget of first-party sources: a ratchet on line counts.
 
-  file-size.py [-C DIR] [--allow FILE] [--staged | --update | --report]
+  file-size.py [-C DIR] [--allow FILE] [--base REV] [--staged | --update | --report]
 
 A scanned file may have at most `limit` lines, a test file `test-limit`,
 unless the allowlist names it with a budget: a listed file may not grow past
@@ -20,13 +20,22 @@ by default) holds the settings and the entries:
 `#` starts a comment. The files scanned are those git sees under the scan
 directories: tracked, or untracked and not ignored.
 
-  (no flag)  every scanned file against its budget; an entry above its
-             file's size, or naming a file under the limit or gone, is
-             stale and fails too (`--update` fixes it)
-  --staged   the staged blobs of the staged files only (a pre-commit hook);
-             stale entries are not reported
-  --update   lowers each entry to its file's size, removes the entries of
-             files under the limit or gone; never raises nor adds one
+The allowlist itself only ever tightens: against its version at a base (REV,
+by default the merge-base of HEAD and `develop`, else HEAD; HEAD under
+--staged), a new entry, a raised number or any changed setting line fails.
+The one new entry allowed is a file git sees renamed from a listed one in the
+same diff (`-M`), the old entry gone and the number no higher than its own.
+
+  (no flag)  every scanned file against its budget, and the allowlist
+             against the base; an entry above its file's size, or naming a
+             file under the limit or gone, is stale and fails too
+             (`--update` fixes it)
+  --staged   the staged blobs of the staged files only, and the staged
+             allowlist against HEAD's (a pre-commit hook); stale entries are
+             not reported
+  --update   lowers each entry to its file's size, moves the entry of a
+             renamed file to its new path, removes the entries of files under
+             the limit or gone; never raises nor adds one
   --report   every scanned file over its limit, largest first; exits 0
 
 Exit 1 on a violation, 2 on a usage or setup error.
@@ -37,6 +46,7 @@ import os
 import subprocess
 import sys
 
+SETTING_KEYS = ("limit", "test-limit", "test", "exclude", "scan", "ext")
 LIMIT_DEFAULT = 500
 TEST_LIMIT_DEFAULT = 800
 TEST_DEFAULT = ["tests/*", "*/tests/*", "*/tests.rs", "*_tests.rs"]
@@ -53,12 +63,15 @@ class Allow:
         self.scan = []
         self.exclude = []
         self.entries = {}
+        self.settings = []
         self.lines = text.splitlines()
         for n, raw in enumerate(self.lines, 1):
             words = raw.split("#", 1)[0].split()
             if not words:
                 continue
             key, rest = words[0], words[1:]
+            if key in SETTING_KEYS:
+                self.settings.append(" ".join(words))
             if key == "limit" and len(rest) == 1 and rest[0].isdigit():
                 self.limit = int(rest[0])
             elif key == "test-limit" and len(rest) == 1 and rest[0].isdigit():
@@ -148,6 +161,73 @@ def stale(sizes, allow):
     return bad
 
 
+def rev_exists(root, rev):
+    out = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}"],
+                         capture_output=True)
+    return out.returncode == 0
+
+
+def default_base(root):
+    if not rev_exists(root, "HEAD"):
+        return None
+    if rev_exists(root, "develop"):
+        return git(root, "merge-base", "HEAD", "develop").strip()
+    return "HEAD"
+
+
+def base_allow(root, base, allow_rel):
+    """The allowlist at `base`, or None when there is none to hold it to."""
+    if base is None or not rev_exists(root, base):
+        return None
+    out = subprocess.run(["git", "-C", root, "show", f"{base}:{allow_rel}"], capture_output=True)
+    return Allow(out.stdout.decode(), f"{base}:{allow_rel}") if out.returncode == 0 else None
+
+
+def renames(root, base, cached):
+    """`{new path: old path}` of the renames git sees between `base` and the
+    worktree (the index when `cached`)."""
+    if base is None:
+        return {}
+    args = ["diff", "-M", "--name-status", "-z"] + (["--cached"] if cached else []) + [base]
+    words = git(root, *args).split("\0")
+    found, i = {}, 0
+    while i < len(words) and words[i]:
+        status = words[i]
+        if status.startswith(("R", "C")):
+            if status.startswith("R"):
+                found[words[i + 2]] = words[i + 1]
+            i += 3
+        else:
+            i += 2
+    return found
+
+
+def against_base(allow, base, renamed):
+    """What `allow` loosens against its `base` version."""
+    if base is None:
+        return []
+    bad = []
+    if allow.settings != base.settings:
+        gone = [x for x in base.settings if x not in allow.settings]
+        new = [x for x in allow.settings if x not in base.settings]
+        change = "; ".join([f"was `{x}`" for x in gone] + [f"now `{x}`" for x in new])
+        bad.append(f"{allow.path} changes its settings against {base.path} ({change or 'order'})")
+    for rel, n in sorted(allow.entries.items()):
+        old = base.entries.get(rel)
+        if old is not None:
+            if n > old:
+                bad.append(f"{allow.path} lists {rel} at {n}, above its {old} at {base.path}")
+            continue
+        src = renamed.get(rel)
+        if src in base.entries and src not in allow.entries and n <= base.entries[src]:
+            continue
+        bad.append(f"{allow.path} adds {rel} at {n}, which {base.path} does not list")
+    return bad
+
+
+BASE_HINT = "the allowlist only tightens: a file over its limit is split, never listed or raised"
+
+
 def report(violations, hint=None):
     for v in violations:
         print(f"file-size: {v}", file=sys.stderr)
@@ -159,11 +239,13 @@ def report(violations, hint=None):
 SPLIT_HINT = "a file over its budget is split into modules; its budget never goes up"
 
 
-def cmd_check(root, allow):
+def cmd_check(root, allow, base):
     sizes = scanned(root, allow)
     grown = over_budget(sizes, allow)
     old = stale(sizes, allow)
+    loose = against_base(allow, base_allow(root, base, allow.path), renames(root, base, False))
     rc = report(grown, SPLIT_HINT if grown else None)
+    rc = report(loose, BASE_HINT if loose else None) or rc
     return report(old, "run `file-size.py --update` and commit the allowlist" if old else None) or rc
 
 
@@ -179,17 +261,27 @@ def cmd_staged(root, allow_rel):
         if allow.in_scope(rel):
             sizes[rel] = count_lines(git(root, "cat-file", "blob", f":{rel}", binary=True))
     grown = over_budget(sizes, allow)
-    return report(grown, SPLIT_HINT if grown else None)
+    base = "HEAD" if rev_exists(root, "HEAD") else None
+    loose = against_base(allow, base_allow(root, base, allow_rel), renames(root, base, True))
+    rc = report(grown, SPLIT_HINT if grown else None)
+    return report(loose, BASE_HINT if loose else None) or rc
 
 
-def cmd_update(root, allow, allow_file):
+def cmd_update(root, allow, allow_file, base):
     sizes = scanned(root, allow)
+    moved_to = {old: new for new, old in renames(root, base, False).items()}
     out, changed = [], []
     for raw in allow.lines:
         words = raw.split("#", 1)[0].split()
         if len(words) == 2 and words[0] in allow.entries:
             rel, budget = words[0], int(words[1])
             n = sizes.get(rel)
+            new = moved_to.get(rel)
+            if n is None and new in sizes and new not in allow.entries:
+                rel, n = new, sizes[new]
+                changed.append(f"moved {words[0]} -> {rel}")
+                if n > allow.limit_of(rel):
+                    raw = f"{rel} {min(n, budget)}"
             if n is None or n <= allow.limit_of(rel):
                 changed.append(f"removed {rel} ({'gone' if n is None else f'{n} lines'})")
                 continue
@@ -205,7 +297,9 @@ def cmd_update(root, allow, allow_file):
         print(f"file-size: {c}")
     allow = load_allow(root, os.path.relpath(allow_file, root))
     grown = over_budget(sizes, allow)
-    return report(grown, SPLIT_HINT if grown else None)
+    loose = against_base(allow, base_allow(root, base, allow.path), renames(root, base, False))
+    rc = report(grown, SPLIT_HINT if grown else None)
+    return report(loose, BASE_HINT if loose else None) or rc
 
 
 def cmd_report(root, allow):
@@ -234,20 +328,26 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("-C", dest="root", default=".", help="any directory of the repository")
     p.add_argument("--allow", default="file-size.allow", help="relative to the root")
+    p.add_argument("--base", help="the revision the allowlist is held to (not with --staged)")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--staged", action="store_true")
     mode.add_argument("--update", action="store_true")
     mode.add_argument("--report", action="store_true")
     a = p.parse_args()
     root = git(a.root, "rev-parse", "--show-toplevel").strip()
+    if a.staged and a.base:
+        fail_setup("--staged holds the allowlist to HEAD; --base does not apply")
     if a.staged:
         return cmd_staged(root, a.allow)
+    if a.base and not rev_exists(root, a.base):
+        fail_setup(f"--base {a.base} is no commit")
+    base = a.base or default_base(root)
     allow = load_allow(root, a.allow)
     if a.update:
-        return cmd_update(root, allow, os.path.join(root, a.allow))
+        return cmd_update(root, allow, os.path.join(root, a.allow), base)
     if a.report:
         return cmd_report(root, allow)
-    return cmd_check(root, allow)
+    return cmd_check(root, allow, base)
 
 
 if __name__ == "__main__":

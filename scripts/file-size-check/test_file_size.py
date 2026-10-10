@@ -34,6 +34,10 @@ class Repo:
         with open(path, "w") as f:
             f.write(text)
 
+    def commit(self):
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+
     def read(self, rel):
         with open(os.path.join(self.root, rel)) as f:
             return f.read()
@@ -157,6 +161,98 @@ class Ratchet(Case):
     def test_unreadable_allowlist_line_is_a_setup_error(self):
         repo = self.repo(SETTINGS + "src/a.rs lots\n")
         self.assertEqual(repo.run()[0], 2)
+
+
+class AgainstTheBase(Case):
+    """The allowlist only tightens against its committed version."""
+
+    def based(self):
+        repo = self.repo(SETTINGS + "src/big.rs 600\n")
+        repo.write("src/big.rs", lines(600))
+        repo.commit()
+        self.assertEqual(repo.run(), (0, ""))
+        return repo
+
+    def refused(self, repo, text, *flags):
+        rc, out = repo.run(*flags)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(text, out)
+        repo.git("add", "-A")
+        rc, out = repo.run("--staged")
+        self.assertEqual(rc, 1, out)
+        self.assertIn(text, out)
+
+    def test_a_raised_entry_fails(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "src/big.rs 700\n")
+        repo.write("src/big.rs", lines(700))
+        self.refused(repo, "lists src/big.rs at 700, above its 600")
+
+    def test_a_new_entry_fails(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "src/big.rs 600\nsrc/new.rs 700\n")
+        repo.write("src/new.rs", lines(700))
+        self.refused(repo, "adds src/new.rs at 700")
+
+    def test_an_added_exclude_fails(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "exclude src/new.rs\nsrc/big.rs 600\n")
+        repo.write("src/new.rs", lines(700))
+        self.refused(repo, "changes its settings")
+
+    def test_a_raised_limit_fails(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS.replace("limit 500", "limit 800")
+                   + "src/big.rs 600\n")
+        repo.write("src/new.rs", lines(700))
+        self.refused(repo, "now `limit 800`")
+
+    def test_a_raised_test_limit_fails(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS.replace("test-limit 800", "test-limit 900")
+                   + "src/big.rs 600\n")
+        self.refused(repo, "now `test-limit 900`")
+
+    def test_an_added_test_glob_fails_even_after_update(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "test src/new.rs\nsrc/big.rs 600\n")
+        repo.write("src/new.rs", lines(700))
+        rc, out = repo.run("--update")
+        self.assertEqual(rc, 1, out)
+        self.refused(repo, "now `test src/new.rs`")
+
+    def test_an_explicit_base_is_held_to(self):
+        repo = self.based()
+        repo.write("file-size.allow", SETTINGS + "src/big.rs 700\n")
+        repo.write("src/big.rs", lines(700))
+        repo.commit()
+        self.assertEqual(repo.run()[0], 0)  # HEAD is the default base and lists 700
+        rc, out = repo.run("--base", "HEAD~1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("above its 600", out)
+
+    def test_a_renamed_file_keeps_its_entry_through_update(self):
+        repo = self.based()
+        repo.git("mv", "src/big.rs", "src/huge.rs")
+        rc, out = repo.run()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("lists src/big.rs, which is gone", out)
+        rc, out = repo.run("--update")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("moved src/big.rs -> src/huge.rs", out)
+        self.assertEqual(repo.read("file-size.allow"), SETTINGS + "src/huge.rs 600\n")
+        self.assertEqual(repo.run(), (0, ""))
+        repo.git("add", "-A")
+        self.assertEqual(repo.run("--staged"), (0, ""))
+        repo.commit()
+        self.assertEqual(repo.run("--base", "HEAD~1"), (0, ""))
+
+    def test_a_renamed_file_may_not_raise_its_entry(self):
+        repo = self.based()
+        repo.git("mv", "src/big.rs", "src/huge.rs")
+        repo.write("src/huge.rs", lines(650))
+        repo.write("file-size.allow", SETTINGS + "src/huge.rs 650\n")
+        self.refused(repo, "adds src/huge.rs at 650")
 
 
 class RealAllowlist(Case):
