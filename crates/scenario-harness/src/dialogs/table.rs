@@ -115,6 +115,16 @@ pub struct DialogTable {
     refused: HashSet<DialogId>,
 }
 
+/// Whether a REFER or SUBSCRIBE opens a subscription: a REFER stating
+/// `Refer-Sub: false` asks for none (RFC 4488 §4).
+fn opens_subscription(request: &SipRequest) -> bool {
+    request.method().as_str() != "REFER"
+        || !request
+            .header::<header::ReferSub>()
+            .and_then(Result::ok)
+            .is_some_and(|refer_sub| refer_sub.is("false"))
+}
+
 /// Whether a NOTIFY ends its subscription (`Subscription-State: terminated`,
 /// RFC 6665 §4.1.3).
 fn notify_terminates(request: &SipRequest) -> bool {
@@ -198,7 +208,9 @@ impl DialogTable {
                     d.pending_bye = Some(request.cseq().seq());
                 }
             }
-            Some(remote) if matches!(method, "REFER" | "SUBSCRIBE") => {
+            Some(remote)
+                if matches!(method, "REFER" | "SUBSCRIBE") && opens_subscription(request) =>
+            {
                 if let Some(d) = self.dialogs.get_mut(&DialogId { call_id, local, remote }) {
                     d.subscriptions += 1;
                 }
@@ -243,25 +255,52 @@ impl DialogTable {
         }
     }
 
-    /// Feed a response the UA received (it is the UAC of the request).
-    pub fn note_received_response(&mut self, response: &SipResponse, now_us: u64) {
+    /// Feed a response the UA received (it is the UAC of the request) and
+    /// judge it: `Some` when it is a 2xx to an in-dialog request the UA sent
+    /// on a dialog a non-2xx final ended by the time it arrives (RFC 3261
+    /// §12.1.2: that dialog is gone, so nothing on it is answered 2xx). A
+    /// PRACK is excepted (RFC 3262 §3), and a CANCEL is hop-by-hop.
+    pub fn note_received_response(
+        &mut self,
+        response: &SipResponse,
+        now_us: u64,
+    ) -> Option<DialogVerdict> {
         let (Some(local), Some(remote)) =
             (tag_of(response.from().tag()), tag_of(response.to().tag()))
         else {
-            return;
+            return None;
         };
         let id = DialogId { call_id: response.call_id().to_string(), local, remote };
         let status = response.status();
-        match response.cseq().method().as_str() {
-            "INVITE" => {
+        let method = response.cseq().method().as_str();
+        let initial = method == "INVITE" && {
+            let key = InviteKey {
+                call_id: id.call_id.clone(),
+                caller_tag: id.local.clone(),
+                role: Role::Uac,
+            };
+            self.invites.get(&key).is_some_and(|i| i.cseq == response.cseq().seq())
+        };
+        if (200..300).contains(&status) && !initial && !matches!(method, "PRACK" | "CANCEL") {
+            if let Some(DialogState::EndedByFinal(by)) = self.dialogs.get(&id).map(|d| d.state) {
+                return Some(DialogVerdict {
+                    method: method.to_string(),
+                    call_id: id.call_id.clone(),
+                    from_tag: id.local.clone(),
+                    to_tag: id.remote.clone(),
+                    cseq: response.cseq().seq(),
+                    kind: VerdictKind::EndedAnswered { status, by },
+                });
+            }
+        }
+        match method {
+            "INVITE" if initial => {
                 let key = InviteKey {
                     call_id: id.call_id.clone(),
                     caller_tag: id.local.clone(),
                     role: Role::Uac,
                 };
-                if self.invites.get(&key).is_some_and(|i| i.cseq == response.cseq().seq()) {
-                    self.invite_response(key, id, status, now_us);
-                }
+                self.invite_response(key, id, status, now_us);
             }
             "BYE" if status >= 200 => {
                 if let Some(d) = self.dialogs.get_mut(&id) {
@@ -277,6 +316,7 @@ impl DialogTable {
             }
             _ => {}
         }
+        None
     }
 
     /// A response to an initial INVITE, sent or received under the dialog ID
@@ -302,7 +342,11 @@ impl DialogTable {
             200..=299 => {
                 invite.answered_at_us.get_or_insert(now_us);
                 let d = self.dialogs.entry(id).or_insert_with(|| fresh(DialogState::Confirmed));
-                if d.state == DialogState::Early {
+                // A 2xx confirms the dialog its To-tag names. One a non-2xx
+                // final seemed to end was answered on another transaction of
+                // the same INVITE identity (a merged copy, RFC 3261 §8.2.2.2,
+                // drew that final); only a BYE's end is final.
+                if matches!(d.state, DialogState::Early | DialogState::EndedByFinal(_)) {
                     d.state = DialogState::Confirmed;
                 }
             }
@@ -371,6 +415,7 @@ impl DialogTable {
             });
         let state = dialog.state;
         let last = dialog.remote_cseq;
+        let role = dialog.invite.role;
         let subscribed = method == "NOTIFY" && dialog.subscriptions > 0;
         let dialog = self.dialogs.get_mut(&id).expect("looked up above");
         dialog.received.insert(txn);
@@ -393,6 +438,13 @@ impl DialogTable {
         }
         if abandoned {
             return Some(verdict(self.unknown(&id)));
+        }
+        // An early dialog takes no re-INVITE while its INVITE is in progress
+        // (§14.1), and the callee never BYEs one (§15).
+        let early_forbidden = state == DialogState::Early
+            && (method == "INVITE" || (method == "BYE" && role == Role::Uac));
+        if early_forbidden {
+            return Some(verdict(VerdictKind::OnEarlyDialog { reinvite: method == "INVITE" }));
         }
         let dialog = self.dialogs.get_mut(&id).expect("looked up above");
         match last {

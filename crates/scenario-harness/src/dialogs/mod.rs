@@ -13,18 +13,19 @@
 //! - a PRACK on an early dialog a non-2xx final ended (RFC 3262 §3);
 //! - a NOTIFY of a subscription the UA opened, after a BYE (RFC 5057 §5.2).
 //!
-//! A verdict fails the run unless a `dialog-…` waiver on the receiving UA opts
-//! it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`).
+//! A verdict fails the run unless a `dialog-…` waiver naming the receiving UA
+//! opts it out (`WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice")`);
+//! one naming no UA covers nothing.
 
 mod judge;
 mod table;
 mod verdict;
 
-pub use judge::{covers, DialogJudge, DialogJudging, DialogOptIns};
+pub use judge::{covers, is_partyless_dialog_waiver, DialogJudge, DialogJudging, DialogOptIns};
 pub use table::{BackwardsCseq, DialogState, DialogTable};
 pub use verdict::{
-    DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_ENDED,
-    DIALOG_UNKNOWN,
+    DialogVerdict, VerdictKind, DIALOG_CSEQ_BACKWARDS, DIALOG_CSEQ_SKIP, DIALOG_EARLY_REQUEST,
+    DIALOG_ENDED, DIALOG_ENDED_ANSWERED, DIALOG_UNKNOWN,
 };
 
 #[cfg(test)]

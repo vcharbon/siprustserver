@@ -27,6 +27,7 @@ use super::rr_fold::decide_rr_fold;
 use super::rule_coverage;
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate};
 use super::step::StepCounter;
+use super::ua::WeakAgent;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
 use super::{Agent, Proxy};
 use crate::absorption::Absorption;
@@ -103,6 +104,9 @@ pub struct Harness {
     /// The dialog judge of every UA this harness bound; [`finish`](Self::finish)
     /// gates their verdicts and the failure dump shows their tables.
     judges: Judges,
+    /// Every UA this harness bound, its socket not held: `finish` sights what
+    /// each still has queued, so an unread request meets its dialog table.
+    bound: RefCell<Vec<WeakAgent>>,
     /// What the SUTs bound on this harness add to its failure dump.
     views: FailureViews,
     /// The ordinal source of the run's scripted waits, shared by its agents.
@@ -222,6 +226,7 @@ impl Harness {
             wrapped.recording.channel(),
             waivers.clone(),
             recorder.clone(),
+            judges.clone(),
         );
         Self {
             network: wrapped.network,
@@ -238,6 +243,7 @@ impl Harness {
             anchors,
             finish_settles: RefCell::new(Vec::new()),
             judges,
+            bound: RefCell::new(Vec::new()),
             views,
             steps: StepCounter::default(),
             dialog_opt_ins: DialogOptIns::default(),
@@ -376,15 +382,19 @@ impl Harness {
         }
     }
 
+    /// The panic text of the dialog verdicts this run's UAs recorded that no
+    /// `dialog-…` waiver covers, or `None`: the dialog gate a wrapping harness
+    /// that runs its own audit (the failover matrix) applies at its end.
+    pub fn dialog_gate_failure(&self) -> Option<String> {
+        let (verdicts, _) = surviving_verdicts(&self.judges.borrow(), &self.waivers.borrow());
+        (!verdicts.is_empty()).then(|| render_dialog_panic(&self.name, &verdicts))
+    }
+
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
     /// (e.g. the failover matrix) that wrap this `Harness` and run their OWN,
-    /// **bind-scoped** CSeq audit at their layer-close: the generic gate here is
-    /// unscoped — it audits every recorded bind, including the internal cluster
-    /// workers, where a *transparent* failover legitimately splits one logical
-    /// dialog's CSeq stream across nodes (CSeq 1 → primary, 2 → backup-takeover,
-    /// 3 → reclaimed primary) and so reports a phantom "skip" no real UA sees.
-    /// The wrapping harness substitutes the correct endpoint-scoped check, so it
-    /// disarms this one to avoid a redundant, unscoped double-gate.
+    /// **bind-scoped** CSeq audit at their layer-close. The dialog verdicts of
+    /// its UAs are not disarmed: the wrapper gates them through
+    /// [`dialog_gate_failure`](Self::dialog_gate_failure).
     pub fn disarm_cseq_gate(&self) {
         self.cseq_gate.disarm();
     }
@@ -479,7 +489,7 @@ impl Harness {
         if !holds_dialogs {
             dialogs.set_judging(DialogJudging::Off);
         }
-        Agent {
+        let agent = Agent {
             name: name.clone(),
             addr,
             uri: format!("sip:{name}@{}", addr.ip()),
@@ -492,6 +502,21 @@ impl Harness {
             holdback: Arc::default(),
             dialogs,
             steps: self.steps.clone(),
+        };
+        self.keep_bound(&agent);
+        agent
+    }
+
+    /// Hold `agent` for the end-of-run sighting of what it left unread.
+    pub(crate) fn keep_bound(&self, agent: &Agent) {
+        self.bound.borrow_mut().push(agent.downgrade());
+    }
+
+    /// Let every UA's dialog table judge what it still has queued, left
+    /// unread, so a request no step pulled still meets its table.
+    fn judge_unread(&self) {
+        for agent in self.bound.borrow().iter().filter_map(WeakAgent::upgrade) {
+            agent.judge_unread();
         }
     }
 
@@ -702,6 +727,7 @@ impl Harness {
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
         self.settle_network().await;
+        self.judge_unread();
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
         // gate below and is seeded into the report so the projection reuses it.
@@ -726,14 +752,15 @@ impl Harness {
             let waivers = self.waivers.borrow();
             // The dialog verdicts first: they name the UA and the request, the
             // most specific reason a run can fail for.
-            let verdicts = surviving_verdicts(&self.judges.borrow(), &waivers);
+            let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
             if !verdicts.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_dialog_panic(&self.name, &verdicts));
             }
-            let gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
             if !gate.gating.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_rfc_panic(&self.name, &gate.gating));
             }
+            gate.waived_sut.extend(waived_dialog);
             if let Some(line) = waived_sut_line(&gate.waived_sut) {
                 eprintln!("[{}] {line}", self.name);
             }
@@ -794,6 +821,7 @@ impl Harness {
         self.cseq_gate.disarm();
         self.run_finish_settles().await;
         self.settle_network().await;
+        self.judge_unread();
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
         // the returned gating findings, and (seeded) the report projection.
@@ -804,8 +832,10 @@ impl Harness {
         // so the borrow is released before the `close().await` below.
         let (gate, verdicts) = {
             let waivers = self.waivers.borrow();
-            let gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
-            (gate, surviving_verdicts(&self.judges.borrow(), &waivers))
+            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
+            gate.waived_sut.extend(waived_dialog);
+            (gate, verdicts)
         };
         if let Some(line) = waived_sut_line(&gate.waived_sut) {
             eprintln!("[{}] {line}", self.name);

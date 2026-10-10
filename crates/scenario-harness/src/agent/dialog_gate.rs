@@ -2,6 +2,7 @@
 //! verdict a `dialog-…` waiver on its UA does not opt out fails the run, and a
 //! waiver that covers one is used.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::waiver::WaiverState;
@@ -14,12 +15,14 @@ pub(crate) struct GatedVerdict {
 }
 
 /// The verdicts of `judges` no waiver covers, marking each covering waiver
-/// used.
+/// used, and per rule the count of verdicts a waiver covered: every dialog
+/// verdict is a finding against the SUT that sent the message.
 pub(crate) fn surviving_verdicts(
     judges: &[Arc<DialogJudge>],
     waivers: &[WaiverState],
-) -> Vec<GatedVerdict> {
+) -> (Vec<GatedVerdict>, BTreeMap<String, usize>) {
     let mut out = Vec::new();
+    let mut waived_by_rule = BTreeMap::new();
     for judge in judges {
         for verdict in judge.gated() {
             let mut waived = false;
@@ -29,17 +32,19 @@ pub(crate) fn surviving_verdicts(
                     waived = true;
                 }
             }
-            if !waived {
+            if waived {
+                *waived_by_rule.entry(verdict.rule().to_string()).or_insert(0) += 1;
+            } else {
                 out.push(GatedVerdict { party: judge.party().to_string(), verdict });
             }
         }
     }
-    out
+    (out, waived_by_rule)
 }
 
 /// The panic text of a run whose UAs recorded dialog verdicts: a first line
 /// naming the first rule that fired and its UA, then one line per verdict.
-pub(super) fn render_dialog_panic(name: &str, verdicts: &[GatedVerdict]) -> String {
+pub(crate) fn render_dialog_panic(name: &str, verdicts: &[GatedVerdict]) -> String {
     let more = match verdicts.len() {
         0 | 1 => String::new(),
         n => format!(" (and {} more verdict(s))", n - 1),

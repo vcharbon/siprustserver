@@ -89,7 +89,12 @@ async fn a_scripted_receive_of_a_request_on_no_dialog_fails() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    h.finish().await;
+    let report = h.finish().await;
+    assert_eq!(
+        report.waived_sut_findings().get(DIALOG_UNKNOWN),
+        Some(&1),
+        "a waived dialog verdict counts as a waived SUT finding"
+    );
 }
 
 /// Not opted in, the scripted receive itself errors with the verdict.
@@ -148,4 +153,48 @@ async fn a_waiver_on_another_ua_covers_nothing_here() {
     let (_alice_dialog, mut bob_dialog) = established(&alice, &bob).await;
     forged_options(&h, &alice, &bob, &mut bob_dialog, "bob-forged").await;
     alice.receive("OPTIONS").await;
+}
+
+/// A request no step pulls is still judged: `finish` sights what each UA left
+/// queued.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "dialog rule dialog-unknown fired on alice")]
+async fn a_request_left_queued_fails_the_run_at_finish() {
+    let h = Harness::new("dialog-table-queued");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (_alice_dialog, mut bob_dialog) = established(&alice, &bob).await;
+    forged_options(&h, &alice, &bob, &mut bob_dialog, "bob-forged").await;
+    h.finish().await;
+}
+
+/// A request `drain` discards is sighted, and a harness dropped without
+/// `finish` still fails on its verdict.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "dialog rule dialog-unknown fired on alice")]
+async fn a_drained_request_fails_a_harness_dropped_without_finish() {
+    let h = Harness::new("dialog-table-drop");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (_alice_dialog, mut bob_dialog) = established(&alice, &bob).await;
+    forged_options(&h, &alice, &bob, &mut bob_dialog, "bob-forged").await;
+    h.advance(std::time::Duration::from_millis(200)).await;
+    assert_eq!(alice.drain().await, 1);
+    drop(h);
+}
+
+/// A `dialog-…` waiver naming no UA covers nothing: every dialog verdict is a
+/// finding against the SUT, so it is a dead waiver, conditional or not.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "matched no finding")]
+async fn a_dialog_waiver_naming_no_ua_is_dead() {
+    let h = Harness::new("dialog-table-partyless");
+    h.waive(WaiverScope::rule(DIALOG_UNKNOWN, "no UA named").conditional());
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (mut alice_dialog, _) = established(&alice, &bob).await;
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    h.finish().await;
 }

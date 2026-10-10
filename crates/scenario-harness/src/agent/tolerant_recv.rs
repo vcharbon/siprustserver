@@ -72,8 +72,12 @@ impl Agent {
                 Ok(Some(pkt)) => pkt,
                 _ => return, // timed out or queue closed
             };
-            let Ok(SipMessage::Request(r)) = CustomParser::new().parse(&pkt.raw) else {
-                continue; // responses / unparseable noise: nothing to answer
+            let Ok(msg) = CustomParser::new().parse(&pkt.raw) else {
+                continue; // unparseable noise: nothing to answer
+            };
+            self.dialogs.sight(&msg);
+            let SipMessage::Request(r) = msg else {
+                continue; // responses: nothing to answer
             };
             let Some((status, reason)) =
                 release_verdict(r.method().as_str(), r.to().tag().is_some())
@@ -115,6 +119,7 @@ impl Agent {
             let msg = CustomParser::new()
                 .parse(&pkt.raw)
                 .unwrap_or_else(|e| panic!("{} drained an unparseable datagram: {e}", self.name));
+            self.dialogs.sight(&msg);
             let r = match msg {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(resp) => panic!(

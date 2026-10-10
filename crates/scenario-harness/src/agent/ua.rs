@@ -116,7 +116,76 @@ pub struct Agent {
     pub(crate) steps: StepCounter,
 }
 
+/// An [`Agent`] that does not keep its socket bound: what a harness holds so
+/// that, at its end, it sights what is still queued on each UA it bound.
+pub(crate) struct WeakAgent {
+    name: String,
+    addr: SocketAddr,
+    uri: String,
+    ep: std::sync::Weak<dyn UdpEndpoint>,
+    ids: Arc<Ids>,
+    rr_fold: RecordRouteFold,
+    recv_timeout: Duration,
+    txn: Arc<Absorption>,
+    two_xx_acks: Arc<TwoXxAcks>,
+    holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
+    dialogs: Arc<DialogJudge>,
+    steps: StepCounter,
+}
+
+impl WeakAgent {
+    /// The agent, while its socket is still bound by someone.
+    pub(crate) fn upgrade(&self) -> Option<Agent> {
+        Some(Agent {
+            name: self.name.clone(),
+            addr: self.addr,
+            uri: self.uri.clone(),
+            ep: self.ep.upgrade()?,
+            ids: self.ids.clone(),
+            rr_fold: self.rr_fold,
+            recv_timeout: self.recv_timeout,
+            txn: self.txn.clone(),
+            two_xx_acks: self.two_xx_acks.clone(),
+            holdback: self.holdback.clone(),
+            dialogs: self.dialogs.clone(),
+            steps: self.steps.clone(),
+        })
+    }
+}
+
 impl Agent {
+    /// This agent without a hold on its socket.
+    pub(crate) fn downgrade(&self) -> WeakAgent {
+        WeakAgent {
+            name: self.name.clone(),
+            addr: self.addr,
+            uri: self.uri.clone(),
+            ep: Arc::downgrade(&self.ep),
+            ids: self.ids.clone(),
+            rr_fold: self.rr_fold,
+            recv_timeout: self.recv_timeout,
+            txn: self.txn.clone(),
+            two_xx_acks: self.two_xx_acks.clone(),
+            holdback: self.holdback.clone(),
+            dialogs: self.dialogs.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    /// Let this UA's dialog table judge what is still queued on its socket,
+    /// left unread: what a run never pulled still meets the table, and the
+    /// ladder still shows it unconsumed.
+    pub(crate) fn judge_unread(&self) {
+        if !self.dialogs.is_on() {
+            return;
+        }
+        for pkt in self.ep.peek_queued() {
+            if let Ok(msg) = self.parse(&pkt.raw) {
+                self.dialogs.sight(&msg);
+            }
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -154,6 +223,17 @@ impl Agent {
     /// [`StepError::Dialog`], unless a `dialog-…` waiver on this UA opts it out.
     pub(super) fn dialog_check(&self, request: &SipRequest) -> Result<(), StepError> {
         match self.dialogs.failure_for(request) {
+            Some(verdict) => {
+                Err(StepError::Dialog { who: self.name.clone(), verdict: Box::new(verdict) })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// A scripted expect's check of `response`: its dialog verdict as a
+    /// [`StepError::Dialog`], unless a `dialog-…` waiver on this UA opts it out.
+    pub(super) fn response_dialog_check(&self, response: &SipResponse) -> Result<(), StepError> {
+        match self.dialogs.response_failure_for(response) {
             Some(verdict) => {
                 Err(StepError::Dialog { who: self.name.clone(), verdict: Box::new(verdict) })
             }
@@ -564,10 +644,15 @@ impl Agent {
     /// This models a real always-on UA: its kernel keeps reading the socket even
     /// after the application is done driving the call. Pair it with a clock pump
     /// (e.g. `FailoverHarness::linger_peers`) so in-flight datagrams first land in
-    /// the queue, then drain. Returns the number of datagrams drained.
+    /// the queue, then drain. Returns the number of datagrams drained. Each
+    /// meets this UA's dialog table, which records its verdict; the §17.2
+    /// view does not see it, so a later retransmission still surfaces.
     pub async fn drain(&self) -> usize {
         let mut n = 0;
-        while self.ep.try_recv().is_some() {
+        while let Some(pkt) = self.ep.try_recv() {
+            if let Ok(msg) = self.parse(&pkt.raw) {
+                self.dialogs.sight(&msg);
+            }
             n += 1;
         }
         n

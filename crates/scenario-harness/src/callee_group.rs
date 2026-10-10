@@ -176,6 +176,18 @@ impl UdpEndpoint for SubEndpoint {
         }
     }
 
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        let mut r = self.router.lock().unwrap();
+        let mut own: Vec<UdpPacket> =
+            r.stash.get(&self.owner).map(|q| q.iter().cloned().collect()).unwrap_or_default();
+        for pkt in self.shared.peek_queued() {
+            if r.owner_of(&pkt.raw).as_deref() == Some(self.owner.as_str()) {
+                own.push(pkt);
+            }
+        }
+        own
+    }
+
     fn local_addr(&self) -> SocketAddr {
         self.addr
     }
@@ -325,6 +337,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 dialogs: self.harness.dialog_judge(name),
                 steps: self.harness.steps(),
             };
+            self.harness.keep_bound(&agent);
             agents.insert(name.clone(), agent);
         }
 

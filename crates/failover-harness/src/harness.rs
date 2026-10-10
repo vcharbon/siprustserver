@@ -2562,6 +2562,11 @@ impl Drop for FailoverHarness {
         if std::thread::panicking() {
             return;
         }
+        // A request a simulated UA's dialog table refused fails the test too.
+        let dialog = self.harness.inner.lock().ok().and_then(|g| g.as_ref()?.dialog_gate_failure());
+        if let Some(why) = dialog {
+            panic!("{why}");
+        }
         let findings = self.rfc_audit_findings();
         if !findings.is_empty() {
             panic!(

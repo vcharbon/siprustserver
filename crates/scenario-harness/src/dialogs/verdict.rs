@@ -1,4 +1,5 @@
-//! The verdicts the dialog table passes on a received in-dialog request, each
+//! The verdicts the dialog table passes on a received in-dialog request (or a
+//! 2xx answering one the UA sent), each
 //! one a named rule a test opts out of with a `WaiverScope` on the UA that
 //! holds the table.
 
@@ -19,6 +20,13 @@ pub enum VerdictKind {
     CseqBackwards { cseq: u32, last: u32 },
     /// The CSeq is more than one above the last one the peer used.
     CseqSkip { cseq: u32, last: u32 },
+    /// A re-INVITE on an early dialog (RFC 3261 §14.1: its INVITE is still in
+    /// progress), or a BYE from the callee on one (§15: the callee never BYEs
+    /// an early dialog). `reinvite` tells the two apart.
+    OnEarlyDialog { reinvite: bool },
+    /// A `status` 2xx answered a request the UA sent in dialog, on a dialog a
+    /// `by` non-2xx final had ended when the 2xx arrived (RFC 3261 §12.1.2).
+    EndedAnswered { status: u16, by: u16 },
 }
 
 impl VerdictKind {
@@ -29,19 +37,31 @@ impl VerdictKind {
             VerdictKind::Ended { .. } => DIALOG_ENDED,
             VerdictKind::CseqBackwards { .. } => DIALOG_CSEQ_BACKWARDS,
             VerdictKind::CseqSkip { .. } => DIALOG_CSEQ_SKIP,
+            VerdictKind::OnEarlyDialog { .. } => DIALOG_EARLY_REQUEST,
+            VerdictKind::EndedAnswered { .. } => DIALOG_ENDED_ANSWERED,
         }
+    }
+
+    /// Whether the verdict judges a response the UA received rather than a
+    /// request.
+    pub fn on_response(&self) -> bool {
+        matches!(self, VerdictKind::EndedAnswered { .. })
     }
 
     /// Whether the receiving UA refuses the request on the wire: `481` for a
     /// request on no dialog or an ended one, `500` for a CSeq going backwards
-    /// (RFC 3261 §12.2.2). A skip is accepted.
+    /// (RFC 3261 §12.2.2), `491` for a re-INVITE while its INVITE is in
+    /// progress (§14.2). A skip, a callee's early BYE and a response are
+    /// taken.
     pub fn refusal(&self) -> Option<(u16, &'static str)> {
         match self {
             VerdictKind::UnknownDialog { .. } | VerdictKind::Ended { .. } => {
                 Some((481, "Call/Transaction Does Not Exist"))
             }
             VerdictKind::CseqBackwards { .. } => Some((500, "Server Internal Error")),
-            VerdictKind::CseqSkip { .. } => None,
+            VerdictKind::CseqSkip { .. } | VerdictKind::EndedAnswered { .. } => None,
+            VerdictKind::OnEarlyDialog { reinvite: true } => Some((491, "Request Pending")),
+            VerdictKind::OnEarlyDialog { reinvite: false } => None,
         }
     }
 }
@@ -54,6 +74,11 @@ pub const DIALOG_ENDED: &str = "dialog-ended";
 pub const DIALOG_CSEQ_BACKWARDS: &str = "dialog-cseq-backwards";
 /// The rule of a CSeq more than one above the last remote CSeq.
 pub const DIALOG_CSEQ_SKIP: &str = "dialog-cseq-skip";
+/// The rule of a re-INVITE, or a callee's BYE, on an early dialog.
+pub const DIALOG_EARLY_REQUEST: &str = "dialog-early-request";
+/// The rule of a 2xx to an in-dialog request on a dialog a non-2xx final
+/// ended.
+pub const DIALOG_ENDED_ANSWERED: &str = "dialog-ended-answered";
 
 /// One verdict: the request it judges (method, Call-ID, tags, CSeq) and what
 /// is wrong with it.
@@ -104,6 +129,16 @@ impl fmt::Display for DialogVerdict {
                 f,
                 "{m} CSeq {cseq} skips on From-tag {} (last remote CSeq {last})",
                 self.from_tag
+            ),
+            VerdictKind::OnEarlyDialog { .. } => write!(
+                f,
+                "{m} on the early dialog From-tag {} To-tag {} while its INVITE is in progress",
+                self.from_tag, self.to_tag
+            ),
+            VerdictKind::EndedAnswered { status, by } => write!(
+                f,
+                "{status} to {m} on a dialog a {by} ended (Call-ID {}, tags {}/{})",
+                self.call_id, self.from_tag, self.to_tag
             ),
         }
     }

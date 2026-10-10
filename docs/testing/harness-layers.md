@@ -62,19 +62,25 @@ Automatic (you cannot opt out, only waive per-rule):
   SUT-side deviation with no such ADR entry is a bug to fix, never a window.
 - **Dialog table** — every simulated UA (an `Agent`, the reactive actor's
   agents, the load lane's) keeps an RFC 3261 §12 dialog table
-  (`scenario_harness::dialogs`), fed by every message it sends and sights.
-  A received in-dialog request on no dialog it holds (an unknown From- or
-  To-tag, or another fork's early dialog past the §13.2.2.4 window), on a
-  dialog a non-2xx final or a BYE ended, or whose CSeq goes backwards or
-  skips, is a verdict: a scripted `receive` of it fails at once with a
-  `StepError::Dialog` naming the UA, the request and the tags it holds
-  (`alice: OPTIONS From-tag A1 names no dialog (holds A2)`); the actor
-  answers it 481 (500 for a CSeq going backwards) on its own; and
-  `finish()` fails on every verdict, in the load lane `rfc_findings` counts
-  it. A test that sends such a request on purpose opts in on the receiving
-  UA: `h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`
-  (`dialog-unknown`, `dialog-ended`, `dialog-cseq-backwards`,
-  `dialog-cseq-skip`); an opt-in that covers nothing is a dead waiver. A
+  (`scenario_harness::dialogs`), fed by every message it sends, sights,
+  drains or leaves unread at `finish()`. A received in-dialog request on no
+  dialog it holds (an unknown From- or To-tag, or another fork's early
+  dialog past the §13.2.2.4 window), on a dialog a non-2xx final or a BYE
+  ended, a re-INVITE or a callee's BYE on an early dialog, a CSeq that goes
+  backwards or skips, and a 2xx to a request it sent on a dialog a non-2xx
+  final ended, are verdicts: a scripted `receive` or `expect` of the message
+  fails at once with a `StepError::Dialog` naming the UA, the message and
+  the tags it holds (`alice: OPTIONS From-tag A1 names no dialog (holds
+  A2)`); the actor answers a refused request 481 (500 for a CSeq going
+  backwards, 491 for an early re-INVITE) on its own; and `finish()`, the
+  Drop backstop, `FailoverHarness`'s Drop and the load lane's
+  `rfc_findings` fail on every verdict. A test that sends such a message on
+  purpose opts in on the receiving UA:
+  `h.waive(WaiverScope::rule(DIALOG_UNKNOWN, why).on_party("alice"))`
+  (`dialog-unknown`, `dialog-ended`, `dialog-early-request`,
+  `dialog-ended-answered`, `dialog-cseq-backwards`, `dialog-cseq-skip`). A
+  dialog waiver naming no UA covers nothing and is dead, like one that covers
+  nothing; a waived verdict counts on the `waived SUT findings` line. A
   proxy agent keeps no table (`Agent::hold_no_dialogs` for a hand-built one),
   and the scenario interpreter reads the verdicts itself
   (`Agent::hand_dialogs_to_driver`).

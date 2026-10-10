@@ -334,7 +334,7 @@ impl AgentBinder {
         use crate::agent::dialog_gate::{as_findings, surviving_verdicts};
         use crate::agent::waiver::{apply_waivers_findings, Attribution, WaiverState};
         let states: Vec<WaiverState> = waivers.iter().cloned().map(WaiverState::new).collect();
-        let mut findings = as_findings(surviving_verdicts(&self.judges.lock().unwrap(), &states));
+        let mut findings = as_findings(surviving_verdicts(&self.judges.lock().unwrap(), &states).0);
         if let Some(rec) = &self.recording {
             let events = rec.channel().snapshot();
             findings.extend(apply_waivers_findings(&events, &states, &Attribution::SubLane));

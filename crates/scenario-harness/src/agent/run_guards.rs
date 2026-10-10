@@ -11,6 +11,8 @@ use std::rc::Rc;
 use layer_harness::{Channel, NetworkTag, Recorder};
 use sip_net::{audit_wire_entries, RfcFinding, SignalingNetworkEvent};
 
+use super::dialog_gate::{render_dialog_panic, surviving_verdicts};
+use super::failure_dump::Judges;
 use super::waiver::{apply_waivers, WaiverState};
 use crate::report::wire::facets;
 
@@ -164,6 +166,8 @@ pub(super) struct CseqGate {
     /// Resolves the emitting party from a recorded `from_lane` for waiver
     /// attribution (same source the `Harness` uses at `finish`).
     recorder: Recorder,
+    /// The dialog judges of the harness's UAs: their verdicts gate here too.
+    judges: Judges,
 }
 
 impl CseqGate {
@@ -172,8 +176,9 @@ impl CseqGate {
         channel: Channel<SignalingNetworkEvent>,
         waivers: Rc<RefCell<Vec<WaiverState>>>,
         recorder: Recorder,
+        judges: Judges,
     ) -> Self {
-        Self { name, channel, armed: Cell::new(true), waivers, recorder }
+        Self { name, channel, armed: Cell::new(true), waivers, recorder, judges }
     }
 
     pub(super) fn disarm(&self) {
@@ -185,6 +190,10 @@ impl Drop for CseqGate {
     fn drop(&mut self) {
         if !self.armed.get() || std::thread::panicking() {
             return;
+        }
+        let verdicts = surviving_verdicts(&self.judges.borrow(), &self.waivers.borrow()).0;
+        if !verdicts.is_empty() {
+            panic!("{}", render_dialog_panic(&self.name, &verdicts));
         }
         // Reading the snapshot + running the rules is panic-free in practice, but
         // guard it so a render fault can never turn into a double-panic abort.

@@ -201,3 +201,32 @@ async fn a_request_toward_a_leg_a_bye_ended_is_answered_481_here() {
     b2bua.assert_fully_reaped();
     h.finish().await;
 }
+
+/// What the SUT sends onto a dialog a BYE ended reaches the callee's dialog
+/// table even when no step pulls it: the drained NOTIFY fails the run.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "dialog rule dialog-ended fired on bob")]
+async fn a_drained_request_on_an_ended_dialog_fails_the_run() {
+    let h = Harness::new("ended-leg-drained-notify");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let b2bua = B2buaSut::builder(decision())
+        .services(vec![lingering::service_def()])
+        .tune(|c| c.keepalive_interval_sec = 300)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut b_inv = bob.receive("INVITE").await;
+    b_inv.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bob_dialog = b_inv.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    bob_bye.expect(200).await;
+    h.advance(Duration::from_millis(500)).await;
+    assert!(bob.drain().await >= 1, "the NOTIFY reached bob");
+    h.finish().await;
+}

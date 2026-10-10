@@ -166,6 +166,7 @@ pub(super) async fn try_expect_response_tolerating(
                 if let Some(ctx) = ack {
                     ctx.ack_non_2xx(&r).await?;
                 }
+                agent.response_dialog_check(&r)?;
                 if r.status() != status {
                     return Err(StepError::WrongStatus {
                         who: agent.name.clone(),

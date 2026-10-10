@@ -278,7 +278,14 @@ pub(crate) fn apply_waivers_findings(
 /// The declared waivers that filtered NOTHING and are not `conditional` — an
 /// error at `finish()`.
 pub(super) fn unused_waivers(waivers: &[WaiverState]) -> Vec<&WaiverScope> {
-    waivers.iter().filter(|w| !w.used.get() && !w.scope.conditional).map(|w| &w.scope).collect()
+    waivers
+        .iter()
+        .filter(|w| {
+            crate::dialogs::is_partyless_dialog_waiver(&w.scope)
+                || (!w.used.get() && !w.scope.conditional)
+        })
+        .map(|w| &w.scope)
+        .collect()
 }
 
 #[cfg(test)]

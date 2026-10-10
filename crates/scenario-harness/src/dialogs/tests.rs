@@ -265,3 +265,95 @@ fn a_referrers_notifies_outlive_its_bye() {
         "the subscription ended with its terminating NOTIFY"
     );
 }
+
+/// A UAC (local tag `A1`) whose INVITE (CSeq 1) rang on fork `B1`.
+fn ringing_uac() -> DialogTable {
+    let mut t = DialogTable::new(BackwardsCseq::Verdict);
+    t.note_sent_request(&request("INVITE", 1, "A1", None));
+    t.note_received_response(&response(180, "INVITE", 1, "A1", "B1"), 0);
+    t
+}
+
+/// A request the UAC sent on its early dialog with `B1`.
+fn uac_request(method: &str, cseq: u32) -> SipRequest {
+    request(method, cseq, "A1", Some("B1"))
+}
+
+/// RFC 3261 §12.1.2: a non-2xx final ended the early dialog, so a 2xx to a
+/// request the UA sent on it answers a dialog that is gone. The message names
+/// the status, the method, the final and the dialog.
+#[test]
+fn a_2xx_on_a_dialog_a_final_ended_is_a_verdict() {
+    let mut t = ringing_uac();
+    t.note_sent_request(&uac_request("BYE", 2));
+    assert_eq!(t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0), None);
+    let v = t.note_received_response(&response(200, "BYE", 2, "A1", "B1"), 0).expect("a verdict");
+    assert_eq!(v.rule(), DIALOG_ENDED_ANSWERED);
+    assert_eq!(
+        v.to_string(),
+        format!("200 to BYE on a dialog a 487 ended (Call-ID {CALL}, tags A1/B1)")
+    );
+    assert_eq!(v.kind.refusal(), None, "a response is taken");
+}
+
+/// The 481 such a request deserves, a PRACK's 2xx (RFC 3262 §3) and a 2xx
+/// before the final draw nothing.
+#[test]
+fn a_481_a_prack_200_and_a_2xx_before_the_final_are_no_verdict() {
+    let mut t = ringing_uac();
+    assert_eq!(t.note_received_response(&response(200, "UPDATE", 2, "A1", "B1"), 0), None);
+    t.note_received_response(&response(487, "INVITE", 1, "A1", "B1"), 0);
+    assert_eq!(t.note_received_response(&response(481, "BYE", 3, "A1", "B1"), 0), None);
+    assert_eq!(t.note_received_response(&response(200, "PRACK", 4, "A1", "B1"), 0), None);
+}
+
+/// §15: the callee never BYEs an early dialog; the caller may.
+#[test]
+fn a_callees_bye_on_an_early_dialog_is_a_verdict() {
+    let mut t = ringing_uac();
+    let bye = parse(format!(
+        "BYE sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-eb\r\n\
+         From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
+         CSeq: 1 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+    ));
+    let SipMessage::Request(bye) = bye else { unreachable!() };
+    let v = t.judge_received(&bye, 0).expect("a verdict");
+    assert_eq!(v.rule(), DIALOG_EARLY_REQUEST);
+    assert_eq!(v.kind.refusal(), None);
+    assert!(v.to_string().starts_with("BYE on the early dialog From-tag B1 To-tag A1"), "{v}");
+
+    let mut uas = ringing_uas(BackwardsCseq::Verdict);
+    assert_eq!(uas.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None, "the caller may");
+}
+
+/// §14.1: no re-INVITE on an early dialog while its INVITE is in progress,
+/// from either side; the UA answers 491.
+#[test]
+fn a_reinvite_on_an_early_dialog_is_a_verdict() {
+    let mut uas = ringing_uas(BackwardsCseq::Verdict);
+    let v = uas.judge_received(&request("INVITE", 2, "A1", Some("B1")), 0).expect("a verdict");
+    assert_eq!(v.rule(), DIALOG_EARLY_REQUEST);
+    assert_eq!(v.kind.refusal(), Some((491, "Request Pending")));
+}
+
+/// RFC 4488: a REFER stating `Refer-Sub: false` opens no subscription, so a
+/// NOTIFY after the BYE is on an ended dialog.
+#[test]
+fn a_refer_sub_false_refer_opens_no_subscription() {
+    let mut t = ringing_uas(BackwardsCseq::Verdict);
+    t.note_sent_response(&response(200, "INVITE", 1, "A1", "B1"), 0);
+    let refer = parse(format!(
+        "REFER sip:a@host SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-r1\r\n\
+         From: <sip:b@host>;tag=B1\r\nTo: <sip:a@host>;tag=A1\r\nCall-ID: {CALL}\r\n\
+         CSeq: 1 REFER\r\nRefer-To: <sip:c@host>\r\nRefer-Sub: false\r\n\
+         Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+    ));
+    let SipMessage::Request(refer) = refer else { unreachable!() };
+    t.note_sent_request(&refer);
+    assert_eq!(t.judge_received(&request("BYE", 2, "A1", Some("B1")), 0), None);
+    t.note_sent_response(&response(200, "BYE", 2, "A1", "B1"), 0);
+    assert_eq!(
+        kind(t.judge_received(&notify(3, "active"), 0)),
+        Some(VerdictKind::Ended { by: None })
+    );
+}

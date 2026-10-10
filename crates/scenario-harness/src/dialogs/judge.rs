@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{SipMessage, SipRequest, SipResponse};
 use tokio::time::Instant;
 
 use super::table::{BackwardsCseq, DialogTable};
@@ -107,14 +107,13 @@ impl DialogJudge {
         if inner.judging == DialogJudging::Off {
             return;
         }
-        match msg {
+        let verdict = match msg {
             SipMessage::Response(r) => inner.table.note_received_response(r, now_us),
-            SipMessage::Request(r) => {
-                if let Some(v) = inner.table.judge_received(r, now_us) {
-                    if !inner.recorded.contains(&v) {
-                        inner.recorded.push(v);
-                    }
-                }
+            SipMessage::Request(r) => inner.table.judge_received(r, now_us),
+        };
+        if let Some(v) = verdict {
+            if !inner.recorded.contains(&v) {
+                inner.recorded.push(v);
             }
         }
     }
@@ -128,7 +127,8 @@ impl DialogJudge {
             .iter()
             .rev()
             .find(|v| {
-                v.call_id == request.call_id().as_str()
+                !v.kind.on_response()
+                    && v.call_id == request.call_id().as_str()
                     && v.method == request.method().as_str()
                     && v.cseq == request.cseq().seq()
                     && v.from_tag == tag(request.from().tag())
@@ -144,6 +144,27 @@ impl DialogJudge {
             return None;
         }
         self.verdict_for(request).filter(|v| !self.opted_in(v))
+    }
+
+    /// The verdict on `response` that fails a scripted expect: one recorded
+    /// when it was sighted, under harness judging and not opted in.
+    pub fn response_failure_for(&self, response: &SipResponse) -> Option<DialogVerdict> {
+        let inner = self.inner.lock().unwrap();
+        if inner.judging != DialogJudging::Harness {
+            return None;
+        }
+        let tag = |t: Option<&str>| t.unwrap_or_default().to_string();
+        let found = inner.recorded.iter().rev().find(|v| {
+            v.kind.on_response()
+                && v.call_id == response.call_id().as_str()
+                && v.method == response.cseq().method().as_str()
+                && v.cseq == response.cseq().seq()
+                && v.from_tag == tag(response.from().tag())
+                && v.to_tag == tag(response.to().tag())
+        });
+        let found = found.cloned();
+        drop(inner);
+        found.filter(|v| !self.opted_in(v))
     }
 
     /// Whether an opt-in of the run covers `v` on this UA.
@@ -189,7 +210,14 @@ impl DialogJudge {
 }
 
 /// Whether the waiver `w` opts the verdict `v` of the UA `party` out: the
-/// same rule, on that party or on any.
+/// same rule, naming that party. A dialog verdict is a finding against the
+/// SUT, so a waiver naming no party covers none.
 pub fn covers(w: &WaiverScope, party: &str, v: &DialogVerdict) -> bool {
-    w.rule == v.rule() && w.position.is_none() && w.party.as_deref().is_none_or(|p| p == party)
+    w.rule == v.rule() && w.position.is_none() && w.party.as_deref() == Some(party)
+}
+
+/// Whether `w` waives a dialog rule without naming the UA it is on: it
+/// covers nothing, so it is a dead waiver whatever else it says.
+pub fn is_partyless_dialog_waiver(w: &WaiverScope) -> bool {
+    w.rule.starts_with("dialog-") && w.party.is_none()
 }
