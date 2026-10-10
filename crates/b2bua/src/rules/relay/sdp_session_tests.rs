@@ -287,16 +287,17 @@ fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     let SipMessage::Request(req) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a request")
     };
-    super::note_request(call, leg, &req);
+    // The dialog the gate resolves the request to: our tag `b`, the peer's `a`.
+    let source = call::DialogId { our_tag: "b".into(), peer_tag: "a".into() };
+    super::note_request(call, leg, &req, Some(&source));
 }
 
 /// The peer of `leg` sends a `method` request this stack relays: received as
 /// [`peer_sends`], then pending on the relay target's dialog until its final.
 fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     peer_sends(call, leg, method, with_sdp);
-    let tags = call::helpers::RequestTags::new(Some("b"), None);
     let call::helpers::RelayPeer::Leg { leg_id: target, .. } =
-        call::helpers::resolve_relay_peer(call, leg, tags)
+        call::helpers::resolve_relay_peer(call, leg, None)
     else {
         panic!("a relay target");
     };

@@ -4,10 +4,10 @@
 //! on a dialog. Only a reliable provisional carrying a description answers an
 //! INVITE offer before the final (§5.1); an unreliable one answers nothing.
 
-use call::{Call, Dialog, Leg, LegState, PendingRequest};
+use call::{Call, Dialog, DialogId, Leg, LegState, PendingRequest};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
-use sip_message::{HeaderName, SipMessage, SipParser, SipRequest};
+use sip_message::{HeaderName, SipMessage, SipParser};
 
 /// The owner of the INVITE offer open on the sender's dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,14 +19,18 @@ pub enum OpenOffer {
     Stack,
 }
 
-/// The INVITE offer open when `source_leg_id`'s peer sends `req`, if any:
-/// its relayed re-INVITE, the call's initial INVITE (the caller) or the INVITE
-/// this stack dialled it with (a callee). An offerless INVITE whose offer this
-/// stack showed in a reliable provisional is open until the PRACK.
-pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<OpenOffer> {
-    let shown = req.to().tag().unwrap_or_default();
-    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
-    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, tags);
+/// The INVITE offer open when `source_leg_id`'s peer sends a request on its
+/// dialog `source`, if any: its relayed re-INVITE, the call's initial INVITE
+/// (the caller) or the INVITE this stack dialled it with (a callee). An
+/// offerless INVITE whose offer this stack showed in a reliable provisional is
+/// open until the PRACK.
+pub fn open_offer(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> Option<OpenOffer> {
+    let shown = source.map_or("", |id| id.our_tag.as_str());
+    let peer = call::helpers::relay_peer_dialog(call, source_leg_id, source);
     if let Some(p) = peer.and_then(|(_, d)| pending_invite(d)) {
         return relayed(call, shown, p);
     }
@@ -34,7 +38,7 @@ pub fn open_offer(call: &Call, source_leg_id: &str, req: &SipRequest) -> Option<
         return initial(call, shown, peer);
     }
     let leg = call.b_legs.iter().find(|l| l.leg_id == source_leg_id)?;
-    dialled(call, leg, req.from().tag().unwrap_or_default())
+    dialled(call, leg, source.map_or("", |id| id.peer_tag.as_str()))
 }
 
 /// The re-INVITE relayed onto `dialog` still awaiting its final.

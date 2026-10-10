@@ -304,7 +304,7 @@ impl ActionExecutor<'_> {
             // was shown in, so the translation is keyed there — and the PRACK
             // names that dialog itself: its To-tag is the tag this stack showed
             // on its face, whichever leg the provisional came from.
-            let a_tag = req.to().tag().unwrap_or_default().to_string();
+            let a_tag = ctx.dialog().map_or(String::new(), |d| d.our_tag.clone());
             req.header::<RAck>().and_then(Result::ok).map(|r| {
                 let a_rseq = i64::from(r.rseq());
                 let translated =

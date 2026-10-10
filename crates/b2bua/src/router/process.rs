@@ -777,14 +777,16 @@ pub(super) fn rule_chain_turn(
     // The record names the message before the rules read it, so what the
     // turn sends follows what it received.
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
-        call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), now_ms);
+        let dialog = resolved.dialog.as_ref();
+        call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), dialog, now_ms);
     }
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
     // the rules read it.
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            crate::rules::relay::note_request(&mut call, &res.source_leg_id, req);
+            let source = resolved.dialog.as_ref();
+            crate::rules::relay::note_request(&mut call, &res.source_leg_id, req, source);
         }
     }
     // A decision folding back is marked before the rules apply it, whichever

@@ -1540,14 +1540,22 @@ impl<'a> RuleContext<'a> {
     /// service rule can own failover-pending policy; the CORE default is the
     /// `update-peer-unavailable` local 491.
     pub fn peer_relay_ready(&self) -> bool {
-        call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, self.request_tags())
+        call::helpers::relay_peer_dialog_ready(
+            self.call.0,
+            self.source_leg_id,
+            self.request_dialog_id(),
+        )
     }
     /// Whether a [`RuleAction::RelayToPeer`] of the current event reaches any
     /// leg, by the resolver the executor's relay path reads
     /// ([`call::helpers::resolve_relay_peer`]).
     pub fn relay_peer_resolves(&self) -> bool {
         matches!(
-            call::helpers::resolve_relay_peer(self.call.0, self.source_leg_id, self.request_tags()),
+            call::helpers::resolve_relay_peer(
+                self.call.0,
+                self.source_leg_id,
+                self.request_dialog_id()
+            ),
             call::helpers::RelayPeer::Leg { .. }
         )
     }
@@ -1557,7 +1565,7 @@ impl<'a> RuleContext<'a> {
     /// an INVITE transaction still open on the source dialog or on the
     /// dialog its relay would be regenerated on.
     pub fn invite_glare(&self) -> bool {
-        call::helpers::invite_glare(self.call.0, self.source_leg_id, self.request_tags())
+        call::helpers::invite_glare(self.call.0, self.source_leg_id, self.request_dialog_id())
     }
 
     /// The refusal the current UPDATE draws (RFC 3311 §5.2), if any: 500 over
@@ -1566,12 +1574,12 @@ impl<'a> RuleContext<'a> {
     /// ([`crate::open_offer::open_offer`]).
     pub fn update_refusal(&self) -> Option<GlareRefusal> {
         let req = self.request().filter(|r| *r.method() == Method::Update)?;
-        if call::helpers::peer_update_pending(self.call.0, self.source_leg_id, self.request_tags())
-        {
+        let source = self.request_dialog_id();
+        if call::helpers::peer_update_pending(self.call.0, self.source_leg_id, source) {
             return Some(GlareRefusal::Unanswered);
         }
         req.sdp()?;
-        match crate::open_offer::open_offer(self.call.0, self.source_leg_id, req)? {
+        match crate::open_offer::open_offer(self.call.0, self.source_leg_id, source)? {
             crate::open_offer::OpenOffer::Sender => Some(GlareRefusal::Unanswered),
             crate::open_offer::OpenOffer::Stack => Some(GlareRefusal::Crossing),
         }
@@ -1591,11 +1599,14 @@ impl<'a> RuleContext<'a> {
     /// How the current INVITE's glare is refused (RFC 3261 §14.2): by what is
     /// open on the dialog, the sender's own earlier INVITE first.
     pub fn glare_refusal(&self) -> GlareRefusal {
-        let tags = self.request_tags();
-        if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, tags) {
+        let source = self.request_dialog_id();
+        if call::helpers::sender_invite_unanswered(self.call.0, self.source_leg_id, source) {
             GlareRefusal::Unanswered
-        } else if call::helpers::sender_invite_unacknowledged(self.call.0, self.source_leg_id, tags)
-        {
+        } else if call::helpers::sender_invite_unacknowledged(
+            self.call.0,
+            self.source_leg_id,
+            source,
+        ) {
             GlareRefusal::Unacknowledged
         } else {
             GlareRefusal::Crossing
@@ -1637,18 +1648,19 @@ impl<'a> RuleContext<'a> {
         let id = self.resolved.dialog.as_ref()?;
         self.source_leg()?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
     }
-    /// The To-tag and From-tag of the current request (none for any other event).
-    pub fn request_tags(&self) -> call::helpers::RequestTags<'_> {
-        self.request()
-            .map(|r| call::helpers::RequestTags::new(r.to().tag(), r.from().tag()))
-            .unwrap_or_default()
+    /// The dialog of the source leg the current request names, as the
+    /// engine's dialog gate resolved it ([`Self::resolved`]); `None` for any
+    /// other event and for a request naming no dialog.
+    pub fn request_dialog_id(&self) -> Option<&'a call::DialogId> {
+        self.request()?;
+        self.resolved.dialog.as_ref()
     }
     /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
     /// regenerated on, resolved with the SAME resolver as the relay executor
     /// ([`call::helpers::relay_peer_dialog`]) so match and action never
     /// disagree. `None` when no peer leg or dialog resolves.
     pub fn peer_dialog(&self) -> Option<&'a Dialog> {
-        call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, self.request_tags())
+        call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, self.request_dialog_id())
             .map(|(_, d)| d)
     }
 }

@@ -6034,6 +6034,11 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     let SipMessage::Request(req) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a request")
     };
+    // The gate resolves her UPDATE to her dialog `a1`.
+    let resolved = call::helpers::Resolved {
+        dialog: Some(call::DialogId { our_tag: "a1".into(), peer_tag: "atag".into() }),
+        relay: None,
+    };
     let config = B2buaConfig::default();
     let refusal = |call: &call::Call| {
         let event = CallEvent::Sip {
@@ -6050,7 +6055,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
             now_ms: 0,
             config: &config,
             discharged: None,
-            resolved: &call::helpers::UNRESOLVED,
+            resolved: &resolved,
         };
         ctx.update_refusal()
     };

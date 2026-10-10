@@ -9,25 +9,19 @@ use sip_message::{Method, SipMessage, SipParser};
 
 use b2bua_sdk::model::RuleContext;
 
-use call::helpers::find_pending_request;
+use call::helpers::{find_leg, find_pending_request};
 
-/// Find the dialog on `leg_id` (the a-leg or a b-leg) holding the pending
-/// transparent-relay snapshot for `outbound_cseq`; returns its identity plus
-/// an owned clone of the dialog.
+/// The dialog of `leg_id` (the a-leg or a b-leg) holding the relayed
+/// re-INVITE snapshot for `outbound_cseq`: the leg's established dialog, the
+/// only one a re-INVITE rides (RFC 3261 §14.1); its identity plus an owned
+/// clone.
 pub(super) fn find_pending_dialog(
     call: &Call,
     leg_id: &str,
     outbound_cseq: i64,
 ) -> Option<(DialogId, Dialog)> {
-    let leg = if call.a_leg.leg_id == leg_id {
-        &call.a_leg
-    } else {
-        call.b_legs.iter().find(|l| l.leg_id == leg_id)?
-    };
-    leg.dialogs
-        .iter()
-        .find(|d| find_pending_request(d, outbound_cseq).is_some())
-        .map(|d| (d.id(), d.clone()))
+    let d = find_leg(call, leg_id)?.dialogs.established()?;
+    find_pending_request(d, outbound_cseq).map(|_| (d.id(), d.clone()))
 }
 
 /// The INVITE CSeq cached on a dialog's pending INVITE handle (RFC 3261
@@ -45,7 +39,7 @@ pub(super) fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
 /// relay path shares with the rule-vocabulary readiness predicate
 /// (`RuleContext::peer_relay_ready`), so the two never drift.
 pub(super) fn resolve_peer(call: &Call, ctx: &RuleContext) -> call::helpers::RelayPeer {
-    call::helpers::resolve_relay_peer(call, ctx.source_leg_id, ctx.request_tags())
+    call::helpers::resolve_relay_peer(call, ctx.source_leg_id, ctx.request_dialog_id())
 }
 
 pub(super) fn leg_index(call: &Call, leg_id: &str) -> Option<usize> {

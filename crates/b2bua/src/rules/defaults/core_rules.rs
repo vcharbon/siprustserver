@@ -1251,7 +1251,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &["relay-prack"],
             Match::request().method("PRACK").filter(|ctx| {
                 let Some(req) = ctx.request() else { return false };
-                let a_tag = req.to().tag().unwrap_or_default();
+                let a_tag = ctx.dialog().map_or("", |d| d.our_tag.as_str());
                 rack_tokens(req).is_some_and(|rack| ctx.call.rack_pracked_here(a_tag, rack))
             }),
             |_ctx| {
@@ -1416,7 +1416,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     relay()
                 };
             };
-            let a_tag = req.to().tag().unwrap_or_default();
+            let a_tag = ctx.dialog().map_or("", |d| d.our_tag.as_str());
             if ctx.call.unacknowledgeable_rack(ctx.source_leg_id, a_tag, tokens) {
                 return refuse(481, "Call/Transaction Does Not Exist");
             }

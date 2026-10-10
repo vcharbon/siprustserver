@@ -38,7 +38,7 @@
 
 use std::borrow::Cow;
 
-use call::{Call, Leg, LegSdpSession, LegState};
+use call::{Call, DialogId, Leg, LegSdpSession, LegState};
 use sip_message::SdpOrigin;
 
 use crate::config::{SdpCrossing, SdpForm, SdpFormPolicy};
@@ -321,14 +321,14 @@ pub fn next_origin_in_dialog(leg: &Leg, remote_tag: &str) -> Option<String> {
 /// [`call::helpers::invite_glare`]; an UPDATE carrying a description unless
 /// it meets an UPDATE of that peer awaiting its final or an open INVITE offer
 /// ([`b2bua_sdk::open_offer::open_offer`], RFC 3311 §5.2). Nothing else.
-pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest) {
-    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
+/// `source` is the dialog the request names, as the dialog gate resolved it.
+pub fn note_request(call: &mut Call, leg_id: &str, req: &SipRequest, source: Option<&DialogId>) {
     let opens = match req.method() {
-        Method::Invite => !call::helpers::invite_glare(call, leg_id, tags),
+        Method::Invite => !call::helpers::invite_glare(call, leg_id, source),
         Method::Update => {
             req.sdp().is_some()
-                && !call::helpers::peer_update_pending(call, leg_id, tags)
-                && b2bua_sdk::open_offer::open_offer(call, leg_id, req).is_none()
+                && !call::helpers::peer_update_pending(call, leg_id, source)
+                && b2bua_sdk::open_offer::open_offer(call, leg_id, source).is_none()
         }
         _ => false,
     };

@@ -64,7 +64,7 @@ pub fn response_to_a_leg(
         return None;
     } else if let Some(tag) = to_tag.as_deref().filter(|_| status > 100) {
         // The caller now holds the early dialog this provisional names.
-        if let Some(d) = call.a_leg.dialogs.iter_mut().find(|d| d.our_tag == tag) {
+        if let Some(d) = call::helpers::caller_dialog_mut(call, tag) {
             d.shown = true;
         }
     }

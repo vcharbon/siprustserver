@@ -14,7 +14,7 @@
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
 
 use call::helpers::{find_leg, find_pending_request, record_message};
-use call::{Call, MessageDirection, MessageEntry, Obligation};
+use call::{Call, Dialog, DialogId, MessageDirection, MessageEntry, Obligation};
 use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
 use crate::config::B2buaConfig;
@@ -51,19 +51,24 @@ impl Ring {
     /// answers with, the hop-by-hop ACK of a non-2xx INVITE final on a client
     /// transaction this node holds, the 200 and 487 a matched CANCEL draws.
     /// `discharged` is the obligation the received request retired, the
-    /// executor's own verdict on whether an ACK is the first of its 2xx.
+    /// executor's own verdict on whether an ACK is the first of its 2xx;
+    /// `dialog` is the dialog the dialog gate resolved the message to.
     pub(crate) fn received(
         &self,
         call: Call,
         leg_id: &str,
         event: &CallEvent,
         discharged: Option<&Obligation>,
+        dialog: Option<&DialogId>,
         now_ms: i64,
     ) -> Call {
         match event {
             CallEvent::Sip { message, matched_client_txn, .. } => {
-                if repeated(&call, leg_id, message, discharged)
-                    || probe_answer(&call, leg_id, message)
+                let named = dialog.and_then(|id| {
+                    find_leg(&call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
+                });
+                if repeated(&call, leg_id, message, discharged, named)
+                    || probe_answer(message, named)
                 {
                     return call;
                 }
@@ -252,6 +257,7 @@ fn repeated(
     leg_id: &str,
     message: &SipMessage,
     discharged: Option<&Obligation>,
+    named: Option<&Dialog>,
 ) -> bool {
     let Some(leg) = find_leg(call, leg_id) else { return false };
     match message {
@@ -266,25 +272,21 @@ fn repeated(
                 })
         }
         SipMessage::Response(resp) => {
-            leg.dialogs
-                .of_response(resp.to().tag(), resp.from().tag())
-                .is_some_and(|d| crate::rules::relay::retransmitted_2xx(d, resp))
+            named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(d, resp))
                 || crate::rules::relay::repeated_reliable_provisional(call, leg_id, resp)
         }
     }
 }
 
 /// Whether `message` answers the liveness probe this stack sent on `leg_id`:
-/// a response to an OPTIONS no pending relay on the dialog it names accounts
-/// for — the reading the keepalive absorbs by. A relayed OPTIONS leaves a
-/// pending request, so its answer is dialog history and is recorded.
-fn probe_answer(call: &Call, leg_id: &str, message: &SipMessage) -> bool {
+/// a response to an OPTIONS no pending relay on the dialog it names (`named`)
+/// accounts for — the reading the keepalive absorbs by. A relayed OPTIONS
+/// leaves a pending request, so its answer is dialog history and is recorded.
+fn probe_answer(message: &SipMessage, named: Option<&Dialog>) -> bool {
     let SipMessage::Response(resp) = message else { return false };
     if resp.cseq().method() != Method::Options {
         return false;
     }
     let cseq = i64::from(resp.cseq().seq());
-    find_leg(call, leg_id)
-        .and_then(|leg| leg.dialogs.of_response(resp.to().tag(), resp.from().tag()))
-        .is_none_or(|d| find_pending_request(d, cseq).is_none())
+    named.is_none_or(|d| find_pending_request(d, cseq).is_none())
 }

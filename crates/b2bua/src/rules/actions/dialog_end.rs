@@ -13,10 +13,13 @@ use b2bua_sdk::model::RuleContext;
 /// BYE left `Ending`, with the final the turn's event carries.
 pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye: ByeDisposition) {
     let on_leg = ctx.source_leg_id == leg_id;
-    let bye_request = ctx
+    // The dialog the BYE names, as the dialog gate resolved it.
+    let bye_dialog = ctx
         .request()
         .filter(|r| on_leg && *r.method() == SipMethod::Bye)
-        .map(|r| (r.to().tag().map(str::to_string), r.from().tag().map(str::to_string)));
+        .and_then(|_| ctx.dialog())
+        .filter(|d| d.retired().is_none())
+        .map(|d| d.id());
     let bye_final = ctx
         .response()
         .filter(|r| on_leg && r.cseq().method() == SipMethod::Bye && r.status() >= 200)
@@ -27,13 +30,7 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
                 d.state = DialogState::Ending;
             }
         }
-        ByeDisposition::ByeReceived => {
-            let named = bye_request.as_ref().and_then(|(to, from)| {
-                let (to, from) = (to.as_deref()?, from.as_deref()?);
-                leg.dialogs.by_tags(to, from).filter(|d| d.retired().is_none()).map(|d| d.id())
-            });
-            end_one(leg, named, DialogEnd::PeerBye);
-        }
+        ByeDisposition::ByeReceived => end_one(leg, bye_dialog.clone(), DialogEnd::PeerBye),
         ByeDisposition::ByeConfirmed => {
             end_one(leg, None, DialogEnd::OurBye { final_status: bye_final });
         }

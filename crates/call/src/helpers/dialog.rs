@@ -3,7 +3,6 @@
 
 use crate::model::{Call, Dialog, DialogId, Leg, PendingRequest, RetainedEmission};
 
-use super::identity::RequestTags;
 use super::leg::find_leg;
 use super::lens::{update_dialog, update_leg};
 use super::peering::relay_peer_dialog;
@@ -120,24 +119,32 @@ pub fn invite_transaction_open(dialog: &Dialog) -> bool {
         || dialog.awaited_ack_cseq.is_some()
 }
 
-/// Whether an INVITE from `source_leg_id`'s peer, carrying `tags`,
+/// Whether an INVITE from `source_leg_id`'s peer, on its dialog `source`,
 /// meets glare (RFC 3261 §14.1): an INVITE transaction still open
-/// ([`invite_transaction_open`]) on the dialog it arrived on or on the dialog
-/// its relay would be regenerated on ([`relay_peer_dialog`]).
-pub fn invite_glare(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    let source =
-        find_leg(call, source_leg_id).and_then(|leg| leg.dialogs.of_request(tags.to, tags.from));
-    source.is_some_and(invite_transaction_open)
-        || relay_peer_dialog(call, source_leg_id, tags)
+/// ([`invite_transaction_open`]) on that dialog or on the dialog its relay
+/// would be regenerated on ([`relay_peer_dialog`]).
+pub fn invite_glare(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> bool {
+    named_dialog(call, source_leg_id, source).is_some_and(invite_transaction_open)
+        || relay_peer_dialog(call, source_leg_id, source)
             .is_some_and(|(_, d)| invite_transaction_open(d))
 }
 
-/// Whether `source_leg_id`'s peer, sending an INVITE carrying `tags`, has an
-/// earlier INVITE of its own on the dialog that this side has sent no final
+/// The dialog of `leg_id` that `id` names.
+fn named_dialog<'a>(call: &'a Call, leg_id: &str, id: Option<&DialogId>) -> Option<&'a Dialog> {
+    let id = id?;
+    find_leg(call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
+}
+
+/// Whether `source_leg_id`'s peer, sending an INVITE on its dialog `source`,
+/// has an earlier INVITE of its own on the dialog that this side has sent no final
 /// to (RFC 3261 §14.2, first clause): its relay awaits a final on the
 /// relay-target dialog and was not CANCELled.
-pub fn sender_invite_unanswered(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
+pub fn sender_invite_unanswered(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> bool {
+    relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
         d.inbound_pending_requests
             .iter()
             .any(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
@@ -145,23 +152,22 @@ pub fn sender_invite_unanswered(call: &Call, source_leg_id: &str, tags: RequestT
 }
 
 /// Whether `source_leg_id`'s peer has an earlier INVITE of its own whose 2xx
-/// this side sent and still awaits the ACK for, on the dialog `tags` name
+/// this side sent and still awaits the ACK for, on its dialog `source`
 /// (RFC 6026 *Accepted*).
 pub fn sender_invite_unacknowledged(
     call: &Call,
     source_leg_id: &str,
-    tags: RequestTags<'_>,
+    source: Option<&DialogId>,
 ) -> bool {
-    find_leg(call, source_leg_id)
-        .and_then(|leg| leg.dialogs.of_request(tags.to, tags.from))
+    named_dialog(call, source_leg_id, source)
         .is_some_and(|d| d.pending_reinvite_2xx.is_some() || d.answered_2xx.is_some())
 }
 
 /// Whether an UPDATE that `source_leg_id`'s peer sent is still awaiting its
 /// final (RFC 3311 §5.2): its relay snapshot is on the dialog a request from
-/// that leg, carrying `tags`, is relayed on.
-pub fn peer_update_pending(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    relay_peer_dialog(call, source_leg_id, tags).is_some_and(|(_, d)| {
+/// that leg's dialog `source` is relayed on.
+pub fn peer_update_pending(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> bool {
+    relay_peer_dialog(call, source_leg_id, source).is_some_and(|(_, d)| {
         d.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("UPDATE"))
     })
 }

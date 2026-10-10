@@ -7,7 +7,6 @@
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution
-//!   - [`identity`] — the tags an in-dialog request carries
 //!   - [`resolved`] — what a received message names: its dialog, the relay a
 //!     response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
@@ -29,7 +28,6 @@
 
 pub mod decision_log;
 pub mod dialog;
-pub mod identity;
 pub mod leg;
 pub mod lens;
 pub mod lifecycle;
@@ -52,7 +50,6 @@ pub use dialog::{
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
     set_awaited_ack_cseq, take_retired_relays, PendingHolder,
 };
-pub use identity::RequestTags;
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, find_b_leg, find_b_leg_by_call_id, find_leg, is_adopted,

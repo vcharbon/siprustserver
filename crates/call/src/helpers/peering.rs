@@ -4,7 +4,6 @@
 
 use crate::model::{ActivePeer, Call, Dialog, DialogId, Leg, LegState};
 
-use super::identity::RequestTags;
 use super::leg::{callee_dialog, caller_dialog, find_b_leg, is_adopted};
 
 // ── Caller-facing fronts ────────────────────────────────────────────────────
@@ -76,7 +75,7 @@ pub enum RelayPeer {
 }
 
 /// Resolve the leg and dialog a transparent `RelayToPeer` from
-/// `source_leg_id` continues on, the source dialog named by `tags`. The ONE
+/// `source_leg_id`'s dialog `source` continues on. The ONE
 /// resolver the executor's relay path, its finals and the rule-vocabulary
 /// readiness predicate ([`relay_peer_dialog_ready`]) share.
 ///
@@ -93,11 +92,15 @@ pub enum RelayPeer {
 /// source's dialog when the caller was shown it, else the caller's confirmed
 /// dialog; toward a b-leg with no fork named, the dialog the leg's requests
 /// ride ([`crate::Dialogs::carrying`]).
-pub fn resolve_relay_peer(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> RelayPeer {
+pub fn resolve_relay_peer(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> RelayPeer {
     let a_leg_id = &call.a_leg.leg_id;
     let toward = |leg_id: &str| -> RelayPeer {
         let dialog = if leg_id == a_leg_id {
-            toward_caller(call, source_leg_id, tags)
+            toward_caller(call, source_leg_id, source)
         } else {
             find_b_leg(call, leg_id).and_then(|l| l.dialogs.carrying()).map(Dialog::id)
         };
@@ -107,7 +110,9 @@ pub fn resolve_relay_peer(call: &Call, source_leg_id: &str, tags: RequestTags<'_
         return toward(peer);
     }
     if source_leg_id == a_leg_id {
-        if let Some(face) = call.a_leg.dialogs.of_request(tags.to, tags.from) {
+        if let Some(face) =
+            source.and_then(|id| call.a_leg.dialogs.by_tags(&id.our_tag, &id.peer_tag))
+        {
             if let Some((leg_id, fork)) = fronted_fork(call, face) {
                 return RelayPeer::Leg { leg_id, dialog: fork.map(Dialog::id) };
             }
@@ -128,13 +133,14 @@ pub fn resolve_relay_peer(call: &Call, source_leg_id: &str, tags: RequestTags<'_
     toward(a_leg_id)
 }
 
-/// The caller-facing dialog a request from `source_leg_id`'s dialog (named by
-/// `tags`, its From-tag the callee's) is relayed on: the live one fronting it
+/// The caller-facing dialog a request from `source_leg_id`'s dialog `source`
+/// (its peer tag the callee's) is relayed on: the live one fronting it
 /// when the caller was shown it, else the caller's confirmed dialog. `None`
 /// while the caller holds no dialog that callee dialog was shown under.
-fn toward_caller(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> Option<DialogId> {
-    let face =
-        tags.from.and_then(|t| fronting_dialog(call, source_leg_id, t)).filter(|d| d.is_live());
+fn toward_caller(call: &Call, source_leg_id: &str, source: Option<&DialogId>) -> Option<DialogId> {
+    let face = source
+        .and_then(|id| fronting_dialog(call, source_leg_id, &id.peer_tag))
+        .filter(|d| d.is_live());
     match face {
         Some(d) => (d.shown || d.was_established()).then(|| d.id()),
         None => call.a_leg.dialogs.confirmed().map(Dialog::id),
@@ -161,8 +167,12 @@ fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a
 /// (a failed b-leg whose `/call/failure` reroute is still pending). An
 /// `Early` dialog is relayable — an early-dialog UPDATE is the RFC 3311 §5.1
 /// normal case.
-pub fn relay_peer_dialog_ready(call: &Call, source_leg_id: &str, tags: RequestTags<'_>) -> bool {
-    relay_peer_dialog(call, source_leg_id, tags)
+pub fn relay_peer_dialog_ready(
+    call: &Call,
+    source_leg_id: &str,
+    source: Option<&DialogId>,
+) -> bool {
+    relay_peer_dialog(call, source_leg_id, source)
         .is_some_and(|(leg, _)| leg.state != LegState::Terminated)
 }
 
@@ -173,9 +183,10 @@ pub fn relay_peer_dialog_ready(call: &Call, source_leg_id: &str, tags: RequestTa
 pub fn relay_peer_dialog<'a>(
     call: &'a Call,
     source_leg_id: &str,
-    tags: RequestTags<'_>,
+    source: Option<&DialogId>,
 ) -> Option<(&'a Leg, &'a Dialog)> {
-    let RelayPeer::Leg { leg_id, dialog: Some(id) } = resolve_relay_peer(call, source_leg_id, tags)
+    let RelayPeer::Leg { leg_id, dialog: Some(id) } =
+        resolve_relay_peer(call, source_leg_id, source)
     else {
         return None;
     };
