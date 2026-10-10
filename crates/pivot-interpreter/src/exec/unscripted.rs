@@ -11,6 +11,7 @@ use crate::close::{self, Owed, FOREIGN_DIALOG, FOREIGN_DIALOG_481};
 use crate::gate::{self, Inbound};
 use crate::plan::{CompiledStep, Discriminator};
 use crate::scripted_final;
+use crate::stack::via_target;
 
 /// The site an emission the FLOW never scripted is attributed to: it belongs to
 /// no step, because no step is what it answers.
@@ -236,13 +237,4 @@ impl<'a, 'p> Runner<'a, 'p> {
         scripted_final::pending_reject(&steps, leg, cseq, &ladder, |id| cursor.node_complete(id))
             .cloned()
     }
-}
-
-/// Where a response to `request` goes: the topmost Via's sent-by, per RFC 3261
-/// §18.2.2.
-pub(super) fn via_target(request: &sip_message::SipRequest) -> Option<std::net::SocketAddr> {
-    let via = request.top_via();
-    let (host, port) = via.host_port();
-    let host = via.received().unwrap_or(host);
-    format!("{host}:{port}").parse().ok()
 }

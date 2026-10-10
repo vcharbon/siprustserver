@@ -278,10 +278,7 @@ impl LegStack {
             .iter()
             .rev()
             .find(|r| wanted.as_ref().is_none_or(|m| r.cseq().method() == m))?;
-        let via = request.top_via();
-        let (host, port) = via.host_port();
-        let host = via.received().unwrap_or(host);
-        format!("{host}:{port}").parse().ok()
+        via_target(request)
     }
 
     /// The reliable provisionals this leg has received and not yet PRACKed.
@@ -325,6 +322,15 @@ impl LegStack {
 fn media_type(text: &str) -> MediaType {
     use sip_message::header::HeaderValue;
     MediaType::parse(&SipStr::owned(text)).unwrap_or_else(|_| MediaType::new(SipStr::owned(text)))
+}
+
+/// Where a response to `request` goes: the topmost Via's sent-by, per RFC 3261
+/// §18.2.2. Absent where the Via names no address this run can reach.
+pub(crate) fn via_target(request: &SipRequest) -> Option<SocketAddr> {
+    let via = request.top_via();
+    let (host, port) = via.host_port();
+    let host = via.received().unwrap_or(host);
+    format!("{host}:{port}").parse().ok()
 }
 
 /// Whether a provisional is reliable (RFC 3262 §3: `Require: 100rel`). Header
