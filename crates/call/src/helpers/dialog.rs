@@ -17,28 +17,14 @@ pub fn bump_our_cseq(call: Call, leg_id: &str, id: &DialogId, delta: i64) -> Cal
     update_dialog(call, leg_id, id, |d| d.our_cseq += delta)
 }
 
-/// Track the peer's latest CSeq on a dialog.
-pub fn set_peer_cseq(call: Call, leg_id: &str, id: &DialogId, peer_cseq: i64) -> Call {
-    update_dialog(call, leg_id, id, |d| d.peer_cseq = Some(peer_cseq))
-}
-
-/// Whether a request `leg_id`'s peer sent in the dialog its `tags` name carries
-/// a CSeq below the last one that dialog took: out of order (RFC 3261 §12.2.2).
-/// Each dialog is measured on its own sequence; a request naming no dialog is
-/// not measured.
-pub fn out_of_order(call: &Call, leg_id: &str, tags: RequestTags<'_>, cseq: i64) -> bool {
-    find_leg(call, leg_id)
-        .and_then(|leg| leg.dialogs.of_request(tags.to, tags.from))
-        .and_then(|d| d.peer_cseq)
-        .is_some_and(|last| cseq < last)
-}
-
-/// CSeq delta for a relayed request: `inbound - sourceRemoteCSeq`, clamped ≥ 1.
-pub fn relay_cseq_delta(inbound_cseq: i64, source_remote_cseq: Option<i64>) -> i64 {
-    match source_remote_cseq {
-        None => 1,
-        Some(s) => (inbound_cseq - s).max(1),
-    }
+/// Note a request the peer sent in dialog `id` as in order: its CSeq becomes
+/// the dialog's remote sequence number unless that already stands higher
+/// (RFC 3261 §12.2.2). The one writer of `peer_cseq` past the dialog's
+/// creation.
+pub fn advance_peer_cseq(call: Call, leg_id: &str, id: &DialogId, cseq: i64) -> Call {
+    update_dialog(call, leg_id, id, |d| {
+        d.peer_cseq = Some(d.peer_cseq.map_or(cseq, |c| c.max(cseq)))
+    })
 }
 
 // ── ACK branch ──────────────────────────────────────────────────────────────

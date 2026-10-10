@@ -71,7 +71,7 @@ async fn end_transferred_call(alice_dialog: &mut Dialog, bob: &Agent, charlie: &
     alice_bye.expect(200).await;
 }
 
-/// Assert a re-INVITE carries `body`, an INVITE CSeq > 1 (a re-INVITE, not the
+/// Assert a re-INVITE carries `body`, a To-tag (a re-INVITE, not the
 /// initial INVITE), and a Contact whose URI carries `leg=<leg>`.
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
@@ -80,7 +80,10 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         apart_from_origin(body),
         "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
-    assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
+    assert!(
+        req.to().tag().is_some(),
+        "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
+    );
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),

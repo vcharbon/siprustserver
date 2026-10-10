@@ -17,7 +17,8 @@
 //! | `Retired` | 481, but a BYE crossing this stack's release of it |
 //!
 //! A live dialog of a call this stack is ending reads as `Ending`. A request
-//! below its dialog's last CSeq draws 500 (§12.2.2). An ACK passes on a dialog
+//! below its dialog's last CSeq draws 500 (§12.2.2); one the gate passes sets
+//! that last CSeq ([`note_in_order`]). An ACK passes on a dialog
 //! a 2xx established, ended by a BYE since or not (RFC 5407 §2); it is never
 //! answered (§17.1.1.3), so one the gate refuses is dropped. A CANCEL is matched by
 //! transaction (§9.1) and passes unread. A response whose From-tag is no tag
@@ -109,6 +110,25 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
         return Verdict::OutOfOrder;
     }
     Verdict::Pass(Resolved { dialog: Some(dialog.id()), relay: None })
+}
+
+/// Note the request the gate passed in order on the dialog it names: its
+/// CSeq becomes that dialog's remote sequence number (RFC 3261 §12.2.2). An
+/// ACK numbers nothing (§13.2.2.4).
+pub(super) fn note_in_order(
+    call: Call,
+    leg_id: &str,
+    resolved: &Resolved,
+    event: &CallEvent,
+) -> Call {
+    let CallEvent::Sip { message, .. } = event else { return call };
+    let (SipMessage::Request(req), Some(dialog)) = (message.as_ref(), &resolved.dialog) else {
+        return call;
+    };
+    if *req.method() == Method::Ack {
+        return call;
+    }
+    call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()))
 }
 
 /// Whether `dialog` takes a request of `method`; `call_ending`: its call is

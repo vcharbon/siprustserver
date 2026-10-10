@@ -45,12 +45,12 @@ pub mod timer;
 
 pub use decision_log::mark_decision;
 pub use dialog::{
-    add_pending_request, bump_our_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
-    cancel_pending_request, close_rejected_invite_round, close_relay, find_pending_request,
-    invite_glare, invite_transaction_open, out_of_order, peer_update_pending, relay_cseq_delta,
+    add_pending_request, advance_peer_cseq, bump_our_cseq, cache_sdp_on_leg_dialog,
+    cached_sdp_for_leg_dialog, cancel_pending_request, close_rejected_invite_round, close_relay,
+    find_pending_request, invite_glare, invite_transaction_open, peer_update_pending,
     relayed_pending, remove_pending_request, retain_ack_branch, retain_emitted_ack,
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
-    set_awaited_ack_cseq, set_peer_cseq, take_retired_relays, PendingHolder,
+    set_awaited_ack_cseq, take_retired_relays, PendingHolder,
 };
 pub use identity::RequestTags;
 pub use leg::{

@@ -1,11 +1,9 @@
-//! Relaying an inbound in-dialog **request** to the peer leg: per-dialog CSeq
-//! bookkeeping, the RAck rewrite, the pending-request correlation snapshot,
+//! Relaying an inbound in-dialog **request** to the peer leg: the target
+//! dialog's next CSeq, the RAck rewrite, the pending-request correlation snapshot,
 //! and ACK origination toward a leg. Response relay does NOT live here — see
 //! [`super::relay_response`].
 
-use call::helpers::{
-    add_pending_request, bump_our_cseq, find_b_leg, leg_kind, relay_cseq_delta, set_peer_cseq,
-};
+use call::helpers::{add_pending_request, bump_our_cseq, find_b_leg, leg_kind};
 use call::{ByeDisposition, Call, DialogId, PendingRequest, RetainedEmission};
 use sip_message::generators::{
     self, CapabilitySet, GenerateInDialogRequestOpts, InDialogMethod, RelayScope, RelaySituation,
@@ -179,11 +177,11 @@ impl ActionExecutor<'_> {
 
     /// Relay an inbound SIP request to `target_leg`, in its dialog
     /// `target_dialog`; with no live dialog there to carry it, the sender is
-    /// told to retry ([`Unrelayed::NotNow`]). Replicates the source's
-    /// per-dialog CSeq bookkeeping (`relay_cseq_delta` — each dialog has its own
-    /// sequence, RFC 3261 §12.2.1.1), the PRACK `RAck` CSeq rewrite (RFC 3262
-    /// §7.2), and the pending-request snapshot used to correlate the eventual
-    /// response (RFC 3261 §8.1.3.3).
+    /// told to retry ([`Unrelayed::NotNow`]). The relayed copy carries the
+    /// target dialog's next number (RFC 3261 §12.2.1.1: each dialog numbers
+    /// its own requests; a gap in the sender's sequence is not reproduced),
+    /// the PRACK `RAck` CSeq rewrite (RFC 3262 §7.2), and the pending-request
+    /// snapshot used to correlate the eventual response (RFC 3261 §8.1.3.3).
     pub(super) fn relay_request(
         &self,
         call: &mut Call,
@@ -287,24 +285,13 @@ impl ActionExecutor<'_> {
             return;
         };
 
-        // ── Per-dialog CSeq (§12.2.1.1): outbound = target.ourCSeq + delta,
-        //    delta = relay_cseq_delta(inbound, sourceDialog.peerCSeq), the
-        //    source dialog being the one the request's tags name. ──
+        // The target dialog's next number (§12.2.1.1).
         let inbound_cseq = req.cseq().seq() as i64;
-        let source_leg_id = ctx.source_leg_id.to_string();
-        let source_dialog = ctx.dialog().cloned();
-        let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.peer_cseq);
-        let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
         let target_invite_cseq =
             invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.our_cseq);
-        let outbound_cseq = target_dialog.our_cseq + delta;
-
-        // Advance the sequences: source learns the inbound CSeq; target bumps.
-        if let Some(sd) = &source_dialog {
-            *call = set_peer_cseq(call.clone(), &source_leg_id, &sd.id(), inbound_cseq);
-        }
+        let outbound_cseq = target_dialog.our_cseq + 1;
         let t_id = target_dialog.id();
-        *call = bump_our_cseq(call.clone(), target_leg, &t_id, delta);
+        *call = bump_our_cseq(call.clone(), target_leg, &t_id, 1);
 
         // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
         // *on the target leg* — the CSeq token becomes the target's INVITE CSeq

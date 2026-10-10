@@ -164,6 +164,7 @@ pub(super) async fn process(
             }
             super::dialog_gate::Gate::Dropped => return,
         };
+        let call = super::dialog_gate::note_in_order(call, &res.source_leg_id, &resolved, &event);
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match

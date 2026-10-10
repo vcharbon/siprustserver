@@ -59,7 +59,7 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
 }
 
-/// Assert a re-INVITE carries `body`, CSeq > 1, and a Contact carrying `leg=<leg>`.
+/// Assert a re-INVITE carries `body`, a To-tag, and a Contact carrying `leg=<leg>`.
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert_eq!(
@@ -67,7 +67,10 @@ fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
         apart_from_origin(body),
         "re-INVITE body should equal expected SDP, under the dialog's own o="
     );
-    assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
+    assert!(
+        req.to().tag().is_some(),
+        "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
+    );
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),

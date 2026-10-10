@@ -66,7 +66,10 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
 
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
-    assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
+    assert!(
+        req.to().tag().is_some(),
+        "a re-INVITE names its dialog by the To-tag (RFC 3261 §14.1)"
+    );
     let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),

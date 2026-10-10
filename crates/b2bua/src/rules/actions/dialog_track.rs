@@ -325,10 +325,7 @@ impl ActionExecutor<'_> {
         // comma-combined header — the proxy's double-record-route halves — is
         // two), same as the b-leg path above.
         let route_set = self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
-        let cseq = a_invite.cseq().seq() as i64;
-        let mut dialog =
-            Dialog::new(tag.clone(), call.a_leg_invite.from_tag.clone(), DialogState::Early, cseq);
-        dialog.peer_cseq = Some(cseq);
+        let mut dialog = caller_facing_dialog(&tag, &call.a_leg_invite.from_tag, &a_invite);
         dialog.remote_target = remote_target;
         dialog.route_set = route_set;
         call.a_leg.dialogs.insert(dialog);
@@ -398,10 +395,20 @@ pub(super) fn own_a_dialog_mut(call: &mut Call) -> Option<&mut Dialog> {
     caller_dialog_mut(call, &own)
 }
 
+/// A caller-facing early dialog under our tag `tag` toward the caller's tag
+/// `caller_tag`: the remote sequence number is the caller's INVITE CSeq
+/// (RFC 3261 §12.1.1), and ours is empty, so our first request toward the
+/// caller carries 1 (§12.2.1.1, §8.1.1.5).
+fn caller_facing_dialog(tag: &str, caller_tag: &str, a_invite: &sip_message::SipRequest) -> Dialog {
+    let mut dialog = Dialog::new(tag, caller_tag, DialogState::Early, 0);
+    dialog.peer_cseq = Some(i64::from(a_invite.cseq().seq()));
+    dialog
+}
+
 /// Open the caller-facing early dialog `tag` names beside the a-leg's own
-/// dialog: a record of its own — same caller, route set and target — whose
-/// two sequences start from the caller's INVITE (RFC 3261 §12.1.2,
-/// §12.2.1.1). Nothing is opened for an empty tag, a tag the a-leg already
+/// dialog: a record of its own — same caller, route set and target — with
+/// fresh sequences ([`caller_facing_dialog`], RFC 3261 §12.1.2). Nothing is
+/// opened for an empty tag, a tag the a-leg already
 /// holds, or an a-leg with no dialog of its own yet.
 pub(super) fn open_early_a_dialog(call: &mut Call, tag: &str) {
     if tag.is_empty() || caller_dialog(call, tag).is_some() {
@@ -410,9 +417,8 @@ pub(super) fn open_early_a_dialog(call: &mut Call, tag: &str) {
     let Some(own) = call.a_leg.own_tag.as_deref().and_then(|t| caller_dialog(call, t)) else {
         return;
     };
-    let cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
-    let mut face = Dialog::new(tag, own.peer_tag.clone(), DialogState::Early, cseq);
-    face.peer_cseq = Some(cseq);
+    let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    let mut face = caller_facing_dialog(tag, &own.peer_tag, &a_invite);
     face.route_set = own.route_set.clone();
     face.remote_target = own.remote_target.clone();
     call.a_leg.dialogs.insert(face);
@@ -432,9 +438,8 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
         let Some(own) = call.a_leg.own_tag.as_deref().and_then(|t| caller_dialog(call, t)) else {
             return;
         };
-        let fresh = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
-        let mut d = Dialog::new(tag, own.peer_tag.clone(), DialogState::Early, fresh);
-        d.peer_cseq = Some(fresh);
+        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        let mut d = caller_facing_dialog(tag, &own.peer_tag, &a_invite);
         d.route_set = own.route_set.clone();
         d.remote_target = own.remote_target.clone();
         call.a_leg.dialogs.insert(d);

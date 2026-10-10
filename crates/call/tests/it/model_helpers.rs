@@ -60,36 +60,22 @@ fn cseq_lens_helpers() {
     let call = bump_our_cseq(call, "a", &a_id(), 5);
     assert_eq!(a_dialog(&call).our_cseq, before + 5);
 
-    let call = set_peer_cseq(call, "b-1", &b_id(), 9999);
+    let call = advance_peer_cseq(call, "b-1", &b_id(), 9999);
     assert_eq!(b_dialog(&call).peer_cseq, Some(9999));
-
-    assert_eq!(relay_cseq_delta(10, None), 1);
-    assert_eq!(relay_cseq_delta(10, Some(7)), 3);
-    assert_eq!(relay_cseq_delta(5, Some(9)), 1); // clamped ≥ 1
 }
 
-/// §12.2.2: a request below the last CSeq of the dialog its tags name is out
-/// of order — the To-tag ours, the From-tag the peer's, on either leg. The
-/// last one again, a higher one, a dialog with no request yet and tags naming
-/// no dialog are not.
+/// §12.2.2: a request in order sets the dialog's remote sequence number, which
+/// never decreases.
 #[test]
-fn out_of_order_measures_the_named_dialog_against_its_last_cseq() {
-    let from_bob = |tag| RequestTags::new(Some(B_LOCAL_TAG), Some(tag));
-    let call = set_peer_cseq(representative_call(), "b-1", &b_id(), 7);
-    assert!(out_of_order(&call, "b-1", from_bob(B_TAG), 6));
-    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 7));
-    assert!(!out_of_order(&call, "b-1", from_bob(B_TAG), 8));
-    assert!(!out_of_order(&call, "b-1", from_bob("another-fork"), 1));
-
-    let mut unseen = call.clone();
+fn the_peer_sequence_never_decreases() {
+    let mut unseen = representative_call();
     unseen.b_legs[0].dialogs.by_tags_mut(B_LOCAL_TAG, B_TAG).unwrap().peer_cseq = None;
-    assert!(!out_of_order(&unseen, "b-1", from_bob(B_TAG), 1));
-
-    let to_us = |tag| RequestTags::new(Some(tag), Some(ALICE_TAG));
-    let call = set_peer_cseq(call, "a", &a_id(), 4);
-    assert!(out_of_order(&call, "a", to_us(A_TAG), 3));
-    assert!(!out_of_order(&call, "a", to_us(A_TAG), 5));
-    assert!(!out_of_order(&call, "a", to_us("another-face"), 1));
+    let call = advance_peer_cseq(unseen, "b-1", &b_id(), 7);
+    assert_eq!(b_dialog(&call).peer_cseq, Some(7), "the first request sets it");
+    let call = advance_peer_cseq(call, "b-1", &b_id(), 12);
+    assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a gap is in order");
+    let call = advance_peer_cseq(call, "b-1", &b_id(), 9);
+    assert_eq!(b_dialog(&call).peer_cseq, Some(12), "a lower number leaves it");
 }
 
 #[test]

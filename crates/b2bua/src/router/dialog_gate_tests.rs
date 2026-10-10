@@ -1,10 +1,11 @@
 //! The dialog gate's table (ADR-0041): which dialog state takes which request,
 //! and what a caller-facing dialog the caller was never shown names.
 
+use b2bua_sdk::event::CallEvent;
 use call::{Call, CallModelState, Dialog, DialogEnd, DialogState, RetiredDialog, StragglerRelease};
-use sip_message::{Method, SipRequest};
+use sip_message::{Method, SipMessage, SipRequest};
 
-use super::dialog_gate::{admits, request_verdict, Verdict};
+use super::dialog_gate::{admits, note_in_order, request_verdict, Verdict};
 use super::test_support::{invite, src};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
@@ -124,6 +125,27 @@ fn a_request_below_its_dialogs_last_cseq_is_out_of_order() {
         request_verdict(&call, "a", &caller_request(Method::Info, 6)),
         Verdict::Pass(_)
     ));
+}
+
+/// The caller's last CSeq on `ours` once the gate passed `req`.
+fn last_cseq_after(call: Call, req: SipRequest) -> Option<i64> {
+    let Verdict::Pass(resolved) = request_verdict(&call, "a", &req) else {
+        panic!("the gate passes {}", req.method());
+    };
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(req)),
+        src: src(),
+        matched_client_txn: false,
+    };
+    let call = note_in_order(call, "a", &resolved, &event);
+    call.a_leg.dialogs.by_tags("ours", CALLER_TAG).expect("the dialog").peer_cseq
+}
+
+#[test]
+fn a_request_the_gate_passes_sets_its_dialogs_last_cseq_and_an_ack_does_not() {
+    let call = call_with_caller_dialog(true);
+    assert_eq!(last_cseq_after(call.clone(), caller_request(Method::Info, 9)), Some(9));
+    assert_eq!(last_cseq_after(call, caller_request(Method::Ack, 9)), Some(1));
 }
 
 #[test]

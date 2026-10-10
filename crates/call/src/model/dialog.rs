@@ -158,10 +158,13 @@ pub struct Dialog {
     /// The peer's tag in the dialog.
     pub peer_tag: String,
     pub state: DialogState,
-    /// The last CSeq this side sent in the dialog (§12.2.1.1).
+    /// The last CSeq this side sent in the dialog; 0 before its first. Every
+    /// request this side sends in it, relayed or its own, carries the next
+    /// number (§12.2.1.1): the number a relayed request arrived with plays
+    /// no part.
     pub our_cseq: i64,
     /// The last CSeq the peer sent in the dialog; `None` until it sent one
-    /// (§12.2.2).
+    /// (§12.2.2). It serves the out-of-order check alone.
     pub peer_cseq: Option<i64>,
     /// Peer Contact URI — Request-URI for in-dialog requests (§12.2.1.1).
     pub remote_target: String,

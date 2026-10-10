@@ -33,11 +33,7 @@ impl ActionExecutor<'_> {
     /// the response goes back to the request's top-Via sent-by on the source
     /// leg's server transaction, under the source face's Contact where
     /// [`generators::response_states_own_contact`] states one (the 2xx to
-    /// UPDATE, the 202 to REFER). A locally answered **in-dialog** request still
-    /// advances the source dialog's highest-seen CSeq (RFC 3261 §12.2.2), so
-    /// the next relayed request's `relay_cseq_delta` does not reproduce the
-    /// gap on the peer dialog (§12.2.1.1 — its CSeq increments by exactly one).
-    /// `extra_headers` ride the response as given; on a failure final to the
+    /// UPDATE, the 202 to REFER). `extra_headers` ride the response as given; on a failure final to the
     /// initial INVITE the deployment's minted-final advertisement fills a half
     /// they leave unnamed.
     #[allow(clippy::too_many_arguments)]
@@ -62,17 +58,6 @@ impl ActionExecutor<'_> {
                     |_| false,
                     &mut extra_headers,
                 );
-            }
-            if let Some(sd) = ctx.dialog() {
-                let inbound_cseq = req.cseq().seq() as i64;
-                if sd.peer_cseq.is_none_or(|c| inbound_cseq > c) {
-                    *call = call::helpers::set_peer_cseq(
-                        call.clone(),
-                        ctx.source_leg_id,
-                        &sd.id(),
-                        inbound_cseq,
-                    );
-                }
             }
             // A request naming no dialog is answered under the leg's own tag
             // (RFC 3261 §8.2.6.2), never a minted one; a tagged To is echoed.
