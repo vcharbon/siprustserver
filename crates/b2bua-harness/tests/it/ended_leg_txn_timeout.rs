@@ -143,12 +143,12 @@ async fn a_transaction_timing_out_on_an_ended_leg_keeps_its_disposition() {
 }
 
 /// The caller's in-dialog INFO, sent while the NOTIFY on the callee's ended
-/// leg is unanswered, belongs to the INVITE usage the callee's BYE ended
-/// (RFC 5057 §5.2): this stack answers it 481 itself (RFC 3261 §12.2.2) and
-/// nothing reaches the callee. The NOTIFY's own timeout still leaves the leg
-/// `ByeReceived`.
+/// leg is unanswered, has no live peer dialog to ride: her own dialog lives,
+/// so this stack tells her to retry (500 with `Retry-After`, RFC 3261 §14.2),
+/// never 481, which would end her dialog (§12.2.1.2); nothing reaches the
+/// callee. The NOTIFY's own timeout still leaves the leg `ByeReceived`.
 #[tokio::test(start_paused = true)]
-async fn a_request_toward_a_leg_a_bye_ended_is_answered_481_here() {
+async fn a_request_toward_a_leg_a_bye_ended_is_told_to_retry() {
     let h = Harness::new("ended-leg-txn-timeout-pending");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -182,7 +182,11 @@ async fn a_request_toward_a_leg_a_bye_ended_is_answered_481_here() {
     // One second later the caller's INFO names the callee's ended dialog.
     h.advance(Duration::from_secs(1)).await;
     let mut info = alice_dialog.send_request(InDialogMethod::Info).send().await;
-    info.expect(481).await;
+    let refused = info.expect(500).await;
+    assert!(
+        b2bua_harness::stated_by_response(&refused, "Retry-After").is_some_and(|v| v.trim() == "1"),
+        "the 500 states Retry-After: 1"
+    );
 
     // Past the NOTIFY's Timer F (32 s after the BYE).
     h.advance(Duration::from_secs(33)).await;

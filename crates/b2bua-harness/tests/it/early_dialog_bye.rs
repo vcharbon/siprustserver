@@ -197,19 +197,11 @@ async fn caller_bye_crossing_the_callees_answer_confirms_and_releases_the_callee
 }
 
 /// The callee BYEs the early dialog it opened — forbidden to it (RFC 3261
-/// §15, last paragraph) but survived here — and the caller's own BYE crosses
-/// the final that release draws. Every transaction gets exactly one final, no
-/// second INVITE final goes out, and the teardown already under way is not
-/// restarted.
-///
-/// The callee's release answers the caller's INVITE in the same turn, so the
-/// caller's BYE always lands on a leg that already carries its final: the
-/// "terminating, INVITE still unanswered" shape is not reachable this way.
-///
-/// Ordering this test depends on: bob's BYE is sent first and the simulated
-/// network delivers same-instant datagrams in order, so his BYE is processed
-/// before alice's and the 503 precedes her BYE. Were alice's BYE processed
-/// first, the caller's early-dialog BYE would answer the INVITE 487 instead.
+/// §15, last paragraph) but survived here — and the caller's own BYE follows.
+/// The release CANCELs the INVITE still ringing at the callee (§9.1) and the
+/// call waits for its 487, so the caller's BYE lands on her live early
+/// dialog: 200, and her INVITE 487 (§15.1.2). Every transaction gets exactly
+/// one final, and the teardown under way is not restarted.
 #[tokio::test(start_paused = true)]
 async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-callee-first", 100);
@@ -240,18 +232,21 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     let mut a_bye = call.send_request(InDialogMethod::Bye).send().await;
     b_bye.expect(200).await;
 
-    // The callee's release answers the INVITE; alice's BYE, arriving after
-    // that final, names a dialog the final ended.
-    call.expect(503).await; // auto-ACKed (§17.1.1.3)
-    a_bye.expect(481).await;
+    // The release CANCELs bob's INVITE and waits for its 487: alice's BYE
+    // ends her early dialog.
+    a_bye.expect(200).await;
+    call.expect(487).await; // auto-ACKed (§17.1.1.3)
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    b_inv.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
 
     h.advance(Duration::from_secs(2)).await;
     reaped(&b2bua).await;
     let report = h.finish().await;
     assert_eq!(
         invite_final_statuses(&report, alice_addr),
-        [503],
-        "exactly one INVITE final on alice's wire: the callee's release, answered unanswered"
+        [487],
+        "exactly one INVITE final on alice's wire: the one her BYE drew"
     );
     let bye_finals = sent(&report.entries(), b2bua.addr, alice_addr, "SIP/2.0 ")
         .into_iter()

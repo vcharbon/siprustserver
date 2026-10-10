@@ -540,3 +540,64 @@ async fn a_transferee_request_under_an_unknown_from_tag_is_refused_481() {
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+/// The caller's early dialog is one a service stated (it fronts no callee
+/// dialog); her first callee fails and the call fails over. Her INFO there
+/// reaches the leg still ringing, not the failed one.
+#[tokio::test(start_paused = true)]
+async fn a_caller_request_on_a_service_tag_after_failover_reaches_the_live_leg() {
+    let h = Harness::with_transit_delay("dialog-gate-service-tag-failover", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob1 = h.agent_auto("bob1").await;
+    let bob2 = h.agent_auto("bob2").await;
+    let (first, second) = (bob1.addr(), bob2.addr());
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| {
+                let mut r = route_to(&first.ip().to_string(), first.port());
+                r.callback_context = Some("failover".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |_req| {
+                CallFailureResponse::Route(route_to(&second.ip().to_string(), second.port()))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .services(vec![own_then_stated::service_def()])
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas1 = bob1.receive("INVITE").await;
+    uas1.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas1.respond(183, "Session Progress").await;
+    let stated = call.expect(183).await;
+    let own_tag = stated.to().tag().expect("the service's stated tag").to_string();
+    assert_eq!(own_tag, own_then_stated::TAG);
+    uas1.respond(486, "Busy Here").await;
+    bob1.receive("ACK").await;
+    let mut uas2 = bob2.receive("INVITE").await;
+    uas2.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    let mut info = call.send_request(InDialogMethod::Info).with_to_tag(&own_tag).send().await;
+    bob2.receive("INFO").await.respond(200, "OK").await;
+    info.expect(200).await;
+
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob1.drain().await;
+    bob2.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
