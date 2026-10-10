@@ -45,6 +45,13 @@ pub struct ServerTxn {
     /// different final after it is rejected here; a same-status retransmission
     /// (RFC 3261 §13.3.1.4) is allowed through.
     final_status: Option<u16>,
+    /// The To-tag [`adopt_to_tag`](Self::adopt_to_tag) pinned or the 2xx
+    /// carried, whichever came last: the dialog [`dialog`](Self::dialog)
+    /// names (RFC 3261 §12.1.1).
+    dialog_tag: Option<String>,
+    /// The To-tag of the first tagged provisional: the early dialog
+    /// [`dialog`](Self::dialog) names when nothing else does.
+    provisional_tag: Option<String>,
 }
 
 impl ServerTxn {
@@ -68,6 +75,8 @@ impl ServerTxn {
             emitted_early: HashSet::new(),
             winner: None,
             final_status: None,
+            dialog_tag: None,
+            provisional_tag: None,
         }
     }
 
@@ -209,6 +218,7 @@ impl ServerTxn {
     /// before responding the winning 2xx.
     pub fn adopt_to_tag(&mut self, tag: &str) {
         self.to_tag = Some(tag.to_string());
+        self.dialog_tag = Some(tag.to_string());
     }
 
     /// Open (or return) the early dialog `early_id` on THIS INVITE server
@@ -299,14 +309,32 @@ impl ServerTxn {
         self.winner = Some(winner);
     }
 
-    /// Form the UAS-side confirmed [`Dialog`] for this transaction, so this UA
-    /// can originate in-dialog requests (e.g. the callee sends the BYE). Call
-    /// after responding 2xx (so the To-tag is minted). The remote target is the
-    /// caller's Contact; the route set is the request's Record-Route in order
-    /// (§12.1.1), so in-dialog requests route back through any proxy.
+    /// Form the UAS-side [`Dialog`] for this transaction, so this UA can
+    /// originate in-dialog requests (e.g. the callee sends the BYE). Its local
+    /// tag is that of the response that created it (RFC 3261 §12.1.1): the
+    /// 2xx's or the one [`adopt_to_tag`](Self::adopt_to_tag) pinned, whichever
+    /// came last, else the sticky tag, else the first tagged provisional's; a
+    /// request already naming a dialog names its own. The remote target is the caller's Contact; the route set
+    /// is the request's Record-Route in order (§12.1.1), so in-dialog requests
+    /// route back through any proxy. Its own sequence starts at this UA's
+    /// [`Party::first_cseq`](super::Party::first_cseq). Panics before any
+    /// response created a dialog.
     pub fn dialog(&self) -> Dialog {
         let req = &self.request;
-        let local_tag = self.to_tag.clone().unwrap_or_default();
+        let local_tag = req
+            .to()
+            .tag()
+            .map(str::to_owned)
+            .or_else(|| self.dialog_tag.clone())
+            .or_else(|| self.to_tag.clone())
+            .or_else(|| self.provisional_tag.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: dialog() on {} before a response created a dialog (RFC 3261 §12.1.1)",
+                    self.agent.name,
+                    request_label(None, req)
+                )
+            });
         let remote_target = req
             .header::<header::Contact>()
             .and_then(Result::ok)
@@ -327,7 +355,7 @@ impl ServerTxn {
             local_uri: req.to().uri().to_string(),
             remote_uri: req.from().uri().to_string(),
             remote_target,
-            local_cseq: 0, // UAS originates its own CSeq space; first request → 1
+            local_cseq: self.agent.answers_as.first_cseq() - 1,
             route_set: self.route_set.clone(),
         };
         let fallback = next_hop(&dialog, top_via_addr(req).unwrap_or(self.agent.addr));
@@ -477,6 +505,13 @@ impl<'a> Respond<'a> {
             }
             txn.to_tag.clone()
         };
+        if txn.request.to().tag().is_none() {
+            match self.status {
+                101..=199 if txn.provisional_tag.is_none() => txn.provisional_tag = to_tag.clone(),
+                200..=299 => txn.dialog_tag = to_tag.clone(),
+                _ => {}
+            }
+        }
         // Contact is required on 2xx and useful on 18x to establish the early
         // dialog's remote target; omit on plain 100.
         let contact = if self.status >= 180 { Some(txn.agent.contact()) } else { None };

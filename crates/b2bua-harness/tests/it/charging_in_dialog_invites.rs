@@ -63,7 +63,7 @@ async fn transfer_stating(
     let h = Harness::new(name);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_port}")).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port}")).await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{charlie_port}")).await.transfer_target();
     let engine = ScriptedDecisionEngine::builder()
         .fallback(move |_req| {
             let mut route = route_to_processing_refer("127.0.0.1", bob_port);

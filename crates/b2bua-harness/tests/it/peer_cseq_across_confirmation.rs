@@ -4,16 +4,16 @@
 //! Each side of a dialog numbers its requests from its own sequence. The callee
 //! starts its sequence with its first request, wherever that lands (the early
 //! dialog included); the 2xx that confirms the dialog echoes the INVITE's CSeq,
-//! which is the B2BUA's own number, never the callee's. A relayed request is
-//! renumbered onto the other leg by its distance from the sender's previous
-//! request, so the B2BUA must remember the sender's last number across the
-//! confirmation: forgetting it shows the far side a gap (§12.2.1.1), and stops
-//! recognising an old request as out of order (§12.2.2, answered 500).
+//! which is the B2BUA's own number, never the callee's. A relayed request
+//! takes the next number of the dialog it goes out on, so the far side sees
+//! one unbroken run (§12.2.1.1); the B2BUA remembers the sender's last number
+//! across the confirmation to recognise an old request as out of order
+//! (§12.2.2, answered 500).
 
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Agent, Harness, ServerTxn, WaiverScope};
+use scenario_harness::{Agent, Harness, Party, ServerTxn, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
@@ -22,6 +22,9 @@ const BOB_REOFFER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 
 const ALICE_REANSWER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
 const ALICE_REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
 const BOB_REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+
+/// The callee's first CSeq in a dialog it answers: m in the diagrams below.
+const CALLEE_FIRST: u32 = Party::Callee.first_cseq();
 
 fn cseq_of(txn: &ServerTxn) -> u32 {
     txn.request().cseq().seq()
@@ -76,17 +79,18 @@ async fn relayed_update(dialog: &mut scenario_harness::Dialog, to: &Agent) -> (u
     seen
 }
 
-/// The callee's two early UPDATEs (its CSeq 1 and 2) are relayed as the
-/// B2BUA's next two requests toward the caller; after the answer, its re-INVITE
-/// (3) and BYE (4) continue that run toward the caller without a gap.
+/// The callee's two early UPDATEs (its CSeq m and m+1) are relayed as the
+/// B2BUA's next two requests toward the caller; after the answer, its
+/// re-INVITE (m+2) and BYE (m+3) continue that run toward the caller without a
+/// gap.
 ///
 /// ```text
 ///   callee → B2BUA                       B2BUA → caller
-///   UPDATE 1 (early)                     UPDATE n
-///   UPDATE 2 (early)                     UPDATE n+1
+///   UPDATE m (early)                     UPDATE n
+///   UPDATE m+1 (early)                   UPDATE n+1
 ///   200 (INVITE, CSeq 1: the B2BUA's)
-///   re-INVITE 3                          re-INVITE n+2
-///   BYE 4                                BYE n+3
+///   re-INVITE m+2                        re-INVITE n+2
+///   BYE m+3                              BYE n+3
 /// ```
 #[tokio::test(start_paused = true)]
 async fn callee_requests_after_the_answer_continue_its_early_sequence() {
@@ -115,7 +119,11 @@ async fn callee_requests_after_the_answer_continue_its_early_sequence() {
         relayed_update(&mut bob_dialog, &alice).await.0,
         relayed_update(&mut bob_dialog, &alice).await.0,
     ];
-    assert_eq!(bob_dialog.local_cseq(), 2, "the callee spent 1 and 2 on its early dialog");
+    assert_eq!(
+        bob_dialog.local_cseq(),
+        CALLEE_FIRST + 1,
+        "the callee spent m and m+1 on its early dialog"
+    );
 
     uas.respond(200, "OK").await;
     call.expect(200).await;
@@ -127,7 +135,7 @@ async fn callee_requests_after_the_answer_continue_its_early_sequence() {
     seen.push(cseq_of(&at_alice));
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    bob_dialog.ack_for(3, None).await;
+    bob_dialog.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = bob_dialog.bye().await;
@@ -266,7 +274,7 @@ async fn caller_requests_after_the_answer_continue_its_early_sequence() {
     let mut at_alice = alice.receive("INVITE").await;
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    bob_dialog.ack_for(1, None).await;
+    bob_dialog.ack(None).await;
     alice.receive("ACK").await;
 
     let resume = ALICE_REOFFER.replace("1 2 IN", "1 3 IN").replace("sendonly", "sendrecv");
@@ -296,15 +304,15 @@ async fn caller_requests_after_the_answer_continue_its_early_sequence() {
 }
 
 /// A forked callee: each early dialog runs its own sequence (§12.1.2), and the
-/// one the 2xx confirms keeps ITS sequence. Fork 1 spent 1 and 2, fork 2 then
-/// spent its own 1; fork 1 answers, so its re-INVITE 3 and BYE 4 continue
-/// the run the caller was shown without a gap.
+/// one the 2xx confirms keeps ITS sequence. Fork 1 spent m and m+1, fork 2
+/// then spent its own m; fork 1 answers, so its re-INVITE m+2 and BYE m+3
+/// continue the run the caller was shown without a gap.
 ///
 /// ```text
-///   fork 1: UPDATE 1, UPDATE 2
-///   fork 2: UPDATE 1
+///   fork 1: UPDATE m, UPDATE m+1
+///   fork 2: UPDATE m
 ///   200 (INVITE, fork 1)
-///   fork 1: re-INVITE 3, BYE 4
+///   fork 1: re-INVITE m+2, BYE m+3
 /// ```
 #[tokio::test(start_paused = true)]
 async fn the_confirmed_fork_keeps_its_own_early_sequence() {
@@ -342,7 +350,7 @@ async fn the_confirmed_fork_keeps_its_own_early_sequence() {
     view.record(&at_alice);
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    fork1.ack_for(3, None).await;
+    fork1.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = fork1.bye().await;
@@ -360,8 +368,8 @@ async fn the_confirmed_fork_keeps_its_own_early_sequence() {
     let _ = h.finish().await;
 }
 
-/// §12.2.2: once the callee spent 1 and 2 on its early dialog, a request it
-/// sends after the answer under CSeq 1 is out of order — answered 500 and
+/// §12.2.2: once the callee spent m and m+1 on its early dialog, a request it
+/// sends after the answer under CSeq m is out of order — answered 500 and
 /// never relayed. Its next request continues its own sequence toward the
 /// caller.
 #[tokio::test(start_paused = true)]
@@ -404,9 +412,9 @@ async fn an_early_number_reused_after_the_answer_is_out_of_order() {
     let _alice_dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    bob_dialog.set_local_cseq(0);
+    bob_dialog.set_local_cseq(CALLEE_FIRST - 1);
     let mut stale = bob_dialog.request(InDialogMethod::Info, None).await;
-    bob_dialog.set_local_cseq(2);
+    bob_dialog.set_local_cseq(CALLEE_FIRST + 1);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -430,9 +438,9 @@ async fn an_early_number_reused_after_the_answer_is_out_of_order() {
 }
 
 /// §12.2.2 per fork: each early dialog of a forked callee is measured against
-/// its OWN sequence. Fork 1's first UPDATE (1), after fork 2 spent 1 and 2, is
-/// in order and relayed; fork 1 then answers, and its reuse of 1 after its
-/// re-INVITE (2) is out of order.
+/// its OWN sequence. Fork 1's first UPDATE (m), after fork 2 spent m and m+1,
+/// is in order and relayed; fork 1 then answers, and its reuse of m after its
+/// re-INVITE (m+1) is out of order.
 #[tokio::test(start_paused = true)]
 async fn each_fork_is_measured_against_its_own_sequence() {
     let h = Harness::with_transit_delay("b2bua-fork-stale-cseq-own-sequence", 1);
@@ -477,12 +485,12 @@ async fn each_fork_is_measured_against_its_own_sequence() {
     view.record(&at_alice);
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    fork1.ack_for(2, None).await;
+    fork1.ack(None).await;
     alice.receive("ACK").await;
 
-    fork1.set_local_cseq(0);
+    fork1.set_local_cseq(CALLEE_FIRST - 1);
     let mut stale = fork1.request(InDialogMethod::Info, None).await;
-    fork1.set_local_cseq(2);
+    fork1.set_local_cseq(CALLEE_FIRST + 1);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -505,8 +513,8 @@ async fn each_fork_is_measured_against_its_own_sequence() {
     let _ = h.finish().await;
 }
 
-/// §12.2.2 at the confirmation itself: fork 2 spent 1 and 2 on its early
-/// dialog after fork 1 had spoken; fork 2 answers, and its reuse of 1 right
+/// §12.2.2 at the confirmation itself: fork 2 spent m and m+1 on its early
+/// dialog after fork 1 had spoken; fork 2 answers, and its reuse of m right
 /// after the answer is out of order against fork 2's own sequence.
 #[tokio::test(start_paused = true)]
 async fn the_confirmed_fork_is_measured_against_its_early_sequence() {
@@ -546,9 +554,9 @@ async fn the_confirmed_fork_is_measured_against_its_early_sequence() {
     let _alice_dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    fork2.set_local_cseq(0);
+    fork2.set_local_cseq(CALLEE_FIRST - 1);
     let mut stale = fork2.request(InDialogMethod::Info, None).await;
-    fork2.set_local_cseq(2);
+    fork2.set_local_cseq(CALLEE_FIRST + 1);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -573,7 +581,7 @@ async fn the_confirmed_fork_is_measured_against_its_early_sequence() {
 
 /// §12.2.2 after the answer: fork 2 lost, so a request it sends once fork 1's
 /// 2xx confirmed the leg names no dialog the B2BUA holds — 481, not relayed —
-/// and leaves fork 1's sequence alone, so fork 1's BYE (its CSeq 1) is in
+/// and leaves fork 1's sequence alone, so fork 1's BYE (its CSeq m) is in
 /// order and ends the call.
 #[tokio::test(start_paused = true)]
 async fn a_losing_fork_request_after_the_answer_names_no_dialog() {
@@ -600,7 +608,7 @@ async fn a_losing_fork_request_after_the_answer_names_no_dialog() {
     let _alice_dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    fork2.set_local_cseq(4);
+    fork2.set_local_cseq(CALLEE_FIRST + 3);
     let mut stray = fork2.request(InDialogMethod::Info, None).await;
     stray.expect(481).await;
     h.advance(Duration::from_millis(500)).await;

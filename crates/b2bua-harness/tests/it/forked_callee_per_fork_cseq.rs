@@ -23,7 +23,7 @@
 //! ```
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 use sip_message::types::SipResponse;
@@ -74,7 +74,7 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
@@ -117,7 +117,7 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;

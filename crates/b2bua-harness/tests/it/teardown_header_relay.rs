@@ -8,6 +8,7 @@
 //! PSTN gateway and both CDRs are built on.
 
 use b2bua_harness::{stated, B2buaScene};
+use scenario_harness::Party;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 use sip_message::SipRequest;
@@ -226,7 +227,10 @@ async fn a_retransmitted_2xx_repeats_the_advertisement_the_first_one_stated() {
         .iter()
         .filter(|e| e.from == sut)
         .map(|e| String::from_utf8_lossy(&e.raw).to_string())
-        .filter(|text| text.starts_with("SIP/2.0 200") && text.contains("CSeq: 1 INVITE"))
+        .filter(|text| {
+            text.starts_with("SIP/2.0 200")
+                && text.contains(&format!("CSeq: {} INVITE", Party::Caller.first_cseq()))
+        })
         .collect();
     assert!(answers.len() >= 2, "alice's silence must produce a retransmit, got {}", answers.len());
     let advert = |text: &str| -> Vec<String> {

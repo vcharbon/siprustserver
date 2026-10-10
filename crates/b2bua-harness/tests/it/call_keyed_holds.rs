@@ -34,7 +34,7 @@ use b2bua_harness::{
 use call::ReleaseEventKind;
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -541,7 +541,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
     let mut retry = alice
         .invite(&bob)
         .identity(CALL_ID, FROM_TAG)
-        .cseq(2)
+        .cseq(Party::Caller.first_cseq() + 1)
         .with_sdp(OFFER)
         .through(b2bua.addr)
         .send()

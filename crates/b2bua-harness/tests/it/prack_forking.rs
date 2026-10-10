@@ -19,7 +19,7 @@
 //! (RFC 3261 §12.2.1.1), and the RAck CSeq rewrite (RFC 3262 §7.2).
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq};
 use sip_message::types::SipResponse;
@@ -59,7 +59,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -86,7 +86,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -136,7 +136,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack3 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p3)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p3), Party::Caller.first_cseq()))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -203,7 +203,7 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -227,7 +227,7 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -239,7 +239,7 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
     let (mut stray, sent) = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .try_send_with_request()
         .await
         .expect("the PRACK goes out");

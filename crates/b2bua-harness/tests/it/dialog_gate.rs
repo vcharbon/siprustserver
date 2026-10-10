@@ -425,7 +425,7 @@ async fn a_transferee_request_under_an_unknown_from_tag_is_refused_481() {
     let h = Harness::with_transit_delay("dialog-gate-transferee-unknown-from-tag", 1);
     let alice = h.agent_auto("alice").await;
     let bob = h.agent_auto("bob").await;
-    let charlie = h.agent_auto("charlie").await;
+    let charlie = h.agent_auto("charlie").await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer(&bob.addr().ip().to_string(), bob.addr().port())
         .start(&h, "b2bua", &h.next_addr().to_string())
         .await;

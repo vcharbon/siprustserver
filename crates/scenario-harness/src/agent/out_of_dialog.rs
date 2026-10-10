@@ -15,6 +15,7 @@ use sip_message::{
 
 use super::client_txn::{recv_response_raw, request_label};
 use super::dialog::InDialogTxn;
+use super::party::Party;
 use super::step::{unwrap_step, StepError};
 use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
@@ -165,7 +166,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 &caller.tag(),
             )),
             to: Some(to_of(&self.to_uri.unwrap_or_else(|| peer.uri.clone()))),
-            cseq: 1,
+            cseq: Party::Caller.first_cseq(),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),
@@ -233,7 +234,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 &caller.tag(),
             )),
             to: Some(to_of(&self.to_uri.clone().unwrap_or_else(|| peer.uri.clone()))),
-            cseq: 1,
+            cseq: Party::Caller.first_cseq(),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(70),

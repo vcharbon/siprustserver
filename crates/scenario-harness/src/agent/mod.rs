@@ -58,6 +58,8 @@
 //! - `invite` / `client_invite` / `out_of_dialog` / `dialog` —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
+//! - `party` — [`Party`]: the side of the SUT a UA answers on, and the first
+//!   CSeq each side numbers from.
 //! - `server_txn` — the UAS side: [`ServerTxn`] + the [`Respond`] builder.
 //! - `client_txn` — the shared client-side expect core, §17.1.1.3 auto-ACK,
 //!   CANCEL build+send.
@@ -82,6 +84,7 @@ mod ladder;
 mod log_dump;
 mod out_of_dialog;
 mod panic_note;
+mod party;
 mod proxy;
 mod rr_fold;
 mod rule_coverage;
@@ -100,6 +103,7 @@ pub use failure_dump::{expect_failure, DumpSection, FailedRun, FailureView};
 pub use harness::Harness;
 pub use invite::Invite;
 pub use out_of_dialog::OutOfDialogRequest;
+pub use party::Party;
 pub use proxy::{
     forwarded_request, forwarded_response, request_next_hop, response_next_hop, Proxy,
 };

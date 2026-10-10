@@ -336,6 +336,7 @@ impl<'h> CalleeGroupBuilder<'h> {
                 holdback: std::sync::Arc::default(),
                 dialogs: self.harness.dialog_judge(name),
                 steps: self.harness.steps(),
+                answers_as: crate::Party::Callee,
             };
             self.harness.keep_bound(&agent);
             agents.insert(name.clone(), agent);

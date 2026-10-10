@@ -30,7 +30,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use std::net::SocketAddr;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -157,7 +157,12 @@ async fn a_rerouted_attempt_s_rejection_rides_the_first_attempt_s_caller_tag() {
         "the caller-facing final rides the tag the FIRST attempt minted",
     );
     assert_eq!(
-        caller_ack_to_tag(&h, ALICE.parse().unwrap(), B2BUA.parse().unwrap(), 1),
+        caller_ack_to_tag(
+            &h,
+            ALICE.parse().unwrap(),
+            B2BUA.parse().unwrap(),
+            Party::Caller.first_cseq()
+        ),
         first_atag,
         "the caller's ACK copies the To of the final it acknowledges (§17.1.1.3)",
     );
@@ -237,7 +242,12 @@ async fn a_rerouted_fork_s_rejection_still_rides_the_first_attempt_s_caller_tag(
          rides the leg's PRIMARY tag",
     );
     assert_eq!(
-        caller_ack_to_tag(&h, ALICE.parse().unwrap(), B2BUA.parse().unwrap(), 1),
+        caller_ack_to_tag(
+            &h,
+            ALICE.parse().unwrap(),
+            B2BUA.parse().unwrap(),
+            Party::Caller.first_cseq()
+        ),
         first_atag,
         "the caller's ACK copies the To of the final it acknowledges (§17.1.1.3)",
     );

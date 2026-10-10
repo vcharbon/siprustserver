@@ -161,7 +161,7 @@ async fn refer_gating_a_reinvite_c_ringing() {
     let h = Harness::with_transit_delay("refer-gating-a-reinvite-c-ringing", 1);
     let alice = h.agent("alice", "127.0.0.1:6002").await;
     let bob = h.agent("bob", "127.0.0.1:6012").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6012)
         .start(&h, "b2bua", "127.0.0.1:6022")
         .await;
@@ -233,7 +233,7 @@ async fn refer_gating_a_reinvite_c_realigning() {
     let h = Harness::with_transit_delay("refer-gating-a-reinvite-c-realigning", 1);
     let alice = h.agent("alice", "127.0.0.1:6003").await;
     let bob = h.agent("bob", "127.0.0.1:6013").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6013)
         .start(&h, "b2bua", "127.0.0.1:6023")
         .await;
@@ -380,7 +380,7 @@ async fn refer_gating_a_info_c_ringing() {
     let h = Harness::with_transit_delay("refer-gating-a-info-c-ringing", 1);
     let alice = h.agent("alice", "127.0.0.1:6005").await;
     let bob = h.agent("bob", "127.0.0.1:6015").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6015)
         .start(&h, "b2bua", "127.0.0.1:6025")
         .await;
@@ -519,7 +519,7 @@ async fn refer_gating_second_refer_c_ringing() {
     let h = Harness::with_transit_delay("refer-gating-second-refer-c-ringing", 1);
     let alice = h.agent("alice", "127.0.0.1:6007").await;
     let bob = h.agent("bob", "127.0.0.1:6017").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6017)
         .start(&h, "b2bua", "127.0.0.1:6027")
         .await;
@@ -583,7 +583,7 @@ async fn refer_gating_second_refer_c_realigning() {
     let h = Harness::with_transit_delay("refer-gating-second-refer-c-realigning", 1);
     let alice = h.agent("alice", "127.0.0.1:6008").await;
     let bob = h.agent("bob", "127.0.0.1:6018").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6018)
         .start(&h, "b2bua", "127.0.0.1:6028")
         .await;

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 
@@ -401,7 +401,7 @@ async fn the_straggler_bye_continues_its_forks_own_sequence() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack_at_bob = bob.receive("PRACK").await;
@@ -447,6 +447,6 @@ fn alice_finals(h: &Harness, b2bua: &B2buaSut) -> usize {
         .into_iter()
         .filter(|e| e.from == b2bua.addr && e.to == ALICE.parse().unwrap())
         .filter(|e| e.raw.starts_with(b"SIP/2.0 200 "))
-        .filter(|e| sip_message::sniff::cseq_number(&e.raw) == Some(1))
+        .filter(|e| sip_message::sniff::cseq_number(&e.raw) == Some(Party::Caller.first_cseq()))
         .count()
 }

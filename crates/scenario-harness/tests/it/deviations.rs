@@ -11,6 +11,9 @@ use scenario_harness::{
 use sip_message::generators::InDialogMethod;
 use sip_message::Method;
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 
@@ -42,7 +45,7 @@ async fn cseq_jump_visible_on_the_wire() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    // Establish (INVITE CSeq 1).
+    // Establish (INVITE CSeq C).
     let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
@@ -61,14 +64,14 @@ async fn cseq_jump_visible_on_the_wire() {
     // Step 0: UPDATE → base 2 + 48 = 50.
     let mut upd = dialog.send_request(InDialogMethod::Update).with_sdp(OFFER).send().await;
     let mut ubob = bob.receive("UPDATE").await;
-    assert_eq!(ubob.request().cseq().seq(), 50, "UPDATE carries base+jump on the wire");
+    assert_eq!(ubob.request().cseq().seq(), C + 49, "UPDATE carries base+jump on the wire");
     ubob.respond(200, "OK").with_sdp(ANSWER).await;
     upd.expect(200).await;
 
     // Step 1: BYE → continues from the jump = 51.
     let mut bye = dialog.bye().await;
     let mut bbob = bob.receive("BYE").await;
-    assert_eq!(bbob.request().cseq().seq(), 51, "the next request continues from the jump");
+    assert_eq!(bbob.request().cseq().seq(), C + 50, "the next request continues from the jump");
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
@@ -110,24 +113,24 @@ async fn cseq_reuse_emitted_as_declared() {
         ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
     });
 
-    // Step 0: INFO CSeq 2.
+    // Step 0: INFO CSeq C+1.
     let mut i0 = dialog.send_request(InDialogMethod::Info).send().await;
     let mut r0 = bob.receive("INFO").await;
-    assert_eq!(r0.request().cseq().seq(), 2);
+    assert_eq!(r0.request().cseq().seq(), C + 1);
     r0.respond(200, "OK").await;
     i0.expect(200).await;
 
-    // Step 1: INFO reuses CSeq 2.
+    // Step 1: INFO reuses CSeq C+1.
     let mut i1 = dialog.send_request(InDialogMethod::Info).send().await;
     let mut r1 = bob.receive("INFO").await;
-    assert_eq!(r1.request().cseq().seq(), 2, "reuse emits the previous number");
+    assert_eq!(r1.request().cseq().seq(), C + 1, "reuse emits the previous number");
     r1.respond(200, "OK").await;
     i1.expect(200).await;
 
     // Step 2: BYE continues from the reused number = 3.
     let mut bye = dialog.bye().await;
     let mut bbob = bob.receive("BYE").await;
-    assert_eq!(bbob.request().cseq().seq(), 3, "continues from the reused number");
+    assert_eq!(bbob.request().cseq().seq(), C + 2, "continues from the reused number");
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
@@ -158,13 +161,13 @@ async fn zero_deviation_cseq_is_natural() {
     // No pattern declared.
     let mut upd = dialog.send_request(InDialogMethod::Update).with_sdp(OFFER).send().await;
     let mut ubob = bob.receive("UPDATE").await;
-    assert_eq!(ubob.request().cseq().seq(), 2, "natural increment");
+    assert_eq!(ubob.request().cseq().seq(), C + 1, "natural increment");
     ubob.respond(200, "OK").with_sdp(ANSWER).await;
     upd.expect(200).await;
 
     let mut bye = dialog.bye().await;
     let mut bbob = bob.receive("BYE").await;
-    assert_eq!(bbob.request().cseq().seq(), 3, "natural increment continues");
+    assert_eq!(bbob.request().cseq().seq(), C + 2, "natural increment continues");
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
@@ -214,7 +217,7 @@ async fn shared_cseq_counter_survives_a_scope_refresh_clone() {
     // Consume step 0 on the LIVE dialog (OPTIONS → base 2 + jump 48 = 50).
     let mut opt = dialog.send_request(InDialogMethod::Options).send().await;
     let mut obob = bob.receive("OPTIONS").await;
-    assert_eq!(obob.request().cseq().seq(), 50, "the jump is applied on the live dialog");
+    assert_eq!(obob.request().cseq().seq(), C + 49, "the jump is applied on the live dialog");
     obob.respond(200, "OK").await;
     opt.expect(200).await;
 
@@ -225,7 +228,11 @@ async fn shared_cseq_counter_survives_a_scope_refresh_clone() {
     // Clean teardown from the live dialog; the BYE continues the shared counter.
     let mut bye = dialog.bye().await;
     let mut bbob = bob.receive("BYE").await;
-    assert_eq!(bbob.request().cseq().seq(), 51, "the BYE continues from the jump (shared counter)");
+    assert_eq!(
+        bbob.request().cseq().seq(),
+        C + 50,
+        "the BYE continues from the jump (shared counter)"
+    );
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 
@@ -386,7 +393,7 @@ async fn templated_in_dialog_request_honors_the_pattern() {
     );
     let mut i = dialog.send_template(&info, EmitOpts::default()).await;
     let mut r = bob.receive("INFO").await;
-    assert_eq!(r.request().cseq().seq(), 50, "the templated INFO honours the jump");
+    assert_eq!(r.request().cseq().seq(), C + 49, "the templated INFO honours the jump");
     assert_eq!(
         r.request().raw(sip_message::header::HeaderName::ContentType).next(),
         Some("application/xml"),
@@ -398,7 +405,7 @@ async fn templated_in_dialog_request_honors_the_pattern() {
     // Step 1: BYE continues from the jump = 51.
     let mut bye = dialog.bye().await;
     let mut bbob = bob.receive("BYE").await;
-    assert_eq!(bbob.request().cseq().seq(), 51, "the next request continues from the jump");
+    assert_eq!(bbob.request().cseq().seq(), C + 50, "the next request continues from the jump");
     bbob.respond(200, "OK").await;
     bye.expect(200).await;
 

@@ -4,9 +4,12 @@
 //! losers settle by the protocol automatics. SUT-less, through the
 //! recording-wrapped simulated network.
 
-use scenario_harness::{EmitOpts, Harness, MessageTemplate, TemplateHeader};
+use scenario_harness::{EmitOpts, Harness, MessageTemplate, Party, TemplateHeader};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
+
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = Party::Caller.first_cseq();
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -43,7 +46,7 @@ async fn two_early_dialogs_winner_answers() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&t2)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("1 {C} INVITE"))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -59,6 +62,41 @@ async fn two_early_dialogs_winner_answers() {
     bob.receive("ACK").await;
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    h.finish().await;
+}
+
+/// A UAS dialog carries the To-tag of the response that created it (RFC 3261
+/// §12.1.1), an explicitly stated one included, and numbers its own requests
+/// from the callee's first CSeq: the callee's BYE names the dialog by that tag.
+#[tokio::test(start_paused = true)]
+async fn a_uas_dialog_is_named_by_the_tag_its_response_carried() {
+    let h = Harness::new("uas-dialog-tag-of-its-response").describe(
+        "bob answers under an explicitly stated To-tag; the dialog he BYEs from \
+         carries it",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").with_to_tag("bob-stated").send().await;
+    call.expect(180).await;
+    assert_eq!(uas.dialog().local_tag(), "bob-stated", "the early dialog the 180 created");
+
+    uas.respond(200, "OK").with_to_tag("bob-stated").with_sdp(ANSWER).send().await;
+    call.expect(200).await;
+    let _alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bob_dialog = uas.dialog();
+    assert_eq!(bob_dialog.local_tag(), "bob-stated", "the dialog the 200 created");
+    let mut bye = bob_dialog.bye().await;
+    let mut at_alice = alice.receive("BYE").await;
+    assert_eq!(at_alice.request().from().tag(), Some("bob-stated"));
+    assert_eq!(at_alice.request().cseq().seq(), Party::Callee.first_cseq());
+    at_alice.respond(200, "OK").await;
     bye.expect(200).await;
 
     h.finish().await;
@@ -127,7 +165,7 @@ async fn early_dialog_update_before_final() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&t2)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("1 {C} INVITE"))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;

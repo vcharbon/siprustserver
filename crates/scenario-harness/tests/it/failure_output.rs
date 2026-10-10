@@ -11,6 +11,9 @@ use scenario_harness::{
 };
 use sip_message::generators::InDialogMethod;
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
 
@@ -101,7 +104,10 @@ async fn an_expect_timeout_names_the_awaited_response_and_its_dialog() {
     .await;
     let digest = failed.digest();
     assert!(
-        digest.starts_with("alice timed out after 5s waiting for a 200 to INFO CSeq 2 (Call-ID "),
+        digest.starts_with(&format!(
+            "alice timed out after 5s waiting for a 200 to INFO CSeq {} (Call-ID ",
+            C + 1
+        )),
         "{digest}"
     );
     assert!(

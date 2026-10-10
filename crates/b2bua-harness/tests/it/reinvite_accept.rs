@@ -66,7 +66,7 @@ async fn transfer_stating(
     let h = Harness::with_transit_delay(name, 1);
     let alice = h.agent("alice", "127.0.0.1:5961").await;
     let bob = h.agent("bob", "127.0.0.1:5971").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5971)
         .start(&h, "b2bua", "127.0.0.1:5981")
         .await;

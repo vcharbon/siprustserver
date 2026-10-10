@@ -115,7 +115,8 @@ async fn a_held_callee_numbers_its_requests_on_across_the_answer() {
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the held call settles, got {verdict:?}");
     let seen = alice_task.await.expect("alice's side");
-    assert_eq!(seen, vec![1, 2, 3, 4], "one CSeq sequence across the answer");
+    let m = crate::Party::Callee.first_cseq();
+    assert_eq!(seen, vec![m, m + 1, m + 2, m + 3], "one CSeq sequence across the answer");
 
     h.finish().await;
 }

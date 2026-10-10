@@ -106,7 +106,7 @@ async fn a_forked_callee_request_rides_its_own_caller_facing_dialog() {
     on_tag2.push(cseq_of(&at_alice));
     at_alice.respond(200, "OK").with_sdp(ALICE_REANSWER).await;
     reinvite.expect(200).await;
-    fork2.ack_for(3, None).await;
+    fork2.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = fork2.bye().await;
@@ -125,11 +125,11 @@ async fn a_forked_callee_request_rides_its_own_caller_facing_dialog() {
     let _ = h.finish().await;
 }
 
-/// A strict caller numbers each early dialog from her INVITE: three UPDATEs on
-/// fork 1's dialog (2, 3, 4), then one on fork 2's (2) — in order on fork 2's
-/// own dialog, so relayed. Fork 2 answers; her reuse of 1 there is below the
-/// 2 that dialog took, so it is out of order (§12.2.2): 500, not relayed. Her
-/// BYE (3) continues fork 2's dialog and is in order.
+/// A strict caller numbers each early dialog from her INVITE (n): three
+/// UPDATEs on fork 1's dialog (n+1, n+2, n+3), then one on fork 2's (n+1) — in
+/// order on fork 2's own dialog, so relayed. Fork 2 answers; her reuse of n
+/// there is below the n+1 that dialog took, so it is out of order (§12.2.2):
+/// 500, not relayed. Her BYE (n+2) continues fork 2's dialog and is in order.
 #[tokio::test(start_paused = true)]
 async fn the_caller_is_measured_per_caller_facing_dialog() {
     let h = Harness::with_transit_delay("b2bua-caller-measured-per-early-dialog", 1);
@@ -152,11 +152,12 @@ async fn the_caller_is_measured_per_caller_facing_dialog() {
     uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
     let a_tag2 = call.expect(180).await.to().tag().expect("fork 2's a-facing tag").to_string();
 
+    let n = call.invite_cseq();
     for (a_tag, b_tag, cseq) in [
-        (&a_tag1, "bobfork1", 2),
-        (&a_tag1, "bobfork1", 3),
-        (&a_tag1, "bobfork1", 4),
-        (&a_tag2, "bobfork2", 2),
+        (&a_tag1, "bobfork1", n + 1),
+        (&a_tag1, "bobfork1", n + 2),
+        (&a_tag1, "bobfork1", n + 3),
+        (&a_tag2, "bobfork2", n + 1),
     ] {
         let mut update = call.send_request(InDialogMethod::Update).with_to_tag(a_tag).send().await;
         let mut at_bob = bob.receive("UPDATE").await;
@@ -172,11 +173,11 @@ async fn the_caller_is_measured_per_caller_facing_dialog() {
     assert_eq!(ok.to().tag(), Some(a_tag2.as_str()), "fork 2 answers");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    assert_eq!(dialog.local_cseq(), 2, "fork 2's dialog spent 1 and 2");
+    assert_eq!(dialog.local_cseq(), n + 1, "fork 2's dialog spent n and n+1");
 
-    dialog.set_local_cseq(0);
+    dialog.set_local_cseq(n - 1);
     let mut stale = dialog.request(InDialogMethod::Info, None).await;
-    dialog.set_local_cseq(2);
+    dialog.set_local_cseq(n + 1);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -262,9 +263,9 @@ async fn an_out_of_order_caller_request_is_answered_500() {
 }
 
 /// The 180's early dialog keeps its record beside the one a service's 183
-/// opens: the answer confirms it with the 2 and 3 the caller spent there, so
-/// her reuse of 2 after the answer is out of order (RFC 3261 §12.2.2) — 500,
-/// not relayed — and her BYE (4) continues it.
+/// opens: the answer confirms it with the n+1 and n+2 the caller spent there
+/// (n her INVITE's), so her reuse of n+1 after the answer is out of order
+/// (RFC 3261 §12.2.2) — 500, not relayed — and her BYE (n+3) continues it.
 #[tokio::test(start_paused = true)]
 async fn the_shown_early_dialog_keeps_its_sequence_beside_a_service_tag() {
     let h = Harness::with_transit_delay("b2bua-shown-tag-beside-service-tag", 1);
@@ -302,11 +303,12 @@ async fn the_shown_early_dialog_keeps_its_sequence_beside_a_service_tag() {
     assert_eq!(ok.to().tag(), Some(ringing_tag.as_str()), "the callee's dialog answers");
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    assert_eq!(dialog.local_cseq(), 3, "the 180's dialog spent 2 and 3");
+    let n = call.invite_cseq();
+    assert_eq!(dialog.local_cseq(), n + 2, "the 180's dialog spent n+1 and n+2");
 
-    dialog.set_local_cseq(1);
+    dialog.set_local_cseq(n);
     let mut stale = dialog.request(InDialogMethod::Info, None).await;
-    dialog.set_local_cseq(3);
+    dialog.set_local_cseq(n + 2);
     stale.expect(500).await;
     h.advance(Duration::from_millis(500)).await;
     assert!(
@@ -379,8 +381,9 @@ mod restamp {
 
 /// A service's 183 under a tag of its own, beside the callee's 180 the caller
 /// already holds, opens a caller-facing early dialog of its own (RFC 3261
-/// §12.1.2): she spends 2 and 3 on the callee's dialog (the 180's tag), then
-/// her own 2 on the service's — in order there, so relayed.
+/// §12.1.2): she spends n+1 and n+2 on the callee's dialog (the 180's tag, n
+/// her INVITE's), then her own n+1 on the service's — in order there, so
+/// relayed.
 #[tokio::test(start_paused = true)]
 async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
     let h = Harness::with_transit_delay("b2bua-unrecorded-caller-facing-tag", 1);
@@ -399,7 +402,10 @@ async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
     let shown = call.expect(183).await;
     assert_eq!(shown.to().tag(), Some(restamp::TAG), "the service's own early dialog");
 
-    for (tag, cseq) in [(ringing_tag.as_str(), 2), (ringing_tag.as_str(), 3), (restamp::TAG, 2)] {
+    let n = call.invite_cseq();
+    for (tag, cseq) in
+        [(ringing_tag.as_str(), n + 1), (ringing_tag.as_str(), n + 2), (restamp::TAG, n + 1)]
+    {
         let mut update = call.send_request(InDialogMethod::Update).with_to_tag(tag).send().await;
         let mut at_bob = bob.receive("UPDATE").await;
         at_bob.respond(200, "OK").await;

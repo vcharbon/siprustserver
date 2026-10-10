@@ -17,6 +17,9 @@ use scenario_harness::{
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 fn parse(raw: &[u8]) -> SipMessage {
     CustomParser::new().parse(raw).unwrap_or_else(|e| panic!("entry did not parse: {e}"))
 }
@@ -139,7 +142,7 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
                     Goal::new(Barrier::None, GoalStep::Bye),
                 ],
             );
-            // step 0 (OPTIONS): natural → CSeq 2; step 1 (BYE): reuse → CSeq 2.
+            // step 0 (OPTIONS): natural → CSeq C+1; step 1 (BYE): reuse → CSeq C+1.
             a.cseq =
                 Some(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
             a
@@ -158,10 +161,10 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
     );
 
     let entries = h.wire_entries();
-    assert_eq!(req_cseq(&entries, "OPTIONS"), Some(2), "OPTIONS carries the natural CSeq 2");
+    assert_eq!(req_cseq(&entries, "OPTIONS"), Some(C + 1), "OPTIONS carries the natural CSeq C+1");
     assert_eq!(
         req_cseq(&entries, "BYE"),
-        Some(2),
+        Some(C + 1),
         "the teardown BYE reuses the OPTIONS's CSeq via the shared counter (declared reuse)",
     );
     h.finish().await;
@@ -311,20 +314,20 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
             })
             .expect("a 200/INVITE for the transaction was recorded")
     };
-    let initial_acks = ack_ms(1);
+    let initial_acks = ack_ms(C);
     assert_eq!(initial_acks.len(), 1, "one ACK to the establishing INVITE");
     assert!(
-        initial_acks[0].saturating_sub(first_200_ms(1)) < 500,
+        initial_acks[0].saturating_sub(first_200_ms(C)) < 500,
         "the UNSCOPED ordinal-0 ACK fires promptly (scoping holds ONLY ordinal 1): gap {}ms",
-        initial_acks[0].saturating_sub(first_200_ms(1)),
+        initial_acks[0].saturating_sub(first_200_ms(C)),
     );
-    let reinvite_acks = ack_ms(2);
+    let reinvite_acks = ack_ms(C + 1);
     assert_eq!(
         reinvite_acks.len(),
         2,
         "exactly the held ACK + the ONE post-hold re-ACK (mid-hold retransmissions absorbed)",
     );
-    let held_gap = reinvite_acks[0].saturating_sub(first_200_ms(2));
+    let held_gap = reinvite_acks[0].saturating_sub(first_200_ms(C + 1));
     assert!(
         held_gap >= 1000,
         "the re-INVITE ACK was held the declared 1s despite mid-hold 200 retransmissions: gap {held_gap}ms",
@@ -408,7 +411,7 @@ async fn mid_hold_retransmissions_are_recorded_and_leave_the_response_log_alone(
         .collect();
     assert_eq!(
         retransmitted,
-        vec![(200, "INVITE".to_string(), 2), (200, "INVITE".to_string(), 2)],
+        vec![(200, "INVITE".to_string(), C + 1), (200, "INVITE".to_string(), C + 1)],
         "both mid-hold retransmissions of the re-INVITE 200 are recorded, in arrival order",
     );
     // The response log holds the establishing 200 and the re-INVITE's FIRST 200

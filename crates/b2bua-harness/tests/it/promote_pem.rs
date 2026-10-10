@@ -8,7 +8,7 @@
 
 use b2bua_harness::{hangup, settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::error::SipParseError;
 use sip_message::header::kind::TokenKind;
 use sip_message::header::{
@@ -473,7 +473,7 @@ async fn second_update_in_the_window_over_a_pending_one(
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;

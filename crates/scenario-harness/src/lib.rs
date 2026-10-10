@@ -42,8 +42,8 @@ pub const SIMULATED_TRANSIT_DELAY_MS: u64 = 100;
 pub use agent::{
     expect_failure, forwarded_request, forwarded_response, request_next_hop, response_next_hop,
     Agent, CancelHandle, ClientInvite, ClientReinvite, Dialog, DumpSection, FailedRun, FailureView,
-    Harness, InDialogRequest, InDialogTxn, Inbound, Invite, OutOfDialogRequest, Proxy, Respond,
-    ServerTxn, StepError, WaiverScope,
+    Harness, InDialogRequest, InDialogTxn, Inbound, Invite, OutOfDialogRequest, Party, Proxy,
+    Respond, ServerTxn, StepError, WaiverScope,
 };
 // Captured-message replay vocabulary (`sip_message::template` + matching),
 // re-exported so a `send_template`/`expect_template` caller reaches the harness

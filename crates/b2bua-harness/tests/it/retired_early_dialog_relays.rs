@@ -7,7 +7,7 @@
 //! answered session's description state, and never nothing at call end.
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, ServerTxn};
+use scenario_harness::{Harness, Party, ServerTxn};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 
@@ -245,14 +245,22 @@ async fn fresh_tag_answer_leaves_the_early_info_its_final(
         .respond(status, if status == 200 { "OK" } else { "Call/Transaction Does Not Exist" })
         .await;
     let answered = info1.expect(status).await;
-    assert_eq!(answered.cseq().seq(), 1, "the callee's first INFO is the one answered");
+    assert_eq!(
+        answered.cseq().seq(),
+        Party::Callee.first_cseq(),
+        "the callee's first INFO is the one answered"
+    );
 
     let mut info2 = bob_dialog.request(InDialogMethod::Info, None).await;
     let mut at_alice2 = alice.receive("INFO").await;
     assert_eq!(at_alice2.request().from().tag(), Some(a2.as_str()), "relayed in A2");
     at_alice2.respond(200, "OK").await;
     let answered = info2.expect(200).await;
-    assert_eq!(answered.cseq().seq(), 2, "the callee's second INFO is the one answered");
+    assert_eq!(
+        answered.cseq().seq(),
+        Party::Callee.first_cseq() + 1,
+        "the callee's second INFO is the one answered"
+    );
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
@@ -332,7 +340,7 @@ async fn a_retired_relays_description_leaves_the_answered_session_alone() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag2)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -367,7 +375,7 @@ async fn a_retired_relays_description_leaves_the_answered_session_alone() {
     );
     at_alice.respond(200, "OK").with_sdp(ALICE_HELD).await;
     reinvite.expect(200).await;
-    fork1.ack_for(1, None).await;
+    fork1.ack(None).await;
     alice.receive("ACK").await;
 
     let mut bye = dialog.bye().await;

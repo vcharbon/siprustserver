@@ -157,7 +157,7 @@ impl ActorScenario for Refer {
             // the linear shape) and the c-realign re-INVITE reactively.
             ActorSpec {
                 role: "charlie",
-                agent: env.callee_agent("charlie").clone(),
+                agent: env.callee_agent("charlie").clone().transfer_target(),
                 disposition: Disposition::RingThenAnswer { ring: Duration::ZERO },
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
@@ -302,7 +302,7 @@ impl ActorScenario for ReferCharlieReject {
             // TransferDeclined outcome).
             ActorSpec {
                 role: "charlie",
-                agent: env.callee_agent("charlie").clone(),
+                agent: env.callee_agent("charlie").clone().transfer_target(),
                 disposition: Disposition::Reject(603),
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],

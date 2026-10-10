@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -205,7 +205,10 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
         .filter(|e| {
             e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 ")
         })
-        .filter(|e| String::from_utf8_lossy(&e.raw).contains("CSeq: 1 INVITE"))
+        .filter(|e| {
+            String::from_utf8_lossy(&e.raw)
+                .contains(&format!("CSeq: {} INVITE", Party::Caller.first_cseq()))
+        })
         .count();
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
 }
@@ -276,7 +279,10 @@ async fn retransmitted_2xx_under_fake_prack_does_not_restage_the_answer() {
         .filter(|e| {
             e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 ")
         })
-        .filter(|e| String::from_utf8_lossy(&e.raw).contains("CSeq: 1 INVITE"))
+        .filter(|e| {
+            String::from_utf8_lossy(&e.raw)
+                .contains(&format!("CSeq: {} INVITE", Party::Caller.first_cseq()))
+        })
         .count();
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
 }

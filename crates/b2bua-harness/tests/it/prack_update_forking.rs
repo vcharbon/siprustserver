@@ -34,7 +34,7 @@
 //! callflow by the harness RFC audit at `finish()`.
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::{Harness, Party, RunReport};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq, Require};
 use sip_message::types::SipResponse;
@@ -88,7 +88,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
@@ -115,7 +115,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;

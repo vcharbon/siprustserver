@@ -3,6 +3,9 @@ use std::time::Duration;
 use crate::actor::*;
 use crate::{Harness, ANSWER_SDP, OFFER_SDP};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = crate::Party::Caller.first_cseq();
+
 /// A bob-only [`CallPlan`] with the given forking disposition — the C1(a)
 /// machinery rig: alice is hand-rolled (the fork dance on the caller side is
 /// the C1(b) capability; here the CALLEE's emission is the subject).
@@ -178,7 +181,7 @@ async fn forking_ring_reliable_answers_on_winner_prack_only() {
             let mut prack1 = call
                 .send_request(InDialogMethod::Prack)
                 .with_to_tag("f1")
-                .with_rack("1 1 INVITE")
+                .with_rack(&format!("1 {C} INVITE"))
                 .send()
                 .await;
             prack1.expect(200).await;
@@ -186,7 +189,7 @@ async fn forking_ring_reliable_answers_on_winner_prack_only() {
             let mut prack2 = call
                 .send_request(InDialogMethod::Prack)
                 .with_to_tag("f2")
-                .with_rack("1 1 INVITE")
+                .with_rack(&format!("1 {C} INVITE"))
                 .send()
                 .await;
             prack2.expect(200).await;

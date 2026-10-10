@@ -9,7 +9,7 @@ use std::sync::Arc;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, stated_by_response, B2buaSut};
-use scenario_harness::{Harness, WaiverScope};
+use scenario_harness::{Harness, Party, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::SipResponse;
 
@@ -402,7 +402,7 @@ async fn an_update_offer_after_a_reliable_provisional_without_sdp_is_refused_500
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -469,7 +469,7 @@ async fn an_update_offer_while_the_offer_in_a_reliable_183_is_unanswered_is_refu
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .with_sdp(OFFER)
         .send()
         .await;
@@ -528,7 +528,7 @@ async fn an_update_offer_after_a_reroute_whose_new_leg_has_not_answered_is_refus
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&a_tag)
-        .with_rack(&format!("{rseq} 1 INVITE"))
+        .with_rack(&format!("{rseq} {} INVITE", Party::Caller.first_cseq()))
         .send()
         .await;
     carol.receive("PRACK").await.respond(200, "OK").await;

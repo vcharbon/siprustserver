@@ -330,7 +330,7 @@ async fn a_transfer_target_carries_neither_the_session_timer_nor_stale_clock_sta
     let h = Harness::new("session-timer-transfer-target");
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let bob = h.agent("bob", "127.0.0.1:5912").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5912)
         .start(&h, "b2bua", "127.0.0.1:5922")
         .await;
@@ -727,7 +727,7 @@ async fn a_refresh_toward_a_transfer_target_carries_no_session_timer() {
     let h = Harness::new("session-timer-transfer-refresh");
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let bob = h.agent("bob", "127.0.0.1:5913").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
         .start(&h, "b2bua", "127.0.0.1:5923")
         .await;

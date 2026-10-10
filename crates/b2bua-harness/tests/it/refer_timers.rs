@@ -60,7 +60,7 @@ async fn refer_overall_safety_fires() {
     let h = Harness::new("refer-overall-safety-fires");
     let alice = h.agent("alice", "127.0.0.1:5751").await;
     let bob = h.agent("bob", "127.0.0.1:5761").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     // reinvite_answer=600s, overall_safety=10s → the overall watchdog trips
     // first while the c-realign re-INVITE toward C is unanswered.
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5761)

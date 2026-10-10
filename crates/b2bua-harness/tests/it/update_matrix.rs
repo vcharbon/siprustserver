@@ -18,7 +18,7 @@
 
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::{Harness, WaiverScope};
+use scenario_harness::{Harness, Party, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{HeaderName, RSeq};
 use sip_message::types::SipResponse;
@@ -258,7 +258,7 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p183)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p183), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -360,7 +360,7 @@ async fn early_update_forking_b_to_a_second_fork() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&early)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&early), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -424,7 +424,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f1)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -438,7 +438,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&f2)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;

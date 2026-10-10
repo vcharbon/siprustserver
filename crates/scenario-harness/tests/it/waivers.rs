@@ -305,8 +305,9 @@ fn with_cseq_response(resp: SipResponse, seq: u32) -> SipResponse {
     resp.thaw().set(CSeq::new(seq, method)).freeze().expect("a CSeq edit keeps the response whole")
 }
 
-/// Relay lane, the relayer's own fault: alice numbers her INFOs 2 and 3, and
-/// mid forwards the second as CSeq 2 (mapping bob's answer back to 3), which
+/// Relay lane, the relayer's own fault: alice numbers her INFOs n+1 and n+2
+/// (n her INVITE's), and mid forwards the second as CSeq n+1 (mapping bob's
+/// answer back to n+2), which
 /// §16.6 forbids. Nothing shows that request reaching mid, so the reuse at bob
 /// is mid's as originator and gates the run, waiver on alice or not.
 #[tokio::test(start_paused = true)]
@@ -345,9 +346,10 @@ async fn a_relayer_rewriting_the_cseq_still_gates() {
     mid.forward_response(alice_addr).await;
     i2.expect(200).await;
     let mut i3 = dialog.send_request(InDialogMethod::Info).send().await;
-    mid.forward_request_altered(bob_addr, |req| with_cseq_request(req, 2)).await;
+    let n = call.invite_cseq();
+    mid.forward_request_altered(bob_addr, |req| with_cseq_request(req, n + 1)).await;
     bob.receive("INFO").await.respond(200, "OK").await;
-    mid.forward_response_altered(alice_addr, |resp| with_cseq_response(resp, 3)).await;
+    mid.forward_response_altered(alice_addr, |resp| with_cseq_response(resp, n + 2)).await;
     i3.expect(200).await;
 
     let mut bye = dialog.bye().await;

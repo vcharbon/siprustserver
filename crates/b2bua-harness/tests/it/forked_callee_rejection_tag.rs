@@ -19,7 +19,7 @@
 
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, Party};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 use sip_message::types::SipResponse;
@@ -104,7 +104,12 @@ async fn a_non_first_fork_s_rejection_rides_the_primary_caller_tag() {
         "a non-2xx final rides the caller leg's PRIMARY tag, not the rejecting fork's",
     );
     assert_eq!(
-        caller_ack_to_tag(&h, ALICE.parse().unwrap(), B2BUA.parse().unwrap(), 1),
+        caller_ack_to_tag(
+            &h,
+            ALICE.parse().unwrap(),
+            B2BUA.parse().unwrap(),
+            Party::Caller.first_cseq()
+        ),
         fork1_atag,
         "the caller's ACK copies the To of the final it acknowledges (§17.1.1.3)",
     );
@@ -144,7 +149,7 @@ async fn a_non_first_reliable_fork_s_rejection_rides_the_primary_caller_tag() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p1), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
@@ -161,7 +166,7 @@ async fn a_non_first_reliable_fork_s_rejection_rides_the_primary_caller_tag() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_rack(&format!("{} {} INVITE", rseq_of(&p2), Party::Caller.first_cseq()))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
@@ -186,7 +191,12 @@ async fn a_non_first_reliable_fork_s_rejection_rides_the_primary_caller_tag() {
         "a reliably-rung fork's rejection still rides the caller leg's PRIMARY tag",
     );
     assert_eq!(
-        caller_ack_to_tag(&h, ALICE.parse().unwrap(), B2BUA.parse().unwrap(), 1),
+        caller_ack_to_tag(
+            &h,
+            ALICE.parse().unwrap(),
+            B2BUA.parse().unwrap(),
+            Party::Caller.first_cseq()
+        ),
         fork1_atag,
         "the caller's ACK copies the To of the final it acknowledges (§17.1.1.3)",
     );

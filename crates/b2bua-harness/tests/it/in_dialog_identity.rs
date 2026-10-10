@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::{B2buaScene, B2buaSut};
+use scenario_harness::Party;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 use sip_message::SipRequest;
@@ -186,8 +187,11 @@ async fn a_second_forked_early_dialog_keeps_the_dialled_display_names() {
             .await;
         let p = call.expect(183).await;
         let a_tag = p.to().tag().expect("an a-facing tag").to_string();
-        let rack =
-            format!("{} 1 INVITE", p.header::<RSeq>().expect("RSeq").expect("readable").value());
+        let rack = format!(
+            "{} {} INVITE",
+            p.header::<RSeq>().expect("RSeq").expect("readable").value(),
+            Party::Caller.first_cseq()
+        );
         let mut prack = call
             .send_request(InDialogMethod::Prack)
             .with_to_tag(&a_tag)

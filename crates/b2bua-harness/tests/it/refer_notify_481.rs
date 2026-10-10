@@ -64,7 +64,7 @@ async fn notify_481_ends_the_subscription() {
     let h = Harness::with_transit_delay("refer-notify-481", 1);
     let alice = h.agent("alice", "127.0.0.1:6071").await;
     let bob = h.agent("bob", "127.0.0.1:6072").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6072)
         .start(&h, "b2bua", "127.0.0.1:6074")
         .await;

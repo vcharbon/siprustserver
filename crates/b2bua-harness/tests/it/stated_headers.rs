@@ -260,7 +260,7 @@ async fn an_every_message_set_rides_every_message_of_the_call() {
         "P-Charging-Vector",
         &[STATED],
     );
-    assert_repeated_whole("the answer", &copies(&to_alice, "SIP/2.0 200 ", "1 INVITE"));
+    assert_repeated_whole("the answer", &copies(&to_alice, "SIP/2.0 200 ", "1001 INVITE"));
     let reinvite_cseq = to_bob
         .iter()
         .find(|m| m.status == Some(200) && m.cseq.ends_with(" INVITE"))
@@ -322,7 +322,7 @@ async fn the_reliable_provisional_ladder_repeats_the_stated_lines() {
         "P-Charging-Vector",
         &[STATED],
     );
-    let rungs = copies(&to_alice, "SIP/2.0 183 ", "1 INVITE");
+    let rungs = copies(&to_alice, "SIP/2.0 183 ", "1001 INVITE");
     assert!(rungs.len() >= 3, "two rungs fired: {} copies", rungs.len());
     assert_repeated_whole("the reliable 183", &rungs);
 }
@@ -385,13 +385,13 @@ async fn an_every_message_add_yields_to_a_relayed_line_and_the_arm_mints_none() 
         &[STATED],
     );
     let to_alice = sent(&report, b2bua, alice);
-    let answer = one(&to_alice, "SIP/2.0 200 ", "1 INVITE");
+    let answer = one(&to_alice, "SIP/2.0 200 ", "1001 INVITE");
     assert_eq!(
         answer.lines("P-Charging-Vector"),
         [ANSWERER_OWN],
         "the answer relays the answerer's own: the add yields"
     );
-    let bye_ok = one(&to_alice, "SIP/2.0 200 ", "2 BYE");
+    let bye_ok = one(&to_alice, "SIP/2.0 200 ", "1002 BYE");
     assert_eq!(
         bye_ok.lines("P-Charging-Vector"),
         [STATED],
@@ -466,7 +466,7 @@ async fn each_scope_reaches_its_own_messages() {
     assert_every_message_carries("toward the originated leg", &to_bob, "X-Gone", &[]);
     let invite = one(&to_bob, "INVITE ", "1 INVITE");
     assert_eq!(invite.lines("X-Every-Add"), ["caller"], "the add yields to the relayed line");
-    for m in to_bob.iter().filter(|m| m.cseq != "1 INVITE") {
+    for m in to_bob.iter().filter(|m| m.cseq != "1 INVITE" && !m.is_trying()) {
         assert_eq!(m.lines("X-Every-Add"), ["every"], "callee: {} takes the add", m.what());
     }
     for m in to_alice.iter().filter(|m| !m.is_trying()) {
@@ -481,7 +481,7 @@ async fn each_scope_reaches_its_own_messages() {
     }
 
     // originator_finals: the caller's 200 to her INVITE, nothing else.
-    let answer = one(&to_alice, "SIP/2.0 200 ", "1 INVITE");
+    let answer = one(&to_alice, "SIP/2.0 200 ", "1001 INVITE");
     assert_eq!(answer.lines("X-Final"), ["final-1", "final-2"], "the final takes both lines");
     assert_eq!(answer.lines("X-Final-Kept"), ["callee"], "and keeps the callee's relayed line");
     for m in to_bob.iter().chain(&to_alice).filter(|m| !std::ptr::eq(*m, answer)) {
@@ -520,12 +520,12 @@ async fn a_cancel_carries_the_every_message_set_and_the_layers_own_messages_none
         Vec::<String>::new(),
         "the ACK of a non-2xx is the transaction layer's"
     );
-    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1 INVITE").lines("X-Every"), ["every"]);
-    let terminated = one(&to_alice, "SIP/2.0 487 ", "1 INVITE");
+    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1001 INVITE").lines("X-Every"), ["every"]);
+    let terminated = one(&to_alice, "SIP/2.0 487 ", "1001 INVITE");
     for name in ["X-Every", "X-Final", "X-Every-Add"] {
         assert!(terminated.lines(name).is_empty(), "the layer's 487 carries no `{name}`");
     }
-    let cancel_ok = one(&to_alice, "SIP/2.0 200 ", "1 CANCEL");
+    let cancel_ok = one(&to_alice, "SIP/2.0 200 ", "1001 CANCEL");
     assert!(
         cancel_ok.lines("X-Every").is_empty() && cancel_ok.lines("X-Final").is_empty(),
         "the 200 to the CANCEL is the transaction layer's own"
@@ -594,11 +594,11 @@ async fn a_failover_route_states_its_own_sets() {
 
     assert_eq!(one(&to_bob, "INVITE ", "1 INVITE").lines("X-Every"), ["first"]);
     assert_every_message_carries("toward the rerouted leg", &to_carol, "X-Every", &["second"]);
-    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1 INVITE").lines("X-Every"), ["first"]);
-    let answer = one(&to_alice, "SIP/2.0 200 ", "1 INVITE");
+    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1001 INVITE").lines("X-Every"), ["first"]);
+    let answer = one(&to_alice, "SIP/2.0 200 ", "1001 INVITE");
     assert_eq!(answer.lines("X-Every"), ["second"], "the reroute's set from then on");
     assert_eq!(answer.lines("X-Final"), ["second"], "the reroute's finals set");
-    assert_eq!(one(&to_alice, "SIP/2.0 200 ", "2 BYE").lines("X-Every"), ["second"]);
+    assert_eq!(one(&to_alice, "SIP/2.0 200 ", "1002 BYE").lines("X-Every"), ["second"]);
 }
 
 /// bob refuses; the plan rejects with its own final: the reject applies no
@@ -633,8 +633,8 @@ async fn a_failover_reject_ends_the_routes_sets() {
     let (b2bua, alice) = (s.b2bua.addr, s.alice.addr());
     let report = s.finish().await;
     let to_alice = sent(&report, b2bua, alice);
-    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1 INVITE").lines("X-Every"), ["first"]);
-    let rejected = one(&to_alice, "SIP/2.0 480 ", "1 INVITE");
+    assert_eq!(one(&to_alice, "SIP/2.0 180 ", "1001 INVITE").lines("X-Every"), ["first"]);
+    let rejected = one(&to_alice, "SIP/2.0 480 ", "1001 INVITE");
     assert_eq!(rejected.lines("Reason"), ["Q.850;cause=34"], "the reject's own statement");
     assert!(rejected.lines("X-Every").is_empty(), "the route's every-message set ended");
     assert!(rejected.lines("X-Final").is_empty(), "the route's finals set ended");
@@ -667,7 +667,7 @@ async fn a_relayed_failure_carries_the_routes_sets() {
     let (b2bua, alice) = (s.b2bua.addr, s.alice.addr());
     let report = s.finish().await;
     let to_alice = sent(&report, b2bua, alice);
-    let failed = one(&to_alice, "SIP/2.0 486 ", "1 INVITE");
+    let failed = one(&to_alice, "SIP/2.0 486 ", "1001 INVITE");
     assert_eq!(failed.lines("X-Every"), ["first"]);
     assert_eq!(failed.lines("X-Final"), ["first"]);
 }
@@ -841,7 +841,7 @@ async fn the_wider_scope_applies_first_and_the_narrower_against_its_result() {
     assert_eq!(invite.lines("X-A"), ["launched"], "(a) the narrower replacement stands");
     assert!(invite.lines("X-B").is_empty(), "the removal takes the caller's line off");
     assert_eq!(invite.lines("X-C"), ["launched"], "(c) the add lands once the removal ran");
-    let answer = one(&to_alice, "SIP/2.0 200 ", "1 INVITE");
+    let answer = one(&to_alice, "SIP/2.0 200 ", "1001 INVITE");
     assert_eq!(answer.lines("X-B"), ["final"], "(b) the add lands once the removal ran");
     assert_eq!(answer.lines("X-A"), ["every"]);
     assert!(one(&to_bob, "BYE ", "2 BYE").lines("X-C").is_empty(), "(c) on the INVITE only");
@@ -1490,11 +1490,11 @@ async fn a_termination_takes_back_the_set_a_tentative_one_replaced() {
     let to_bob = sent(&report, b2bua, bob);
     let to_alice = sent(&report, b2bua, alice);
     assert_eq!(one(&to_bob, "INVITE ", "1 INVITE").lines("X-Set"), ["tentative"]);
-    assert_eq!(one(&to_alice, "SIP/2.0 200", "1 INVITE").lines("X-Set"), ["tentative"]);
+    assert_eq!(one(&to_alice, "SIP/2.0 200", "1001 INVITE").lines("X-Set"), ["tentative"]);
     let bye = |messages: &[Sent]| {
         messages.iter().find(|m| m.start.starts_with("BYE ")).expect("a BYE").lines("X-Set")
     };
     assert_eq!(bye(&to_bob), ["earlier"]);
     assert_eq!(bye(&to_alice), ["earlier"]);
-    assert_eq!(one(&to_alice, "SIP/2.0 487", "2 INVITE").lines("X-Set"), ["earlier"]);
+    assert_eq!(one(&to_alice, "SIP/2.0 487", "1002 INVITE").lines("X-Set"), ["earlier"]);
 }

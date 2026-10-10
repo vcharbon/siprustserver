@@ -55,7 +55,7 @@ async fn refer_allow_happy() {
     let h = Harness::with_transit_delay("refer-allow-happy", 1);
     let alice = h.agent("alice", "127.0.0.1:5901").await;
     let bob = h.agent("bob", "127.0.0.1:5911").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5911)
         .start(&h, "b2bua", "127.0.0.1:5921")
         .await;
@@ -150,7 +150,7 @@ async fn refer_allow_c486() {
     let h = Harness::with_transit_delay("refer-allow-c-rejects-486", 1);
     let alice = h.agent("alice", "127.0.0.1:5902").await;
     let bob = h.agent("bob", "127.0.0.1:5912").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5912)
         .start(&h, "b2bua", "127.0.0.1:5922")
         .await;
@@ -203,7 +203,7 @@ async fn refer_allow_c_multiple_18x() {
     let h = Harness::with_transit_delay("refer-allow-c-multiple-18x", 1);
     let alice = h.agent("alice", "127.0.0.1:5905").await;
     let bob = h.agent("bob", "127.0.0.1:5915").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5915)
         .start(&h, "b2bua", "127.0.0.1:5925")
         .await;
@@ -286,7 +286,7 @@ async fn refer_allow_c_no_answer() {
     let h = Harness::new("refer-allow-c-no-answer");
     let alice = h.agent("alice", "127.0.0.1:5904").await;
     let bob = h.agent("bob", "127.0.0.1:5914").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5914)
         .start(&h, "b2bua", "127.0.0.1:5924")
         .await;
@@ -355,7 +355,7 @@ async fn refer_allow_c603() {
     let h = Harness::with_transit_delay("refer-allow-c-rejects-603", 1);
     let alice = h.agent("alice", "127.0.0.1:5903").await;
     let bob = h.agent("bob", "127.0.0.1:5913").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5913)
         .start(&h, "b2bua", "127.0.0.1:5923")
         .await;

@@ -87,7 +87,7 @@ async fn refer_allow_full_happy() {
     let h = Harness::with_transit_delay("refer-allow-full-happy", 1);
     let alice = h.agent("alice", "127.0.0.1:5961").await;
     let bob = h.agent("bob", "127.0.0.1:5971").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5971)
         .start(&h, "b2bua", "127.0.0.1:5981")
         .await;
@@ -162,7 +162,7 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
     let h = Harness::with_transit_delay("refer-allow-full-c-reliable", 1);
     let alice = h.agent("alice", "127.0.0.1:5966").await;
     let bob = h.agent("bob", "127.0.0.1:5976").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976)
         .start(&h, "b2bua", "127.0.0.1:5986")
         .await;
@@ -251,7 +251,7 @@ async fn refer_allow_full_a_reject_realign() {
     let h = Harness::with_transit_delay("refer-allow-full-a-reject-realign", 1);
     let alice = h.agent("alice", "127.0.0.1:5962").await;
     let bob = h.agent("bob", "127.0.0.1:5972").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5972)
         .start(&h, "b2bua", "127.0.0.1:5982")
         .await;
@@ -316,7 +316,7 @@ async fn refer_allow_full_a_glare_reinvite() {
     let h = Harness::with_transit_delay("refer-allow-full-a-glare-reinvite", 1);
     let alice = h.agent("alice", "127.0.0.1:5963").await;
     let bob = h.agent("bob", "127.0.0.1:5973").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5973)
         .start(&h, "b2bua", "127.0.0.1:5983")
         .await;
@@ -398,7 +398,7 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     let h = Harness::with_transit_delay("refer-allow-full-a-bye-during-a-realign", 1);
     let alice = h.agent("alice", "127.0.0.1:5964").await;
     let bob = h.agent("bob", "127.0.0.1:5974").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5974)
         .start(&h, "b2bua", "127.0.0.1:5984")
         .await;
@@ -469,7 +469,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
     let h = Harness::new("refer-allow-full-a-reinvite-timeout");
     let alice = h.agent("alice", "127.0.0.1:5965").await;
     let bob = h.agent("bob", "127.0.0.1:5975").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5975)
         .start(&h, "b2bua", "127.0.0.1:5985")
         .await;

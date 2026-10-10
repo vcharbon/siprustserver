@@ -1130,7 +1130,7 @@ impl ShapePlan {
 
         b.callees.push(ActorSpec {
             role: "charlie",
-            agent: env.callee_agent("charlie").clone(),
+            agent: env.callee_agent("charlie").clone().transfer_target(),
             disposition: if happy {
                 Disposition::RingThenAnswer { ring: Duration::ZERO }
             } else {

@@ -59,7 +59,7 @@ async fn no_notify_after_terminated() {
     let h = Harness::with_transit_delay("refer-no-notify-after-terminated", 1);
     let alice = h.agent("alice", "127.0.0.1:5966").await;
     let bob = h.agent("bob", "127.0.0.1:5976").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976)
         .start(&h, "b2bua", "127.0.0.1:5986")
         .await;

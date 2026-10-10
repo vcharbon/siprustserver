@@ -22,6 +22,7 @@ use super::client_txn::{expect_response, request_label};
 use super::dialog::InDialogTxn;
 use super::harness::Ids;
 use super::out_of_dialog::OutOfDialogRequest;
+use super::party::Party;
 use super::rr_fold::RecordRouteFold;
 use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, unwrap_step_at, StepCounter, StepError, StepSite};
@@ -114,6 +115,9 @@ pub struct Agent {
     /// The ordinal source of the run's scripted waits, shared by every agent
     /// of one harness.
     pub(crate) steps: StepCounter,
+    /// The side this UA stands on when it answers an INVITE: its own CSeq
+    /// sequence in that dialog starts at [`Party::first_cseq`].
+    pub(crate) answers_as: Party,
 }
 
 /// An [`Agent`] that does not keep its socket bound: what a harness holds so
@@ -131,6 +135,7 @@ pub(crate) struct WeakAgent {
     holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
     dialogs: Arc<DialogJudge>,
     steps: StepCounter,
+    answers_as: Party,
 }
 
 impl WeakAgent {
@@ -149,6 +154,7 @@ impl WeakAgent {
             holdback: self.holdback.clone(),
             dialogs: self.dialogs.clone(),
             steps: self.steps.clone(),
+            answers_as: self.answers_as,
         })
     }
 }
@@ -169,6 +175,7 @@ impl Agent {
             holdback: self.holdback.clone(),
             dialogs: self.dialogs.clone(),
             steps: self.steps.clone(),
+            answers_as: self.answers_as,
         }
     }
 
@@ -191,6 +198,13 @@ impl Agent {
     }
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// This UA as the target of a transfer: its sequence in a dialog it
+    /// answers starts at [`Party::TransferTarget`]'s first CSeq.
+    pub fn transfer_target(mut self) -> Self {
+        self.answers_as = Party::TransferTarget;
+        self
     }
 
     /// The identity of the UA STACK behind this handle: equal for clones of one

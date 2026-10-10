@@ -23,6 +23,7 @@ use super::addr_alloc::AddrAlloc;
 use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
+use super::party::Party;
 use super::rr_fold::decide_rr_fold;
 use super::rule_coverage::{self, WaivedFindings};
 use super::run_guards::{
@@ -504,6 +505,7 @@ impl Harness {
             holdback: Arc::default(),
             dialogs,
             steps: self.steps.clone(),
+            answers_as: Party::Callee,
         };
         self.keep_bound(&agent);
         agent

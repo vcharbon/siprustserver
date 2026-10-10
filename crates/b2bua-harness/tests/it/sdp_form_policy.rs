@@ -53,7 +53,7 @@ async fn the_service_policy_forms_descriptions_after_the_calls_restatement() {
     let h = Harness::with_transit_delay("sdp-form-policy-transfer", 1);
     let alice = h.agent("alice", "127.0.0.1:5934").await;
     let bob = h.agent("bob", "127.0.0.1:5944").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5944)
         .tune(|c| c.sdp_form = Arc::new(CanonicalOnceRestated))
         .start(&h, "b2bua", "127.0.0.1:5954")

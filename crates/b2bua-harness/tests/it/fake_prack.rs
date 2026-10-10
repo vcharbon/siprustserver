@@ -749,7 +749,7 @@ async fn a_transfer_target_is_offered_no_reliability_of_the_stacks_own() {
     let h = Harness::new("fake-prack-transfer-target");
     let alice = h.agent("alice", "127.0.0.1:5709").await;
     let bob = h.agent("bob", "127.0.0.1:5719").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let engine = ScriptedDecisionEngine::builder()
         .fallback(|_req| {
             let mut r = route_to_processing_refer("127.0.0.1", 5719);

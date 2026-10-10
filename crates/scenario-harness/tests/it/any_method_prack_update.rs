@@ -7,6 +7,9 @@ use scenario_harness::{Harness, StepError};
 use sip_message::generators::{InDialogMethod, OutOfDialogMethod};
 use sip_message::header::{HeaderName, RAck, RSeq};
 
+/// The caller's first CSeq: its INVITE's.
+const C: u32 = scenario_harness::Party::Caller.first_cseq();
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const REOFFER_A: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
@@ -49,7 +52,7 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
         .expect("the PRACK carries a readable RAck");
     assert_eq!(
         (rack.rseq(), rack.seq(), rack.method().as_str()),
-        (1, 1, "INVITE"),
+        (1, C, "INVITE"),
         "RAck must reference the 183's RSeq + the INVITE's CSeq (RFC 3262 §7.2)",
     );
     prack_uas.respond(200, "OK").try_send().await?;

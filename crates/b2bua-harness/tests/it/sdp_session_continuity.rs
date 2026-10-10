@@ -77,7 +77,7 @@ async fn a_spliced_peer_continues_each_dialog_session() {
     let h = Harness::with_transit_delay("sdp-session-continuity-transfer", 1);
     let alice = h.agent("alice", "127.0.0.1:5932").await;
     let bob = h.agent("bob", "127.0.0.1:5942").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5942)
         .start(&h, "b2bua", "127.0.0.1:5952")
         .await;
@@ -509,7 +509,7 @@ async fn each_offerless_reinvite_after_a_splice_is_a_new_version() {
     let h = Harness::with_transit_delay("sdp-session-continuity-offerless-reinvite", 1);
     let alice = h.agent("alice", "127.0.0.1:5937").await;
     let bob = h.agent("bob", "127.0.0.1:5947").await;
-    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
+    let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await.transfer_target();
     let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5947)
         .start(&h, "b2bua", "127.0.0.1:5957")
         .await;
