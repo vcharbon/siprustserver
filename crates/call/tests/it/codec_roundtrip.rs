@@ -567,7 +567,7 @@ fn reroute_plan_in_callback_context_survives_replication() {
 //
 // CODEC ARMS. The `call` crate has exactly **one** `CallBodyCodec` impl:
 // `MsgpackCodec` (`rmp-serde`'s positional/array encoding). There is no
-// protobuf codec (ADR-0008); see the protobuf FIXME at the end of this file.
+// protobuf codec (ADR-0008).
 
 /// `it("a-leg kind/adopted survive encode→decode")` — the explicitly-tagged
 /// a-leg carries `kind=A` / `adopted=true` through the positional msgpack codec.
@@ -754,10 +754,6 @@ fn service_ext_transfer_c_initial_sdp_base64_survives() {
     assert_eq!(slice["phase"], "c-realigning");
     assert_eq!(slice["cLegId"], "b-2");
 }
-
-// FIXME(codec): no protobuf `CallBodyCodec` exists to run the `leg_kind_*` /
-// `service_ext_*` cases against; drive them from a `&[&dyn CallBodyCodec]` table
-// once one does — a codec that JSON-stringifies `ext` corrupts raw bytes.
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]

@@ -136,8 +136,6 @@ pub(super) fn invite_here(ctx: &RouterCtx, call_ref: &str, cseq: u32) -> bool {
 /// `call`'s own: its INVITE carries the same CSeq. A copy is answered 482
 /// even once the original's transaction has ended, which §8.2.2.2 does not
 /// cover.
-/// FIXME(copy-after-end): answer a same-CSeq INVITE whose original
-/// transaction ended as a new request on a live identity (500 Retry-After).
 fn copies(call: &Call, cseq: u32) -> bool {
     call.a_leg_invite.cseq == cseq
 }

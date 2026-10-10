@@ -48,9 +48,6 @@ impl<'a> OwedAnswer<'a> {
     /// request is ever owed something. `admitted` when it is a new INVITE the
     /// router's rungs admitted; a new INVITE that is not is a copy of a call
     /// already here, and its refusal is counted as a copy.
-    /// FIXME(stated-headers): an answer to an in-call request carries none of
-    /// the call's stated headers; the discard site holds no call. Stamp it
-    /// where the call is resolved.
     pub(super) async fn render(&self, event: &CallEvent, why: Discard, owed: Owed, admitted: bool) {
         let CallEvent::Sip { message, src, .. } = event else { return };
         let SipMessage::Request(req) = message.as_ref() else { return };

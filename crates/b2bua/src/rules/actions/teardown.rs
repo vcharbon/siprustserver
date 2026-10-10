@@ -229,7 +229,6 @@ impl ActionExecutor<'_> {
                 // where the rule states none (RFC 3326 §2).
                 let stated_reason = stated.iter().any(|h| HeaderName::Reason.matches(&h.name));
                 let own = own_release_reason(ctx).filter(|_| !stated_reason);
-                // FIXME(b2bua): destroy_leg on a confirmed a-leg leaves her dialog Ending without a BYE; mint the a-leg BYE.
                 if let Some(e) =
                     self.bye_to_b_leg(call, leg_id, own, Relayed::headers(stated), None)
                 {
