@@ -55,11 +55,13 @@ A `Finding` names the charged `emitter`, the `taker`, whether the emission was
 5. **A rule is declared once, in its family's `rules!` table**: a doc line
    (the RFC clause and the one-line contract) over `Name = "kebab-token";`
    (`, relayable` where a forwarded copy carries the offence). `Name` is both the
-   `RuleId` constant and the unit-struct body; `RuleId::ALL`, `all_rules()` and
-   the live adapter's suite read the tables. Then `just rule-copies` rewrites the
-   copies outside Rust (the token fixture, the TypeScript `RFC_RULES`, the review
-   goldens); pivot-schema's `every_rule_list_copy_is_current` names a stale one.
-   Removing a rule is the same two steps.
+   `RuleId` constant and the unit-struct body; `RuleId::ALL` and `all_rules()`
+   read the tables. The rule also takes its `Live` row in the LIVE table of
+   `sip-net/src/rfc_audit/wire_adapter/<family>.rs` (sip-net's
+   `every_merged_rule_has_a_live_adapter` names a rule without one). Then
+   `just rule-copies` rewrites the copies outside Rust (the token fixture, the
+   TypeScript `RFC_RULES`); pivot-schema's `every_rule_list_copy_is_current`
+   names a stale one. Removing a rule is the same three steps.
 6. **Doc comments are contracts**: `/// **RFC XXXX §Y — <one-line MUST>.**`
    then which party is charged, what discharges the obligation, and what is
    undecidable and why.
@@ -72,8 +74,7 @@ A `Finding` names the charged `emitter`, the `taker`, whether the emission was
   the taker (the bind whose PEER is judged), either end (a two-party
   negotiation), or the taker else the emitter (an omission the taker is owed) —
   with its skipped lanes, roles, severity and detail line. A family's rows sit in
-  `wire_adapter/<family>.rs`; a rule with no row is surfaced at the emitter with
-  a generic detail line.
+  `wire_adapter/<family>.rs`, and every rule has one.
   Lane classification comes from `rfc_audit::relay_lanes`; per-message reads
   from `rfc_audit::msg_reads`.
 - **Capture** (`sip-pcap/src/rfc/`): one view per leg, the recording span as the
@@ -87,5 +88,5 @@ A `Finding` names the charged `emitter`, the `taker`, whether the emission was
 - A `#[cfg(test)]` test in that family's `tests` mod asserting BOTH a clean case
   and a flagged case, plus the semantics no adapter can state
   (closed-observation behaviour, both halves of a pair, repeat handling).
-- Its row in the family's `rules!` table, then `just rule-copies`; a live
-  `Live` row where the default surfacing does not fit.
+- Its row in the family's `rules!` table, its `Live` row in the live adapter's
+  family file, then `just rule-copies`.

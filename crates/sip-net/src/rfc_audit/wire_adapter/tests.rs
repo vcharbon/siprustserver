@@ -261,10 +261,16 @@ fn every_merged_rule_has_a_live_adapter() {
         severities.dedup();
         assert_eq!(arms, severities.len(), "{token} is surfaced twice at one severity");
     }
-    let surfaced: Vec<&str> = by_token.keys().copied().collect();
-    let mut declared: Vec<&str> = rfc_rules::RuleId::ALL.iter().map(|r| r.token()).collect();
-    declared.sort_unstable();
-    assert_eq!(surfaced, declared);
+    let missing: Vec<&str> = rfc_rules::RuleId::ALL
+        .iter()
+        .map(|r| r.token())
+        .filter(|t| !by_token.contains_key(t))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "rules with no live row (add one to the LIVE table of wire_adapter/<family>.rs): {}",
+        missing.join(", ")
+    );
 }
 
 /// A request the CALLEE originates: From/To reversed relative to the

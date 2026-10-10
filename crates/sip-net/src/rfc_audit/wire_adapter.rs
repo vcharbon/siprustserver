@@ -16,8 +16,9 @@
 //! holds of a chain whose first sighting it does not (modeled loss) is new.
 //!
 //! Each rule is surfaced by its `Live` row: vantage, skipped lanes, roles,
-//! severity and detail line, the detail a fn named after the rule's token. A
-//! rule with no row is surfaced at the emitter with a generic detail line.
+//! severity and detail line, the detail a fn named after the rule's token.
+//! Every rule has a row: `every_merged_rule_has_a_live_adapter` names one
+//! without.
 
 use std::collections::{HashMap, HashSet};
 
@@ -252,8 +253,7 @@ impl Skip {
 
 /// How the live audit surfaces one rule: its vantage, the lanes it skips, the
 /// roles it applies to, whether it only advises, which findings it admits, and
-/// the detail line a finding reads as. A rule with no row is surfaced at the
-/// emitter with [`generic_detail`].
+/// the detail line a finding reads as.
 #[derive(Clone, Copy)]
 struct Live {
     id: RuleId,
@@ -379,11 +379,6 @@ impl CrossMessageAuditRule for Live {
     }
 }
 
-/// The detail line of a rule with no row of its own.
-fn generic_detail(f: &rfc_rules::Finding, cid: &str) -> String {
-    format!("Breaks {} (callId {cid}, CSeq {})", f.rule, f.cseq)
-}
-
 /// The detail line both `tag-consistency` arms report, off the flip evidence.
 fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
     let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
@@ -403,8 +398,7 @@ fn tag_flip_detail(f: &rfc_rules::Finding, _cid: &str) -> String {
     )
 }
 
-/// Every family's live rows; [`cross_rules`] gives a rule with none the
-/// default row.
+/// Every family's live rows.
 const FAMILIES: &[&[Live]] = &[
     ack::LIVE,
     cancel::LIVE,
@@ -423,15 +417,9 @@ const FAMILIES: &[&[Live]] = &[
     wellformed::LIVE,
 ];
 
-/// The live rows of `id`, or the default row when it has none.
+/// The live rows of `id`.
 fn rows_of(id: RuleId) -> Vec<Live> {
-    let rows: Vec<Live> =
-        FAMILIES.iter().flat_map(|f| f.iter()).filter(|l| l.id == id).copied().collect();
-    if rows.is_empty() {
-        vec![Live::emitter(id, generic_detail)]
-    } else {
-        rows
-    }
+    FAMILIES.iter().flat_map(|f| f.iter()).filter(|l| l.id == id).copied().collect()
 }
 
 /// The merged-rule cross checks this adapter contributes to the default suite:
