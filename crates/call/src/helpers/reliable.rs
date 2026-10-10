@@ -417,8 +417,12 @@ pub fn pending_invite_answered_by(call: &Call, a_tag: &str, a_rseq: i64) -> Opti
     let leg = crate::helpers::find_leg(call, &shown.b_leg_id)?;
     leg.dialogs
         .iter()
-        .find_map(|d| crate::helpers::find_pending_request(d, shown.b_cseq))
-        .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
+        .flat_map(|d| d.inbound_pending_requests.iter())
+        .find(|p| {
+            p.outbound_cseq == shown.b_cseq
+                && p.method.eq_ignore_ascii_case("INVITE")
+                && !p.cancelled
+        })
         .map(|p| (shown.b_leg_id.clone(), p.outbound_cseq))
 }
 
