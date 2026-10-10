@@ -264,9 +264,8 @@ impl ActionExecutor<'_> {
         }
         // A dialog a BYE ended carries no more requests of its INVITE usage
         // (RFC 3261 §15.1.2, RFC 5057 §5.2): the sender hears 481 from here
-        // (§12.2.2). A NOTIFY rides a subscription usage, and a BYE crossing
-        // one ends nothing more.
-        if bye_ended(call, target_leg) && !matches!(req.method(), Method::Notify | Method::Bye) {
+        // (§12.2.2).
+        if bye_ended(call, target_leg) && !outlives_the_invite_usage(req.method()) {
             self.respond(call, fx, ctx, 481, "Call/Transaction Does Not Exist", &[], None, vec![]);
             return;
         }
@@ -457,6 +456,13 @@ impl ActionExecutor<'_> {
     }
 }
 
+/// Whether a request of `method` still rides a dialog whose INVITE usage a
+/// BYE ended: a SUBSCRIBE or a NOTIFY of its subscription usage, which the
+/// BYE does not end (RFC 5057 §5.2), or a BYE crossing it.
+fn outlives_the_invite_usage(method: &Method) -> bool {
+    matches!(method, Method::Subscribe | Method::Notify | Method::Bye)
+}
+
 /// Whether a BYE ended `leg_id`'s dialog: the peer's BYE answered, or one this
 /// stack sent.
 fn bye_ended(call: &Call, leg_id: &str) -> bool {
@@ -520,4 +526,31 @@ fn relayed_request_headers(
     };
     relay::settle_session_timer(&mut headers, req.headers(), takes_part, leg_offers);
     (headers, advertised)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outlives_the_invite_usage;
+    use sip_message::Method;
+
+    /// A subscription usage outlives the BYE that ends the INVITE usage
+    /// (RFC 5057 §5.2): its SUBSCRIBE (a refresh or an `Expires: 0`) and its
+    /// NOTIFY still ride the dialog; every request of the INVITE usage does not.
+    #[test]
+    fn only_the_subscription_usage_and_a_crossing_bye_outlive_a_bye() {
+        for m in [Method::Subscribe, Method::Notify, Method::Bye] {
+            assert!(outlives_the_invite_usage(&m), "{m:?}");
+        }
+        for m in [
+            Method::Invite,
+            Method::Info,
+            Method::Update,
+            Method::Prack,
+            Method::Options,
+            Method::Message,
+            Method::Refer,
+        ] {
+            assert!(!outlives_the_invite_usage(&m), "{m:?}");
+        }
+    }
 }
