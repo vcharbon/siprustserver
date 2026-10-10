@@ -228,8 +228,13 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Charge a datagram no armed expect on `leg` matched: to the expect of the
-    /// transaction it rides, else to the step it came closest to. `false` once
-    /// the arrival leaves the leg nothing it can still be satisfied by.
+    /// transaction it rides (RFC 3261 §17.1.3), else to the step it came CLOSEST
+    /// to. One whose discriminator matched and whose content did not says exactly
+    /// what is wrong, where an unordered group's first member would describe a
+    /// step the datagram was never for (`progress`).
+    ///
+    /// `false` when the arrival leaves the leg nothing it can still be satisfied
+    /// by: the script is ended here (§11.2) and the run goes on to its close.
     async fn charge_unmatched(
         &mut self,
         leg: &str,
@@ -241,11 +246,6 @@ impl<'a, 'p> Runner<'a, 'p> {
     ) -> bool {
         let scope = self.instance.scope();
         let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
-        // Charged to the expect of the transaction the datagram rides
-        // (RFC 3261 §17.1.3), else to the step it came CLOSEST to: one whose
-        // discriminator matched and whose content did not says exactly what
-        // is wrong, where an unordered group's first member would describe a
-        // step the datagram was never for (`progress`).
         let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
         let (closest, own_transaction, retired, released, ends) = {
             let cursor = self.instance.cursor();
