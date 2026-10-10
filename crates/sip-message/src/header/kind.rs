@@ -128,6 +128,7 @@ kinds! {
     RetryAfter => RetryAfter, Single;
     Reason => Reason, Comma;
     Replaces => Replaces, Single;
+    ReferSub => ReferSub, Single;
 
     MaxForwards => MaxForwards, Single;
     ContentLength => ContentLength, Single;
@@ -160,7 +161,7 @@ capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, A
 
 capability! { TokenParamsKind:
     Event, SubscriptionState, Accept, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
-    Replaces,
+    Replaces, ReferSub,
 }
 
 numeric_kinds! {

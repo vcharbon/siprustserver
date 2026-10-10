@@ -126,6 +126,17 @@ mod tests {
         assert_eq!(s.to_wire(), raw);
     }
 
+    /// RFC 4488 §4: a REFER that asks for no implicit subscription.
+    #[test]
+    fn a_refer_sub_reads_its_value() {
+        let r = crate::header::ReferSub::parse(&SipStr::owned("false;x=1")).unwrap();
+        assert!(r.is("false"));
+        assert_eq!(
+            crate::header::HeaderName::known("refer-sub").map(|n| n.to_string()).as_deref(),
+            Some("Refer-Sub")
+        );
+    }
+
     /// RFC 3891: the replaced dialog is the leading Call-ID plus the two tags.
     #[test]
     fn a_replaces_reads_the_dialog_it_names() {

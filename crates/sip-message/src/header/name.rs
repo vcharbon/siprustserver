@@ -84,6 +84,7 @@ known_header_names! {
     RAck => "RAck",
     Reason => "Reason",
     RecordRoute => "Record-Route",
+    ReferSub => "Refer-Sub",
     ReferTo => "Refer-To",
     ReferredBy => "Referred-By",
     RemotePartyId => "Remote-Party-ID",

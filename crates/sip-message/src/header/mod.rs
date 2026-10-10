@@ -44,9 +44,10 @@ pub use aliases::{
     AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength,
     Diversion, Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
     PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate,
-    ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferTo, ReferredBy,
-    RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry, ServiceRouteEntry,
-    SessionExpires, SubscriptionState, Supported, To, Unsupported, WwwAuthenticate,
+    ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferSub, ReferTo,
+    ReferredBy, RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry,
+    ServiceRouteEntry, SessionExpires, SubscriptionState, Supported, To, Unsupported,
+    WwwAuthenticate,
 };
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
