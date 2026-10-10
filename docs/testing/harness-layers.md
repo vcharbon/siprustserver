@@ -91,7 +91,10 @@ Automatic (you cannot opt out, only waive per-rule):
 - **Rule coverage** — `finish()` writes one TSV row per RFC rule the run
   exercised (`test, rule, occasions, decided, hits, waived`) under
   `<target>/rule-coverage/`, one file per test, from
-  `sip_net::evaluate_rfc_audit`'s per-rule population.
+  `sip_net::evaluate_rfc_audit`'s per-rule population, after a
+  `# run=<nextest run id>\texe=<test binary>` header. `waived` names whose
+  findings of the rule a waiver covered in that run (`-`, `sut`, `simulated`,
+  `sut+simulated`).
 - **Failure dump** — on any panic before `finish()` returns, gate failures
   included, the harness prints the failure dump to stderr
   ([Reading a failure](#reading-a-failure)). Read it before adding

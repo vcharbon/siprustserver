@@ -205,6 +205,9 @@ pub(crate) struct Waived<T> {
     pub gating: Vec<T>,
     /// Per rule, how many findings charged to the SUT a waiver covered.
     pub sut: BTreeMap<String, usize>,
+    /// Per rule, how many findings charged to a simulated party a waiver
+    /// covered.
+    pub simulated: BTreeMap<String, usize>,
 }
 
 /// The non-advisory findings that SURVIVE the waivers (marking each covering
@@ -228,7 +231,7 @@ fn waive(
     waivers: &[WaiverState],
     attr: &Attribution,
 ) -> Waived<(RfcFinding, Option<String>)> {
-    let mut out = Waived { gating: Vec::new(), sut: BTreeMap::new() };
+    let mut out = Waived { gating: Vec::new(), sut: BTreeMap::new(), simulated: BTreeMap::new() };
     for f in findings.iter().filter(|f| !f.advisory) {
         let party = finding_party(f, entries, attr);
         let mut waived = false;
@@ -240,7 +243,9 @@ fn waive(
         }
         if !waived {
             out.gating.push((f.clone(), party));
-        } else if !attr.is_simulated(party.as_deref()) {
+        } else if attr.is_simulated(party.as_deref()) {
+            *out.simulated.entry(f.rule.clone()).or_default() += 1;
+        } else {
             *out.sut.entry(f.rule.clone()).or_default() += 1;
         }
     }
@@ -494,6 +499,7 @@ mod tests {
         let findings = [finding(RULE, 1), finding(RULE, 1), finding(RULE, 2)];
         let out = waive(&findings, &entries, &waivers, &attr);
         assert!(out.gating.is_empty(), "every finding is waived");
+        assert_eq!(out.simulated, BTreeMap::from([(RULE.to_string(), 1)]));
         assert_eq!(out.sut, BTreeMap::from([(RULE.to_string(), 2)]));
     }
 }

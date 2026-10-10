@@ -24,8 +24,10 @@ use super::artifact_dump::ArtifactDump;
 use super::dialog_gate::{as_findings, render_dialog_panic, surviving_verdicts};
 use super::failure_dump::{first_cause, FailureDump, FailureView, FailureViews, Judges};
 use super::rr_fold::decide_rr_fold;
-use super::rule_coverage;
-use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate};
+use super::rule_coverage::{self, WaivedFindings};
+use super::run_guards::{
+    render_rfc_panic, rfc_hard_gate_findings, waived_sut_line, CseqGate, HardGate,
+};
 use super::step::StepCounter;
 use super::ua::WeakAgent;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
@@ -732,7 +734,6 @@ impl Harness {
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
         // gate below and is seeded into the report so the projection reuses it.
         let audit = sip_net::evaluate_rfc_audit(&events);
-        rule_coverage::record(&self.name, &audit.population, &self.waivers.borrow());
         let rfc_findings = audit.findings;
         // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
         // violation must fail the test (a real UA would reject these). Skip if the
@@ -753,10 +754,11 @@ impl Harness {
             // The dialog verdicts first: they name the UA and the request, the
             // most specific reason a run can fail for.
             let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
+            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            rule_coverage::record(&self.name, &audit.population, waived_findings(&gate));
             if !verdicts.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_dialog_panic(&self.name, &verdicts));
             }
-            let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
             if !gate.gating.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_rfc_panic(&self.name, &gate.gating));
             }
@@ -826,13 +828,13 @@ impl Harness {
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
         // the returned gating findings, and (seeded) the report projection.
         let audit = sip_net::evaluate_rfc_audit(&events);
-        rule_coverage::record(&self.name, &audit.population, &self.waivers.borrow());
         let rfc_findings = audit.findings;
         // The gating set the scoped waivers leave unwaived. Computed in a scope
         // so the borrow is released before the `close().await` below.
         let (gate, verdicts) = {
             let waivers = self.waivers.borrow();
             let mut gate = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &self.recorder);
+            rule_coverage::record(&self.name, &audit.population, waived_findings(&gate));
             let (verdicts, waived_dialog) = surviving_verdicts(&self.judges.borrow(), &waivers);
             gate.waived_sut.extend(waived_dialog);
             (gate, verdicts)
@@ -857,4 +859,9 @@ impl Harness {
         report.seed_waived_sut_findings(gate.waived_sut);
         (report, gating)
     }
+}
+
+/// The RFC findings `gate`'s waivers covered, by whose they were.
+fn waived_findings(gate: &HardGate) -> WaivedFindings<'_> {
+    WaivedFindings { sut: &gate.waived_sut, simulated: &gate.waived_simulated }
 }

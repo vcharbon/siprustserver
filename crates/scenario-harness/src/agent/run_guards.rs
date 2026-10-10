@@ -44,6 +44,8 @@ fn sut_names(recorder: &Recorder) -> HashSet<String> {
 pub(super) struct HardGate {
     pub gating: Vec<GatedFinding>,
     pub waived_sut: BTreeMap<String, usize>,
+    /// Per rule, the findings charged to a simulated party a waiver covered.
+    pub waived_simulated: BTreeMap<String, usize>,
 }
 
 /// `waived SUT findings: rule×n, …`, or `None` when no SUT finding was waived.
@@ -123,7 +125,7 @@ pub(super) fn rfc_hard_gate_findings(
             GatedFinding { finding, party, message }
         })
         .collect();
-    HardGate { gating, waived_sut: waived.sut }
+    HardGate { gating, waived_sut: waived.sut, waived_simulated: waived.simulated }
 }
 
 /// The hard-gate panic text: a first line naming the first rule that fired
