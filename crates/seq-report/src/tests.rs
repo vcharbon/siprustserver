@@ -416,7 +416,7 @@ fn grouped_sub_lanes_render_a_shared_socket_header() {
         Lane::new("10.0.0.9:5070#callee", "callee", LaneKind::Ua).with_group("10.0.0.9:5070"),
         Lane::new("10.0.0.9:5070#alt", "alt", LaneKind::Ua).with_group("10.0.0.9:5070"),
     ];
-    doc.rows.truncate(0);
+    doc.rows.clear();
     doc.rows.push(SeqRow {
         at_ms: 0,
         seq: 1,

@@ -200,14 +200,13 @@ fn resolution_candidates_absolute_first_for_dotted_hosts() {
     );
 }
 
+type Lookup = std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>;
+
 /// A lookup-recording double for [`resolve_first`]: scripts which query
 /// strings answer, and records every attempt in order.
 fn scripted_lookup(
     answers: &'static [&'static str],
-) -> (
-    Arc<Mutex<Vec<String>>>,
-    impl Fn(String, u16) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>,
-) {
+) -> (Arc<Mutex<Vec<String>>>, impl Fn(String, u16) -> Lookup) {
     let attempts = Arc::new(Mutex::new(Vec::new()));
     let recorded = attempts.clone();
     let lookup = move |candidate: String, _port: u16| {
