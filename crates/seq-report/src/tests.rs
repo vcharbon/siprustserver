@@ -56,7 +56,7 @@ fn mixed_doc() -> SeqDoc {
 
 /// A lifecycle marker recorded at the SAME `at_ms` as a following message
 /// must render BEFORE it — order follows the global `seq` (true recording
-/// order), NOT `at_ms`. This is the keepalive-cell symptom:
+/// order), NOT `at_ms`:
 /// the `reboot` band must precede the `PullRequest[Bootstrap]` it triggers
 /// even though both land on one paused-clock millisecond.
 #[test]
@@ -144,7 +144,7 @@ fn all_three_planes_appear_with_distinct_styling() {
     assert!(html.contains("crash b1"), "lifecycle band label");
     // The legend names all three planes.
     assert!(html.contains("class=\"legend\""));
-    // (The Replication legend entry now carries a per-socket-color note, so
+    // (The Replication legend entry carries a per-socket-color note, so
     // match its prefix rather than an exact `>Replication<`.)
     assert!(html.contains(">SIP<") && html.contains(">Replication"));
     assert!(html.contains("Lifecycle"));
@@ -163,7 +163,7 @@ fn format_epoch_utc_renders_time_of_day_with_millis() {
 fn wall_clock_doc_shows_absolute_utc_reference() {
     // A wall-clock-aligned doc renders the absolute-UTC anchor in the header
     // AND an absolute time next to each row's relative stamp. A virtual-clock
-    // doc (epoch_base_ms = None) shows neither (relative-only, unchanged).
+    // doc (epoch_base_ms = None) shows neither (relative-only).
     let mut doc = mixed_doc();
     // Anchor the base (at_ms 0) to a known epoch ms.
     let t0 = ((8 * 3600 + 48 * 60 + 29) * 1000 + 135) as i64; // 08:48:29.135Z
@@ -174,7 +174,7 @@ fn wall_clock_doc_shows_absolute_utc_reference() {
     // The repl row at at_ms=200 → t0 + 200ms = 08:48:29.335Z somewhere.
     assert!(html.contains("08:48:29.335Z"), "per-row absolute time shown");
 
-    // Without the anchor, no absolute time leaks in (relative-only, unchanged).
+    // Without the anchor, no absolute time leaks in (relative-only).
     let plain = render_html(&mixed_doc());
     assert!(!plain.contains("Timeline t0"));
     assert!(!plain.contains("08:48:29"));
@@ -481,8 +481,8 @@ fn views_render_as_chip_table_and_disagreement_list() {
     assert!(txt.contains("b2 believes absent (withdraw)"), "{txt}");
 }
 
-/// A doc with no beliefs renders exactly as before: no views section, no
-/// disagreements list.
+/// A doc with no beliefs renders no views section and no disagreements
+/// list.
 #[test]
 fn a_doc_without_views_renders_no_views_sections() {
     let html = render_html(&mixed_doc());

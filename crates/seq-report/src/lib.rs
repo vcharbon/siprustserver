@@ -96,14 +96,13 @@ pub struct Lane {
     /// Shared-resource header this lane belongs under (e.g. the `ip:port` of a
     /// shared mux socket whose LOGICAL endpoints each get their own sub-lane).
     /// Consecutive lanes with the same `group` render
-    /// one bracketing header above their individual captions. `None` (the
-    /// default, and every pre-existing doc) renders exactly as before.
+    /// one bracketing header above their individual captions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
 }
 
 impl Lane {
-    /// Convenience constructor.
+    /// A lane with no group (see [`Lane::with_group`]).
     pub fn new(id: impl Into<String>, label: impl Into<String>, kind: LaneKind) -> Self {
         Self { id: id.into(), label: label.into(), kind, group: None }
     }
@@ -249,7 +248,7 @@ pub struct SeqDoc {
     /// paused-runtime harness/failover views), which stay relative-only.
     ///
     /// `#[serde(default)]` so docs persisted before this field deserialize as
-    /// `None` (relative-only), preserving the prior behaviour.
+    /// `None` (relative-only).
     #[serde(default)]
     pub epoch_base_ms: Option<i64>,
 }
@@ -338,8 +337,8 @@ pub fn format_epoch_utc(epoch_ms: i64) -> String {
 }
 
 /// Format a virtual-clock offset (ms, relative to the first row) as `T+SEC.mmms`
-/// — e.g. `T+0.015s`, `T+1m02.345s`. Shared by both renderers (and a port of
-/// the SIP report's `formatRelativeTimestamp`) so timestamps read identically.
+/// — e.g. `T+0.015s`, `T+1m02.345s`. Shared by both renderers so timestamps
+/// read identically.
 pub fn format_relative(ms: i64) -> String {
     let ms = ms.max(0);
     let total_sec = ms / 1000;
