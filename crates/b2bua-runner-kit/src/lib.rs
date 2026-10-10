@@ -366,9 +366,7 @@ pub struct RunnerEnv {
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long a b-leg initial
     /// INVITE waits for a response of ANY kind before its transaction gives up
     /// and the `call_failure` consult carries `timeout_kind: "response"`.
-    /// Default 32 (RFC 3261 Timer B); supported range 2..=32 — tightening it
-    /// is a deliberate §17.1.1.2 deviation (telephony policy: a hop drawing
-    /// nothing is dead, and the reroute must not wait 64·T1). In-dialog INVITE
+    /// Default 32 (RFC 3261 Timer B); supported range 2..=32. In-dialog INVITE
     /// and non-INVITE keep 64·T1; the first provisional swaps in
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
     pub invite_first_response_timeout_sec: i64,
