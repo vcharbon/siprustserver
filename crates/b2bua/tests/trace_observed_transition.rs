@@ -116,6 +116,7 @@ fn an_observers_cursor_move_is_on_the_trace() {
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let result = execute_rules(
         &[observer()],

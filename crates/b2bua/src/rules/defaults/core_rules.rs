@@ -8,8 +8,8 @@
 
 use call::helpers::RAckTokens;
 use call::{
-    ByeDisposition, CallModelState, CdrEventType, Direction, LegDisposition, LegState, Obligation,
-    TerminationCause, TimeoutKind, TimerType,
+    ByeDisposition, CallModelState, CdrEventType, DialogState, Direction, LegDisposition, LegState,
+    Obligation, TerminationCause, TimeoutKind, TimerType,
 };
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest};
@@ -1149,6 +1149,25 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![]),
         )
         .runs_while_terminating(),
+        // The straggler's own BYE crossing the release (RFC 3261 §15.1.2): the
+        // gate passes it on the retired dialog alone, and 200 is all it
+        // takes; the release's final still settles the release.
+        rule(
+            "straggler-crossing-bye",
+            &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
+            Match::request()
+                .method("BYE")
+                .filter(|ctx| ctx.dialog().is_some_and(|d| d.retired().is_some())),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        )
+        .runs_while_terminating(),
         rule(
             "absorb-straggler-release-timeout",
             &[],
@@ -1195,10 +1214,19 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
+        // A BYE crossing this stack's own (RFC 3261 §15.1.2): on a dialog it
+        // is ending, or of a call it is tearing down — an early dialog its
+        // CANCEL ends included — is answered 200 and ends the dialog it names.
         rule(
             "resolve-cross-bye",
-            &[],
-            Match::request().method("BYE").call_state(CallModelState::Terminating),
+            &["relay-bye"],
+            Match::request().method("BYE").filter(|ctx| {
+                ctx.dialog().is_some_and(|d| d.state == DialogState::Ending)
+                    || matches!(
+                        ctx.call.state(),
+                        CallModelState::Terminating | CallModelState::Terminated
+                    )
+            }),
             |ctx| {
                 ok(vec![
                     RuleAction::Respond {
@@ -1217,11 +1245,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A PRACK naming a reliable provisional this stack already PRACKed
         // toward its responder — as it CANCELled, at the responder's final, or
         // ahead of a BYE — is answered 200 here (RFC 3262 §3): a relay would
-        // be a second PRACK for one `RSeq`. Outranks `post-bye-481`, whose 481
-        // would deny a provisional this face really sent.
+        // be a second PRACK for one `RSeq`.
         rule(
             "answer-pracked-prack",
-            &["post-bye-481", "relay-prack"],
+            &["relay-prack"],
             Match::request().method("PRACK").filter(|ctx| {
                 let Some(req) = ctx.request() else { return false };
                 let a_tag = req.to().tag().unwrap_or_default();
@@ -1236,30 +1263,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
-        // A dialog whose BYE is in flight answers in-dialog requests 481 locally:
-        // BYE terminates the session (RFC 3261 §15.1.2, §12.2.2), so relaying would
-        // offer the request to a peer that already hung up. ACK passes (`relay-ack`),
-        // the BYE resolves via `resolve-bye-response`/`resolve-cross-bye`, CANCEL keeps
-        // txn semantics; the plain `Respond` leaves the teardown/CDR/reap path intact.
-        // OPTIONS is exempt: an in-dialog OPTIONS is a liveness probe answered like
-        // any request while the dialog exists (RFC 3261 §11.2) — the dialog dies
-        // only when the BYE transaction completes — so it keeps `relay-options`.
-        rule(
-            "post-bye-481",
-            &["reinvite-glare", "update-glare", "update-peer-unavailable"],
-            Match::request()
-                .methods(&["INVITE", "UPDATE", "PRACK", "INFO", "MESSAGE", "REFER", "NOTIFY"])
-                .call_state(CallModelState::Terminating)
-                .call_state(CallModelState::Terminated),
-            |_ctx| {
-                ok(vec![RuleAction::Respond {
-                    status: 481,
-                    reason: "Call/Transaction Does Not Exist".into(),
-                    body: vec![],
-                    content_type: None,
-                }])
-            },
-        ),
         // ── relay (broad) ───────────────────────────────────────────────────
         // An ACK relays to the peer. The ladder it discharges — the a-leg's
         // initial 2xx or a re-INVITE 2xx on either face (RFC 3261 §13.3.1.4)
@@ -1268,10 +1271,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-ack", &[], Match::request().method("ACK"), |_ctx| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // A BYE on a leg this stack already ended (Terminated, or a BYE
-        // disposition set) ends that dialog alone: the leg is no longer a party
-        // of the session, so its BYE crossing ours (RFC 3261 §15.1.2) is
-        // answered 200 and resolved on the leg while the call stays up.
+        // A BYE on a live dialog of a leg this stack already ended (Terminated,
+        // or a BYE disposition set: a CANCEL in flight, a failed leg) ends
+        // that dialog alone: the leg is no longer a party of the session, so
+        // its BYE is answered 200 and resolved on the leg while the call
+        // stays up.
         rule(
             "resolve-ended-leg-bye",
             &["relay-bye"],
@@ -1312,10 +1316,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .method("BYE")
                 .direction(Direction::FromA)
                 .leg_states(&[LegState::Trying, LegState::Early])
-                .filter(|ctx| {
-                    let a = ctx.call.a_leg();
-                    a.invite_final_sent.is_none() && ctx.dialog().is_some()
-                }),
+                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_none()),
             |ctx| {
                 let a = ctx.source_leg_id.to_string();
                 let mut actions = vec![
@@ -1352,29 +1353,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
-        // A caller's BYE after this stack answered her INVITE with a non-2xx
-        // final names no dialog: that final ended every early dialog the INVITE
-        // opened (RFC 3261 §12.3), so the BYE draws 481 (§12.2.2) and changes
-        // nothing. Outranks the rules that answer a BYE 200, which hold for a
-        // dialog that exists (a confirmed one crossing our BYE included).
-        rule(
-            "ended-early-dialog-bye",
-            &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
-            Match::request()
-                .method("BYE")
-                .direction(Direction::FromA)
-                .filter(|ctx| ctx.call.a_leg().invite_final_sent.is_some_and(|s| s >= 300)),
-            |_ctx| {
-                ok(vec![RuleAction::Respond {
-                    status: 481,
-                    reason: "Call/Transaction Does Not Exist".into(),
-                    body: vec![],
-                    content_type: None,
-                }])
-            },
-        ),
-        // A BYE from a live party of an Active call ends the session; a BYE on a
-        // leg this stack already ended is `resolve-ended-leg-bye`'s.
+        // A BYE from a live party of an Active call ends the session; one on a
+        // leg this stack already ended is `resolve-ended-leg-bye`'s, one
+        // crossing this stack's own BYE `resolve-cross-bye`'s.
         rule(
             "relay-bye",
             &[],

@@ -140,6 +140,7 @@ async fn media_leg_rings_first(name: &str, shape: Shape) {
     // ── the media leg answers and plays; the caller gets its early media ──
     mrf_uas.respond(200, "OK").with_to_tag(MRF_TAG).with_sdp(MRF_SDP).await;
     mrf.receive("ACK").await;
+    mrf_uas.adopt_to_tag(MRF_TAG);
     let mut mrf_dialog = mrf_uas.dialog();
     call.expect(183).await;
     mrf.receive("INFO").await.respond(200, "OK").await;

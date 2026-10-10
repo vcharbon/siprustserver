@@ -776,6 +776,17 @@ The dialog-creating INVITE a leg sent (its From-tag and CSeq): each dialog a
 response to it creates is minted from it. A dialled leg holds no dialog
 before such a response.
 
+**Dialog gate**:
+The engine step that resolves a message to the dialog it names, before any
+rule reads it, and refuses a request its dialog does not take (481, or 500
+when out of order). Rules read what it resolved (`RuleContext::dialog`).
+_Avoid_: "foreign-dialog check" (the gate refuses by state, not only by
+absence).
+
+**Not now**:
+A relayed request no dialog can carry yet while its own dialog lives on:
+500 with `Retry-After`, never silence and never 481.
+
 ## Call reaper vocabulary
 
 The terminal-guarantee module (design in progress; extends ADR-0010 X5's

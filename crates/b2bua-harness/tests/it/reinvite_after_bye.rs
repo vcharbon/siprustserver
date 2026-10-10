@@ -1,5 +1,5 @@
 //! A dialog whose BYE is in flight answers in-dialog requests 481 locally
-//! (`post-bye-481`, RFC 3261 §15.1.2 / §12.2.2): the caller hangs up, the
+//! (the dialog gate, RFC 3261 §15.1.2 / §12.2.2): the caller hangs up, the
 //! B2BUA relays the BYE toward the callee, and the callee fires one more
 //! session-refresh re-INVITE before answering that BYE. The re-INVITE is
 //! answered 481 by the B2BUA itself — never relayed to the caller, who
@@ -39,7 +39,7 @@ async fn reinvite_during_bye_gets_481_locally() {
     let mut bob_bye = bob.receive("BYE").await;
 
     // ── before answering the BYE, bob fires a session-refresh re-INVITE: the
-    //    B2BUA answers it 481 itself (`post-bye-481`) — it never reaches alice,
+    //    B2BUA answers it 481 itself (its dialog is ending) — it never reaches alice,
     //    whose dialog is already gone. ──
     let mut reinv = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
     reinv.expect(481).await;

@@ -3,6 +3,7 @@
 //! several steps delegates to its action-family module (relay / originate /
 //! respond / dialog_track / teardown).
 
+use call::helpers::RelayPeer;
 use call::helpers::{
     add_cdr_event, deactivate_rule, mark_decision, merge_leg, remove_pending_request,
     set_leg_disposition, set_leg_state, split_leg,
@@ -16,6 +17,7 @@ use sip_message::SipHeader;
 
 use super::select::{find_pending_dialog, resolve_peer};
 use super::teardown::terminate_all;
+use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -27,14 +29,20 @@ impl ActionExecutor<'_> {
         fx: &mut HandlerEffects,
     ) {
         match action {
-            RuleAction::RelayToPeer { transform } => {
-                let (peer, target_dialog) = resolve_peer(call, ctx);
-                if let Some(peer) = peer {
-                    self.relay_to(call, fx, ctx, &peer, transform, target_dialog);
+            RuleAction::RelayToPeer { transform } => match resolve_peer(call, ctx) {
+                RelayPeer::Leg { leg_id, dialog } => {
+                    self.relay_to(call, fx, ctx, &leg_id, transform, dialog);
                 }
-            }
+                RelayPeer::NoLeg => self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow),
+                RelayPeer::Unadopted => {
+                    self.refuse_unrelayed(call, fx, ctx, Unrelayed::ServiceOwned);
+                }
+            },
             RuleAction::RelayToLeg { leg_id, transform } => {
-                self.relay_to(call, fx, ctx, leg_id, transform, None);
+                let carrying = call::helpers::find_leg(call, leg_id)
+                    .and_then(|l| l.dialogs.carrying())
+                    .map(call::Dialog::id);
+                self.relay_to(call, fx, ctx, leg_id, transform, carrying);
             }
             RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref(), vec![]);
@@ -445,7 +453,7 @@ impl ActionExecutor<'_> {
 
     /// Relay the current event to `target_leg` (response → regenerate on the
     /// a-leg; ACK → ack the target leg; other in-dialog request → regenerate on
-    /// the peer dialog).
+    /// `target_dialog`, the dialog of the target leg it rides).
     pub(super) fn relay_to(
         &self,
         call: &mut Call,

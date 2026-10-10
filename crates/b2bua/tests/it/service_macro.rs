@@ -130,6 +130,7 @@ fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) ->
         now_ms: 0,
         config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     }
 }
 

@@ -40,11 +40,11 @@ pub(super) fn invite_cseq_from_handle(dialog: &Dialog) -> Option<i64> {
     }
 }
 
-/// Resolve the relay target leg plus, for forking, the specific target
-/// dialog. Thin view over [`call::helpers::resolve_relay_peer`] — the ONE
-/// resolver this relay path shares with the rule-vocabulary readiness predicate
+/// Resolve the relay target leg and the dialog of it the relay rides. Thin
+/// view over [`call::helpers::resolve_relay_peer`] — the ONE resolver this
+/// relay path shares with the rule-vocabulary readiness predicate
 /// (`RuleContext::peer_relay_ready`), so the two never drift.
-pub(super) fn resolve_peer(call: &Call, ctx: &RuleContext) -> (Option<String>, Option<DialogId>) {
+pub(super) fn resolve_peer(call: &Call, ctx: &RuleContext) -> call::helpers::RelayPeer {
     call::helpers::resolve_relay_peer(call, ctx.source_leg_id, ctx.request_tags())
 }
 

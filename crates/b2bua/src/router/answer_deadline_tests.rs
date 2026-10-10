@@ -157,7 +157,7 @@ fn turn(node: &Node, call: Call, event: &CallEvent) -> crate::effects::HandlerRe
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
-    rule_chain_turn(node.core.router_ctx(), call, event, &res, &call_ref, NOW)
+    rule_chain_turn(node.core.router_ctx(), call, event, &res, Default::default(), &call_ref, NOW)
 }
 
 /// The outcome the probe's rules read, if any rule read an answer.

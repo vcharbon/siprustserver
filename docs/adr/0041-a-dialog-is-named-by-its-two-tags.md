@@ -2,7 +2,7 @@
 
 **Status:** accepted (2026-10-10)
 
-**Owner:** `crates/call/src/model/dialog.rs` and `dialogs.rs`; the engine side is `crates/b2bua/src/router/process.rs`.
+**Owner:** `crates/call/src/model/dialog.rs` and `dialogs.rs`; the engine side is the dialog gate, `crates/b2bua/src/router/dialog_gate.rs`.
 
 ## Context
 
@@ -35,9 +35,36 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    (`fronts`): one, or several a masking policy shows the caller as one.
    Answering the caller confirms the dialog the 2xx names and retires the
    others; no dialog is renamed.
-5. **The engine resolves a request's dialog before any rule** and refuses
-   what names none (481, §12.2.2), so a rule reads the dialog it was handed
-   (`RuleContext::dialog`) and never looks one up again.
+5. **The engine resolves every message's dialog before any rule** (the
+   dialog gate), so a rule reads what it was handed (`RuleContext::dialog`,
+   `RuleContext::relayed_pending`) and never looks a dialog up again. A
+   request with a To-tag, on any leg:
+
+   | its dialog | the gate |
+   |---|---|
+   | none, or a caller-facing one the caller was never shown | 481 (§12.2.2) |
+   | `Early`, `Confirmed` | pass |
+   | `Ending` | BYE, OPTIONS, PRACK pass; others 481 |
+   | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
+   | `Ended(PeerBye \| OurBye)` | 481, a BYE included (§15.1.2) |
+   | `Retired` | 481, but a BYE crossing this stack's release of it |
+
+   A live dialog of a call being torn down reads as `Ending`: its early
+   dialogs end by a CANCEL, not by a BYE of ours. A request below its
+   dialog's last CSeq draws 500 (§12.2.2). An ACK passes on any dialog a 2xx
+   established, ended since or not (RFC 5407 §2), and is otherwise dropped
+   unanswered (§17.1.1.3); a CANCEL is matched by transaction (§9.1). A
+   response resolves to the relay it answers (by dialog, method and CSeq),
+   to its dialog, or to the request this stack sent; one whose From-tag is
+   no tag of this stack's on the leg answers nothing and is dropped.
+6. **A relay always ends its request's turn with a final.** No dialog to
+   carry it now — no peer leg while the call lives, a peer leg with no
+   dialog yet or several early ones and none named, a peer dialog its party
+   was never shown or no longer live — draws 500 with `Retry-After` (§14.2,
+   RFC 3311 §5.2): the sender may retry and keeps its dialog, which a 481
+   would end (§12.2.1.2, RFC 5057 §5.2). An UPDATE with no relayable peer
+   draws 491. A request from a leg its service owns that no rule takes draws
+   403 (§21.4.4).
 
 ## Consequences
 
@@ -46,5 +73,5 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
 - Every turn can check the model whole: each dialog reachable by one pair of
   tags, at most one confirmed dialog per leg, every `fronts` naming a dialog
   the callee leg holds.
-- Decision 5 lands after decisions 1–4: until then the router's foreign-dialog
-  refusal reads the same records.
+- A peer's BYE after its dialog ended — by its own BYE or by ours — draws
+  481; only a BYE crossing ours while it is in flight is answered 200.

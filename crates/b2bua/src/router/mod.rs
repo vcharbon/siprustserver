@@ -23,6 +23,9 @@ mod answer_deadline_tests;
 mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
+mod dialog_gate;
+#[cfg(test)]
+mod dialog_gate_tests;
 mod ingress;
 mod interpret;
 pub(crate) mod late_prack;

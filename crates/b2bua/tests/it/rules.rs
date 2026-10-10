@@ -120,6 +120,7 @@ fn timer_global_duration_selects_max_duration() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -159,6 +160,7 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -291,6 +293,7 @@ fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -342,6 +345,7 @@ fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -469,6 +473,7 @@ fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -501,6 +506,7 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -735,6 +741,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -819,6 +826,7 @@ fn in_dialog_bye_selects_relay_bye() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -849,6 +857,7 @@ fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination()
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -902,6 +911,7 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -915,46 +925,6 @@ fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
         !actions.iter().any(|a| matches!(a, RuleAction::BeginTermination { .. })),
         "a terminating call is not torn down twice, got {actions:?}",
     );
-}
-
-/// A caller's BYE on the early dialog this stack already ended with a non-2xx
-/// final to her INVITE (RFC 3261 §12.3; here the 487 answering her CANCEL)
-/// names no dialog: it draws 481 (§12.2.2) and nothing else, whether the
-/// call is still terminating or already terminated.
-#[test]
-fn bye_on_an_early_a_dialog_ended_by_a_non_2xx_final_draws_481_alone() {
-    let rules = default_rules();
-    for state in [CallModelState::Terminating, CallModelState::Terminated] {
-        let mut call = call_with_early_a_dialog("btag");
-        call.a_leg.invite_final_sent = Some(487);
-        call.a_leg.state = LegState::Terminated;
-        call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
-        call.state = state;
-        let bye = in_dialog_request(sip_message::Method::Bye);
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(bye)),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        };
-        let ctx = RuleContext {
-            call: RuleCall::new(&call),
-            call_ref: &call.call_ref,
-            event: &event,
-            source_leg_id: "a",
-            direction: Direction::FromA,
-            now_ms: 0,
-            config: &B2buaConfig::default(),
-            discharged: None,
-        };
-        let ranked = pick_ranked(&rules, &call, &ctx);
-        let top = ranked.first().unwrap_or_else(|| panic!("{state:?}: a rule answers the BYE"));
-        let actions = (top.handle)(&ctx).expect("the rule handles the BYE").actions;
-        assert!(
-            matches!(actions.as_slice(), [RuleAction::Respond { status: 481, .. }]),
-            "{state:?}: `{}` answers 481 and touches nothing else, got {actions:?}",
-            top.id,
-        );
-    }
 }
 
 /// A BYE from a leg this stack already ended (Terminated, its own BYE sent)
@@ -986,6 +956,7 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -1036,6 +1007,7 @@ Content-Length: 0\r\n\r\n";
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -1053,44 +1025,6 @@ Content-Length: 0\r\n\r\n";
                 outcome.actions,
             );
         }
-    }
-}
-
-/// An in-dialog request on a call whose BYE is in flight selects `post-bye-481`
-/// (the session is terminated, §15.1.2 — never `relay-reinvite`), while ACK
-/// still selects `relay-ack` and an OPTIONS liveness probe keeps
-/// `relay-options` (RFC 3261 §11.2 — the dialog exists until the BYE completes).
-#[test]
-fn in_dialog_request_on_terminating_call_selects_post_bye_481() {
-    let mut call = test_call();
-    call.state = CallModelState::Terminating;
-    let config = B2buaConfig::default();
-    for (method, expected) in [
-        (sip_message::Method::Invite, "post-bye-481"),
-        (sip_message::Method::Update, "post-bye-481"),
-        (sip_message::Method::Info, "post-bye-481"),
-        (sip_message::Method::Options, "relay-options"),
-        (sip_message::Method::Ack, "relay-ack"),
-    ] {
-        let req = in_dialog_request(method.clone());
-        let event = CallEvent::Sip {
-            message: Box::new(SipMessage::Request(req)),
-            src: "127.0.0.1:5060".parse().unwrap(),
-            matched_client_txn: false,
-        };
-        let ctx = RuleContext {
-            call: RuleCall::new(&call),
-            call_ref: &call.call_ref,
-            event: &event,
-            source_leg_id: "a",
-            direction: Direction::FromA,
-            now_ms: 0,
-            config: &config,
-            discharged: None,
-        };
-        let rules = default_rules();
-        let ranked = pick_ranked(&rules, &call, &ctx);
-        assert_eq!(ranked.first().map(|r| r.id), Some(expected), "method {method:?}");
     }
 }
 
@@ -1285,6 +1219,7 @@ fn execute_with(config: &B2buaConfig, call: &call::Call, actions: &[RuleAction])
         now_ms: 0,
         config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -1510,6 +1445,7 @@ fn handle_from(call: &call::Call, event: &CallEvent, leg: &str) -> (&'static str
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -1536,6 +1472,7 @@ fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction])
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -1749,6 +1686,7 @@ fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
         now_ms: 0,
         config: &B2buaConfig::default(),
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked: Vec<&str> = pick_ranked(&rules, &call, &ctx).iter().map(|r| r.id).collect();
@@ -1922,6 +1860,7 @@ fn ctx_for<'a>(
         now_ms: 0,
         config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     }
 }
 
@@ -2183,6 +2122,7 @@ Content-Length: 0\r\n\r\n";
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -2251,6 +2191,7 @@ Content-Length: 0\r\n\r\n";
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -2306,6 +2247,7 @@ Content-Length: 0\r\n\r\n";
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let id_gen = IdGen::seeded(1);
     let exec = ActionExecutor {
@@ -2406,6 +2348,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let exec = ActionExecutor {
         config: &config,
@@ -2517,12 +2460,13 @@ mod media_primitives {
             now_ms: 0,
             config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         exec.execute(actions, call, &ctx)
     }
 
-    // Relay-to-peer from an unadopted media leg produces ZERO outbound — it must
-    // NOT fall back to A.
+    // Relay-to-peer from an unadopted media leg relays nothing — it must NOT
+    // fall back to A — and its request is refused 403.
     #[test]
     fn relay_to_peer_is_gated_for_unadopted_media_leg() {
         let mut call = test_call();
@@ -2543,9 +2487,19 @@ mod media_primitives {
             &id_gen,
             &[RuleAction::RelayToPeer { transform: MessageTransform::default() }],
         );
-        assert!(
-            result.effects.outbound.is_empty(),
-            "an unadopted media leg's relay-to-peer must not be mis-routed to A"
+        let sent: Vec<Option<u16>> = result
+            .effects
+            .outbound
+            .iter()
+            .map(|e| match &e.body {
+                b2bua::effects::OutboundBody::Response(r) => Some(r.status()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![Some(403)],
+            "an unadopted media leg's relay-to-peer is refused 403, never mis-routed to A"
         );
     }
 
@@ -2821,6 +2775,7 @@ mod answer_a_leg_new_dialog {
             now_ms: 0,
             config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -3351,6 +3306,7 @@ mod ack_leg_body {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let id_gen = IdGen::seeded(1);
         let exec = ActionExecutor {
@@ -3448,6 +3404,7 @@ mod ack_leg_body {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let id_gen = IdGen::seeded(1);
         let exec = ActionExecutor {
@@ -3637,6 +3594,7 @@ mod create_leg_admission {
             now_ms: 1_700_000_000_000,
             config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         exec.execute(&[create_leg(host, port)], &call, &ctx)
     }
@@ -3749,6 +3707,7 @@ mod default_sdp_create_leg {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let id_gen = IdGen::seeded(1);
         let exec = ActionExecutor {
@@ -3855,6 +3814,7 @@ mod header_update_removal_withholds_a_relayed_name {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let id_gen = IdGen::seeded(1);
         let exec = ActionExecutor {
@@ -4455,6 +4415,7 @@ mod service_timers {
             now_ms: 1_000,
             config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         }
     }
 }
@@ -4555,6 +4516,7 @@ fn timer_ctx<'a>(
         now_ms,
         config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     }
 }
 
@@ -4859,6 +4821,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
         now_ms: 0,
         config: &config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -4976,6 +4939,7 @@ mod ladder_give_up {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let picked: Vec<&str> = pick_ranked(rules, &call, &ctx).iter().map(|r| r.id).collect();
         assert_eq!(
@@ -5994,6 +5958,7 @@ mod sdp_body_author {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         let id_gen = IdGen::seeded(1);
         let exec = ActionExecutor {
@@ -6085,6 +6050,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
             now_ms: 0,
             config: &config,
             discharged: None,
+            resolved: &call::helpers::UNRESOLVED,
         };
         ctx.update_refusal()
     };

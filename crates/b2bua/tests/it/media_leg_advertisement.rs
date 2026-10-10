@@ -83,6 +83,7 @@ fn originate(
         now_ms: 0,
         config,
         discharged: None,
+        resolved: &call::helpers::UNRESOLVED,
     };
     let leg = RuleAction::CreateLeg {
         destination: ("127.0.0.1".into(), 5090),

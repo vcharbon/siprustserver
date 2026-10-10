@@ -1435,6 +1435,10 @@ pub struct RuleContext<'a> {
     /// `None` for every other event, and for an ACK or PRACK that named no
     /// live ladder (a retransmitted ACK, a repeat PRACK).
     pub discharged: Option<&'a Obligation>,
+    /// What the engine's dialog gate resolved the event's message to before
+    /// the rules ran: the dialog it names on the source leg, and the relay a
+    /// response answers. Empty for any other event.
+    pub resolved: &'a call::helpers::Resolved,
 }
 
 impl<'a> RuleContext<'a> {
@@ -1542,9 +1546,10 @@ impl<'a> RuleContext<'a> {
     /// leg, by the resolver the executor's relay path reads
     /// ([`call::helpers::resolve_relay_peer`]).
     pub fn relay_peer_resolves(&self) -> bool {
-        call::helpers::resolve_relay_peer(self.call.0, self.source_leg_id, self.request_tags())
-            .0
-            .is_some()
+        matches!(
+            call::helpers::resolve_relay_peer(self.call.0, self.source_leg_id, self.request_tags()),
+            call::helpers::RelayPeer::Leg { .. }
+        )
     }
 
     /// Whether the current INVITE meets glare (RFC 3261 §14.1), by the same
@@ -1597,21 +1602,14 @@ impl<'a> RuleContext<'a> {
         }
     }
 
-    /// The pending-relay snapshot the current response answers, read through
-    /// [`call::helpers::relayed_pending`] as the relay executor reads it: the
-    /// dialog the response's tags name, or the relays kept for a dialog the
-    /// answer retired — never another dialog's. `None` for any
-    /// non-response event.
+    /// The pending-relay snapshot the current response answers, as the
+    /// engine's dialog gate resolved it ([`Self::resolved`]): kept on the
+    /// dialog the response's tags name, or among the relays of a dialog the
+    /// answer retired — never another dialog's. `None` for any non-response
+    /// event.
     pub fn relayed_pending(&self) -> Option<call::PendingRequest> {
-        let resp = self.response()?;
-        call::helpers::relayed_pending(
-            self.call.0,
-            self.source_leg_id,
-            resp.to().tag(),
-            resp.from().tag(),
-            resp.cseq().seq() as i64,
-        )
-        .map(|(_, p)| p)
+        self.response()?;
+        self.resolved.relay.as_ref().map(|(_, p)| p.clone())
     }
 
     /// Does the current response answer a request THIS STACK RELAYED
@@ -1630,17 +1628,14 @@ impl<'a> RuleContext<'a> {
             self.call.b_legs().iter().find(|l| l.leg_id == self.source_leg_id)
         }
     }
-    /// The dialog of the source leg the current message names by its tags:
-    /// a request's To-tag is ours and its From-tag the peer's, a response's
-    /// the reverse (RFC 3261 §12.2). `None` for any other event, and when the
-    /// tags name no dialog of the leg.
+    /// The dialog of the source leg the current message names, as the
+    /// engine's dialog gate resolved it ([`Self::resolved`]): a request's
+    /// To-tag is ours and its From-tag the peer's, a response's the reverse
+    /// (RFC 3261 §12.2). `None` for any other event, and when the message
+    /// names no dialog of the leg.
     pub fn dialog(&self) -> Option<&'a Dialog> {
-        let leg = self.source_leg()?;
-        if let Some(r) = self.request() {
-            return leg.dialogs.of_request(r.to().tag(), r.from().tag());
-        }
-        let r = self.response()?;
-        leg.dialogs.of_response(r.to().tag(), r.from().tag())
+        let id = self.resolved.dialog.as_ref()?;
+        self.source_leg()?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
     }
     /// The To-tag and From-tag of the current request (none for any other event).
     pub fn request_tags(&self) -> call::helpers::RequestTags<'_> {

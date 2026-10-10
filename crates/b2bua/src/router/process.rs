@@ -22,10 +22,7 @@ use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::{
-    build_481, build_merged_482, build_out_of_order_500, build_retry_later_500,
-    build_store_fault_500,
-};
+use super::responses::{build_481, build_merged_482, build_retry_later_500, build_store_fault_500};
 use super::RouterCtx;
 use crate::admission::{class_of, Class};
 use crate::answer_deadline::Screened;
@@ -157,12 +154,16 @@ pub(super) async fn process(
                 crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
             }
         }
-        // A request in a dialog this call does not hold is refused before any
-        // of the machinery below reads it (RFC 3261 §12.2.2).
-        if let Some(refusal) = refuse_foreign_dialog(ctx, &call, &event, &res).await {
-            record_refusal(ctx, call, &res.source_leg_id, &event, refusal.as_ref(), now_ms);
-            return;
-        }
+        // The message is resolved to the dialog it names, or refused, before
+        // any of the machinery below reads it (RFC 3261 §12.2.2, ADR-0041).
+        let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res).await {
+            super::dialog_gate::Gate::Pass(resolved) => resolved,
+            super::dialog_gate::Gate::Refused(answer) => {
+                record_refusal(ctx, call, &res.source_leg_id, &event, answer.as_ref(), now_ms);
+                return;
+            }
+            super::dialog_gate::Gate::Dropped => return,
+        };
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
@@ -183,12 +184,6 @@ pub(super) async fn process(
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
-        // A request below its dialog's last CSeq is refused before any rule
-        // reads it (RFC 3261 §12.2.2).
-        if let Some(answer) = refuse_out_of_order(ctx, &call, &event, &res).await {
-            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
-            return;
-        }
         // The limiter-refresh timer marks the call due on the worker's refresh
         // batch outside the rule chain; the call never waits on the limiter.
         if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
@@ -204,7 +199,7 @@ pub(super) async fn process(
                 ),
             )
         } else {
-            rule_chain_turn(ctx, call, &event, &res, &call_ref, now_ms)
+            rule_chain_turn(ctx, call, &event, &res, resolved, &call_ref, now_ms)
         }
     };
 
@@ -608,89 +603,6 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
     }
 }
 
-/// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a To-tag naming
-/// no dialog this stack holds on the leg it arrived on — or, on a confirmed
-/// b-leg, a From-tag naming none ([`call::helpers::abandoned_dialog`]) — draws
-/// 481 and touches nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
-/// §13.3.1.4 ladder keeps repeating the 2xx it failed to acknowledge. A CANCEL
-/// is matched by transaction (§9.1) and never read here. `Some` when refused,
-/// holding the 481 sent, if any.
-async fn refuse_foreign_dialog(
-    ctx: &RouterCtx,
-    call: &Call,
-    event: &CallEvent,
-    res: &Resolution,
-) -> Option<Option<sip_message::SipResponse>> {
-    let CallEvent::Sip { message, src, .. } = event else { return None };
-    let SipMessage::Request(req) = message.as_ref() else { return None };
-    if req.method() == Method::Cancel {
-        return None;
-    }
-    let tag = req.to().tag()?;
-    let tags = call::helpers::RequestTags::new(Some(tag), req.from().tag());
-    let foreign = holds_our_tag(call, &res.source_leg_id, tag) == Some(false)
-        || call::helpers::abandoned_dialog(call, &res.source_leg_id, tags);
-    if !foreign {
-        return None;
-    }
-    if req.method() == Method::Ack {
-        return Some(None);
-    }
-    // An in-call refusal is a message of the leg it resolved to: it takes the
-    // call's stated headers.
-    let mut refusal = build_481(req, None);
-    crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
-    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
-    Some(Some(refusal))
-}
-
-/// Whether `tag` is one this stack put on `leg_id`: the tag of one of its
-/// dialogs the call still holds (a retired one excepted), or the leg's own
-/// ([`call::helpers::leg_own_tag`]). `None` while the leg holds no tag of its
-/// own, so a request's To-tag has nothing to be measured against (RFC 3261
-/// §12.2.2).
-fn holds_our_tag(call: &Call, leg_id: &str, tag: &str) -> Option<bool> {
-    let leg = call::helpers::find_leg(call, leg_id)?;
-    let own: Vec<&str> = leg
-        .dialogs
-        .iter()
-        .filter(|d| d.retired().is_none())
-        .map(|d| d.our_tag.as_str())
-        .chain(call::helpers::leg_own_tag(leg))
-        .filter(|t| !t.is_empty())
-        .collect();
-    (!own.is_empty()).then(|| own.contains(&tag))
-}
-
-/// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a CSeq below the
-/// last one its dialog took ([`call::helpers::out_of_order`]) draws 500 and
-/// touches nothing. ACK and CANCEL carry the CSeq of the request they belong
-/// to and are never measured. The 500 sent, if refused.
-async fn refuse_out_of_order(
-    ctx: &RouterCtx,
-    call: &Call,
-    event: &CallEvent,
-    res: &Resolution,
-) -> Option<sip_message::SipResponse> {
-    let CallEvent::Sip { message, src, .. } = event else { return None };
-    let SipMessage::Request(req) = message.as_ref() else { return None };
-    if matches!(req.method(), Method::Ack | Method::Cancel) {
-        return None;
-    }
-    req.to().tag()?;
-    let tags = call::helpers::RequestTags::new(req.to().tag(), req.from().tag());
-    let cseq = i64::from(req.cseq().seq());
-    if !call::helpers::out_of_order(call, &res.source_leg_id, tags, cseq) {
-        return None;
-    }
-    // An in-call refusal is a message of the leg it resolved to: it takes the
-    // call's stated headers.
-    let mut refusal = build_out_of_order_500(req);
-    crate::rules::stated_headers::stamp_response(call, &res.source_leg_id, &mut refusal);
-    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
-    Some(refusal)
-}
-
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
 /// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
 /// final to the INVITE carried where a call resolves, and no effect on any
@@ -755,6 +667,7 @@ pub(super) fn rule_chain_turn(
     mut call: Call,
     event: &CallEvent,
     res: &Resolution,
+    resolved: call::helpers::Resolved,
     call_ref: &str,
     now_ms: i64,
 ) -> HandlerResult {
@@ -887,6 +800,7 @@ pub(super) fn rule_chain_turn(
         now_ms,
         config: &ctx.config,
         discharged: discharged.as_ref(),
+        resolved: &resolved,
     };
     let mut result = if rules_read {
         execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations)
@@ -933,6 +847,7 @@ pub(super) fn rule_chain_turn(
             now_ms,
             config: &ctx.config,
             discharged: discharged.as_ref(),
+            resolved: &resolved,
         };
         // An UNANSWERED a-leg (still trying/early) has no final response yet:
         // `begin_termination` assumes the firing *rule* already replied (as

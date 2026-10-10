@@ -8,6 +8,8 @@
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution
 //!   - [`identity`] — the tags an in-dialog request carries
+//!   - [`resolved`] — what a received message names: its dialog, the relay a
+//!     response answers
 //!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
 //!     of one call compare on them (replication reconciliation)
 //!   - [`dialog`] — CSeq, ACK branch, pending and retired relays, SDP cache
@@ -36,6 +38,7 @@ pub mod obligation;
 pub mod peering;
 pub mod record;
 pub mod reliable;
+pub mod resolved;
 pub mod services;
 pub mod termination;
 pub mod timer;
@@ -49,7 +52,7 @@ pub use dialog::{
     retired_relay_count, sender_invite_unacknowledged, sender_invite_unanswered,
     set_awaited_ack_cseq, set_peer_cseq, take_retired_relays, PendingHolder,
 };
-pub use identity::{abandoned_dialog, RequestTags};
+pub use identity::RequestTags;
 pub use leg::{
     add_b_leg, callee_dialog, callee_dialog_mut, caller_answered, caller_dialog, caller_dialog_mut,
     carrying_dialog, dialog_with_peer, find_b_leg, find_b_leg_by_call_id, find_leg, is_adopted,
@@ -66,7 +69,7 @@ pub use obligation::{
 };
 pub use peering::{
     a_tag_shown, all_peered_legs, fronting_dialog, get_peer, merge_leg, relay_peer_dialog,
-    relay_peer_dialog_ready, resolve_relay_peer, split_leg,
+    relay_peer_dialog_ready, resolve_relay_peer, split_leg, RelayPeer,
 };
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
@@ -79,6 +82,7 @@ pub use reliable::{
     starts_reliable_ladder, unacknowledgeable_rack, unacknowledged_relayed_provisionals,
     unacknowledged_shown, OwedPrack, RAckTokens, UnackedShown,
 };
+pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use services::{
     promote_pem_promoted, promote_pem_state, promote_pem_window_open, record_relay_first_18x_value,
     refer_processed_locally, relay_first_18x_first_relayed, relay_first_18x_messages,

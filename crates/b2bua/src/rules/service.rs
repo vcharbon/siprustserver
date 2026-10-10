@@ -68,6 +68,7 @@ pub fn seed_services(
                     now_ms: exec.now_ms,
                     config: exec.config,
                     discharged: None,
+                    resolved: &call::helpers::UNRESOLVED,
                 };
                 exec.execute(&seed.actions, &result.call, &ctx)
             };

@@ -251,6 +251,7 @@ impl ActionExecutor<'_> {
             now_ms: turn.now_ms,
             config: turn.config,
             discharged: turn.discharged,
+            resolved: turn.resolved,
         };
         let forced = self.execute(&actions, &call, &ctx);
         effects.extend(forced.effects);

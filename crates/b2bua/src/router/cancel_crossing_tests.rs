@@ -91,7 +91,15 @@ async fn a_cancel_that_beat_the_relayed_2xx_byes_the_callee_only() {
         indexed: None,
     };
     let call_ref = call.call_ref.clone();
-    let result = rule_chain_turn(node.core.router_ctx(), call, &event, &res, &call_ref, 1_000);
+    let result = rule_chain_turn(
+        node.core.router_ctx(),
+        call,
+        &event,
+        &res,
+        Default::default(),
+        &call_ref,
+        1_000,
+    );
 
     let requests_to = |leg: &str| -> Vec<String> {
         result

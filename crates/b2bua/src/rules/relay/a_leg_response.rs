@@ -55,6 +55,11 @@ pub fn response_to_a_leg(
             return None;
         }
         call.a_leg.invite_final_sent = Some(status);
+        // A non-2xx final ends every early dialog the INVITE opened (RFC
+        // 3261 §12.1).
+        if status >= 300 {
+            call::helpers::reject_early_dialogs(&mut call.a_leg, status);
+        }
     } else if provisional_after_final(call, fx, status) {
         return None;
     } else if let Some(tag) = to_tag.as_deref().filter(|_| status > 100) {

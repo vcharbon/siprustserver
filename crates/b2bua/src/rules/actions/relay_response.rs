@@ -187,20 +187,14 @@ impl ActionExecutor<'_> {
         }
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
-        // The relay this response answers is read only through the dialog its
-        // tags name (our From-tag, the responder's To-tag), live or retired by
-        // the answer. Two dialogs may carry
-        // the same CSeq, so a fallback onto another dialog would deliver the
-        // final to a transaction it does not answer — or, finding none, fall
-        // through to the INVITE-response regeneration below and corrupt a
-        // `200 (PRACK)` / `200 (UPDATE)` into a spurious `200 (INVITE)`.
-        let relayed = call::helpers::relayed_pending(
-            call,
-            &source_leg_id,
-            resp.to().tag(),
-            resp.from().tag(),
-            cseq_num,
-        );
+        // The relay this response answers, as the engine's dialog gate
+        // resolved it: kept on the dialog the response's tags name (our
+        // From-tag, the responder's To-tag), live or retired by the answer,
+        // for the same method and CSeq. Never another dialog's: two dialogs
+        // may carry the same CSeq, and a final delivered to a transaction it
+        // does not answer — or regenerated below as an INVITE response —
+        // would turn a `200 (PRACK)` into a spurious `200 (INVITE)`.
+        let relayed = ctx.resolved.relay.clone();
         if let Some((holder, pending)) = relayed {
             // §18.2.2: a relayed response goes to the originator's top Via
             // sent-by, and the snapshot holds that Via verbatim. A Via no
@@ -652,9 +646,8 @@ impl ActionExecutor<'_> {
             remove_headers: vec![HeaderName::Require, HeaderName::RSeq, HeaderName::PEarlyMedia],
             add_headers: vec![],
         };
-        let (peer, target_to_tag) = resolve_peer(call, ctx);
-        if let Some(peer) = peer {
-            self.relay_to(call, fx, ctx, &peer, &transform, target_to_tag);
+        if let call::helpers::RelayPeer::Leg { leg_id, dialog } = resolve_peer(call, ctx) {
+            self.relay_to(call, fx, ctx, &leg_id, &transform, dialog);
         }
     }
 }

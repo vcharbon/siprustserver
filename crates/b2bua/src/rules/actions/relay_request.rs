@@ -23,6 +23,7 @@ use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
 
 use super::select::{in_dialog_method, invite_cseq_from_handle, leg_at, leg_index};
+use super::unrelayed::Unrelayed;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -176,7 +177,9 @@ impl ActionExecutor<'_> {
         Some((rejected, false))
     }
 
-    /// Relay an inbound SIP request to `target_leg`. Replicates the source's
+    /// Relay an inbound SIP request to `target_leg`, in its dialog
+    /// `target_dialog`; with no live dialog there to carry it, the sender is
+    /// told to retry ([`Unrelayed::NotNow`]). Replicates the source's
     /// per-dialog CSeq bookkeeping (`relay_cseq_delta` — each dialog has its own
     /// sequence, RFC 3261 §12.2.1.1), the PRACK `RAck` CSeq rewrite (RFC 3262
     /// §7.2), and the pending-request snapshot used to correlate the eventual
@@ -270,24 +273,18 @@ impl ActionExecutor<'_> {
             self.refuse_unrelayable(call, fx, ctx, req);
             return;
         };
-        let Some(t_idx) = leg_index(call, target_leg) else {
+        // The dialog the resolver named — the callee fork toward a b-leg, the
+        // caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1: each
+        // early dialog is independent). A live one carries the request; with
+        // none, the sender is told to retry (`Unrelayed::NotNow`).
+        let picked = leg_index(call, target_leg).and_then(|t_idx| {
+            let id = target_dialog.as_ref()?;
+            let d = leg_at(call, t_idx).dialogs.by_tags(&id.our_tag, &id.peer_tag)?;
+            d.is_live().then(|| (t_idx, d.clone()))
+        });
+        let Some((t_idx, target_dialog)) = picked else {
+            self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);
             return;
-        };
-        // Forking: the dialog the resolver named — the callee fork toward a
-        // b-leg, the caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1:
-        // each early dialog is independent); else the one the leg's requests
-        // ride (`Dialogs::carrying`). A leg holding none has no dialog to carry
-        // the request.
-        let target_dialog = {
-            let leg = leg_at(call, t_idx);
-            let picked = match &target_dialog {
-                Some(id) => leg.dialogs.by_tags(&id.our_tag, &id.peer_tag),
-                None => leg.dialogs.carrying(),
-            };
-            match picked {
-                Some(d) => d.clone(),
-                None => return,
-            }
         };
 
         // ── Per-dialog CSeq (§12.2.1.1): outbound = target.ourCSeq + delta,

@@ -295,7 +295,11 @@ fn peer_sends(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
 fn peer_relays(call: &mut Call, leg: &str, method: &str, with_sdp: bool) {
     peer_sends(call, leg, method, with_sdp);
     let tags = call::helpers::RequestTags::new(Some("b"), None);
-    let target = call::helpers::resolve_relay_peer(call, leg, tags).0.expect("a relay target");
+    let call::helpers::RelayPeer::Leg { leg_id: target, .. } =
+        call::helpers::resolve_relay_peer(call, leg, tags)
+    else {
+        panic!("a relay target");
+    };
     let pending = call::PendingRequest {
         method: method.into(),
         outbound_cseq: 7,
