@@ -1,5 +1,5 @@
-//! B2BUA runtime configuration — the subset of the source `AppConfig` the
-//! dispatcher / router / store / rules read. Behavioural timeouts that have a
+//! B2BUA runtime configuration — the subset the dispatcher / router / store /
+//! rules read. Behavioural timeouts that have a
 //! tokio analogue stay here as plain values.
 
 use crate::sdp_form::{AsWritten, SdpFormPolicy};
@@ -19,7 +19,7 @@ pub struct B2buaConfig {
     /// preloaded `Route: <sip:host:port;lr;outbound>` so the proxy classifies
     /// the flow as worker-outbound (skip LB, forward to the R-URI). The R-URI /
     /// remote target stays the callee (RFC 3261 §16.12). `None` = send b-leg
-    /// traffic straight to the callee (port of `AppConfig.b2bOutboundProxy`).
+    /// traffic straight to the callee.
     pub b2b_outbound_proxy: Option<(String, u16)>,
     /// Global cap on concurrently-running handlers across all calls.
     pub event_dispatch_concurrency: usize,
@@ -87,8 +87,8 @@ pub struct B2buaConfig {
     pub keepalive_interval_sec: i64,
     /// **Keepalive-timeout grace**, seconds — how long the B2BUA waits for the
     /// in-dialog OPTIONS `200` before declaring the leg dead and tearing the call
-    /// down (`keepalive-timeout` rule → BYE). Production default **32 s** (was a
-    /// hard-coded 5 s). The 5 s value was unsound across a worker reboot: a
+    /// down (`keepalive-timeout` rule → BYE). Production default **32 s**. A 5 s
+    /// grace is unsound across a worker reboot: a
     /// reclaimed dialog re-arms its keepalive and fires OPTIONS into a path still
     /// settling (smoothed reclaim burst draining over `L_max/speedup`, the proxy
     /// EndpointSlice re-discovering the rebooted worker's new pod IP), so the
@@ -220,11 +220,9 @@ pub struct B2buaConfig {
     /// `TimeoutKind::Response` and the `call_failure` consult carries
     /// `timeout_kind: "response"` — the "is this hop alive?" question, distinct
     /// from [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)'s "how
-    /// long may it ring?": the first provisional swaps the long bound in. A
-    /// **deliberate RFC 3261 §17.1.1.2 deviation, telephony policy**: the RFC's
-    /// Timer B is 64·T1 = 32 s, and a caller must not hear silence for half a
-    /// minute before the reroute to an alternate hop. Only the initial INVITE
-    /// reads it — an in-dialog INVITE keeps Timer B and a non-INVITE Timer F.
+    /// long may it ring?": the first provisional swaps the long bound in. Only
+    /// the initial INVITE reads it — an in-dialog INVITE keeps Timer B and a
+    /// non-INVITE Timer F.
     /// The Timer A ladder is cut at the bound, so the bound buys a rung count:
     /// 2 s → 2 re-sends (0.5/1.5), 5 s → 3 (0.5/1.5/3.5), 10 s → 4, 32 s → 6.
     /// [`validate`](Self::validate) range-checks
@@ -237,13 +235,11 @@ pub struct B2buaConfig {
     /// **Strict RFC 3261 §9.1 CANCEL wait** (ADR-0028). `false` (the default)
     /// is the bounded-hold policy: a b-leg CANCEL for a response-less branch
     /// waits for the first provisional at most the sip-txn grace window
-    /// (`CANCEL_HOLD_GRACE`, 1 s), then goes on the wire regardless — every
-    /// emitted CANCEL reaches the callee, so an abandoned setup can never ring
-    /// to the callee's own give-up (and behind the 100-absorbing LB, a
-    /// 100-only b-leg is still CANCELed). `true` is the literal §9.1 wait: no
-    /// CANCEL is ever sent pre-provisional — a callee that answers nothing is
-    /// never CANCELed and rides the terminating backstop instead. Overridable
-    /// via `B2BUA_CANCEL_STRICT_RFC_WAIT` (truthy = strict).
+    /// (`CANCEL_HOLD_GRACE`, 1 s), then goes on the wire regardless. `true` is
+    /// the literal §9.1 wait: no CANCEL is ever sent pre-provisional — a callee
+    /// that answers nothing is never CANCELed and rides the terminating
+    /// backstop instead. Overridable via `B2BUA_CANCEL_STRICT_RFC_WAIT` (truthy
+    /// = strict).
     pub cancel_strict_rfc3261_wait: bool,
     /// **Un-ACKed 2xx give-up deadline**, seconds (RFC 3261 §13.3.1.4; the
     /// RFC's `64·T1` = 32 s is the default). When it elapses with no ACK for a
@@ -257,8 +253,7 @@ pub struct B2buaConfig {
     /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) does.
     /// Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
     pub ack_timeout_sec: i64,
-    /// **CPS bucket rung capacity** (port of
-    /// `AppConfig.cpsBucketSize`). The hard ceiling on a *burst* of new-dialog
+    /// **CPS bucket rung capacity**. The hard ceiling on a *burst* of new-dialog
     /// INVITEs this worker will admit: tokens accrue at
     /// [`cps_bucket_rate`](Self::cps_bucket_rate)/s up to this cap, and the
     /// admission gate consumes one per new INVITE (an emergency caller is
@@ -267,13 +262,11 @@ pub struct B2buaConfig {
     /// panic-ELU backstop still applies). Default **1000**. Overridable via
     /// `B2BUA_CPS_BUCKET_SIZE`.
     pub cps_bucket_size: u32,
-    /// **CPS bucket rung refill rate** (tokens/sec; port of
-    /// `AppConfig.cpsBucketRate`). The sustained new-INVITE rate the bucket
+    /// **CPS bucket rung refill rate** (tokens/sec). The sustained new-INVITE rate the bucket
     /// permits once its burst capacity is drained. Default **500**.
     /// Overridable via `B2BUA_CPS_BUCKET_RATE`.
     pub cps_bucket_rate: u32,
-    /// **Panic-ELU rung threshold** (`0..1`; port of
-    /// `AppConfig.overloadPanicEluThreshold`).
+    /// **Panic-ELU rung threshold** (`0..1`).
     /// A *backstop* on the worker's OWN EWMA-smoothed Event-Loop Utilization:
     /// above it, a non-emergency new INVITE that already passed the CPS bucket
     /// is still 503'd locally, regardless of the LB's AIMD cap. The LB-side AIMD
@@ -283,7 +276,7 @@ pub struct B2buaConfig {
     /// `>= 1.0` effectively disables it (the clamped ELU never exceeds 1).
     /// Overridable via `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD`.
     pub overload_panic_elu_threshold: f64,
-    /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) of
+    /// **Retry-After base** (seconds) of
     /// every new-call 503: the panic-ELU and capacity rejects, the ingress
     /// brake, the deferred backlog and the dispatcher cap shed. The
     /// `bucket_empty` 503 starts from the later of this and the bucket's
@@ -302,8 +295,7 @@ pub struct B2buaConfig {
     /// has not ACKed it yet (RFC 3261 §20.33 leaves the header optional there).
     /// `None`, the default: no `Retry-After` on any 491.
     pub glare_retry_after: Option<RetryAfterRange>,
-    /// **b-leg destination allow-list** (port of
-    /// `AppConfig.workerAllowedTargetSuffixes`). The decision boundary classifies
+    /// **b-leg destination allow-list**. The decision boundary classifies
     /// `route.destination.host` against this list (see `destination_allowlist`):
     /// an IP literal always passes; otherwise the host must end with one of these
     /// suffixes (case-insensitive), else the gate emits a `503` and terminates
@@ -543,8 +535,6 @@ impl Default for B2buaConfig {
             // CPS bucket and panic-ELU rungs. Defaults match the env knobs
             // (B2BUA_CPS_BUCKET_SIZE / B2BUA_CPS_BUCKET_RATE /
             // B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD / B2BUA_RETRY_AFTER_BASE_SEC).
-            // The hard CPS ceiling is 1000-burst @ 500/s;
-            // the panic-ELU backstop sits at 0.75 EWMA-ELU.
             cps_bucket_size: 1000,
             cps_bucket_rate: 500,
             overload_panic_elu_threshold: 0.75,
@@ -560,15 +550,11 @@ impl Default for B2buaConfig {
             worker_allowed_target_suffixes: vec![".svc.cluster.local".to_string()],
             // Decision-backend deadline: one knob for all three methods (ADR-0022).
             call_control_timeout_ms: 5_000,
-            // Opt-in transparent header relay: empty = no relay (production
-            // default, strict no-op). Set names via `B2BUA_RELAY_HEADERS`.
             relay_headers: Vec::new(),
             privacy_service: true,
             relay_policy: sip_message::generators::RelayPolicy::transparent(),
             relayed_cancel_reason: crate::release_reason::CancelReason::Verbatim,
             own_release_reason: None,
-            // Default SDP source: None = no canned offer. Opt-in per-CreateLeg
-            // via `body_override`, never an automatic fallback.
             default_sdp: None,
             sdp_form: std::sync::Arc::new(AsWritten),
             node_capabilities: sip_message::generators::CapabilitySet::default(),
