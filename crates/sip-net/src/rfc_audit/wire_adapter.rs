@@ -651,12 +651,9 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
 /// (`rfc_rules::rules::cancel`) at this bind's vantage — **informational, never
 /// gating** (ADR-0028).
 ///
-/// The live policy this bind adds to the rule body: the finding is advisory,
-/// because the SUT's bounded hold deliberately sends a pre-1xx CANCEL once the
-/// branch stays response-less past the grace window, so a literal §9.1 breach
-/// is sanctioned policy here rather than a defect class; and a `{Proxy}`-only
-/// declared lane is skipped, because a transparent relay forwards the upstream
-/// UAC's CANCEL at the upstream's timing. No relay-lane skip beyond that: a
+/// The live policy this bind adds to the rule body: the finding is advisory;
+/// and a `{Proxy}`-only declared lane is skipped, because a transparent relay
+/// forwards the upstream UAC's CANCEL at the upstream's timing. No relay-lane skip beyond that: a
 /// B2BUA/AS authors its own b-leg CANCEL and is judged on it.
 pub struct CancelAfter1xxRule;
 
@@ -1169,9 +1166,7 @@ impl CrossMessageAuditRule for RecordRoutePlacementRule {
 ///
 /// The live policy this bind adds to the rule body: surfaced at the TAKER (the
 /// bind that asked is where the missing echo is observed, and the far server is
-/// charged); the finding is advisory, because the source-port lookup only fires
-/// under NAT and there is none on 127.0.0.1, so a loopback fake stack that omits
-/// the echo is not defective; and the relay-lane skip.
+/// charged); the finding is advisory; and the relay-lane skip.
 pub struct RportEchoRule;
 
 impl CrossMessageAuditRule for RportEchoRule {
@@ -1594,10 +1589,7 @@ impl CrossMessageAuditRule for NoTarget404Rule {
 /// (`rfc_rules::rules::capability`) at this bind's vantage — **informational,
 /// never gating**.
 ///
-/// The live policy this bind adds to the rule body: the finding is advisory,
-/// because the B2BUA answers OPTIONS-keepalive probes (ADR-0008 two-tier
-/// OPTIONS) with a deliberately bare 200 — those are transport health checks,
-/// not §11.2 capability discovery.
+/// The live policy this bind adds to the rule body: the finding is advisory.
 pub struct OptionsResponseEchoesRule;
 
 impl CrossMessageAuditRule for OptionsResponseEchoesRule {
@@ -1977,9 +1969,7 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
 ///
 /// The live policy this bind adds to the rule body: subject `{Proxy}`, because
 /// §16.7 binds proxies and a UAS answering an INVITE is governed by §8.2.6; and
-/// the finding is **advisory**, because a paused test clock lets a fixture
-/// advance far past the grace in VIRTUAL time before it answers, which is no
-/// real-world latency at all.
+/// the finding is **advisory**.
 pub struct Proxy100WithinGraceRule;
 
 impl CrossMessageAuditRule for Proxy100WithinGraceRule {
@@ -2858,9 +2848,7 @@ impl CrossMessageAuditRule for AnswerStreamMatchesOfferRule {
 /// relay-lane skip, because origin continuity is a per-ORIGINATOR invariant — a
 /// transparent proxy's sent stream legitimately interleaves both agents'
 /// origins on one Call-ID. And the finding is **advisory**: a B2BUA re-offers
-/// under an origin of its own, and the shared SDP fixtures are constants
-/// several agents reuse, so the rule fires on fixture data as much as on stack
-/// behaviour. Gating waits on one session per agent in the fixtures.
+/// under an origin of its own.
 pub struct SdpOriginContinuityRule;
 
 impl CrossMessageAuditRule for SdpOriginContinuityRule {
@@ -3438,10 +3426,9 @@ impl CrossMessageAuditRule for PayloadTypeMappingStableRule {
 // taker — the bind is the vantage, the far party is charged, and the recording
 // is the only place that party's stream is checked at all.
 //
-// Two things the predecessor peer trait supplied come from the merged model
-// instead: subject dispatch and the advisory flag stay per-rule below (the
-// cross-message trait carries both), and the offending wire position — which a
-// peer finding could never state — now falls out of the finding's anchor.
+// Subject dispatch and the advisory flag stay per-rule below (the
+// cross-message trait carries both), and the offending wire position falls out
+// of the finding's anchor.
 
 /// RFC 3261 §8.1.1.7 live: the merged `branch-prefix` rule at this bind's
 /// vantage — the sender mints the branch, so the bind is charged for what it

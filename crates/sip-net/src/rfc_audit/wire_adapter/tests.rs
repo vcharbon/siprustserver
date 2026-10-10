@@ -917,9 +917,8 @@ fn a_request_for_an_unknown_dialog_is_flagged_on_the_lane_that_served_it() {
     assert_eq!(out[0].2, Some(4), "offending points at the BYE it served");
 }
 
-/// §16.3: advisory, `{Proxy}`-only, and — the regression this rule exists
-/// for — a §16.6 forward on a FRESH branch is a resolved target, not a
-/// no-target outcome.
+/// §16.3: advisory, `{Proxy}`-only, and a §16.6 forward on a FRESH branch
+/// is a resolved target, not a no-target outcome.
 #[test]
 fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
     assert!(NoTarget404Rule.force_advisory());
