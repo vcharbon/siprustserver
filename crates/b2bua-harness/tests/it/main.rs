@@ -11,8 +11,6 @@
 //! `cargo nextest run --workspace -E 'package(=b2bua-harness) & binary(it)' <module>::<name>`.
 
 // Shared fixtures, reached from a test module as `crate::common::…`.
-mod common;
-
 mod ack_body_relayed;
 mod ack_header_relay;
 mod admit_owes_release;
@@ -40,6 +38,7 @@ mod cancel_while_waiting_for_a_permit;
 mod capacity_admission;
 mod cdr_write_before_remove;
 mod charging_in_dialog_invites;
+mod common;
 mod coverage_doc;
 mod crossing_2xx_repeat_is_a_write;
 mod decision_context;
@@ -196,6 +195,7 @@ mod unacked_reinvite_2xx_reap;
 mod unanswered_at_release;
 mod unparseable_final;
 mod unreadable_routing_target;
+mod unrelayed_in_dialog_request;
 mod unroutable;
 mod unrung_answer_dialog_identity;
 mod unwired_store;

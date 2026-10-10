@@ -270,6 +270,7 @@ impl ActionExecutor<'_> {
             return;
         }
         let Some(method) = in_dialog_method(req.method()) else {
+            self.refuse_unrelayable(call, fx, ctx, req);
             return;
         };
         let Some(t_idx) = leg_index(call, target_leg) else {
@@ -453,6 +454,37 @@ impl ActionExecutor<'_> {
             leg_id: Some(target_leg.to_string()),
             provenance: Provenance::Relayed,
         });
+    }
+}
+
+impl ActionExecutor<'_> {
+    /// Answer `req`, a request of a method this stack relays in no dialog,
+    /// so its sender is not left to run out Timer F (RFC 3261 §8.2,
+    /// §17.2.2): a SUBSCRIBE draws `489 Bad Event`, as this stack serves no
+    /// event package (RFC 6665 §4.2.1.2); any other method `405` with the
+    /// node's `Allow` (§8.2.1), the node's answer to a method it does not
+    /// serve.
+    fn refuse_unrelayable(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        req: &SipRequest,
+    ) {
+        if req.method() == Method::Subscribe {
+            self.respond(call, fx, ctx, 489, "Bad Event", &[], None, vec![]);
+            return;
+        }
+        let allow = self
+            .config
+            .node_capabilities
+            .allow_text()
+            .unwrap_or_else(|| generators::B2BUA_ALLOW.to_string());
+        let allow = SipHeader {
+            name: sip_message::SipStr::owned(HeaderName::Allow.as_wire_str()),
+            value: sip_message::SipStr::owned(&allow),
+        };
+        self.respond(call, fx, ctx, 405, "Method Not Allowed", &[], None, vec![allow]);
     }
 }
 

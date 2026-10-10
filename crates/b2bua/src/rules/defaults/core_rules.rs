@@ -1476,6 +1476,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-notify", &[], Match::request().method("NOTIFY"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
+        // An in-dialog request of a method this stack models no relay for (a
+        // SUBSCRIBE, a PUBLISH, a REGISTER, an extension method) goes to the
+        // relay too, which answers it locally (489 to a SUBSCRIBE, else 405):
+        // no request is left to run out its sender's Timer F (RFC 3261 §8.2).
+        rule(
+            "relay-unmodelled",
+            &[],
+            Match::request().filter(|ctx| ctx.request().is_some_and(|r| unmodelled(r.method()))),
+            |_| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
+        ),
         // ── lifecycle ───────────────────────────────────────────────────────
         // RFC 3261 §9: a CANCEL targets the one pending INVITE **transaction**
         // it matched — cancelling a re-INVITE ends that renegotiation, not the
@@ -2135,6 +2145,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
 
 /// The three `RAck` tokens a PRACK carries (RFC 3262 §7.2), or `None` when it
 /// carries no readable `RAck`.
+/// Whether `method` is one no relay rule models: neither a method the
+/// in-dialog relay builds nor an ACK or CANCEL, which have their own.
+fn unmodelled(method: &Method) -> bool {
+    !matches!(method, Method::Ack | Method::Cancel)
+        && sip_message::generators::InDialogMethod::try_from(method).is_err()
+}
+
 fn rack_tokens(req: &SipRequest) -> Option<RAckTokens> {
     let rack = req.header::<RAck>().and_then(Result::ok)?;
     Some(RAckTokens {
