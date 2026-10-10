@@ -66,8 +66,7 @@ pub struct CallConfig {
     /// environment axis shared with the e2e framework (`EndpointConfig.egress`):
     /// [`EgressPolicy::Transparent`] when the SUT routes the callee itself,
     /// [`EgressPolicy::ApiCallPin`] to pin the b-leg back to the static `uas`
-    /// endpoint (`--route-pin-to-uas`). Replaces the hand-rolled
-    /// route/refer `X-Api-Call` pins.
+    /// endpoint (`--route-pin-to-uas`).
     pub egress: EgressPolicy,
     pub options_hold: Duration,
     pub options_cadence: Duration,
@@ -103,7 +102,7 @@ pub struct CallTuning {
     pub drop_nth: Option<crate::mux::TargetedDrop>,
 }
 
-/// Driver construction config.
+/// The settings [`Driver::new`] builds a driver from.
 pub struct DriverCfg {
     pub cps: f64,
     pub duration: Duration,
@@ -251,7 +250,8 @@ impl MixEntry {
     }
 }
 
-/// The load driver.
+/// Offers calls at the live CPS target, one task per call picked from the
+/// weighted mix, shedding a call when `max_in_flight` calls are running.
 pub struct Driver {
     /// The live-tunable offered rate (milli-cps under the hood). Seeded from
     /// `cfg.cps`; `POST /rate` re-targets it and the governor re-anchors its grid.

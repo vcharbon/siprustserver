@@ -13,7 +13,7 @@ fn rfc_fail(rule: &str, detail: &str) -> CallOutcome {
 
 /// The chaos dimension splits a failure class into independent near/clear
 /// sub-buckets across counts, the Prometheus surface, and the on-disk dirs;
-/// the un-tagged `count` still sums both (so existing summaries are intact).
+/// the un-tagged `count` still sums both.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn chaos_splits_counts_samples_and_dirs() {
@@ -267,8 +267,8 @@ fn the_index_counts_an_accepted_reject_as_ok() {
 
 /// The case dimension splits ONE class into per-failure-mode sample buckets:
 /// two different RFC rules on the same scenario each keep their own first-N
-/// samples (the whole point — N samples of the first rule to fire no longer
-/// starve a second, rarer rule), and the counts table carries the case.
+/// samples (N samples of the first rule to fire never starve a second,
+/// rarer rule), and the counts table carries the case.
 #[test]
 #[ignore = "slow lane: loadgen"]
 fn case_splits_sample_buckets_within_a_class() {
@@ -487,7 +487,7 @@ async fn final_write_is_not_overwritten_by_snapshot_task() {
     r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default()).unwrap();
     assert!(read_finished(&out), "final write says finished:true");
 
-    // The regression: advance past several more would-be ticks — a leaked
+    // Advance past several more would-be ticks — a leaked
     // task would overwrite the final index with a finished:false snapshot.
     for _ in 0..5 {
         tokio::time::advance(Duration::from_secs(1)).await;

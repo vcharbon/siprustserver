@@ -4,11 +4,9 @@
 //! [`ShapeRegistry`] (and, if needed, the per-run [`ScenarioInputs`]) as a
 //! parameter instead of hardcoding [`ShapeRegistry::with_defaults`].
 //!
-//! This is the open-registry seam: ADR-0021 (b) made the shape registry OPEN
-//! (`ShapeRegistry::empty().register(…)` lets a third-party crate add shapes
-//! without patching the workspace), but the shipped bin constructed the
-//! registry inline, so a downstream load bin's only options were forking the
-//! whole bin or nothing. With this module a third-party bin is:
+//! This is the open-registry seam: the shape registry is OPEN (ADR-0021 (b):
+//! `ShapeRegistry::empty().register(…)` lets a third-party crate add shapes
+//! without patching the workspace). A third-party bin is:
 //!
 //! ```ignore
 //! #[tokio::main(flavor = "multi_thread")]

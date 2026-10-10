@@ -99,7 +99,7 @@ async fn calltxns_absorbs_duplicate_prack_and_reanswers() {
 
 /// RFC 3262 §3: a RELIABLE provisional we send (Require:100rel + RSeq) is
 /// retransmitted until the matching PRACK (RAck response-num = its RSeq)
-/// arrives — the gap that made a dropped reliable 183 unrecoverable (the
+/// arrives — otherwise a dropped reliable 183 is unrecoverable (the
 /// peer's INVITE resender already stopped on the 100 Trying). A plain 18x
 /// stays best-effort (never proactively retransmitted).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -181,7 +181,7 @@ fn ack_req(branch: &str, cseq: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Always-display re-emission (the invisible-recovery gap): the send tap sees
+/// Always-display re-emission: the send tap sees
 /// EVERY recovery frame the engine puts on the wire, tagged by kind — the
 /// proactive Timer A/E/G retransmit, the reactive re-ACK on a duplicate 2xx,
 /// and the reactive re-answer to a duplicate request. Without it these hit the

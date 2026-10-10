@@ -58,7 +58,7 @@ pub struct RenderedSample {
 // Reporter
 // ---------------------------------------------------------------------------
 
-/// Reporter config.
+/// The sample bounds of a [`Reporter`].
 #[derive(Clone)]
 pub struct ReporterCfg {
     /// Max stored callflow samples per `(scenario, class)` bucket.
@@ -189,7 +189,6 @@ impl Reporter {
         }
     }
 
-    /// `(received, expected)` for the cross-call 18x-delivery gate.
     /// Fold one sampled call's per-waiver used mask into its scenario's CAMPAIGN
     /// tally (ADR-0024 §6). `waivers` is the call's stable merged waiver list
     /// (case + plan); `used` is aligned to it. Idempotent to call on an
@@ -222,6 +221,7 @@ impl Reporter {
             .collect()
     }
 
+    /// `(received, expected)` for the cross-call 18x-delivery gate.
     pub fn ringing_totals(&self) -> (u64, u64) {
         (
             self.ringing_received.load(Ordering::Relaxed),
