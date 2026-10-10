@@ -1,10 +1,10 @@
 //! The **executor**: a plan instance driven over the scenario harness.
 //!
 //! The whole job (`PCAP2TEST_PIVOT_V3.md` §14) and nothing beside it: bind the
-//! endpoints the lane supplies, sequence the flow through [`Cursor`], emit what
-//! a `send` states through [`LegStack`], gate an `expect` through [`gate`],
-//! answer `background` without moving the cursor, record every datagram
-//! verbatim, settle, and evaluate `postconditions`.
+//! endpoints the lane supplies, sequence the flow through
+//! [`Cursor`](crate::cursor::Cursor), emit what a `send` states through [`LegStack`], gate an
+//! `expect` through [`gate`](crate::gate), answer `background` without moving the cursor, record
+//! every datagram verbatim, settle, and evaluate `postconditions`.
 //!
 //! **A datagram that does not match is a failure.** The agents drop to the raw
 //! wire so nothing is absorbed beneath the interpreter, and the ONE §17.2
