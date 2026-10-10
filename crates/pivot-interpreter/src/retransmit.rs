@@ -382,9 +382,8 @@ impl Repeats {
     /// Register the datagram `step` put on the wire or matched, with the count
     /// the document declares for it.
     ///
-    /// A BYE an expect claims is the SUT ending a dialog (RFC 3261 §15): every
-    /// ladder of a 2xx the SUT ran to a re-INVITE of ours on that dialog stops
-    /// there, so the claim closes them ([`StepLadder::ended_by_emitters_bye`]).
+    /// A BYE an expect claims closes every ladder of a 2xx the SUT ran to a
+    /// re-INVITE of ours on that dialog ([`StepLadder::ended_by_emitters_bye`]).
     /// The 2xx that created the dialog keeps its ladder to the ACK or the
     /// §13.3.1.4 give-up.
     pub fn claim(
@@ -529,18 +528,11 @@ impl Repeats {
     fn owed(&self, i: usize, run_end_us: u64) -> Option<u32> {
         let ladder = &self.ladders[i];
         match ladder.side {
-            // An ACK rides no timer, so a count on one is never a pacing: the
-            // core sends one per 2xx it received, and the paired final's OWN
-            // repeats are how many that is. A count read off the capture would
-            // assert the captured platform's ladder instead.
             // An ACK rides no timer on either side, so its count is the WIRE's
             // and never a pacing. Ours we produce, so the paired final's own
-            // repeats say how many (RFC 3261 §13.2.2.4). The SUT's is the SUT's:
-            // a copy arriving BEFORE its first ACK draws no second one — there
-            // is no ACK to re-send yet — so the number turns on a timing this
-            // module does not model, and it asserts one only where the DOCUMENT
-            // states it. The ladder still COUNTS either way, so a re-ACK lands
-            // in it instead of reaching the gate as a stray.
+            // repeats say how many (RFC 3261 §13.2.2.4). The ladder still
+            // COUNTS either way, so a re-ACK lands in it instead of reaching the
+            // gate as a stray.
             _ if ladder.draws_its_count() => match ladder.side {
                 LadderSide::Send => {
                     Some(self.paired_final(ladder).map_or(ladder.declared, |f| f.observed))

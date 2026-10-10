@@ -36,7 +36,7 @@ use sip_message::Method;
 use crate::plan::{CompiledStep, Discriminator, Plan};
 use crate::program::ItemKind;
 
-/// Where one step stands.
+/// Where one step stands; every status but `Pending` is settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
     /// Not yet done: waiting to be armed, armed, or in flight.
@@ -636,7 +636,7 @@ impl<'p> Cursor<'p> {
         }
     }
 
-    /// Whether every item has completed.
+    /// Whether every top-level item has completed.
     pub fn is_done(&self) -> bool {
         self.items.iter().all(|s| *s == ItemStatus::Complete)
     }

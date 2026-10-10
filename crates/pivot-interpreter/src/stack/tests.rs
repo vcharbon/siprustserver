@@ -1215,7 +1215,7 @@ fn an_update_that_cannot_tell_which_fork_it_rides_is_refused_by_name() {
         })
     );
     // A leg that has rung NO fork and confirmed no dialog has no dialog at
-    // all, which is the older refusal and stands.
+    // all.
     let mut fresh = stack("B", "r1a2b3");
     assert_eq!(
         fresh.update(None, &[], Vec::new(), None, None),

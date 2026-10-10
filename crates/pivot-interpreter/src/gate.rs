@@ -303,11 +303,6 @@ pub fn body_content_holds(
         return GateVerdict::Matches;
     }
     if let Some((reason, bug)) = body_holds(&step.msg, inbound) {
-        // A body miss the LANE declared a known bug for is left out of the
-        // match, for the reason a differing header is: rejecting the datagram
-        // abandons the leg and hides every step behind the symptom, where
-        // recording says the same thing and lets the run go on. What it found
-        // is [`waived_body_findings`].
         if !bug.is_some_and(|bug| scope.waives(bug)) {
             return GateVerdict::Rejects(reason);
         }

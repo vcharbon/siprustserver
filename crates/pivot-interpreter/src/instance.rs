@@ -32,7 +32,6 @@ use crate::state::{LegState, RunState, StepOutcome};
 pub struct Instance<'p> {
     plan: &'p Plan,
     config: RunConfig,
-    /// This instance's dialog-identity nonce.
     nonce: String,
     state: RunState,
     cursor: Cursor<'p>,
@@ -187,7 +186,7 @@ impl<'p> Instance<'p> {
         self.claims.claim(endpoint, ruri_user, inbound)
     }
 
-    /// Count a message a background policy answered.
+    /// Count one message the background policy at `index` answered.
     pub fn note_background_answered(&mut self, index: usize) {
         self.background.note_answered(index);
     }

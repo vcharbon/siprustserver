@@ -152,7 +152,8 @@ pub struct Context<'a> {
     pub call_headers: &'a BTreeMap<String, String>,
 }
 
-/// Compose `msg` for the wire.
+/// Compose `msg` for the wire: exactly what it states, plus the additions
+/// this module lists.
 pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, RenderError> {
     let Context { resolver, config, effects, composer, base_dir, media, leg, mscml, call_headers } =
         *cx;

@@ -153,7 +153,6 @@ struct LegView {
     took_final: Option<SipResponse>,
     /// The CSeq numbers this leg has ACKed.
     acked: BTreeSet<u32>,
-    /// Whether this leg has already sent a CANCEL for its INVITE.
     sent_cancel: bool,
     /// Whether a BYE crossed this leg in either direction: the dialog is over,
     /// or is being ended by the side that sent it.
@@ -199,7 +198,6 @@ struct LegView {
     /// Each holds a server transaction in Completed (RFC 3261 §17.2.1); the
     /// peer's ACK on that CSeq ends it (§17.1.1.3).
     sent_finals: BTreeMap<u32, (u16, u64)>,
-    /// Whether a CANCEL arrived for the INVITE this leg took.
     took_cancel: bool,
     /// Requests taken and not answered with a final, oldest first.
     unanswered: Vec<Open>,

@@ -299,7 +299,8 @@ impl LegStack {
         self.sent_invites.iter().map(|invite| invite.cseq().seq())
     }
 
-    /// The Call-ID this leg carries.
+    /// The Call-ID this leg carries: its [`dialog_identity`]'s, or the one the
+    /// last INVITE it took names.
     pub fn call_id(&self) -> &str {
         &self.dialog.call_id
     }
@@ -624,8 +625,8 @@ impl LegStack {
     ///
     /// RFC 3262 §3 gives every early dialog ONE space: its first reliable
     /// provisional seeds it and each later one is greater by exactly one, so a
-    /// document that states an unrelated number on the second — two forks of a
-    /// capture the cut folded into one — is renumbered onto the space it rides.
+    /// document that states an unrelated number on the second is renumbered
+    /// onto the space it rides.
     /// A number the document repeats retransmits its provisional and stands.
     fn pace_rseq(&self, tag: &str, extra: &mut [SipHeader]) {
         let Some(last) = self.early_rseq(tag) else { return };
@@ -809,9 +810,6 @@ impl LegStack {
         content_type: Option<String>,
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
-        // A response under a number this leg never sent is a lane fault, not a
-        // dialog fact; the newest INVITE keeps its ACK composable rather than
-        // failing the step over it.
         let invite = self
             .sent_invites
             .iter()

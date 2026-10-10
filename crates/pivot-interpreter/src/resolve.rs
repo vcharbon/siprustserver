@@ -122,7 +122,7 @@ impl<'a> Resolver<'a> {
         Ok(out)
     }
 
-    /// One accessor's value.
+    /// One accessor's value, or why this run cannot answer it.
     pub fn accessor(&self, accessor: &Accessor) -> Result<String, ResolveError> {
         let name = accessor.to_string();
         match accessor {

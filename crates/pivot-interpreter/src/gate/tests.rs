@@ -655,7 +655,7 @@ fn a_header_set_that_differs_leaves_the_match_and_names_each_header_with_both_si
         headers: vec![
             // Present, and carrying another value.
             Header { name: "Reason".into(), value: "Q.850;cause=31".into(), class: None },
-            // Absent altogether — the ticket's own shape.
+            // Absent altogether.
             Header {
                 name: "Content-Disposition".into(),
                 value: "session;handling=required".into(),
