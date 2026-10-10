@@ -732,10 +732,6 @@ impl<'a> Reading<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ack-body-after-complete-offer-answer
-// ---------------------------------------------------------------------------
-
 /// **RFC 3261 §13.2.2.4 — an ACK closing a completed offer/answer exchange
 /// carries NO body.** When the INVITE carried the offer and a non-failure
 /// response carried the answer, the round is over: §13.2.1 forbids a further
@@ -791,10 +787,6 @@ impl Obligation for AckBodyAfterCompleteOfferAnswer {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// final-2xx-answers-the-offer
-// ---------------------------------------------------------------------------
 
 /// **RFC 3261 §13.2.1 / RFC 3264 §6 — an offer is ANSWERED.** The answer to an
 /// offer a request carried rides a reliable non-failure message correlated to
@@ -865,10 +857,6 @@ impl Obligation for Final2xxAnswersTheOffer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// delayed-offer-answered-in-ack
-// ---------------------------------------------------------------------------
-
 /// **RFC 3261 §13.2.2.4 / §13.2.1 — a delayed offer is answered in the ACK.**
 /// Where the INVITE carried no offer, the 2xx carries it, and the ACK MUST
 /// carry the answer: it is the last message of the round, so an ACK without
@@ -914,10 +902,6 @@ impl Obligation for DelayedOfferAnsweredInAck {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// second-answer-repeats-the-first
-// ---------------------------------------------------------------------------
 
 /// **RFC 3261 §13.2.1 — one dialog carries ONE answer.** The peer treats the
 /// answer it receives as the answer and ignores every later description on that
@@ -980,10 +964,6 @@ impl Obligation for SecondAnswerRepeatsTheFirst {
     }
 }
 
-// ---------------------------------------------------------------------------
-// answer-stream-matches-offer
-// ---------------------------------------------------------------------------
-
 /// **RFC 3264 §6 — an accepted stream keeps the offer's media type AND
 /// transport protocol.** The answer holds one `m=` line per offered stream, in
 /// the offer's order; the `m=` line the answerer sends back for stream *i*
@@ -1033,10 +1013,6 @@ impl Obligation for AnswerStreamMatchesOffer {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// sdp-origin-continuity
-// ---------------------------------------------------------------------------
 
 /// **RFC 4566 §5.2 / RFC 3264 §8 — every session description an agent sends on
 /// one call describes the SAME session, and its `sess-version` counts the
@@ -1105,10 +1081,6 @@ impl Obligation for SdpOriginContinuity {
     }
 }
 
-// ---------------------------------------------------------------------------
-// no-new-offer-while-offer-pending
-// ---------------------------------------------------------------------------
-
 /// **RFC 3264 §5 — an agent holds ONE offer of its own outstanding at a time on
 /// a call.** An offer is answered before the next one goes out: the two ends
 /// agree on the media by walking rounds one at a time, and a second offer over
@@ -1153,10 +1125,6 @@ impl Obligation for NoNewOfferWhileOfferPending {
     }
 }
 
-// ---------------------------------------------------------------------------
-// answer-m-line-count-matches-offer
-// ---------------------------------------------------------------------------
-
 /// **RFC 3264 §6 — an answer holds exactly one `m=` line per offered stream.**
 /// The two ends index streams by position, so a rejected stream keeps its slot
 /// at port 0 and an added one is a re-offer's business, never an answer's. A
@@ -1194,10 +1162,6 @@ impl Obligation for AnswerMLineCountMatchesOffer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// answer-t-line-equals-offer
-// ---------------------------------------------------------------------------
-
 /// **RFC 3264 §6 — an answer repeats the offer's `t=` line.** The session's
 /// time bounds are the offerer's statement and the answer carries them back
 /// verbatim; a rewritten `t=` leaves the two ends disagreeing on when the
@@ -1231,10 +1195,6 @@ impl Obligation for AnswerTLineEqualsOffer {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// answer-media-type-matches-offer
-// ---------------------------------------------------------------------------
 
 /// **RFC 3264 §6.1 — the answer's stream at each offered position states that
 /// position's media type.** Streams pair by index, so an answer that puts video
@@ -1283,10 +1243,6 @@ impl Obligation for AnswerMediaTypeMatchesOffer {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// direction-pair-valid
-// ---------------------------------------------------------------------------
 
 /// The answer directions RFC 3264 §6.1 admits for an offered one:
 /// `sendonly→{recvonly,inactive}`, `recvonly→{sendonly,inactive}`,
@@ -1350,10 +1306,6 @@ impl Obligation for DirectionPairValid {
     }
 }
 
-// ---------------------------------------------------------------------------
-// rejected-stream-minimal-answer
-// ---------------------------------------------------------------------------
-
 /// **RFC 3264 §6 — an answer rejecting a stream still lists a media format.**
 /// Rejection is port 0 on an otherwise complete `m=` line: the format list is
 /// part of the line's grammar (RFC 4566 §5.14), so a bare `m=audio 0 RTP/AVP`
@@ -1396,10 +1348,6 @@ impl Obligation for RejectedStreamMinimalAnswer {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// re-offer-m-line-count-monotonic
-// ---------------------------------------------------------------------------
 
 /// **RFC 3264 §8 — an agent's later description carries at least as many `m=`
 /// lines as the one before it.** A stream is removed by keeping its slot at
@@ -1453,10 +1401,6 @@ impl Obligation for ReOfferMLineCountMonotonic {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// zero-port-propagation
-// ---------------------------------------------------------------------------
 
 /// **RFC 3264 §8 — a stream offered at port 0 is answered at port 0.** Port 0
 /// is the offerer disabling the stream; the answerer cannot revive it, and a
@@ -1514,10 +1458,6 @@ impl Obligation for ZeroPortPropagation {
         out
     }
 }
-
-// ---------------------------------------------------------------------------
-// payload-type-mapping-stable
-// ---------------------------------------------------------------------------
 
 /// True iff two `a=rtpmap` encodings name ONE binding, read as the media type
 /// under judgement spells them: the case-insensitive MIME subtype comparison of
@@ -1601,12 +1541,6 @@ impl Obligation for PayloadTypeMappingStable {
 // ---------------------------------------------------------------------------
 // The two obligations a description owes ON ITS OWN
 // ---------------------------------------------------------------------------
-//
-// Neither needs the round walk above: a description that no reader accepts, and
-// one that states two dispositions for one stream, are wrong before any peer
-// answers them. They stay in this file because RFC 3264 is one family and every
-// `sdp_doc` reading in this crate lives here — and, like every rule above, each
-// judges what an agent SENT.
 
 /// **RFC 3264 §5-6 / RFC 4566 §5 — a body sent as SDP satisfies the
 /// offer/answer grammar.** A real peer 488s a malformed description: no `v=0`
