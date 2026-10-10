@@ -1058,8 +1058,6 @@ impl ReplicationConnection for SimConnection {
         }
         self.in_dir.wake.notify_waiters();
         // Decode back from bytes — sim moves encoded `Vec<u8>`, never `Frame`.
-        // A decode failure here is a codec/test bug, not a peer condition;
-        // surface it as a clean close rather than panicking the actor.
         decode_frame(&bytes).ok()
     }
 
