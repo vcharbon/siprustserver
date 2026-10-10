@@ -58,8 +58,28 @@ test-cpu-quota:
 
 # ── review gates ───────────────────────────────────────────────────────
 
-lint:
+lint: file-size
     cargo clippy --workspace --all-targets
+
+# File-size budget: a first-party .rs file has at most 500 lines, a test file
+# 800, a file `file-size.allow` lists at most its listed size
+# (scripts/file-size.py). The pre-commit hook checks the staged files.
+file-size:
+    scripts/file-size.py
+
+# Lowers each allowlist entry to its file's size and removes the entries of
+# files under the limit; never raises nor adds one.
+file-size-update:
+    scripts/file-size.py --update
+
+# Every file over its limit, largest first, with its budget.
+large-files:
+    @scripts/file-size.py --report
+
+# The file-size lint on throwaway repositories, this repository's settings
+# included (under a second).
+file-size-check:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/file-size-check
 
 fmt:
     cargo fmt --all
