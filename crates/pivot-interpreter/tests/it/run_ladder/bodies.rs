@@ -175,38 +175,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
-/// The recorded lines of one leg, read back off the bundle as raw JSON so the
-/// on-disk encoding itself is what the rung asserts, not a decoder's reading
-/// of it.
-pub(crate) fn recorded_lines(dir: &std::path::Path, leg: &str) -> Vec<serde_json::Value> {
-    let text = std::fs::read_to_string(dir.join(format!("recording/{leg}.jsonl")))
-        .unwrap_or_else(|e| panic!("recording/{leg}.jsonl: {e}"));
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}")))
-        .collect()
-}
-
-/// The datagram a recorded line carries, reassembled from whichever of the
-/// three arms the line wrote (`raw` | `head` + `body_b64` | `raw_b64`).
-pub(crate) fn recorded_wire(line: &serde_json::Value) -> Vec<u8> {
-    use base64::Engine as _;
-    let b64 = |key: &str| {
-        base64::engine::general_purpose::STANDARD
-            .decode(line[key].as_str().unwrap_or_else(|| panic!("{key} is a string: {line}")))
-            .unwrap_or_else(|e| panic!("{key} decodes: {e}"))
-    };
-    if let Some(raw) = line["raw"].as_str() {
-        return raw.as_bytes().to_vec();
-    }
-    if let Some(head) = line["head"].as_str() {
-        let mut out = head.as_bytes().to_vec();
-        out.extend(b64("body_b64"));
-        return out;
-    }
-    b64("raw_b64")
-}
-
 /// The one recorded line on `leg`, in `dir`, whose datagram starts with `prefix`.
 fn recorded_line<'a>(
     lines: &'a [serde_json::Value],
