@@ -176,69 +176,7 @@ impl<'a> Reading<'a> {
 
         match &msg.kind {
             Kind::Request { method } if method.eq_ignore_ascii_case("ACK") => {
-                // An ACK rides the INVITE transaction, and the agent that sent
-                // the ACK is the one that sent that INVITE.
-                let round_key = RoundKey {
-                    cseq: msg.cseq,
-                    method: "INVITE".to_string(),
-                    request_sent_by_agent: sent,
-                };
-                let round = state.round_at.get(&round_key).map(|i| &state.rounds[*i]);
-                let slot = (msg.cseq, sent, dialog);
-                if sent && !state.offered_reliably.contains(&slot) {
-                    if let Some(ri) = state.delayed_at.get(&slot) {
-                        self.delayed_acks.push(DelayedAck {
-                            msg: mi,
-                            src: msg.src.as_str(),
-                            dst: msg.dst.as_str(),
-                            cseq: msg.cseq,
-                            offer: state.rounds[*ri].offer,
-                            answered: has_doc,
-                            body_known: msg.body.is_some(),
-                        });
-                    }
-                }
-                let outcome = match (round, msg.body.is_some(), has_doc) {
-                    (_, false, _) => AckRound::BodyUnknown,
-                    (_, true, false) => AckRound::NoDescription,
-                    (Some(r), true, true) => match r.answered.get(dialog) {
-                        Some(answer) => AckRound::Closed { offer: r.offer, answer: *answer },
-                        None => AckRound::Open,
-                    },
-                    (None, true, true) => {
-                        // §13.2.1 delayed offer: the 2xx carried it and this ACK
-                        // carries the answer, which is the round's second half,
-                        // not a third description.
-                        match state.delayed_at.remove(&(msg.cseq, sent, dialog)) {
-                            Some(ri) => {
-                                state.rounds[ri].answered.insert(dialog, mi);
-                                if sent {
-                                    let offer = state.rounds[ri].offer;
-                                    let offer_cseq = state.rounds[ri].offer_cseq;
-                                    self.answers.push(Answered {
-                                        msg: mi,
-                                        src: msg.src.as_str(),
-                                        dst: msg.dst.as_str(),
-                                        offer,
-                                        offer_cseq,
-                                    });
-                                }
-                                AckRound::Open
-                            }
-                            None => AckRound::RoundUnknown,
-                        }
-                    }
-                };
-                if !sent {
-                    return; // the ACK's sender owns the occasion, on its own slot
-                }
-                self.acks.push(AckSighting {
-                    msg: mi,
-                    src: msg.src.as_str(),
-                    dst: msg.dst.as_str(),
-                    cseq: msg.cseq,
-                    round: outcome,
-                });
+                self.absorb_ack(state, mi, msg, sent, dialog, has_doc);
             }
             Kind::Request { method } => {
                 if !has_doc {
@@ -366,5 +304,78 @@ impl<'a> Reading<'a> {
                 }
             }
         }
+    }
+
+    /// The ACK half of [`Self::absorb`]: the delayed-offer answer it carries,
+    /// and the round it acknowledges as the sender saw it.
+    fn absorb_ack(
+        &mut self,
+        state: &mut AgentState<'a>,
+        mi: usize,
+        msg: &'a Msg,
+        sent: bool,
+        dialog: &'a str,
+        has_doc: bool,
+    ) {
+        // An ACK rides the INVITE transaction, and the agent that sent
+        // the ACK is the one that sent that INVITE.
+        let round_key =
+            RoundKey { cseq: msg.cseq, method: "INVITE".to_string(), request_sent_by_agent: sent };
+        let round = state.round_at.get(&round_key).map(|i| &state.rounds[*i]);
+        let slot = (msg.cseq, sent, dialog);
+        if sent && !state.offered_reliably.contains(&slot) {
+            if let Some(ri) = state.delayed_at.get(&slot) {
+                self.delayed_acks.push(DelayedAck {
+                    msg: mi,
+                    src: msg.src.as_str(),
+                    dst: msg.dst.as_str(),
+                    cseq: msg.cseq,
+                    offer: state.rounds[*ri].offer,
+                    answered: has_doc,
+                    body_known: msg.body.is_some(),
+                });
+            }
+        }
+        let outcome = match (round, msg.body.is_some(), has_doc) {
+            (_, false, _) => AckRound::BodyUnknown,
+            (_, true, false) => AckRound::NoDescription,
+            (Some(r), true, true) => match r.answered.get(dialog) {
+                Some(answer) => AckRound::Closed { offer: r.offer, answer: *answer },
+                None => AckRound::Open,
+            },
+            (None, true, true) => {
+                // §13.2.1 delayed offer: the 2xx carried it and this ACK
+                // carries the answer, which is the round's second half,
+                // not a third description.
+                match state.delayed_at.remove(&(msg.cseq, sent, dialog)) {
+                    Some(ri) => {
+                        state.rounds[ri].answered.insert(dialog, mi);
+                        if sent {
+                            let offer = state.rounds[ri].offer;
+                            let offer_cseq = state.rounds[ri].offer_cseq;
+                            self.answers.push(Answered {
+                                msg: mi,
+                                src: msg.src.as_str(),
+                                dst: msg.dst.as_str(),
+                                offer,
+                                offer_cseq,
+                            });
+                        }
+                        AckRound::Open
+                    }
+                    None => AckRound::RoundUnknown,
+                }
+            }
+        };
+        if !sent {
+            return; // the ACK's sender owns the occasion, on its own slot
+        }
+        self.acks.push(AckSighting {
+            msg: mi,
+            src: msg.src.as_str(),
+            dst: msg.dst.as_str(),
+            cseq: msg.cseq,
+            round: outcome,
+        });
     }
 }
