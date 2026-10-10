@@ -6,7 +6,7 @@ use sip_message::{Method, SipMessage};
 use super::completion::outcome_of;
 use super::ladders::drawn_key;
 use super::Runner;
-use crate::close::{self};
+use crate::close;
 use crate::deviation::StepEffects;
 use crate::gate::Inbound;
 use crate::plan::{CompiledStep, Discriminator};
