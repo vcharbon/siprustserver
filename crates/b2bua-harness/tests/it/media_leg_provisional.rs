@@ -5,6 +5,7 @@
 //! the caller is sent nothing, no caller-facing tag is mapped to it, and the
 //! callee dialled after the media leg still rings the caller.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
@@ -18,10 +19,6 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const MRF_SDP: &str = "v=0\r\no=mrf 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const DEST_SDP: &str = "v=0\r\no=dest 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
-const ALICE: &str = "127.0.0.1:6731";
-const MRF_PORT: u16 = 6732;
-const DEST_PORT: u16 = 6733;
-const B2BUA: &str = "127.0.0.1:6734";
 const ORDINAL: &str = "w0";
 const CALL_ID: &str = "media-leg-provisional@127.0.0.1";
 const FROM_TAG: &str = "alice-tag";
@@ -49,23 +46,25 @@ enum Ring {
 }
 
 /// A route that defers to the announcement service: a media leg to the media
-/// server first, then the destination.
-fn decision(shape: Shape) -> Arc<ScriptedDecisionEngine> {
+/// server at `mrf` first, then the destination at `dest`.
+fn decision(shape: Shape, mrf: SocketAddr, dest: SocketAddr) -> Arc<ScriptedDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r: RouteDecision = match shape.strategy {
-                    Some(strategy) => route_to_with_18x("127.0.0.1", DEST_PORT, strategy),
-                    None => route_to("127.0.0.1", DEST_PORT),
+                    Some(strategy) => {
+                        route_to_with_18x(&dest.ip().to_string(), dest.port(), strategy)
+                    }
+                    None => route_to(&dest.ip().to_string(), dest.port()),
                 };
                 r.service_ext.insert(
                     "announcement".into(),
                     serde_json::json!({
                         "clip_id": "clip-1",
-                        "mrf_host": "127.0.0.1",
-                        "mrf_port": MRF_PORT,
-                        "dest_host": "127.0.0.1",
-                        "dest_port": DEST_PORT,
+                        "mrf_host": mrf.ip().to_string(),
+                        "mrf_port": mrf.port(),
+                        "dest_host": dest.ip().to_string(),
+                        "dest_port": dest.port(),
                         "defer_routing": true,
                     }),
                 );
@@ -79,12 +78,12 @@ fn decision(shape: Shape) -> Arc<ScriptedDecisionEngine> {
 /// answers; the caller hangs up. Checks the model the media leg's 1xx leaves.
 async fn media_leg_rings_first(name: &str, shape: Shape) {
     let h = Harness::with_transit_delay(name, 1);
-    let alice = h.agent("alice", ALICE).await;
-    let mrf = h.agent("mrf", &format!("127.0.0.1:{MRF_PORT}")).await;
-    let dest = h.agent("dest", &format!("127.0.0.1:{DEST_PORT}")).await;
-    let b2bua = B2buaSut::builder(decision(shape))
+    let alice = h.agent_auto("alice").await;
+    let mrf = h.agent_auto("mrf").await;
+    let dest = h.agent_auto("dest").await;
+    let b2bua = B2buaSut::builder(decision(shape, mrf.addr(), dest.addr()))
         .services(vec![announcement::service()])
-        .start(&h, "b2bua", B2BUA)
+        .start(&h, "b2bua", &h.next_addr().to_string())
         .await;
 
     let mut call = alice
