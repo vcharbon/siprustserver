@@ -65,6 +65,14 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    would end (§12.2.1.2, RFC 5057 §5.2). An UPDATE with no relayable peer
    draws 491. A request from a leg its service owns that no rule takes draws
    403 (§21.4.4).
+7. **Each dialog numbers its own requests.** A dialog holds `our_cseq`, the
+   last CSeq this side sent there, and `peer_cseq`, the peer's last, which
+   serves the §12.2.2 order check alone and is set by the gate for every
+   request it passes. A relayed request takes the target dialog's next
+   number, `our_cseq + 1`, never a copy of or a distance from the sender's
+   (§12.2.1.1): a gap in the sender's sequence is not reproduced on the other
+   face. Our sequence on a caller-facing dialog starts at 1, as on a dialled
+   leg (§8.1.1.5 allows any start below 2³¹).
 
 ## Consequences
 
@@ -73,5 +81,8 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
 - Every turn can check the model whole: each dialog reachable by one pair of
   tags, at most one confirmed dialog per leg, every `fronts` naming a dialog
   the callee leg holds.
+- Each face of a call carries a contiguous run of this stack's own numbers;
+  a trace that maps a request across the call matches it by the relay
+  record, not by its CSeq.
 - A peer's BYE after its dialog ended — by its own BYE or by ours — draws
   481; only a BYE crossing ours while it is in flight is answered 200.
