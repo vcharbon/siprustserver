@@ -1,12 +1,12 @@
 use super::*;
 // A third-party registration test binds a plain LINEAR body — the last
-// in-tree use of the linear `BasicCall` now the shipped shapes are actors.
+// in-tree use of the linear `BasicCall`.
 use scenario_harness::actor::scenarios::BasicCall;
 
 #[test]
 fn defaults_register_one_id_space_with_both_surfaces() {
     let reg = ShapeRegistry::with_defaults();
-    // Load ids unchanged (report/metrics compatibility).
+    // Load ids (report/metrics compatibility).
     for id in [
         "basic_call",
         "reinvite",
@@ -23,7 +23,7 @@ fn defaults_register_one_id_space_with_both_surfaces() {
         let d = reg.get(id).unwrap_or_else(|| panic!("load shape {id:?} missing"));
         assert!(d.load.is_some(), "{id} carries a load body");
     }
-    // Functional ids unchanged; no load body.
+    // Functional ids; no load body.
     for id in ["basic-call", "basic-call-media", "rerouting", "transfer-refer-media"] {
         let d = reg.get(id).unwrap_or_else(|| panic!("functional shape {id:?} missing"));
         assert!(d.load.is_none(), "{id} is functional-only");
@@ -76,8 +76,7 @@ fn load_scenario_constructs_from_inputs() {
 }
 
 /// The boolean sugar expands to the default label list (role ==
-/// single prefix == label, bob → bob2 → charlie bind order), so every
-/// pre-legs shape drives the wire byte-identically.
+/// single prefix == label, bob → bob2 → charlie bind order).
 #[test]
 fn callee_legs_boolean_sugar_expands_to_the_historic_labels() {
     let flat = |legs: &[LegSpec]| -> Vec<(&str, Vec<&str>)> {

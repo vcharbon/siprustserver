@@ -219,8 +219,7 @@ impl ShapeDescriptor {
     /// The effective callee-leg declaration the load driver binds and demuxes
     /// from: [`legs`](Self::legs) verbatim when declared, else the default
     /// `[bob(, bob2)(, charlie)]` expansion of the boolean sugar (role ==
-    /// single prefix == label), so every pre-existing shape is byte-identical
-    /// on the wire.
+    /// single prefix == label).
     pub fn callee_legs(&self) -> &'static [LegSpec] {
         if !self.legs.is_empty() {
             return self.legs;
@@ -357,7 +356,7 @@ impl ShapeRegistry {
 
 /// Authoring parameters for the `rerouting` shape — the typed `input.extras`
 /// the editor suggests. All optional (defaults reproduce the canonical 486
-/// flow), so a case that sets none behaves exactly as before. Declared here —
+/// flow). Declared here —
 /// next to the shape's descriptor — and consumed by the functional body in
 /// `e2e-core` via `Input::params`.
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
@@ -424,8 +423,8 @@ const TRANSFER_ANCHORS: &[Anchor] = &[
 
 /// Every shipped shape, declared once. Grouped by surface:
 ///
-///  - **load-only** — the fallible real-call scenarios (report/metrics ids
-///    unchanged: `basic_call`, `reinvite`, …);
+///  - **load-only** — the fallible real-call scenarios (`basic_call`,
+///    `reinvite`, …);
 ///  - **functional-only** — the anchored e2e shapes (`basic-call`, `rerouting`,
 ///    …), whose `!Send` bodies `e2e-core` attaches by id;
 ///  - **dual-body** — `rerouting_prack`: ONE descriptor, both bodies.
@@ -485,9 +484,8 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(PRACK_ANCHORS)
             .default_weight(0.5)
             .load_actor_with(|_| Arc::new(cs::prack_update_early(cs::default_binder()))),
-        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier replace
-        // the one serialized coroutine. Same id, same anchors, same downstream
-        // contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
+        // ACTOR-executed: per-endpoint reactive actors + the ack-gated settle barrier;
+        // same downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3).
         ShapeDescriptor::new("refer")
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
