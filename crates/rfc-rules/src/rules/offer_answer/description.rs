@@ -71,7 +71,8 @@ impl Obligation for SdpBodyParseable {
 /// is not held at all.
 ///
 /// **One finding per DESCRIPTION**, naming every stream at fault: writing one
-/// body with contradictory dispositions is one act. Charges the sender.
+/// body with contradictory dispositions is one act. Charges the sender; the
+/// live row scopes it to the UAC.
 pub struct C0PortNonZero;
 
 impl Obligation for C0PortNonZero {
