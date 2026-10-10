@@ -1,8 +1,8 @@
 //! A leg's dialogs moving to the state its teardown records (RFC 3261 §15):
-//! this stack's BYE leaves a dialog `Ending`, the peer's BYE or the end of
+//! this stack's BYE leaves a dialog `Ending(Bye)`, the peer's BYE or the end of
 //! this stack's BYE transaction leaves it `Ended`.
 
-use call::{ByeDisposition, Call, DialogEnd, DialogState, Leg};
+use call::{ByeDisposition, Call, DialogEnd, DialogState, EndingBy, Leg};
 use sip_message::Method as SipMethod;
 
 use b2bua_sdk::model::RuleContext;
@@ -27,7 +27,7 @@ pub(super) fn end_dialogs(call: &mut Call, ctx: &RuleContext, leg_id: &str, bye:
     *call = call::helpers::update_leg(call.clone(), leg_id, |leg| match bye {
         ByeDisposition::ByeSent => {
             if let Some(d) = leg.dialogs.confirmed_mut() {
-                d.state = DialogState::Ending;
+                d.state = DialogState::Ending(EndingBy::Bye);
             }
         }
         ByeDisposition::ByeReceived => end_one(leg, bye_dialog.clone(), DialogEnd::PeerBye),

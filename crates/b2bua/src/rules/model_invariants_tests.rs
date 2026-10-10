@@ -174,7 +174,8 @@ fn a_confirmed_leg_without_a_confirmed_dialog_breaks_the_leg_confirmed_invariant
 fn a_confirmed_dialog_on_an_unconfirmed_leg_breaks_the_leg_confirmed_invariant() {
     let mut call = call();
     call.b_legs[0].state = LegState::Terminated;
-    call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state = DialogState::Ending;
+    call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state =
+        DialogState::Ending(call::EndingBy::Bye);
     assert_eq!(
         leg_confirmed_one_confirmed_dialog(&after(&call)),
         Ok(()),
@@ -191,7 +192,7 @@ fn two_confirmed_dialogs_on_a_leg_break_the_leg_confirmed_invariant() {
     call.b_legs[0].state = LegState::Confirmed;
     call.b_legs[0].dialogs.by_tags_mut("own", "b1").unwrap().state = DialogState::Confirmed;
     let mut fork = dialog("own", "b2");
-    fork.state = DialogState::Ending;
+    fork.state = DialogState::Ending(call::EndingBy::Bye);
     call.b_legs[0].dialogs.insert(fork);
     let err = leg_confirmed_one_confirmed_dialog(&after(&call)).unwrap_err();
     assert!(err.contains("leg b-1 is Confirmed"), "{err}");

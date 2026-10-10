@@ -182,9 +182,7 @@ impl ActionExecutor<'_> {
                     } else {
                         let relayed = relayed(&Method::Cancel, &id);
                         self.prack_relayed_unacknowledged(call, fx, &id, None);
-                        if let Some(e) = self.cancel_to_leg(call, &id, &relayed.headers) {
-                            fx.outbound.push(e);
-                        }
+                        self.send_cancel(call, fx, &id, &relayed.headers);
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::Cancelled);
                         // Same crossing-200 parity as `destroy_leg`: a ringing
                         // b-leg CANCELed by termination (e.g. `setup-timeout` +
@@ -267,9 +265,7 @@ impl ActionExecutor<'_> {
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
                 self.prack_relayed_unacknowledged(call, fx, leg_id, None);
-                if let Some(e) = self.cancel_to_leg(call, leg_id, &stated) {
-                    fx.outbound.push(e);
-                }
+                self.send_cancel(call, fx, leg_id, &stated);
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::Cancelled);
                 // Parity with the explicit `CancelLeg` path: mark the ringing leg
                 // `Cancelling` so a 200 OK that crosses this internally-originated
@@ -299,10 +295,7 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Leg(leg_id));
         let situation = RelaySituation::request(&Method::Cancel, relay::toward_leg(leg_id));
         self.prack_relayed_unacknowledged(call, fx, leg_id, None);
-        if let Some(e) = self.cancel_to_leg(call, leg_id, &relayed_teardown(ctx, situation).headers)
-        {
-            fx.outbound.push(e);
-        }
+        self.send_cancel(call, fx, leg_id, &relayed_teardown(ctx, situation).headers);
         *call = set_leg_disposition(call.clone(), leg_id, LegDisposition::Cancelling);
     }
 
@@ -649,7 +642,22 @@ impl ActionExecutor<'_> {
         self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
     }
 
-    pub(super) fn cancel_to_leg(
+    /// CANCEL `leg_id`'s INVITE carrying `relayed` (RFC 3261 §9.1): from the
+    /// moment it leaves, each early dialog of that INVITE is ending.
+    fn send_cancel(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        relayed: &[SipHeader],
+    ) {
+        if let Some(e) = self.cancel_to_leg(call, leg_id, relayed) {
+            fx.outbound.push(e);
+            *call = call::helpers::cancel_early_dialogs(call.clone(), leg_id);
+        }
+    }
+
+    fn cancel_to_leg(
         &self,
         call: &Call,
         leg_id: &str,

@@ -60,8 +60,8 @@ pub mod timer;
 pub use cdr::{CdrEvent, CdrEventType};
 pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{
-    Dialog, DialogEnd, DialogId, DialogState, Direction, PeerDialog, PendingRequest, RetiredDialog,
-    StragglerRelease, Unacked2xx,
+    Dialog, DialogEnd, DialogId, DialogState, Direction, EndingBy, PeerDialog, PendingRequest,
+    RetiredDialog, StragglerRelease, Unacked2xx,
 };
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};

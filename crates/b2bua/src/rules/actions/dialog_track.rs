@@ -5,7 +5,9 @@
 //! [`super::relay_response`] / [`super::relay_request`].
 
 use call::helpers::{callee_dialog, caller_dialog, caller_dialog_mut, fronting_dialog};
-use call::{Call, Dialog, DialogState, LegState, PeerDialog, RetiredDialog};
+use call::{
+    Call, Dialog, DialogState, EndingBy, LegDisposition, LegState, PeerDialog, RetiredDialog,
+};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
@@ -75,9 +77,16 @@ impl ActionExecutor<'_> {
         // preloaded bootstrap Route only and under-reproduces the route set (the
         // §12.2.1.1 audit catches it behind a front proxy).
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, source_leg_id);
+        // An early dialog opened behind this stack's CANCEL of the INVITE is
+        // ending from the start (RFC 3261 §9.1).
+        let state = if leg.disposition == LegDisposition::Cancelling {
+            DialogState::Ending(EndingBy::Cancel)
+        } else {
+            DialogState::Early
+        };
         *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
             leg.state = LegState::Early;
-            let mut d = Dialog::new(invite.our_tag, to_tag, DialogState::Early, invite.cseq);
+            let mut d = Dialog::new(invite.our_tag, to_tag, state, invite.cseq);
             d.pending_invite_txn = leg.pending_invite_txn.clone();
             d.remote_target = contact;
             d.route_set = route_set;

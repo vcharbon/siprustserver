@@ -26,7 +26,8 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    CSeq); each fork's dialog is minted from it, its own sequence starting at
    the INVITE's. A caller-facing dialog exists once the stack mints its tag.
 3. **A dialog carries its state**: `Early`, `Confirmed`, `Ending` (our BYE
-   in flight), `Ended(Rejected | PeerBye | OurBye)` and `Retired` — an early
+   of it, or our CANCEL of its INVITE, in flight; the INVITE's final ends a
+   cancelled one), `Ended(Rejected | PeerBye | OurBye)` and `Retired` — an early
    dialog the call let go of without a BYE (a losing fork, a caller-facing
    dialog the answer did not take, a leg given up before its INVITE's final),
    holding the relays still open in it and
@@ -45,13 +46,15 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
    |---|---|
    | none, or a caller-facing one the caller was never shown | 481 (§12.2.2) |
    | `Early`, `Confirmed` | pass |
-   | `Ending` | BYE, OPTIONS, PRACK pass; others 481 |
+   | `Ending` | BYE, PRACK pass; INFO, MESSAGE, NOTIFY, OPTIONS 200 here; others 487 (§21.4.25) |
    | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
    | `Ended(PeerBye \| OurBye)` | 481, a BYE included (§15.1.2) |
-   | `Retired` | 481, but a BYE crossing this stack's release of it |
+   | `Retired` | 481; one whose release BYE is in flight reads as `Ending` |
 
-   A live dialog of a call being torn down reads as `Ending`: its early
-   dialogs end by a CANCEL, not by a BYE of ours. A request below its
+   A dialog exists until the BYE or CANCEL ending it completes (§15.1.2), so
+   requests crossing it are answered in it: a 200 the gate sends goes no
+   further, and a 487 refuses what the dialog will no longer act on. A
+   request below its
    dialog's last CSeq draws 500 (§12.2.2). An ACK passes on any dialog a 2xx
    established, ended since or not (RFC 5407 §2), and is otherwise dropped
    unanswered (§17.1.1.3); a CANCEL is matched by transaction (§9.1). A
@@ -96,3 +99,5 @@ of). A positional read picks a wrong dialog as soon as a leg holds two.
   record, not by its CSeq.
 - A peer's BYE after its dialog ended — by its own BYE or by ours — draws
   481; only a BYE crossing ours while it is in flight is answered 200.
+- No gate cell reads the call's state: a call's teardown shows in its
+  dialogs, each `Ending` by the BYE or CANCEL this stack sent.

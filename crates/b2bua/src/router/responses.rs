@@ -1,7 +1,7 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
 //! call-layer-stateless store-fault 500, the 481 and 405 a request naming
-//! no call draws, the out-of-order 500, the retry-later 500 and the
-//! merged-request 482. The 503 refusing a new INVITE is the admission
+//! no call draws, the 200 and 487 an ending dialog answers, the out-of-order
+//! 500, the retry-later 500 and the merged-request 482. The 503 refusing a new INVITE is the admission
 //! ladder's ([`crate::admission::Refusals`]).
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
@@ -20,6 +20,25 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 /// `200 OK` to `req`, a request in a dialog, under the To-tag it carries.
 pub(super) fn build_200(req: &SipRequest) -> SipResponse {
     generate_response(req, 200, "OK", &GenerateResponseOpts::default())
+}
+
+/// `200 OK` to `req`, a request in a dialog, stating `advertisement` (RFC
+/// 3261 §11.2: an OPTIONS answer names what this stack supports).
+pub(super) fn build_200_advertising(
+    req: &SipRequest,
+    advertisement: &CapabilitySet,
+) -> SipResponse {
+    let opts = GenerateResponseOpts {
+        extra_headers: minted_final_lines(advertisement),
+        ..Default::default()
+    };
+    generate_response(req, 200, "OK", &opts)
+}
+
+/// `487 Request Terminated` to `req`, a request in a dialog this stack is
+/// ending by a BYE or a CANCEL (RFC 3261 §21.4.25).
+pub(super) fn build_487(req: &SipRequest) -> SipResponse {
+    generate_response(req, 487, "Request Terminated", &GenerateResponseOpts::default())
 }
 
 /// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming

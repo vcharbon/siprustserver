@@ -86,11 +86,12 @@ impl Dialogs {
     }
 
     /// The dialog a request toward the leg rides when no dialog of the leg is
-    /// named: the confirmed one, else the leg's only live dialog. `None` when
-    /// several early dialogs leave the choice open.
+    /// named: the confirmed one, else the leg's only dialog that carries
+    /// requests ([`Dialog::carries_requests`]). `None` when several early
+    /// dialogs leave the choice open.
     pub fn carrying(&self) -> Option<&Dialog> {
         self.confirmed().or_else(|| {
-            let mut live = self.0.iter().filter(|d| d.is_live());
+            let mut live = self.0.iter().filter(|d| d.carries_requests());
             let only = live.next()?;
             live.next().is_none().then_some(only)
         })

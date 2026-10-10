@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use call::helpers::{
     callee_dialog, find_b_leg, find_leg, unacknowledged_relayed_provisionals, OwedPrack,
 };
-use call::{Call, DialogState, Leg, LegDisposition, LegState, MessageDirection};
+use call::{Call, DialogState, EndingBy, Leg, LegDisposition, LegState, MessageDirection};
 use sip_message::{Method, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
@@ -123,7 +123,7 @@ fn leg_confirmed_one_confirmed_dialog(turn: &Turn<'_>) -> Result<(), String> {
         let confirmed: Vec<_> = leg.dialogs.iter().filter(|d| d.is_confirmed()).collect();
         let sound = match (leg.state, confirmed.as_slice()) {
             (LegState::Confirmed, [_]) => true,
-            (LegState::Terminated, [d]) => d.state == DialogState::Ending,
+            (LegState::Terminated, [d]) => d.state == DialogState::Ending(EndingBy::Bye),
             (LegState::Confirmed, _) => false,
             (_, other) => other.is_empty(),
         };
@@ -321,7 +321,8 @@ fn no_a_dialog_past_a_rejection(turn: &Turn<'_>) -> Result<(), String> {
 
 /// No dialog stays early once its INVITE is over (RFC 3261 §12.1, §12.1.2):
 /// past the final sent on the caller's INVITE, on a confirmed leg (the 2xx
-/// retired the other forks), and on an ended leg.
+/// retired the other forks), and on an ended leg unless this stack's CANCEL
+/// of that INVITE awaits its final (§9.1).
 fn no_early_dialog_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
     for leg in legs(turn.after) {
         let over = match leg.state {
@@ -331,7 +332,11 @@ fn no_early_dialog_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
             }
         };
         let Some(over) = over else { continue };
-        if let Some(d) = leg.dialogs.iter().find(|d| d.state == DialogState::Early) {
+        let early = |d: &&call::Dialog| match leg.state {
+            LegState::Terminated => d.state == DialogState::Early,
+            _ => d.awaits_invite_final(),
+        };
+        if let Some(d) = leg.dialogs.iter().find(early) {
             return Err(format!(
                 "leg {} ({over}) holds early dialog {}/{}",
                 leg.leg_id, d.our_tag, d.peer_tag

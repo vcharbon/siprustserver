@@ -580,16 +580,20 @@ fn arb_dialog_state() -> impl Strategy<Value = DialogState> {
     ];
     let retired = (
         proptest::collection::vec(arb_pending_request(), 0..2),
-        proptest::option::of(
-            (arb_tag(), arb_tag())
-                .prop_map(|(ack_branch, bye_branch)| StragglerRelease { ack_branch, bye_branch }),
-        ),
+        proptest::option::of((arb_tag(), arb_tag(), any::<bool>()).prop_map(
+            |(ack_branch, bye_branch, settled)| StragglerRelease {
+                ack_branch,
+                bye_branch,
+                settled,
+            },
+        )),
     )
         .prop_map(|(open_relays, release)| RetiredDialog { open_relays, release });
     prop_oneof![
         Just(DialogState::Early),
         Just(DialogState::Confirmed),
-        Just(DialogState::Ending),
+        Just(DialogState::Ending(EndingBy::Bye)),
+        Just(DialogState::Ending(EndingBy::Cancel)),
         end.prop_map(DialogState::Ended),
         retired.prop_map(DialogState::Retired),
     ]

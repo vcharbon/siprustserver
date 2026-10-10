@@ -158,8 +158,14 @@ pub(super) async fn process(
         // any of the machinery below reads it (RFC 3261 §12.2.2, ADR-0041).
         let resolved = match super::dialog_gate::admit(ctx, &call, &event, &res).await {
             super::dialog_gate::Gate::Pass(resolved) => resolved,
-            super::dialog_gate::Gate::Refused(answer) => {
-                record_refusal(ctx, call, &res.source_leg_id, &event, answer.as_deref(), now_ms);
+            super::dialog_gate::Gate::Answered { answer, in_order } => {
+                let leg = res.source_leg_id.as_str();
+                let call = match &in_order {
+                    Some(r) => super::dialog_gate::note_in_order(call, leg, r, &event),
+                    None => call,
+                };
+                let taken = in_order.is_some();
+                record_refusal(ctx, call, leg, &event, answer.as_deref(), taken, now_ms);
                 return;
             }
             super::dialog_gate::Gate::Dropped => return,
@@ -182,7 +188,7 @@ pub(super) async fn process(
         if let Some(answer) =
             reject_stray_cancel(ctx, &call, &res.source_leg_id, own_tag.as_deref(), &event).await
         {
-            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
+            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), false, now_ms);
             return;
         }
         // The limiter-refresh timer marks the call due on the worker's refresh
@@ -635,21 +641,50 @@ async fn reject_stray_cancel(
     Some(refusal)
 }
 
-/// A request refused on a live call's behalf is still a message of the
-/// call's: the ring records it and the answer as a turn of their own, and
-/// the record lands.
+/// A request the router answered on a live call's behalf is still a message
+/// of the call's: the ring records it and the answer as a turn of their own,
+/// and the record lands — also without a ring when the answer `changed` the
+/// record (a request taken in order sets its dialog's last CSeq).
 fn record_refusal(
     ctx: &RouterCtx,
     call: Call,
     leg_id: &str,
     event: &CallEvent,
     answer: Option<&sip_message::SipResponse>,
+    changed: bool,
     now_ms: i64,
 ) {
-    let Some(ring) = crate::message_ring::Ring::of(&ctx.config) else { return };
-    let CallEvent::Sip { message, .. } = event else { return };
-    let SipMessage::Request(req) = message.as_ref() else { return };
-    ctx.state.update(call::helpers::seal_turn(ring.refused(call, leg_id, req, answer, now_ms)));
+    let ring = crate::message_ring::Ring::of(&ctx.config);
+    let req = match event {
+        CallEvent::Sip { message, .. } => match message.as_ref() {
+            SipMessage::Request(req) => Some(req),
+            SipMessage::Response(_) => None,
+        },
+        _ => None,
+    };
+    let call = match (ring, req) {
+        (Some(ring), Some(req)) => {
+            call::helpers::seal_turn(ring.refused(call, leg_id, req, answer, now_ms))
+        }
+        _ if changed => call,
+        _ => return,
+    };
+    ctx.state.update(call);
+}
+
+/// The branch of a BYE client transaction `event` ends: a final to it, or a
+/// transaction timeout (whose branch names it alone).
+fn bye_transaction_end(event: &CallEvent) -> Option<&str> {
+    match event {
+        CallEvent::Sip { message, .. } => match message.as_ref() {
+            SipMessage::Response(r) if r.status() >= 200 && r.cseq().method() == Method::Bye => {
+                r.top_via().branch()
+            }
+            _ => None,
+        },
+        CallEvent::Timeout { branch, .. } => Some(branch.as_str()),
+        _ => None,
+    }
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the
@@ -762,6 +797,11 @@ pub(super) fn rule_chain_turn(
                 );
             }
         }
+    }
+    // The end of a BYE that released a retired dialog, its final or its
+    // timeout, settles that release (§15.1.1) before the rules read it.
+    if let Some(branch) = bye_transaction_end(event) {
+        call = call::helpers::settle_straggler_release(call, branch);
     }
     // The transaction layer answered an out-of-dialog CANCEL itself — 200 to
     // the CANCEL, 487 to the initial INVITE (RFC 3261 §9.2): the record

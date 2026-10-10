@@ -125,7 +125,7 @@ impl ActionExecutor<'_> {
         };
         fx.outbound.push(bye);
         straggler.our_cseq += 1;
-        let release = StragglerRelease { ack_branch, bye_branch };
+        let release = StragglerRelease { ack_branch, bye_branch, settled: false };
         match &mut straggler.state {
             DialogState::Retired(r) => r.release = Some(release),
             state => {

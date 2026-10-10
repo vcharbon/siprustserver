@@ -11,25 +11,31 @@
 //! |---|---|
 //! | none, or a caller-facing one the caller was never shown | 481 |
 //! | `Early`, `Confirmed` | pass |
-//! | `Ending` (this side's BYE in flight) | BYE, OPTIONS, PRACK pass; others 481 |
+//! | `Ending` (this side's BYE or CANCEL in flight) | see below |
 //! | `Ended(Rejected)` | PRACK passes (RFC 3262 §3); others 481 |
 //! | `Ended` by a BYE | 481, a BYE included (§15.1.2) |
-//! | `Retired` | 481, but a BYE crossing this stack's release of it |
+//! | `Retired` | 481; one whose release BYE is in flight reads as `Ending` |
 //!
-//! A live dialog of a call this stack is ending reads as `Ending`. A request
-//! below its dialog's last CSeq draws 500 (§12.2.2); one the gate passes sets
-//! that last CSeq ([`note_in_order`]). An ACK passes on a dialog
+//! A dialog this side is ending still exists until its BYE or its INVITE
+//! takes a final (§15.1.2): a BYE crossing ours and a PRACK pass to their
+//! rules; an INFO, MESSAGE, NOTIFY or OPTIONS is answered 200 here and goes
+//! no further; any other request, an INVITE, UPDATE, REFER or SUBSCRIBE among
+//! them, is answered 487 (§21.4.25). A request below its dialog's last CSeq
+//! draws 500 (§12.2.2); one the gate passes or answers sets that last CSeq
+//! ([`note_in_order`]). An ACK passes on a dialog
 //! a 2xx established, ended by a BYE since or not (RFC 5407 §2); it is never
 //! answered (§17.1.1.3), so one the gate refuses is dropped. A CANCEL is matched by
 //! transaction (§9.1) and passes unread. A response whose From-tag is no tag
 //! this stack put on the leg answers nothing of this stack's and is dropped.
 
 use call::helpers::{response_origin, Resolved, ResponseFacts, ResponseOrigin};
-use call::{Call, CallModelState, Dialog, DialogEnd, DialogState};
+use call::{Call, Dialog, DialogEnd, DialogState};
 use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 
 use super::resolve::Resolution;
-use super::responses::{build_481, build_out_of_order_500};
+use super::responses::{
+    build_200, build_200_advertising, build_481, build_487, build_out_of_order_500,
+};
 use super::RouterCtx;
 use b2bua_sdk::event::CallEvent;
 
@@ -37,8 +43,9 @@ use b2bua_sdk::event::CallEvent;
 pub(super) enum Gate {
     /// The event reaches the rules, its message resolved.
     Pass(Resolved),
-    /// A request refused here, with the answer sent (none for an ACK).
-    Refused(Option<Box<SipResponse>>),
+    /// A request answered here, with the answer sent (none for an ACK), and
+    /// the dialog it was taken in order on, if any.
+    Answered { answer: Option<Box<SipResponse>>, in_order: Option<Resolved> },
     /// A response that answers nothing of this stack's, dropped unread.
     Dropped,
 }
@@ -57,18 +64,23 @@ pub(super) async fn admit(
         SipMessage::Response(resp) => return admit_response(call, leg_id, resp),
         SipMessage::Request(req) => req,
     };
-    let refusal = match request_verdict(call, leg_id, req) {
+    let (mut answer, in_order) = match request_verdict(call, leg_id, req) {
         Verdict::Pass(resolved) => return Gate::Pass(resolved),
-        Verdict::Drop => return Gate::Refused(None),
-        Verdict::NoDialog => build_481(req, None),
-        Verdict::OutOfOrder => build_out_of_order_500(req),
+        Verdict::Drop => return Gate::Answered { answer: None, in_order: None },
+        Verdict::NoDialog => (build_481(req, None), None),
+        Verdict::OutOfOrder => (build_out_of_order_500(req), None),
+        // An OPTIONS 200 states what this stack supports (§11.2).
+        Verdict::Absorbed(resolved) if *req.method() == Method::Options => {
+            (build_200_advertising(req, &ctx.config.minted_final_advertisement), Some(resolved))
+        }
+        Verdict::Absorbed(resolved) => (build_200(req), Some(resolved)),
+        Verdict::Terminated(resolved) => (build_487(req), Some(resolved)),
     };
-    // An in-call refusal is a message of the leg it resolved to: it takes the
+    // An in-call answer is a message of the leg it resolved to: it takes the
     // call's stated headers.
-    let mut refusal = refusal;
-    crate::rules::stated_headers::stamp_response(call, leg_id, &mut refusal);
-    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
-    Gate::Refused(Some(Box::new(refusal)))
+    crate::rules::stated_headers::stamp_response(call, leg_id, &mut answer);
+    let _ = ctx.txn.send_response(answer.clone(), *src).await;
+    Gate::Answered { answer: Some(Box::new(answer)), in_order }
 }
 
 /// The gate's reading of a request.
@@ -80,6 +92,10 @@ pub(super) enum Verdict {
     NoDialog,
     /// Below its dialog's last CSeq: 500 (§12.2.2).
     OutOfOrder,
+    /// A request its ending dialog takes without carrying it further: 200.
+    Absorbed(Resolved),
+    /// A request its ending dialog will not act on: 487 (§21.4.25).
+    Terminated(Resolved),
     /// An ACK naming no dialog that takes it: dropped unanswered (§17.1.1.3).
     Drop,
 }
@@ -100,16 +116,19 @@ pub(super) fn request_verdict(call: &Call, leg_id: &str, req: &SipRequest) -> Ve
         .dialogs
         .of_request(Some(to), req.from().tag())
         .filter(|d| dialled || d.shown || d.was_established());
-    let ending = matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
-    if !admits(dialog, method, ending) {
-        return if *method == Method::Ack { Verdict::Drop } else { Verdict::NoDialog };
-    }
-    let Some(dialog) = dialog else { return Verdict::Pass(Resolved::default()) };
+    let taken: fn(Resolved) -> Verdict = match admission(dialog, method) {
+        Admission::Pass => Verdict::Pass,
+        Admission::Absorb => Verdict::Absorbed,
+        Admission::Terminate => Verdict::Terminated,
+        Admission::Refuse if *method == Method::Ack => return Verdict::Drop,
+        Admission::Refuse => return Verdict::NoDialog,
+    };
+    let Some(dialog) = dialog else { return Verdict::NoDialog };
     let cseq = i64::from(req.cseq().seq());
     if *method != Method::Ack && dialog.peer_cseq.is_some_and(|last| cseq < last) {
         return Verdict::OutOfOrder;
     }
-    Verdict::Pass(Resolved { dialog: Some(dialog.id()), relay: None })
+    taken(Resolved { dialog: Some(dialog.id()), relay: None })
 }
 
 /// Note the request the gate passed in order on the dialog it names: its
@@ -131,22 +150,45 @@ pub(super) fn note_in_order(
     call::helpers::advance_peer_cseq(call, leg_id, dialog, i64::from(req.cseq().seq()))
 }
 
-/// Whether `dialog` takes a request of `method`; `call_ending`: its call is
-/// being torn down, so a live dialog of it reads as ending.
-pub(super) fn admits(dialog: Option<&Dialog>, method: &Method, call_ending: bool) -> bool {
-    let Some(d) = dialog else { return false };
+/// What a dialog makes of a request.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Admission {
+    /// The request reaches the rules.
+    Pass,
+    /// The dialog takes it and nothing carries it further: 200.
+    Absorb,
+    /// The dialog is ending and acts on it no more: 487.
+    Terminate,
+    /// No dialog takes it: 481, or an ACK dropped.
+    Refuse,
+}
+
+/// What `dialog` makes of a request of `method`.
+pub(super) fn admission(dialog: Option<&Dialog>, method: &Method) -> Admission {
+    let Some(d) = dialog else { return Admission::Refuse };
     // The ACK of a 2xx belongs to its INVITE transaction and outlives the
     // dialog's BYE (RFC 5407 §2, Appendix D).
     if *method == Method::Ack {
-        return d.is_live() || d.was_established();
+        return if d.is_live() || d.was_established() {
+            Admission::Pass
+        } else {
+            Admission::Refuse
+        };
     }
-    let survives_end = || matches!(method, Method::Bye | Method::Options | Method::Prack);
-    match &d.state {
-        DialogState::Early | DialogState::Confirmed if !call_ending => true,
-        DialogState::Early | DialogState::Confirmed | DialogState::Ending => survives_end(),
-        DialogState::Ended(DialogEnd::Rejected(_)) => *method == Method::Prack,
+    let ending = match &d.state {
+        DialogState::Early | DialogState::Confirmed => return Admission::Pass,
+        DialogState::Ended(DialogEnd::Rejected(_)) if *method == Method::Prack => {
+            return Admission::Pass
+        }
+        DialogState::Ending(_) => true,
+        DialogState::Retired(r) => r.release_in_flight(),
         DialogState::Ended(_) => false,
-        DialogState::Retired(r) => *method == Method::Bye && r.release.is_some(),
+    };
+    match method {
+        _ if !ending => Admission::Refuse,
+        Method::Bye | Method::Prack => Admission::Pass,
+        Method::Info | Method::Message | Method::Notify | Method::Options => Admission::Absorb,
+        _ => Admission::Terminate,
     }
 }
 

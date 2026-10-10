@@ -148,8 +148,8 @@ fn toward_caller(call: &Call, source_leg_id: &str, source: Option<&DialogId>) ->
 }
 
 /// The callee leg and dialog the caller-facing dialog `face` relays: the
-/// first it fronts whose dialog is live, else the first it fronts. `None`
-/// when it fronts none.
+/// first it fronts whose dialog carries requests, else the first it fronts.
+/// `None` when it fronts none.
 fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a Dialog>)> {
     let fork = |f: &crate::model::PeerDialog| {
         find_b_leg(call, &f.leg_id).and_then(|l| callee_dialog(l, &f.peer_tag))
@@ -157,7 +157,7 @@ fn fronted_fork<'a>(call: &'a Call, face: &Dialog) -> Option<(String, Option<&'a
     let first = face.fronts.first()?;
     face.fronts
         .iter()
-        .find_map(|f| fork(f).filter(|d| d.is_live()).map(|d| (f.leg_id.clone(), Some(d))))
+        .find_map(|f| fork(f).filter(|d| d.carries_requests()).map(|d| (f.leg_id.clone(), Some(d))))
         .or_else(|| Some((first.leg_id.clone(), fork(first))))
 }
 

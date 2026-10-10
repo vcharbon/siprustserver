@@ -3,8 +3,8 @@
 //! setters, and termination-resolution predicates.
 
 use crate::model::{
-    ByeDisposition, Call, CallModelState, Dialog, DialogEnd, DialogState, Leg, LegDisposition,
-    LegKind, LegState, MessageDirection, MessageEntry, RetiredDialog,
+    ByeDisposition, Call, CallModelState, Dialog, DialogEnd, DialogState, EndingBy, Leg,
+    LegDisposition, LegKind, LegState, MessageDirection, MessageEntry, RetiredDialog,
 };
 
 use super::lens::update_leg;
@@ -107,6 +107,30 @@ pub fn set_leg_disposition(call: Call, leg_id: &str, disposition: LegDisposition
     update_leg(call, leg_id, |l| l.disposition = disposition)
 }
 
+/// Note the CANCEL of `leg_id`'s INVITE leaving (RFC 3261 §9.1): each early
+/// dialog that INVITE opened is ending, and ends on the INVITE's final.
+pub fn cancel_early_dialogs(call: Call, leg_id: &str) -> Call {
+    update_leg(call, leg_id, |l| {
+        for d in l.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
+            d.state = DialogState::Ending(EndingBy::Cancel);
+        }
+    })
+}
+
+/// Note the final or the timeout of the BYE on `bye_branch` that released a
+/// retired dialog (RFC 3261 §15.1.1): that release is settled.
+pub fn settle_straggler_release(mut call: Call, bye_branch: &str) -> Call {
+    let legs = std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut());
+    for d in legs.flat_map(|l| l.dialogs.iter_mut()) {
+        if let DialogState::Retired(RetiredDialog { release: Some(r), .. }) = &mut d.state {
+            if r.bye_branch == bye_branch {
+                r.settled = true;
+            }
+        }
+    }
+    call
+}
+
 /// Set the BYE disposition of a specific leg.
 pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Call {
     update_leg(call, leg_id, |l| l.bye_disposition = Some(bye))
@@ -137,10 +161,10 @@ pub fn record_dialling_invite_rejected(call: Call, leg_id: &str, cseq: i64, stat
     })
 }
 
-/// End every early dialog of `leg` under the non-2xx final `status` its
-/// dialog-creating INVITE took (RFC 3261 §12.1).
+/// End every early dialog of `leg` — its CANCEL in flight or not — under
+/// the non-2xx final `status` its dialog-creating INVITE took (RFC 3261 §12.1).
 pub fn reject_early_dialogs(leg: &mut Leg, status: u16) {
-    for d in leg.dialogs.iter_mut().filter(|d| d.state == DialogState::Early) {
+    for d in leg.dialogs.iter_mut().filter(|d| d.awaits_invite_final()) {
         d.state = DialogState::Ended(DialogEnd::Rejected(status));
     }
 }

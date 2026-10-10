@@ -273,12 +273,12 @@ impl ActionExecutor<'_> {
         };
         // The dialog the resolver named — the callee fork toward a b-leg, the
         // caller-facing dialog toward the a-leg (RFC 3261 §12.2.1.1: each
-        // early dialog is independent). A live one carries the request; with
-        // none, the sender is told to retry (`Unrelayed::NotNow`).
+        // early dialog is independent). One that carries requests takes it;
+        // with none, the sender is told to retry (`Unrelayed::NotNow`).
         let picked = leg_index(call, target_leg).and_then(|t_idx| {
             let id = target_dialog.as_ref()?;
             let d = leg_at(call, t_idx).dialogs.by_tags(&id.our_tag, &id.peer_tag)?;
-            d.is_live().then(|| (t_idx, d.clone()))
+            d.carries_requests().then(|| (t_idx, d.clone()))
         });
         let Some((t_idx, target_dialog)) = picked else {
             self.refuse_unrelayed(call, fx, ctx, Unrelayed::NotNow);

@@ -82,12 +82,8 @@ impl ActionExecutor<'_> {
                 d.state = DialogState::Confirmed;
                 relay::adopt_confirmed_dialog(leg, &winner);
             }
-            losers = leg
-                .dialogs
-                .iter()
-                .filter(|d| d.state == DialogState::Early)
-                .map(|d| d.id())
-                .collect();
+            losers =
+                leg.dialogs.iter().filter(|d| d.awaits_invite_final()).map(|d| d.id()).collect();
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
         }

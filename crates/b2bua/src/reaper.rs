@@ -340,7 +340,8 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
         if !resolved {
             leg.bye_disposition = Some(ByeDisposition::ByeTimeout);
             // A BYE still in flight ends unanswered (RFC 3261 §15.1.1).
-            for d in leg.dialogs.iter_mut().filter(|d| d.state == call::DialogState::Ending) {
+            let bye = call::DialogState::Ending(call::EndingBy::Bye);
+            for d in leg.dialogs.iter_mut().filter(|d| d.state == bye) {
                 d.state = call::DialogState::Ended(call::DialogEnd::OurBye { final_status: None });
             }
         }

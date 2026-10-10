@@ -13,7 +13,7 @@
 //! ```
 
 use b2bua_harness::{settle_until, B2buaSut};
-use call::{Call, Dialog, DialogEnd, DialogState, PeerDialog};
+use call::{Call, Dialog, DialogEnd, DialogState, EndingBy, PeerDialog};
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
@@ -85,8 +85,10 @@ async fn each_dialog_carries_the_state_its_messages_put_it_in() {
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
     assert_eq!(bye_at_bob.request().to().tag(), Some("fork2"), "the BYE rides fork 2");
-    settle_until(|| live().is_some_and(|c| callee_fork(&c, "fork2").state == DialogState::Ending))
-        .await;
+    settle_until(|| {
+        live().is_some_and(|c| callee_fork(&c, "fork2").state == DialogState::Ending(EndingBy::Bye))
+    })
+    .await;
     let ending = live().expect("the call is live until bob answers");
     assert_eq!(caller_face(&ending, &a2).state, DialogState::Ended(DialogEnd::PeerBye));
     assert!(callee_fork(&ending, "fork1").retired().is_some(), "a retired dialog stays retired");

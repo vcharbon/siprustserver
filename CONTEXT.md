@@ -756,15 +756,17 @@ _Avoid_: "identity tag" (one tag never names a dialog of a leg that holds
 several), "local/remote tag" for the fields (the RFC terms stay for the RFC).
 
 **Dialog state**:
-`Early`, `Confirmed`, `Ending` (our BYE in flight), `Ended` (rejected by the
-INVITE's final, the peer's BYE, our BYE's final or timeout) or **retired**.
+`Early`, `Confirmed`, `Ending` (our BYE, or our CANCEL of its INVITE, in
+flight: the dialog still exists), `Ended` (rejected by the INVITE's final, the
+peer's BYE, our BYE's final or timeout) or **retired**.
 A dialog record stays until its call is released.
 
 **Retired dialog**:
 An early dialog the call let go of without a BYE: a losing callee fork, a
 caller-facing dialog the answer did not take, an early dialog of a leg ended
 before its INVITE's final. It keeps the relays still open
-in it and, for a fork whose 2xx came late, the ACK and BYE that released it.
+in it and, for a fork whose 2xx came late, the ACK and BYE that released it;
+while that BYE is in flight it reads as ending.
 _Avoid_: "pruned"/"dropped" dialog (nothing is removed).
 
 **Fronting**:
@@ -780,7 +782,9 @@ before such a response.
 **Dialog gate**:
 The engine step that resolves a message to the dialog it names, before any
 rule reads it, and refuses a request its dialog does not take (481, or 500
-when out of order). Rules read what it resolved (`RuleContext::dialog`).
+when out of order). An ending dialog answers a request crossing its end
+itself (200, or 487 for what it no longer acts on). Rules read what it
+resolved (`RuleContext::dialog`).
 _Avoid_: "foreign-dialog check" (the gate refuses by state, not only by
 absence).
 

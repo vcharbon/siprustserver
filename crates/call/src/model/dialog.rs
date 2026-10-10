@@ -89,13 +89,25 @@ pub enum DialogState {
     Early,
     /// A 2xx to the dialog-creating INVITE established it (§12.1).
     Confirmed,
-    /// This side sent a BYE that has no final yet (§15.1.1).
-    Ending,
+    /// This side sent the request that ends the dialog, and it has no final
+    /// yet: the dialog still exists (§15.1.2).
+    Ending(EndingBy),
     /// The dialog is over; how it ended.
     Ended(DialogEnd),
     /// An early dialog the call let go of without a BYE: a losing callee fork
     /// or a caller-facing dialog the answer did not take (§12.1.2).
     Retired(RetiredDialog),
+}
+
+/// The request this side sent to end a dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EndingBy {
+    /// A BYE on the confirmed dialog (§15.1.1).
+    Bye,
+    /// A CANCEL of the dialog-creating INVITE (§9.1): the early dialog ends on
+    /// that INVITE's final.
+    Cancel,
 }
 
 /// How a dialog ended.
@@ -130,6 +142,16 @@ pub struct RetiredDialog {
 pub struct StragglerRelease {
     pub ack_branch: String,
     pub bye_branch: String,
+    /// The BYE's transaction ended: a final, or its timeout (§15.1.1).
+    pub settled: bool,
+}
+
+impl RetiredDialog {
+    /// Whether this stack's release BYE of the dialog awaits its final: the
+    /// dialog then reads as ending (§15.1.2).
+    pub fn release_in_flight(&self) -> bool {
+        self.release.as_ref().is_some_and(|r| !r.settled)
+    }
 }
 
 /// A callee dialog a caller-facing dialog stands for: `leg_id`'s dialog
@@ -263,16 +285,28 @@ impl Dialog {
         DialogId { our_tag: self.our_tag.clone(), peer_tag: self.peer_tag.clone() }
     }
 
-    /// Whether the dialog is early or confirmed, or this side's BYE is in
-    /// flight: the states in which it still carries requests.
+    /// Whether the dialog is early or confirmed, or this side's BYE or CANCEL
+    /// ending it is in flight: the states in which it still exists.
     pub fn is_live(&self) -> bool {
-        matches!(self.state, DialogState::Early | DialogState::Confirmed | DialogState::Ending)
+        matches!(self.state, DialogState::Early | DialogState::Confirmed | DialogState::Ending(_))
+    }
+
+    /// Whether a new request may ride the dialog: a live one, but not an
+    /// early dialog whose INVITE this side is cancelling (§9.1).
+    pub fn carries_requests(&self) -> bool {
+        self.is_live() && self.state != DialogState::Ending(EndingBy::Cancel)
+    }
+
+    /// Whether the dialog awaits the final of the INVITE that created it:
+    /// early, or this side's CANCEL of that INVITE is in flight (§9.1).
+    pub fn awaits_invite_final(&self) -> bool {
+        matches!(self.state, DialogState::Early | DialogState::Ending(EndingBy::Cancel))
     }
 
     /// Whether a 2xx established the dialog and no BYE has completed on it:
     /// confirmed, or this side's BYE is in flight.
     pub fn is_confirmed(&self) -> bool {
-        matches!(self.state, DialogState::Confirmed | DialogState::Ending)
+        matches!(self.state, DialogState::Confirmed | DialogState::Ending(EndingBy::Bye))
     }
 
     /// Whether a 2xx established the dialog: confirmed, ending, or ended by a

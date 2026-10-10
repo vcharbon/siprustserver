@@ -1214,18 +1214,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
-        // A BYE crossing this stack's own (RFC 3261 §15.1.2): on a dialog it
-        // is ending, or of a call it is tearing down — an early dialog its
-        // CANCEL ends included — is answered 200 and ends the dialog it names.
+        // A BYE crossing this stack's own BYE or CANCEL (RFC 3261 §15.1.2) on
+        // the dialog it is ending is answered 200 and ends that dialog.
         rule(
             "resolve-cross-bye",
             &["relay-bye"],
             Match::request().method("BYE").filter(|ctx| {
-                ctx.dialog().is_some_and(|d| d.state == DialogState::Ending)
-                    || matches!(
-                        ctx.call.state(),
-                        CallModelState::Terminating | CallModelState::Terminated
-                    )
+                ctx.dialog().is_some_and(|d| matches!(d.state, DialogState::Ending(_)))
             }),
             |ctx| {
                 ok(vec![
