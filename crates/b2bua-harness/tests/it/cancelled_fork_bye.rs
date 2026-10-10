@@ -88,7 +88,7 @@ async fn a_callee_bye_on_a_fork_being_cancelled_ends_that_fork_alone() {
     let bob2 = h.agent("bob2", &format!("127.0.0.1:{RETARGET_PORT}")).await;
     let first = bob1.addr();
     let decision =
-        Arc::new(ScriptedDecisionEngine::route_all_to(&first.ip().to_string(), first.port()));
+        Arc::new(ScriptedDecisionEngine::route_all_to(first.ip().to_string(), first.port()));
     let b2bua = B2buaSut::builder(decision)
         .services(vec![retarget::service_def()])
         .tune(|c| {
@@ -145,7 +145,7 @@ async fn a_caller_cancel_leaves_a_fork_already_being_cancelled_to_its_cancel() {
     let bob2 = h.agent("bob2", &format!("127.0.0.1:{RETARGET_PORT}")).await;
     let first = bob1.addr();
     let decision =
-        Arc::new(ScriptedDecisionEngine::route_all_to(&first.ip().to_string(), first.port()));
+        Arc::new(ScriptedDecisionEngine::route_all_to(first.ip().to_string(), first.port()));
     let b2bua = B2buaSut::builder(decision)
         .services(vec![retarget::service_def()])
         .tune(|c| {
