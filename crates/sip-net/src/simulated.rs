@@ -258,6 +258,10 @@ impl UdpEndpoint for SimEndpoint {
         self.queue.poll()
     }
 
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        self.queue.peek_all()
+    }
+
     fn local_addr(&self) -> SocketAddr {
         self.addr
     }

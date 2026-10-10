@@ -35,6 +35,13 @@ pub trait UdpEndpoint: Send + Sync {
     /// endpoint's queue is closed and drained.
     async fn recv(&self) -> Option<UdpPacket>;
 
+    /// The packets queued and not yet read, oldest first, left queued: what a
+    /// test fabric inspects at the end of a run without reading it. Empty
+    /// where the transport cannot tell (a kernel socket).
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        Vec::new()
+    }
+
     /// Non-blocking inbound poll (the TS `poll`).
     fn try_recv(&self) -> Option<UdpPacket>;
 
@@ -99,6 +106,9 @@ impl UdpEndpoint for std::sync::Arc<dyn UdpEndpoint> {
     }
     fn try_recv(&self) -> Option<UdpPacket> {
         (**self).try_recv()
+    }
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        (**self).peek_queued()
     }
     fn local_addr(&self) -> SocketAddr {
         (**self).local_addr()

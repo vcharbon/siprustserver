@@ -628,6 +628,10 @@ impl UdpEndpoint for RecordedEndpoint {
         pkt
     }
 
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        self.inner.peek_queued()
+    }
+
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()
     }
@@ -812,6 +816,9 @@ impl UdpEndpoint for ParanoidEndpoint {
     }
     fn try_recv(&self) -> Option<UdpPacket> {
         self.inner.try_recv()
+    }
+    fn peek_queued(&self) -> Vec<UdpPacket> {
+        self.inner.peek_queued()
     }
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()

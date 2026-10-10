@@ -118,6 +118,11 @@ impl PacketQueue {
         self.inner.lock().unwrap().buf.pop_front()
     }
 
+    /// The queued packets, oldest first, left queued.
+    pub fn peek_all(&self) -> Vec<UdpPacket> {
+        self.inner.lock().unwrap().buf.iter().cloned().collect()
+    }
+
     /// Current queued count (the TS `sizeUnsafe`). Drives the audit's
     /// queue-leak check and the pre-ingress depth argument.
     pub fn depth(&self) -> usize {
