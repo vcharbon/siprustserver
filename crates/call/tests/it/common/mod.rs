@@ -78,6 +78,7 @@ fn dialog(
             emitted_ack: None,
             sdp_session: None,
             awaited_ack_cseq: None,
+            shown: false,
         },
     }
 }
@@ -567,6 +568,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
         proptest::option::of(arb_retained_emission()),
         proptest::option::of(any::<i64>()),
         proptest::option::of(arb_sdp_session()),
+        any::<bool>(),
     )
         .prop_map(
             |(
@@ -580,6 +582,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 emitted_ack,
                 awaited_ack_cseq,
                 sdp_session,
+                shown,
             )| {
                 B2buaDialogExt {
                     remote_cseq,
@@ -592,6 +595,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                     emitted_ack,
                     awaited_ack_cseq,
                     sdp_session,
+                    shown,
                 }
             },
         );

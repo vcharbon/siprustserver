@@ -422,3 +422,124 @@ async fn a_service_tag_beside_a_shown_one_moves_no_other_sequence() {
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
+
+/// The service that shows the caller the stack's own early tag first: the
+/// callee's 180 is answered toward her as a 180 under the B2BUA's own To-tag,
+/// the callee's 183 as a 183 under a To-tag the service states; neither is
+/// relayed.
+mod own_then_stated {
+    use b2bua::rules::{
+        Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+        ServiceSeed, Terminal,
+    };
+    use b2bua::{define_service, sm_rule};
+    use call::{Direction, LegState};
+
+    pub const TAG: &str = "service-stated";
+
+    define_service! {
+        id: "own-then-stated",
+        machine: OWN_THEN_STATED,
+        states: OtsState { Waiting, Shown },
+        init: |_call: &RuleCall| Some(ServiceSeed::new(OtsState::Waiting.label())),
+        rules: [ own_180(), stated_183() ],
+    }
+
+    fn own_180() -> RuleDefinition {
+        sm_rule! {
+            id: "own-180",
+            machine: OWN_THEN_STATED,
+            active: [ OtsState::Waiting ],
+            transitions: [ OtsState::Waiting => OtsState::Shown ],
+            effects: [
+                Effect::Provisional { status: 180, label: "180 under the stack's own To-tag" },
+            ],
+            matcher: Match::response()
+                .method("INVITE")
+                .status_code(180)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early]),
+            handle: |ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::SendProvisionalToLeg {
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status: 180,
+                        reason: "Ringing".into(),
+                        body: None,
+                        to_tag: None,
+                        p_early_media: None,
+                    },
+                    RuleAction::SetState { machine: OWN_THEN_STATED, to: OtsState::Shown.label() },
+                ]))
+            },
+        }
+    }
+
+    fn stated_183() -> RuleDefinition {
+        sm_rule! {
+            id: "stated-183",
+            machine: OWN_THEN_STATED,
+            active: [ OtsState::Shown ],
+            transitions: [ OtsState::Shown => Terminal ],
+            effects: [
+                Effect::Provisional { status: 183, label: "183 under the service's stated To-tag" },
+            ],
+            matcher: Match::response()
+                .method("INVITE")
+                .status_code(183)
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early]),
+            handle: |ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![
+                    RuleAction::SendProvisionalToLeg {
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status: 183,
+                        reason: "Session Progress".into(),
+                        body: None,
+                        to_tag: Some(TAG.into()),
+                        p_early_media: None,
+                    },
+                    RuleAction::ClearState { machine: OWN_THEN_STATED },
+                ]))
+            },
+        }
+    }
+}
+
+/// A caller may BYE any early dialog she holds (RFC 3261 §15). The stack's own
+/// 180 shows her its tag; a later 183 under a tag the service states opens an
+/// early dialog of its own beside it (§12.1.2), so her BYE on the first still
+/// names a dialog: 200, her INVITE 487, the ringing callee CANCELled.
+#[tokio::test(start_paused = true)]
+async fn a_bye_on_the_stacks_own_early_tag_outlives_a_stated_one() {
+    let h = Harness::with_transit_delay("b2bua-own-early-tag-then-stated-tag", 1);
+    let alice = h.agent_auto("alice").await;
+    let bob = h.agent_auto("bob").await;
+    let b2bua = B2buaSut::route_all_to(&bob.addr().ip().to_string(), bob.addr().port())
+        .services(vec![own_then_stated::service_def()])
+        .start(&h, "b2bua", &h.next_addr().to_string())
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    let own = call.expect(180).await.to().tag().expect("the stack's own tag").to_string();
+    uas.respond(183, "Session Progress").await;
+    let stated = call.expect(183).await;
+    assert_eq!(stated.to().tag(), Some(own_then_stated::TAG), "the service's stated tag");
+    assert_ne!(own, own_then_stated::TAG, "two early dialogs");
+
+    let mut bye = call.send_request(InDialogMethod::Bye).with_to_tag(&own).send().await;
+    bye.expect(200).await;
+    call.expect(487).await;
+    bob.receive("CANCEL").await.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive("ACK").await;
+
+    h.advance(Duration::from_secs(1)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    alice.drain().await;
+    bob.drain().await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}

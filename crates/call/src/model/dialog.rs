@@ -150,6 +150,11 @@ pub struct B2buaDialogExt {
     /// and the one that confirms hands this state to its leg. `None` while the
     /// dialog carries what the leg's opening INVITE stated.
     pub sdp_session: Option<LegSdpSession>,
+    /// A provisional this stack sent the caller carried this dialog's local
+    /// tag, so she holds the early dialog it names (RFC 3261 §12.1.1): a
+    /// caller-facing dialog only, set once and kept.
+    #[serde(default)]
+    pub shown: bool,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.

@@ -306,6 +306,7 @@ mod tests {
                 emitted_ack: None,
                 sdp_session: None,
                 awaited_ack_cseq: None,
+                shown: false,
             },
         };
         Leg {
@@ -394,6 +395,7 @@ mod tests {
                 emitted_ack: None,
                 sdp_session: None,
                 awaited_ack_cseq: None,
+                shown: false,
             },
         });
     }

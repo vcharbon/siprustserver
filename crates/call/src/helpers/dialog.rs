@@ -339,6 +339,7 @@ pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
             emitted_ack: None,
             sdp_session: None,
             awaited_ack_cseq: None,
+            shown: false,
         },
     }
 }
@@ -364,6 +365,7 @@ pub fn make_dialog_from_incoming(
             emitted_ack: None,
             sdp_session: None,
             awaited_ack_cseq: None,
+            shown: false,
         },
     }
 }

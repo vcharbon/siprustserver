@@ -98,6 +98,7 @@ fn call_with_early_a_dialog(a1: &str) -> call::Call {
             emitted_ack: None,
             sdp_session: None,
             awaited_ack_cseq: None,
+            shown: false,
         },
     }];
     call
@@ -2140,6 +2141,7 @@ fn b_leg_pending() -> Leg {
             emitted_ack: None,
             sdp_session: None,
             awaited_ack_cseq: None,
+            shown: false,
         },
     };
     Leg {
@@ -2512,6 +2514,7 @@ mod media_primitives {
                 emitted_ack: None,
                 sdp_session: None,
                 awaited_ack_cseq: None,
+                shown: false,
             },
         }];
     }
@@ -4773,6 +4776,7 @@ fn call_with_retained_answered_2xx() -> call::Call {
             cached_sdp: None,
             pending_reinvite_2xx: None,
             awaited_ack_cseq: None,
+            shown: false,
             answered_2xx: Some(call::Unacked2xx {
                 dialog_tag: "btag".into(),
                 cseq: 1,
@@ -4958,6 +4962,7 @@ mod ladder_give_up {
                 emitted_ack: None,
                 sdp_session: None,
                 awaited_ack_cseq: None,
+                shown: false,
             },
         }];
         let mut b = super::b_leg_pending();

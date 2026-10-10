@@ -29,12 +29,10 @@ pub fn find_by_b_tag<'a>(call: &'a Call, b_leg_id: &str, b_tag: &str) -> Option<
     call.tag_map.iter().find(|m| m.b_leg_id == b_leg_id && m.b_tag == b_tag)
 }
 
-/// Whether a response this stack sent the caller carried `a_tag`: a relayed
-/// provisional mapped it to the callee dialog it stands for, or a reliable
-/// provisional was shown under it.
+/// Whether a provisional this stack sent the caller carried `a_tag`: the
+/// a-dialog of that tag is marked shown ([`crate::B2buaDialogExt::shown`]).
 pub fn a_tag_shown(call: &Call, a_tag: &str) -> bool {
-    find_by_a_tag(call, a_tag).is_some()
-        || call.reliable_provisionals.iter().any(|r| r.a_tag == a_tag)
+    call.a_leg.dialogs.iter().any(|d| d.ext.shown && d.sip.local_tag == a_tag)
 }
 
 // ── Active peer (INAP-style split/merge) ────────────────────────────────────

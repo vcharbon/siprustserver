@@ -420,6 +420,7 @@ impl ActionExecutor<'_> {
                 emitted_ack: None,
                 sdp_session: None,
                 awaited_ack_cseq: None,
+                shown: false,
             },
         };
         call.a_leg.dialogs = vec![dialog];
@@ -519,6 +520,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
             Some(own) => {
                 d.sip.local_cseq = own.sip.local_cseq;
                 d.ext.remote_cseq = own.ext.remote_cseq;
+                d.ext.shown = own.ext.shown;
                 let open = std::mem::replace(
                     &mut d.ext.inbound_pending_requests,
                     own.ext.inbound_pending_requests,
@@ -528,6 +530,7 @@ pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
             None => {
                 d.sip.local_cseq = fresh;
                 d.ext.remote_cseq = Some(fresh);
+                d.ext.shown = false;
                 retired.push((old_tag, std::mem::take(&mut d.ext.inbound_pending_requests)));
             }
         }
