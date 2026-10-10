@@ -30,7 +30,7 @@ pub struct LimiterEntry {
 pub struct LimiterHeld {
     /// The change number the set is stated under.
     pub change: u64,
-    /// The entries held.
+    /// The entries held; empty when the limiter holds none for the key.
     pub entries: Vec<LimiterEntry>,
 }
 
@@ -441,7 +441,6 @@ impl CallLimiterState {
         first
     }
 
-    /// Reserve the next change number.
     fn next_change(&mut self) -> u64 {
         self.reserve_changes(1)
     }
