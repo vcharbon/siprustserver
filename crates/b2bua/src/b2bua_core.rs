@@ -60,7 +60,7 @@ pub struct B2buaCore {
     repl_store: Option<Arc<ReplicatingCallStore>>,
     /// Abort handles for the directly-spawned tasks (router loop + repl serve
     /// loop). [`abort`](Self::abort) aborts them for a simulated crash; ordinary
-    /// drop leaves them to die with the endpoint/channels as before.
+    /// drop leaves them to die with the endpoint/channels.
     tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The X11 fail-back command sender of a wired node, retained so the
     /// channel the router selects on stays open while the core lives. `None`
@@ -109,7 +109,7 @@ pub struct B2buaDeps {
     /// Live-path store-fault probe (ADR-0023). Default = **no faults**: the
     /// router's live lookup sites (initial-INVITE dialog-existence check,
     /// in-dialog request fetch, keepalive/audit read) consult it before their
-    /// sync map reads and behave exactly as before while disarmed. A test
+    /// sync map reads, and read the map unchanged while it is disarmed. A test
     /// retains a clone of the handle and flips per-path switches mid-call.
     /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
     /// terminate-writer paths are deliberately un-probed.
