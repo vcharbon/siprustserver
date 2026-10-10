@@ -468,11 +468,7 @@ pub struct Waived {
     pub finding: Failure,
 }
 
-/// One step's retransmission ladder, as the run counted it (§6.9).
-///
-/// One step's retransmission ladder, declared against observed (§6.9): a
-/// `send`'s ladder is what the peer emitted, an `expect`'s what came back
-/// byte-identical to the datagram the step matched.
+/// Which side paced a step's retransmission ladder (§6.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LadderSide {
@@ -484,6 +480,10 @@ pub enum LadderSide {
     Expect,
 }
 
+/// One step's retransmission ladder, declared against observed (§6.9): a
+/// `send`'s ladder is what the peer emitted, an `expect`'s what came back
+/// byte-identical to the datagram the step matched.
+///
 /// The count is per STEP, which is where the document states it. Beside the two
 /// counts it states the ladder's FACTS, so a reader can see WHICH ladder the run
 /// asserted: `intervals_ms` is the pacing the document's count was read under,
