@@ -5,9 +5,10 @@ use std::collections::{BTreeSet, HashMap};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
-use super::peer_dialogs::{charge, RELAYED};
+use super::peer_dialogs::RELAYED;
 
 /// How long after an endpoint takes the first 2xx to its INVITE an early
 /// dialog of another branch still stands: §13.2.2.4 has the UAC terminate the

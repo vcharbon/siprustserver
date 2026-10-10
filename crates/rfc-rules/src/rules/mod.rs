@@ -4,6 +4,7 @@
 //! file — no rule file owns another's reading.
 
 mod branch;
+mod charge;
 
 pub mod ack;
 pub mod cancel;

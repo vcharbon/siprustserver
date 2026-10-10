@@ -41,6 +41,7 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use super::charge::charge;
 use super::Obligation;
 
 crate::registry::rules! {
@@ -91,19 +92,6 @@ fn on_label(msg: &Msg) -> String {
     match &msg.kind {
         Kind::Request { method } => method.clone(),
         Kind::Response { status } => status.to_string(),
-    }
-}
-
-/// A finding on `msg` for `rule`, charging the endpoint that emitted it.
-fn charge(rule: RuleId, msg: &Msg, mi: usize, decision: Decision) -> Finding {
-    Finding {
-        rule,
-        emitter: msg.src.clone(),
-        taker: msg.dst.clone(),
-        cseq: msg.cseq,
-        relayed: false,
-        anchor: mi,
-        decision,
     }
 }
 

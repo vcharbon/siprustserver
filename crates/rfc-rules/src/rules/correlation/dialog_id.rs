@@ -8,9 +8,10 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, WireView};
 
+use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
-use super::peer_dialogs::{charge, PeerDialogs, RELAYED};
+use super::peer_dialogs::{PeerDialogs, RELAYED};
 
 /// **§12.2.1.1 — an in-dialog message names the taker's own dialog.** The tag
 /// the taker minted is half the dialog identifier; a request whose To-tag, or a

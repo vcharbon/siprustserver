@@ -8,9 +8,10 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, WireView};
 
+use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
-use super::peer_dialogs::{charge, PeerDialogs, RELAYED};
+use super::peer_dialogs::{PeerDialogs, RELAYED};
 
 /// **§8.1.3 / §17.1.3 — a response reproduces its request's Via stack.** A UAC
 /// matches a response to its client transaction by the topmost Via branch and a

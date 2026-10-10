@@ -6,9 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, WireView};
 
+use crate::rules::charge::charge;
 use crate::rules::Obligation;
-
-use super::peer_dialogs::charge;
 
 /// Methods that can legitimately OPEN a transaction outside a dialog. Every
 /// other verb (BYE, ACK, UPDATE, INFO, PRACK, CANCEL) is intrinsically

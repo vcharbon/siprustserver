@@ -1,11 +1,10 @@
-//! The per-endpoint dialog state most of the family reads, and the finding shape
-//! every rule of it produces.
+//! The per-endpoint dialog state most of the family reads, and the reason a
+//! relaying vantage gives.
 
 use std::collections::HashMap;
 
 use sip_message::sniff;
 
-use crate::verdict::{Decision, Finding, RuleId};
 use crate::wire::{Kind, Msg};
 
 /// What ONE endpoint knows about ONE Call-ID from its own stream.
@@ -99,20 +98,6 @@ impl PeerDialogs {
         }
         self.by.entry((msg.src.clone(), msg.call_id.clone())).or_default().sent(msg);
         self.by.entry((msg.dst.clone(), msg.call_id.clone())).or_default().took(msg);
-    }
-}
-
-/// A finding on the message at `mi`, charging the endpoint that emitted it and
-/// read at the endpoint that took it.
-pub(super) fn charge(rule: RuleId, msg: &Msg, mi: usize, decision: Decision) -> Finding {
-    Finding {
-        rule,
-        emitter: msg.src.clone(),
-        taker: msg.dst.clone(),
-        cseq: msg.cseq,
-        relayed: false,
-        anchor: mi,
-        decision,
     }
 }
 

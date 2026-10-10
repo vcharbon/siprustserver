@@ -5,9 +5,10 @@ use sip_message::sniff;
 use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::WireView;
 
+use crate::rules::charge::charge;
 use crate::rules::Obligation;
 
-use super::peer_dialogs::{charge, PeerDialogs, RELAYED};
+use super::peer_dialogs::{PeerDialogs, RELAYED};
 
 /// **§9.1 — a CANCEL's Request-URI is its INVITE's.** The CANCEL must target
 /// exactly the request it cancels; a different URI reaches a different server
