@@ -426,7 +426,7 @@ fn header_occurrences(name: &str, inbound: &Inbound) -> String {
 /// about?" and not "does it hold?". A relayed request carries the peer-origin
 /// headers the step froze; the SUT's own background traffic of the same method
 /// carries none of them, and that is the only thing on the wire that tells the
-/// two apart when they land in one instant (`exec::holds_out_for_better`).
+/// two apart when they land in one instant (`exec::arbitration`).
 pub fn declared_headers_carried(step: &CompiledStep, inbound: &Inbound) -> (usize, usize) {
     let declared = &step.msg.headers;
     let carried = declared.iter().filter(|want| inbound.header(&want.name).is_some()).count();

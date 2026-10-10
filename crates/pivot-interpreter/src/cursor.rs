@@ -189,7 +189,7 @@ impl<'p> Cursor<'p> {
     /// It arms only where the leg can TELL IT APART: an EXPECT already armed
     /// here with this discriminator would let the earlier step's datagram settle
     /// the later one. A send with the same discriminator cannot — nothing armed
-    /// consumes a datagram but an expect (`exec.rs`).
+    /// consumes a datagram but an expect (`exec::deliver`).
     fn caused_elsewhere(&self, frontier: &[String], armed: &[String]) -> bool {
         !frontier.is_empty()
             && frontier.iter().all(|id| {
