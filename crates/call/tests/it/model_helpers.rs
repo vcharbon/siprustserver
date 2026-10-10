@@ -950,3 +950,77 @@ fn a_cancelled_invite_takes_back_the_2xx_that_never_left() {
     let ring: Vec<_> = a.messages.entries.iter().map(|e| e.seq).collect();
     assert_eq!(ring, [1, 2], "the ring holds what reached the wire");
 }
+
+/// RFC 3261 §12.2: a received request names its dialog by (To-tag, From-tag),
+/// a response by (From-tag, To-tag) — the same lookup on either leg — and a
+/// message missing either tag names none.
+#[test]
+fn a_message_names_its_dialog_by_direction() {
+    let call = representative_call();
+    let a = &call.a_leg.dialogs;
+    assert_eq!(a.of_request(Some(A_TAG), Some(ALICE_TAG)).unwrap().our_tag, A_TAG);
+    assert_eq!(a.of_response(Some(ALICE_TAG), Some(A_TAG)).unwrap().our_tag, A_TAG);
+    assert!(a.of_request(Some(ALICE_TAG), Some(A_TAG)).is_none(), "the reverse names none");
+    assert!(a.of_request(None, Some(ALICE_TAG)).is_none(), "an untagged To names none");
+    let b = &call.b_legs[0].dialogs;
+    assert_eq!(b.of_request(Some(B_LOCAL_TAG), Some(B_TAG)).unwrap().peer_tag, B_TAG);
+    assert_eq!(b.of_response(Some(B_TAG), Some(B_LOCAL_TAG)).unwrap().peer_tag, B_TAG);
+}
+
+/// The dialog a request toward a leg rides when none is named: the confirmed
+/// one; else the leg's only live dialog; none while two early forks leave the
+/// choice open, and none among dialogs that ended or retired.
+#[test]
+fn the_carrying_dialog_is_the_confirmed_or_the_only_live_one() {
+    let early = |tag: &str| Dialog::new("ours", tag, DialogState::Early, 1);
+    let one: Dialogs = vec![early("f1")].into();
+    assert_eq!(one.carrying().map(|d| d.peer_tag.as_str()), Some("f1"));
+    let two: Dialogs = vec![early("f1"), early("f2")].into();
+    assert!(two.carrying().is_none(), "two early forks name no carrying dialog");
+    let answered: Dialogs = vec![
+        Dialog { state: DialogState::Retired(RetiredDialog::default()), ..early("f1") },
+        Dialog { state: DialogState::Confirmed, ..early("f2") },
+    ]
+    .into();
+    assert_eq!(answered.carrying().map(|d| d.peer_tag.as_str()), Some("f2"));
+    let ended: Dialogs =
+        vec![Dialog { state: DialogState::Ended(DialogEnd::PeerBye), ..early("f1") }].into();
+    assert!(ended.carrying().is_none());
+}
+
+/// A relay open in an early dialog the answer retired is found through that
+/// dialog's tags, and closing it leaves the retired record in place (RFC 3261
+/// §8.1.3.3).
+#[test]
+fn a_retired_dialogs_relay_is_found_by_its_tags_and_closed_in_place() {
+    let mut call = settled_call();
+    let open = PendingRequest {
+        method: "UPDATE".into(),
+        outbound_cseq: 3,
+        inbound_cseq: 3,
+        source_vias: vec![],
+        source_call_id: "cid".into(),
+        source_from: "f".into(),
+        source_to: "t".into(),
+        direction: Direction::FromA,
+        cancelled: false,
+        offered_100rel: false,
+        offered: true,
+        source_timestamp: None,
+    };
+    let lost = Dialog {
+        state: DialogState::Retired(RetiredDialog { open_relays: vec![open], release: None }),
+        ..Dialog::new(B_LOCAL_TAG, "lost-fork", DialogState::Early, 3)
+    };
+    call.b_legs[0].dialogs.insert(lost);
+    let (holder, pending) =
+        relayed_pending(&call, "b-1", Some("lost-fork"), Some(B_LOCAL_TAG), 3).expect("found");
+    let id = DialogId { our_tag: B_LOCAL_TAG.into(), peer_tag: "lost-fork".into() };
+    assert_eq!(holder, PendingHolder::Retired(id.clone()));
+    assert_eq!(pending.method, "UPDATE");
+    assert!(relayed_pending(&call, "b-1", Some(B_TAG), Some(B_LOCAL_TAG), 3).is_none());
+
+    let call = close_relay(call, "b-1", &holder, 3);
+    let kept = call.b_legs[0].dialogs.by_tags(&id.our_tag, &id.peer_tag).expect("kept");
+    assert!(kept.retired().is_some_and(|r| r.open_relays.is_empty()));
+}
