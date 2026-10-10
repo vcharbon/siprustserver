@@ -26,7 +26,7 @@ async fn now_ms_is_monotonic_non_decreasing() {
     }
 }
 
-// ── Stage 3: clock-skew divergence observability seam ──
+// ── Clock-skew divergence observability seam ──
 
 #[tokio::test(start_paused = true)]
 async fn wall_divergence_is_raw_minus_now() {
@@ -50,11 +50,6 @@ async fn wall_divergence_is_raw_minus_now() {
 
 #[test]
 fn system_panics_on_pre_epoch_clock() {
-    // We cannot force SystemTime backwards, but we CAN assert the guard: the
-    // pre-epoch branch is `duration_since(UNIX_EPOCH).expect(...)`. Model it
-    // directly — a pre-epoch SystemTime yields `Err` from `duration_since`, and
-    // our constructor `.expect()`s it. This documents/locks the fail-loud
-    // contract that replaced the silent `unwrap_or(0)`.
     let pre_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
     let result = std::panic::catch_unwind(|| {
         pre_epoch

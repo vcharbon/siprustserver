@@ -56,9 +56,9 @@
 //! deadline earlier/later by the disagreement; a past-due `fire_at` clamps to a
 //! zero delay and fires immediately. See docs/MIGRATION_PLAN_B2B.md §2.
 //!
-//! ## Skew re-anchoring at the replication boundary (clock-skew hardening, landed)
+//! ## Skew re-anchoring at the replication boundary
 //!
-//! The raw cross-node trust above is now **bounded to ~replication latency**. The
+//! The raw cross-node trust above is **bounded to ~replication latency**. The
 //! replication `Data` frame carries an `origin_now_ms` stamp (the sender's
 //! `now_ms()` at flush-send time); the receiving store persists
 //! `skew_offset_ms = receiver_now_ms − origin_now_ms` alongside the body's
@@ -73,7 +73,7 @@
 //! re-anchor introduces no wall-clock-dependent rule, settle window, or handback.
 //! A periodic `clock_wall_divergence_ms` gauge makes a live host step observable
 //! before it corrupts a restore. Keep the infra discipline too (slewing chrony,
-//! host kept awake) — the SUT now bounds the residual, it does not license drift.
+//! host kept awake) — the SUT bounds the residual, it does not license drift.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;

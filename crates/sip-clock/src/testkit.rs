@@ -77,8 +77,7 @@ where
 /// harness drives the SIP *and* replication planes together — notify →
 /// server drain → send → transit-delivery actor → puller recv → store apply
 /// → status publish, several task hops). One `yield_now` advances exactly
-/// one hop, so we yield generously. A single constant here replaces the
-/// per-crate 64-vs-96 drift the copied `settle()` helpers had accumulated.
+/// one hop, so we yield generously.
 const SETTLE_YIELDS: usize = 96;
 
 /// Let every spawned task in the sim pipeline hop forward without advancing
