@@ -17,7 +17,7 @@ fn established(extra: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
 fn a_rewritten_mid_dialog_uri_is_reported_on_the_lane_that_sent_it() {
     let mut evs = established("");
     evs.push(sent(SUT, in_dialog("BYE", B, "z9hG4bK-b", 2, "sip:eve@127.0.0.1", B, ""), BOB, 2));
-    let out = MidDialogUriRule.check_positioned(&evs);
+    let out = live(RuleId::MidDialogUri).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "attributed to the lane that sent the request");
     assert!(
@@ -29,7 +29,7 @@ fn a_rewritten_mid_dialog_uri_is_reported_on_the_lane_that_sent_it() {
 
     let mut clean = established("");
     clean.push(sent(SUT, in_dialog("BYE", B, "z9hG4bK-b", 2, A, B, ""), BOB, 2));
-    assert!(MidDialogUriRule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::MidDialogUri).check_positioned(&clean).is_empty());
 }
 
 /// A relay carries the originator's From/To through unchanged: per-UA URI
@@ -42,7 +42,7 @@ fn a_relay_lane_carrying_a_foreign_uri_is_not_judged() {
         recv(SUT, resp_with(200, 1, "INVITE", "z9hG4bK-b", ""), BOB, 2),
         sent(SUT, in_dialog("BYE", B, "z9hG4bK-y", 2, "sip:eve@127.0.0.1", B, ""), BOB, 3),
     ];
-    assert!(MidDialogUriRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::MidDialogUri).check_positioned(&evs).is_empty());
 }
 
 /// §12.2.1.1 route reproduction at the emitter: the 200's Record-Route
@@ -51,7 +51,7 @@ fn a_relay_lane_carrying_a_foreign_uri_is_not_judged() {
 fn a_dropped_mid_dialog_route_set_is_reported_on_the_lane_that_sent_it() {
     let mut evs = established("Record-Route: <sip:p1@127.0.0.1;lr>\r\n");
     evs.push(sent(SUT, in_dialog("BYE", B, "z9hG4bK-b", 2, A, B, ""), BOB, 2));
-    let out = MidDialogRouteRule.check_positioned(&evs);
+    let out = live(RuleId::MidDialogRoute).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("omits Route header"), "{}", out[0].1);
@@ -64,7 +64,7 @@ fn a_dropped_mid_dialog_route_set_is_reported_on_the_lane_that_sent_it() {
         BOB,
         2,
     ));
-    assert!(MidDialogRouteRule.check_positioned(&replayed).is_empty());
+    assert!(live(RuleId::MidDialogRoute).check_positioned(&replayed).is_empty());
 }
 
 /// §8.1.2 + RFC 3263 §4 at the emitter: the bytes went past the
@@ -78,7 +78,7 @@ fn bytes_sent_past_the_derived_destination_are_reported_at_the_emitter() {
         "127.0.0.1:9999",
         2,
     ));
-    let out = MidDialogWireDestinationRule.check_positioned(&evs);
+    let out = live(RuleId::MidDialogWireDestination).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("wire-sent to 127.0.0.1:9999"), "{}", out[0].1);
@@ -90,7 +90,7 @@ fn bytes_sent_past_the_derived_destination_are_reported_at_the_emitter() {
         BOB,
         2,
     ));
-    assert!(MidDialogWireDestinationRule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::MidDialogWireDestination).check_positioned(&clean).is_empty());
 }
 
 /// §12.1.1 at the TAKER: the lane that TOOK the 100 reports it, and the far
@@ -101,7 +101,10 @@ fn record_route_on_a_100_is_reported_at_the_taker() {
         sent(SUT, in_dialog_less_to_tag("z9hG4bK-i"), BOB, 0),
         recv(SUT, resp(100, 1, "INVITE", "", "z9hG4bK-i"), BOB, 1),
     ];
-    assert!(RecordRoutePlacementRule.check_positioned(&evs).is_empty(), "a bare 100 is clean");
+    assert!(
+        live(RuleId::RecordRoutePlacement).check_positioned(&evs).is_empty(),
+        "a bare 100 is clean"
+    );
 
     let leaked = vec![
         sent(SUT, in_dialog_less_to_tag("z9hG4bK-i"), BOB, 0),
@@ -122,7 +125,7 @@ fn record_route_on_a_100_is_reported_at_the_taker() {
             1,
         ),
     ];
-    let out = RecordRoutePlacementRule.check_positioned(&leaked);
+    let out = live(RuleId::RecordRoutePlacement).check_positioned(&leaked);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "reported on the lane that took it");
     assert!(out[0].1.contains("100 Trying carries Record-Route"), "{}", out[0].1);
@@ -157,14 +160,14 @@ fn a_request_for_an_unknown_dialog_is_flagged_on_the_lane_that_served_it() {
         ]
     };
     assert!(
-        UnknownDialog481Rule.check_positioned(&confirmed("at", 200)).is_empty(),
+        live(RuleId::UnknownDialog481).check_positioned(&confirmed("at", 200)).is_empty(),
         "the dialog the 200 confirmed is known"
     );
     assert!(
-        UnknownDialog481Rule.check_positioned(&confirmed("zz", 481)).is_empty(),
+        live(RuleId::UnknownDialog481).check_positioned(&confirmed("zz", 481)).is_empty(),
         "the 481 discharges it"
     );
-    let out = UnknownDialog481Rule.check_positioned(&confirmed("zz", 200));
+    let out = live(RuleId::UnknownDialog481).check_positioned(&confirmed("zz", 200));
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "the lane that owed the 481 is charged");
     assert!(out[0].1.contains("481") && out[0].1.contains("answered 200"), "{}", out[0].1);
@@ -176,7 +179,7 @@ fn a_request_for_an_unknown_dialog_is_flagged_on_the_lane_that_served_it() {
 #[test]
 fn a_bye_off_dialog_and_an_early_callee_bye_both_surface() {
     let off = vec![sent(ALICE, req("BYE", "z9hG4bK-b", 2, None), BOB, 0)];
-    let f = NoByeOutsideOrEarlyDialogRule.check_positioned(&off);
+    let f = live(RuleId::NoByeOutsideOrEarlyDialog).check_positioned(&off);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].0, ALICE);
     assert!(f[0].1.contains("outside any dialog"), "{}", f[0].1);
@@ -186,7 +189,7 @@ fn a_bye_off_dialog_and_an_early_callee_bye_both_surface() {
         sent(BOB, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
         sent(BOB, from_callee("BYE", "z9hG4bK-b", 2), ALICE, 2),
     ];
-    let f = NoByeOutsideOrEarlyDialogRule.check_positioned(&early);
+    let f = live(RuleId::NoByeOutsideOrEarlyDialog).check_positioned(&early);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].0, BOB, "the callee is charged");
     assert!(f[0].1.contains("early dialog"), "{}", f[0].1);
@@ -198,5 +201,5 @@ fn a_bye_off_dialog_and_an_early_callee_bye_both_surface() {
         recv(BOB, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 2),
         sent(BOB, from_callee("BYE", "z9hG4bK-b", 2), ALICE, 3),
     ];
-    assert!(NoByeOutsideOrEarlyDialogRule.check_positioned(&accepted).is_empty());
+    assert!(live(RuleId::NoByeOutsideOrEarlyDialog).check_positioned(&accepted).is_empty());
 }

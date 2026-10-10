@@ -7,7 +7,7 @@ use super::*;
 /// at the caller's lane and charged to its sender.
 #[test]
 fn a_request_under_a_rung_branch_tag_after_the_answer_gates() {
-    assert!(!InDialogFromTagRule.force_advisory(), "a MUST gates");
+    assert!(!live(RuleId::InDialogFromTag).force_advisory(), "a MUST gates");
     let toward_alice = |from_tag: &str| {
         format!(
             "OPTIONS {A} SIP/2.0\r\n\
@@ -30,8 +30,8 @@ fn a_request_under_a_rung_branch_tag_after_the_answer_gates() {
             recv(ALICE, toward_alice(from_tag), BOB, 300_000),
         ]
     };
-    assert!(InDialogFromTagRule.check(&call("b2")).is_empty());
-    let out = InDialogFromTagRule.check_positioned(&call("b1"));
+    assert!(live(RuleId::InDialogFromTag).check(&call("b2")).is_empty());
+    let out = live(RuleId::InDialogFromTag).check_positioned(&call("b1"));
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE, "reported at the caller, whose dialog it fails to name");
     assert_eq!(out[0].3, Some(BOB.to_string()), "charged to the request's sender");
@@ -46,7 +46,7 @@ fn a_peer_side_defect_is_reported_on_the_lane_that_took_it() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         recv(SUT, req("CANCEL", "z9hG4bK-other", 1, None), ALICE, 1),
     ];
-    let out = CancelViaBranchRule.check_positioned(&evs);
+    let out = live(RuleId::CancelViaBranch).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "reported on the lane that took the CANCEL");
     assert!(out[0].1.contains("matches no received INVITE"), "{}", out[0].1);
@@ -57,7 +57,7 @@ fn a_peer_side_defect_is_reported_on_the_lane_that_took_it() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         recv(SUT, req("CANCEL", "z9hG4bK-i", 1, None), ALICE, 1),
     ];
-    assert!(CancelViaBranchRule.check(&clean).is_empty());
+    assert!(live(RuleId::CancelViaBranch).check(&clean).is_empty());
 }
 
 /// A UAS To-tag flip on a **2xx** is SURFACED and never gates: a forking
@@ -71,7 +71,7 @@ fn a_uas_tag_flip_on_a_2xx_is_advisory() {
     ];
     let f: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
         .into_iter()
-        .filter(|f| f.rule == TagConsistencyRule.name())
+        .filter(|f| f.rule == live_arm(RuleId::TagConsistency, true).name())
         .collect();
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].lane, SUT);
@@ -90,7 +90,7 @@ fn a_uas_tag_flip_on_a_non_2xx_gates() {
     ];
     let f: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
         .into_iter()
-        .filter(|f| f.rule == TagConsistencyNon2xxRule.name())
+        .filter(|f| f.rule == live_arm(RuleId::TagConsistency, false).name())
         .collect();
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].lane, SUT);
@@ -106,5 +106,7 @@ fn a_final_under_a_shown_tag_charges_neither_arm() {
         sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 0),
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
     ];
-    assert!(evaluate_rfc_findings(&evs).into_iter().all(|f| f.rule != TagConsistencyRule.name()));
+    assert!(evaluate_rfc_findings(&evs)
+        .into_iter()
+        .all(|f| f.rule != live_arm(RuleId::TagConsistency, true).name()));
 }

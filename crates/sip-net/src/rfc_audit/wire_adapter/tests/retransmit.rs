@@ -23,7 +23,7 @@ fn a_re_composed_2xx_rung_is_charged_to_the_lane_that_sent_it() {
         sent(SUT, ok.clone(), ALICE, 1),
         sent(SUT, recomposed(ok), ALICE, 2),
     ];
-    let out = RungByteIdenticalRule.check_positioned(&evs);
+    let out = live(RuleId::RungByteIdentical).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "attributed to the lane that re-composed its rung");
     assert_eq!(out[0].3.as_deref(), Some(SUT));
@@ -35,7 +35,7 @@ fn a_re_composed_2xx_rung_is_charged_to_the_lane_that_sent_it() {
     assert!(detail.contains("this copy `To: <sip:bob@127.0.0.1>;tag=bt`"), "{detail}");
     assert!(detail.contains("§13.3.1.4"), "{detail}");
     assert_eq!(out[0].2, Some(3), "offending points at the divergent copy");
-    assert!(!RungByteIdenticalRule.force_advisory(), "a divergent rung gates");
+    assert!(!live(RuleId::RungByteIdentical).force_advisory(), "a divergent rung gates");
 }
 
 /// The LB proxy's own Record-Route cookie may differ between two copies of
@@ -68,7 +68,7 @@ fn a_re_stamped_own_record_route_cookie_is_not_charged_but_a_foreign_row_is() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 2),
         sent(SUT, forwarded("\"\"", "lr"), WORKER, 3),
     ];
-    assert!(RungByteIdenticalRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
 
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
@@ -76,7 +76,7 @@ fn a_re_stamped_own_record_route_cookie_is_not_charged_but_a_foreign_row_is() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 2),
         sent(SUT, forwarded("\"\"", "x=1;lr"), WORKER, 3),
     ];
-    let out = RungByteIdenticalRule.check_positioned(&evs);
+    let out = live(RuleId::RungByteIdentical).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     let detail = &out[0].1;
@@ -96,7 +96,7 @@ fn a_byte_identical_2xx_rung_is_not_charged() {
         sent(SUT, ok.clone(), ALICE, 2),
         sent(SUT, ok, ALICE, 3),
     ];
-    assert!(RungByteIdenticalRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
 }
 
 /// A B2BUA relaying two forks' 2xx sends two messages under one branch and
@@ -108,7 +108,7 @@ fn another_forks_2xx_is_not_a_rung() {
         sent(SUT, resp(200, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
         sent(SUT, resp(200, 1, "INVITE", "bt2", "z9hG4bK-i"), ALICE, 2),
     ];
-    assert!(RungByteIdenticalRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
 }
 
 /// The far end's re-composed rung is not this bind's: the rule charges the
@@ -118,7 +118,7 @@ fn another_forks_2xx_is_not_a_rung() {
 fn a_re_composed_rung_the_peer_sent_is_not_charged_to_this_bind() {
     let bye = req("BYE", "z9hG4bK-b", 2, Some("bt"));
     let evs = vec![recv(SUT, bye.clone(), ALICE, 0), recv(SUT, recomposed(bye), ALICE, 1)];
-    assert!(RungByteIdenticalRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::RungByteIdentical).check_positioned(&evs).is_empty());
 }
 
 /// A reliable provisional the SUT re-sent under the same `RSeq` with other
@@ -145,7 +145,7 @@ fn a_re_composed_reliable_provisional_rung_is_charged() {
         sent(SUT, recomposed(reliable(1)), ALICE, 2),
         sent(SUT, reliable(2), ALICE, 3),
     ];
-    let out = RungByteIdenticalRule.check_positioned(&evs);
+    let out = live(RuleId::RungByteIdentical).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(out[0].1.contains("reliable provisional 183 RSeq 1 (INVITE)"), "{}", out[0].1);
     assert!(out[0].1.contains("RFC 3262 §3"), "{}", out[0].1);

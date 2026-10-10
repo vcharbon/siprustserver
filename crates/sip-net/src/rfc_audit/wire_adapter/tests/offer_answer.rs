@@ -45,10 +45,10 @@ fn t38_call(
 
 #[test]
 fn an_ack_body_on_a_completed_round_is_flagged_at_its_wire_position() {
-    assert!(AckBodyAfterCompleteOfferAnswerRule.check(&t38_call(None, None)).is_empty());
+    assert!(live(RuleId::AckBodyAfterCompleteOfferAnswer).check(&t38_call(None, None)).is_empty());
 
-    let out =
-        AckBodyAfterCompleteOfferAnswerRule.check_positioned(&t38_call(None, Some(STRAY_ANSWER)));
+    let out = live(RuleId::AckBodyAfterCompleteOfferAnswer)
+        .check_positioned(&t38_call(None, Some(STRAY_ANSWER)));
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE, "charged to the lane that sent the ACK");
     assert!(out[0].1.contains("audio/RTP/AVP"), "{}", out[0].1);
@@ -56,7 +56,8 @@ fn an_ack_body_on_a_completed_round_is_flagged_at_its_wire_position() {
     assert_eq!(out[0].2, Some(7), "offending points at the ACK that carried the body");
 
     // The establishing round is closed by the 180, not by the bodyless 200.
-    let first = AckBodyAfterCompleteOfferAnswerRule.check(&t38_call(Some(STRAY_ANSWER), None));
+    let first =
+        live(RuleId::AckBodyAfterCompleteOfferAnswer).check(&t38_call(Some(STRAY_ANSWER), None));
     assert_eq!(first.len(), 1, "{first:?}");
 }
 
@@ -68,7 +69,7 @@ fn a_delayed_offer_ack_carries_the_answer_and_is_clean() {
         recv(ALICE, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), BOB, 1),
         sent(ALICE, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), Some(AUDIO_ANSWER)), BOB, 2),
     ];
-    assert!(AckBodyAfterCompleteOfferAnswerRule.check(&evs).is_empty());
+    assert!(live(RuleId::AckBodyAfterCompleteOfferAnswer).check(&evs).is_empty());
 }
 
 /// The same as [`resp_sdp`], made reliable: `Require: 100rel` and an
@@ -83,19 +84,19 @@ fn reliable_resp_sdp(status: u16, cseq: u32, branch: &str, body: Option<&str>) -
 /// is flagged at the 2xx sender's lane, charged to the ACK's sender.
 #[test]
 fn a_delayed_offer_acked_without_an_answer_gates() {
-    assert!(!DelayedOfferAnsweredInAckRule.force_advisory(), "a MUST gates");
+    assert!(!live(RuleId::DelayedOfferAnsweredInAck).force_advisory(), "a MUST gates");
     let answered = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), Some(AUDIO_ANSWER)), ALICE, 2),
     ];
-    assert!(DelayedOfferAnsweredInAckRule.check(&answered).is_empty());
+    assert!(live(RuleId::DelayedOfferAnsweredInAck).check(&answered).is_empty());
     let silent = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, None), ALICE, 0),
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_OFFER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    let out = DelayedOfferAnsweredInAckRule.check_positioned(&silent);
+    let out = live(RuleId::DelayedOfferAnsweredInAck).check_positioned(&silent);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, BOB, "reported where the answer had to arrive");
     assert_eq!(out[0].3, Some(ALICE.to_string()), "charged to the ACK's sender");
@@ -103,7 +104,7 @@ fn a_delayed_offer_acked_without_an_answer_gates() {
 
 #[test]
 fn a_final_leaving_the_offer_unanswered_is_flagged_at_its_wire_position() {
-    assert!(!Final2xxAnswersTheOfferRule.force_advisory(), "a MUST gates");
+    assert!(!live(RuleId::Final2xxAnswersTheOffer).force_advisory(), "a MUST gates");
 
     // Judged from the ANSWERER's bind: it takes the offer and ends the
     // round with a 200 stating no plan of its own.
@@ -112,14 +113,14 @@ fn a_final_leaving_the_offer_unanswered_is_flagged_at_its_wire_position() {
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    assert!(Final2xxAnswersTheOfferRule.check(&clean).is_empty());
+    assert!(live(RuleId::Final2xxAnswersTheOffer).check(&clean).is_empty());
 
     let silent = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(AUDIO_OFFER)), ALICE, 0),
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", None), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    let out = Final2xxAnswersTheOfferRule.check_positioned(&silent);
+    let out = live(RuleId::Final2xxAnswersTheOffer).check_positioned(&silent);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, BOB, "reported on the answerer's own lane");
     assert_eq!(out[0].3, Some(BOB.to_string()), "charged to the answerer");
@@ -138,7 +139,10 @@ fn a_reliable_provisional_answer_discharges_the_final() {
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", None), ALICE, 4),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 5),
     ];
-    assert!(Final2xxAnswersTheOfferRule.check(&evs).is_empty(), "RFC 3262 §5 answered it");
+    assert!(
+        live(RuleId::Final2xxAnswersTheOffer).check(&evs).is_empty(),
+        "RFC 3262 §5 answered it"
+    );
 }
 
 #[test]
@@ -150,7 +154,7 @@ fn a_silent_answerer_is_named_on_the_lane_that_took_it() {
         recv(ALICE, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", None), BOB, 1),
         sent(ALICE, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), BOB, 2),
     ];
-    let out = Final2xxAnswersTheOfferRule.check_positioned(&evs);
+    let out = live(RuleId::Final2xxAnswersTheOffer).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE, "reported at the vantage that took the 200");
     assert_eq!(out[0].3, Some(BOB.to_string()), "charged to the answerer all the same");
@@ -163,7 +167,7 @@ fn a_failure_final_and_a_cancelled_round_owe_no_answer() {
         sent(BOB, resp_sdp(486, 1, "INVITE", "z9hG4bK-i1", None), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    assert!(Final2xxAnswersTheOfferRule.check(&rejected).is_empty());
+    assert!(live(RuleId::Final2xxAnswersTheOffer).check(&rejected).is_empty());
 
     let cancelled = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(AUDIO_OFFER)), ALICE, 0),
@@ -173,7 +177,7 @@ fn a_failure_final_and_a_cancelled_round_owe_no_answer() {
         sent(BOB, resp_sdp(487, 1, "INVITE", "z9hG4bK-i1", None), ALICE, 4),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 5),
     ];
-    assert!(Final2xxAnswersTheOfferRule.check(&cancelled).is_empty());
+    assert!(live(RuleId::Final2xxAnswersTheOffer).check(&cancelled).is_empty());
 }
 
 #[test]
@@ -185,14 +189,14 @@ fn an_answer_re_typing_the_offered_stream_is_flagged_on_the_answerer() {
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(T38_ANSWER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    assert!(AnswerStreamMatchesOfferRule.check(&clean).is_empty());
+    assert!(live(RuleId::AnswerStreamMatchesOffer).check(&clean).is_empty());
 
     let retyped = vec![
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(T38_OFFER)), ALICE, 0),
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(AUDIO_ANSWER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    let out = AnswerStreamMatchesOfferRule.check_positioned(&retyped);
+    let out = live(RuleId::AnswerStreamMatchesOffer).check_positioned(&retyped);
     assert_eq!(out.len(), 1, "one answer is one finding: {out:?}");
     assert_eq!(out[0].0, BOB);
     assert!(out[0].1.contains("m=[0]"), "{}", out[0].1);
@@ -204,11 +208,15 @@ fn an_answer_re_typing_the_offered_stream_is_flagged_on_the_answerer() {
 
 #[test]
 fn an_origin_that_leaves_the_session_is_advisory_and_positioned() {
-    assert!(SdpOriginContinuityRule.force_advisory());
-    assert_eq!(SdpOriginContinuityRule.subject(), HashSet::from([UaRole::Uac, UaRole::Uas]));
-    assert!(SdpOriginContinuityRule.check(&t38_call(None, None)).is_empty());
+    assert!(live(RuleId::SdpOriginContinuity).force_advisory());
+    assert_eq!(
+        live(RuleId::SdpOriginContinuity).subject(),
+        HashSet::from([UaRole::Uac, UaRole::Uas])
+    );
+    assert!(live(RuleId::SdpOriginContinuity).check(&t38_call(None, None)).is_empty());
 
-    let out = SdpOriginContinuityRule.check_positioned(&t38_call(None, Some(STRAY_ANSWER)));
+    let out =
+        live(RuleId::SdpOriginContinuity).check_positioned(&t38_call(None, Some(STRAY_ANSWER)));
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE);
     assert!(out[0].1.contains("o=bob 1 1 IN IP4 127.0.0.1"), "{}", out[0].1);
@@ -231,12 +239,12 @@ fn a_relay_lane_carrying_both_agents_origins_is_not_judged() {
         sent(SUT, ok, ALICE, 3),
     ];
     assert!(
-        SdpOriginContinuityRule.check(&evs).is_empty(),
+        live(RuleId::SdpOriginContinuity).check(&evs).is_empty(),
         "{:?}",
-        SdpOriginContinuityRule.check(&evs)
+        live(RuleId::SdpOriginContinuity).check(&evs)
     );
-    assert!(AnswerStreamMatchesOfferRule.check(&evs).is_empty());
-    assert!(AckBodyAfterCompleteOfferAnswerRule.check(&evs).is_empty());
+    assert!(live(RuleId::AnswerStreamMatchesOffer).check(&evs).is_empty());
+    assert!(live(RuleId::AckBodyAfterCompleteOfferAnswer).check(&evs).is_empty());
 }
 
 // ── the RFC 3264 offer/answer-model rules ───────────────────────────────
@@ -303,14 +311,14 @@ fn sdp_round(offer: &str, answer: &str) -> Vec<Stamped<SignalingNetworkEvent>> {
 
 #[test]
 fn a_second_offer_over_an_unanswered_one_is_advisory_at_either_end() {
-    assert!(NoNewOfferWhileOfferPendingRule.force_advisory());
-    assert!(NoNewOfferWhileOfferPendingRule.check(&t38_call(None, None)).is_empty());
+    assert!(live(RuleId::NoNewOfferWhileOfferPending).force_advisory());
+    assert!(live(RuleId::NoNewOfferWhileOfferPending).check(&t38_call(None, None)).is_empty());
 
     let glare = vec![
         sent(ALICE, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(AUDIO_OFFER)), BOB, 0),
         sent(ALICE, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(T38_OFFER)), BOB, 1),
     ];
-    let out = NoNewOfferWhileOfferPendingRule.check_positioned(&glare);
+    let out = live(RuleId::NoNewOfferWhileOfferPending).check_positioned(&glare);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE, "charged to the lane that sent the second offer");
     assert!(out[0].1.contains("MUST-002"), "{}", out[0].1);
@@ -322,27 +330,27 @@ fn a_second_offer_over_an_unanswered_one_is_advisory_at_either_end() {
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i1", 1, None, Some(AUDIO_OFFER)), ALICE, 0),
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(T38_OFFER)), ALICE, 1),
     ];
-    let out = NoNewOfferWhileOfferPendingRule.check(&taker);
+    let out = live(RuleId::NoNewOfferWhileOfferPending).check(&taker);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, BOB, "reported on the lane that took it");
 }
 
 #[test]
 fn a_bad_answer_is_named_at_the_offerers_lane() {
-    assert!(AnswerMLineCountMatchesOfferRule
+    assert!(live(RuleId::AnswerMLineCountMatchesOffer)
         .check(&sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO))
         .is_empty());
 
     let evs = sdp_round(OFFER_1AUDIO, BAD_ANSWER);
     for (rule, must, quote) in [
         (
-            Box::new(AnswerMLineCountMatchesOfferRule) as Box<dyn CrossMessageAuditRule>,
+            Box::new(live(RuleId::AnswerMLineCountMatchesOffer)) as Box<dyn CrossMessageAuditRule>,
             "MUST-018",
             "video/RTP/AVP",
         ),
-        (Box::new(AnswerTLineEqualsOfferRule), "MUST-019", "100 200"),
-        (Box::new(AnswerMediaTypeMatchesOfferRule), "MUST-022", "m=[0]"),
-        (Box::new(RejectedStreamMinimalAnswerRule), "MUST-021", "m=[1]"),
+        (Box::new(live(RuleId::AnswerTLineEqualsOffer)), "MUST-019", "100 200"),
+        (Box::new(live(RuleId::AnswerMediaTypeMatchesOffer)), "MUST-022", "m=[0]"),
+        (Box::new(live(RuleId::RejectedStreamMinimalAnswer)), "MUST-021", "m=[1]"),
     ] {
         let out = rule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{}: {out:?}", rule.name());
@@ -358,26 +366,29 @@ fn a_bad_answer_is_named_at_the_offerers_lane() {
         sent(BOB, resp_sdp(200, 1, "INVITE", "z9hG4bK-i1", Some(BAD_ANSWER)), ALICE, 1),
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
     ];
-    let out = AnswerMLineCountMatchesOfferRule.check(&at_answerer);
+    let out = live(RuleId::AnswerMLineCountMatchesOffer).check(&at_answerer);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, BOB);
 }
 
 #[test]
 fn the_direction_and_zero_port_pairings_are_advisory() {
-    assert!(DirectionPairValidRule.force_advisory());
-    assert!(ZeroPortPropagationRule.force_advisory());
+    assert!(live(RuleId::DirectionPairValid).force_advisory());
+    assert!(live(RuleId::ZeroPortPropagation).force_advisory());
 
     let held = OFFER_1AUDIO.replace("a=sendrecv", "a=inactive");
-    let out = DirectionPairValidRule.check_positioned(&sdp_round(&held, ANSWER_1AUDIO));
+    let out = live(RuleId::DirectionPairValid).check_positioned(&sdp_round(&held, ANSWER_1AUDIO));
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(out[0].1.contains("MUST-023"), "{}", out[0].1);
     assert!(out[0].1.contains("answer 'sendrecv' invalid for offer 'inactive'"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(2));
 
     let disabled = OFFER_1AUDIO.replace("m=audio 49170 RTP/AVP 0 96", "m=audio 0 RTP/AVP 0 96");
-    assert!(DirectionPairValidRule.check(&sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO)).is_empty());
-    let out = ZeroPortPropagationRule.check_positioned(&sdp_round(&disabled, ANSWER_1AUDIO));
+    assert!(live(RuleId::DirectionPairValid)
+        .check(&sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO))
+        .is_empty());
+    let out =
+        live(RuleId::ZeroPortPropagation).check_positioned(&sdp_round(&disabled, ANSWER_1AUDIO));
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(out[0].1.contains("MUST-044"), "{}", out[0].1);
     assert!(out[0].1.contains("m=[0] answered port=50000"), "{}", out[0].1);
@@ -392,7 +403,7 @@ fn a_shrinking_re_offer_is_charged_only_to_the_lane_that_sent_it() {
         BOB,
         3,
     ));
-    let out = ReOfferMLineCountMonotonicRule.check_positioned(&evs);
+    let out = live(RuleId::ReOfferMLineCountMonotonic).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE);
     assert!(out[0].1.contains("MUST-042"), "{}", out[0].1);
@@ -406,17 +417,19 @@ fn a_shrinking_re_offer_is_charged_only_to_the_lane_that_sent_it() {
         recv(BOB, req_sdp("ACK", "z9hG4bK-a1", 1, Some("bt"), None), ALICE, 2),
         recv(BOB, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(OFFER_1AUDIO)), ALICE, 3),
     ];
-    assert!(ReOfferMLineCountMonotonicRule.check(&taker).is_empty());
+    assert!(live(RuleId::ReOfferMLineCountMonotonic).check(&taker).is_empty());
 }
 
 #[test]
 fn a_rebound_payload_type_is_named_at_either_end() {
-    assert!(PayloadTypeMappingStableRule.check(&sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO)).is_empty());
+    assert!(live(RuleId::PayloadTypeMappingStable)
+        .check(&sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO))
+        .is_empty());
 
     let reoffer = OFFER_1AUDIO.replace("a=rtpmap:96 opus/48000/2", "a=rtpmap:96 H264/90000");
     let mut evs = sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO);
     evs.push(sent(ALICE, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(&reoffer)), BOB, 3));
-    let out = PayloadTypeMappingStableRule.check_positioned(&evs);
+    let out = live(RuleId::PayloadTypeMappingStable).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE);
     assert!(out[0].1.contains("MUST-047"), "{}", out[0].1);
@@ -442,15 +455,15 @@ fn a_relay_lane_carrying_a_negotiation_is_not_judged_on_it() {
         sent(SUT, ok, ALICE, 3),
     ];
     let rules: Vec<Box<dyn CrossMessageAuditRule>> = vec![
-        Box::new(NoNewOfferWhileOfferPendingRule),
-        Box::new(AnswerMLineCountMatchesOfferRule),
-        Box::new(AnswerTLineEqualsOfferRule),
-        Box::new(AnswerMediaTypeMatchesOfferRule),
-        Box::new(DirectionPairValidRule),
-        Box::new(RejectedStreamMinimalAnswerRule),
-        Box::new(ReOfferMLineCountMonotonicRule),
-        Box::new(ZeroPortPropagationRule),
-        Box::new(PayloadTypeMappingStableRule),
+        Box::new(live(RuleId::NoNewOfferWhileOfferPending)),
+        Box::new(live(RuleId::AnswerMLineCountMatchesOffer)),
+        Box::new(live(RuleId::AnswerTLineEqualsOffer)),
+        Box::new(live(RuleId::AnswerMediaTypeMatchesOffer)),
+        Box::new(live(RuleId::DirectionPairValid)),
+        Box::new(live(RuleId::RejectedStreamMinimalAnswer)),
+        Box::new(live(RuleId::ReOfferMLineCountMonotonic)),
+        Box::new(live(RuleId::ZeroPortPropagation)),
+        Box::new(live(RuleId::PayloadTypeMappingStable)),
     ];
     for rule in rules {
         let out = rule.check(&evs);

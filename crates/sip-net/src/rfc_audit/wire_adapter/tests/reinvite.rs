@@ -12,7 +12,7 @@ fn a_racing_re_invite_surfaces_at_the_lane_that_took_it() {
         recv(BOB, req("INVITE", "z9hG4bK-2", 3, Some("bt")), ALICE, 1),
         sent(BOB, resp(200, 3, "INVITE", "bt", "z9hG4bK-2"), ALICE, 2),
     ];
-    let out = ConcurrentReInvite500Or491Rule.check_positioned(&evs);
+    let out = live(RuleId::ConcurrentReInvite500Or491).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, BOB, "charged to the UAS that owed the 500");
     assert!(out[0].1.contains("500+Retry-After"), "{}", out[0].1);
@@ -30,9 +30,9 @@ fn a_racing_re_invite_surfaces_at_the_lane_that_took_it() {
         ]
     };
     let compliant = answered(500, "Retry-After: 4\r\n");
-    assert!(ConcurrentReInvite500Or491Rule.check_positioned(&compliant).is_empty());
+    assert!(live(RuleId::ConcurrentReInvite500Or491).check_positioned(&compliant).is_empty());
     let pending_491 = answered(491, "");
-    assert_eq!(ConcurrentReInvite500Or491Rule.check_positioned(&pending_491).len(), 1);
+    assert_eq!(live(RuleId::ConcurrentReInvite500Or491).check_positioned(&pending_491).len(), 1);
 }
 
 /// §14.1 at the sending lane: the re-INVITE that overtook its own prior
@@ -44,7 +44,7 @@ fn a_re_invite_overtaking_the_ack_surfaces_at_the_uac_lane() {
         recv(ALICE, resp(200, 2, "INVITE", "bt", "z9hG4bK-1"), BOB, 1),
         sent(ALICE, req("INVITE", "z9hG4bK-2", 3, Some("bt")), BOB, 2),
     ];
-    let out = NoReInviteWhileInviteInProgressRule.check_positioned(&evs);
+    let out = live(RuleId::NoReInviteWhileInviteInProgress).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE);
     assert!(out[0].1.contains("not yet ACKed"), "{}", out[0].1);
@@ -59,11 +59,11 @@ fn an_abandoned_re_invite_surfaces_unless_the_dialog_was_byed() {
         sent(ALICE, req("INVITE", "z9hG4bK-re", 2, Some("bt")), BOB, 0),
         recv(ALICE, resp(183, 2, "INVITE", "bt", "z9hG4bK-re"), BOB, 1),
     ];
-    let out = FailedReinviteTearsDownDialogRule.check_positioned(&evs);
+    let out = live(RuleId::FailedReinviteTearsDownDialog).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE);
     assert!(out[0].1.contains("silently torn down"), "{}", out[0].1);
-    assert!(!FailedReinviteTearsDownDialogRule.force_advisory());
+    assert!(!live(RuleId::FailedReinviteTearsDownDialog).force_advisory());
 
     // "Absent another cause": a BYE is an independent teardown.
     let byed = vec![
@@ -71,5 +71,5 @@ fn an_abandoned_re_invite_surfaces_unless_the_dialog_was_byed() {
         recv(ALICE, resp(100, 2, "INVITE", "", "z9hG4bK-re"), BOB, 1),
         sent(ALICE, req("BYE", "z9hG4bK-bye", 3, Some("bt")), BOB, 2),
     ];
-    assert!(FailedReinviteTearsDownDialogRule.check_positioned(&byed).is_empty());
+    assert!(live(RuleId::FailedReinviteTearsDownDialog).check_positioned(&byed).is_empty());
 }

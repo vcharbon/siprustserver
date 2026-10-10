@@ -32,6 +32,17 @@ const BOB: &str = "127.0.0.1:5070";
 const A: &str = "sip:alice@127.0.0.1";
 const B: &str = "sip:bob@127.0.0.1";
 
+/// The one live row of `id`.
+fn live(id: RuleId) -> Live {
+    let [only] = rows_of(id)[..] else { panic!("{id} has more than one live row") };
+    only
+}
+
+/// The live row of `id` at severity `advisory`, for a rule surfaced twice.
+fn live_arm(id: RuleId, advisory: bool) -> Live {
+    rows_of(id).into_iter().find(|l| l.advisory == advisory).expect("a row at that severity")
+}
+
 fn sent(bind: &str, raw: Vec<u8>, to: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
     Stamped {
         event: SignalingNetworkEvent::SendCalled {

@@ -49,7 +49,7 @@ fn a_cancel_the_sut_sent_after_acking_its_own_final_is_flagged() {
         sent(SUT, b_leg_req("ACK", "z9hG4bK-b", Some("bt")), BOB, 3),
     ];
     assert!(
-        NoCancelAfterFinalRule.check_positioned(&crossed).is_empty(),
+        live(RuleId::NoCancelAfterFinal).check_positioned(&crossed).is_empty(),
         "a CANCEL the ACK has not yet sealed may have crossed the final"
     );
 
@@ -59,13 +59,13 @@ fn a_cancel_the_sut_sent_after_acking_its_own_final_is_flagged() {
         sent(SUT, b_leg_req("ACK", "z9hG4bK-b", Some("bt")), BOB, 2),
         sent(SUT, b_leg_req("CANCEL", "z9hG4bK-b", None), BOB, 3),
     ];
-    let out = NoCancelAfterFinalRule.check_positioned(&late);
+    let out = live(RuleId::NoCancelAfterFinal).check_positioned(&late);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "the lane that sent the CANCEL is charged");
     assert_eq!(out[0].3.as_deref(), Some(SUT));
     assert!(out[0].1.contains("486") && out[0].1.contains("§9.1"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(4), "offending points at the late CANCEL");
-    assert!(!NoCancelAfterFinalRule.force_advisory(), "the late CANCEL gates");
+    assert!(!live(RuleId::NoCancelAfterFinal).force_advisory(), "the late CANCEL gates");
 }
 
 /// The far end's own late CANCEL is not this bind's: the rule charges the
@@ -79,7 +79,7 @@ fn a_late_cancel_the_peer_sent_is_not_charged_to_this_bind() {
         recv(SUT, req("ACK", "z9hG4bK-i", 1, Some("bt")), ALICE, 2),
         recv(SUT, req("CANCEL", "z9hG4bK-i", 1, None), ALICE, 3),
     ];
-    assert!(NoCancelAfterFinalRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::NoCancelAfterFinal).check_positioned(&evs).is_empty());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn divergent_cancel_route_is_flagged_at_its_wire_position() {
         sent(SUT, req_with("INVITE", "z9hG4bK-r", "Route: <sip:p1@h;lr>\r\n"), BOB, 0),
         sent(SUT, req_with("CANCEL", "z9hG4bK-r", "Route: <sip:p2@h;lr>\r\n"), BOB, 1),
     ];
-    let out = CancelRouteEchoesInviteRule.check_positioned(&evs);
+    let out = live(RuleId::CancelRouteEchoesInvite).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "attributed to the lane that sent the CANCEL");
     assert!(out[0].1.contains("differ") && out[0].1.contains("z9hG4bK-r"), "{}", out[0].1);
@@ -98,7 +98,7 @@ fn divergent_cancel_route_is_flagged_at_its_wire_position() {
         sent(SUT, req_with("INVITE", "z9hG4bK-r", "Route: <sip:p1@h;lr>\r\n"), BOB, 0),
         sent(SUT, req_with("CANCEL", "z9hG4bK-r", "Route: <sip:p1@h;lr>\r\n"), BOB, 1),
     ];
-    assert!(CancelRouteEchoesInviteRule.check_positioned(&echoed).is_empty());
+    assert!(live(RuleId::CancelRouteEchoesInvite).check_positioned(&echoed).is_empty());
 }
 
 #[test]
@@ -110,20 +110,20 @@ fn relay_lane_passing_a_cancel_through_is_not_judged() {
         sent(SUT, req_with("INVITE", "z9hG4bK-b", "Route: <sip:p1@h;lr>\r\n"), BOB, 1),
         sent(SUT, req_with("CANCEL", "z9hG4bK-b", "Route: <sip:p2@h;lr>\r\n"), BOB, 2),
     ];
-    assert!(CancelRouteEchoesInviteRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::CancelRouteEchoesInvite).check_positioned(&evs).is_empty());
 }
 
 #[test]
 fn eager_cancel_is_advisory_and_noted_on_a_forwarding_lane() {
     // The rule never gates (ADR-0028), and a B2BUA/AS lane authoring its
     // own b-leg CANCEL is judged on it — no relay exemption here.
-    assert!(CancelAfter1xxRule.force_advisory());
+    assert!(live(RuleId::CancelAfter1xx).force_advisory());
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-a", 1, None), ALICE, 0),
         sent(SUT, req("INVITE", "z9hG4bK-b", 1, None), BOB, 1),
         sent(SUT, req("CANCEL", "z9hG4bK-b", 1, None), BOB, 2),
     ];
-    let out = CancelAfter1xxRule.check_positioned(&evs);
+    let out = live(RuleId::CancelAfter1xx).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("before any received"), "{}", out[0].1);
@@ -136,7 +136,7 @@ fn eager_cancel_is_advisory_and_noted_on_a_forwarding_lane() {
         recv(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-b"), BOB, 2),
         sent(SUT, req("CANCEL", "z9hG4bK-b", 1, None), BOB, 3),
     ];
-    assert!(CancelAfter1xxRule.check_positioned(&waited).is_empty());
+    assert!(live(RuleId::CancelAfter1xx).check_positioned(&waited).is_empty());
 }
 
 #[test]
@@ -149,9 +149,9 @@ fn proxy_declared_lane_sends_no_eager_cancel_finding() {
     ];
     let mut ua = vec![bind_roles(SUT, HashSet::from([UaRole::Uac, UaRole::Uas]), 0)];
     ua.extend(wire.clone());
-    assert_eq!(CancelAfter1xxRule.check(&ua).len(), 1, "a UA lane is judged");
+    assert_eq!(live(RuleId::CancelAfter1xx).check(&ua).len(), 1, "a UA lane is judged");
 
     let mut proxy = vec![bind_roles(SUT, HashSet::from([UaRole::Proxy]), 0)];
     proxy.extend(wire);
-    assert!(CancelAfter1xxRule.check(&proxy).is_empty(), "a {{Proxy}} lane is exempt");
+    assert!(live(RuleId::CancelAfter1xx).check(&proxy).is_empty(), "a {{Proxy}} lane is exempt");
 }

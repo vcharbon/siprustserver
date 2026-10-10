@@ -29,13 +29,14 @@ fn legacy_branch_invite() -> Vec<u8> {
 /// bytes is charged nothing.
 #[test]
 fn a_minted_defect_is_charged_to_its_sender_and_positioned() {
-    let out = BranchPrefixRule.check_positioned(&[sent(ALICE, legacy_branch_invite(), BOB, 0)]);
+    let out =
+        live(RuleId::BranchPrefix).check_positioned(&[sent(ALICE, legacy_branch_invite(), BOB, 0)]);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, ALICE, "the sender is charged");
     assert!(out[0].1.contains("magic cookie"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(1), "the offending wire entry");
 
-    let taken = BranchPrefixRule.check(&[recv(SUT, legacy_branch_invite(), ALICE, 0)]);
+    let taken = live(RuleId::BranchPrefix).check(&[recv(SUT, legacy_branch_invite(), ALICE, 0)]);
     assert!(taken.is_empty(), "a lane that only TOOK the bytes minted nothing: {taken:?}");
 }
 
@@ -60,7 +61,7 @@ fn the_record_route_rule_is_narrowed_to_declared_proxies() {
         let evs = vec![bind_roles(SUT, roles, 0), sent(SUT, rr.clone(), BOB, 1)];
         evaluate_rfc_findings(&evs)
             .into_iter()
-            .filter(|f| f.rule == NoRecordRouteFromUaRule.name())
+            .filter(|f| f.rule == live(RuleId::NoRecordRouteFromUa).name())
             .collect()
     };
     let as_proxy = named(HashSet::from([UaRole::Proxy]));

@@ -12,7 +12,7 @@ fn second_different_final_is_flagged_at_its_wire_position() {
         recv(SUT, req("ACK", "z9hG4bK-i", 1, Some("bt")), ALICE, 2),
         sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 3),
     ];
-    let out = SingleFinalPerServerTxnRule.check_positioned(&evs);
+    let out = live(RuleId::SingleFinalPerServerTxn).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "attributed to the lane that authored the second final");
     assert!(out[0].1.contains("480") && out[0].1.contains("487"), "{}", out[0].1);
@@ -34,7 +34,7 @@ fn every_divergent_status_is_named_on_the_one_finding() {
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 4),
         recv(SUT, req("ACK", "z9hG4bK-r", 1, Some("bt")), ALICE, 5),
     ];
-    let out = SingleFinalPerServerTxnRule.check_positioned(&evs);
+    let out = live(RuleId::SingleFinalPerServerTxn).check_positioned(&evs);
     assert_eq!(out.len(), 1, "one finding for the transaction: {out:?}");
     assert!(
         out[0].1.contains("480") && out[0].1.contains("486") && out[0].1.contains("487"),
@@ -54,7 +54,7 @@ fn same_status_retransmissions_are_silent() {
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-g"), ALICE, 4),
         recv(SUT, req("ACK", "z9hG4bK-g", 1, Some("bt")), ALICE, 5),
     ];
-    assert!(SingleFinalPerServerTxnRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::SingleFinalPerServerTxn).check_positioned(&evs).is_empty());
 }
 
 #[test]
@@ -68,11 +68,11 @@ fn later_1xx_stays_with_no_1xx_after_final() {
         recv(SUT, req("ACK", "z9hG4bK-p", 1, Some("bt")), ALICE, 3),
     ];
     assert!(
-        SingleFinalPerServerTxnRule.check_positioned(&evs).is_empty(),
+        live(RuleId::SingleFinalPerServerTxn).check_positioned(&evs).is_empty(),
         "a 1xx is not a final — this rule does not judge it"
     );
     assert_eq!(
-        No1xxAfterFinalRule.check(&evs).len(),
+        live(RuleId::No1xxAfterFinal).check(&evs).len(),
         1,
         "the sibling rule owns the after-final provisional"
     );
@@ -89,7 +89,7 @@ fn relay_lane_forwarding_two_finals_is_not_judged() {
         recv(SUT, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 3),
         sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-a"), ALICE, 4),
     ];
-    assert!(SingleFinalPerServerTxnRule.check_positioned(&evs).is_empty());
+    assert!(live(RuleId::SingleFinalPerServerTxn).check_positioned(&evs).is_empty());
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn b2bua_lane_authoring_its_a_leg_finals_is_judged() {
         recv(SUT, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 3),
         sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-a"), ALICE, 4),
     ];
-    let out = SingleFinalPerServerTxnRule.check(&evs);
+    let out = live(RuleId::SingleFinalPerServerTxn).check(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
 }
@@ -113,7 +113,7 @@ fn b2bua_lane_authoring_its_a_leg_finals_is_judged() {
 /// points at itself; a relay lane forwarding its upstream's is not judged.
 #[test]
 fn a_late_provisional_fires_at_the_uas_lane_and_not_on_a_relay() {
-    assert_eq!(No1xxAfterFinalRule.subject(), HashSet::from([UaRole::Uas]));
+    assert_eq!(live(RuleId::No1xxAfterFinal).subject(), HashSet::from([UaRole::Uas]));
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
@@ -121,7 +121,7 @@ fn a_late_provisional_fires_at_the_uas_lane_and_not_on_a_relay() {
         recv(SUT, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 3),
         sent(SUT, resp(181, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 4),
     ];
-    let out = No1xxAfterFinalRule.check_positioned(&evs);
+    let out = live(RuleId::No1xxAfterFinal).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "attributed to the UAS lane");
     assert_eq!(out[0].2, Some(5), "offending points at the late 181");
@@ -134,7 +134,7 @@ fn a_late_provisional_fires_at_the_uas_lane_and_not_on_a_relay() {
         sent(SUT, resp(200, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 2),
         sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 3),
     ];
-    assert!(No1xxAfterFinalRule.check_positioned(&retransmits).is_empty());
+    assert!(live(RuleId::No1xxAfterFinal).check_positioned(&retransmits).is_empty());
 
     // A lane that forwards both directions of one Call-ID relays what the
     // upstream produced; the late 1xx is flagged on the upstream lane.
@@ -145,5 +145,5 @@ fn a_late_provisional_fires_at_the_uas_lane_and_not_on_a_relay() {
         recv(SUT, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 3),
         sent(SUT, resp(183, 1, "INVITE", "bt", "z9hG4bK-a"), ALICE, 4),
     ];
-    assert!(No1xxAfterFinalRule.check_positioned(&relayed).is_empty());
+    assert!(live(RuleId::No1xxAfterFinal).check_positioned(&relayed).is_empty());
 }

@@ -12,7 +12,7 @@ fn a_cseq_reuse_is_reported_on_the_lane_that_took_it() {
         recv(SUT, req("OPTIONS", "z9hG4bK-o", 2, Some("bt")), ALICE, 0),
         recv(SUT, req("BYE", "z9hG4bK-b", 2, Some("bt")), ALICE, 1),
     ];
-    let out = CseqInDialogOrderRule.check_positioned(&evs);
+    let out = live(RuleId::CseqInDialogOrder).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "reported on the lane that took the stream");
     assert!(out[0].1.contains("reuses a prior request's CSeq"), "{}", out[0].1);
@@ -31,7 +31,7 @@ fn a_recorded_sender_does_not_double_report_the_taker_finding() {
         sent(ALICE, req("BYE", "z9hG4bK-b", 2, Some("bt")), SUT, 2),
         recv(SUT, req("BYE", "z9hG4bK-b", 2, Some("bt")), ALICE, 3),
     ];
-    let out = CseqInDialogOrderRule.check_positioned(&evs);
+    let out = live(RuleId::CseqInDialogOrder).check_positioned(&evs);
     assert_eq!(out.len(), 1, "one report, at the taker: {out:?}");
     assert_eq!(out[0].0, SUT);
 }
@@ -46,7 +46,7 @@ fn a_response_cseq_off_its_transaction_is_reported_at_the_taker() {
         sent(SUT, req("INVITE", "z9hG4bK-i", 1, None), BOB, 0),
         recv(SUT, resp(200, 2, "INVITE", "bt", "z9hG4bK-i"), BOB, 1),
     ];
-    let out = ResponseCseqMatchesTransactionRule.check_positioned(&evs);
+    let out = live(RuleId::ResponseCseqMatchesTransaction).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("does not match its transaction"), "{}", out[0].1);
@@ -58,7 +58,7 @@ fn a_response_cseq_off_its_transaction_is_reported_at_the_taker() {
         sent(SUT, req("INVITE", "z9hG4bK-i", 1, None), BOB, 0),
         recv(SUT, resp(200, 1, "INVITE", "bt", "z9hG4bK-i"), BOB, 1),
     ];
-    assert!(ResponseCseqMatchesTransactionRule.check_positioned(&matched).is_empty());
+    assert!(live(RuleId::ResponseCseqMatchesTransaction).check_positioned(&matched).is_empty());
 }
 
 /// §13.2.2.4 at the taker: the UAS that cannot match the ACK to its INVITE
@@ -69,7 +69,7 @@ fn an_ack_on_an_unknown_cseq_is_reported_at_the_taker() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         recv(SUT, req("ACK", "z9hG4bK-a", 3, Some("bt")), ALICE, 1),
     ];
-    let out = AckCseqMatchesInviteRule.check_positioned(&evs);
+    let out = live(RuleId::AckCseqMatchesInvite).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("acknowledges no INVITE"), "{}", out[0].1);
@@ -80,5 +80,5 @@ fn an_ack_on_an_unknown_cseq_is_reported_at_the_taker() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         recv(SUT, req("ACK", "z9hG4bK-a", 1, Some("bt")), ALICE, 1),
     ];
-    assert!(AckCseqMatchesInviteRule.check_positioned(&matched).is_empty());
+    assert!(live(RuleId::AckCseqMatchesInvite).check_positioned(&matched).is_empty());
 }

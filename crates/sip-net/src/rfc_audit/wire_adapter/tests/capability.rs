@@ -9,7 +9,7 @@ fn a_re_invite_with_no_capabilities_is_reported_once_at_the_taker() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         recv(SUT, req("INVITE", "z9hG4bK-r", 2, Some("bt")), ALICE, 1),
     ];
-    let out = AllowSupportedOnInviteRule.check_positioned(&evs);
+    let out = live(RuleId::AllowSupportedOnInvite).check_positioned(&evs);
     assert_eq!(out.len(), 1, "one finding, both headers on it: {out:?}");
     assert_eq!(out[0].0, SUT, "reported on the lane that took the re-INVITE");
     assert!(
@@ -36,7 +36,7 @@ fn a_re_invite_with_no_capabilities_is_reported_once_at_the_taker() {
             1,
         ),
     ];
-    assert!(AllowSupportedOnInviteRule.check_positioned(&advertised).is_empty());
+    assert!(live(RuleId::AllowSupportedOnInvite).check_positioned(&advertised).is_empty());
 }
 
 // ---- the §8.2 / §11.2 / §12.2.2 / §16.3 reject-and-capability family ---
@@ -49,13 +49,13 @@ fn an_unrecognised_method_is_flagged_on_the_lane_that_took_it() {
         recv(SUT, req_with("FROBNICATE", "z9hG4bK-x", ""), ALICE, 0),
         sent(SUT, resp_with(405, 1, "FROBNICATE", "z9hG4bK-x", "Allow: INVITE, BYE\r\n"), ALICE, 1),
     ];
-    assert!(UnsupportedMethod405AllowRule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::UnsupportedMethod405Allow).check_positioned(&clean).is_empty());
 
     let served = vec![
         recv(SUT, req_with("FROBNICATE", "z9hG4bK-x", ""), ALICE, 0),
         sent(SUT, resp_with(200, 1, "FROBNICATE", "z9hG4bK-x", ""), ALICE, 1),
     ];
-    let out = UnsupportedMethod405AllowRule.check_positioned(&served);
+    let out = live(RuleId::UnsupportedMethod405Allow).check_positioned(&served);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT, "the lane that took the verb owed the 405");
     assert!(out[0].1.contains("405") && out[0].1.contains("got 200 / Allow=0"), "{}", out[0].1);
@@ -75,13 +75,13 @@ fn an_unsupported_require_served_is_flagged() {
             1,
         ),
     ];
-    assert!(UnsupportedExtension420Rule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::UnsupportedExtension420).check_positioned(&clean).is_empty());
 
     let served = vec![
         recv(SUT, req_with("INVITE", "z9hG4bK-i", "Require: frobnicate\r\n"), ALICE, 0),
         sent(SUT, resp_with(200, 1, "INVITE", "z9hG4bK-i", ""), ALICE, 1),
     ];
-    let out = UnsupportedExtension420Rule.check_positioned(&served);
+    let out = live(RuleId::UnsupportedExtension420).check_positioned(&served);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("[frobnicate]") && out[0].1.contains("420"), "{}", out[0].1);
@@ -92,7 +92,7 @@ fn an_unsupported_require_served_is_flagged() {
 #[test]
 fn a_bare_415_and_a_bare_421_are_flagged_on_their_sender() {
     let bare_415 = vec![sent(SUT, resp_with(415, 1, "INVITE", "z9hG4bK-i", ""), ALICE, 0)];
-    let out = Unsupported415AcceptsRule.check_positioned(&bare_415);
+    let out = live(RuleId::Unsupported415Accepts).check_positioned(&bare_415);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("Accept / Accept-Encoding / Accept-Language"), "{}", out[0].1);
@@ -103,33 +103,33 @@ fn a_bare_415_and_a_bare_421_are_flagged_on_their_sender() {
         ALICE,
         0,
     )];
-    assert!(Unsupported415AcceptsRule.check_positioned(&with_accept).is_empty());
+    assert!(live(RuleId::Unsupported415Accepts).check_positioned(&with_accept).is_empty());
 
     let bare_421 = vec![sent(SUT, resp_with(421, 1, "INVITE", "z9hG4bK-i", ""), ALICE, 0)];
-    let out = UnsupportedExtension421Rule.check_positioned(&bare_421);
+    let out = live(RuleId::UnsupportedExtension421).check_positioned(&bare_421);
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(out[0].1.contains("Require"), "{}", out[0].1);
 
     let listed =
         vec![sent(SUT, resp_with(421, 1, "INVITE", "z9hG4bK-i", "Require: 100rel\r\n"), ALICE, 0)];
-    assert!(UnsupportedExtension421Rule.check_positioned(&listed).is_empty());
+    assert!(live(RuleId::UnsupportedExtension421).check_positioned(&listed).is_empty());
 }
 
 /// §11.2 is advisory and reads at the sender of the 2xx.
 #[test]
 fn a_bare_options_200_is_advisory_at_its_sender() {
-    assert!(OptionsResponseEchoesRule.force_advisory());
+    assert!(live(RuleId::OptionsResponseEchoes).force_advisory());
     let clean = vec![
         recv(SUT, req_with("OPTIONS", "z9hG4bK-o", ""), ALICE, 0),
         sent(SUT, resp_with(200, 1, "OPTIONS", "z9hG4bK-o", "Allow: INVITE\r\n"), ALICE, 1),
     ];
-    assert!(OptionsResponseEchoesRule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::OptionsResponseEchoes).check_positioned(&clean).is_empty());
 
     let bare = vec![
         recv(SUT, req_with("OPTIONS", "z9hG4bK-o", ""), ALICE, 0),
         sent(SUT, resp_with(200, 1, "OPTIONS", "z9hG4bK-o", ""), ALICE, 1),
     ];
-    let out = OptionsResponseEchoesRule.check_positioned(&bare);
+    let out = live(RuleId::OptionsResponseEchoes).check_positioned(&bare);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("Allow/Supported/Accept"), "{}", out[0].1);

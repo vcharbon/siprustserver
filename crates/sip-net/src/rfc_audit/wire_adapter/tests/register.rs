@@ -6,14 +6,14 @@ use super::*;
 #[test]
 fn a_register_carrying_route_is_flagged_on_the_lane_that_sent_it() {
     let evs = vec![sent(SUT, req_with("REGISTER", "z9hG4bK-r", "Route: <sip:p@h;lr>\r\n"), BOB, 0)];
-    let out = RegisterNoRouteSetRule.check_positioned(&evs);
+    let out = live(RuleId::RegisterNoRouteSet).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("Route"), "{}", out[0].1);
     assert_eq!(out[0].2, Some(1), "offending points at the REGISTER");
 
     let clean = vec![sent(SUT, req_with("REGISTER", "z9hG4bK-r", ""), BOB, 0)];
-    assert!(RegisterNoRouteSetRule.check_positioned(&clean).is_empty());
+    assert!(live(RuleId::RegisterNoRouteSet).check_positioned(&clean).is_empty());
 }
 
 /// §10.2 serialisation live: a second binding for one AOR while the first
@@ -37,7 +37,7 @@ fn a_racing_register_is_flagged_on_the_lane_that_sent_it() {
         sent(SUT, register("z9hG4bK-1", "<sip:a@1>"), BOB, 0),
         sent(SUT, register("z9hG4bK-2", "<sip:a@2>"), BOB, 1),
     ];
-    let out = SerialRegisterRule.check_positioned(&evs);
+    let out = live(RuleId::SerialRegister).check_positioned(&evs);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("still pending"), "{}", out[0].1);
@@ -49,5 +49,5 @@ fn a_racing_register_is_flagged_on_the_lane_that_sent_it() {
         recv(SUT, resp(200, 1, "REGISTER", "rt", "z9hG4bK-1"), BOB, 1),
         sent(SUT, register("z9hG4bK-2", "<sip:a@2>"), BOB, 2),
     ];
-    assert!(SerialRegisterRule.check_positioned(&serialised).is_empty());
+    assert!(live(RuleId::SerialRegister).check_positioned(&serialised).is_empty());
 }

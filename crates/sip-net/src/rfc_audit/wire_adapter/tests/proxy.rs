@@ -10,12 +10,12 @@ fn an_extra_100_is_reported_once_at_the_taker() {
         sent(SUT, in_dialog_less_to_tag("z9hG4bK-i"), BOB, 0),
         recv(SUT, resp(100, 1, "INVITE", "", "z9hG4bK-i"), BOB, 1),
     ];
-    assert!(Proxy100TryingNotForwardedRule.check_positioned(&owed).is_empty());
+    assert!(live(RuleId::Proxy100TryingNotForwarded).check_positioned(&owed).is_empty());
 
     let mut extra = owed;
     extra.push(recv(SUT, resp(100, 1, "INVITE", "", "z9hG4bK-i"), BOB, 2));
     extra.push(recv(SUT, resp(100, 1, "INVITE", "", "z9hG4bK-i"), BOB, 3));
-    let out = Proxy100TryingNotForwardedRule.check_positioned(&extra);
+    let out = live(RuleId::Proxy100TryingNotForwarded).check_positioned(&extra);
     assert_eq!(out.len(), 1, "one finding for the transaction: {out:?}");
     assert_eq!(out[0].0, SUT, "reported on the lane that took them");
     assert!(out[0].1.contains("received 3 100 Trying"), "{}", out[0].1);
@@ -27,14 +27,14 @@ fn an_extra_100_is_reported_once_at_the_taker() {
 /// is a resolved target, not a no-target outcome.
 #[test]
 fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
-    assert!(NoTarget404Rule.force_advisory());
-    assert_eq!(NoTarget404Rule.subject(), HashSet::from([UaRole::Proxy]));
+    assert!(live(RuleId::NoTarget404).force_advisory());
+    assert_eq!(live(RuleId::NoTarget404).subject(), HashSet::from([UaRole::Proxy]));
 
     let unforwarded = vec![
         recv(SUT, req("INVITE", "z9hG4bK-in", 1, None), ALICE, 0),
         sent(SUT, resp(500, 1, "INVITE", "bt", "z9hG4bK-in"), ALICE, 1),
     ];
-    let out = NoTarget404Rule.check_positioned(&unforwarded);
+    let out = live(RuleId::NoTarget404).check_positioned(&unforwarded);
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(out[0].0, SUT);
     assert!(out[0].1.contains("expected 404"), "{}", out[0].1);
@@ -43,7 +43,7 @@ fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
         recv(SUT, req("INVITE", "z9hG4bK-in", 1, None), ALICE, 0),
         sent(SUT, resp(404, 1, "INVITE", "bt", "z9hG4bK-in"), ALICE, 1),
     ];
-    assert!(NoTarget404Rule.check_positioned(&answered_404).is_empty());
+    assert!(live(RuleId::NoTarget404).check_positioned(&answered_404).is_empty());
 
     let forwarded = vec![
         recv(SUT, req("INVITE", "z9hG4bK-in", 1, None), ALICE, 0),
@@ -52,9 +52,9 @@ fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-in"), ALICE, 3),
     ];
     assert!(
-        NoTarget404Rule.check_positioned(&forwarded).is_empty(),
+        live(RuleId::NoTarget404).check_positioned(&forwarded).is_empty(),
         "{:?}",
-        NoTarget404Rule.check_positioned(&forwarded)
+        live(RuleId::NoTarget404).check_positioned(&forwarded)
     );
 
     let relayed = vec![
@@ -63,7 +63,7 @@ fn no_target_404_is_advisory_proxy_scoped_and_survives_a_branch_rewrite() {
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-in"), ALICE, 2),
     ];
     assert!(
-        NoTarget404Rule.check_positioned(&relayed).is_empty(),
+        live(RuleId::NoTarget404).check_positioned(&relayed).is_empty(),
         "a relayed downstream rejection resolved a target"
     );
 }
@@ -78,7 +78,7 @@ fn strict_route_is_judged_only_on_a_declared_proxy_lane() {
     proxy.extend(wire.clone());
     let found: Vec<RfcFinding> = evaluate_rfc_findings(&proxy)
         .into_iter()
-        .filter(|f| f.rule == StrictRouteRewriteHandledRule.name())
+        .filter(|f| f.rule == live(RuleId::StrictRouteRewriteHandled).name())
         .collect();
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].lane, SUT);
@@ -88,7 +88,9 @@ fn strict_route_is_judged_only_on_a_declared_proxy_lane() {
     let mut ua = vec![bind_roles(SUT, HashSet::from([UaRole::Uac, UaRole::Uas]), 0)];
     ua.extend(wire);
     assert!(
-        !evaluate_rfc_findings(&ua).iter().any(|f| f.rule == StrictRouteRewriteHandledRule.name()),
+        !evaluate_rfc_findings(&ua)
+            .iter()
+            .any(|f| f.rule == live(RuleId::StrictRouteRewriteHandled).name()),
         "a UA lane forwards nothing and is not judged",
     );
 }
@@ -97,11 +99,11 @@ fn strict_route_is_judged_only_on_a_declared_proxy_lane() {
 /// virtual time no real latency corresponds to.
 #[test]
 fn the_100_trying_grace_is_advisory_and_proxy_scoped() {
-    assert!(Proxy100WithinGraceRule.force_advisory());
-    assert_eq!(Proxy100WithinGraceRule.subject(), HashSet::from([UaRole::Proxy]));
+    assert!(live(RuleId::Proxy100WithinGrace).force_advisory());
+    assert_eq!(live(RuleId::Proxy100WithinGrace).subject(), HashSet::from([UaRole::Proxy]));
 
     let silent = vec![recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0)];
-    let f = Proxy100WithinGraceRule.check_positioned(&silent);
+    let f = live(RuleId::Proxy100WithinGrace).check_positioned(&silent);
     assert_eq!(f.len(), 1, "{f:?}");
     assert!(f[0].1.contains("100 Trying") && f[0].1.contains("no response sent"), "{}", f[0].1);
 
@@ -110,14 +112,14 @@ fn the_100_trying_grace_is_advisory_and_proxy_scoped() {
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 5),
     ];
-    assert!(Proxy100WithinGraceRule.check_positioned(&prompt).is_empty());
+    assert!(live(RuleId::Proxy100WithinGrace).check_positioned(&prompt).is_empty());
 
     // Past it, the finding names the Δ actually observed.
     let late = vec![
         recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
         sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 350),
     ];
-    let f = Proxy100WithinGraceRule.check_positioned(&late);
+    let f = live(RuleId::Proxy100WithinGrace).check_positioned(&late);
     assert_eq!(f.len(), 1, "{f:?}");
     assert!(f[0].1.contains("Δ=350ms"), "{}", f[0].1);
 }
