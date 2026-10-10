@@ -25,24 +25,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "ack-preserves-invite-route": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "ack-require-subset-of-invite": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "allow-supported-on-invite": {
       "hits": 4,
       "documents": 1,
@@ -115,60 +97,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "cancel-after-1xx": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "cancel-cseq-method": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "cancel-request-uri": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "cancel-route-echoes-invite": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "cancel-via-branch": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "concurrent-re-invite-500-or-491": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "contact-presence": {
       "hits": 0,
       "documents": 0,
@@ -205,24 +133,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "delay-2xx-on-unacked-reliable-1xx-with-sdp": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "delayed-offer-answered-in-ack": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "dialog-call-id-stable": {
       "hits": 0,
       "documents": 0,
@@ -237,15 +147,6 @@
       "documents": 0,
       "occasions": 4,
       "decided": 4,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "failed-reinvite-tears-down-dialog": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
       "by_role": {},
       "relayed": 0,
       "buckets": {}
@@ -295,15 +196,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "mid-dialog-route": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "mid-dialog-tags": {
       "hits": 0,
       "documents": 0,
@@ -349,15 +241,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "no-200-after-cancel": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "no-ack-to-dialog-creating-2xx": {
       "hits": 2,
       "documents": 1,
@@ -384,15 +267,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "no-cancel-after-final": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "no-contact-on-bye": {
       "hits": 0,
       "documents": 0,
@@ -411,51 +285,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "no-new-reliable-1xx-after-final": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-overlapping-reliable-provisionals": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-prack-of-100-trying": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-prack-of-out-of-order-rseq": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-re-invite-while-invite-in-progress": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "no-record-route-from-ua": {
       "hits": 0,
       "documents": 0,
@@ -465,56 +294,11 @@
       "relayed": 0,
       "buckets": {}
     },
-    "no-reliable-1xx-on-in-dialog": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-require-on-cancel-or-ack": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "no-target-404": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "no-to-tag-on-initial-request": {
       "hits": 0,
       "documents": 0,
       "occasions": 3,
       "decided": 3,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "non-contiguous-rseq": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "options-response-echoes": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
       "by_role": {},
       "relayed": 0,
       "buckets": {}
@@ -537,24 +321,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "prack-2xx-or-481": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "prack-answers-1xx-offer": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "proxy-100-trying-not-forwarded": {
       "hits": 0,
       "documents": 0,
@@ -569,15 +335,6 @@
       "documents": 0,
       "occasions": 4,
       "decided": 4,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "rack-without-known-invite": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
       "by_role": {},
       "relayed": 0,
       "buckets": {}
@@ -600,15 +357,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "register-no-route-set": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "rejected-stream-minimal-answer": {
       "hits": 0,
       "documents": 0,
@@ -623,24 +371,6 @@
       "documents": 0,
       "occasions": 8,
       "decided": 8,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "reliable-needs-client-opt-in": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "require-reliable-1xx-on-require": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
       "by_role": {},
       "relayed": 0,
       "buckets": {}
@@ -688,15 +418,6 @@
       "relayed": 0,
       "buckets": {}
     },
-    "rung-byte-identical": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "sdp-body-parseable": {
       "hits": 0,
       "documents": 0,
@@ -721,51 +442,6 @@
       "buckets": {
         "sdp origin names another session": 1
       }
-    },
-    "second-answer-repeats-the-first": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "serial-register": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "single-final-per-server-txn": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "strict-route-rewrite-handled": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "strict-route-shuffle-on-send": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
     },
     "tag-consistency": {
       "hits": 0,
@@ -794,74 +470,11 @@
       "relayed": 0,
       "buckets": {}
     },
-    "unacked-invite-non-2xx-final": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unacked-reliable-provisional": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
     "unknown-dialog-481": {
       "hits": 0,
       "documents": 0,
       "occasions": 1,
       "decided": 1,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unmatched-prack-proxied": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unsupported-415-accepts": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unsupported-extension-420": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unsupported-extension-421": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
-      "by_role": {},
-      "relayed": 0,
-      "buckets": {}
-    },
-    "unsupported-method-405-allow": {
-      "hits": 0,
-      "documents": 0,
-      "occasions": 0,
-      "decided": 0,
       "by_role": {},
       "relayed": 0,
       "buckets": {}

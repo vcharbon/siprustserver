@@ -82,12 +82,10 @@ file-size-check:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/file-size-check
 
 # Rewrites every file outside Rust that restates the RFC rule list (the token
-# fixture, the TypeScript `RFC_RULES`) from the rule registry, then the review
-# goldens that list every rule. pivot-schema's `every_rule_list_copy_is_current`
-# names a stale one.
+# fixture, the TypeScript `RFC_RULES`) from the rule registry. pivot-schema's
+# `every_rule_list_copy_is_current` names a stale one.
 rule-copies:
     cargo run -q -p pivot-schema -- rule-copies --write
-    UPDATE_GOLDENS=1 cargo nextest run --workspace -E 'package(=sip-pcap) & test(/rfc_review::/)'
 
 fmt:
     cargo fmt --all
