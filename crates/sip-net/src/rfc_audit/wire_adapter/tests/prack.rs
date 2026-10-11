@@ -241,9 +241,12 @@ fn a_relay_lane_is_not_judged_on_the_reliable_provisional_negotiation() {
     assert!(live(RuleId::RequireReliable1xxOnRequire).check(&evs).is_empty());
 }
 
+/// RFC 3262 §3 binds each INVITE transaction on its own: a UAS shows a
+/// reliable provisional only to a request that offered `100rel`, whatever
+/// another leg's INVITE offered, so the finding gates.
 #[test]
-fn a_reliable_1xx_without_client_opt_in_is_advisory_on_the_uas_lane() {
-    assert!(live(RuleId::ReliableNeedsClientOptIn).force_advisory());
+fn a_reliable_1xx_without_client_opt_in_gates_on_the_uas_lane() {
+    assert!(!live(RuleId::ReliableNeedsClientOptIn).force_advisory());
     assert_eq!(
         live(RuleId::ReliableNeedsClientOptIn).subject(),
         HashSet::from([UaRole::Uas]),
