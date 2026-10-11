@@ -1,6 +1,8 @@
 # A request sent off the call's turn is answered by its deadline
 
-**Status:** accepted (2026-10-01)
+**Status:** accepted (2026-10-01); **superseded in part by
+[ADR-0043](0043-outbound-backend-client-policy.md)** (the fold of an unanswered
+`/call/failure` consult is the stack's own bare `503`)
 
 ## Context
 

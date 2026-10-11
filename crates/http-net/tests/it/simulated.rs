@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::failures::FailureCause;
 use http_net::{
-    ExchangeOutcome, Fault, HttpError, HttpRequest, HttpResponse, HttpService, HttpTransport,
+    ExchangeOutcome, Fault, HttpRequest, HttpResponse, HttpService, HttpTransport,
     RecordingHttpNetwork, SimulatedHttpNetwork,
 };
 use layer_harness::{Recorder, TransportKind};
@@ -79,7 +80,7 @@ async fn non_2xx_response_is_still_ok() {
 async fn no_server_is_connect_error() {
     let net = SimulatedHttpNetwork::new();
     let err = net.request(addr("10.0.0.9:8080"), HttpRequest::get("/x")).await.unwrap_err();
-    assert!(matches!(err, HttpError::Connect(_)));
+    assert_eq!(err.cause, FailureCause::Refused);
 }
 
 #[tokio::test(start_paused = true)]
@@ -89,7 +90,7 @@ async fn dropping_the_handle_deregisters() {
     let server = net.serve(addr("10.0.0.1:8080"), svc).await.unwrap();
     drop(server);
     let err = net.request(addr("10.0.0.1:8080"), HttpRequest::get("/x")).await.unwrap_err();
-    assert!(matches!(err, HttpError::Connect(_)));
+    assert_eq!(err.cause, FailureCause::Refused);
 }
 
 #[tokio::test(start_paused = true)]
@@ -101,7 +102,7 @@ async fn cut_fails_immediately() {
     net.apply_fault(Fault::Cut { dst });
 
     let err = net.request(dst, HttpRequest::get("/x")).await.unwrap_err();
-    assert!(matches!(err, HttpError::Connect(_)));
+    assert_eq!(err.cause, FailureCause::Refused);
     assert_eq!(calls.load(Ordering::Relaxed), 0, "handler never ran");
 
     // Resume clears the cut.
@@ -128,7 +129,7 @@ async fn error_after_resets_following_delay() {
     });
     advance_settled(Duration::from_millis(60)).await;
     let err = h.await.unwrap().unwrap_err();
-    assert!(matches!(err, HttpError::Io { .. }));
+    assert_eq!(err.cause, FailureCause::ConnReset);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
@@ -424,4 +425,39 @@ async fn a_request_its_caller_abandons_leaves_the_flight() {
     advance_settled(Duration::from_millis(300)).await;
     assert!(h.await.unwrap().is_err(), "the caller timed out");
     assert_eq!(net.in_flight(dst), 0, "a dropped request is no longer in flight");
+}
+
+/// Each scripted behaviour is the outcome `reqwest` produces for it, one per
+/// request in order, then the standing behaviour; `StallBody` is served but
+/// never completes, `Eof` is never served.
+#[tokio::test(start_paused = true)]
+async fn scripted_behaviours_are_taken_one_per_request() {
+    use http_net::Behaviour;
+    let net = SimulatedHttpNetwork::new().with_connect_timeout(Duration::from_millis(300));
+    let (svc, calls) = echo();
+    let dst = addr("10.0.0.1:8080");
+    let _server = net.serve(dst, svc).await.unwrap();
+    net.apply_fault(Fault::Script {
+        dst,
+        steps: vec![
+            Behaviour::Eof,
+            Behaviour::Blackhole,
+            Behaviour::Reset { after_ms: 5 },
+            Behaviour::Refuse,
+            Behaviour::StallBody,
+        ],
+    });
+    let request = || net.request(dst, HttpRequest::get("/x"));
+
+    let start = tokio::time::Instant::now();
+    assert_eq!(request().await.unwrap_err().cause, FailureCause::Eof);
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "closed before any service saw it");
+    assert_eq!(request().await.unwrap_err().cause, FailureCause::ConnectTimeout);
+    assert!(start.elapsed() >= Duration::from_millis(300), "the connect timeout ended it");
+    assert_eq!(request().await.unwrap_err().cause, FailureCause::ConnReset);
+    assert_eq!(request().await.unwrap_err().cause, FailureCause::Refused);
+    let stalled = tokio::time::timeout(Duration::from_secs(10), request()).await;
+    assert!(stalled.is_err(), "a stalled body never completes");
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the stalled answer was served");
+    assert_eq!(request().await.unwrap().status, 200, "the script is spent");
 }

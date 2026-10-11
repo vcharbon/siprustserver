@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use http_net::failures::FailureCause;
 use http_net::{
-    to_http_entries, ExchangeOutcome, Fault, HttpAnswer, HttpError, HttpNetworkEvent, HttpOutcome,
+    to_http_entries, ExchangeOutcome, Fault, HttpAnswer, HttpNetworkEvent, HttpOutcome,
     HttpRequest, HttpResponse, HttpService, HttpTransport, RecordingHttpNetwork,
     SimulatedHttpNetwork, HTTP_TAG,
 };
@@ -176,7 +177,7 @@ async fn a_request_no_service_saw_is_drawn_from_the_client_side() {
     sim.apply_fault(Fault::Cut { dst });
 
     let err = rec.request(dst, HttpRequest::get("/gone")).await.unwrap_err();
-    assert!(matches!(err, HttpError::Connect(_)));
+    assert_eq!(err.cause, FailureCause::Refused);
 
     let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
     assert_eq!(entries.len(), 1);
@@ -250,7 +251,7 @@ async fn serve_forwards_answer_so_a_reset_stays_a_reset() {
     });
     advance_settled(Duration::from_millis(10)).await;
     let err = h.await.unwrap().unwrap_err();
-    assert!(matches!(err, HttpError::Io { .. }), "a reset reaches the client: {err:?}");
+    assert_eq!(err.cause, FailureCause::Eof, "a reset reaches the client: {err:?}");
 
     let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
     assert_eq!(entries.len(), 1);

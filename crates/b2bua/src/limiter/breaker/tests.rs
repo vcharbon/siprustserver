@@ -1,46 +1,61 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use super::*;
 use crate::limiter::lease::LimiterLease;
 use crate::limiter::refresh_batch::RefreshBatchConfig;
 use crate::limiter::release_queue::ReleaseQueueConfig;
 use crate::limiter::testkit::{held_of, replies};
-use crate::limiter::RefreshOutcome;
+use crate::limiter::{LimiterHealth, RefreshOutcome};
 use crate::metrics::RefreshGiveUp;
+use sip_clock::testkit::settle;
+
+/// The client's breaker, switched by the test.
+struct Switch {
+    open: watch::Sender<bool>,
+    unaddressed: AtomicBool,
+    trips: AtomicUsize,
+}
+
+impl Default for Switch {
+    fn default() -> Self {
+        Self {
+            open: watch::channel(false).0,
+            unaddressed: AtomicBool::new(false),
+            trips: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Switch {
+    fn set(&self, open: bool) {
+        self.open.send_replace(open);
+    }
+}
+
+impl LimiterHealth for Switch {
+    fn breaker(&self) -> watch::Receiver<bool> {
+        self.open.subscribe()
+    }
+    fn has_address(&self) -> bool {
+        !self.unaddressed.load(Ordering::SeqCst)
+    }
+    fn trip(&self) {
+        self.trips.fetch_add(1, Ordering::SeqCst);
+        self.set(true);
+    }
+}
 
 /// A limiter answering admits from a script (then `Admitted`), logging
-/// every request, with a health answer at the test's say.
+/// every request, its breaker at the test's say.
 #[derive(Default)]
 struct Scripted {
     admits: Mutex<VecDeque<AdmitOutcome>>,
     admits_sent: AtomicUsize,
     refreshed: Mutex<Vec<Vec<RefreshCall>>>,
     released: Mutex<Vec<Vec<String>>>,
-    serving: Arc<Serving>,
-}
-
-#[derive(Default)]
-struct Serving {
-    up: AtomicBool,
-    asked: AtomicUsize,
-    /// The limiter's address is not known.
-    unaddressed: AtomicBool,
-    forgets: AtomicUsize,
-}
-
-#[async_trait]
-impl LimiterHealth for Serving {
-    async fn serving(&self) -> bool {
-        self.asked.fetch_add(1, Ordering::SeqCst);
-        self.up.load(Ordering::SeqCst)
-    }
-    fn has_address(&self) -> bool {
-        !self.unaddressed.load(Ordering::SeqCst)
-    }
-    fn forget_address(&self) {
-        self.forgets.fetch_add(1, Ordering::SeqCst);
-    }
+    switch: Arc<Switch>,
 }
 
 #[async_trait]
@@ -69,7 +84,7 @@ impl CallLimiter for Scripted {
         RefreshAnswer::Answered(replies(calls, RefreshOutcome::Extended))
     }
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
-        Some(self.serving.clone())
+        Some(self.switch.clone())
     }
     fn report_to(&self, _: crate::limiter::LimiterReports) {}
 }
@@ -82,6 +97,8 @@ struct Rig {
     metrics: B2buaMetrics,
 }
 
+const TICK: Duration = Duration::from_secs(1);
+
 /// The worker's refresh batch over `inner`, forgetting what `releases`
 /// is told, its sender running.
 fn batch(
@@ -90,7 +107,7 @@ fn batch(
     metrics: &B2buaMetrics,
 ) -> Arc<RefreshBatch> {
     let config = RefreshBatchConfig {
-        tick: PROBE,
+        tick: TICK,
         max: 100,
         lease: LimiterLease::starting_at(Duration::from_secs(120)),
         cap: 10,
@@ -102,29 +119,21 @@ fn batch(
     refreshes
 }
 
-const PROBE: Duration = Duration::from_secs(1);
-
-fn rig(script: Vec<AdmitOutcome>) -> Rig {
-    rig_with(script, Scripted::default())
-}
-
-fn rig_with(script: Vec<AdmitOutcome>, scripted: Scripted) -> Rig {
+fn rig(scripted: Scripted) -> Rig {
     let scripted = Arc::new(scripted);
-    *scripted.admits.lock().unwrap() = script.into();
     let metrics = B2buaMetrics::new();
     let config =
         ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(120)), cap: 10 };
     let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
     tokio::spawn(releases.clone().run());
     let refreshes = batch(scripted.clone(), &releases, &metrics);
-    let (limiter, breaker) = BreakerLimiter::guard(
+    let (limiter, policy) = BreakerLimiter::guard(
         scripted.clone(),
-        BreakerConfig { failures: 3, probe: PROBE },
         releases.clone(),
         refreshes.clone(),
         metrics.clone(),
     );
-    tokio::spawn(breaker.expect("a limiter with a health answer is guarded").run());
+    tokio::spawn(policy.expect("a limiter with a breaker is guarded").run());
     Rig { scripted, limiter, releases, refreshes, metrics }
 }
 
@@ -134,29 +143,20 @@ async fn admit(limiter: &Arc<dyn CallLimiter>) -> AdmitOutcome {
         .await
 }
 
-use sip_clock::testkit::settle;
-
-/// Three lost admits, then let the probe see the breaker open.
-async fn trip(limiter: &Arc<dyn CallLimiter>) {
-    for _ in 0..3 {
-        admit(limiter).await;
-    }
+/// Set the breaker and let the policy follow.
+async fn set(r: &Rig, open: bool) {
+    r.scripted.switch.set(open);
     settle().await;
 }
 
-fn lost(n: usize) -> Vec<AdmitOutcome> {
-    vec![AdmitOutcome::Unavailable; n]
-}
-
 #[tokio::test(start_paused = true)]
-async fn three_consecutive_lost_admits_open_it() {
-    let r = rig(lost(3));
-    for _ in 0..3 {
-        assert_eq!(admit(&r.limiter).await, AdmitOutcome::Unavailable);
-    }
+async fn open_an_admit_sends_nothing_and_is_counted() {
+    let r = rig(Scripted::default());
+    assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
+    set(&r, true).await;
     assert!(r.metrics.limiter().breaker_open());
     assert_eq!(admit(&r.limiter).await, AdmitOutcome::NotSent, "open: nothing sent");
-    assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 3);
+    assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 1);
     assert_eq!(
         r.metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
         1
@@ -165,54 +165,23 @@ async fn three_consecutive_lost_admits_open_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn any_answered_admit_ends_the_run() {
-    let mut script = lost(2);
-    script.push(AdmitOutcome::Rejected { limiter_id: "x".into(), held: Default::default() });
-    script.extend(lost(2));
-    script.push(AdmitOutcome::Released);
-    script.extend(lost(2));
-    script.push(AdmitOutcome::Admitted);
-    script.extend(lost(2));
-    let r = rig(script);
-    for _ in 0..11 {
-        assert_ne!(admit(&r.limiter).await, AdmitOutcome::NotSent);
-    }
-    assert!(!r.metrics.limiter().breaker_open(), "no run reached three");
-    assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_unsent_admit_neither_counts_nor_ends_the_run() {
-    let mut script = lost(2);
-    script.push(AdmitOutcome::NotSent);
-    script.extend(lost(1));
-    let r = rig(script);
-    for _ in 0..4 {
-        admit(&r.limiter).await;
-    }
-    assert!(r.metrics.limiter().breaker_open(), "two lost, one unsent, one lost");
-}
-
-#[tokio::test(start_paused = true)]
 async fn open_it_holds_the_refresh_batch_and_its_close_sends_every_key_due_at_once() {
-    let r = rig(lost(3));
-    trip(&r.limiter).await;
+    let r = rig(Scripted::default());
+    set(&r, true).await;
     r.refreshes.mark("k", "c-k", &held_of(&["x".into()]));
     r.refreshes.mark("k", "c-k", &held_of(&["x".into(), "y".into()]));
     r.refreshes.mark("other", "c-other", &held_of(&["z".into()]));
     r.refreshes.mark("ended", "c-ended", &held_of(&["x".into()]));
     r.releases.push("ended");
     for _ in 0..3 {
-        tokio::time::advance(PROBE).await;
+        tokio::time::advance(TICK).await;
         settle().await;
     }
     assert!(r.scripted.refreshed.lock().unwrap().is_empty(), "nothing sent open");
     assert_eq!(r.metrics.limiter().refresh_due(), 2, "the ended call's is forgotten");
     assert_eq!(r.metrics.limiter().refresh_given_up_total(RefreshGiveUp::Released), 1);
 
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
+    set(&r, false).await;
     let key = |key: &str, ids: &[&str]| RefreshCall {
         key: key.into(),
         held: held_of(&ids.iter().map(|id| id.to_string()).collect::<Vec<_>>()),
@@ -228,39 +197,35 @@ async fn open_it_holds_the_refresh_batch_and_its_close_sends_every_key_due_at_on
 
 #[tokio::test(start_paused = true)]
 async fn a_refresh_sent_while_open_sends_nothing() {
-    let r = rig(lost(3));
-    trip(&r.limiter).await;
+    let r = rig(Scripted::default());
+    set(&r, true).await;
     let calls = [RefreshCall { key: "k".into(), held: held_of(&["x".into()]) }];
     assert_eq!(r.limiter.refresh(&calls).await, RefreshAnswer::Unavailable);
     assert!(r.scripted.refreshed.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
-async fn open_it_holds_the_releases_and_the_first_health_answer_sends_them() {
-    let r = rig(lost(3));
-    trip(&r.limiter).await;
+async fn open_it_holds_the_releases_and_its_close_sends_them() {
+    let r = rig(Scripted::default());
+    set(&r, true).await;
     r.releases.push("a");
     for _ in 0..3 {
-        tokio::time::advance(PROBE).await;
+        tokio::time::advance(TICK).await;
         settle().await;
     }
     assert!(r.scripted.released.lock().unwrap().is_empty(), "nothing sent while open");
-    assert_eq!(r.scripted.serving.asked.load(Ordering::SeqCst), 3, "probed every period");
 
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
-    assert!(!r.metrics.limiter().breaker_open(), "the first answer closes it");
+    set(&r, false).await;
+    assert!(!r.metrics.limiter().breaker_open(), "the close is followed");
     assert_eq!(r.metrics.limiter().breaker_transitions_total(false), 1);
     assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
     assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted, "admits are sent again");
-    assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_release_given_up_at_the_cap_leaves_no_refresh_to_send_on_close() {
-    let r = rig(lost(3));
-    trip(&r.limiter).await;
+    let r = rig(Scripted::default());
+    set(&r, true).await;
     r.refreshes.mark("ended", "c-ended", &held_of(&["x".into()]));
     r.releases.push("ended");
     for n in 0..10 {
@@ -268,9 +233,7 @@ async fn a_release_given_up_at_the_cap_leaves_no_refresh_to_send_on_close() {
     }
     assert!(!r.releases.waiting_keys().contains(&"ended".to_string()), "given up at the cap");
 
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
+    set(&r, false).await;
     assert!(!r.metrics.limiter().breaker_open());
     assert!(
         r.scripted.refreshed.lock().unwrap().is_empty(),
@@ -279,19 +242,12 @@ async fn a_release_given_up_at_the_cap_leaves_no_refresh_to_send_on_close() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn it_reopens_after_a_close() {
-    let r = rig([lost(3), lost(3)].concat());
-    trip(&r.limiter).await;
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
-    assert!(!r.metrics.limiter().breaker_open());
-    r.scripted.serving.up.store(false, Ordering::SeqCst);
-    trip(&r.limiter).await;
-    assert!(r.metrics.limiter().breaker_open(), "a new run opens it again");
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
+async fn it_follows_every_transition() {
+    let r = rig(Scripted::default());
+    for open in [true, false, true, false] {
+        set(&r, open).await;
+        assert_eq!(r.metrics.limiter().breaker_open(), open);
+    }
     assert_eq!(
         (
             r.metrics.limiter().breaker_transitions_total(true),
@@ -302,67 +258,30 @@ async fn it_reopens_after_a_close() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_limiter_without_an_address_starts_open_and_the_first_health_answer_closes_it() {
+async fn a_limiter_without_an_address_trips_its_breaker_and_its_close_resumes() {
     let scripted = Scripted::default();
-    scripted.serving.unaddressed.store(true, Ordering::SeqCst);
-    let r = rig_with(Vec::new(), scripted);
+    scripted.switch.unaddressed.store(true, Ordering::SeqCst);
+    let r = rig(scripted);
+    assert_eq!(r.scripted.switch.trips.load(Ordering::SeqCst), 1, "tripped at the guard");
     assert!(r.metrics.limiter().breaker_open(), "starts open");
     assert_eq!(r.metrics.limiter().breaker_transitions_total(true), 1);
     assert_eq!(admit(&r.limiter).await, AdmitOutcome::NotSent, "fails open at once");
     assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 0, "nothing sent");
-    assert_eq!(
-        r.metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen),
-        1
-    );
     r.releases.push("a");
     settle().await;
     assert!(r.scripted.released.lock().unwrap().is_empty(), "the queue is held");
 
-    tokio::time::advance(PROBE).await;
-    settle().await;
-    assert!(r.metrics.limiter().breaker_open(), "no answer yet");
-    r.scripted.serving.unaddressed.store(false, Ordering::SeqCst);
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
-    assert!(!r.metrics.limiter().breaker_open(), "the first answer closes it");
+    set(&r, false).await;
+    assert!(!r.metrics.limiter().breaker_open());
     assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
     assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
 }
 
-#[tokio::test(start_paused = true)]
-async fn it_forgets_the_address_when_it_opens_and_after_each_failed_probe() {
-    let r = rig([vec![AdmitOutcome::Admitted], lost(3)].concat());
-    admit(&r.limiter).await;
-    assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 0, "closed: kept");
-    trip(&r.limiter).await;
-    assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 1, "forgotten on open");
-    for _ in 0..3 {
-        tokio::time::advance(PROBE).await;
-        settle().await;
-    }
-    assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 4, "and on each failed probe");
-    r.scripted.serving.up.store(true, Ordering::SeqCst);
-    tokio::time::advance(PROBE).await;
-    settle().await;
-    assert!(!r.metrics.limiter().breaker_open());
-    assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 4, "kept once answered");
-}
-
-#[tokio::test(start_paused = true)]
-async fn nothing_is_probed_while_closed() {
-    let r = rig(Vec::new());
-    tokio::time::advance(10 * PROBE).await;
-    settle().await;
-    assert_eq!(r.scripted.serving.asked.load(Ordering::SeqCst), 0);
-}
-
-/// A limiter whose admits of key `slow` wait for the test and then
-/// answer `slow`; every other admit is lost at once.
+/// A limiter whose admits wait for the test, then answer `slow`.
 struct InFlight {
     go: tokio::sync::Notify,
     slow: AdmitOutcome,
-    serving: Arc<Serving>,
+    switch: Arc<Switch>,
 }
 
 #[async_trait]
@@ -373,15 +292,12 @@ impl CallLimiter for InFlight {
 
     async fn admit(
         &self,
-        key: &str,
+        _: &str,
         _: u64,
         _: &LimiterHeld,
         _: &[LimiterEntry],
         _: bool,
     ) -> AdmitOutcome {
-        if key != "slow" {
-            return AdmitOutcome::Unavailable;
-        }
         self.go.notified().await;
         self.slow.clone()
     }
@@ -392,27 +308,26 @@ impl CallLimiter for InFlight {
         RefreshAnswer::Answered(replies(calls, RefreshOutcome::Extended))
     }
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
-        Some(self.serving.clone())
+        Some(self.switch.clone())
     }
     fn report_to(&self, _: crate::limiter::LimiterReports) {}
 }
 
-/// `inner` behind its admit bound and a breaker opening on one lost
-/// admit, as the worker composes them, its probe running.
+/// `inner` behind its admit bound and the breaker policy, as the worker
+/// composes them, the policy running.
 fn guard_one(inner: Arc<dyn CallLimiter>) -> (Arc<dyn CallLimiter>, B2buaMetrics) {
     let metrics = B2buaMetrics::new();
     let config =
         ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(120)), cap: 10 };
     let releases = ReleaseQueue::new(inner.clone(), config, metrics.clone());
     let refreshes = batch(inner.clone(), &releases, &metrics);
-    let (limiter, breaker) = BreakerLimiter::guard(
+    let (limiter, policy) = BreakerLimiter::guard(
         crate::limiter::bounded::BoundedLimiter::wrap(inner, metrics.clone()),
-        BreakerConfig { failures: 1, probe: PROBE },
         releases,
         refreshes,
         metrics.clone(),
     );
-    tokio::spawn(breaker.expect("guarded").run());
+    tokio::spawn(policy.expect("guarded").run());
     (limiter, metrics)
 }
 
@@ -422,60 +337,36 @@ async fn an_admit_answered_after_the_breaker_opened_changes_nothing() {
         let inner = Arc::new(InFlight {
             go: tokio::sync::Notify::new(),
             slow: slow.clone(),
-            serving: Arc::default(),
+            switch: Arc::default(),
         });
         let (limiter, metrics) = guard_one(inner.clone());
         let in_flight = tokio::spawn({
             let limiter = limiter.clone();
-            async move {
-                limiter
-                    .admit(
-                        "slow",
-                        2,
-                        &LimiterHeld::default(),
-                        &[LimiterEntry { id: "x".into(), limit: 1 }],
-                        false,
-                    )
-                    .await
-            }
+            async move { admit(&limiter).await }
         });
         settle().await;
-        assert_eq!(admit(&limiter).await, AdmitOutcome::Unavailable, "this one opens it");
+        inner.switch.set(true);
+        settle().await;
         assert!(metrics.limiter().breaker_open());
         inner.go.notify_one();
         assert_eq!(in_flight.await.unwrap(), slow, "its answer reaches its call");
         assert!(metrics.limiter().breaker_open(), "{slow:?} after the open closes nothing");
-        assert_eq!(
-            metrics.limiter().breaker_transitions_total(true),
-            1,
-            "{slow:?} after the open opens nothing again"
-        );
+        assert_eq!(metrics.limiter().breaker_transitions_total(true), 1);
         assert_eq!(admit(&limiter).await, AdmitOutcome::NotSent, "still open");
     }
 }
 
-/// An admit the limiter never answers is ended just past the admit
-/// budget by the bound below the breaker, counted once as a timeout, and
-/// the breaker opens on it.
+/// An admit the limiter never answers is ended just past the admit budget
+/// by the bound below the policy, counted once as a timeout.
 #[tokio::test(start_paused = true)]
 async fn an_admit_the_limiter_never_answers_counts_as_a_timeout() {
     let inner = Arc::new(InFlight {
         go: tokio::sync::Notify::new(),
         slow: AdmitOutcome::Admitted,
-        serving: Arc::default(),
+        switch: Arc::default(),
     });
     let (limiter, metrics) = guard_one(inner);
-    let stalled = tokio::spawn(async move {
-        limiter
-            .admit(
-                "slow",
-                2,
-                &LimiterHeld::default(),
-                &[LimiterEntry { id: "x".into(), limit: 1 }],
-                false,
-            )
-            .await
-    });
+    let stalled = tokio::spawn(async move { admit(&limiter).await });
     settle().await;
     let cap = crate::limiter::LOCAL_ADMIT_BUDGET + crate::limiter::bounded::ADMIT_SLACK;
     tokio::time::advance(cap - Duration::from_millis(1)).await;
@@ -486,129 +377,28 @@ async fn an_admit_the_limiter_never_answers_counts_as_a_timeout() {
     assert!(stalled.is_finished(), "ended at the cap");
     assert_eq!(stalled.await.unwrap(), AdmitOutcome::Unavailable);
     assert_eq!(metrics.limiter().failures_total(LimiterOp::Admit, LimiterFailure::Timeout), 1);
-    assert!(metrics.limiter().breaker_open(), "the stall opened the breaker");
-}
-
-/// A health answer that panics every time it is asked.
-#[derive(Default)]
-struct PanickingHealth {
-    asked: AtomicUsize,
-}
-
-#[async_trait]
-impl LimiterHealth for PanickingHealth {
-    async fn serving(&self) -> bool {
-        self.asked.fetch_add(1, Ordering::SeqCst);
-        panic!("the health answer panics");
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_probe_that_keeps_panicking_restarts_once_per_period_and_the_breaker_stays_open() {
-    let health = Arc::new(PanickingHealth::default());
-    let scripted = Arc::new(Scripted::default());
-    *scripted.admits.lock().unwrap() = lost(3).into();
-    let metrics = B2buaMetrics::new();
-    let config =
-        ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(120)), cap: 10 };
-    let releases = ReleaseQueue::new(scripted.clone(), config, metrics.clone());
-    let refreshes = batch(scripted.clone(), &releases, &metrics);
-    let inner: Arc<dyn CallLimiter> =
-        Arc::new(WithHealth { inner: scripted, health: health.clone() });
-    let (limiter, breaker) = BreakerLimiter::guard(
-        inner,
-        BreakerConfig { failures: 3, probe: PROBE },
-        releases,
-        refreshes,
-        metrics.clone(),
-    );
-    tokio::spawn(breaker.unwrap().run());
-    trip(&limiter).await;
-    for _ in 0..5 {
-        tokio::time::advance(PROBE).await;
-        settle().await;
-    }
-    assert_eq!(health.asked.load(Ordering::SeqCst), 5, "one probe per period, no spin");
-    assert_eq!(metrics.limiter().task_restarts_total(LimiterTask::BreakerProbe), 5);
-    assert!(metrics.limiter().breaker_open(), "the breaker stays open");
-    assert_eq!(admit(&limiter).await, AdmitOutcome::NotSent);
-}
-
-/// `inner` with `health` as its health answer.
-struct WithHealth {
-    inner: Arc<Scripted>,
-    health: Arc<dyn LimiterHealth>,
-}
-
-#[async_trait]
-impl CallLimiter for WithHealth {
-    fn admit_budget(&self) -> std::time::Duration {
-        self.inner.admit_budget()
-    }
-
-    async fn admit(
-        &self,
-        key: &str,
-        change: u64,
-        held: &LimiterHeld,
-        e: &[LimiterEntry],
-        r: bool,
-    ) -> AdmitOutcome {
-        self.inner.admit(key, change, held, e, r).await
-    }
-    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
-        self.inner.release(keys).await
-    }
-    async fn refresh(&self, calls: &[RefreshCall]) -> RefreshAnswer {
-        self.inner.refresh(calls).await
-    }
-    fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
-        Some(self.health.clone())
-    }
-    fn report_to(&self, _: crate::limiter::LimiterReports) {}
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_guarded_limiter_is_not_guarded_again() {
-    let r = rig(Vec::new());
+    let r = rig(Scripted::default());
     let metrics = B2buaMetrics::new();
     let config =
         ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(120)), cap: 10 };
     let releases = ReleaseQueue::new(r.limiter.clone(), config, metrics.clone());
     let refreshes = batch(r.limiter.clone(), &releases, &metrics);
-    let (_, again) = BreakerLimiter::guard(
-        r.limiter.clone(),
-        BreakerConfig { failures: 3, probe: PROBE },
-        releases,
-        refreshes,
-        metrics,
-    );
-    assert!(again.is_none(), "one breaker per limiter");
+    let (_, again) = BreakerLimiter::guard(r.limiter.clone(), releases, refreshes, metrics);
+    assert!(again.is_none(), "one breaker policy per limiter");
 }
 
 #[tokio::test]
-async fn a_limiter_without_a_health_answer_runs_without_a_breaker() {
+async fn a_limiter_without_a_breaker_runs_unguarded() {
     let metrics = B2buaMetrics::new();
     let noop: Arc<dyn CallLimiter> = Arc::new(crate::limiter::NoopLimiter);
     let config =
         ReleaseQueueConfig { lease: LimiterLease::starting_at(Duration::from_secs(120)), cap: 10 };
     let releases = ReleaseQueue::new(noop.clone(), config, metrics.clone());
     let refreshes = batch(noop.clone(), &releases, &metrics);
-    let (_, breaker) = BreakerLimiter::guard(
-        noop,
-        BreakerConfig { failures: 3, probe: PROBE },
-        releases,
-        refreshes,
-        metrics,
-    );
-    assert!(breaker.is_none());
-}
-
-#[test]
-fn the_config_states_the_thresholds() {
-    let config = B2buaConfig::default();
-    assert_eq!(
-        BreakerConfig::from_config(&config),
-        BreakerConfig { failures: 3, probe: Duration::from_secs(1) }
-    );
+    let (_, policy) = BreakerLimiter::guard(noop, releases, refreshes, metrics);
+    assert!(policy.is_none());
 }

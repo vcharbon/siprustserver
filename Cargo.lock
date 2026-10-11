@@ -1836,8 +1836,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sip-clock",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

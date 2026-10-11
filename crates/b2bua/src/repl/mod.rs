@@ -16,6 +16,7 @@
 //!   impl no-ops (`peer`/`direction`/`call_gen`/`ttl`), and **atomically bumps
 //!   the changelog** on every mutation.
 
+mod backend_gate;
 mod changelog;
 mod incarnation;
 mod puller;

@@ -5,7 +5,7 @@
 //!
 //! - a `/call/failure` consult: its answer's deadline. The copy reads the
 //!   answer as lost at the deadline — not when it was served again — and
-//!   relays the callee's final to the caller, as for an unanswered consult;
+//!   answers the caller the stack's own `503`, as for an unanswered consult;
 //! - a release event's consult (the subscribed maximum duration): the
 //!   duration timer is re-armed as the consult's answer deadline in the
 //!   call's replicated timer list, so the copy fires it again at that
@@ -324,8 +324,8 @@ async fn fully_over(c: &mut Cluster, call_ref: &str) -> TerminationCause {
 // ── /call/failure: the answer's deadline ────────────────────────────────────
 
 /// Bob rings then refuses alice's call; the `/call/failure` consult is lost
-/// with the primary; the copy relays bob's 486 to alice at the consult's
-/// deadline, not at the call's setup deadline. On the takeover path alice's
+/// with the primary; the copy answers alice the stack's own 503 at the
+/// consult's deadline, not at the call's setup deadline. On the takeover path alice's
 /// UPDATE on the early dialog makes the backup take the call over; the
 /// pending failover answers it 491 (RFC 5407 §3.1).
 async fn failure_cell(name: &str, recovery: Recovery) {
@@ -352,22 +352,22 @@ async fn failure_cell(name: &str, recovery: Recovery) {
     assert!(c.fh.now_ms() < deadline.0, "the call is served again before its deadline");
     // Quiet up to a second before the deadline: nothing answers alice sooner.
     c.fh.advance(Duration::from_millis((deadline.0 - c.fh.now_ms() - 1_000) as u64)).await;
-    invite.expect(486).await;
+    invite.expect(503).await;
     assert_in(&c, deadline, "the caller was answered");
     assert_eq!(c.asked.load(Ordering::SeqCst), 1, "the lost consult is not re-sent");
     if let Recovery::Takeover = recovery {
         copy_lets_go_then_reboot(&mut c, &primary, &call_ref).await;
     }
-    assert_eq!(fully_over(&mut c, &call_ref).await, TerminationCause::RemoteFinal);
+    assert_eq!(fully_over(&mut c, &call_ref).await, TerminationCause::Admission);
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_relays_the_final_at_its_deadline() {
+async fn a_failure_consult_lost_with_its_node_answers_503_at_its_deadline() {
     failure_cell("consult-answer-deadline-failure", Recovery::Reclaim).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_failure_consult_lost_with_its_node_relays_the_final_on_the_takeover_copy() {
+async fn a_failure_consult_lost_with_its_node_answers_503_on_the_takeover_copy() {
     failure_cell("consult-answer-deadline-failure-takeover", Recovery::Takeover).await;
 }
 

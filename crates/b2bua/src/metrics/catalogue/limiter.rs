@@ -54,7 +54,7 @@ const RELEASE_FLUSH_VALUES: [&str; 3] =
 /// `ReleaseFlushOutcome::ALL`.
 pub const RELEASE_FLUSH: Dim = Dim::new("outcome", &RELEASE_FLUSH_VALUES);
 
-const TASK_VALUES: [&str; 3] = label_values!(LimiterTask::ALL, LimiterTask::label);
+const TASK_VALUES: [&str; 2] = label_values!(LimiterTask::ALL, LimiterTask::label);
 /// A supervised limiter task, indexed like [`LimiterTask::ALL`].
 pub const TASK: Dim = Dim::new("task", &TASK_VALUES);
 
@@ -66,7 +66,7 @@ assert_exposition_order!(AdmitSite: Initial, Fold, Service);
 assert_exposition_order!(RefreshDiscard: CallGone, Stale);
 assert_exposition_order!(RefreshGiveUp: LeaseExpired, Cap, Released);
 assert_exposition_order!(ReleaseGiveUp: LeaseExpired, Cap, Shutdown);
-assert_exposition_order!(LimiterTask: ReleaseSender, RefreshSender, BreakerProbe);
+assert_exposition_order!(LimiterTask: ReleaseSender, RefreshSender);
 assert_exposition_order!(ReleaseFlushOutcome: Empty, Sent, GivenUp);
 
 pub const REQUESTS: Family = Family::counter(
@@ -167,7 +167,7 @@ pub const RELEASE_FLUSH_SECONDS: Family = Family::counter(
 pub const TASK_RESTARTS: Family = Family::counter(
     "b2bua_limiter_task_restarts_total",
     Labels::Product(&[TASK]),
-    "supervised limiter tasks that panicked and were restarted with their state intact (task=release_sender|refresh_sender|breaker_probe) — expected 0",
+    "supervised limiter tasks that panicked and were restarted with their state intact (task=release_sender|refresh_sender) — expected 0",
 );
 
 pub const BREAKER_OPEN: Family = Family::gauge(

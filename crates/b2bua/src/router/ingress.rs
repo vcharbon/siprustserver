@@ -53,7 +53,11 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                 crate::peer_failures::PeerFailureKind::TransactionTimeout
             }
         };
-        ctx.metrics.record_peer_failure(dest, classify_b2bua_peer(&ctx.config, dest), kind);
+        ctx.metrics.record_peer_failure(
+            dest,
+            classify_b2bua_peer(ctx.outbound_proxy.as_deref(), dest),
+            kind,
+        );
     }
 
     // ADR-0014 acting-backup self-release: the txn layer reports the last

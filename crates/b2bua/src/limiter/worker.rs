@@ -6,7 +6,7 @@
 //! itself; a key whose release is queued is forgotten by the batch, and each
 //! refresh answer comes back to its call as a re-entrant event), and the
 //! admit path `Breaker(Bounded(client))`, or `Bounded(client)` for a client
-//! without a health answer ([`crate::limiter::bounded`],
+//! without a breaker ([`crate::limiter::bounded`],
 //! [`crate::limiter::breaker`]). The handle is a cheap clone; every call's
 //! admit, release and refresh, and every exit's last release send, go
 //! through it.
@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::B2buaConfig;
 use crate::limiter::bounded::BoundedLimiter;
-use crate::limiter::breaker::{BreakerConfig, BreakerLimiter};
+use crate::limiter::breaker::BreakerLimiter;
 use crate::limiter::lease::LimiterLease;
 use crate::limiter::refresh_batch::{RefreshBatch, RefreshBatchConfig};
 use crate::limiter::release_queue::{ReleaseFlush, ReleaseQueue, ReleaseQueueConfig};
@@ -45,7 +45,7 @@ impl LimiterWorker {
     /// The worker side over `limiter` under `config`, its counts on
     /// `metrics`, each refresh answer posted on `reentry`; and the handles of
     /// the tasks it runs (the release queue's sender, the refresh batch's
-    /// sender, the breaker's probe when guarded). Dropping every clone of the
+    /// sender, the breaker policy's follower when guarded). Dropping every clone of the
     /// handle leaves them running: the caller owns the returned handles and
     /// aborts them with the node's other tasks.
     pub(crate) fn start(
@@ -76,7 +76,6 @@ impl LimiterWorker {
         tasks.push(tokio::spawn(refreshes.clone().run()));
         let (admits, breaker) = BreakerLimiter::guard(
             BoundedLimiter::wrap(limiter, metrics.clone()),
-            BreakerConfig::from_config(config),
             releases.clone(),
             refreshes.clone(),
             metrics.clone(),

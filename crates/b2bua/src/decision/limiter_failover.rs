@@ -109,8 +109,8 @@ pub(super) async fn limiter_reject_failover(
         ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
         // fallback (ADR-0017 X5); a backend error → the final the engine
-        // stated, else 486 Busy Here: the stack's own, no decision behind it
-        // and no mark.
+        // stated, else a bare 503 (ADR-0043): the stack's own, no decision
+        // behind it and no mark.
         Ok(CallTreatment::Relay { label }) => {
             let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
             crate::initial_invite::reject_call(
@@ -143,8 +143,8 @@ pub(super) async fn limiter_reject_failover(
         Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
             call,
             a_invite,
-            486,
-            Some("Busy Here".into()),
+            503,
+            None,
             None,
             &[],
             &config.minted_final_advertisement,

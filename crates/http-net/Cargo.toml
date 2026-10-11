@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Reusable unary HTTP transport seam (request/response, no streaming). Mirror of repl-net's transport: a SimulatedHttpNetwork in-memory fabric (dst-keyed pause/cutoff/error faults + transit delay) for paused-clock tests, a RecordingHttpNetwork decorator onto the layer-harness Recorder, and a feature-gated RealHttpNetwork (hyper + pooled reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
+description = "Reusable unary HTTP transport seam (request/response, no streaming) and the outbound backend client on it (name lookup, in-flight cap, rotation, breaker, retry). A SimulatedHttpNetwork in-memory fabric (per-destination and per-attempt faults reported as reqwest classifies them, transit delay) for paused-clock tests, a RecordingHttpNetwork decorator onto the layer-harness Recorder, and a feature-gated RealHttpNetwork (hyper + reqwest) for production. Bodies are opaque bytes — JSON/serde lives in the consumer."
 
 [lints]
 workspace = true
@@ -25,6 +25,7 @@ metric-catalogue = { path = "../metric-catalogue" }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+tracing = { workspace = true }
 # The recording decorator records onto the test harness's `Recorder`.
 layer-harness = { path = "../layer-harness" }
 # The scripted service (`scripted`): programs are serde documents, request
@@ -50,3 +51,5 @@ tokio = { workspace = true }
 # `cargo test -p http-net` exercises the real transport too.
 http-net = { path = ".", features = ["real"] }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+# The loopback classifier test resets a connection (SO_LINGER 0).
+socket2 = { workspace = true }

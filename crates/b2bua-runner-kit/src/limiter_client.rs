@@ -12,8 +12,7 @@ use std::time::Duration;
 
 use b2bua::limiter::http::HttpCallLimiter;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
-use b2bua::resolved_target::{NameResolver, ResolvedTarget};
-use http_net::HttpTransport;
+use http_net::{BackendClient, BackendConfig, HttpTransport, NameResolver};
 
 /// What the limiter client is built from.
 pub(crate) struct LimiterClientSettings {
@@ -21,6 +20,8 @@ pub(crate) struct LimiterClientSettings {
     pub hostport: Option<String>,
     /// The admit and health budget.
     pub timeout: Duration,
+    /// The client's breaker, lookups and connections.
+    pub backend: BackendConfig,
     /// The refresh budget.
     pub refresh_timeout: Duration,
     /// The release budget.
@@ -39,13 +40,10 @@ pub(crate) async fn limiter_client(
     let Some(hostport) = settings.hostport.as_deref() else {
         return Arc::new(NoopLimiter);
     };
-    let client = HttpCallLimiter::with_target(
-        transport,
-        ResolvedTarget::name_with(hostport, resolver),
-        settings.timeout,
-    )
-    .with_refresh_timeout(settings.refresh_timeout)
-    .with_release_timeout(settings.release_timeout);
+    let backend = BackendClient::configured(transport, hostport, resolver, &settings.backend);
+    let client = HttpCallLimiter::with_client(backend, settings.timeout)
+        .with_refresh_timeout(settings.refresh_timeout)
+        .with_release_timeout(settings.release_timeout);
     // A name still unresolved leaves the client without an address: the
     // breaker logs its open start.
     client.lookup(settings.boot_lookup).await;
@@ -63,7 +61,7 @@ mod tests {
 
     use async_trait::async_trait;
     use b2bua::limiter::bounded::BoundedLimiter;
-    use b2bua::limiter::breaker::{BreakerConfig, BreakerLimiter};
+    use b2bua::limiter::breaker::BreakerLimiter;
     use b2bua::limiter::lease::LimiterLease;
     use b2bua::limiter::refresh_batch::{RefreshBatch, RefreshBatchConfig};
     use b2bua::limiter::release_queue::{ReleaseQueue, ReleaseQueueConfig};
@@ -80,6 +78,11 @@ mod tests {
     use super::*;
 
     const PROBE: Duration = Duration::from_secs(1);
+
+    /// The limiter client's defaults under a 150 ms admit budget.
+    fn backend() -> BackendConfig {
+        BackendConfig::new(64, Duration::from_millis(150), "/v1/health")
+    }
     const NAME: &str = "limiter:8080";
     /// Past the probe's tick, the time its request takes on the simulated
     /// network (1 ms per hop), in 1 ms steps.
@@ -130,14 +133,14 @@ mod tests {
 
     #[async_trait]
     impl NameResolver for Names {
-        async fn resolve(&self, name: &str) -> Option<SocketAddr> {
+        async fn resolve(&self, name: &str) -> Vec<SocketAddr> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.most_in_flight.fetch_max(now, Ordering::SeqCst);
             let delay = *self.delay.lock().unwrap();
             tokio::time::sleep(delay).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            self.known.lock().unwrap().get(name).copied()
+            self.known.lock().unwrap().get(name).copied().into_iter().collect()
         }
     }
 
@@ -189,8 +192,8 @@ mod tests {
         }
 
         /// The runner's client for [`NAME`], behind the worker's admit bound
-        /// and breaker (3 failures, [`PROBE`]) with its probe and release
-        /// queue running. Composed by hand rather than by the worker handle:
+        /// and breaker policy (the default rule, a [`PROBE`] period) with its
+        /// release queue running. Composed by hand rather than by the worker handle:
         /// these tests read each release's own answer and the learnt lease,
         /// which the handle (a queued release, the refresh period) does not
         /// state.
@@ -198,6 +201,7 @@ mod tests {
             let settings = LimiterClientSettings {
                 hostport: Some(NAME.into()),
                 timeout: Duration::from_millis(150),
+                backend: backend(),
                 refresh_timeout: Duration::from_secs(2),
                 release_timeout: Duration::from_secs(2),
                 boot_lookup: PROBE,
@@ -215,7 +219,6 @@ mod tests {
             tokio::spawn(refreshes.clone().run());
             let (limiter, breaker) = BreakerLimiter::guard(
                 BoundedLimiter::wrap(client, metrics.clone()),
-                BreakerConfig { failures: 3, probe: PROBE },
                 releases,
                 refreshes,
                 metrics.clone(),
@@ -344,12 +347,14 @@ mod tests {
         assert_eq!(w.release("c1#k").await, ReleaseAnswer::Released);
         assert_eq!(held(&lab.a.1), (0, 0));
 
+        // Past the breaker window: the answers above no longer keep it closed.
+        elapse(Duration::from_secs(3)).await;
         lab.net.net.apply_fault(Fault::Cut { dst: lab.a.0 });
         for n in 2..5 {
             assert_eq!(w.admit(&format!("c{n}#k")).await, AdmitOutcome::Unavailable);
         }
-        assert!(w.open());
         settle().await;
+        assert!(w.open());
         lab.names.point(NAME, lab.b.0);
         elapse(PROBE).await;
         assert!(!w.open(), "the probe looks the name up again and reaches its new address");
@@ -369,8 +374,8 @@ mod tests {
         for n in 1..4 {
             assert_eq!(w.admit(&format!("c{n}#k")).await, AdmitOutcome::Unavailable);
         }
-        assert!(w.open());
         settle().await;
+        assert!(w.open());
         elapse(PROBE).await;
         assert!(w.open(), "the name still leads to the cut limiter");
         assert_eq!(w.metrics.limiter().failures_of(LimiterOp::Health), 1);
@@ -391,7 +396,7 @@ mod tests {
         assert!(w.open(), "unresolvable at boot");
         lab.names.point(NAME, lab.a.0);
         run_for(2 * PROBE + Duration::from_millis(20)).await;
-        assert!(!w.open(), "the lookup the first probe started lands, the next probe closes");
+        assert!(!w.open(), "the first probe's own lookup lands and its request closes it");
         assert_eq!(lab.names.most_in_flight.load(Ordering::SeqCst), 1, "one lookup at a time");
         assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
         assert_eq!(held(&lab.a.1), (1, 1));
@@ -400,15 +405,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_boot_lookup_landing_after_the_boot_wait_is_kept_and_the_first_probe_closes() {
+    async fn a_boot_lookup_landing_after_the_boot_wait_leaves_the_probe_to_look_up_afresh() {
         let lab = Lab::new().await;
         lab.names.point(NAME, lab.a.0);
         lab.names.slow(PROBE + PROBE / 2);
         let w = lab.worker().await;
         assert!(w.open(), "the boot wait ended before the lookup");
-        run_for(PROBE + Duration::from_millis(20)).await;
-        assert!(!w.open(), "the boot lookup landed and was kept; the first probe closes");
-        assert_eq!(lab.names.lookups.load(Ordering::SeqCst), 1, "the boot lookup only");
+        run_for(2 * PROBE + PROBE / 2 + Duration::from_millis(20)).await;
+        assert!(!w.open(), "the first probe's fresh lookup lands; its request closes");
+        assert_eq!(lab.names.lookups.load(Ordering::SeqCst), 2, "the boot lookup, the probe's");
         assert_eq!(w.admit("c1#k").await, AdmitOutcome::Admitted);
         assert_eq!(held(&lab.a.1), (1, 1));
         assert_eq!(w.release("c1#k").await, ReleaseAnswer::Released);
@@ -420,6 +425,7 @@ mod tests {
         let settings = LimiterClientSettings {
             hostport: None,
             timeout: Duration::from_millis(150),
+            backend: backend(),
             refresh_timeout: Duration::from_secs(2),
             release_timeout: Duration::from_secs(2),
             boot_lookup: PROBE,

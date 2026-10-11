@@ -464,11 +464,11 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
     let _ = s.h.finish().await;
 }
 
-/// The limiter is cut while the breaker stays closed (no admit is sent, and
-/// only admits trip it): the batch backs off on consecutive unanswered
-/// requests instead of resending every tick. Once the limiter is back, the
-/// next retry is answered and the backoff is gone: the next refresh leaves
-/// within one tick of falling due.
+/// The limiter is cut: the batch backs off on consecutive unanswered
+/// requests instead of resending every tick, whether or not the breaker
+/// opens on them and holds it. Once the limiter is back, the next retry (or
+/// the probe's close) is answered and the backoff is gone: the next refresh
+/// leaves within one tick of falling due.
 #[tokio::test(start_paused = true)]
 async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     let s = Scene::new("refresh-batch-backoff", Setup::default()).await;
@@ -479,7 +479,6 @@ async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     s.advance_to(REFRESH + Duration::from_secs(30)).await;
     let sent = s.sent_on("/v1/refresh");
     assert!(sent <= 10, "{sent} refresh requests in 30 s of a dead limiter (one per tick: 30)");
-    assert!(!s.b2bua.metrics().limiter().breaker_open(), "refreshes never trip the breaker");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     let resumed = s.start.elapsed();

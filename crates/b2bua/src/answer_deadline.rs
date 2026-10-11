@@ -19,7 +19,7 @@
 //!   deadline's expiry — a fire the router's timer screen delivered, so its
 //!   answer had not come first — is the request's answer with nothing usable:
 //!   an HTTP request's `error` result ([`NO_ANSWER`]), an admit's
-//!   `unavailable` report, a failure consult's unanswered `terminate` fold. A
+//!   `unavailable` report, a failure consult's unanswered `503` fold. A
 //!   release consult's expiry is the release event again, which its rule
 //!   consults on anew.
 
@@ -156,7 +156,7 @@ fn deadline_of(fx: &FireAndForgetEffect, budgets: &AnswerBudgets) -> Option<(Tim
         )),
         FireAndForgetEffect::FailureAsyncHttp { request, limiter_change, .. } => {
             budgets.failure.map(|budget| {
-                let unanswered = crate::failure_terminate::unanswered(request);
+                let unanswered = crate::failure_unavailable::payload(request);
                 (TimerType::FailureAnswer { change: *limiter_change, unanswered }, budget)
             })
         }
@@ -295,13 +295,14 @@ fn lost_http_answer(call: &Call, correlation_id: &str) -> CallEvent {
     }
 }
 
-/// The `/call/failure` fold of a consult left unanswered: `terminate` with
-/// `unanswered`, the payload its deadline carries.
+/// The `/call/failure` fold of a consult left unanswered: the stack's own
+/// `503` ([`crate::failure_unavailable`]) with `unanswered`, the payload its
+/// deadline carries.
 fn lost_failure_answer(call: &Call, unanswered: &serde_json::Value) -> CallEvent {
     CallEvent::InternalEvent {
         call_ref: call.call_ref.clone(),
         topic: FAILURE_TOPIC.to_string(),
-        outcome: crate::failure_terminate::OUTCOME.to_string(),
+        outcome: crate::failure_unavailable::OUTCOME.to_string(),
         payload: unanswered.clone(),
         body: Vec::new(),
         incarnation: Some(call.incarnation().to_string()),

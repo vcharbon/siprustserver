@@ -39,21 +39,33 @@
 //! never a per-request log line (ADR-0026). A runner appends
 //! [`failures::prometheus_text`] to its `/metrics` body.
 //!
-//! ## Fail-open lives in the client, not here
-//! The transport reports the honest outcome (`Ok(response)` or
-//! [`HttpError`]). The *timeout budget* and the fail-open policy are the
-//! caller's job (it wraps `request` in `tokio::time::timeout`): under a paused
-//! clock a [`Fault::Stall`]ed request simply never completes until the caller's
-//! timeout fires when the harness advances. See `b2bua::limiter::http`.
+//! ## Backend clients
+//! A server calling an HTTP backend on its request path does it through a
+//! [`BackendClient`] (ADR-0043): one per backend, its name looked up through a
+//! [`ResolvedTarget`] (bounded, single-flight), its connections held as
+//! [`ClientSettings`] state, a cap on requests in flight, a client rotated on a
+//! fixed period, a circuit breaker, and the generic retry rule. The transport
+//! reports the honest outcome (`Ok(response)` or a classified [`HttpError`]);
+//! the budgets and what a failure means for the caller (fail the call, let
+//! it through) are the caller's policy.
 
+pub mod backend;
 pub mod failures;
+mod resolved_target;
+mod resolver;
 pub mod scripted;
+pub mod settings;
 mod transport;
 
+pub use backend::{AttemptError, BackendClient, BackendConfig, BreakerConfig, Budgets};
+pub use resolved_target::{Addresses, LookupSettings, ResolvedTarget, LOOKUP_BOUND, MAX_STUCK};
+pub use resolver::{MemoryResolver, NameResolver, SystemResolver};
+pub use settings::ClientSettings;
 #[cfg(feature = "real")]
 pub use transport::RealHttpNetwork;
 pub use transport::{
-    to_http_entries, BindError, CapturedExchange, ExchangeOutcome, Fault, HttpAnswer, HttpError,
-    HttpNetworkEvent, HttpOutcome, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport, RecordedHttpEntry, RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
+    to_http_entries, AddressedClient, Behaviour, BindError, CapturedExchange, ExchangeOutcome,
+    Fault, HttpAnswer, HttpClient, HttpError, HttpNetworkEvent, HttpOutcome, HttpRequest,
+    HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordedHttpEntry,
+    RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
 };

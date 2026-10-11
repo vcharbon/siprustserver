@@ -5,6 +5,8 @@
 //! Select one (the workspace build `just test` made, no rebuild):
 //! `cargo nextest run --workspace -E 'package(=http-net) & binary(it)' <module>::`.
 
+mod backend;
+mod classify;
 mod real;
 mod recording;
 mod scripted;

@@ -9,7 +9,7 @@ fn every_series_is_rendered_with_its_closed_labels() {
     m.count_failure(LimiterOp::Health, LimiterFailure::BadAnswer);
     m.count_refresh_answer(RefreshOutcome::Dropped);
     m.count_release_given_up(ReleaseGiveUp::Shutdown, 3);
-    m.count_task_restart(LimiterTask::BreakerProbe);
+    m.count_task_restart(LimiterTask::RefreshSender);
     m.set_uncounted_calls(2);
     let mut s = String::new();
     m.render(&mut s);
@@ -22,7 +22,7 @@ fn every_series_is_rendered_with_its_closed_labels() {
         "b2bua_limiter_refresh_answers_total{outcome=\"dropped\"} 1",
         "b2bua_limiter_refresh_answers_total{outcome=\"extended\"} 0",
         "b2bua_limiter_release_given_up_total{reason=\"shutdown\"} 3",
-        "b2bua_limiter_task_restarts_total{task=\"breaker_probe\"} 1",
+        "b2bua_limiter_task_restarts_total{task=\"refresh_sender\"} 1",
         "b2bua_limiter_uncounted_calls 2",
         "b2bua_limiter_release_flushes_total{outcome=\"given_up\"} 0",
         "# TYPE b2bua_limiter_uncounted_calls gauge",

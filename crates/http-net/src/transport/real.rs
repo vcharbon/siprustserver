@@ -2,12 +2,15 @@
 //!
 //! Server: a tokio `TcpListener` accept loop handing each connection to hyper's
 //! HTTP/1.1 `serve_connection` (keep-alive on by default, so a client's pooled
-//! connection serves many requests). Client: a shared, pooled `reqwest::Client`
-//! — the b2bua makes many small calls per second, so connection reuse matters.
+//! connection serves many requests). Client: a pooled `reqwest::Client` built
+//! from [`ClientSettings`] (connect timeout, idle timeout, TCP keepalive, TCP
+//! user timeout, a ceiling on every request), shared by the addressed
+//! [`request`](HttpTransport::request); a backend gets a client of its own
+//! ([`HttpTransport::client`], `real_client`).
 //!
-//! No TLS: this is internal cluster `http://` traffic. The fail-open timeout
-//! still lives in the caller; this layer surfaces transport failures as
-//! [`HttpError`].
+//! No TLS: this is internal cluster `http://` traffic. The caller owns its
+//! budget; this layer surfaces transport failures as [`HttpError`],
+//! classified as `cause` reads them.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,9 +26,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::{
-    BindError, HttpAnswer, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
-    HttpTransport,
+    BindError, HttpAnswer, HttpClient, HttpError, HttpRequest, HttpResponse, HttpServerHandle,
+    HttpService, HttpTransport,
 };
+use crate::resolved_target::ResolvedTarget;
+use crate::settings::ClientSettings;
 
 /// The real HTTP transport. Clone shares the pooled client.
 #[derive(Clone)]
@@ -40,12 +45,15 @@ impl Default for RealHttpNetwork {
 }
 
 impl RealHttpNetwork {
-    /// Build with a pooled keep-alive client (no TLS).
+    /// Build with a pooled keep-alive client under the default
+    /// [`ClientSettings`] (no TLS).
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("reqwest client builds with default (no-tls) config");
-        Self { client }
+        Self::with_settings(&ClientSettings::default())
+    }
+
+    /// Build with a pooled keep-alive client under `settings` (no TLS).
+    pub fn with_settings(settings: &ClientSettings) -> Self {
+        Self { client: super::real_client::build(settings, None) }
     }
 }
 
@@ -105,37 +113,15 @@ impl HttpTransport for RealHttpNetwork {
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         // `req.path` is a path-and-query target, so the query string rides along.
         let url = format!("http://{dst}{}", req.path);
-        let method = reqwest::Method::from_bytes(req.method.as_bytes())
-            .map_err(|e| HttpError::Io { addr: dst, reason: format!("bad method: {e}") })?;
-        let mut builder = self.client.request(method, &url);
-        for (name, value) in &req.headers {
-            builder = builder.header(name.as_str(), value.as_str());
-        }
-        let resp = builder.body(req.body).send().await.map_err(|e| {
-            // Cause-labelled counter only — the caller's fail-open episode owns
-            // the log line (ADR-0026: no per-request output).
-            crate::failures::record(&dst.to_string(), super::cause::classify(&e));
-            if e.is_connect() {
-                HttpError::Connect(dst)
-            } else {
-                HttpError::Io { addr: dst, reason: e.to_string() }
-            }
-        })?;
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| {
-                crate::failures::record(&dst.to_string(), super::cause::classify(&e));
-                HttpError::Io { addr: dst, reason: e.to_string() }
-            })?
-            .to_vec();
-        Ok(HttpResponse { status, headers, body })
+        super::real_client::send(&self.client, &dst.to_string(), &url, req).await
+    }
+
+    fn client(
+        self: Arc<Self>,
+        target: Arc<ResolvedTarget>,
+        settings: &ClientSettings,
+    ) -> Arc<dyn HttpClient> {
+        Arc::new(super::real_client::NamedClient::new(target, settings))
     }
 }
 

@@ -1,6 +1,8 @@
 # Admission holds are keyed by the call
 
-**Status:** accepted (2026-09-27)
+**Status:** accepted (2026-09-27); **superseded in part by
+[ADR-0043](0043-outbound-backend-client-policy.md)** (the breaker's rule, probe
+and env keys are the limiter client's backend breaker)
 
 **Owner:** `crates/b2bua/src/limiter/` owns the admission set; its call side is `call::model::limiter`.
 

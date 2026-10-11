@@ -127,12 +127,6 @@ pub struct B2buaConfig {
     /// oldest entry is dropped (its lease frees the call). Default 100 000:
     /// one lease of calls ending at 800/s.
     pub limiter_release_queue_cap: usize,
-    /// Consecutive admits with no usable answer that open the worker's
-    /// limiter circuit breaker. Default 3.
-    pub limiter_breaker_failures: u32,
-    /// How often an open limiter breaker probes the limiter's health answer,
-    /// milliseconds; the first answer closes it. Default 1000.
-    pub limiter_breaker_probe_ms: u64,
     /// The worker's limiter refresh tick, milliseconds: a refresh falling due
     /// is sent within one tick, with every other key due, in one request per
     /// [`limiter_refresh_batch_max`](Self::limiter_refresh_batch_max) keys.
@@ -517,8 +511,6 @@ impl Default for B2buaConfig {
             reboot_budget_sec: 600,
             limiter_refresh_sec: 40,
             limiter_release_queue_cap: 100_000,
-            limiter_breaker_failures: 3,
-            limiter_breaker_probe_ms: 1_000,
             limiter_refresh_batch_ms: 1_000,
             limiter_refresh_batch_max: 1_000,
             keepalive_catchup_speedup: 10,
@@ -653,16 +645,6 @@ impl B2buaConfig {
         if self.limiter_release_queue_cap == 0 {
             return Err("limiter_release_queue_cap=0: the release queue needs room for \
                         one release"
-                .to_string());
-        }
-        if self.limiter_breaker_failures == 0 {
-            return Err("limiter_breaker_failures=0: the limiter breaker opens after at \
-                        least one failed admit"
-                .to_string());
-        }
-        if self.limiter_breaker_probe_ms == 0 {
-            return Err("limiter_breaker_probe_ms=0: an open limiter breaker needs a \
-                        probe period"
                 .to_string());
         }
         if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {

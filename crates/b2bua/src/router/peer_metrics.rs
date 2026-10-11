@@ -1,9 +1,14 @@
 //! Per-peer failure attribution (observability only;
 //! `b2bua_peer_failures_total{peer,scope,kind}`): resolve which hop a failure
 //! belongs to and classify it internal/external against the configured
-//! outbound proxy.
+//! outbound proxy. Runs on the router task, so it never waits on a name
+//! lookup: a hostname is read from the outbound proxy's kept addresses
+//! ([`RouterCtx::outbound_proxy`]), whose lookup runs off the task.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+
+use http_net::ResolvedTarget;
 
 use call::{Call, TimerType};
 
@@ -27,22 +32,51 @@ pub(super) fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, 
         if key.timer_type != TimerType::KeepaliveTimeout {
             return;
         }
-        if let Some((host, port)) = keepalive_timeout_peer(&ctx.config, call, key.leg_id()) {
-            use std::net::ToSocketAddrs;
-            if let Ok(mut addrs) = (host.as_str(), port).to_socket_addrs() {
-                if let Some(dest) = addrs.next() {
-                    ctx.metrics.record_peer_failure(
-                        &dest,
-                        classify_b2bua_peer(&ctx.config, &dest),
-                        crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
-                    );
-                    // Aggregated per hop: a dead peer is one episode, however
-                    // many calls it takes with it (ADR-0026).
-                    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
-                }
-            }
-        }
+        let hop = keepalive_timeout_peer(&ctx.config, call, key.leg_id());
+        let Some(dest) =
+            hop.and_then(|(host, port)| hop_address(ctx.outbound_proxy.as_deref(), &host, port))
+        else {
+            return;
+        };
+        ctx.metrics.record_peer_failure(
+            &dest,
+            classify_b2bua_peer(ctx.outbound_proxy.as_deref(), &dest),
+            crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
+        );
+        // Aggregated per hop: a dead peer is one episode, however many calls
+        // it takes with it (ADR-0026).
+        ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
     }
+}
+
+/// The address of the hop `host:port`, without a lookup: an IP literal is
+/// its own; the outbound proxy's name reads its kept address (a lookup is
+/// started off the task when none is kept); any other name gives `None`, and
+/// nothing is recorded.
+fn hop_address(proxy: Option<&ResolvedTarget>, host: &str, port: u16) -> Option<SocketAddr> {
+    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, port));
+    }
+    let proxy = proxy.filter(|p| p.host_port() == (host.to_string(), port))?;
+    let kept = proxy.address();
+    if kept.is_none() {
+        proxy.look_up();
+    }
+    kept
+}
+
+/// The configured outbound proxy as a target whose name is looked up off the
+/// router task; an IP literal is never looked up.
+pub(crate) fn outbound_proxy_target(config: &B2buaConfig) -> Option<Arc<ResolvedTarget>> {
+    let (host, port) = config.b2b_outbound_proxy.as_ref()?;
+    let target = match host.parse::<IpAddr>() {
+        Ok(ip) => ResolvedTarget::addr(SocketAddr::new(ip, *port)),
+        Err(_) => {
+            ResolvedTarget::name_with(format!("{host}:{port}"), Arc::new(http_net::SystemResolver))
+        }
+    };
+    Some(Arc::new(target))
 }
 
 /// Resolve the egress-aware next hop of the leg a `KeepaliveTimeout` fired for —
@@ -51,7 +85,7 @@ pub(super) fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, 
 /// `relay::leg_egress_dest`) WITHOUT mutating a request. Returns `None` (record
 /// nothing) when the leg or its confirmed dialog can't be resolved — never a fabricated
 /// address. The returned `(host, port)` may be a hostname (the outbound proxy); the
-/// caller resolves it to a `SocketAddr` before recording.
+/// caller reads its address ([`hop_address`]) before recording.
 fn keepalive_timeout_peer(
     config: &B2buaConfig,
     call: &Call,
@@ -80,25 +114,25 @@ fn keepalive_timeout_peer(
 /// the metric is still bounded and correct, just coarser for repl-peer timeouts
 /// (which are rare and would count against the external cap).
 ///
-/// The outbound proxy may be configured as a HOSTNAME (not an IP literal). We
-/// resolve it via `ToSocketAddrs` (taking the first resolved addr) and compare by
-/// resolved IP+port, so the internal pinning fires for a hostname-configured proxy
-/// — not just the cluster's VIP IP literal. This path is cold (keepalive/response
-/// timeout), so the lazy resolve here is acceptable. If resolution fails, the dest
-/// classifies External (fail-open; the metric stays bounded).
+/// The outbound proxy may be configured as a HOSTNAME: `dest` is compared with
+/// every address its name resolved to, as kept now. None kept yet (its first
+/// lookup still running, or failed) classifies `External` and starts a lookup
+/// off the task, so the metric stays bounded and the router never waits.
 pub(super) fn classify_b2bua_peer(
-    config: &B2buaConfig,
+    proxy: Option<&ResolvedTarget>,
     dest: &SocketAddr,
 ) -> crate::peer_failures::PeerScope {
-    use std::net::ToSocketAddrs;
-    if let Some((host, port)) = &config.b2b_outbound_proxy {
-        if let Ok(mut resolved) = (host.as_str(), *port).to_socket_addrs() {
-            if resolved.any(|proxy| proxy == *dest) {
-                return crate::peer_failures::PeerScope::Internal;
-            }
+    let Some(proxy) = proxy else {
+        return crate::peer_failures::PeerScope::External;
+    };
+    match proxy.addresses() {
+        Some(addrs) if addrs.contains(dest) => crate::peer_failures::PeerScope::Internal,
+        Some(_) => crate::peer_failures::PeerScope::External,
+        None => {
+            proxy.look_up();
+            crate::peer_failures::PeerScope::External
         }
     }
-    crate::peer_failures::PeerScope::External
 }
 
 #[cfg(test)]
@@ -113,36 +147,50 @@ mod tests {
         config.b2b_outbound_proxy = Some(("10.0.0.9".to_string(), 5060));
         let proxy: SocketAddr = "10.0.0.9:5060".parse().unwrap();
         let other: SocketAddr = "203.0.113.7:5060".parse().unwrap();
-        assert_eq!(classify_b2bua_peer(&config, &proxy), PeerScope::Internal);
-        assert_eq!(classify_b2bua_peer(&config, &other), PeerScope::External);
+        let target = outbound_proxy_target(&config);
+        assert_eq!(classify_b2bua_peer(target.as_deref(), &proxy), PeerScope::Internal);
+        assert_eq!(classify_b2bua_peer(target.as_deref(), &other), PeerScope::External);
         // With no outbound proxy configured, every peer is external.
         config.b2b_outbound_proxy = None;
-        assert_eq!(classify_b2bua_peer(&config, &proxy), PeerScope::External);
+        let target = outbound_proxy_target(&config);
+        assert_eq!(classify_b2bua_peer(target.as_deref(), &proxy), PeerScope::External);
     }
 
-    // A hostname-configured outbound proxy resolving to the candidate's IP+port
-    // must classify Internal (a `parse::<SocketAddr>()` on a hostname always
-    // fails → everything would fall to External and internal pinning would never
-    // fire off-cluster). `localhost` is a stable, network-free resolution.
-    #[test]
-    fn classify_b2bua_peer_resolves_a_hostname_outbound_proxy() {
+    /// A resolver that never answers.
+    struct Hanging;
+
+    #[async_trait::async_trait]
+    impl http_net::NameResolver for Hanging {
+        async fn resolve(&self, _: &str) -> Vec<SocketAddr> {
+            std::future::pending().await
+        }
+    }
+
+    /// A hostname-configured outbound proxy is read from its kept addresses,
+    /// never looked up on the router task: with a lookup that never returns
+    /// the classification answers at once (`External`), and once the name
+    /// resolved, every address it found pins `Internal`.
+    #[tokio::test(start_paused = true)]
+    async fn a_hostname_outbound_proxy_never_blocks_the_router_task() {
         use crate::peer_failures::PeerScope;
-        let mut config = B2buaConfig::default();
-        config.b2b_outbound_proxy = Some(("localhost".to_string(), 5060));
-        // localhost resolves to 127.0.0.1 (and/or ::1); the loopback v4 candidate
-        // at the configured port must be classified Internal.
         let loopback: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        let other: SocketAddr = "127.0.0.1:5999".parse().unwrap();
-        assert_eq!(
-            classify_b2bua_peer(&config, &loopback),
-            PeerScope::Internal,
-            "a hostname-configured outbound proxy must resolve and pin internal",
-        );
-        assert_eq!(
-            classify_b2bua_peer(&config, &other),
-            PeerScope::External,
-            "a different port is not the proxy",
-        );
+        let hanging = ResolvedTarget::name_with("proxy.svc:5060", Arc::new(Hanging));
+        let start = tokio::time::Instant::now();
+        assert_eq!(classify_b2bua_peer(Some(&hanging), &loopback), PeerScope::External);
+        assert_eq!(hop_address(Some(&hanging), "proxy.svc", 5060), None, "nothing kept yet");
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO, "answered at once");
+
+        let resolver = Arc::new(http_net::MemoryResolver::new());
+        let second: SocketAddr = "127.0.0.2:5060".parse().unwrap();
+        resolver.point("proxy.svc:5060", [loopback, second]);
+        let named = ResolvedTarget::name_with("proxy.svc:5060", resolver.clone());
+        assert_eq!(classify_b2bua_peer(Some(&named), &second), PeerScope::External, "not yet");
+        sip_clock::testkit::settle().await;
+        assert_eq!(resolver.lookups(), 1, "looked up off the task");
+        assert_eq!(classify_b2bua_peer(Some(&named), &second), PeerScope::Internal);
+        assert_eq!(hop_address(Some(&named), "proxy.svc", 5060), Some(loopback));
+        assert_eq!(hop_address(Some(&named), "other.svc", 5060), None, "no other name");
+        assert_eq!(hop_address(None, "[::1]", 5060), Some("[::1]:5060".parse().unwrap()));
     }
 
     // A B-leg keepalive timeout must attribute to the FAILED b-leg's egress hop
@@ -172,7 +220,10 @@ mod tests {
              not the surviving a-leg's external hop",
         );
         assert_eq!(
-            classify_b2bua_peer(&config, &"10.0.0.9:5060".parse().unwrap()),
+            classify_b2bua_peer(
+                outbound_proxy_target(&config).as_deref(),
+                &"10.0.0.9:5060".parse().unwrap()
+            ),
             crate::peer_failures::PeerScope::Internal,
             "the failed b-leg's egress hop classifies internal",
         );

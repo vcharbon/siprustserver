@@ -253,7 +253,7 @@ fn failure_deadline(change: u64) -> TimerType {
         "sip_reason": "Busy Here",
         "failed_leg_id": "b-1",
     });
-    TimerType::FailureAnswer { change, unanswered: crate::failure_terminate::unanswered(&request) }
+    TimerType::FailureAnswer { change, unanswered: crate::failure_unavailable::payload(&request) }
 }
 
 /// The consult `change`'s fold `outcome`, carrying the admit its task sent
@@ -289,14 +289,14 @@ fn ending(call: &Call) -> bool {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_expired_failure_deadline_relays_the_failed_final_and_ends_the_call() {
+async fn an_expired_failure_deadline_answers_503_and_ends_the_call() {
     let node = wired().await;
     let call = awaiting(awaiting_call(), failure_deadline(4));
     let event = fired(&call, failure_deadline(4));
     let result = turn(&node, call, &event);
     assert!(ending(&result.call), "the unanswered consult ends the call");
     let termination = result.call.termination.as_ref().expect("a termination record");
-    assert_eq!(termination.cause, call::TerminationCause::RemoteFinal);
+    assert_eq!(termination.cause, call::TerminationCause::Admission, "the stack's own final");
     assert!(
         result.call.timers.iter().all(|t| format!("{:?}", t.timer_type()) != "FailureAnswer:4"),
         "off the ledger"

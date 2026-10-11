@@ -1,7 +1,8 @@
 //! [`LoadBalancerStrategy`] — port of `strategies/LoadBalancer.ts`.
 //!
 //! - `select_for_new_dialog`: Call-ID → snapshot the registry → filter `Alive`
-//!   (and, for non-emergency new dialogs, drop `above_critical`-band workers) →
+//!   (a new dialog takes the `NotReady` workers when none is `Alive`; and, for
+//!   non-emergency new dialogs, drop `above_critical`-band workers) →
 //!   `rendezvous_select` → spend one token from the winner's per-worker AIMD
 //!   bucket → address. `NoTarget` when the candidate set is empty;
 //!   `RateCapExhausted` when the winner's bucket is empty (→ 503 + Retry-After).
@@ -164,7 +165,14 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let in_dialog = is_in_dialog(msg);
         let snapshot = self.registry.snapshot();
 
+        // A new dialog falls back to the not-ready workers only while no
+        // worker is alive (ADR-0043): not-ready still serves calls.
         let alive: Vec<_> = snapshot.iter().filter(|w| w.health == WorkerHealth::Alive).collect();
+        let alive = if alive.is_empty() && !in_dialog {
+            snapshot.iter().filter(|w| w.health == WorkerHealth::NotReady).collect()
+        } else {
+            alive
+        };
         let candidates: Vec<_> = if is_emergency || in_dialog {
             alive.clone()
         } else {

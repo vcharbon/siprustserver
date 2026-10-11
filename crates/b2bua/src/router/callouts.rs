@@ -18,10 +18,10 @@ use crate::decision::{
     CallTreatment, FailureInfo, RouteDecision, SipHeaderUpdates,
 };
 use crate::decision_log::STACK_AUTHORED;
-use crate::failure_terminate;
 use crate::limiter::report::{admit_report_of, LimiterAdmitResult};
 use crate::limiter::{AdmitOutcome, LimiterEntry, LimiterHeld, LimiterWorker};
 use crate::metrics::AdmitSite;
+use crate::{failure_terminate, failure_unavailable};
 use b2bua_sdk::event::CallEvent;
 use tokio::sync::mpsc;
 
@@ -450,13 +450,13 @@ async fn failure_outcome(
                     }),
                 );
             }
-            // Explicit `Relay`, or a backend error → relay the original b-leg
-            // failure (response path) + tear the call down. Echo the failure's
-            // status/reason the seed stashed for the relay.
+            // Explicit `Relay` → relay the original b-leg failure (response
+            // path) + tear the call down. Echo the failure's status/reason the
+            // seed stashed for the relay.
             Ok(CallTreatment::Relay { label }) => {
                 break (
                     failure_terminate::OUTCOME,
-                    failure_terminate::payload(request, &failed_leg_id, Some(label)),
+                    failure_terminate::payload(request, &failed_leg_id, label),
                 );
             }
             // The engine's stated refusal: the reject fold a decision reject
@@ -475,7 +475,7 @@ async fn failure_outcome(
                 break ("reject", payload);
             }
             Err(CallDecisionError::Unavailable(_)) => {
-                break (failure_terminate::OUTCOME, failure_terminate::unanswered(request));
+                break (failure_unavailable::OUTCOME, failure_unavailable::payload(request));
             }
         }
     };

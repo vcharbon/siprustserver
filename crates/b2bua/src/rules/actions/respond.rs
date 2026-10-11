@@ -602,9 +602,8 @@ pub(super) struct AuthoredFinal<'a> {
 /// event — and only when that failure had a peer final: `None` when the final
 /// restates no peer's. A setup deadline, a capacity refusal or a media-service failure mints
 /// its own diagnosis about a peer that is not the one being answered, so it
-/// carries none of them: a fold whose `origin` is `call_limiter` resolved a
-/// limiter refusal (the router's re-consult / terminal 486), not the peer's
-/// final, and folds nothing. The deployment's relay policy is read for the
+/// carries none of them, nor does a fold that answers no peer's final
+/// ([`crate::failure_unavailable::answers_the_peer`]). The deployment's relay policy is read for the
 /// final being minted: a `status` to the INVITE, toward the caller.
 fn failure_headers_answering(
     ctx: &RuleContext,
@@ -615,7 +614,7 @@ fn failure_headers_answering(
     match ctx.event {
         b2bua_sdk::event::CallEvent::InternalEvent { topic, payload, .. }
             if topic == "call-failure-result"
-                && payload.get("origin").and_then(|v| v.as_str()) != Some("call_limiter") =>
+                && crate::failure_unavailable::answers_the_peer(payload) =>
         {
             let minted =
                 RelaySituation::response(status, &Method::Invite, RelayDirection::TowardCaller);

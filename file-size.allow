@@ -11,7 +11,7 @@ ext .rs
 # No generated or fixture .rs file is tracked; one would go here as
 # `exclude <path glob>`.
 
-crates/b2bua-harness/src/lib.rs 1289
+crates/b2bua-harness/src/lib.rs 1189
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955
@@ -21,14 +21,14 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 1175
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1500
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 1137
-crates/b2bua-sdk/src/config.rs 921
+crates/b2bua-runner-kit/src/lib.rs 1135
+crates/b2bua-sdk/src/config.rs 903
 crates/b2bua-sdk/src/model.rs 1318
 crates/b2bua/src/b2bua_core.rs 958
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 520
 crates/b2bua/src/limiter/release_queue.rs 513
-crates/b2bua/src/metrics/limiter.rs 554
+crates/b2bua/src/metrics/limiter.rs 551
 crates/b2bua/src/metrics.rs 1059
 crates/b2bua/src/repl/changelog.rs 640
 crates/b2bua/src/repl/puller.rs 1154
@@ -41,7 +41,7 @@ crates/b2bua/src/router/callouts.rs 705
 crates/b2bua/src/router/process.rs 667
 crates/b2bua/src/router/reclaim.rs 551
 crates/b2bua/src/rules/actions/relay_response.rs 594
-crates/b2bua/src/rules/actions/respond.rs 641
+crates/b2bua/src/rules/actions/respond.rs 640
 crates/b2bua/src/rules/actions/teardown.rs 694
 crates/b2bua/src/rules/defaults/core_rules.rs 2081
 crates/b2bua/src/rules/relay_first_18x.rs 526
@@ -68,7 +68,7 @@ crates/failover-harness/tests/it/limiter_ha.rs 881
 crates/failover-harness/tests/it/limiter_release_by_call.rs 970
 crates/failover-harness/tests/it/prack_takeover.rs 906
 crates/http-net/src/scripted/service.rs 535
-crates/http-net/tests/it/scripted.rs 924
+crates/http-net/tests/it/scripted.rs 921
 crates/loadgen/src/app.rs 823
 crates/loadgen/src/driver.rs 1001
 crates/loadgen/src/mux/endpoint.rs 503

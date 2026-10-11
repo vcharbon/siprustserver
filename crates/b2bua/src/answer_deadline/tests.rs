@@ -317,7 +317,7 @@ fn an_unbounded_failure_consult_arms_no_deadline() {
 }
 
 #[test]
-fn an_expired_failure_deadline_is_the_consult_s_unanswered_terminate_fold() {
+fn an_expired_failure_deadline_is_the_consult_s_unanswered_503_fold() {
     let mut call = arm(sending(call(), vec![failure_consult(4)]), &BUDGETS, NOW).call;
     let mut fx = HandlerEffects::new();
     let Some(Screened::Expired(CallEvent::InternalEvent { topic, outcome, payload, .. })) =
@@ -325,13 +325,12 @@ fn an_expired_failure_deadline_is_the_consult_s_unanswered_terminate_fold() {
     else {
         panic!("an expired deadline is read as the consult's answer");
     };
-    assert_eq!((topic.as_str(), outcome.as_str()), (FAILURE_TOPIC, "terminate"));
+    assert_eq!((topic.as_str(), outcome.as_str()), (FAILURE_TOPIC, "reject"));
     assert_eq!(
         payload,
         serde_json::json!({
-            "status": 486,
-            "reason": "Busy Here",
-            "origin": "external",
+            "code": 503,
+            "origin": "decision_unavailable",
             "failed_leg_id": "b-1",
             "stack_authored": true,
         }),

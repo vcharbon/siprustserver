@@ -7,11 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use http_net::failures::FailureCause;
 use http_net::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     ScriptedHttpService,
 };
-use http_net::{HttpError, HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -113,7 +114,10 @@ async fn reset_closes_the_connection_without_a_response() {
     assert!(read.is_empty(), "no status line: {:?}", String::from_utf8_lossy(&read));
 
     let err = net.request(dst, HttpRequest::post("/start", b"{}".to_vec())).await.unwrap_err();
-    assert!(matches!(err, HttpError::Io { .. }), "the client sees a transport failure: {err:?}");
+    assert!(
+        matches!(err.cause, FailureCause::Eof | FailureCause::ConnReset),
+        "the client sees the connection closed: {err:?}"
+    );
 }
 
 #[tokio::test]

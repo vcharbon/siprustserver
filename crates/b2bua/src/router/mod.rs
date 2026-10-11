@@ -35,6 +35,7 @@ mod materialise;
 mod message_cap;
 mod owed;
 mod peer_metrics;
+pub(crate) use peer_metrics::outbound_proxy_target;
 mod process;
 #[cfg(test)]
 mod provisional_turn_tests;
@@ -168,6 +169,9 @@ pub struct RouterCtx {
     /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
     /// summaries, falling-edge totals — not one line per dead call.
     pub keepalive_waves: Arc<observe::WaveSet>,
+    /// The configured outbound proxy, its name looked up off the router task
+    /// (per-peer failure attribution reads only its kept addresses).
+    pub outbound_proxy: Option<Arc<http_net::ResolvedTarget>>,
     /// Events that resolved to no call, aggregated per class (ADR-0026).
     pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// The PRACKs released calls still answer 200 (RFC 3262 §3).

@@ -117,7 +117,8 @@ pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> 
 /// always did; the 503 path needs it too). The status + `Reason` header text is the
 /// contract `sip-proxy::health::probe::classify_503` keys on:
 ///   - `Ready`    → `200 OK` + `X-Overload: v=1; elu=…; gc=…; adm=…`.
-///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`.
+///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`, also
+///     while a gating backend's breaker is open ([`Readiness::options_state`]).
 ///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
 ///     `Retry-After: 0`.
 ///
@@ -139,7 +140,9 @@ pub(crate) fn build_options_health_response(
     req: &sip_message::SipRequest,
     capabilities: &CapabilitySet,
 ) -> sip_message::SipResponse {
-    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
+    let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness
+        .options_state()
+    {
         ReadinessState::Ready => (
             200,
             "OK",

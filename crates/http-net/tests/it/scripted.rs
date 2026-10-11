@@ -7,13 +7,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use http_net::failures::FailureCause;
 use http_net::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     HttpScriptError, HttpState, HttpUnmatched, ScriptedHttpService,
 };
-use http_net::{
-    HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpTransport, SimulatedHttpNetwork,
-};
+use http_net::{HttpRequest, HttpResponse, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 
 fn dst() -> std::net::SocketAddr {
     "10.0.0.7:8080".parse().unwrap()
@@ -379,13 +378,11 @@ async fn reset_is_a_connection_reset_on_the_simulated_fabric() {
     let (net, _h) = serve(&svc).await;
 
     let err = net.request(dst(), HttpRequest::post("/start", b"{}".to_vec())).await.unwrap_err();
-    match err {
-        HttpError::Io { addr, reason } => {
-            assert_eq!(addr, dst());
-            assert!(reason.contains("reset"), "{reason}");
-        }
-        other => panic!("expected a reset, got {other:?}"),
-    }
+    assert_eq!(
+        (err.cause, err.peer),
+        (FailureCause::Eof, dst().to_string()),
+        "closed without a response"
+    );
     assert!(script.verdict().is_green());
 }
 

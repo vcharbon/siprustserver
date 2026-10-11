@@ -16,8 +16,8 @@
 //! ([`call::CallLimiterState`]). The **call site owns the fail-open policy**: a
 //! failed admit leaves held as it was, a sent one owes the call's release, and
 //! only a confirmed set refreshes. [`CallLimiter::health`] is the limiter's
-//! health answer, which the worker's circuit breaker
-//! ([`crate::limiter::breaker`]) probes; [`CallLimiter::report_to`] registers
+//! health, its client's breaker, which the worker's breaker policy
+//! ([`crate::limiter::breaker`]) follows; [`CallLimiter::report_to`] registers
 //! where a client reports what the limiter's answers say beyond each outcome
 //! ([`LimiterReports`]): the lease they state, and the answers it could not
 //! read.
@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 pub use call::{AdmitOutcome, LimiterEntry, LimiterHeld};
+use tokio::sync::watch;
 
 use crate::limiter::lease::LimiterLease;
 use crate::metrics::{B2buaMetrics, LimiterFailure, LimiterOp};
@@ -143,8 +144,8 @@ pub trait CallLimiter: Send + Sync {
     /// once per round of its chain (ADR-0039). A wrapper states the budget of
     /// what it wraps.
     fn admit_budget(&self) -> Duration;
-    /// The limiter's health answer, which the worker's circuit breaker
-    /// probes. A limiter without one runs without a breaker.
+    /// The limiter's health: its client's breaker, which the worker's
+    /// breaker policy follows. A limiter without one runs without a breaker.
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
         None
     }
@@ -200,20 +201,18 @@ impl LimiterReports {
     }
 }
 
-/// A limiter's health answer.
-#[async_trait]
+/// A limiter's health, as its client's backend breaker states it
+/// (ADR-0043).
 pub trait LimiterHealth: Send + Sync {
-    /// Whether the limiter answered a request that reads its store, within
-    /// the admit budget: an admit sent now can be served.
-    async fn serving(&self) -> bool;
+    /// The breaker's state as it changes: `true` while open.
+    fn breaker(&self) -> watch::Receiver<bool>;
     /// Whether the limiter's address is known: a limiter whose name has not
-    /// resolved has none, and a breaker guarding it starts open.
+    /// resolved has none, and its breaker is tripped open.
     fn has_address(&self) -> bool {
         true
     }
-    /// Forget the limiter's address, so the next request looks its name up
-    /// again. A limiter at a fixed address keeps it.
-    fn forget_address(&self) {}
+    /// Open the breaker now; its probe closes it once the limiter answers.
+    fn trip(&self);
 }
 
 /// No limiter: every admit sends nothing ([`AdmitOutcome::NotSent`]), so no

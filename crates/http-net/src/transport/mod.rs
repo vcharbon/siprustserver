@@ -1,23 +1,34 @@
 //! The unary HTTP transport seam: traits, DTOs, and error types.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
+mod addressed;
 #[cfg(feature = "real")]
 mod cause;
 mod entries;
 mod peer;
 #[cfg(feature = "real")]
 mod real;
+#[cfg(feature = "real")]
+mod real_client;
 mod recording;
+#[cfg(feature = "real")]
+mod reqwest_resolve;
 mod simulated;
 
+pub use addressed::AddressedClient;
 pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
 #[cfg(feature = "real")]
 pub use real::RealHttpNetwork;
 pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
-pub use simulated::{Fault, SimulatedHttpNetwork};
+pub use simulated::{Behaviour, Fault, SimulatedHttpNetwork};
+
+use crate::failures::FailureCause;
+use crate::resolved_target::ResolvedTarget;
+use crate::settings::ClientSettings;
 
 /// A one-shot HTTP request.
 ///
@@ -140,14 +151,14 @@ pub enum HttpAnswer {
     /// Send this response.
     Response(HttpResponse),
     /// Close the connection without a response. The simulated fabric reports
-    /// it to the client as [`HttpError::Io`]; the real server drops the
+    /// it to the client as an `Eof` [`HttpError`]; the real server drops the
     /// connection before writing a status line.
     Abort,
 }
 
 /// A bound server. Dropping it deregisters the service (simulated) / shuts the
 /// listener down (real), so further requests to its address fail with
-/// [`HttpError::Connect`].
+/// a refused [`HttpError`].
 pub trait HttpServerHandle: Send + Sync {
     /// The bound local address (single source of truth for the URL the client
     /// dials).
@@ -158,18 +169,41 @@ pub trait HttpServerHandle: Send + Sync {
 /// other. Real, simulated, and recording impls all wear this trait so the
 /// consumer is wired identically in production and in tests.
 #[async_trait]
-pub trait HttpTransport: Send + Sync {
+pub trait HttpTransport: Send + Sync + 'static {
     /// Bind `service` at `addr`. The returned handle owns the binding.
     async fn serve(
         &self,
         addr: SocketAddr,
-        service: std::sync::Arc<dyn HttpService>,
+        service: Arc<dyn HttpService>,
     ) -> Result<Box<dyn HttpServerHandle>, BindError>;
 
     /// Fire a one-shot request at `dst` and await the response. The caller owns
     /// the timeout (wrap this in `tokio::time::timeout`); the transport only
     /// reports transport-level failures.
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError>;
+
+    /// A client of its own for the backend `target`, holding its connections
+    /// as `settings` state. The default resolves `target` on each request and
+    /// sends through [`request`](Self::request); the real transport builds a
+    /// `reqwest` client whose URL carries the target's name and whose name
+    /// lookups go through `target`.
+    fn client(
+        self: Arc<Self>,
+        target: Arc<ResolvedTarget>,
+        settings: &ClientSettings,
+    ) -> Arc<dyn HttpClient> {
+        let _ = settings;
+        Arc::new(AddressedClient::new(self, target))
+    }
+}
+
+/// One backend's client: every request goes to the one target it was built
+/// for ([`HttpTransport::client`]).
+#[async_trait]
+pub trait HttpClient: Send + Sync {
+    /// Send `req` to the backend and await the response. The caller owns the
+    /// budget; the client reports transport-level failures only.
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>;
 }
 
 /// Failure binding a server.
@@ -183,22 +217,48 @@ pub enum BindError {
     Io(String),
 }
 
-/// A transport-level request failure. Distinct from a non-2xx response: a
-/// [`HttpResponse`] with `status >= 400` is still `Ok` here. The caller maps
-/// **both** any `HttpError` and a timeout to "backend unavailable" (fail-open).
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum HttpError {
-    /// Could not reach a server at `dst` — nothing bound there, or the
-    /// destination was cut ([`Fault::Cut`]) / refused.
-    #[error("connection refused: no server at {0}")]
-    Connect(SocketAddr),
-    /// The connection was established but then failed mid-flight
-    /// ([`Fault::ErrorAfter`]: ECONNRESET-style), or a real I/O error.
-    #[error("io error to {addr}: {reason}")]
-    Io {
-        /// The destination that failed.
-        addr: SocketAddr,
-        /// Human-readable cause (for logs / recording).
-        reason: String,
-    },
+/// A transport-level request failure, classified as `reqwest` failures are
+/// ([`FailureCause`]). Distinct from a non-2xx response: a [`HttpResponse`]
+/// with `status >= 400` is still `Ok` here.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{cause} to {peer}: {detail}")]
+pub struct HttpError {
+    /// The destination: a socket address, or a backend's name.
+    pub peer: String,
+    /// What failed.
+    pub cause: FailureCause,
+    /// Human-readable detail (for logs / recording).
+    pub detail: String,
+}
+
+impl HttpError {
+    /// A failure of `cause` sending to `peer`.
+    pub fn new(peer: impl ToString, cause: FailureCause, detail: impl Into<String>) -> Self {
+        Self { peer: peer.to_string(), cause, detail: detail.into() }
+    }
+
+    /// `peer` refused the connection, or no server is bound there.
+    pub fn refused(peer: impl ToString) -> Self {
+        Self::new(peer, FailureCause::Refused, "connection refused")
+    }
+
+    /// `peer` reset the connection.
+    pub fn reset(peer: impl ToString) -> Self {
+        Self::new(peer, FailureCause::ConnReset, "connection reset")
+    }
+
+    /// `peer` closed the connection before a complete response.
+    pub fn eof(peer: impl ToString) -> Self {
+        Self::new(peer, FailureCause::Eof, "connection closed before a complete response")
+    }
+
+    /// The connect to `peer` did not complete within its bound.
+    pub fn connect_timeout(peer: impl ToString) -> Self {
+        Self::new(peer, FailureCause::ConnectTimeout, "connect timed out")
+    }
+
+    /// `peer`'s name did not resolve.
+    pub fn dns(peer: impl ToString) -> Self {
+        Self::new(peer, FailureCause::Dns, "the name did not resolve")
+    }
 }

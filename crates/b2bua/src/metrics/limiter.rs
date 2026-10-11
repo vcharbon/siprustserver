@@ -208,20 +208,17 @@ impl RefreshDiscard {
 pub enum LimiterTask {
     ReleaseSender,
     RefreshSender,
-    BreakerProbe,
 }
 
 impl LimiterTask {
     /// Every task, in declaration order.
-    pub const ALL: [LimiterTask; 3] =
-        [LimiterTask::ReleaseSender, LimiterTask::RefreshSender, LimiterTask::BreakerProbe];
+    pub const ALL: [LimiterTask; 2] = [LimiterTask::ReleaseSender, LimiterTask::RefreshSender];
 
     /// The `task` label value.
     pub const fn label(self) -> &'static str {
         match self {
             LimiterTask::ReleaseSender => "release_sender",
             LimiterTask::RefreshSender => "refresh_sender",
-            LimiterTask::BreakerProbe => "breaker_probe",
         }
     }
 }

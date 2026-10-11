@@ -34,12 +34,19 @@ pub fn classify(err: &reqwest::Error) -> FailureCause {
 fn classify_below(top: &(dyn Error + 'static), connect: bool) -> FailureCause {
     let mut source = top.source();
     while let Some(e) = source {
+        if e.downcast_ref::<hyper::Error>().is_some_and(hyper::Error::is_incomplete_message) {
+            return FailureCause::Eof;
+        }
         if let Some(io) = e.downcast_ref::<std::io::Error>() {
             match io.kind() {
                 std::io::ErrorKind::ConnectionRefused => return FailureCause::Refused,
+                std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable => {
+                    return FailureCause::Unreachable
+                }
                 std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
                     return FailureCause::ConnReset
                 }
+                std::io::ErrorKind::UnexpectedEof => return FailureCause::Eof,
                 std::io::ErrorKind::TimedOut => {
                     return if connect {
                         FailureCause::ConnectTimeout
@@ -75,8 +82,14 @@ fn classify_text(text: &str) -> Option<FailureCause> {
     if t.contains("connection refused") {
         return Some(FailureCause::Refused);
     }
+    if t.contains("no route to host") || t.contains("network is unreachable") {
+        return Some(FailureCause::Unreachable);
+    }
     if t.contains("connection reset") || t.contains("broken pipe") {
         return Some(FailureCause::ConnReset);
+    }
+    if t.contains("connection closed before message completed") {
+        return Some(FailureCause::Eof);
     }
     if t.contains("tls") || t.contains("certificate") || t.contains("ssl") {
         return Some(FailureCause::Tls);

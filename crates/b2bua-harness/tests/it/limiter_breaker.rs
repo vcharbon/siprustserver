@@ -1,12 +1,12 @@
 //! The limiter circuit breaker: no call pays the admit timeout of a limiter
 //! that keeps failing.
 //!
-//! Three consecutive admits that get no usable answer (a stalled limiter, a
-//! cut one) open the worker's breaker: from then on an admit sends no request
-//! and waits nothing, the call runs uncounted and owes no release, and the
-//! release queue sends nothing. A background probe asks the limiter's health
-//! answer every second; the first answer closes the breaker, the queue sends
-//! what waited, and the next call is counted again.
+//! Three requests inside 2 s that get no HTTP response at all (a stalled
+//! limiter, a cut one) open the limiter client's breaker: from then on an
+//! admit sends no request and waits nothing, the call runs uncounted and owes
+//! no release, and the release queue sends nothing. A background probe asks
+//! the limiter's health every second; the first response closes the breaker,
+//! the queue sends what waited, and the next call is counted again.
 //!
 //! Every call holds three limiters.
 
@@ -342,6 +342,7 @@ async fn failures_spread_wider_than_the_window_leave_the_breaker_closed() {
     assert_eq!(s.sent_on("/v1/admit"), 4, "the fourth call still sends its admit");
     assert_eq!(metrics.limiter().uncounted_calls(), 4, "every call failed open");
 
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
     for dialog in &mut dialogs {
         s.hang_up(dialog).await;
     }

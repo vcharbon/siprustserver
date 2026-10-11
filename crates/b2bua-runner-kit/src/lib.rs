@@ -68,12 +68,12 @@ use b2bua::destination_allowlist::{classify_admission, AdmissionVerdict};
 use b2bua::ingress_brake::{build_ingress_brake_hook, IngressBrakeConfig, IngressBrakeCounters};
 use b2bua::limiter::CallLimiter;
 use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
-use b2bua::resolved_target::SystemResolver;
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
 use http_net::RealHttpNetwork;
+use http_net::SystemResolver;
 use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
@@ -438,12 +438,10 @@ pub struct RunnerEnv {
     /// `LIMITER_RELEASE_QUEUE_CAP` — most releases the worker's release queue
     /// holds; the oldest is dropped past it (default 100000).
     pub limiter_release_queue_cap: usize,
-    /// `LIMITER_BREAKER_FAILURES` — consecutive failed admits that open the
-    /// worker's limiter breaker (default 3).
-    pub limiter_breaker_failures: u32,
-    /// `LIMITER_BREAKER_PROBE_MS` — how often an open breaker probes the
-    /// limiter's health answer (default 1000).
-    pub limiter_breaker_probe_ms: u64,
+    /// `LIMITER_BREAKER_*`, `LIMITER_LOOKUP_*`, `LIMITER_MAX_IN_FLIGHT`, … —
+    /// the limiter client's breaker, lookups and connections (`limiter_env`,
+    /// [`http_net::BackendConfig`]).
+    pub limiter_backend: http_net::BackendConfig,
     /// The planned exit's bounds, the grammar in `drain_env`:
     /// `B2BUA_DRAIN_GRACE_MS` (the wait for the live calls), `B2BUA_DRAIN_MIN_MS`
     /// (the floor of a withdrawn worker's caught-up exit, ADR-0031 D2) and
@@ -574,8 +572,7 @@ impl RunnerEnv {
             limiter_refresh_timeout_ms: limiter.refresh_timeout_ms,
             limiter_release_timeout_ms: limiter.release_timeout_ms,
             limiter_release_queue_cap: limiter.queue_cap,
-            limiter_breaker_failures: limiter.breaker_failures,
-            limiter_breaker_probe_ms: limiter.breaker_probe_ms,
+            limiter_backend: limiter.backend,
             drain: drain_env::drain_from_lookup(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
@@ -749,8 +746,6 @@ impl RunnerEnv {
             limiter_refresh_batch_ms: self.limiter_refresh_batch_ms,
             limiter_refresh_batch_max: self.limiter_refresh_batch_max,
             limiter_release_queue_cap: self.limiter_release_queue_cap,
-            limiter_breaker_failures: self.limiter_breaker_failures,
-            limiter_breaker_probe_ms: self.limiter_breaker_probe_ms,
             setup_timeout_ms: self.setup_timeout_ms,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
@@ -851,17 +846,20 @@ impl RunnerBase {
                 refresh_timeout_ms = self.env.limiter_refresh_timeout_ms,
                 release_timeout_ms = self.env.limiter_release_timeout_ms,
                 refresh_sec = self.env.limiter_refresh_sec,
-                breaker_failures = self.env.limiter_breaker_failures,
-                breaker_probe_ms = self.env.limiter_breaker_probe_ms,
+                breaker_requests = self.env.limiter_backend.breaker.min_sent,
+                breaker_window_ms = self.env.limiter_backend.breaker.window.as_millis() as u64,
+                breaker_probe_ms = self.env.limiter_backend.breaker.probe_period.as_millis() as u64,
+                max_in_flight = self.env.limiter_backend.client.max_in_flight,
                 "call-limiter client wired"
             );
         }
         let settings = limiter_client::LimiterClientSettings {
             hostport,
             timeout: std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+            backend: self.env.limiter_backend.clone(),
             refresh_timeout: std::time::Duration::from_millis(self.env.limiter_refresh_timeout_ms),
             release_timeout: std::time::Duration::from_millis(self.env.limiter_release_timeout_ms),
-            boot_lookup: std::time::Duration::from_millis(self.env.limiter_breaker_probe_ms),
+            boot_lookup: self.env.limiter_backend.breaker.probe_period,
         };
         limiter_client::limiter_client(
             &settings,

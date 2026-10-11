@@ -26,10 +26,6 @@ fn the_limiter_refresh_and_release_queue_bounds_are_checked() {
     assert!(e.contains("limiter_refresh_batch_max=0"), "{e}");
     let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
     assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
-    let e = with(|c| c.limiter_breaker_failures = 0).expect_err("zero failures");
-    assert!(e.contains("limiter_breaker_failures=0"), "{e}");
-    let e = with(|c| c.limiter_breaker_probe_ms = 0).expect_err("zero probe period");
-    assert!(e.contains("limiter_breaker_probe_ms=0"), "{e}");
 }
 
 /// New calls hold half the handler permits and stop 5 % below the queue

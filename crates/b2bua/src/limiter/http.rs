@@ -1,17 +1,19 @@
 //! [`HttpCallLimiter`] — the production limiter client.
 //!
-//! Speaks the call-keyed limiter API over an injected [`HttpTransport`] (real
-//! `reqwest` in the runner, the simulated fabric in tests) to a
-//! [`ResolvedTarget`]. The **timeout budgets live here**: every request is
-//! wrapped in `tokio::time::timeout`, and a timeout *or* any transport error
-//! (a target name that does not resolve included) *or* a non-200 status maps
-//! to `Unavailable`. An admit runs on a call's turn under the fail-open
-//! budget; a refresh runs off every call, in the worker's refresh batch, and
-//! a release off every call, in the worker's release queue, each under its
-//! own longer budget, since no call waits on either. The health answer
-//! ([`CallLimiter::health`]) asks `GET /v1/health`, which reads the limiter's
-//! store, under the admit budget; it has an address once the target's name
-//! resolved, and forgetting it makes the next request look the name up again.
+//! Speaks the call-keyed limiter API through a [`BackendClient`] (ADR-0043):
+//! the limiter's own client over an injected [`HttpTransport`] (real
+//! `reqwest` in the runner, the simulated fabric in tests), its name looked
+//! up through its [`ResolvedTarget`], at most [`MAX_IN_FLIGHT`] requests in
+//! flight, and its breaker probing `GET /v1/health`. The **timeout budgets
+//! live here**: every request is one attempt, never retried, under its
+//! budget, and a timeout *or* any transport error (a target name that does
+//! not resolve included) *or* the breaker open *or* a non-200 status maps to
+//! `Unavailable`. An admit runs on a call's turn under the fail-open budget;
+//! a refresh runs off every call, in the worker's refresh batch, and a
+//! release off every call, in the worker's release queue, each under its own
+//! longer budget, since no call waits on either. The client's health
+//! ([`CallLimiter::health`]) is its breaker; each probe is counted as a
+//! health request, and a probe's valid answer states the limiter's lease.
 //! Every admit, refresh and health answer states the limiter's lease, which
 //! the client reports to every [`LimiterReports`] registered with
 //! [`CallLimiter::report_to`]; a lease is learnt only from a body judged
@@ -30,14 +32,17 @@ use call_limiter::wire::{
     self, AdmitAnswer, AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, HeldSet,
     RefreshRequest, RefreshResponse, ReleaseRequest,
 };
-use http_net::{HttpRequest, HttpResponse, HttpTransport};
+use http_net::{
+    AttemptError, BackendClient, BreakerConfig, ClientSettings, HttpRequest, HttpResponse,
+    HttpTransport, ResolvedTarget,
+};
+use tokio::sync::watch;
 
 use crate::limiter::{
     AdmitOutcome, CallLimiter, LimiterEntry, LimiterHealth, LimiterHeld, LimiterReports,
     RefreshAnswer, RefreshCall, RefreshOutcome, RefreshReply, ReleaseAnswer,
 };
 use crate::metrics::{LimiterFailure, LimiterOp};
-use crate::resolved_target::ResolvedTarget;
 
 /// The shortest lease an answer may state: the limiter's own floor.
 const MIN_LEASE_MS: u64 = 1_000;
@@ -48,6 +53,12 @@ const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 /// The refresh budget a client runs with unless told otherwise.
 const DEFAULT_REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The limiter client's cap on requests in flight.
+pub const MAX_IN_FLIGHT: usize = 64;
+
+/// The path the limiter's breaker probes.
+pub const HEALTH_PATH: &str = "/v1/health";
+
 /// HTTP-backed limiter client over a pluggable transport.
 pub struct HttpCallLimiter {
     endpoint: Arc<Endpoint>,
@@ -57,15 +68,10 @@ pub struct HttpCallLimiter {
     release_timeout: Duration,
 }
 
-/// A request never reached an answer: the transport failed, or the
-/// target's name does not resolve.
-struct TransportFailed;
-
-/// The transport and the target every request of one client goes through,
+/// The limiter's client and every request of one client goes through it,
 /// and the client's fail-open episode.
 struct Endpoint {
-    transport: Arc<dyn HttpTransport>,
-    target: ResolvedTarget,
+    client: BackendClient,
     /// Fail-open aggregation keyed by the limiter target (ADR-0026): a limiter
     /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
     /// — ended once 200s have come back for the idle window. A failed health
@@ -79,13 +85,6 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    /// Send `req` to the target. `Err` on a transport error, a name that
-    /// does not resolve included.
-    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, TransportFailed> {
-        let addr = self.target.resolve().await.ok_or(TransportFailed)?;
-        self.transport.request(addr, req).await.map_err(|_| TransportFailed)
-    }
-
     /// A 200 came back: the episode may end.
     fn answered(&self) {
         // One relaxed load while healthy.
@@ -118,8 +117,8 @@ impl Endpoint {
         }
     }
 
-    /// Send `req` for `op` under `budget`: the 200 answer, or `None` after
-    /// counting why none came back.
+    /// Send `req` for `op` under `budget`, once: the 200 answer, or `None`
+    /// after counting why none came back.
     async fn call(
         &self,
         op: LimiterOp,
@@ -127,21 +126,41 @@ impl Endpoint {
         budget: Duration,
     ) -> Option<HttpResponse> {
         self.sent(op);
-        match tokio::time::timeout(budget, self.send(req)).await {
-            Ok(Ok(resp)) if resp.status == 200 => Some(resp),
-            other => {
-                self.failed(
-                    op,
-                    match other {
-                        Err(_) => LimiterFailure::Timeout,
-                        Ok(Err(_)) => LimiterFailure::Transport,
-                        Ok(Ok(_)) => LimiterFailure::Status,
-                    },
-                );
-                None
+        let cause = match self.client.attempt(req, budget).await {
+            Ok(resp) if resp.status == 200 => return Some(resp),
+            Ok(_) => LimiterFailure::Status,
+            Err(AttemptError::Timeout | AttemptError::Saturated) => LimiterFailure::Timeout,
+            Err(AttemptError::Transport(_)) => LimiterFailure::Transport,
+            Err(AttemptError::BreakerOpen) => LimiterFailure::BreakerOpen,
+        };
+        self.failed(op, cause);
+        None
+    }
+
+    /// One probe of the breaker's: a health request, its answer reported
+    /// as an admit's is.
+    fn probed(&self, answer: Option<&HttpResponse>) {
+        self.sent(LimiterOp::Health);
+        match answer {
+            None => self.failed(LimiterOp::Health, LimiterFailure::Transport),
+            Some(resp) if resp.status != 200 => {
+                self.failed(LimiterOp::Health, LimiterFailure::Status);
             }
+            Some(resp) => match read_health(&resp.body) {
+                Some(lease_ms) => {
+                    self.answered();
+                    self.stated_lease(lease_ms);
+                }
+                None => self.failed(LimiterOp::Health, LimiterFailure::BadAnswer),
+            },
         }
     }
+}
+
+/// The limiter's breaker: its rule, its probe of [`HEALTH_PATH`] under the
+/// admit budget `timeout`.
+pub fn breaker_config(timeout: Duration) -> BreakerConfig {
+    BreakerConfig { probe_timeout: timeout, ..BreakerConfig::probing(HEALTH_PATH) }
 }
 
 impl HttpCallLimiter {
@@ -152,21 +171,39 @@ impl HttpCallLimiter {
         Self::with_target(transport, ResolvedTarget::addr(addr), timeout)
     }
 
-    /// [`new`](Self::new) for any [`ResolvedTarget`].
+    /// [`new`](Self::new) for any [`ResolvedTarget`], under the default
+    /// client settings ([`MAX_IN_FLIGHT`]) and [`breaker_config`].
     pub fn with_target(
         transport: Arc<dyn HttpTransport>,
         target: ResolvedTarget,
         timeout: Duration,
     ) -> Self {
-        let addr_key = target.to_string();
+        let client = BackendClient::new(
+            transport,
+            Arc::new(target),
+            ClientSettings::with_max_in_flight(MAX_IN_FLIGHT),
+            breaker_config(timeout),
+        );
+        Self::with_client(client, timeout)
+    }
+
+    /// [`new`](Self::new) over the limiter's own `client`.
+    pub fn with_client(client: BackendClient, timeout: Duration) -> Self {
+        let addr_key = client.target().to_string();
+        let endpoint = Arc::new(Endpoint {
+            client,
+            fail_open: crate::lifecycle::backend_waves("call-limiter"),
+            addr_key,
+            reports: RwLock::default(),
+        });
+        let probes = Arc::downgrade(&endpoint);
+        endpoint.client.report_probes_to(Arc::new(move |answer| {
+            if let Some(endpoint) = probes.upgrade() {
+                endpoint.probed(answer);
+            }
+        }));
         Self {
-            endpoint: Arc::new(Endpoint {
-                transport,
-                target,
-                fail_open: crate::lifecycle::backend_waves("call-limiter"),
-                addr_key,
-                reports: RwLock::default(),
-            }),
+            endpoint,
             timeout,
             refresh_timeout: DEFAULT_REFRESH_TIMEOUT,
             release_timeout: DEFAULT_RELEASE_TIMEOUT,
@@ -189,7 +226,8 @@ impl HttpCallLimiter {
     /// address is known. A lookup still running past `budget` lands later
     /// and is kept.
     pub async fn lookup(&self, budget: Duration) -> bool {
-        tokio::time::timeout(budget, self.endpoint.target.resolve()).await.ok().flatten().is_some()
+        let target = self.endpoint.client.target();
+        tokio::time::timeout(budget, target.resolve()).await.ok().flatten().is_some()
     }
 
     /// One request of `op` whose body serializes `body`, under `budget`;
@@ -211,39 +249,22 @@ impl HttpCallLimiter {
     }
 }
 
-/// The client's health answer: `GET /v1/health` under the admit budget.
+/// The client's health: its backend breaker.
 struct HttpHealth {
     endpoint: Arc<Endpoint>,
-    timeout: Duration,
 }
 
-#[async_trait]
 impl LimiterHealth for HttpHealth {
-    async fn serving(&self) -> bool {
-        let health = HttpRequest::get("/v1/health");
-        let Some(resp) = self.endpoint.call(LimiterOp::Health, health, self.timeout).await else {
-            tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
-            return false;
-        };
-        match read_health(&resp.body) {
-            Some(lease_ms) => {
-                self.endpoint.answered();
-                self.endpoint.stated_lease(lease_ms);
-                true
-            }
-            None => {
-                self.endpoint.failed(LimiterOp::Health, LimiterFailure::BadAnswer);
-                false
-            }
-        }
+    fn breaker(&self) -> watch::Receiver<bool> {
+        self.endpoint.client.breaker_state()
     }
 
     fn has_address(&self) -> bool {
-        self.endpoint.target.address().is_some()
+        self.endpoint.client.target().address().is_some()
     }
 
-    fn forget_address(&self) {
-        self.endpoint.target.forget();
+    fn trip(&self) {
+        self.endpoint.client.trip();
     }
 }
 
@@ -321,7 +342,7 @@ impl CallLimiter for HttpCallLimiter {
     }
 
     fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
-        Some(Arc::new(HttpHealth { endpoint: self.endpoint.clone(), timeout: self.timeout }))
+        Some(Arc::new(HttpHealth { endpoint: self.endpoint.clone() }))
     }
 
     fn report_to(&self, reports: LimiterReports) {

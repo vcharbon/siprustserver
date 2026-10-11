@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http_net::failures::{self, FailureCause};
-use http_net::{HttpError, HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
+use http_net::{HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
 
 /// Echoes the received path-and-query as the body and reflects the `x-debug`
 /// request header back out, alongside a minted trace-id response header.
@@ -76,7 +76,11 @@ async fn a_refused_backend_behind_a_tls_named_path_counts_as_refused() {
         .request(dst, HttpRequest::post("/tls/admit", b"{}".to_vec()))
         .await
         .expect_err("a closed port must not answer");
-    assert!(matches!(err, HttpError::Connect(addr) if addr == dst), "{err:?}");
+    assert_eq!(
+        (err.cause, err.peer.as_str()),
+        (FailureCause::Refused, &*dst.to_string()),
+        "{err:?}"
+    );
 
     // The peer label is this test's own ephemeral port, so the process-wide
     // counters are not shared with any other test.

@@ -21,10 +21,19 @@
 //! wins over a latched `Ready` (SIGTERM → drain, never un-drain). The latch has
 //! two sources: SIGTERM, and the worker observing its own endpoint withdrawn
 //! from routing (ADR-0031 D6) — whichever comes first.
+//!
+//! ## Backend gate (OPTIONS only)
+//! [`Readiness::gate_options_on`] registers a backend's breaker: while one is
+//! open, [`Readiness::options_state`] reports a `Ready` node `NotReady`, and
+//! `Ready` again once all are closed; never latched (ADR-0043).
+//! [`Readiness::state`], which `/ready` reads, ignores the gate.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tokio::sync::watch;
+
+use super::backend_gate::BackendGate;
 use super::ReplicationSupervisor;
 
 /// The three readiness states the OPTIONS responder self-reports.
@@ -95,6 +104,8 @@ struct ReadinessInner {
     /// including the boot state — is lined exactly once (ADR-0026): `state` is
     /// read once per OPTIONS probe and must never be a per-probe line.
     not_ready_logged: AtomicBool,
+    /// The backends whose open breaker gates the OPTIONS self-health.
+    backends: BackendGate,
 }
 
 /// Clone-cheap readiness handle (shared `Arc` inside). Wired into
@@ -113,6 +124,7 @@ impl Readiness {
                 draining: AtomicBool::new(false),
                 ready_latched: AtomicBool::new(false),
                 not_ready_logged: AtomicBool::new(false),
+                backends: BackendGate::default(),
             }),
         }
     }
@@ -150,6 +162,22 @@ impl Readiness {
     /// [`state`](Self::state) remains the state machine.
     pub fn is_draining(&self) -> bool {
         self.inner.draining.load(Ordering::SeqCst)
+    }
+
+    /// From now on, `breaker` open (`true`) turns a `Ready` node's OPTIONS
+    /// self-health `NotReady` ([`options_state`](Self::options_state)).
+    pub fn gate_options_on(&self, breaker: watch::Receiver<bool>) {
+        self.inner.backends.add(breaker);
+    }
+
+    /// The state the OPTIONS self-health reports: [`state`](Self::state),
+    /// with a `Ready` node reported `NotReady` while a gating backend's
+    /// breaker is open.
+    pub fn options_state(&self) -> ReadinessState {
+        match self.state() {
+            ReadinessState::Ready if self.inner.backends.any_open() => ReadinessState::NotReady,
+            state => state,
+        }
     }
 
     /// The current readiness state (Draining wins; else latched/gated Ready;
@@ -306,5 +334,32 @@ mod tests {
         assert_eq!(r.state(), ReadinessState::Ready);
         r.set_draining();
         assert_eq!(r.state(), ReadinessState::Draining);
+    }
+
+    /// A gating backend's open breaker turns OPTIONS not-ready without a
+    /// latch, and `state` (the `/ready` surface) never follows it.
+    #[test]
+    fn an_open_backend_breaker_gates_options_only_and_never_latches() {
+        let r = Readiness::always_ready();
+        let (breaker, open) = watch::channel(false);
+        r.gate_options_on(open);
+        assert_eq!(r.options_state(), ReadinessState::Ready);
+        breaker.send_replace(true);
+        assert_eq!(r.options_state(), ReadinessState::NotReady, "open: OPTIONS not-ready");
+        assert_eq!(r.state(), ReadinessState::Ready, "/ready unchanged");
+        breaker.send_replace(false);
+        assert_eq!(r.options_state(), ReadinessState::Ready, "closed: back, no latch");
+        breaker.send_replace(true);
+        r.set_draining();
+        assert_eq!(r.options_state(), ReadinessState::Draining, "draining wins");
+    }
+
+    /// Before the node is ready, the gate changes nothing.
+    #[test]
+    fn a_not_ready_node_stays_not_ready_whatever_the_gate() {
+        let r = Readiness::new(FlagSource::new(false, false));
+        let (_breaker, open) = watch::channel(false);
+        r.gate_options_on(open);
+        assert_eq!(r.options_state(), ReadinessState::NotReady);
     }
 }

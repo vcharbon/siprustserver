@@ -72,7 +72,8 @@ fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
             payload.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("Declined").to_string();
         (code, reason)
     } else {
-        (500, "Server Internal Error".to_string())
+        // The engine gave no answer: the backend failure's 503 (ADR-0043).
+        (503, "Service Unavailable".to_string())
     }
 }
 

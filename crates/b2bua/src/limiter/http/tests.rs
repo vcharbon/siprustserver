@@ -2,7 +2,7 @@ use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 
 use crate::limiter::lease::LimiterLease;
 use crate::metrics::B2buaMetrics;
-use http_net::{Fault, SimulatedHttpNetwork};
+use http_net::{Fault, MemoryResolver, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
 use super::*;
@@ -26,18 +26,28 @@ async fn served() -> (SimulatedHttpNetwork, Box<dyn http_net::HttpServerHandle>)
     (net, handle)
 }
 
+/// Trip `client`'s breaker if closed and let its next probe run: whether
+/// the breaker is closed after it.
+async fn probe(client: &HttpCallLimiter) -> bool {
+    let health = client.health().expect("the HTTP client has a breaker");
+    let state = health.breaker();
+    health.trip();
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    let closed = !*state.borrow();
+    closed
+}
+
 #[tokio::test(start_paused = true)]
-async fn the_health_answer_follows_the_limiter() {
+async fn the_breaker_probe_follows_the_limiter() {
     let (net, _server) = served().await;
     let client = HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET);
-    let health = client.health().expect("the HTTP client has a health answer");
-    assert!(health.serving().await);
+    assert!(probe(&client).await);
     net.apply_fault(Fault::Stall { dst: laddr() });
-    assert!(!health.serving().await, "a stalled limiter misses the budget");
+    assert!(!probe(&client).await, "a stalled limiter misses the probe budget");
     net.apply_fault(Fault::Cut { dst: laddr() });
-    assert!(!health.serving().await);
+    assert!(!probe(&client).await);
     net.apply_fault(Fault::Resume { dst: laddr() });
-    assert!(health.serving().await);
+    assert!(probe(&client).await);
 }
 
 /// Five admits of distinct calls sent at once through `limiter`.
@@ -61,37 +71,40 @@ async fn five_at_once(limiter: &Arc<dyn CallLimiter>) -> Vec<AdmitOutcome> {
 #[tokio::test(start_paused = true)]
 async fn admits_during_a_first_lookup_inside_the_budget_wait_for_it_and_are_admitted() {
     let (net, _server) = served().await;
-    let names = Arc::new(crate::resolved_target::tests::FakeResolver {
-        delay: Some(Duration::from_millis(100)),
-        ..Default::default()
-    });
-    names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+    let names = Arc::new(MemoryResolver::new());
+    names.slow(Duration::from_millis(100));
+    names.point("limiter:8080", [laddr()]);
     let target = ResolvedTarget::name_with("limiter:8080", names.clone());
     let limiter: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
     assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
-    assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(names.lookups(), 1);
 }
 
 #[tokio::test(start_paused = true)]
 async fn admits_during_a_lookup_slower_than_the_budget_fail_and_the_lookup_still_lands() {
     let (net, _server) = served().await;
-    let names = Arc::new(crate::resolved_target::tests::FakeResolver {
-        delay: Some(Duration::from_millis(300)),
-        ..Default::default()
-    });
-    names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+    let names = Arc::new(MemoryResolver::new());
+    names.slow(Duration::from_millis(300));
+    names.point("limiter:8080", [laddr()]);
     let target = ResolvedTarget::name_with("limiter:8080", names.clone());
-    let limiter: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
+    // A breaker that five failures do not open: this test reads the lookup.
+    let breaker = BreakerConfig { min_sent: 100, ..breaker_config(BUDGET) };
+    let client = BackendClient::new(
+        Arc::new(net),
+        Arc::new(target),
+        ClientSettings::with_max_in_flight(MAX_IN_FLIGHT),
+        breaker,
+    );
+    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::with_client(client, BUDGET));
     assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Unavailable; 5]);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
-    assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(names.lookups(), 1);
 }
 
-fn resolver() -> Arc<crate::resolved_target::tests::FakeResolver> {
-    Arc::new(Default::default())
+fn resolver() -> Arc<MemoryResolver> {
+    Arc::new(MemoryResolver::new())
 }
 
 #[tokio::test(start_paused = true)]
@@ -106,7 +119,7 @@ async fn a_name_that_does_not_resolve_fails_as_a_transport_error() {
     let calls = [RefreshCall { key: "c#k".into(), held: held_of(&["x".into()]) }];
     assert_eq!(client.refresh(&calls).await, RefreshAnswer::Unavailable);
     assert_eq!(client.release(&["c#k".into()]).await, ReleaseAnswer::Unavailable);
-    assert!(!client.health().unwrap().serving().await);
+    assert!(!probe(&client).await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -119,12 +132,12 @@ async fn a_named_client_has_an_address_once_its_name_resolves_until_it_forgets_i
     assert!(!health.has_address(), "never looked up");
     assert!(!client.lookup(BUDGET).await, "does not resolve");
     assert!(!health.has_address());
-    names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+    names.point("limiter:8080", [laddr()]);
     assert!(client.lookup(BUDGET).await);
     assert!(health.has_address());
-    health.forget_address();
+    client.endpoint.client.target().forget();
     assert!(!health.has_address(), "forgotten");
-    assert!(health.serving().await, "the probe looks it up again");
+    assert!(probe(&client).await, "the probe looks it up again");
     assert!(health.has_address());
 }
 
@@ -302,7 +315,7 @@ async fn a_lease_below_one_second_is_a_bad_body() {
     for body in [r#"{"calls":0,"lease_ms":999}"#, r#"{"calls":0}"#] {
         let (client, _server) = answering(body).await;
         client.report_to(LimiterReports::new(&lease, metrics.clone()));
-        assert!(!client.health().unwrap().serving().await, "{body}");
+        assert!(probe(&client).await, "{body}: any response closes the breaker");
     }
     assert_eq!(bad(LimiterOp::Health), 2);
     assert_eq!(lease.current(), Duration::from_secs(20), "nothing learnt");
@@ -313,7 +326,6 @@ async fn one_of_each(client: &HttpCallLimiter) {
     client.admit("c#k", 7, &LimiterHeld::default(), &entries(), false).await;
     client.refresh(&[RefreshCall { key: "c#k".into(), held: held_of(&["x".into()]) }]).await;
     client.release(&["c#k".into()]).await;
-    client.health().unwrap().serving().await;
 }
 
 /// A limiter answering every request with `status`.
@@ -328,7 +340,7 @@ impl http_net::HttpService for Status {
 
 #[tokio::test(start_paused = true)]
 async fn every_request_and_every_failure_is_counted_by_its_cause() {
-    let ops = [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Release, LimiterOp::Health];
+    let ops = [LimiterOp::Admit, LimiterOp::Refresh, LimiterOp::Release];
     let (net, _server) = served().await;
     let client = HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET);
     let lease = LimiterLease::starting_at(Duration::from_secs(20));
@@ -342,6 +354,9 @@ async fn every_request_and_every_failure_is_counted_by_its_cause() {
     }
     net.apply_fault(Fault::Stall { dst: laddr() });
     one_of_each(&client).await;
+    // A fresh client: three failures inside 2 s would open this one's breaker.
+    let client = HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET);
+    client.report_to(LimiterReports::new(&lease, metrics.clone()));
     net.apply_fault(Fault::Cut { dst: laddr() });
     one_of_each(&client).await;
     for op in ops {
@@ -367,7 +382,7 @@ async fn a_health_answer_states_the_lease() {
     let (client, _server) = answering(r#"{"calls":0,"lease_ms":200000}"#).await;
     let lease = LimiterLease::starting_at(Duration::from_secs(20));
     client.report_to(LimiterReports::new(&lease, B2buaMetrics::new()));
-    assert!(client.health().unwrap().serving().await);
+    assert!(probe(&client).await);
     assert_eq!(lease.current(), Duration::from_secs(200));
 }
 
@@ -406,9 +421,8 @@ async fn an_admit_answer_contradicting_itself_teaches_no_lease() {
 async fn a_client_at_an_address_always_has_it() {
     let (net, _server) = served().await;
     let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
-    let health = client.health().unwrap();
-    health.forget_address();
-    assert!(health.has_address());
+    client.endpoint.client.target().forget();
+    assert!(client.health().unwrap().has_address());
 }
 
 #[tokio::test(start_paused = true)]
@@ -417,9 +431,9 @@ async fn a_name_reaches_the_limiter_once_it_resolves() {
     let names = resolver();
     let target = ResolvedTarget::name_with("limiter:8080", names.clone());
     let client = HttpCallLimiter::with_target(Arc::new(net), target, BUDGET);
-    assert!(!client.health().unwrap().serving().await, "not resolving yet");
-    names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
-    assert!(client.health().unwrap().serving().await);
+    assert!(!probe(&client).await, "not resolving yet");
+    names.point("limiter:8080", [laddr()]);
+    assert!(probe(&client).await);
     assert_eq!(
         client.admit("c#k", 10, &LimiterHeld::default(), &entries(), false).await,
         AdmitOutcome::Admitted
