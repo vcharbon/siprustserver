@@ -90,10 +90,8 @@ closure ext. So per-call state lives on the `Call`:
 - Strategy is read from `ctx.call.features.relay_first_18x_to_180.strategy`.
 
 ### New RuleActions
-- `SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag }` — originate a PRACK
-  toward the b-leg early dialog (RAck = `<rseq> <invite_cseq> INVITE`). Built in
-  `actions.rs` reusing the in-dialog generator; the b-leg early dialog is found
-  by `b_tag`.
+- No PRACK action: the PRACK of a reliable 18x the strategy absorbs is the
+  engine's (ADR-0032 X6); the rule only absorbs it.
 - `CacheSdpOnLegDialog { leg_id, b_tag, body }` — store SDP on the dialog ext.
 - `SetPolicyUpdateBody { body }` — set `call.policy_update_body = Bytes`.
 - `SetFirstRelayed { stored_a_tag }` — set the runtime slice.

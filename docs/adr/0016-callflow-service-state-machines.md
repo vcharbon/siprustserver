@@ -132,7 +132,8 @@ a narrowed `RuleContext`, and a public **action subset** —
 (INFO, opaque body), `send-provisional-to-leg` (early-media SDP broker — newly
 **widened into** the public set, demanded by this dogfood), `Respond`, timer
 schedule/cancel, `SetState`, `BeginTermination`. Internal plumbing
-(`SetTransfer`, PEM/PRACK actions, raw send, `Merge`/`Split`) stays private.
+(`SetTransfer`, PEM actions, raw send, `Merge`/`Split`) stays private; the
+PRACK this stack owes is the engine's (ADR-0032 X6).
 
 ## Decision X7 — Two worked examples: `transfer` (in-tree) + `announcement` (separate crate)
 

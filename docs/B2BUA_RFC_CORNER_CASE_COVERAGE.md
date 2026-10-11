@@ -175,7 +175,7 @@ Severity = operational risk if the behaviour is wrong.
 | RACK-MAP-1 | 3262 §7.2 | RAck triple translated across legs | Per-leg (RSeq,CSeq,INVITE) | high | 🟡 | prack_forking rewrites RAck CSeq; add explicit cross-leg assert |
 | PRACK-RESP-1 | 3262 §3 | PRACK match→2xx, no match→481 | UAS semantics | high | ✅ | rfc-audit `prack-2xx-or-481` |
 | PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `no-overlapping-reliable-provisionals` |
-| PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ❌ | add a same-`RSeq` retransmission case (`no-prack-of-out-of-order-rseq` passes a retransmission) |
+| PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | reliable_provisional_repeat_prack `a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack`, `a_repeat_behind_the_18x_mask_draws_no_second_prack` |
 | PRACK-RTX-2 | 3262 §3 | Retransmitted PRACK after 2xx | Resend cached 2xx, no re-process | med | ❌ | add `prack_rtx_absorbed` |
 | PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | 2xx on a match, 481 without | med | ✅ | rfc-audit `prack-2xx-or-481` |
 | DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay-2xx-on-unacked-reliable-1xx-with-sdp` |
