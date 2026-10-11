@@ -21,10 +21,10 @@ crates/b2bua-harness/tests/it/reroute_limiter_holds.rs 1175
 crates/b2bua-harness/tests/it/session_timer_transparency.rs 818
 crates/b2bua-harness/tests/it/stated_headers.rs 1500
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
-crates/b2bua-runner-kit/src/lib.rs 1135
-crates/b2bua-sdk/src/config.rs 903
+crates/b2bua-runner-kit/src/lib.rs 1127
+crates/b2bua-sdk/src/config.rs 892
 crates/b2bua-sdk/src/model.rs 1318
-crates/b2bua/src/b2bua_core.rs 958
+crates/b2bua/src/b2bua_core.rs 953
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 520
 crates/b2bua/src/limiter/release_queue.rs 513
@@ -40,7 +40,7 @@ crates/b2bua/src/repl/tests.rs 827
 crates/b2bua/src/router/callouts.rs 648
 crates/b2bua/src/router/process.rs 667
 crates/b2bua/src/router/reclaim.rs 551
-crates/b2bua/src/rules/actions/relay_response.rs 594
+crates/b2bua/src/rules/actions/relay_response.rs 593
 crates/b2bua/src/rules/actions/respond.rs 640
 crates/b2bua/src/rules/actions/teardown.rs 694
 crates/b2bua/src/rules/defaults/core_rules.rs 2081
@@ -91,7 +91,7 @@ crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
 crates/repl-net/src/transport/simulated.rs 1080
 crates/rfc-rules/src/rules/ack.rs 713
-crates/rfc-rules/src/rules/cancel.rs 666
+crates/rfc-rules/src/rules/cancel.rs 648
 crates/rfc-rules/src/rules/capability.rs 648
 crates/rfc-rules/src/rules/cseq.rs 626
 crates/rfc-rules/src/rules/cseq/tests.rs 874
@@ -101,7 +101,7 @@ crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/reinvite.rs 670
 crates/rfc-rules/src/rules/retransmit.rs 513
 crates/rfc-rules/src/rules/wellformed.rs 656
-crates/rfc-rules/src/verdict/evidence.rs 1723
+crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/goals.rs 510
 crates/scenario-harness/src/actor/response.rs 573
 crates/scenario-harness/src/actor/runner.rs 595
@@ -111,7 +111,7 @@ crates/scenario-harness/src/actor/state.rs 668
 crates/scenario-harness/src/agent/client_invite.rs 631
 crates/scenario-harness/src/agent/dialog.rs 745
 crates/scenario-harness/src/agent/harness.rs 869
-crates/scenario-harness/src/agent/server_txn.rs 600
+crates/scenario-harness/src/agent/server_txn.rs 599
 crates/scenario-harness/src/agent/ua.rs 804
 crates/scenario-harness/src/realcall/env.rs 588
 crates/scenario-harness/tests/it/template_emission.rs 1016
@@ -131,10 +131,10 @@ crates/sip-proxy/src/core/mod.rs 612
 crates/sip-proxy/src/core/request/route.rs 563
 crates/sip-proxy/src/observability/metrics.rs 703
 crates/sip-proxy/src/resolver.rs 510
-crates/sip-txn/src/layer/client.rs 944
-crates/sip-txn/src/layer/owner.rs 600
+crates/sip-txn/src/layer/client.rs 747
+crates/sip-txn/src/layer/owner.rs 581
 crates/sip-txn/src/layer/server.rs 691
-crates/sip-txn/src/metrics.rs 649
+crates/sip-txn/src/metrics.rs 629
 crates/sip-txn/tests/it/bounded_queue.rs 806
 crates/sip-txn/tests/it/fsm.rs 1598
 crates/topology/src/lib.rs 515
