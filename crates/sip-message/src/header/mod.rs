@@ -51,7 +51,7 @@ pub use aliases::{
     ServiceRouteEntry, SessionExpires, SubscriptionState, Supported, To, Unsupported,
     WwwAuthenticate,
 };
-pub use authority::network_host;
+pub use authority::{message_id_domain, network_host};
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use credentials::Credentials;
