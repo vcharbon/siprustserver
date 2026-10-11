@@ -79,8 +79,9 @@ impl Obligation for UnmatchedPrackProxied {
 /// PRACK names (§5): the method `INVITE`, and the `(RSeq, CSeq-num)` pair of a
 /// provisional the UAS had sent reliably in THAT dialog as of the PRACK's
 /// ARRIVAL and still held unacknowledged — an `RSeq` it sends afterwards was
-/// not yet its to acknowledge, one an earlier PRACK of another transaction
-/// already drew a 2xx for is off the unacknowledged list, the right `RSeq`
+/// not yet its to acknowledge, one an earlier-arriving PRACK of another
+/// transaction drew a 2xx for left the unacknowledged list as that PRACK
+/// arrived, whenever its 2xx left (§3), the right `RSeq`
 /// under another INVITE's CSeq names nothing, and a sibling fork's number
 /// names nothing here (§3, errata 4600). Charges the UAS.
 pub struct Prack2xxOr481;
@@ -137,9 +138,10 @@ impl Obligation for Prack2xxOr481 {
     }
 }
 
-/// Whether, before `prack` arrived, the UAS of `key` had answered 2xx to a
-/// PRACK of another transaction naming the same `RAck` in the same dialog: the
-/// provisional was acknowledged then, and is on no unacknowledged list now.
+/// Whether a PRACK of another transaction naming the same `RAck` in the same
+/// dialog reached the UAS of `key` before `prack` did and drew its 2xx, at
+/// any time: the provisional left the unacknowledged list as that PRACK
+/// arrived (RFC 3262 §3).
 fn acknowledged_before(seen: &Reading<'_>, key: &TxnKey<'_>, prack: &Served<'_>) -> bool {
     seen.served.iter().any(|(other, earlier)| {
         other.uas == key.uas
@@ -150,9 +152,7 @@ fn acknowledged_before(seen: &Reading<'_>, key: &TxnKey<'_>, prack: &Served<'_>)
             && earlier.rack == prack.rack
             && earlier.ts_us < prack.ts_us
             && seen.answers.get(other).is_some_and(|list| {
-                list.iter().any(|a| {
-                    a.answers("PRACK") && (200..300).contains(&a.status) && a.ts_us < prack.ts_us
-                })
+                list.iter().any(|a| a.answers("PRACK") && (200..300).contains(&a.status))
             })
     })
 }
