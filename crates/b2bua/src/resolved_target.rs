@@ -323,6 +323,77 @@ pub(crate) mod tests {
         assert_eq!(resolver.lookups.load(Ordering::SeqCst), 1);
     }
 
+    /// Never answers its first `stuck` lookups; answers [`addr`] after that.
+    /// Counts the lookups started and the ones still running.
+    #[derive(Default)]
+    struct StuckResolver {
+        stuck: usize,
+        started: AtomicUsize,
+        running: Arc<AtomicUsize>,
+    }
+
+    /// Decrements the running count when a lookup's future ends or is dropped.
+    struct Running(Arc<AtomicUsize>);
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl NameResolver for StuckResolver {
+        async fn resolve(&self, _: &str) -> Option<SocketAddr> {
+            let n = self.started.fetch_add(1, Ordering::SeqCst);
+            self.running.fetch_add(1, Ordering::SeqCst);
+            let _running = Running(self.running.clone());
+            if n < self.stuck {
+                std::future::pending::<()>().await;
+            }
+            Some(addr())
+        }
+    }
+
+    /// A lookup is bounded at 2 s: past it the request fails, the slot is
+    /// freed, and the next request starts a new lookup that resolves.
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_that_never_returns_does_not_block_a_later_one() {
+        let resolver = Arc::new(StuckResolver { stuck: 1, ..Default::default() });
+        let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+        let first =
+            tokio::time::timeout(std::time::Duration::from_millis(2_100), target.resolve()).await;
+        assert_eq!(first, Ok(None), "the stuck lookup fails its request within 2 s");
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(100), target.resolve()).await;
+        assert_eq!(second, Ok(Some(addr())), "a later request starts a lookup of its own");
+        assert_eq!(resolver.started.load(Ordering::SeqCst), 2);
+    }
+
+    /// A lookup past its bound is left to finish on its own. While 4 of them
+    /// still run, a request starts no new lookup and fails at once.
+    #[tokio::test(start_paused = true)]
+    async fn no_lookup_starts_while_four_are_stuck() {
+        let resolver = Arc::new(StuckResolver { stuck: usize::MAX, ..Default::default() });
+        let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
+        for n in 0..4 {
+            let answer =
+                tokio::time::timeout(std::time::Duration::from_millis(2_100), target.resolve())
+                    .await;
+            assert_eq!(answer, Ok(None), "lookup {n} fails its request within 2 s");
+        }
+        assert_eq!(resolver.running.load(Ordering::SeqCst), 4, "the 4 stuck lookups still run");
+        let start = tokio::time::Instant::now();
+        let fifth =
+            tokio::time::timeout(std::time::Duration::from_millis(2_100), target.resolve()).await;
+        assert_eq!(fifth, Ok(None), "the request fails");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(10),
+            "it fails at once: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(resolver.started.load(Ordering::SeqCst), 4, "no fifth lookup started");
+    }
+
     #[tokio::test]
     async fn a_lookup_its_caller_gave_up_on_still_lands() {
         let resolver =

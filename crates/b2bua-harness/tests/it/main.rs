@@ -209,6 +209,7 @@ mod unacked_2xx_reap;
 mod unacked_2xx_retransmit_is_faithful;
 mod unacked_reinvite_2xx_reap;
 mod unanswered_at_release;
+mod unanswered_failure_consult;
 mod unparseable_final;
 mod unreadable_routing_target;
 mod unrelayed_in_dialog_request;

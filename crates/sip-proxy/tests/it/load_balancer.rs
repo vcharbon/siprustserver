@@ -386,6 +386,55 @@ async fn initial_health_unknown_workers_are_not_selectable() {
     assert_eq!(s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap(), addr(A1));
 }
 
+/// A registry of one dead worker and one not-ready worker.
+fn dead_and_not_ready_registry(clock: Clock) -> SimulatedWorkerRegistry {
+    SimulatedWorkerRegistry::with_clock(
+        vec![
+            WorkerEntry { health: WorkerHealth::Dead, ..WorkerEntry::alive(W1, addr(A1)) },
+            WorkerEntry { health: WorkerHealth::NotReady, ..WorkerEntry::alive(W2, addr(A2)) },
+        ],
+        clock,
+    )
+}
+
+/// No worker is alive: a new dialog goes to a not-ready worker rather than
+/// being refused, since a worker that answers not-ready still serves calls.
+#[tokio::test]
+async fn a_new_dialog_falls_back_to_a_not_ready_worker_when_none_is_alive() {
+    let clock = Clock::test_at(0);
+    let s = strategy(dead_and_not_ready_registry(clock.clone()), clock);
+    let invite = request("INVITE", "call-nr-fallback@h", None);
+    let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await;
+    assert_eq!(selected.ok(), Some(addr(A2)), "the not-ready worker takes the new dialog");
+}
+
+/// While one worker is alive, no new dialog goes to a not-ready worker.
+#[tokio::test]
+async fn a_new_dialog_skips_a_not_ready_worker_while_one_is_alive() {
+    let clock = Clock::test_at(0);
+    let reg = dead_and_not_ready_registry(clock.clone());
+    reg.set_health(W1, WorkerHealth::Alive);
+    let s = strategy(reg, clock);
+    for n in 0..32 {
+        let invite = request("INVITE", &format!("call-nr-skip-{n}@h"), None);
+        let selected = s.select_for_new_dialog(&invite, SelectOpts::default()).await.unwrap();
+        assert_eq!(selected, addr(A1), "call {n} goes to the alive worker");
+    }
+}
+
+/// The fallback is for new dialogs only: an in-dialog request with no
+/// stickiness cookie still finds no target among not-ready workers.
+#[tokio::test]
+async fn an_in_dialog_request_never_falls_back_to_a_not_ready_worker() {
+    let clock = Clock::test_at(0);
+    let s = strategy(dead_and_not_ready_registry(clock.clone()), clock);
+    let bye = request("BYE", "call-nr-in-dialog@h", Some("bobtag"));
+    assert!(matches!(
+        s.select_for_new_dialog(&bye, SelectOpts::default()).await,
+        Err(SelectError::NoTarget { .. })
+    ));
+}
+
 #[tokio::test]
 async fn above_critical_band_filtered_for_non_emergency_only() {
     let clock = Clock::test_at(0);

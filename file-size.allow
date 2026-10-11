@@ -13,7 +13,6 @@ ext .rs
 
 crates/b2bua-harness/src/lib.rs 1289
 crates/b2bua-harness/tests/it/call_keyed_holds.rs 1036
-crates/b2bua-harness/tests/it/decision_log.rs 828
 crates/b2bua-harness/tests/it/fake_prack.rs 810
 crates/b2bua-harness/tests/it/message_ring.rs 955
 crates/b2bua-harness/tests/it/prack_owed_at_final.rs 913
