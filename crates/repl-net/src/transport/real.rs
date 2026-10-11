@@ -21,22 +21,30 @@ use crate::{decode_frame, encode_frame, frame_with_len_prefix, try_read_framed, 
 
 use super::{
     ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError,
+    SendError, SocketSettings,
 };
 
-/// The real tokio-TCP replication network. Stateless; clone is cheap.
+/// The real tokio-TCP replication network. Every stream it opens or accepts
+/// carries its [`SocketSettings`]; clone is cheap.
 #[derive(Clone, Default)]
-pub struct RealReplicationNetwork;
+pub struct RealReplicationNetwork {
+    socket: SocketSettings,
+}
 
 impl RealReplicationNetwork {
-    /// Construct the real network.
+    /// The real network with the default [`SocketSettings`].
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// The real network setting `socket` on every stream.
+    pub fn with_socket(socket: SocketSettings) -> Self {
+        Self { socket }
     }
 
     /// Set this network's socket options on a stream it opened or accepted.
     fn tune(&self, stream: &TcpStream) {
-        let _ = stream.set_nodelay(true);
+        self.socket.apply(stream);
     }
 }
 

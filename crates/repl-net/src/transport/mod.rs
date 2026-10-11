@@ -28,6 +28,7 @@
 mod real;
 mod recording;
 mod simulated;
+mod socket_settings;
 
 use std::net::SocketAddr;
 
@@ -38,6 +39,7 @@ use crate::Frame;
 pub use real::RealReplicationNetwork;
 pub use recording::{CaptureSeq, CapturedFrame, Direction, RecordingReplicationNetwork};
 pub use simulated::{Fault, NodeReplicationNetwork, SimulatedReplicationNetwork};
+pub use socket_settings::SocketSettings;
 
 /// Failure opening an outbound connection.
 #[derive(Debug, Clone, thiserror::Error)]

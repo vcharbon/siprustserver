@@ -48,17 +48,16 @@
 //! others. The readiness state machine consumes `all_current`/`all_bootstrapped`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use repl_net::frame::{Partition, Watermark};
 use repl_net::transport::ReplicationNetwork;
 use tokio::sync::{mpsc, watch};
 use topology::{Membership, Peer};
 
+use super::peer_resolver::AddrResolver;
 use super::puller::{Puller, PullerConfig, PullerStatus};
 use super::self_endpoint::{SelfEndpoint, SelfObserver};
 use super::ReplicatingCallStore;
@@ -73,37 +72,6 @@ const DEFAULT_RECONCILE_PERIOD: Duration = Duration::from_secs(5);
 /// Reclaim flows are ready (and the Backup streams may open). Short so a node
 /// starts backing up its peers promptly after re-hydrating its own partition.
 const BACKUP_GATE_POLL: Duration = Duration::from_millis(100);
-
-/// Resolves a [`Peer`] to its replication [`SocketAddr`], **fresh on every
-/// connect attempt** (ADR-0012 D3). Async so a real impl can DNS-resolve a stable
-/// per-pod name (`tokio::net::lookup_host`) without blocking the runtime; `None`
-/// means "unresolvable right now" — the puller treats it as a failed connect and
-/// backs off, then retries (re-resolving). For sim tests / bare-IP hosts this is
-/// an instant map lookup or parse.
-#[async_trait]
-pub trait PeerResolver: Send + Sync {
-    /// Resolve `peer` to its replication socket address, or `None` if it cannot
-    /// be resolved at this instant.
-    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr>;
-}
-
-/// Shared handle to a [`PeerResolver`].
-pub type AddrResolver = Arc<dyn PeerResolver>;
-
-/// Adapter turning a sync closure (`Fn(&Peer) -> SocketAddr`) into a
-/// [`PeerResolver`] — the sim-test / static-map resolver shape. Always resolves
-/// (never `None`).
-pub struct FnPeerResolver<F>(pub F);
-
-#[async_trait]
-impl<F> PeerResolver for FnPeerResolver<F>
-where
-    F: Fn(&Peer) -> SocketAddr + Send + Sync,
-{
-    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
-        Some((self.0)(peer))
-    }
-}
 
 /// Per-`(ordinal, flow)` retained replication state — survives Park/disconnect/
 /// re-add. One of these per flow lives inside a [`PeerEntry`].
@@ -283,6 +251,9 @@ struct SupervisorInner {
     ///
     /// [`shutdown`]: ReplicationSupervisor::shutdown
     gate: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// When [`start`](ReplicationSupervisor::start) wired the membership: the
+    /// bootstrap hard timer that bounds an unsynced view runs from here.
+    started_at: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl ReplicationSupervisor {
@@ -293,9 +264,10 @@ impl ReplicationSupervisor {
         network: Arc<dyn ReplicationNetwork>,
         store: ReplicatingCallStore,
         resolve: AddrResolver,
+        config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, PullerConfig::default(), metrics)
+        Self::build(self_ordinal, network, store, resolve, config, metrics)
     }
 
     /// Build with explicit puller backoff config (tests inject short backoff).
@@ -345,6 +317,7 @@ impl ReplicationSupervisor {
                 peers: Mutex::new(HashMap::new()),
                 reconcile: Mutex::new(None),
                 gate: Mutex::new(None),
+                started_at: Mutex::new(None),
             }),
         }
     }
@@ -374,6 +347,7 @@ impl ReplicationSupervisor {
     /// non-fatal `Lagged` handling (ADR-0012 D1/D2).
     pub fn start(&self, membership: Arc<dyn Membership>) {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
+        *self.inner.started_at.lock().unwrap() = Some(tokio::time::Instant::now());
         if membership.observes_self() {
             self.inner.self_endpoint.enable();
         }
@@ -719,6 +693,17 @@ impl ReplicationSupervisor {
     /// routing in-dialog traffic at it pre-reclaim (orphan 481s).
     pub fn membership_synced(&self) -> bool {
         self.inner.membership.lock().unwrap().as_ref().is_some_and(|m| m.synced())
+    }
+
+    /// Whether readiness may read the membership view: it is
+    /// [synced](Self::membership_synced), or the bootstrap hard timer has run
+    /// out since [`start`](Self::start) (ADR-0045). Past it the node goes Ready
+    /// with the view it has and peers join as the view fills: the risk an
+    /// unreachable peer already carries under the same timer.
+    pub fn membership_settled(&self) -> bool {
+        let bound = Duration::from_millis(self.inner.config.bootstrap_hard_timeout_ms);
+        self.membership_synced()
+            || self.inner.started_at.lock().unwrap().is_some_and(|at| at.elapsed() >= bound)
     }
 
     /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (The

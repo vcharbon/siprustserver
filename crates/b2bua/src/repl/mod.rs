@@ -19,6 +19,7 @@
 mod backend_gate;
 mod changelog;
 mod incarnation;
+mod peer_resolver;
 mod puller;
 mod readiness;
 mod replication;
@@ -32,13 +33,14 @@ mod supervisor;
 pub use changelog::{
     BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
 };
+pub use peer_resolver::{AddrResolver, FnPeerResolver, PeerResolver};
 pub use puller::{Puller, PullerConfig, PullerStatus};
 pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
 pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
-pub use server::ReplServer;
+pub use server::{ReplServer, ServeConfig};
 pub use store::ReplicatingCallStore;
-pub use supervisor::{AddrResolver, FnPeerResolver, PeerLink, PeerResolver, ReplicationSupervisor};
+pub use supervisor::{PeerLink, ReplicationSupervisor};
 
 #[cfg(test)]
 mod tests;

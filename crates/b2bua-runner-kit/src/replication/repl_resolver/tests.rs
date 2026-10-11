@@ -1,7 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The default lookup bound.
+const BOUND: Duration = Duration::from_secs(2);
 
 /// A name lookup that never returns, as a resolver whose server never answers.
 #[derive(Default)]
@@ -29,7 +30,7 @@ async fn timed(resolver: &ReplResolver, peer: &Peer) -> Option<(Option<SocketAdd
 #[tokio::test(start_paused = true)]
 async fn a_lookup_that_never_returns_is_bounded_at_two_seconds() {
     let names = Arc::new(SilentResolver::default());
-    let resolver = ReplResolver::new(9100, ReplAddressing::Static, names.clone());
+    let resolver = ReplResolver::new(9100, ReplAddressing::Static, names.clone(), BOUND);
     let answer = timed(&resolver, &Peer::new("w1", "peer-w1.example")).await;
     assert_eq!(
         answer,
@@ -43,7 +44,7 @@ async fn a_lookup_that_never_returns_is_bounded_at_two_seconds() {
 async fn a_discovered_peer_falls_back_to_its_pod_ip_once_its_name_lookup_is_out_of_time() {
     let names = Arc::new(SilentResolver::default());
     let addressing = ReplAddressing::PodDns { service: "workers".into(), namespace: "lab".into() };
-    let resolver = ReplResolver::new(9100, addressing, names);
+    let resolver = ReplResolver::new(9100, addressing, names, BOUND);
     let answer = timed(&resolver, &Peer::new("workers-1", "10.0.0.7")).await;
     assert_eq!(
         answer,
@@ -55,7 +56,7 @@ async fn a_discovered_peer_falls_back_to_its_pod_ip_once_its_name_lookup_is_out_
 #[tokio::test(start_paused = true)]
 async fn an_ip_host_is_never_looked_up() {
     let names = Arc::new(SilentResolver::default());
-    let resolver = ReplResolver::new(9100, ReplAddressing::Static, names.clone());
+    let resolver = ReplResolver::new(9100, ReplAddressing::Static, names.clone(), BOUND);
     let answer = timed(&resolver, &Peer::new("w1", "10.0.0.2")).await;
     assert_eq!(answer, Some((Some(SocketAddr::from(([10, 0, 0, 2], 9100))), Duration::ZERO)));
     assert_eq!(names.lookups.load(Ordering::SeqCst), 0);

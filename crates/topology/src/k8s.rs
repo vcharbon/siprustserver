@@ -25,7 +25,9 @@
 //! is the endpoint's first address (the Pod IP) — **port-agnostic**, as
 //! membership must be (the repl port is layered on by the consumer).
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -38,6 +40,11 @@ use crate::{reconcile_to_desired, MemberDelta, Membership, MembershipState, Peer
 /// The standard label kube stamps on every EndpointSlice pointing back to its
 /// owning Service. Watching by this selector scopes the informer to one pool.
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
+
+/// The first wait after a kube client failed to build, doubling up to
+/// [`CONNECT_BACKOFF_CEILING`].
+const CONNECT_BACKOFF_FLOOR: Duration = Duration::from_secs(1);
+const CONNECT_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
 /// Membership derived from a live EndpointSlice watch. Cheap to share via the
 /// `Membership` trait object; the background informer task is aborted on drop.
@@ -63,20 +70,36 @@ impl K8sMembership {
         namespace: impl Into<String>,
         service_name: impl Into<String>,
     ) -> Self {
+        let connect = move || std::future::ready(Ok::<_, String>(client.clone()));
+        Self::spawn_connecting(connect, namespace, service_name)
+    }
+
+    /// [`spawn`](Self::spawn) over the client `connect` builds: a client that
+    /// fails to build is built again after a backoff (1 s doubling to 30 s),
+    /// for as long as the membership lives. The view stays empty and unsynced
+    /// until a client is built and its first listing completes.
+    pub fn spawn_connecting<F, Fut>(
+        connect: F,
+        namespace: impl Into<String>,
+        service_name: impl Into<String>,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Client, String>> + Send,
+    {
         let namespace = namespace.into();
         let service_name = service_name.into();
         let state = Arc::new(MembershipState::new(vec![]));
-
-        let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
-        let cfg =
-            watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
-        let (reader, writer) = reflector::store();
-
         let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let st = state.clone();
         let synced_flag = synced.clone();
         let task = tokio::spawn(async move {
+            let client = connect_with_backoff(connect).await;
+            let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
+            let cfg =
+                watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
+            let (reader, writer) = reflector::store();
             // `reflector` keeps `reader` an up-to-date cache of the whole slice
             // set; we recompute the desired peer set from that full cache on
             // every event, so partial/restart watches converge rather than
@@ -106,6 +129,30 @@ impl K8sMembership {
         });
 
         Self { state, synced, task }
+    }
+}
+
+/// The client `connect` builds, built again after each failure with a backoff
+/// of 1 s doubling to 30 s.
+async fn connect_with_backoff<F, Fut>(connect: F) -> Client
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Client, String>>,
+{
+    let mut wait = CONNECT_BACKOFF_FLOOR;
+    loop {
+        match connect().await {
+            Ok(client) => return client,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    retry_in_ms = wait.as_millis() as u64,
+                    "no kube client for the EndpointSlice watch (will retry)"
+                );
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(CONNECT_BACKOFF_CEILING);
+            }
+        }
     }
 }
 

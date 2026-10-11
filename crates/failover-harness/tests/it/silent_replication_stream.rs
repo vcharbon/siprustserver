@@ -162,7 +162,10 @@ async fn a_silent_replication_stream_is_reopened_from_its_watermark_and_calls_ne
     let drained = fh
         .settle_terminal(async || {
             answer_options(&alice, &bob).await;
-            primary.memory_clean() && backup.memory_clean()
+            primary.memory_clean()
+                && backup.memory_clean()
+                && !primary.holds_any_trace(&ref1).await
+                && !backup.holds_any_trace(&ref1).await
         })
         .await;
     assert!(drained, "both nodes release both calls once the stream flows again");

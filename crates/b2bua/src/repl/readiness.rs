@@ -55,14 +55,15 @@ pub trait ReadinessSource: Send + Sync {
     fn all_bootstrapped(&self) -> bool;
     /// Every peer's forward replog is caught up — sticky `current`.
     fn all_current(&self) -> bool;
-    /// The membership view behind the two gates is authoritative (the informer's
-    /// initial LIST completed). Both gates are `.all()` over the desired peer
-    /// set — vacuously TRUE over the empty snapshot an informer starts with —
-    /// so without this gate a rebooting node could latch Ready in the first
+    /// The membership view behind the two gates may be read: it is
+    /// authoritative (the informer's initial LIST completed), or it has had its
+    /// bound to become so. Both gates are `.all()` over the desired peer set —
+    /// vacuously TRUE over the empty snapshot an informer starts with — so
+    /// without this gate a rebooting node could latch Ready in the first
     /// instants of boot, before its peers (and the calls to reclaim from them)
     /// were even visible. Default `true` for sources with no async view
     /// (always-ready / static / tests).
-    fn membership_synced(&self) -> bool {
+    fn membership_settled(&self) -> bool {
         true
     }
 }
@@ -74,8 +75,8 @@ impl ReadinessSource for ReplicationSupervisor {
     fn all_current(&self) -> bool {
         ReplicationSupervisor::all_current(self)
     }
-    fn membership_synced(&self) -> bool {
-        ReplicationSupervisor::membership_synced(self)
+    fn membership_settled(&self) -> bool {
+        ReplicationSupervisor::membership_settled(self)
     }
 }
 
@@ -182,8 +183,8 @@ impl Readiness {
 
     /// The current readiness state (Draining wins; else latched/gated Ready;
     /// else NotReady). Latches `Ready` the first time the gates are all true —
-    /// and only over a SYNCED membership view, so the informer's empty boot
-    /// snapshot can never vacuously latch a node that has peers to reclaim from.
+    /// and only over a SETTLED membership view, so the informer's empty boot
+    /// snapshot never vacuously latches a node before its bound (ADR-0045).
     pub fn state(&self) -> ReadinessState {
         if self.inner.draining.load(Ordering::SeqCst) {
             return ReadinessState::Draining;
@@ -191,17 +192,17 @@ impl Readiness {
         if self.inner.ready_latched.load(Ordering::SeqCst) {
             return ReadinessState::Ready;
         }
-        let synced = self.inner.source.membership_synced();
+        let settled = self.inner.source.membership_settled();
         let bootstrapped = self.inner.source.all_bootstrapped();
         let current = self.inner.source.all_current();
-        if synced && bootstrapped && current {
+        if settled && bootstrapped && current {
             // `swap`, not `store`: two probes racing the opening gate must
             // produce ONE transition line.
             if !self.inner.ready_latched.swap(true, Ordering::SeqCst) {
                 tracing::info!(
                     node = observe::node(),
                     state = "Ready",
-                    reason = "membership synced, every peer bootstrapped and current",
+                    reason = "membership settled, every peer bootstrapped and current",
                     "readiness transition"
                 );
             }
@@ -211,7 +212,7 @@ impl Readiness {
             tracing::info!(
                 node = observe::node(),
                 state = "NotReady",
-                membership_synced = synced,
+                membership_settled = settled,
                 all_bootstrapped = bootstrapped,
                 all_current = current,
                 "readiness transition"
@@ -276,7 +277,7 @@ mod tests {
         fn all_current(&self) -> bool {
             true // vacuous
         }
-        fn membership_synced(&self) -> bool {
+        fn membership_settled(&self) -> bool {
             self.synced.load(Ordering::SeqCst)
         }
     }

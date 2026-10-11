@@ -5,13 +5,20 @@
 //! discovered peer is reached by its stable pod DNS name, falling back to its
 //! membership host (the pod IP) when the name does not resolve. `None` makes
 //! the puller back off and retry.
+//!
+//! Every lookup is bounded (ADR-0045) and single-flight per name: a lookup past
+//! its bound answers nothing and runs on until it ends by itself, and while a
+//! few of one name's lookups are stuck so, no new one starts
+//! ([`ResolvedTarget`], ADR-0043).
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::repl::PeerResolver;
-use http_net::NameResolver;
+use http_net::{LookupSettings, NameResolver, ResolvedTarget};
 use topology::Peer;
 
 use super::{pod_dns_name, ReplAddressing};
@@ -21,23 +28,39 @@ pub(crate) struct ReplResolver {
     repl_port: u16,
     addressing: ReplAddressing,
     names: Arc<dyn NameResolver>,
+    lookup: LookupSettings,
+    /// One target per name looked up, so its lookups are single-flight.
+    targets: Mutex<HashMap<String, Arc<ResolvedTarget>>>,
 }
 
 impl ReplResolver {
     /// A resolver reaching every peer on `repl_port`, looking names up through
-    /// `names`.
+    /// `names`, each lookup bounded by `lookup_timeout`.
     pub(crate) fn new(
         repl_port: u16,
         addressing: ReplAddressing,
         names: Arc<dyn NameResolver>,
+        lookup_timeout: Duration,
     ) -> Self {
-        Self { repl_port, addressing, names }
+        let lookup = LookupSettings { bound: lookup_timeout, ..LookupSettings::default() };
+        Self { repl_port, addressing, names, lookup, targets: Mutex::default() }
     }
 
-    /// The first address `host` resolves to on the replication port.
+    /// The first address `host` resolves to on the replication port, looked
+    /// up afresh.
     async fn look_up(&self, host: &str) -> Option<SocketAddr> {
         let name = format!("{host}:{}", self.repl_port);
-        self.names.resolve(&name).await.into_iter().next()
+        let target = self
+            .targets
+            .lock()
+            .unwrap()
+            .entry(name.clone())
+            .or_insert_with(|| {
+                Arc::new(ResolvedTarget::name_with_lookup(name, self.names.clone(), self.lookup))
+            })
+            .clone();
+        target.forget();
+        target.resolve().await
     }
 
     /// `host` as an IP on the replication port, never looked up.

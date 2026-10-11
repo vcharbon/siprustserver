@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::transport::SimulatedReplicationNetwork;
+use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
@@ -21,7 +21,7 @@ use crate::config::B2buaConfig;
 use crate::decision::ScriptedDecisionEngine;
 use crate::limiter::NoopLimiter;
 use crate::metrics::B2buaMetrics;
-use crate::repl::{AddrResolver, FnPeerResolver, ReplicatingCallStore};
+use crate::repl::{AddrResolver, FnPeerResolver, PullerConfig, ReplicatingCallStore, ServeConfig};
 use crate::store::InMemoryCallStore;
 use crate::{B2buaCore, B2buaDeps, ReplicationSetup};
 
@@ -75,13 +75,17 @@ pub async fn node_on(
         Arc::new(SimulatedMembership::with_clock(Vec::new(), clock.clone()));
     let addr_resolver: AddrResolver =
         Arc::new(FnPeerResolver(|_: &Peer| SocketAddr::from(([127, 0, 0, 2], 1))));
+    let network = SimulatedReplicationNetwork::with_delay(1);
+    let listener = network.listen(SocketAddr::from(([127, 0, 0, 2], 9600))).await.unwrap();
     let setup = ReplicationSetup {
-        network: Arc::new(SimulatedReplicationNetwork::with_delay(1)),
+        network: Arc::new(network),
         membership,
         store: store.clone(),
-        listen_addr: SocketAddr::from(([127, 0, 0, 2], 9600)),
+        listener,
         addr_resolver,
         incarnation_gen: 1,
+        puller: PullerConfig::default(),
+        serve: ServeConfig::default(),
     };
     let config = B2buaConfig {
         self_ordinal: ordinal.into(),

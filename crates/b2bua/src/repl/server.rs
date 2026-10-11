@@ -9,7 +9,7 @@
 //! peer → us:  PullRequest{ partition, since }          # ONCE, opens one flow
 //! us → peer:  [bootstrap store-scan if since==(0,0)]    # snapshot, stamped at W=head
 //!             Data…(entries > W, batched) ; Noop(head)  # poll-drain, catch-up Noop
-//!             …sleep ~100ms; drain again; Noop only on the catch-up edge + 20s idle…
+//!             …sleep ~100ms; drain again; Noop only on the catch-up edge + idle interval…
 //! peer → us:  Position{ at }                            # what the peer has applied
 //! ```
 //!
@@ -24,8 +24,14 @@
 //! The server is a `sleep`-poll loop (ADR-0014): every ~100ms it drains up to
 //! [`BATCH`] entries above its cursor. While a full batch comes back it loops
 //! immediately (fill the TCP buffer); below a batch it sleeps. A **`Noop`** is
-//! sent only on the **catch-up edge** (just finished draining a backlog) and on
-//! a ~20s **idle floor** — the *first* one tells the puller it is current.
+//! sent only on the **catch-up edge** (just finished draining a backlog) and
+//! every [`ServeConfig::noop_interval`] after the last one — the *first* one
+//! tells the puller it is current, the later ones tell it the stream is alive.
+//!
+//! ## A peer that stops reading (ADR-0045)
+//! Every send is bounded by [`ServeConfig::send_stall`]: a send still blocked
+//! then (the peer's window full, nothing read) drops the stream, which ends the
+//! serve task and releases the changelog its guard pinned.
 //!
 //! ## Flow → keyspace
 //! `partition` fixes the body keyspace (no per-callRef `partition_of`):
@@ -58,8 +64,29 @@ const BATCH: usize = 500;
 /// Poll cadence between drains when not back-to-back streaming (tunable lower).
 const POLL: Duration = Duration::from_millis(100);
 
-/// Idle poll cycles between keepalive `Noop`s once fully caught up (≈20s @ 100ms).
-const IDLE_NOOP_CYCLES: u32 = 200;
+/// The link bounds of the serve loop (ADR-0045).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServeConfig {
+    /// The longest a caught-up stream goes without a `Noop`.
+    pub noop_interval: Duration,
+    /// A send blocked this long drops the stream.
+    pub send_stall: Duration,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self { noop_interval: Duration::from_secs(5), send_stall: Duration::from_secs(15) }
+    }
+}
+
+/// Why a send did not complete.
+#[derive(Debug)]
+enum Unsent {
+    /// The stream closed.
+    Closed,
+    /// The send stayed blocked past [`ServeConfig::send_stall`].
+    Stalled,
+}
 
 /// Serves a node's changelog to pulling peers over a [`ReplicationListener`].
 ///
@@ -76,6 +103,7 @@ pub struct ReplServer {
     /// `None` for the sim/unit-test constructors (which assert on the store
     /// directly); the live `B2buaCore` wires it via [`with_metrics`](Self::with_metrics).
     metrics: Option<crate::metrics::B2buaMetrics>,
+    config: ServeConfig,
 }
 
 impl ReplServer {
@@ -88,7 +116,19 @@ impl ReplServer {
         changelog: Changelog,
         source: Arc<dyn BodySource>,
     ) -> Self {
-        Self { self_ordinal: self_ordinal.into(), changelog, source, metrics: None }
+        Self {
+            self_ordinal: self_ordinal.into(),
+            changelog,
+            source,
+            metrics: None,
+            config: ServeConfig::default(),
+        }
+    }
+
+    /// Serve under `config`'s link bounds.
+    pub fn with_config(mut self, config: ServeConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Attach the metrics handle so the serve loop records `repl_noops_sent`
@@ -181,11 +221,8 @@ impl ReplServer {
 
         // A warm puller that fell below the compacted tail must re-bootstrap.
         if self.changelog.needs_reset(caller, partition, since) {
-            let _ = conn
-                .send(Frame::ResetToBootstrap {
-                    reason: "since fell below the compacted tail".into(),
-                })
-                .await;
+            let reason = "since fell below the compacted tail".into();
+            let _ = self.send(conn, Frame::ResetToBootstrap { reason }, caller, flow).await;
             return;
         }
 
@@ -193,16 +230,16 @@ impl ReplServer {
         // then resumes from W (warm), so the scan and the tail never double-deliver.
         let mut w = since;
         if since == Watermark::new(0, 0) {
-            match self.serve_bootstrap(conn, caller, partition, role, &primary).await {
+            match self.serve_bootstrap(conn, caller, partition, role, &primary, flow).await {
                 Ok(scan_head) => w = scan_head,
-                Err(()) => return, // socket dropped mid-scan.
+                Err(_) => return, // socket dropped or stalled mid-scan.
             }
         }
 
         // ---- poll-tail ----
         let mut ever_caught_up = false;
         let mut streamed_full_batch = false;
-        let mut idle_cycles = 0u32;
+        let mut next_noop = tokio::time::Instant::now() + self.config.noop_interval;
         loop {
             let frames = self
                 .changelog
@@ -210,14 +247,15 @@ impl ReplServer {
                 .await;
             let n = frames.len();
             for frame in frames {
-                if let Frame::Data { at, .. } = &frame {
-                    let at = *at;
-                    if conn.send(frame).await.is_err() {
-                        return;
-                    }
-                    w = at; // advance past what we just sent.
-                } else if conn.send(frame).await.is_err() {
+                let at = match &frame {
+                    Frame::Data { at, .. } => Some(*at),
+                    _ => None,
+                };
+                if self.send(conn, frame, caller, flow).await.is_err() {
                     return;
+                }
+                if let Some(at) = at {
+                    w = at; // advance past what we just sent.
                 }
             }
             if n == BATCH {
@@ -238,10 +276,11 @@ impl ReplServer {
             // held the dead call until its body-TTL backstop.
             //
             // Noop on the catch-up edge (first-ever, or after draining a real
-            // backlog) and on the idle floor; a trickle needs none (its Data
-            // frames already carried `at`).
-            if !ever_caught_up || streamed_full_batch {
-                if conn.send(Frame::Noop { at: w }).await.is_err() {
+            // backlog) and every `noop_interval` after the last one, so the
+            // puller's idle bound never fires on a live stream.
+            let edge = !ever_caught_up || streamed_full_batch;
+            if edge || tokio::time::Instant::now() >= next_noop {
+                if self.send(conn, Frame::Noop { at: w }, caller, flow).await.is_err() {
                     return;
                 }
                 if let Some(m) = &self.metrics {
@@ -249,18 +288,7 @@ impl ReplServer {
                 }
                 ever_caught_up = true;
                 streamed_full_batch = false;
-                idle_cycles = 0;
-            } else {
-                idle_cycles += 1;
-                if idle_cycles >= IDLE_NOOP_CYCLES {
-                    if conn.send(Frame::Noop { at: w }).await.is_err() {
-                        return;
-                    }
-                    if let Some(m) = &self.metrics {
-                        m.record_repl_noop_sent(flow, caller);
-                    }
-                    idle_cycles = 0;
-                }
+                next_noop = tokio::time::Instant::now() + self.config.noop_interval;
             }
             // `sleep` is cancel-safe, so the peer's close can race it here.
             tokio::select! {
@@ -275,8 +303,8 @@ impl ReplServer {
     /// `Data{ op: Put, partition, at: W }` in [`BOOTSTRAP_CHUNK`] batches (one
     /// `send_batch` per chunk — never holding a lock across the socket), and
     /// returns `W` so the tail resumes warm. A key whose body vanished between
-    /// the snapshot and the read is skipped (the call ended). `Err(())` if the
-    /// socket dropped mid-pass.
+    /// the snapshot and the read is skipped (the call ended). `Err` if the
+    /// socket dropped or a send stalled mid-pass.
     async fn serve_bootstrap(
         &self,
         conn: &dyn ReplicationConnection,
@@ -284,7 +312,8 @@ impl ReplServer {
         partition: Partition,
         role: PartitionRole,
         primary: &str,
-    ) -> Result<Watermark, ()> {
+        flow: &'static str,
+    ) -> Result<Watermark, Unsent> {
         // W = head at scan-START (ADR-0014 §8) — read BEFORE the key snapshot.
         // The writer order is body/meta-insert → changelog bump, so a call that
         // lands after this read necessarily bumps a counter > W and the tail
@@ -325,9 +354,44 @@ impl ReplServer {
                     _ => continue,
                 }
             }
-            conn.send_batch(frames).await.map_err(|_| ())?;
+            self.bounded(conn.send_batch(frames), caller, flow).await?;
         }
         Ok(w)
+    }
+
+    /// Send `frame`, bounded by [`ServeConfig::send_stall`].
+    async fn send(
+        &self,
+        conn: &dyn ReplicationConnection,
+        frame: Frame,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        self.bounded(conn.send(frame), caller, flow).await
+    }
+
+    /// Await a send for at most [`ServeConfig::send_stall`]. A send still
+    /// blocked then is a peer that stopped reading: the caller drops the stream.
+    async fn bounded(
+        &self,
+        send: impl std::future::Future<Output = Result<(), repl_net::transport::SendError>>,
+        caller: &str,
+        flow: &'static str,
+    ) -> Result<(), Unsent> {
+        match tokio::time::timeout(self.config.send_stall, send).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(Unsent::Closed),
+            Err(_) => {
+                tracing::info!(
+                    node = observe::node(),
+                    peer = %caller,
+                    flow,
+                    stall_ms = self.config.send_stall.as_millis() as u64,
+                    "replication stream dropped: the peer stopped reading"
+                );
+                Err(Unsent::Stalled)
+            }
+        }
     }
 
     /// Test accessor: this node's ordinal.

@@ -70,7 +70,8 @@
 //!
 //! ## HA replication — opt-in via `B2BUA_REPL=1` (default off: unwired node)
 //!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
-//!   B2BUA_NAMESPACE  the replication grammar (see `b2bua_runner_kit::ReplicationSettings`)
+//!   B2BUA_NAMESPACE / B2BUA_REPL_*_MS  the replication grammar and its link
+//!   bounds (see `b2bua_runner_kit::ReplicationSettings`, ADR-0045)
 //!
 //! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
 //! probe fails) so k8s steers new calls away while in-flight calls finish.

@@ -189,11 +189,11 @@ fn pull_from(net: Arc<dyn ReplicationNetwork>, peer: SocketAddr) -> watch::Sende
     cancel_tx
 }
 
-/// Pump the paused clock until `at`.
+/// Advance the paused clock to `at`, in settled steps of at most 100 ms.
 async fn tick_until(at: Instant) {
-    let now = Instant::now();
-    if at > now {
-        tick((at - now).as_millis() as u64).await;
+    while Instant::now() < at {
+        let step = (at - Instant::now()).min(Duration::from_millis(100));
+        sip_clock::testkit::advance_settled(step).await;
     }
 }
 

@@ -3,10 +3,9 @@
 //! endpoint, and spawns the router loop. Construct it over an endpoint (in
 //! tests, `Harness::bind_sut`), then drive SIP at the endpoint's address.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use repl_net::transport::ReplicationNetwork;
+use repl_net::transport::{ReplicationListener, ReplicationNetwork};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;
@@ -77,10 +76,10 @@ pub struct B2buaCore {
 /// - **`incarnation_gen`** — the per-boot incarnation seed for the
 ///   [`ReplicatingCallStore`]'s changelog (mirrors `IdGen::seeded`), an explicit
 ///   input the host derives (the runner uses the boot wall clock).
-/// - **`addr_resolver`** — maps a cluster `Peer` to its replication
-///   [`SocketAddr`], **resolved per connect** (ADR-0012 D3). The sim harness
-///   passes an explicit `ordinal → addr` map (`FnPeerResolver`); the runner
-///   derives it from `ordinal + host + config`. The core defines no addressing
+/// - **`addr_resolver`** — maps a cluster `Peer` to its replication socket
+///   address, **resolved per connect** (ADR-0012 D3). The sim harness passes
+///   an explicit `ordinal → addr` map (`FnPeerResolver`); the runner derives
+///   it from `ordinal + host + config`. The core defines no addressing
 ///   grammar — the resolver IS the seam.
 pub struct ReplicationSetup {
     /// The replication transport (sim or real). The server `listen`s on it and
@@ -91,12 +90,17 @@ pub struct ReplicationSetup {
     /// The replicating call store (built with `incarnation_gen`). Used as the
     /// `CallState` store AND served to pulling peers.
     pub store: Arc<ReplicatingCallStore>,
-    /// Local replication listen address (where this node serves its changelog).
-    pub listen_addr: SocketAddr,
+    /// The listener this node serves its changelog on, bound by the host before
+    /// the core spawns so that a bind failure refuses the boot.
+    pub listener: Box<dyn ReplicationListener>,
     /// Resolves a peer to its replication address (the host's addressing seam).
     pub addr_resolver: crate::repl::AddrResolver,
     /// Per-boot incarnation seed for the changelog (host-derived).
     pub incarnation_gen: u64,
+    /// The pullers' backoff, bootstrap and link bounds (ADR-0045).
+    pub puller: crate::repl::PullerConfig,
+    /// The serve loop's link bounds (ADR-0045).
+    pub serve: crate::repl::ServeConfig,
 }
 
 /// Wiring inputs for [`B2buaCore::spawn`].
@@ -246,7 +250,7 @@ impl B2buaCore {
         let repl_store = replication.as_ref().map(|s| s.store.clone());
         let capacity = capacity.unwrap_or_else(CapacityGate::live);
         capacity.configure(&config.capacity);
-        let (readiness, supervisor, fail_back) = match &replication {
+        let (readiness, supervisor, fail_back) = match replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
                 // The writer drains to the replicating store itself so its
@@ -272,6 +276,7 @@ impl B2buaCore {
                     setup.network.clone(),
                     (*setup.store).clone(),
                     setup.addr_resolver.clone(),
+                    setup.puller,
                     metrics.clone(),
                 );
                 // Pullers forward X11 fail-back commands to the router; wire the
@@ -290,15 +295,9 @@ impl B2buaCore {
                     setup.store.changelog().clone(),
                     setup.store.clone(),
                 )
-                .with_metrics(metrics.clone());
-                let network = setup.network.clone();
-                let listen_addr = setup.listen_addr;
-                tasks.push(tokio::spawn(async move {
-                    match network.listen(listen_addr).await {
-                        Ok(listener) => server.run(listener).await,
-                        Err(_) => { /* bind failed — peers simply can't pull us */ }
-                    }
-                }));
+                .with_metrics(metrics.clone())
+                .with_config(setup.serve);
+                tasks.push(tokio::spawn(server.run(setup.listener)));
 
                 // Context rebuild is **puller-driven and continuous** (ADR-0014):
                 // each bootstrap pass signals `ReclaimAll` itself (puller.rs

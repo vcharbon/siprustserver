@@ -128,8 +128,9 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     sleep — each `Data` carries its own `at`, so the cursor rides the data); at
     `≤500`, flush the remainder and sleep. A **`Noop` is emitted only on the catch-up
     edge** (drained to head — the *first* such Noop sets the puller's sticky
-    `current` flag = "mostly caught up") **and on a ~20s idle floor** (liveness). A
-    trickle needs no Noop.
+    `current` flag = "mostly caught up") **and on an idle interval** (liveness; 5 s,
+    and the puller leaves a stream silent for 15 s — ADR-0045). A trickle needs no
+    Noop.
 
     The drain is cheap by design (it runs ~10 Hz × peers × 2 flows): the per-peer
     changelog splits into **per-partition compacted sub-logs** (one
@@ -156,7 +157,7 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     |---|---|---|---|
     | **PullRequest** | C→S | `proto_ver, caller, partition, since` | Open one flow. Bootstrap is **implicit** when `since==(0,0)`; else tail. |
     | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, origin_now_ms, indexes, body?, answered, incarnation?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins), and states in `answered` whether the deleting node had answered the call (ADR-0031 D3). A `Put` names the call incarnation its body is of, a `Delete` the one it removed (§"Amendment — `(p,b)` orders one call incarnation"). |
-    | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
+    | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + idle keepalive (ADR-0045). |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
     | **Position** | C→S | `at` | "I have applied everything up to `at`" — the drain's exit signal only (ADR-0031 D2), never a retention or readiness input. |
 

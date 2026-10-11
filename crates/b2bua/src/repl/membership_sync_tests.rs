@@ -36,14 +36,15 @@ async fn an_unsynced_membership_holds_readiness_only_until_the_bootstrap_hard_ti
     sup.start(membership.clone() as Arc<dyn Membership>);
     let readiness = Readiness::new(Arc::new(sup.clone()));
 
-    tick(1_900).await;
+    // `tick` advances one trailing chunk past its span: 1.9 s.
+    tick(1_800).await;
     assert_eq!(
         readiness.state(),
         ReadinessState::NotReady,
         "an empty view that is not authoritative may still hide peers to reclaim from"
     );
 
-    tick(200).await;
+    tick(100).await;
     assert_eq!(
         readiness.state(),
         ReadinessState::Ready,

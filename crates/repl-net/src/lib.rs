@@ -46,5 +46,5 @@ pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_
 pub use transport::{
     CapturedFrame, ConnectError, Direction, Fault, ListenError, RealReplicationNetwork,
     RecordingReplicationNetwork, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError, SimulatedReplicationNetwork,
+    SendError, SimulatedReplicationNetwork, SocketSettings,
 };

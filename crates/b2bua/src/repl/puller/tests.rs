@@ -103,6 +103,7 @@ async fn bootstrap_frames_sharing_watermark_all_rehydrate() {
         backoff_init_ms: 50,
         backoff_max_ms: 1_000,
         bootstrap_hard_timeout_ms: 500, // stream runs 1000ms > this, on purpose
+        ..PullerConfig::default()
     };
     let (puller, status) = Puller::new_at(
         "w0",

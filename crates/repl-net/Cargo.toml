@@ -23,6 +23,8 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 # Recording timestamps come from the injected wall-clock seam.
 sip-clock = { path = "../sip-clock" }
+# TCP keepalive and TCP_USER_TIMEOUT on the real transport's streams.
+socket2 = { workspace = true, features = ["all"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -32,5 +34,3 @@ rmp = { workspace = true }
 # `advance_in_100ms_chunks`); real-TCP tests use a non-paused runtime.
 tokio = { workspace = true }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
-# Reads the socket options the real transport sets (getsockopt).
-socket2 = { workspace = true, features = ["all"] }

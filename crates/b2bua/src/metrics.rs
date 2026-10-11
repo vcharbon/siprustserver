@@ -436,7 +436,7 @@ impl B2buaMetrics {
     /// Count one catch-up/idle `Noop` SENT on a serve-side stream, for
     /// `b2bua_repl_noops_sent_total{flow,peer}` (ADR-0014). `flow` is the stream
     /// kind (`reclaim` = `Pri`, `backup` = `Bak`); `peer` is the pulling caller.
-    /// Climbs continuously on a healthy stream (the ~20s idle floor) — the
+    /// Climbs continuously on a healthy stream (the idle interval, ADR-0045) — the
     /// backup-holder's "I have sent you everything in this flow" liveness sign.
     pub fn record_repl_noop_sent(&self, flow: &str, peer: &str) {
         self.inner.rows.repl_noops_sent.add(&[flow, peer], 1);

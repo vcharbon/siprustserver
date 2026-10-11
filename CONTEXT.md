@@ -330,6 +330,19 @@ store. "Which elements do I back up" is not a separate retrieval: it *is* the
 contents of each peer's per-peer changelog (HRW 2nd-best backup, full mesh).
 _Avoid_: "shard", "partition key" (the partition is just pri/bak).
 
+**Silent stream**:
+A replication stream that has delivered nothing for the idle bound (15 s; a
+served stream carries a `Noop` at least every 5 s). The puller leaves it and
+pulls again from its watermark through the backoff (ADR-0045).
+_Avoid_: "dead peer" (the peer may be alive behind a partition).
+
+**Settled membership**:
+The membership view readiness reads: synced (the informer completed its first
+listing), or past the bootstrap hard timer since the supervisor started. Past
+the timer a worker goes Ready with the view it has; peers join as it fills
+(ADR-0045).
+_Avoid_: "synced" for this bounded notion — synced is the informer's own flag.
+
 **Failure domain** (informally **zone**):
 The blast radius a **primary** and its **backup** must be split across so one
 failure cannot take both. Expressed by a single configurable k8s topology key:

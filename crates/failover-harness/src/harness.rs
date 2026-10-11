@@ -35,7 +35,7 @@ use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
-use b2bua::repl::{Changelog, ReplicatingCallStore};
+use b2bua::repl::ReplicatingCallStore;
 use b2bua::rules::ServiceDef;
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
 use b2bua::{B2buaCore, ReplicationSetup};
@@ -60,6 +60,8 @@ use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
 use crate::views::{Belief, Incarnation, ViewLedger};
 
 mod repl_faults;
+mod repl_wiring;
+use repl_wiring::ReplWiring;
 
 /// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
 /// survives the whole scenario, short enough that dead-peer auto-clean is
@@ -69,63 +71,6 @@ const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
 // ===========================================================================
-
-/// The per-node repl wiring kept so a crashed node can be rebuilt in place
-/// (same ordinal, same repl listen addr, fresh empty store, higher gen).
-struct ReplWiring {
-    /// Shared (recording) replication fabric every node listens/connects on.
-    network: Arc<dyn ReplicationNetwork>,
-    /// The cluster's LIVE `ordinal → repl addr` map, shared by every node: the
-    /// resolver reads it per connect attempt (ADR-0012 D3), so re-pointing an
-    /// ordinal at a replacement's listen address reaches the running peers.
-    addr_map: Arc<Mutex<HashMap<String, SocketAddr>>>,
-    /// The peers this node pulls from (its membership snapshot).
-    peers: Vec<Peer>,
-    /// This node's repl listen address (stable across reboots).
-    listen_addr: SocketAddr,
-    ttls: (i64, i64),
-}
-
-impl ReplWiring {
-    /// Build the `ReplicationSetup` for a (re)spawn at incarnation `gen` over a
-    /// fresh empty [`ReplicatingCallStore`]. Also returns the concrete
-    /// [`SimulatedMembership`] handle so a scenario can drive membership deltas
-    /// (e.g. remove a killed peer, the way k8s drops a dead pod's endpoint — the
-    /// signal the survivor's supervisor turns into an eager takeover).
-    fn setup(
-        &self,
-        gen: u64,
-        clock: &Clock,
-    ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
-        let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
-        let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
-        let sim_membership =
-            Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
-        let membership: Arc<dyn topology::Membership> = sim_membership.clone();
-        let addr_map = self.addr_map.clone();
-        // The resolver is now async (ADR-0012 D3); wrap the cluster's live
-        // ordinal→addr map in the sync-closure adapter. It is READ per connect
-        // attempt, so a peer that moved (a replacement on a fresh listen addr)
-        // is reached on the next reconnect without respawning anything.
-        let addr_resolver: b2bua::repl::AddrResolver =
-            Arc::new(b2bua::repl::FnPeerResolver(move |peer: &Peer| {
-                *addr_map
-                    .lock()
-                    .unwrap()
-                    .get(&peer.ordinal)
-                    .unwrap_or_else(|| panic!("no repl addr for peer {}", peer.ordinal))
-            }));
-        let setup = ReplicationSetup {
-            network: self.network.clone(),
-            membership,
-            store: store.clone(),
-            listen_addr: self.listen_addr,
-            addr_resolver,
-            incarnation_gen: gen,
-        };
-        (setup, store, sim_membership)
-    }
-}
 
 /// A running replicating B2BUA worker bound on the failover harness's SIP fabric
 /// and replicating over the shared repl fabric. Knows how to crash itself (abort
@@ -739,7 +684,7 @@ impl ReplicatedB2buaSut {
         let new_addr = self.reboot_sip_addr();
         self.sip_addr = new_addr;
         self.sip_bind = new_addr.to_string();
-        let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock);
+        let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock).await;
         self.store = store;
         self.membership = membership;
         let core = self.spawn_core(Some(setup)).await;
@@ -1687,7 +1632,7 @@ impl FailoverHarness {
             alive: Arc::new(AtomicBool::new(true)),
             system: b2bua::capacity::simulated().1,
         };
-        let (setup, store, membership) = sut.wiring.setup(gen, &node_clock);
+        let (setup, store, membership) = sut.wiring.setup(gen, &node_clock).await;
         sut.store = store;
         sut.membership = membership;
         let core = sut.spawn_core(Some(setup)).await;

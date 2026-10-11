@@ -38,10 +38,10 @@
 //! still SERVES its takeover copy, and with it healing once that copy has
 //! self-released and the Element is the call's last record.
 //!
-//! The heal here delivers the whole history the cut held back, in order — a real
-//! reconnect compacts the peer log to one entry per ref first, so the Delete
-//! cell's exposure is narrower in production than it is here: the survivor sees
-//! every intermediate version of the primary's teardown, not just its last.
+//! The cut outlasts the puller's idle bound (ADR-0045), so the heal lands
+//! through a reconnect, at the puller's next backoff step: the survivor pulls
+//! the primary again from its watermark and reads the compacted log, one entry
+//! per ref — the primary's last version of the teardown.
 //!
 //! Residual, measured rather than narrated (ADR-0031 D3): the partitioned primary
 //! tore down a call the survivor kept serving. The Put cell ends with the answered
@@ -431,6 +431,15 @@ enum HealAt {
     AfterShed,
 }
 
+/// Pump until the survivor counts a refused forward `op`, the healed
+/// puller's reconnect included (its next backoff step).
+async fn refused_after_heal(fh: &FailoverHarness, survivor: &ReplicatedB2buaSut, op: &str) -> bool {
+    fh.pump_until(Duration::from_millis(500), Duration::from_secs(30), async || {
+        survivor.metrics().repl_forward_flush_refused(op) >= 1
+    })
+    .await
+}
+
 /// The CDRs `nodes` wrote for `call_ref`.
 fn cdrs_on(node: &ReplicatedB2buaSut, call_ref: &str) -> usize {
     node.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count()
@@ -557,7 +566,7 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
         }
         let before = survivor.live_call(&call_ref).expect("the survivor serves the call");
         fh.heal(&pri_ord, &bak_ord);
-        fh.advance(Duration::from_secs(1)).await;
+        assert!(refused_after_heal(&fh, survivor, op).await, "the pending flush landed");
         let after = survivor.live_call(&call_ref).expect("the live call survived the flush");
         assert_eq!(after.state, CallModelState::Active, "the live copy is untouched");
         assert_eq!(after.a_leg.state(), LegState::Confirmed, "and still reads the caller answered");

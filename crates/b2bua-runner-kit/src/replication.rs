@@ -1,21 +1,24 @@
 //! Peer-to-peer call replication a runner composes from env
 //! ([`ReplicationSettings`]): where the peer set comes from, how a peer's
 //! replication address is resolved, and the [`ReplicationSetup`] a runner
-//! assigns to `deps.replication`. Replication off leaves the node unwired.
+//! assigns to `deps.replication`. Replication off leaves the node unwired;
+//! replication on never runs without it.
 //!
 //! ## Env grammar
 //!   B2BUA_REPL          truthy (`1`/`true`/`yes`/`on`) enables replication (default off)
 //!   B2BUA_REPL_LISTEN   replication TCP listen addr        (default 0.0.0.0:9092)
 //!   B2BUA_REPL_PORT     port every peer is reached on      (default = the REPL_LISTEN port)
 //!   B2BUA_PEERS         static membership `ord@host,..`; set, it takes precedence
-//!                       over discovery; malformed, replication stays off
+//!                       over discovery
 //!   B2BUA_REPL_SERVICE  headless Service whose EndpointSlices name the peers
 //!                       (default b2bua-worker)
 //!   B2BUA_NAMESPACE     namespace of that Service          (default $POD_NAMESPACE, then sip-test)
+//!   B2BUA_REPL_*_MS …   the link bounds ([`link_env`], ADR-0045)
 //!
-//! A malformed `B2BUA_REPL_LISTEN` or `B2BUA_REPL_PORT` refuses the boot. A
-//! malformed peer list, or discovery without an in-cluster kube client, leaves
-//! the node unwired and logs why: the worker still serves SIP.
+//! A malformed `B2BUA_REPL_LISTEN`, `B2BUA_REPL_PORT`, `B2BUA_PEERS` or link
+//! bound, or a listen address that cannot be bound, refuses the boot. A kube
+//! client that cannot be built is built again in the background: the node
+//! stays wired, its view empty and unsynced until the informer lists.
 //!
 //! ## Addressing (ADR-0012 D3)
 //! Membership is port-agnostic; every peer's replication server is at
@@ -39,13 +42,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use b2bua::repl::ReplicatingCallStore;
 use b2bua::ReplicationSetup;
 use http_net::SystemResolver;
-use repl_net::RealReplicationNetwork;
+use repl_net::{RealReplicationNetwork, ReplicationNetwork};
 use sip_clock::Clock;
 use topology::{parse_peer_list, Membership, Peer, StaticMembership};
 
 use crate::is_truthy;
 
+mod link_env;
 mod repl_resolver;
+use link_env::LinkSettings;
 use repl_resolver::ReplResolver;
 
 /// Where the peer set comes from.
@@ -77,12 +82,13 @@ pub struct ReplicationSettings {
     pub(crate) peer_port: u16,
     /// `B2BUA_PEERS` when set, else discovery of `B2BUA_REPL_SERVICE`.
     pub(crate) membership: MembershipSource,
+    /// The link bounds, `B2BUA_REPL_*_MS` ([`link_env`]).
+    pub(crate) link: LinkSettings,
 }
 
 impl ReplicationSettings {
-    /// Reads the grammar through `get`. `Ok(None)` when replication is off or
-    /// the peer list is malformed (logged); `Err` naming the variable when the
-    /// listen address or the peer port is malformed.
+    /// Reads the grammar through `get`. `Ok(None)` when replication is off;
+    /// `Err` naming the variable when one is malformed.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
             return Ok(None);
@@ -107,18 +113,12 @@ impl ReplicationSettings {
                     .unwrap_or_else(|| "sip-test".to_string()),
             }
         } else {
-            match parse_peer_list("B2BUA_PEERS", &peers) {
-                Ok(mut list) => {
-                    list.sort_by(|a, b| a.ordinal.cmp(&b.ordinal));
-                    MembershipSource::Static(list)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "B2BUA_PEERS parse error — replication disabled");
-                    return Ok(None);
-                }
-            }
+            let mut list = parse_peer_list("B2BUA_PEERS", &peers).map_err(|e| e.to_string())?;
+            list.sort_by(|a, b| a.ordinal.cmp(&b.ordinal));
+            MembershipSource::Static(list)
         };
-        Ok(Some(Self { listen, peer_port, membership }))
+        let link = LinkSettings::from_lookup(&get)?;
+        Ok(Some(Self { listen, peer_port, membership, link }))
     }
 
     /// How the membership these settings select is addressed.
@@ -132,12 +132,21 @@ impl ReplicationSettings {
     }
 
     /// The setup these settings describe: the membership, a replicating store
-    /// under `incarnation_gen` on `clock`, the real replication transport and
-    /// the per-attempt peer resolver. `None` (logged) when discovery has no
-    /// in-cluster kube client.
-    pub async fn into_setup(self, clock: Clock, incarnation_gen: u64) -> Option<ReplicationSetup> {
+    /// under `incarnation_gen` on `clock`, the real replication transport, the
+    /// bound listener and the per-attempt peer resolver. `Err` naming
+    /// `B2BUA_REPL_LISTEN` when the listener cannot be bound.
+    pub async fn into_setup(
+        self,
+        clock: Clock,
+        incarnation_gen: u64,
+    ) -> Result<ReplicationSetup, String> {
         let addressing = self.addressing();
-        let membership = self.membership.into_membership().await?;
+        let network = RealReplicationNetwork::with_socket(self.link.socket);
+        let listener = network
+            .listen(self.listen)
+            .await
+            .map_err(|e| format!("B2BUA_REPL_LISTEN {} cannot be bound: {e}", self.listen))?;
+        let membership = self.membership.into_membership();
         tracing::info!(
             listen = %self.listen,
             peer_port = self.peer_port,
@@ -145,38 +154,37 @@ impl ReplicationSettings {
             "replication ENABLED"
         );
         spawn_membership_log(membership.clone());
-        Some(ReplicationSetup {
-            network: Arc::new(RealReplicationNetwork::new()),
+        Ok(ReplicationSetup {
+            network: Arc::new(network),
             membership,
             store: Arc::new(ReplicatingCallStore::new(incarnation_gen, clock)),
-            listen_addr: self.listen,
+            listener,
             addr_resolver: Arc::new(ReplResolver::new(
                 self.peer_port,
                 addressing,
                 Arc::new(SystemResolver),
+                self.link.lookup_timeout,
             )),
             incarnation_gen,
+            puller: self.link.puller(),
+            serve: self.link.serve(),
         })
     }
 }
 
 impl MembershipSource {
-    async fn into_membership(self) -> Option<Arc<dyn Membership>> {
+    fn into_membership(self) -> Arc<dyn Membership> {
         self.into_membership_with(|| async {
             kube::Client::try_default().await.map_err(|e| e.to_string())
         })
-        .await
     }
 
     /// The membership, a discovered one watching through the kube client
-    /// `connect` builds.
-    pub(crate) async fn into_membership_with<F, Fut>(
-        self,
-        connect: F,
-    ) -> Option<Arc<dyn Membership>>
+    /// `connect` builds, built again with backoff until it is.
+    pub(crate) fn into_membership_with<F, Fut>(self, connect: F) -> Arc<dyn Membership>
     where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<kube::Client, String>>,
+        F: Fn() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<kube::Client, String>> + Send,
     {
         match self {
             MembershipSource::Static(peers) => {
@@ -187,29 +195,18 @@ impl MembershipSource {
                     peers = %listed.join(","),
                     "replication membership"
                 );
-                Some(Arc::new(StaticMembership::from_peers(peers)))
+                Arc::new(StaticMembership::from_peers(peers))
             }
             MembershipSource::EndpointSlices { service, namespace } => {
                 // Installing the provider a second time returns Err; ignored.
                 let _ = rustls::crypto::ring::default_provider().install_default();
-                match connect().await {
-                    Ok(client) => {
-                        tracing::info!(
-                            source = "k8s-endpointslice",
-                            %service,
-                            %namespace,
-                            "replication membership"
-                        );
-                        Some(Arc::new(topology::K8sMembership::spawn(client, namespace, service)))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "no kube client and no B2BUA_PEERS — replication disabled"
-                        );
-                        None
-                    }
-                }
+                tracing::info!(
+                    source = "k8s-endpointslice",
+                    %service,
+                    %namespace,
+                    "replication membership"
+                );
+                Arc::new(topology::K8sMembership::spawn_connecting(connect, namespace, service))
             }
         }
     }
@@ -223,7 +220,7 @@ pub(crate) fn pod_dns_name(ordinal: &str, service: &str, namespace: &str) -> Str
 
 /// The replication setup the grammar read through `get` selects, its store on
 /// `clock` under a boot-wall-clock incarnation gen; `Ok(None)` when
-/// replication is off or has no membership.
+/// replication is off, `Err` when it cannot run as configured.
 pub async fn replication_setup_from_lookup(
     get: impl Fn(&str) -> Option<String>,
     clock: Clock,
@@ -231,7 +228,7 @@ pub async fn replication_setup_from_lookup(
     let Some(settings) = ReplicationSettings::from_lookup(get)? else {
         return Ok(None);
     };
-    Ok(settings.into_setup(clock, boot_incarnation()).await)
+    settings.into_setup(clock, boot_incarnation()).await.map(Some)
 }
 
 /// Boot wall clock in milliseconds, so a sub-second restart still takes a
@@ -263,191 +260,4 @@ fn spawn_membership_log(membership: Arc<dyn Membership>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        move |k| map.get(k).cloned()
-    }
-
-    fn settings(pairs: &[(&str, &str)]) -> ReplicationSettings {
-        ReplicationSettings::from_lookup(lookup(pairs)).expect("ok").expect("replication on")
-    }
-
-    #[test]
-    fn replication_off_selects_no_setup() {
-        assert_eq!(ReplicationSettings::from_lookup(lookup(&[])), Ok(None));
-        assert_eq!(
-            ReplicationSettings::from_lookup(lookup(&[
-                ("B2BUA_REPL", "0"),
-                ("B2BUA_PEERS", "w0@10.0.0.1"),
-            ])),
-            Ok(None),
-            "a peer list alone does not turn replication on"
-        );
-    }
-
-    #[test]
-    fn a_malformed_peer_list_refuses_boot_naming_its_variable() {
-        for peers in ["noatsign", "w0@10.0.0.1,w0@10.0.0.2", "w0@10.0.0.1,,w1@10.0.0.2"] {
-            let e = ReplicationSettings::from_lookup(lookup(&[
-                ("B2BUA_REPL", "1"),
-                ("B2BUA_PEERS", peers),
-            ]))
-            .expect_err("a malformed peer list must refuse the boot, never run without HA");
-            assert!(e.contains("B2BUA_PEERS"), "{peers:?}: msg was: {e}");
-        }
-    }
-
-    #[test]
-    fn a_static_peer_list_selects_static_addressing() {
-        let s = settings(&[("B2BUA_REPL", "true"), ("B2BUA_PEERS", "w1@10.0.0.2, w0@10.0.0.1")]);
-        assert_eq!(
-            s,
-            ReplicationSettings {
-                listen: SocketAddr::from(([0, 0, 0, 0], 9092)),
-                peer_port: 9092,
-                membership: MembershipSource::Static(vec![
-                    Peer::new("w0", "10.0.0.1"),
-                    Peer::new("w1", "10.0.0.2"),
-                ]),
-            }
-        );
-        assert_eq!(s.addressing(), ReplAddressing::Static);
-    }
-
-    #[test]
-    fn the_peer_port_defaults_to_the_listen_port_and_is_read_from_its_variable() {
-        let peers = ("B2BUA_PEERS", "w0@10.0.0.1");
-        let on = ("B2BUA_REPL", "1");
-        let own = settings(&[on, peers, ("B2BUA_REPL_LISTEN", "127.0.0.1:9200")]);
-        assert_eq!((own.listen, own.peer_port), (SocketAddr::from(([127, 0, 0, 1], 9200)), 9200));
-        let cluster = settings(&[on, peers, ("B2BUA_REPL_PORT", "9100")]);
-        assert_eq!(cluster.peer_port, 9100);
-    }
-
-    #[test]
-    fn a_malformed_listen_address_or_peer_port_is_refused_naming_its_variable() {
-        let on = ("B2BUA_REPL", "1");
-        let e = ReplicationSettings::from_lookup(lookup(&[on, ("B2BUA_REPL_PORT", "nine")]))
-            .expect_err("a non-numeric port must refuse boot");
-        assert!(e.contains("B2BUA_REPL_PORT"), "msg was: {e}");
-        let e = ReplicationSettings::from_lookup(lookup(&[on, ("B2BUA_REPL_LISTEN", "nowhere")]))
-            .expect_err("a listen address with no port must refuse boot");
-        assert!(e.contains("B2BUA_REPL_LISTEN"), "msg was: {e}");
-    }
-
-    #[test]
-    fn no_peer_list_discovers_the_peers_from_the_service_endpoint_slices() {
-        let on = ("B2BUA_REPL", "1");
-        let s = settings(&[on]);
-        assert_eq!(
-            s.membership,
-            MembershipSource::EndpointSlices {
-                service: "b2bua-worker".into(),
-                namespace: "sip-test".into(),
-            }
-        );
-        assert_eq!(
-            s.addressing(),
-            ReplAddressing::PodDns { service: "b2bua-worker".into(), namespace: "sip-test".into() }
-        );
-        let pod_ns = settings(&[on, ("POD_NAMESPACE", "lab"), ("B2BUA_REPL_SERVICE", "workers")]);
-        assert_eq!(
-            pod_ns.membership,
-            MembershipSource::EndpointSlices { service: "workers".into(), namespace: "lab".into() }
-        );
-        let explicit = settings(&[on, ("POD_NAMESPACE", "lab"), ("B2BUA_NAMESPACE", "prod")]);
-        assert!(
-            matches!(&explicit.membership, MembershipSource::EndpointSlices { namespace, .. } if namespace == "prod"),
-            "B2BUA_NAMESPACE wins over POD_NAMESPACE: {:?}",
-            explicit.membership
-        );
-    }
-
-    /// A discovered peer's ordinal is its pod name, so the stable name is the
-    /// pod name under the headless Service, not a prefix added to it.
-    #[test]
-    fn a_discovered_peer_is_named_by_its_pod_name_under_the_service() {
-        assert_eq!(
-            pod_dns_name("b2bua-worker-0", "b2bua-worker", "prod"),
-            "b2bua-worker-0.b2bua-worker.prod.svc.cluster.local"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_listen_address_that_cannot_be_bound_refuses_boot_naming_its_variable() {
-        let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port to hold");
-        let listen = taken.local_addr().unwrap().to_string();
-        let e = replication_setup_from_lookup(
-            lookup(&[
-                ("B2BUA_REPL", "1"),
-                ("B2BUA_PEERS", "w0@10.0.0.1"),
-                ("B2BUA_REPL_LISTEN", &listen),
-            ]),
-            Clock::system(),
-        )
-        .await
-        .err()
-        .expect("a replication listener that cannot bind must refuse the boot");
-        assert!(e.contains("B2BUA_REPL_LISTEN"), "msg was: {e}");
-        drop(taken);
-    }
-
-    /// A discovered membership whose kube client cannot be built keeps the
-    /// node wired: the client is built again with backoff, and the view stays
-    /// unsynced and empty meanwhile.
-    #[tokio::test(start_paused = true)]
-    async fn a_kube_client_that_fails_at_boot_is_retried_and_the_node_stays_wired() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counted = attempts.clone();
-        let source =
-            MembershipSource::EndpointSlices { service: "workers".into(), namespace: "lab".into() };
-        let membership = source
-            .into_membership_with(move || {
-                counted.fetch_add(1, Ordering::SeqCst);
-                async { Err::<kube::Client, String>("no cluster reachable".into()) }
-            })
-            .await
-            .expect("a kube client failing at boot never leaves the node without HA");
-        assert!(!membership.synced(), "the view is not authoritative before a listing");
-        assert!(membership.snapshot().is_empty());
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        assert!(
-            attempts.load(Ordering::SeqCst) >= 3,
-            "the client is built again with backoff: {} attempts in 10 s",
-            attempts.load(Ordering::SeqCst)
-        );
-        assert!(!membership.synced());
-    }
-
-    #[tokio::test]
-    async fn a_static_setup_reaches_each_peer_on_the_cluster_replication_port() {
-        let setup = replication_setup_from_lookup(
-            lookup(&[
-                ("B2BUA_REPL", "1"),
-                ("B2BUA_PEERS", "w0@10.0.0.1,w1@10.0.0.2"),
-                ("B2BUA_REPL_LISTEN", "127.0.0.1:9200"),
-                ("B2BUA_REPL_PORT", "9100"),
-            ]),
-            Clock::system(),
-        )
-        .await
-        .expect("ok")
-        .expect("a static peer list needs no cluster to wire replication");
-        assert_eq!(setup.listen_addr, SocketAddr::from(([127, 0, 0, 1], 9200)));
-        assert_eq!(
-            setup.membership.snapshot(),
-            vec![Peer::new("w0", "10.0.0.1"), Peer::new("w1", "10.0.0.2")]
-        );
-        assert_eq!(
-            setup.addr_resolver.resolve(&Peer::new("w1", "10.0.0.2")).await,
-            Some(SocketAddr::from(([10, 0, 0, 2], 9100)))
-        );
-        assert!(setup.incarnation_gen > 0, "the gen is the boot wall clock");
-    }
-}
+mod tests;

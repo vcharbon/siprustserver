@@ -896,9 +896,9 @@ impl RunnerBase {
     }
 
     /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),
-    /// its store on [`Self::clock`]; `None` when replication is off or has no
-    /// membership. Panics (boot refusal) on a malformed `B2BUA_REPL_LISTEN` or
-    /// `B2BUA_REPL_PORT`.
+    /// its store on [`Self::clock`]; `None` when replication is off. Panics
+    /// (boot refusal) on a malformed replication variable or a replication
+    /// listener that cannot be bound.
     pub async fn replication_setup_from_env(&self) -> Option<ReplicationSetup> {
         replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
             .await

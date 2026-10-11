@@ -205,7 +205,7 @@ pub enum Frame {
     /// `[2, gen, counter]`
     ///
     /// Server → client: caught-up marker. Emitted on the **catch-up edge**
-    /// (backlog drained to head) and on the ~20s idle keepalive floor. The
+    /// (backlog drained to head) and on the idle keepalive interval. The
     /// **first** one after (re)connect sets the puller's sticky `current` flag.
     Noop {
         /// The head position.
