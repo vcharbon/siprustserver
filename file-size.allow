@@ -39,9 +39,9 @@ crates/b2bua/src/repl/store.rs 752
 crates/b2bua/src/repl/supervisor.rs 865
 crates/b2bua/src/repl/tests.rs 827
 crates/b2bua/src/router/callouts.rs 705
-crates/b2bua/src/router/process.rs 697
+crates/b2bua/src/router/process.rs 667
 crates/b2bua/src/router/reclaim.rs 551
-crates/b2bua/src/rules/actions/relay_response.rs 644
+crates/b2bua/src/rules/actions/relay_response.rs 594
 crates/b2bua/src/rules/actions/respond.rs 641
 crates/b2bua/src/rules/actions/teardown.rs 694
 crates/b2bua/src/rules/defaults/core_rules.rs 2081
@@ -50,7 +50,7 @@ crates/b2bua/src/rules/relay/originate.rs 520
 crates/b2bua/src/rules/relay/originate_tests.rs 849
 crates/b2bua/src/rules/relay/sdp_session_tests.rs 968
 crates/b2bua/src/store/mod.rs 1125
-crates/b2bua/tests/it/rules.rs 5883
+crates/b2bua/tests/it/rules.rs 5881
 crates/call-limiter/src/store.rs 599
 crates/call-limiter/tests/it/keyed_by_call.rs 877
 crates/callshapes/src/plan.rs 1186
