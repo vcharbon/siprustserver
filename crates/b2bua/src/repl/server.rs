@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use repl_net::frame::{Frame, Partition, Watermark};
-use repl_net::transport::{ReplicationConnection, ReplicationListener};
+use repl_net::transport::{AcceptError, ReplicationConnection, ReplicationListener};
 
 use super::changelog::{BodySource, Changelog};
 use crate::abort_on_drop::AbortOnDrop;
@@ -63,6 +63,9 @@ const BATCH: usize = 500;
 
 /// Poll cadence between drains when not back-to-back streaming (tunable lower).
 const POLL: Duration = Duration::from_millis(100);
+
+/// The pause after a failed accept before the next one.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 
 /// The link bounds of the serve loop (ADR-0045).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,7 +142,10 @@ impl ReplServer {
     }
 
     /// Accept connections forever, serving each on a per-connection task. Returns
-    /// when the listener is closed (`accept` → `None`). Spawn this on a task.
+    /// only when the listener is closed ([`AcceptError::Closed`]). A failed
+    /// accept (descriptors exhausted, a handshake aborted) never stops it: a
+    /// warning once per run of failures, a pause of 100 ms, and
+    /// accepting goes on. Spawn this on a task.
     ///
     /// The serve tasks are owned by a [`JoinSet`](tokio::task::JoinSet), NOT
     /// detached. This is load-bearing for crash semantics: when the worker is
@@ -148,16 +154,35 @@ impl ReplServer {
     /// to the rebooted node.
     pub async fn run(self, listener: Box<dyn ReplicationListener>) {
         let mut serves = tokio::task::JoinSet::new();
+        let mut failing = false;
         loop {
             tokio::select! {
                 accepted = listener.accept() => match accepted {
-                    Some(conn) => {
+                    Ok(conn) => {
+                        if std::mem::take(&mut failing) {
+                            tracing::info!(
+                                node = observe::node(),
+                                local = %listener.local_addr(),
+                                "replication listener accepting again"
+                            );
+                        }
                         let server = self.clone();
                         serves.spawn(async move {
                             server.serve_connection(conn).await;
                         });
                     }
-                    None => break, // listener closed — stop accepting.
+                    Err(AcceptError::Closed) => break,
+                    Err(AcceptError::Io(error)) => {
+                        if !std::mem::replace(&mut failing, true) {
+                            tracing::warn!(
+                                node = observe::node(),
+                                local = %listener.local_addr(),
+                                %error,
+                                "replication accept failed; accepting again after a pause"
+                            );
+                        }
+                        tokio::time::sleep(ACCEPT_PAUSE).await;
+                    }
                 },
                 Some(_) = serves.join_next() => {}
             }

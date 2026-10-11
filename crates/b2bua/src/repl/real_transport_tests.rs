@@ -962,9 +962,9 @@ impl ReplicationNetwork for LatentNet {
 }
 #[async_trait::async_trait]
 impl repl_net::transport::ReplicationListener for LatentListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, repl_net::AcceptError> {
         let inner = self.inner.accept().await?;
-        Some(Box::new(LatentConn { inner, send_cost: self.send_cost }))
+        Ok(Box::new(LatentConn { inner, send_cost: self.send_cost }))
     }
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()
@@ -1104,9 +1104,9 @@ impl ReplicationNetwork for CountingNet {
 }
 #[async_trait::async_trait]
 impl ReplicationListener for CountingListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, repl_net::AcceptError> {
         let inner = self.inner.accept().await?;
-        Some(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
+        Ok(Box::new(CountingConn { inner, rounds: self.rounds.clone() }))
     }
     fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr()

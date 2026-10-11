@@ -302,7 +302,27 @@ async fn a_connect_to_a_black_hole_waits_until_healed() {
     advance_settled(Duration::from_millis(10)).await;
     assert!(pending.is_finished(), "a heal naming the address lets the connect through");
     assert!(pending.await.unwrap().is_ok(), "and it is established");
-    assert!(listener.accept().await.is_some(), "the listener takes the stream");
+    assert!(listener.accept().await.is_ok(), "the listener takes the stream");
+}
+
+// --- AcceptErrors: accepts that fail, the listener kept ---------------------
+
+#[tokio::test(start_paused = true)]
+async fn armed_accept_errors_fail_that_many_accepts_and_the_queue_waits() {
+    let net = SimulatedReplicationNetwork::with_delay(1);
+    let (a, b) = (addr(1011), addr(2011));
+    let listener = net.listen(b).await.unwrap();
+    net.apply_fault(Fault::AcceptErrors { local: b, count: 2 });
+    let _client = net.connect_from(a, b).await.unwrap();
+    for _ in 0..2 {
+        assert!(
+            matches!(listener.accept().await, Err(crate::transport::AcceptError::Io(_))),
+            "an armed accept fails with an io error"
+        );
+    }
+    assert!(listener.accept().await.is_ok(), "the queued connection is accepted after");
+    drop(listener);
+    assert!(net.connect_from(a, b).await.is_err(), "a dropped listener frees the address");
 }
 
 // --- Block: half-open / hung peer — writer blocks, no error/close ----------

@@ -38,6 +38,9 @@ const B2: &str = "127.0.0.1:5092";
 /// The puller's idle bound and the fast tier's first backoff step.
 const IDLE_MS: i64 = 15_000;
 const BACKOFF_FLOOR_MS: i64 = 100;
+/// The server's `Noop` interval: each stream carried a frame at most this long
+/// before the hold.
+const NOOP_MS: i64 = 5_000;
 
 fn report_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -144,8 +147,9 @@ async fn a_silent_replication_stream_is_reopened_from_its_watermark_and_calls_ne
     );
     let first = pulls.iter().find(|(_, since)| *since > Watermark::new(0, 0)).unwrap().0;
     assert!(
-        first - held_at <= IDLE_MS + BACKOFF_FLOOR_MS + 200,
-        "re-pulled {} ms into the hold",
+        first - held_at >= IDLE_MS - NOOP_MS && first - held_at <= IDLE_MS + BACKOFF_FLOOR_MS + 200,
+        "re-pulled {} ms into the hold: no sooner than the idle bound after the stream's \
+         last frame, no later than one backoff step past it",
         first - held_at
     );
 

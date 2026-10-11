@@ -20,8 +20,8 @@ use tokio::sync::Mutex;
 use crate::{decode_frame, encode_frame, frame_with_len_prefix, try_read_framed, Frame};
 
 use super::{
-    ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError, SocketSettings,
+    AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
+    ReplicationNetwork, SendError, SocketSettings,
 };
 
 /// The real tokio-TCP replication network. Every stream it opens or accepts
@@ -42,9 +42,38 @@ impl RealReplicationNetwork {
         Self { socket }
     }
 
-    /// Set this network's socket options on a stream it opened or accepted.
+    /// Set this network's socket options on a stream it opened or accepted;
+    /// an option the kernel refuses is logged, the stream kept.
     fn tune(&self, stream: &TcpStream) {
-        self.socket.apply(stream);
+        if let Err(error) = self.socket.apply(stream) {
+            tracing::warn!(%error, "replication socket option refused");
+        }
+    }
+
+    /// Open a tuned stream to `dst`.
+    async fn open(&self, dst: SocketAddr) -> Result<TcpStream, ConnectError> {
+        let stream = TcpStream::connect(dst).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                ConnectError::Refused(dst)
+            } else {
+                ConnectError::Io(e.to_string())
+            }
+        })?;
+        self.tune(&stream);
+        Ok(stream)
+    }
+
+    /// Bind a listener at `local` whose accepted streams this network tunes.
+    async fn bind(&self, local: SocketAddr) -> Result<RealListener, ListenError> {
+        let listener = TcpListener::bind(local).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                ListenError::AlreadyInUse(local)
+            } else {
+                ListenError::Io(e.to_string())
+            }
+        })?;
+        let local_addr = listener.local_addr().map_err(|e| ListenError::Io(e.to_string()))?;
+        Ok(RealListener { inner: listener, local_addr, network: self.clone() })
     }
 }
 
@@ -54,27 +83,12 @@ impl ReplicationNetwork for RealReplicationNetwork {
         &self,
         dst: SocketAddr,
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        let stream = TcpStream::connect(dst).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                ConnectError::Refused(dst)
-            } else {
-                ConnectError::Io(e.to_string())
-            }
-        })?;
-        self.tune(&stream);
+        let stream = self.open(dst).await?;
         RealConnection::from_stream(stream).map_err(ConnectError::Io)
     }
 
     async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
-        let listener = TcpListener::bind(local).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                ListenError::AlreadyInUse(local)
-            } else {
-                ListenError::Io(e.to_string())
-            }
-        })?;
-        let local_addr = listener.local_addr().map_err(|e| ListenError::Io(e.to_string()))?;
-        Ok(Box::new(RealListener { inner: listener, local_addr, network: self.clone() }))
+        Ok(Box::new(self.bind(local).await?))
     }
 }
 
@@ -85,12 +99,21 @@ struct RealListener {
     network: RealReplicationNetwork,
 }
 
+impl RealListener {
+    /// Accept the next stream, tuned. An error is one failed accept: the
+    /// listener keeps accepting.
+    async fn take(&self) -> std::io::Result<TcpStream> {
+        let (stream, _peer) = self.inner.accept().await?;
+        self.network.tune(&stream);
+        Ok(stream)
+    }
+}
+
 #[async_trait]
 impl ReplicationListener for RealListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
-        let (stream, _peer) = self.inner.accept().await.ok()?;
-        self.network.tune(&stream);
-        RealConnection::from_stream(stream).ok()
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, AcceptError> {
+        let stream = self.take().await.map_err(|e| AcceptError::Io(e.to_string()))?;
+        RealConnection::from_stream(stream).map_err(AcceptError::Io)
     }
 
     fn local_addr(&self) -> SocketAddr {
@@ -274,24 +297,32 @@ mod tests {
         assert_eq!(server.recv().await, None);
     }
 
-    /// Both ends of a replication stream carry TCP keepalive and a 15 s
-    /// `TCP_USER_TIMEOUT`, so a peer that vanished without a reset is detected
-    /// by the kernel on an idle and on a busy socket alike.
+    /// Both ends of a replication stream carry TCP keepalive and the user
+    /// timeout as configured, so a peer that vanished without a reset is
+    /// detected by the kernel on an idle and on a busy socket alike. The
+    /// streams are the ones `connect` and `accept` wrap.
     #[tokio::test]
     async fn both_ends_carry_keepalive_and_a_user_timeout() {
-        let net = RealReplicationNetwork::new();
-        let listener = TcpListener::bind(loopback()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
-        let (client, (server, _)) = (client.unwrap(), accepted.unwrap());
-        net.tune(&client);
-        net.tune(&server);
+        use std::time::Duration;
+        let settings = SocketSettings {
+            keepalive_idle: Duration::from_secs(7),
+            keepalive_interval: Duration::from_secs(3),
+            keepalive_retries: 4,
+            user_timeout: Duration::from_millis(12_500),
+        };
+        let net = RealReplicationNetwork::with_socket(settings);
+        let listener = net.bind(loopback()).await.unwrap();
+        let (client, server) = tokio::join!(net.open(listener.local_addr), listener.take());
+        let (client, server) = (client.unwrap(), server.unwrap());
         for (end, stream) in [("client", &client), ("server", &server)] {
             let sock = socket2::SockRef::from(stream);
             assert!(sock.keepalive().unwrap(), "{end}: SO_KEEPALIVE");
+            assert_eq!(sock.tcp_keepalive_time().unwrap(), Duration::from_secs(7), "{end}");
+            assert_eq!(sock.tcp_keepalive_interval().unwrap(), Duration::from_secs(3), "{end}");
+            assert_eq!(sock.tcp_keepalive_retries().unwrap(), 4, "{end}");
             assert_eq!(
                 sock.tcp_user_timeout().unwrap(),
-                Some(std::time::Duration::from_secs(15)),
+                Some(Duration::from_millis(12_500)),
                 "{end}: TCP_USER_TIMEOUT"
             );
             assert!(sock.tcp_nodelay().unwrap(), "{end}: TCP_NODELAY");

@@ -37,18 +37,22 @@ impl Default for SocketSettings {
 }
 
 impl SocketSettings {
-    /// Set `TCP_NODELAY`, keepalive and the user timeout on `stream`. An
-    /// option the platform refuses is left as it is: the application bounds
-    /// still hold.
-    pub(crate) fn apply(&self, stream: &TcpStream) {
-        let _ = stream.set_nodelay(true);
+    /// Set `TCP_NODELAY`, keepalive and the user timeout on `stream`. Every
+    /// option is tried; the first one the kernel refuses is returned. The
+    /// kernel counts keepalive times in whole seconds: a host validates them
+    /// before they get here.
+    pub(crate) fn apply(&self, stream: &TcpStream) -> std::io::Result<()> {
+        let nodelay = stream.set_nodelay(true);
         let sock = SockRef::from(stream);
         let keepalive = TcpKeepalive::new()
             .with_time(self.keepalive_idle)
             .with_interval(self.keepalive_interval)
             .with_retries(self.keepalive_retries);
-        let _ = sock.set_tcp_keepalive(&keepalive);
+        let keepalive = sock.set_tcp_keepalive(&keepalive);
         #[cfg(target_os = "linux")]
-        let _ = sock.set_tcp_user_timeout(Some(self.user_timeout));
+        let user_timeout = sock.set_tcp_user_timeout(Some(self.user_timeout));
+        #[cfg(not(target_os = "linux"))]
+        let user_timeout = Ok(());
+        nodelay.and(keepalive).and(user_timeout)
     }
 }

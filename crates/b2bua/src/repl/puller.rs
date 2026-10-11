@@ -57,12 +57,13 @@
 //! - after a post-bootstrap `Data` and on every `Noop` → `Position{at}` back to
 //!   the server, the only client→server frame past the opening `PullRequest`
 //!   (ADR-0031 D2).
-//! - recv `None` / send `Err` / nothing received for `idle_timeout_ms` →
-//!   `Backoff` (RETAIN W).
+//! - recv `None` / send `Err` / a send blocked `send_stall_ms` / nothing
+//!   received for `idle_timeout_ms` → `Backoff` (RETAIN W).
 //! - a connect not established within `connect_timeout_ms` → `Backoff`.
 //! - `Backoff`: `sleep(min(init·2^attempt, max))` + a select on cancel (a plain
 //!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard). A
-//!   stream that delivered a frame resets `attempt`: the next wait is the floor.
+//!   stream that stayed connected for `idle_timeout_ms` resets `attempt`: the
+//!   next wait is the floor.
 //!
 //! ## Link liveness (ADR-0045)
 //! The server sends a `Noop` at least every few seconds, so a stream that
@@ -93,75 +94,15 @@ use super::{AddrResolver, ReplicatingCallStore};
 use crate::router::ReplCommand;
 
 mod apply;
+mod config;
 use apply::{ApplyMode, ApplyOutcome};
+pub use config::PullerConfig;
 
-/// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
-const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
-const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
-/// Default bootstrap hard-timeout (ms): the upper bound on how long the puller
-/// waits — for a reachable connection AND for the first catch-up `Noop` — before
-/// declaring bootstrap-complete best-effort (ADR-0011 X5 — liveness over
-/// completeness). The connection is NOT dropped on expiry; it keeps streaming.
-const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
-/// Default bound on one connect (ms).
-const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
-/// Default bound on a stream delivering nothing (ms), above the server's
-/// `Noop` interval.
-const DEFAULT_IDLE_TIMEOUT_MS: u64 = 15_000;
 /// Protocol version stamped on the `PullRequest`. **v3** (ADR-0014 stream split):
 /// the four-frame `{PullRequest, Data, Noop, ResetToBootstrap}` form (one
 /// socket = one flow, scan-then-tail), `Op` = `{Put, Delete}`. A v3 node cannot
 /// interpret a v2 peer's frames.
 const PROTO_VER: u16 = 3;
-
-/// Backoff knobs for a puller (tests inject short values).
-#[derive(Clone, Copy, Debug)]
-pub struct PullerConfig {
-    /// Backoff floor in ms (`init` in `min(init·2^attempt, max)`).
-    pub backoff_init_ms: u64,
-    /// Backoff ceiling in ms.
-    pub backoff_max_ms: u64,
-    /// Bootstrap **liveness** deadline in ms (X5): the budget for reaching a peer
-    /// AND for the first catch-up `Noop`. On expiry the puller marks **bootstrap-
-    /// complete (best-effort)** so the node boots and serves regardless of an
-    /// unreachable or pathologically-slow peer — WITHOUT dropping the connection,
-    /// which keeps streaming until the real `Noop` arrives. Kept short — it gates
-    /// readiness, never correctness (the `(p,b)` merge admits late frames).
-    pub bootstrap_hard_timeout_ms: u64,
-    /// The longest one connect is waited for, in every phase.
-    pub connect_timeout_ms: u64,
-    /// A stream that delivers nothing for this long is left and pulled again
-    /// from the retained watermark, in every phase.
-    pub idle_timeout_ms: u64,
-}
-
-impl Default for PullerConfig {
-    fn default() -> Self {
-        Self {
-            backoff_init_ms: DEFAULT_BACKOFF_INIT_MS,
-            backoff_max_ms: DEFAULT_BACKOFF_MAX_MS,
-            bootstrap_hard_timeout_ms: DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS,
-            connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
-            idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
-        }
-    }
-}
-
-impl PullerConfig {
-    /// Test-tier config: short backoff + a 2 s bootstrap hard timeout, so a few
-    /// paused-clock advances trip the relevant deadline deterministically, and
-    /// the default link bounds. ONE definition — these values are
-    /// timing-load-bearing under the paused clock (tests advance exactly to a
-    /// deadline).
-    pub fn fast_test() -> Self {
-        Self {
-            backoff_init_ms: 100,
-            backoff_max_ms: 1_000,
-            bootstrap_hard_timeout_ms: 2_000,
-            ..Self::default()
-        }
-    }
-}
 
 /// Shared, observable per-`(peer, flow)` puller status. The supervisor reads
 /// `current` for readiness (scoped to the **Reclaim** flow) and the retained
@@ -197,10 +138,10 @@ pub struct PullerStatus {
 enum RunOutcome {
     /// Connect failed → Backoff (attempt++).
     ConnectFailed,
-    /// Connection cut, or left silent, after a successful connect → Backoff
-    /// (retain W). `delivered`: the stream carried at least one frame, so the
+    /// Connection cut or left after a successful connect → Backoff (retain
+    /// W). `lasted`: the stream stayed connected for the idle bound, so the
     /// backoff starts again from its floor.
-    Disconnected { delivered: bool },
+    Disconnected { lasted: bool },
     /// The cancel signal fired (Park / shutdown) → stop running.
     Cancelled,
 }
@@ -459,7 +400,7 @@ impl Puller {
                 RunOutcome::Cancelled => return,
                 outcome @ (RunOutcome::ConnectFailed | RunOutcome::Disconnected { .. }) => {
                     // ---- Backoff{attempt} ---- retain W (status already holds it).
-                    if outcome == (RunOutcome::Disconnected { delivered: true }) {
+                    if outcome == (RunOutcome::Disconnected { lasted: true }) {
                         attempt = 0;
                     }
                     attempt = attempt.saturating_add(1);
@@ -551,12 +492,31 @@ impl Puller {
 
     /// Leave a stream that delivered nothing for `idle_timeout_ms`: the peer
     /// went silent without a reset (ADR-0045).
-    fn left_idle(&self, delivered: bool) -> RunOutcome {
+    fn left_idle(&self, connected_at: tokio::time::Instant) -> RunOutcome {
         self.note_state(
             "idle",
             &format!("nothing received for {}ms, pulling again", self.config.idle_timeout_ms),
         );
-        RunOutcome::Disconnected { delivered }
+        self.ended(connected_at)
+    }
+
+    /// A stream connected at `connected_at` ended.
+    fn ended(&self, connected_at: tokio::time::Instant) -> RunOutcome {
+        let idle = Duration::from_millis(self.config.idle_timeout_ms);
+        RunOutcome::Disconnected { lasted: connected_at.elapsed() >= idle }
+    }
+
+    /// Send `frame` within `send_stall_ms`; `false` when the stream failed or
+    /// the send stayed blocked (ADR-0045).
+    async fn send(&self, conn: &dyn ReplicationConnection, frame: Frame) -> bool {
+        let bound = Duration::from_millis(self.config.send_stall_ms);
+        match tokio::time::timeout(bound, conn.send(frame)).await {
+            Ok(sent) => sent.is_ok(),
+            Err(_) => {
+                self.note_state("stalled", "a send stayed blocked, pulling again");
+                false
+            }
+        }
     }
 
     /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
@@ -606,6 +566,7 @@ impl Puller {
             self.status_tx.send_modify(|s| s.ever_connected = true);
         }
         self.note_state("streaming", "connected");
+        let connected_at = tokio::time::Instant::now();
 
         // One PullRequest opens this flow's stream from the retained W. `since ==
         // (0,0)` ⇒ the server store-scans this flow's keyspace (every frame
@@ -618,8 +579,8 @@ impl Puller {
             partition: self.partition,
             since,
         };
-        if conn.send(req).await.is_err() {
-            return RunOutcome::Disconnected { delivered: false };
+        if !self.send(conn.as_ref(), req).await {
+            return self.ended(connected_at);
         }
 
         // A warm resume (W > (0,0)) tails directly — already past bootstrap, so
@@ -642,7 +603,6 @@ impl Puller {
         // is left, whatever the phase.
         let idle = Duration::from_millis(self.config.idle_timeout_ms);
         let mut quiet_until = tokio::time::Instant::now() + idle;
-        let mut delivered = false;
 
         loop {
             // While bootstrap is outstanding, race the first frame against the
@@ -653,7 +613,7 @@ impl Puller {
                 Some(at) => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(delivered);
+                        return self.left_idle(connected_at);
                     }
                     _ = tokio::time::sleep_until(at) => {
                         // First Noop is taking too long. Mark complete best-effort
@@ -678,13 +638,12 @@ impl Puller {
                 None => tokio::select! {
                     f = conn.recv() => f,
                     _ = tokio::time::sleep_until(quiet_until) => {
-                        return self.left_idle(delivered);
+                        return self.left_idle(connected_at);
                     }
                     () = cancelled(cancel) => return RunOutcome::Cancelled,
                 },
             };
             if frame.is_some() {
-                delivered = true;
                 quiet_until = tokio::time::Instant::now() + idle;
             }
             match frame {
@@ -758,8 +717,11 @@ impl Puller {
                         // frames all share `at = W`: claiming W before the whole
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
-                        if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
-                            return RunOutcome::Disconnected { delivered };
+                        if !self
+                            .send(conn.as_ref(), Frame::Position { at: self.claimable(at) })
+                            .await
+                        {
+                            return self.ended(connected_at);
                         }
                     }
                 }
@@ -789,8 +751,8 @@ impl Puller {
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
-                    if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
-                        return RunOutcome::Disconnected { delivered };
+                    if !self.send(conn.as_ref(), Frame::Position { at: self.claimable(at) }).await {
+                        return self.ended(connected_at);
                     }
                 }
                 Some(Frame::ResetToBootstrap { .. }) => {
@@ -815,11 +777,11 @@ impl Puller {
                     );
                     *self.bootstrap_started_at.lock().unwrap() = Some(tokio::time::Instant::now());
                     self.note_state("reset_to_bootstrap", "server dropped our watermark");
-                    return RunOutcome::Disconnected { delivered };
+                    return self.ended(connected_at);
                 }
                 // PullRequest is client→server; never expected here. Ignore.
                 Some(_) => {}
-                None => return RunOutcome::Disconnected { delivered },
+                None => return self.ended(connected_at),
             }
         }
     }

@@ -73,6 +73,18 @@ pub enum ListenError {
     Io(String),
 }
 
+/// Failure accepting an inbound connection.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AcceptError {
+    /// The listener is closed: it accepts nothing more.
+    #[error("listener closed")]
+    Closed,
+    /// One accept failed (descriptors exhausted, a handshake aborted, …). The
+    /// listener stays open: the caller accepts again.
+    #[error("accept io error: {0}")]
+    Io(String),
+}
+
 /// Failure sending a frame on a connection.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SendError {
@@ -108,9 +120,11 @@ pub trait ReplicationNetwork: Send + Sync {
 /// The accepting side of a bound listener.
 #[async_trait]
 pub trait ReplicationListener: Send + Sync {
-    /// Await the next inbound connection (the server end). `None` once the
-    /// listener is closed and drained.
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>>;
+    /// Await the next inbound connection (the server end).
+    /// `Err(AcceptError::Closed)` once the listener is closed and drained;
+    /// `Err(AcceptError::Io)` for one failed accept, after which the listener
+    /// still accepts.
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, AcceptError>;
 
     /// The bound local address.
     fn local_addr(&self) -> SocketAddr;

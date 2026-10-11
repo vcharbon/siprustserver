@@ -94,7 +94,9 @@ use super::{
 };
 
 mod fault;
+mod listener;
 pub use fault::Fault;
+use listener::SimListener;
 
 /// Directed pair key for the fault tables.
 type Pair = (SocketAddr, SocketAddr);
@@ -202,6 +204,8 @@ struct SimShared {
     black_holes: Mutex<HashSet<SocketAddr>>,
     /// Woken when a black-hole is lifted, so a waiting `connect` re-checks.
     black_hole_lifted: Notify,
+    /// Listen address → accepts still to fail ([`Fault::AcceptErrors`]).
+    accept_errors: Mutex<HashMap<SocketAddr, usize>>,
 }
 
 impl SimShared {
@@ -324,6 +328,7 @@ impl SimulatedReplicationNetwork {
                 in_flight: AtomicI64::new(0),
                 black_holes: Mutex::new(HashSet::new()),
                 black_hole_lifted: Notify::new(),
+                accept_errors: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -442,6 +447,9 @@ impl SimulatedReplicationNetwork {
             Fault::BlackHole { dst } => {
                 sh.black_holes.lock().unwrap().insert(dst);
             }
+            Fault::AcceptErrors { local, count } => {
+                sh.accept_errors.lock().unwrap().insert(local, count);
+            }
         }
     }
 
@@ -500,11 +508,7 @@ impl ReplicationNetwork for SimulatedReplicationNetwork {
             }
             routing.insert(local, ListenerHandle { incoming_tx });
         }
-        Ok(Box::new(SimListener {
-            local,
-            incoming: tokio::sync::Mutex::new(incoming_rx),
-            shared: self.shared.clone(),
-        }))
+        Ok(Box::new(SimListener::new(local, incoming_rx, self.shared.clone())))
     }
 }
 
@@ -875,29 +879,6 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
     });
 
     Wire { staging_tx, inbound_rx, dir, view }
-}
-
-struct SimListener {
-    local: SocketAddr,
-    incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<Box<dyn ReplicationConnection>>>,
-    shared: Arc<SimShared>,
-}
-
-#[async_trait]
-impl ReplicationListener for SimListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
-        self.incoming.lock().await.recv().await
-    }
-
-    fn local_addr(&self) -> SocketAddr {
-        self.local
-    }
-}
-
-impl Drop for SimListener {
-    fn drop(&mut self) {
-        self.shared.routing.lock().unwrap().remove(&self.local);
-    }
 }
 
 struct SimConnection {

@@ -22,8 +22,8 @@ use sip_clock::Clock;
 use crate::Frame;
 
 use super::{
-    ConnectError, ListenError, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError,
+    AcceptError, ConnectError, ListenError, ReplicationConnection, ReplicationListener,
+    ReplicationNetwork, SendError,
 };
 
 /// Whether a captured frame was sent or received from the wrapped connection's
@@ -153,9 +153,9 @@ struct RecordingListener {
 
 #[async_trait]
 impl ReplicationListener for RecordingListener {
-    async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
+    async fn accept(&self) -> Result<Box<dyn ReplicationConnection>, AcceptError> {
         let conn = self.inner.accept().await?;
-        Some(Box::new(RecordingConnection {
+        Ok(Box::new(RecordingConnection {
             inner: conn,
             clock: self.clock.clone(),
             sink: self.sink.clone(),

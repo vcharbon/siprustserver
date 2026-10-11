@@ -76,11 +76,36 @@ fn a_bound_that_is_not_a_positive_integer_refuses_boot_naming_its_variable() {
 }
 
 #[test]
-fn an_idle_timeout_not_above_the_noop_interval_refuses_boot() {
-    let e = LinkSettings::from_lookup(lookup(&[
-        ("B2BUA_REPL_IDLE_TIMEOUT_MS", "5000"),
+fn an_idle_timeout_under_twice_the_noop_interval_refuses_boot() {
+    for idle in ["5000", "5001", "9999"] {
+        let e = LinkSettings::from_lookup(lookup(&[
+            ("B2BUA_REPL_IDLE_TIMEOUT_MS", idle),
+            ("B2BUA_REPL_NOOP_INTERVAL_MS", "5000"),
+        ]))
+        .expect_err("a quiet live stream could be left between two Noops");
+        assert!(e.contains("B2BUA_REPL_IDLE_TIMEOUT_MS"), "{idle}: msg was: {e}");
+    }
+    let s = LinkSettings::from_lookup(lookup(&[
+        ("B2BUA_REPL_IDLE_TIMEOUT_MS", "10000"),
         ("B2BUA_REPL_NOOP_INTERVAL_MS", "5000"),
     ]))
-    .expect_err("a quiet live stream would be left");
-    assert!(e.contains("B2BUA_REPL_IDLE_TIMEOUT_MS"), "msg was: {e}");
+    .expect("twice the Noop interval holds");
+    assert_eq!(s.idle_timeout, Duration::from_secs(10));
+}
+
+#[test]
+fn a_socket_value_the_kernel_cannot_take_as_given_refuses_boot_naming_its_variable() {
+    for (key, bad) in [
+        ("B2BUA_REPL_KEEPALIVE_IDLE_MS", "500"),
+        ("B2BUA_REPL_KEEPALIVE_IDLE_MS", "2500"),
+        ("B2BUA_REPL_KEEPALIVE_IDLE_MS", "32768000"),
+        ("B2BUA_REPL_KEEPALIVE_INTERVAL_MS", "1500"),
+        ("B2BUA_REPL_KEEPALIVE_INTERVAL_MS", "32768000"),
+        ("B2BUA_REPL_KEEPALIVE_RETRIES", "128"),
+        ("B2BUA_REPL_USER_TIMEOUT_MS", "4294967296"),
+    ] {
+        let e = LinkSettings::from_lookup(lookup(&[(key, bad)]))
+            .expect_err("a value the kernel would round or refuse");
+        assert!(e.contains(key), "{key}={bad}: msg was: {e}");
+    }
 }

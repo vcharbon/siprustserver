@@ -257,7 +257,7 @@ async fn hard_timer_stalled_bootstrap_completes_best_effort() {
     // bootstrap recv loop must trip the hard timer.
     let stall_listener = net.listen(b_addr).await.unwrap();
     tokio::spawn(async move {
-        while let Some(conn) = stall_listener.accept().await {
+        while let Ok(conn) = stall_listener.accept().await {
             tokio::spawn(async move {
                 // Drain inbound forever; never send anything back.
                 while conn.recv().await.is_some() {}

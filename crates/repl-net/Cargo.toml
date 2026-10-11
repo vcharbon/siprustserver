@@ -25,6 +25,8 @@ async-trait = { workspace = true }
 sip-clock = { path = "../sip-clock" }
 # TCP keepalive and TCP_USER_TIMEOUT on the real transport's streams.
 socket2 = { workspace = true, features = ["all"] }
+# A socket option the kernel refuses is logged.
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

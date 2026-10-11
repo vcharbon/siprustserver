@@ -586,7 +586,7 @@ async fn reset_to_bootstrap_rearms_the_hard_deadline() {
     let listener = net.listen(a_addr).await.unwrap();
     tokio::spawn(async move {
         let mut rounds: HashMap<String, u32> = HashMap::new();
-        while let Some(conn) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let Some(Frame::PullRequest { caller, partition, .. }) = conn.recv().await else {
                 continue;
             };

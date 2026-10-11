@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 #[cfg(doc)]
-use super::super::{ConnectError, SendError};
+use super::super::{AcceptError, ConnectError, SendError};
 #[cfg(doc)]
 use super::SimulatedReplicationNetwork;
 
@@ -122,5 +122,14 @@ pub enum Fault {
     BlackHole {
         /// The address that answers no connect.
         dst: SocketAddr,
+    },
+    /// The listener at `local` fails its next `count` accepts with
+    /// [`AcceptError::Io`], as a process out of descriptors does; the
+    /// connections waiting meanwhile stay queued for the accepts after.
+    AcceptErrors {
+        /// The listen address whose accepts fail.
+        local: SocketAddr,
+        /// How many accepts fail.
+        count: usize,
     },
 }

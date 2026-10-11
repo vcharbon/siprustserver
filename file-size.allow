@@ -31,7 +31,7 @@ crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 551
 crates/b2bua/src/metrics.rs 1059
 crates/b2bua/src/repl/changelog.rs 640
-crates/b2bua/src/repl/puller.rs 829
+crates/b2bua/src/repl/puller.rs 791
 crates/b2bua/src/repl/real_transport_tests.rs 1209
 crates/b2bua/src/repl/s12_tests.rs 916
 crates/b2bua/src/repl/store.rs 752
@@ -89,7 +89,7 @@ crates/pivot-schema/src/bundle/verdict.rs 677
 crates/pivot-schema/src/lint/flow_rules.rs 788
 crates/pivot-schema/src/lint/references.rs 505
 crates/pivot-schema/tests/it/lint.rs 2890
-crates/repl-net/src/transport/simulated.rs 1006
+crates/repl-net/src/transport/simulated.rs 987
 crates/rfc-rules/src/rules/ack.rs 713
 crates/rfc-rules/src/rules/cancel.rs 648
 crates/rfc-rules/src/rules/capability.rs 648

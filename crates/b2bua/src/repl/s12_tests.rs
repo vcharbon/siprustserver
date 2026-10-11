@@ -759,7 +759,7 @@ async fn a_bulk_re_seed_after_a_reset_still_refuses_a_regressing_put() {
     let seed_ref = call_ref.clone();
     let rounds: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
     tokio::spawn(async move {
-        while let Some(conn) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let (regressing, seed_ref, rounds) =
                 (regressing.clone(), seed_ref.clone(), rounds.clone());
             tokio::spawn(async move {

@@ -44,7 +44,8 @@ pub use codec::{decode_frame, encode_frame, ReplCodecError};
 pub use frame::{Frame, Op, Partition, UnknownDiscriminant, Watermark};
 pub use framing::{frame_with_len_prefix, try_read_framed, ReplFramingError, MAX_FRAME_LEN};
 pub use transport::{
-    CapturedFrame, ConnectError, Direction, Fault, ListenError, RealReplicationNetwork,
-    RecordingReplicationNetwork, ReplicationConnection, ReplicationListener, ReplicationNetwork,
-    SendError, SimulatedReplicationNetwork, SocketSettings,
+    AcceptError, CapturedFrame, ConnectError, Direction, Fault, ListenError,
+    RealReplicationNetwork, RecordingReplicationNetwork, ReplicationConnection,
+    ReplicationListener, ReplicationNetwork, SendError, SimulatedReplicationNetwork,
+    SocketSettings,
 };

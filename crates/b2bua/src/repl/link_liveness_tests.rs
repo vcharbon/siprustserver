@@ -6,8 +6,12 @@
 //! ```text
 //!   puller   silence ≥ 15 s after the last frame   → reconnect, since = W
 //!   puller   connect with no answer                → given up at 2 s, backoff
+//!   puller   one send blocked 15 s                 → stream left, backoff
+//!   puller   a stream that lasted the idle bound   → backoff from its floor
 //!   server   one send blocked 15 s                 → stream dropped, the
 //!                                                     peer's log reapable
+//!   server   a Noop at least every noop interval   → a quiet stream is kept
+//!   server   accepts that fail                     → accepting goes on
 //! ```
 
 use std::net::SocketAddr;
@@ -25,7 +29,7 @@ use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
 use super::test_support::{cref, fast_config, tick, Node};
-use super::{Puller, ReplicatingCallStore};
+use super::{Changelog, Puller, PullerStatus, ReplServer, ReplicatingCallStore, ServeConfig};
 use crate::store::{CallStore, PartitionRole, PutOpts};
 
 fn addr(n: u16) -> SocketAddr {
@@ -64,7 +68,7 @@ impl ScriptedPeer {
         let (pulls, noop_sent, hang_up) =
             (peer.pulls.clone(), peer.noop_sent.clone(), peer.hang_up.clone());
         tokio::spawn(async move {
-            while let Some(conn) = listener.accept().await {
+            while let Ok(conn) = listener.accept().await {
                 let (pulls, noop_sent, hang_up) =
                     (pulls.clone(), noop_sent.clone(), hang_up.clone());
                 tokio::spawn(async move {
@@ -172,8 +176,11 @@ impl ReplicationNetwork for ConnectProbe {
 
 /// A Reclaim puller from `A` toward `B` at `peer` over `net`, cold, on the
 /// fast test tier. The returned sender keeps it running.
-fn pull_from(net: Arc<dyn ReplicationNetwork>, peer: SocketAddr) -> watch::Sender<bool> {
-    let (puller, _status) = Puller::new_at(
+fn pull_from(
+    net: Arc<dyn ReplicationNetwork>,
+    peer: SocketAddr,
+) -> (watch::Sender<bool>, watch::Receiver<PullerStatus>) {
+    let (puller, status) = Puller::new_at(
         "B",
         "A",
         Partition::Pri,
@@ -186,7 +193,7 @@ fn pull_from(net: Arc<dyn ReplicationNetwork>, peer: SocketAddr) -> watch::Sende
     );
     let (cancel_tx, cancel_rx) = watch::channel(false);
     tokio::spawn(puller.run(cancel_rx));
-    cancel_tx
+    (cancel_tx, status)
 }
 
 /// Advance the paused clock to `at`, in settled steps of at most 100 ms.
@@ -198,6 +205,8 @@ async fn tick_until(at: Instant) {
 }
 
 const IDLE: Duration = Duration::from_secs(15);
+/// The default bound on one blocked send.
+const SEND_STALL: Duration = Duration::from_secs(15);
 const CONNECT_BOUND: Duration = Duration::from_secs(2);
 /// The fast tier's backoff floor ([`fast_config`]).
 const BACKOFF_FLOOR: Duration = Duration::from_millis(100);
@@ -207,7 +216,7 @@ async fn a_peer_silent_after_bootstrap_is_left_after_15_s_and_pulled_again_from_
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let b = addr(1);
     let peer = ScriptedPeer::listen(&net, b).await;
-    let _run = pull_from(net, b);
+    let (_run, _) = pull_from(net, b);
 
     tick(100).await;
     let pulls = peer.pulls();
@@ -242,7 +251,7 @@ async fn a_connect_nobody_answers_after_bootstrap_is_given_up_at_2_s_and_backed_
         inner: sim.clone() as Arc<dyn ReplicationNetwork>,
         attempts: Arc::default(),
     });
-    let _run = pull_from(probe.clone(), b);
+    let (_run, _) = pull_from(probe.clone(), b);
 
     tick(100).await;
     assert_eq!(peer.pulls().len(), 1, "bootstrapped over the first stream");
@@ -270,37 +279,75 @@ async fn a_connect_nobody_answers_after_bootstrap_is_given_up_at_2_s_and_backed_
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_puller_backs_off_from_the_floor_again_after_a_stream_that_delivered() {
-    // A peer whose every stream delivers its catch-up and then closes: each
-    // stream worked, so each reconnect starts the backoff from its floor.
-    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
-    let b = addr(3);
-    let listener = net.listen(b).await.unwrap();
-    let pulls: Arc<Mutex<Vec<Instant>>> = Arc::default();
-    let seen = pulls.clone();
+/// A peer whose streams each deliver one frame and close, from the
+/// `lasting`-th stream on (0-based) keeping that one open 16 s with a `Noop`
+/// every 5 s. Records when each stream was opened and closed.
+async fn closing_peer(
+    net: &Arc<SimulatedReplicationNetwork>,
+    at: SocketAddr,
+    lasting: usize,
+) -> Arc<Mutex<Vec<(Instant, Instant)>>> {
+    let listener = net.listen(at).await.unwrap();
+    let streams: Arc<Mutex<Vec<(Instant, Instant)>>> = Arc::default();
+    let seen = streams.clone();
     tokio::spawn(async move {
-        while let Some(conn) = listener.accept().await {
+        let mut n = 0;
+        while let Ok(conn) = listener.accept().await {
             if let Some(Frame::PullRequest { .. }) = conn.recv().await {
-                seen.lock().unwrap().push(Instant::now());
+                let opened = Instant::now();
                 let _ = conn.send(Frame::Noop { at: W }).await;
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                if n == lasting {
+                    for _ in 0..3 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let _ = conn.send(Frame::Noop { at: W }).await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                seen.lock().unwrap().push((opened, Instant::now()));
             }
+            n += 1;
         }
     });
-    let _run = pull_from(net, b);
+    streams
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_sends_one_frame_and_closes_is_redialled_with_a_growing_backoff() {
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(3);
+    let streams = closing_peer(&net, b, usize::MAX).await;
+    let (_run, _) = pull_from(net, b);
 
     tick(3_000).await;
-    let pulls = pulls.lock().unwrap().clone();
-    assert!(pulls.len() >= 6, "the puller reconnects to each closed stream: {pulls:?}");
-    for pair in pulls.windows(2).take(6) {
-        let gap = pair[1] - pair[0];
-        assert!(
-            gap <= BACKOFF_FLOOR + Duration::from_millis(20),
-            "a stream that delivered resets the backoff to its floor: gaps {:?}",
-            pulls.windows(2).map(|p| p[1] - p[0]).collect::<Vec<_>>()
-        );
+    let opened: Vec<Instant> = streams.lock().unwrap().iter().map(|s| s.0).collect();
+    let gaps: Vec<Duration> = opened.windows(2).map(|p| p[1] - p[0]).collect();
+    assert!(gaps.len() >= 4, "the puller redials each closed stream: {gaps:?}");
+    for pair in gaps.windows(2).take(3) {
+        assert!(pair[1] > pair[0], "a stream that delivered once resets nothing: {gaps:?}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_lasted_the_idle_bound_resets_the_backoff_to_its_floor() {
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(5);
+    let streams = closing_peer(&net, b, 5).await;
+    let (_run, _) = pull_from(net, b);
+
+    tick(25_000).await;
+    let streams = streams.lock().unwrap().clone();
+    assert!(streams.len() >= 7, "the puller redialled after the lasting stream: {streams:?}");
+    let (opened, closed) = streams[5];
+    assert!(closed - opened >= IDLE, "the sixth stream lasted the idle bound");
+    let short_gap = streams[5].0 - streams[4].0;
+    assert!(short_gap > BACKOFF_FLOOR * 4, "the backoff had grown before: {short_gap:?}");
+    let redial = streams[6].0 - closed;
+    assert!(
+        redial <= BACKOFF_FLOOR + Duration::from_millis(20),
+        "after a stream that lasted the idle bound the backoff starts from its floor: {redial:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -367,4 +414,178 @@ async fn a_peer_that_stops_reading_is_dropped_after_15_s_and_its_log_becomes_rea
         }
     };
     assert!(closed, "B closed the stream after {delivered} frames");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_live_stream_keeps_one_connection_across_several_idle_bounds() {
+    let clock = Clock::test_at(0);
+    let sim = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(7);
+    let node = Node::spawn("B", b, 3, &sim, &clock).await;
+    for i in 0..600 {
+        let call_ref = cref("A", &i.to_string());
+        node.store
+            .put_call(
+                PartitionRole::Backup,
+                "A",
+                &call_ref,
+                vec![7u8; 512],
+                &[],
+                600_000,
+                1,
+                0,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+    }
+    let probe = Arc::new(ConnectProbe {
+        inner: sim.clone() as Arc<dyn ReplicationNetwork>,
+        attempts: Arc::default(),
+    });
+    let (_run, status) = pull_from(probe.clone(), b);
+    tick_until(Instant::now() + Duration::from_secs(120)).await;
+    assert!(status.borrow().current, "the puller caught up");
+    let attempts = probe.attempts.lock().unwrap().clone();
+    assert_eq!(attempts.len(), 1, "a live quiet stream is never left: {attempts:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_served_stream_carries_a_noop_at_least_every_noop_interval_during_and_after_bootstrap() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(8);
+    let changelog = Changelog::new(3, clock.clone()).with_ttls(30_000, 300_000);
+    let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
+    for i in 0..300 {
+        let call_ref = cref("A", &i.to_string());
+        store
+            .put_call(
+                PartitionRole::Backup,
+                "A",
+                &call_ref,
+                vec![7u8; 64],
+                &[],
+                600_000,
+                1,
+                0,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+    }
+    // A configured interval other than the default: the server keeps the one
+    // it is given.
+    let interval = Duration::from_secs(3);
+    let config = ServeConfig { noop_interval: interval, send_stall: Duration::from_secs(15) };
+    let server = ReplServer::new("B", changelog, Arc::new(store.clone())).with_config(config);
+    tokio::spawn(server.run(net.listen(b).await.unwrap()));
+
+    let client = net.connect_from(addr(41), b).await.unwrap();
+    client
+        .send(Frame::PullRequest {
+            proto_ver: 3,
+            caller: "A".into(),
+            partition: Partition::Pri,
+            since: Watermark::new(0, 0),
+        })
+        .await
+        .unwrap();
+    let opened = Instant::now();
+    let frames: Arc<Mutex<Vec<(Instant, bool)>>> = Arc::default();
+    let seen = frames.clone();
+    tokio::spawn(async move {
+        while let Some(frame) = client.recv().await {
+            seen.lock().unwrap().push((Instant::now(), matches!(frame, Frame::Noop { .. })));
+        }
+    });
+    tick_until(opened + Duration::from_secs(30)).await;
+
+    let frames = frames.lock().unwrap().clone();
+    let data = frames.iter().filter(|f| !f.1).count();
+    assert_eq!(data, 300, "the bootstrap scan was served");
+    let mut last = opened;
+    for (at, _) in &frames {
+        assert!(*at - last <= interval + Duration::from_millis(200), "a gap of {:?}", *at - last);
+        last = *at;
+    }
+    assert!(
+        opened + Duration::from_secs(30) - last <= interval + Duration::from_millis(200),
+        "the stream went quiet {:?} before the end",
+        opened + Duration::from_secs(30) - last
+    );
+    let noops = frames.iter().filter(|f| f.1).count();
+    assert!(noops >= 9, "a Noop at least every {interval:?}: {noops} in 30 s");
+}
+
+#[tokio::test(start_paused = true)]
+async fn accepts_that_fail_never_stop_the_replication_server() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(9);
+    net.apply_fault(Fault::AcceptErrors { local: b, count: 3 });
+    let _node = Node::spawn("B", b, 3, &net, &clock).await;
+
+    let (_first, first) = pull_from(net.clone(), b);
+    tick(1_000).await;
+    assert!(first.borrow().current, "the stream is served once the failing accepts are past");
+
+    net.apply_fault(Fault::AcceptErrors { local: b, count: 2 });
+    let (_second, second) = pull_from(net, b);
+    tick(1_000).await;
+    assert!(second.borrow().current, "a later episode is ridden out as well");
+}
+
+/// A connection whose sends past the opening `PullRequest` never complete:
+/// a full socket buffer toward a peer that stopped reading.
+struct DeafConn(Box<dyn ReplicationConnection>);
+
+#[async_trait]
+impl ReplicationConnection for DeafConn {
+    async fn send(&self, frame: Frame) -> Result<(), repl_net::transport::SendError> {
+        if matches!(frame, Frame::PullRequest { .. }) {
+            return self.0.send(frame).await;
+        }
+        std::future::pending().await
+    }
+    async fn recv(&self) -> Option<Frame> {
+        self.0.recv().await
+    }
+    fn peer_addr(&self) -> SocketAddr {
+        self.0.peer_addr()
+    }
+    fn local_addr(&self) -> SocketAddr {
+        self.0.local_addr()
+    }
+}
+
+/// A network whose connections are [`DeafConn`]s.
+struct DeafNet(Arc<SimulatedReplicationNetwork>);
+
+#[async_trait]
+impl ReplicationNetwork for DeafNet {
+    async fn connect(
+        &self,
+        dst: SocketAddr,
+    ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+        Ok(Box::new(DeafConn(self.0.connect(dst).await?)))
+    }
+    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
+        self.0.listen(local).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_puller_whose_position_send_stays_blocked_leaves_the_stream_after_15_s() {
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b = addr(10);
+    let peer = ScriptedPeer::listen(&net, b).await;
+    let (_run, _) = pull_from(Arc::new(DeafNet(net)), b);
+
+    tick(100).await;
+    let blocked_from = peer.noop_sent();
+    tick_until(blocked_from + SEND_STALL - Duration::from_millis(100)).await;
+    assert_eq!(peer.pulls().len(), 1, "a send blocked for less than 15 s keeps the stream");
+    tick_until(blocked_from + SEND_STALL + BACKOFF_FLOOR + Duration::from_millis(100)).await;
+    assert_eq!(peer.pulls().len(), 2, "the blocked stream is left and pulled again");
 }

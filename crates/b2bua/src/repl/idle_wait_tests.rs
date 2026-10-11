@@ -43,7 +43,7 @@ async fn silent_peer(net: &Arc<SimulatedReplicationNetwork>, at: SocketAddr) {
     let listener = net.listen(at).await.unwrap();
     tokio::spawn(async move {
         let mut held = Vec::new();
-        while let Some(conn) = listener.accept().await {
+        while let Ok(conn) = listener.accept().await {
             let _ = conn.recv().await;
             held.push(conn);
         }
