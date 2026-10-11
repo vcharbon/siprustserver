@@ -51,6 +51,10 @@
 //!   returns [`SendError::Io`], `recv`→`None`, and a fresh `connect_from` is
 //!   rejected with [`ConnectError::Io`] (a reset some time into the connection).
 //!
+//! A **black-holed address** ([`Fault::BlackHole`]) answers no connect: a
+//! `connect` to it neither succeeds nor fails, as a SYN to an address nobody
+//! answers, until a [`Fault::Heal`] naming it.
+//!
 //! ## Node faults: a directed fault named on two declared endpoints
 //! A puller opens its stream from an ephemeral local, so the live wires of a
 //! connection run between that local and a listener, never between two listen
@@ -89,114 +93,8 @@ use super::{
     SendError,
 };
 
-/// A directed connection fault, keyed by `(src, dst)` direction or by endpoint.
-///
-/// Set on the [`SimulatedReplicationNetwork`] builder before the fabric is
-/// shared, or applied to a live fabric. `delay`/`stall`/`cut` are **directed**
-/// (apply to `src → dst`); `partition`/`heal` are **bidirectional** (both
-/// directions between two endpoints). `reconnect` is not a fault — it is just
-/// a fresh `connect` succeeding once any `cut`/partition on the pair is cleared.
-///
-/// A directed fault whose `src` and `dst` are both **declared endpoints**
-/// ([`declare_endpoint`](SimulatedReplicationNetwork::declare_endpoint)) is a
-/// node fault: it applies to every stream between the two nodes, present and
-/// future, in that direction — the streams either node's puller opened from an
-/// ephemeral local included. Any other pair is one wire direction, literally.
-#[derive(Clone, Debug)]
-pub enum Fault {
-    /// Raise the transit delay `src → dst` (coerced to `>= 1 ms`). A frame
-    /// stamped after the fault (the delivery actor stamps at its next poll)
-    /// waits the new delay; one already stamped keeps its deadline.
-    Delay {
-        /// Source endpoint of the directed connection.
-        src: SocketAddr,
-        /// Destination endpoint of the directed connection.
-        dst: SocketAddr,
-        /// New transit delay in milliseconds.
-        ms: u64,
-    },
-    /// Pause delivery on `src → dst`: the staging queue grows, nothing is
-    /// delivered, until a matching [`Fault::Resume`].
-    Stall {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-    },
-    /// Resume a stalled direction: buffered frames flush in order.
-    Resume {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-    },
-    /// Cut `src → dst` now: in-flight + future sends on live connections of
-    /// that direction fail; their `recv` yields `None`. Between declared
-    /// endpoints the cut outlives the streams it closes — a stream reopened
-    /// under it dies as soon as it is attributed — until a [`Fault::Heal`].
-    Cut {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-    },
-    /// Partition two endpoints: hold delivery in **both** directions (frames
-    /// buffer in order and flush on [`Fault::Heal`]) and refuse new `connect`s
-    /// between them until then.
-    Partition {
-        /// One endpoint.
-        a: SocketAddr,
-        /// The other endpoint.
-        b: SocketAddr,
-    },
-    /// Heal a partition: clear the block so a fresh `connect` succeeds, and
-    /// clear every node fault between the two endpoints, both directions.
-    Heal {
-        /// One endpoint.
-        a: SocketAddr,
-        /// The other endpoint.
-        b: SocketAddr,
-    },
-    /// Arm buffer-overflow → drop-subscriber on `src → dst`: when the bounded
-    /// inbound buffer is full, the delivery actor cuts the connection instead
-    /// of awaiting space (the "buffer-full → drop subscriber → reconnect"
-    /// scenario).
-    DropOnOverflow {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-    },
-    /// **Black-hole** `src → dst`: the peer stops pulling, so the application
-    /// `send` BLOCKS once the in-flight window is full — modelling a TCP sender
-    /// stuck on a full socket buffer with a dead reader. No error, no close:
-    /// `send` simply never completes until the peer drains (its `recv` releases a
-    /// window slot), the block is cleared by [`Fault::Resume`], or the direction
-    /// is later [`Cut`](Fault::Cut)/[`ErrorAfter`](Fault::ErrorAfter). This is the
-    /// half-open / hung-peer case that a clean `Cut` (immediate close) does not
-    /// cover.
-    Block {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-    },
-    /// **Network error after a delay** on `src → dst`: after `ms` elapse, an
-    /// established `send` returns [`SendError::Io`], the delivery actor tears the
-    /// inbound down (`recv` → `None`), and a fresh [`connect_from`] on this pair
-    /// is rejected with [`ConnectError::Io`] — modelling a reset (ECONNRESET)
-    /// some time into the connection's life, distinct from a clean `Cut`.
-    ///
-    /// [`connect_from`]: SimulatedReplicationNetwork::connect_from
-    ErrorAfter {
-        /// Source endpoint.
-        src: SocketAddr,
-        /// Destination endpoint.
-        dst: SocketAddr,
-        /// Delay before the error fires, in milliseconds.
-        ms: u64,
-    },
-}
+mod fault;
+pub use fault::Fault;
 
 /// Directed pair key for the fault tables.
 type Pair = (SocketAddr, SocketAddr);
@@ -300,6 +198,10 @@ struct SimShared {
     /// Live in-flight frame count (across all delivery actors) — harness
     /// introspection, mirrors sip-net's `in_flight`.
     in_flight: AtomicI64,
+    /// Addresses that answer no connect ([`Fault::BlackHole`]).
+    black_holes: Mutex<HashSet<SocketAddr>>,
+    /// Woken when a black-hole is lifted, so a waiting `connect` re-checks.
+    black_hole_lifted: Notify,
 }
 
 impl SimShared {
@@ -373,6 +275,19 @@ impl SimShared {
         p.contains(&wire) || p.contains(&owners)
     }
 
+    /// Wait while `dst` is black-holed ([`Fault::BlackHole`]).
+    async fn await_answer(&self, dst: SocketAddr) {
+        loop {
+            let lifted = self.black_hole_lifted.notified();
+            tokio::pin!(lifted);
+            lifted.as_mut().enable();
+            if !self.black_holes.lock().unwrap().contains(&dst) {
+                return;
+            }
+            lifted.await;
+        }
+    }
+
     /// Wake every live direction, so a partition change is re-read at once.
     fn wake_all(&self) {
         for d in self.dir_state.lock().unwrap().values() {
@@ -407,6 +322,8 @@ impl SimulatedReplicationNetwork {
                 stream_owner: Mutex::new(HashMap::new()),
                 node_faults: Mutex::new(HashMap::new()),
                 in_flight: AtomicI64::new(0),
+                black_holes: Mutex::new(HashSet::new()),
+                black_hole_lifted: Notify::new(),
             }),
         }
     }
@@ -491,7 +408,11 @@ impl SimulatedReplicationNetwork {
                     let mut nf = sh.node_faults.lock().unwrap();
                     nf.remove(&(a, b));
                     nf.remove(&(b, a));
+                    let mut holes = sh.black_holes.lock().unwrap();
+                    holes.remove(&a);
+                    holes.remove(&b);
                 }
+                sh.black_hole_lifted.notify_waiters();
                 // Held streams between the two nodes flush now, in order.
                 sh.wake_all();
             }
@@ -517,6 +438,9 @@ impl SimulatedReplicationNetwork {
                     d2.errored.store(true, Ordering::SeqCst);
                     d2.wake.notify_waiters();
                 });
+            }
+            Fault::BlackHole { dst } => {
+                sh.black_holes.lock().unwrap().insert(dst);
             }
         }
     }
@@ -592,6 +516,8 @@ impl SimulatedReplicationNetwork {
         local: SocketAddr,
         dst: SocketAddr,
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+        // A black-holed destination answers nothing until it is healed.
+        self.shared.await_answer(dst).await;
         // Partitioned? refuse — reading each end as its owning node, so a
         // reconnect from an already-attributed local is refused too.
         if self.shared.partitioned(local, dst) {

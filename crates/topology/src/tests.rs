@@ -1,4 +1,5 @@
 use super::*;
+use sip_clock::Clock;
 
 fn ordinals(peers: &[Peer]) -> Vec<&str> {
     peers.iter().map(|p| p.ordinal.as_str()).collect()

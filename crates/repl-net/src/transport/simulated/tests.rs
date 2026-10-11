@@ -282,6 +282,29 @@ async fn connect_refused_when_no_listener() {
     assert!(matches!(r, Err(ConnectError::Refused(_))));
 }
 
+// --- BlackHole: a connect nobody answers ------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_connect_to_a_black_hole_waits_until_healed() {
+    let net = SimulatedReplicationNetwork::with_delay(1);
+    let (a, b) = (addr(1010), addr(2010));
+    let listener = net.listen(b).await.unwrap();
+    net.apply_fault(Fault::BlackHole { dst: b });
+
+    let pending = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect_from(a, b).await.map(|_| ()) }
+    });
+    advance_settled(Duration::from_secs(60)).await;
+    assert!(!pending.is_finished(), "a black-holed connect neither succeeds nor fails");
+
+    net.apply_fault(Fault::Heal { a: b, b: a });
+    advance_settled(Duration::from_millis(10)).await;
+    assert!(pending.is_finished(), "a heal naming the address lets the connect through");
+    assert!(pending.await.unwrap().is_ok(), "and it is established");
+    assert!(listener.accept().await.is_some(), "the listener takes the stream");
+}
+
 // --- Block: half-open / hung peer — writer blocks, no error/close ----------
 
 #[tokio::test(start_paused = true)]

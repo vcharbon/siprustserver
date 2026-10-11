@@ -33,13 +33,15 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use sip_clock::Clock;
 use tokio::sync::broadcast;
 
 #[cfg(feature = "kube")]
 pub mod k8s;
 #[cfg(feature = "kube")]
 pub use k8s::K8sMembership;
+
+mod simulated;
+pub use simulated::SimulatedMembership;
 
 /// Peer identity ordinal. A plain `String` — the **same** identity type the
 /// proxy's `WorkerEntry.id` uses (`WorkerId = String`) — so a `Peer.ordinal`
@@ -438,76 +440,6 @@ impl Membership for StaticMembership {
     fn changes(&self) -> broadcast::Receiver<MemberDelta> {
         // Never fires, but the retained sender keeps the receiver alive.
         self.state.changes()
-    }
-}
-
-/// A membership whose peer set is driven imperatively by a test. Cheap to clone
-/// — clones share the same underlying state + delta channel. Clock-injected
-/// (mirrors the proxy's `SimulatedWorkerRegistry`); membership mutations
-/// themselves carry no behavioural time.
-#[derive(Clone)]
-pub struct SimulatedMembership {
-    state: Arc<MembershipState>,
-    #[allow(dead_code)]
-    clock: Clock,
-}
-
-impl SimulatedMembership {
-    /// Build with the system clock.
-    pub fn new(initial: Vec<Peer>) -> Self {
-        Self { state: Arc::new(MembershipState::new(initial)), clock: Clock::system() }
-    }
-
-    /// Build with an injected clock (tests use `Clock::test_at(..)`).
-    pub fn with_clock(initial: Vec<Peer>, clock: Clock) -> Self {
-        Self { state: Arc::new(MembershipState::new(initial)), clock }
-    }
-
-    /// Add (or replace) a peer, emitting [`MemberDelta::Added`].
-    pub fn add(&self, peer: Peer) {
-        self.state.add(peer);
-    }
-
-    /// Remove the peer with `ordinal`, emitting [`MemberDelta::Removed`] (no-op
-    /// if absent).
-    pub fn remove(&self, ordinal: &str) {
-        self.state.remove(ordinal);
-    }
-
-    /// Change an existing peer's host, emitting [`MemberDelta::AddressChanged`]
-    /// (no-op if unknown or unchanged).
-    pub fn change_address(&self, peer: Peer) {
-        self.state.set_address(peer);
-    }
-
-    /// Set an existing peer's endpoint conditions, emitting
-    /// [`MemberDelta::ConditionsChanged`] (no-op if unknown or unchanged). The
-    /// peer stays in the snapshot: it is still pulled, and routable iff `ready`
-    /// (ADR-0031 D1).
-    pub fn set_conditions(&self, ordinal: &str, ready: bool, terminating: bool) {
-        let Some(cur) = self.state.resolve(ordinal) else {
-            return;
-        };
-        self.state.set_conditions(Peer::with_conditions(ordinal, cur.host, ready, terminating));
-    }
-
-    /// Resolve a peer by ordinal (test introspection).
-    pub fn resolve(&self, ordinal: &str) -> Option<Peer> {
-        self.state.resolve(ordinal)
-    }
-}
-
-impl Membership for SimulatedMembership {
-    fn snapshot(&self) -> Vec<Peer> {
-        self.state.snapshot()
-    }
-    fn changes(&self) -> broadcast::Receiver<MemberDelta> {
-        self.state.changes()
-    }
-    /// The simulation stands in for the informer: a node's own ordinal is in
-    /// its snapshot while the orchestrator publishes it.
-    fn observes_self(&self) -> bool {
-        true
     }
 }
 

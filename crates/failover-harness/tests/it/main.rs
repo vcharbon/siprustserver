@@ -41,6 +41,7 @@ mod retry_on_a_challenged_identity;
 mod rfc_acceptance_window;
 mod service_answer_deadline;
 mod silent_callee_no_answer_via_lb;
+mod silent_replication_stream;
 mod spiral_takeover;
 mod stale_no_answer_reclaim;
 mod takeover_request_uri_rewritten;

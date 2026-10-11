@@ -32,3 +32,5 @@ rmp = { workspace = true }
 # `advance_in_100ms_chunks`); real-TCP tests use a non-paused runtime.
 tokio = { workspace = true }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+# Reads the socket options the real transport sets (getsockopt).
+socket2 = { workspace = true, features = ["all"] }

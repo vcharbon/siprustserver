@@ -50,6 +50,12 @@ mod test_support;
 mod idle_wait_tests;
 
 #[cfg(test)]
+mod link_liveness_tests;
+
+#[cfg(test)]
+mod membership_sync_tests;
+
+#[cfg(test)]
 mod s5_tests;
 
 #[cfg(test)]

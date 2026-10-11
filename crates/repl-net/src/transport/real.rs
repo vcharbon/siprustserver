@@ -33,6 +33,11 @@ impl RealReplicationNetwork {
     pub fn new() -> Self {
         Self
     }
+
+    /// Set this network's socket options on a stream it opened or accepted.
+    fn tune(&self, stream: &TcpStream) {
+        let _ = stream.set_nodelay(true);
+    }
 }
 
 #[async_trait]
@@ -48,6 +53,7 @@ impl ReplicationNetwork for RealReplicationNetwork {
                 ConnectError::Io(e.to_string())
             }
         })?;
+        self.tune(&stream);
         RealConnection::from_stream(stream).map_err(ConnectError::Io)
     }
 
@@ -60,19 +66,22 @@ impl ReplicationNetwork for RealReplicationNetwork {
             }
         })?;
         let local_addr = listener.local_addr().map_err(|e| ListenError::Io(e.to_string()))?;
-        Ok(Box::new(RealListener { inner: listener, local_addr }))
+        Ok(Box::new(RealListener { inner: listener, local_addr, network: self.clone() }))
     }
 }
 
 struct RealListener {
     inner: TcpListener,
     local_addr: SocketAddr,
+    /// The network whose socket options every accepted stream takes.
+    network: RealReplicationNetwork,
 }
 
 #[async_trait]
 impl ReplicationListener for RealListener {
     async fn accept(&self) -> Option<Box<dyn ReplicationConnection>> {
         let (stream, _peer) = self.inner.accept().await.ok()?;
+        self.network.tune(&stream);
         RealConnection::from_stream(stream).ok()
     }
 
@@ -103,7 +112,6 @@ impl RealConnection {
     fn from_stream(stream: TcpStream) -> Result<Box<dyn ReplicationConnection>, String> {
         let peer = stream.peer_addr().map_err(|e| e.to_string())?;
         let local = stream.local_addr().map_err(|e| e.to_string())?;
-        let _ = stream.set_nodelay(true);
         let (read_half, write_half) = stream.into_split();
         Ok(Box::new(RealConnection {
             peer,
@@ -256,6 +264,30 @@ mod tests {
         // Clean close: drop the client; server recv yields None.
         drop(client);
         assert_eq!(server.recv().await, None);
+    }
+
+    /// Both ends of a replication stream carry TCP keepalive and a 15 s
+    /// `TCP_USER_TIMEOUT`, so a peer that vanished without a reset is detected
+    /// by the kernel on an idle and on a busy socket alike.
+    #[tokio::test]
+    async fn both_ends_carry_keepalive_and_a_user_timeout() {
+        let net = RealReplicationNetwork::new();
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let (client, (server, _)) = (client.unwrap(), accepted.unwrap());
+        net.tune(&client);
+        net.tune(&server);
+        for (end, stream) in [("client", &client), ("server", &server)] {
+            let sock = socket2::SockRef::from(stream);
+            assert!(sock.keepalive().unwrap(), "{end}: SO_KEEPALIVE");
+            assert_eq!(
+                sock.tcp_user_timeout().unwrap(),
+                Some(std::time::Duration::from_secs(15)),
+                "{end}: TCP_USER_TIMEOUT"
+            );
+            assert!(sock.tcp_nodelay().unwrap(), "{end}: TCP_NODELAY");
+        }
     }
 
     #[tokio::test]
