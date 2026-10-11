@@ -6,6 +6,7 @@ use crate::wire::WireView;
 use crate::rules::Obligation;
 
 use super::reading::Reading;
+use super::records::{Served, TxnKey};
 
 /// **RFC 3262 §3 — a PRACK matching nothing local is forwarded, not
 /// absorbed.** A proxy holds no reliable-provisional state, so a PRACK naming
@@ -77,9 +78,11 @@ impl Obligation for UnmatchedPrackProxied {
 /// second. `matched` is the whole §7.2 `RAck` within the early dialog the
 /// PRACK names (§5): the method `INVITE`, and the `(RSeq, CSeq-num)` pair of a
 /// provisional the UAS had sent reliably in THAT dialog as of the PRACK's
-/// ARRIVAL — an `RSeq` it sends afterwards was not yet its to acknowledge, the
-/// right `RSeq` under another INVITE's CSeq names nothing, and a sibling
-/// fork's number names nothing here (§3, errata 4600). Charges the UAS.
+/// ARRIVAL and still held unacknowledged — an `RSeq` it sends afterwards was
+/// not yet its to acknowledge, one an earlier PRACK of another transaction
+/// already drew a 2xx for is off the unacknowledged list, the right `RSeq`
+/// under another INVITE's CSeq names nothing, and a sibling fork's number
+/// names nothing here (§3, errata 4600). Charges the UAS.
 pub struct Prack2xxOr481;
 
 impl Obligation for Prack2xxOr481 {
@@ -111,7 +114,8 @@ impl Obligation for Prack2xxOr481 {
             let matched = rack.on_invite
                 && seen
                     .reliably_sent_before(key.uas, key.call_id, prack.dialog, prack.ts_us)
-                    .contains(&(rack.rseq, rack.cseq));
+                    .contains(&(rack.rseq, rack.cseq))
+                && !acknowledged_before(&seen, key, prack);
             let honoured = if matched { (200..300).contains(&a.status) } else { a.status == 481 };
             out.push(head(if honoured {
                 Decision::Compliant
@@ -131,4 +135,24 @@ impl Obligation for Prack2xxOr481 {
         out.sort_by_key(|f| f.anchor);
         out
     }
+}
+
+/// Whether, before `prack` arrived, the UAS of `key` had answered 2xx to a
+/// PRACK of another transaction naming the same `RAck` in the same dialog: the
+/// provisional was acknowledged then, and is on no unacknowledged list now.
+fn acknowledged_before(seen: &Reading<'_>, key: &TxnKey<'_>, prack: &Served<'_>) -> bool {
+    seen.served.iter().any(|(other, earlier)| {
+        other.uas == key.uas
+            && other.call_id == key.call_id
+            && other.branch != key.branch
+            && earlier.method.eq_ignore_ascii_case("PRACK")
+            && earlier.dialog == prack.dialog
+            && earlier.rack == prack.rack
+            && earlier.ts_us < prack.ts_us
+            && seen.answers.get(other).is_some_and(|list| {
+                list.iter().any(|a| {
+                    a.answers("PRACK") && (200..300).contains(&a.status) && a.ts_us < prack.ts_us
+                })
+            })
+    })
 }

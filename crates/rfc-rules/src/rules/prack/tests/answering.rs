@@ -86,6 +86,42 @@ fn a_prack_draws_2xx_on_a_match_and_481_without_one() {
     assert!(matches!(decide(&Prack2xxOr481, &rejected)[0].decision, Decision::Compliant));
 }
 
+/// `prack-2xx-or-481`: a provisional an earlier PRACK of another transaction
+/// drew a 2xx for is acknowledged, so a new PRACK naming it matches nothing
+/// unacknowledged and owes the 481 (RFC 3262 §3).
+#[test]
+fn a_new_prack_of_an_acknowledged_provisional_draws_481() {
+    let again = |m: Msg| {
+        let mut m = m;
+        m.via_branch = Some("z9hG4bK-second-prack".to_string());
+        m
+    };
+    let second = |status: u16| {
+        vec![
+            inv_resp(1_100_000, 180, &reliable_rows(1), false),
+            prack_on(1_200_000, "1 1 INVITE", false),
+            prack_answer(1_250_000, 200),
+            again(prack_on(1_300_000, "1 1 INVITE", false)),
+            again(prack_answer(1_350_000, status)),
+        ]
+    };
+    let f = decide(&Prack2xxOr481, &second(481));
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert!(f.iter().all(|f| !f.violated()), "the first 200, the second 481: {f:?}");
+    let f = decide(&Prack2xxOr481, &second(200));
+    assert!(f[1].violated(), "a 2xx to a PRACK of an acknowledged provisional: {f:?}");
+
+    let first_refused = vec![
+        inv_resp(1_100_000, 180, &reliable_rows(1), false),
+        prack_on(1_200_000, "1 1 INVITE", false),
+        prack_answer(1_250_000, 500),
+        again(prack_on(1_300_000, "1 1 INVITE", false)),
+        again(prack_answer(1_350_000, 200)),
+    ];
+    let f = decide(&Prack2xxOr481, &first_refused);
+    assert!(!f[1].violated(), "a PRACK the UAS did not 2xx acknowledged nothing: {f:?}");
+}
+
 /// `prack-2xx-or-481`: the match is the whole §7.2 `RAck` — the right
 /// `RSeq` under a CSeq-num of no INVITE this UAS answered reliably, or
 /// under a method no reliable provisional answers, names nothing and owes
