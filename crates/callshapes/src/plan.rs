@@ -49,11 +49,11 @@ pub enum Establishment {
     /// (`winner_reliable`) or plainly. Routing rides the SAME
     /// [`RouteIntent::FailoverOnReject`](crate::binder::RouteIntent) seam as
     /// [`RerouteOnReject`](Self::RerouteOnReject), so a downstream binder maps
-    /// it unchanged; `no_answer_sec` is the SUT ring-timer knob a binder MAY
+    /// it unchanged; `no_answer_ms` is the SUT ring-timer knob a binder MAY
     /// arm client-side ([`RouteBinder::invite_plan_no_answer`]) — a platform
     /// whose SUT owns its own ring timer ignores it. The primary's dwell is
     /// bounded by the SUT timer, never by the callee.
-    RerouteOnNoAnswer { no_answer_sec: u32, winner_reliable: bool },
+    RerouteOnNoAnswer { no_answer_ms: u32, winner_reliable: bool },
     /// TRUE forking (RFC 3261 §12.1.2): the callee `bob` emits one 18x per
     /// DISTINCT explicit To-tag in `tags` on its ONE INVITE server transaction
     /// (as if a downstream proxy had forked), then answers `200` under
@@ -732,7 +732,7 @@ impl ShapePlan {
                             RouteIntent::FailoverOnReject { targets: &["bob", "bob2"] },
                         ),
                     ),
-                    Establishment::RerouteOnNoAnswer { no_answer_sec, winner_reliable } => (
+                    Establishment::RerouteOnNoAnswer { no_answer_ms, winner_reliable } => (
                         winner_reliable,
                         // The primary rings then stays silent; the SUT's
                         // no-answer timer CANCELs it (→ 487, a clean settle) and
@@ -741,7 +741,7 @@ impl ShapePlan {
                         self.binder.invite_plan_no_answer(
                             env,
                             RouteIntent::FailoverOnReject { targets: &["bob", "bob2"] },
-                            i64::from(no_answer_sec),
+                            i64::from(no_answer_ms),
                         ),
                     ),
                     _ => unreachable!("outer match arm"),

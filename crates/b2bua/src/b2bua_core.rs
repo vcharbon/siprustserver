@@ -933,7 +933,7 @@ fn txn_config(
         udp_queue_max: 1024,
         id_gen: id_gen.clone(),
         // The deployment's initial-INVITE bound (default 158 s):
-        // `config.validate()` keeps `setup_timeout_sec` strictly below
+        // `config.validate()` keeps `setup_timeout_ms` strictly below
         // it, so the rules path always gives up before the txn layer.
         invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
         // The initial INVITE's first-response bound (default Timer B):

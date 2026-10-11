@@ -959,7 +959,7 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
 
 /// NO-ANSWER-triggered failover end-to-end on the paused clock:
 ///
-///   INVITE(routes plan, per-route `no_answer_timeout_sec`) → bob 180 …
+///   INVITE(routes plan, per-route `no_answer_ms`) → bob 180 …
 ///   silence … → the SUT's OWN NoAnswer timer fires → CANCEL bob (487, the
 ///   leg settles via the hop-ACK) → /call/failure walks the plan → bob2
 ///   answers → talk → BYE.

@@ -51,7 +51,7 @@
 //!   B2BUA_NEW_CALL_QUEUE_HEADROOM_PCT share of B2BUA_CALL_CAP kept back from normal new INVITEs (default 5; 0..=99; emergency INVITEs and in-dialog requests reach the full cap)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
-//!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
+//!   B2BUA_SETUP_TIMEOUT_MS a-leg total setup deadline in ms, reroutes included (default 150000, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
 //!   B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC b-leg initial INVITE give-up when NOTHING answers, not even a 100 (default 32 = RFC 3261 Timer B; range 2..=32 — tightening is a deliberate §17.1.1.2 deviation, telephony policy: 2 s buys 2 re-sends, 5 s 3, 10 s 4, 32 s 6; a provisional swaps in B2BUA_INVITE_TXN_TIMEOUT_SEC; in-dialog INVITE and non-INVITE keep 64·T1)
 //!   B2BUA_CANCEL_STRICT_RFC_WAIT truthy (1/true/yes/on) = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)

@@ -216,7 +216,7 @@ async fn a_reoffer_describing_fewer_streams_keeps_the_dropped_one_rejected() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5943);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.callback_context = Some("ctx-release".into());
                 NewCallResponse::Route(r)

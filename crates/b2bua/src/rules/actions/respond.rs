@@ -557,7 +557,7 @@ impl ActionExecutor<'_> {
                     call,
                     fx,
                     TimerKey::call(TimerType::GlobalDuration),
-                    platform.max_duration_sec * 1000,
+                    platform.max_duration_ms,
                 );
             }
         }

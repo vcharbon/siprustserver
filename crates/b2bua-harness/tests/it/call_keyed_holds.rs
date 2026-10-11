@@ -183,7 +183,7 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
@@ -662,7 +662,7 @@ async fn a_refresh_landing_after_a_refused_reroute_dropped_the_set_re_creates_no
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)
             })
@@ -899,7 +899,7 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
                 let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
                 // Off the refresh period's multiples: no refresh is in flight
                 // when the reroute is admitted.
-                r.features.platform.max_duration_sec = 62;
+                r.features.platform.max_duration_ms = 62_000;
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)
             })

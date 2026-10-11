@@ -144,7 +144,7 @@ body }` and an executor arm (model on `executeSendNotify`, ActionExecutor.ts:215
 - **No-answer timer:** id `no_answer-{callRef}-{cLegId}` — armed by `create-leg`'s
   `noAnswerTimeoutSec` (executor schedules `NoAnswer` timer with the leg id, RUST
   actions.rs:156-158). The `refer-allow-c-no-answer` scenario passes
-  `no_answer_timeout_sec: 5`. `transfer-c-no-answer` matches `timer no_answer` with
+  `no_answer_ms: 5000`. `transfer-c-no-answer` matches `timer no_answer` with
   `ctx.event.legId === ext.cLegId` (referTransfer.ts:446-449). NB the default
   CORE `no-answer` rule (defaults.rs:370) ALSO matches `NoAnswer` — the transfer
   rule must out-rank it by SERVICE_LAYER + a phase/leg filter; CORE no-answer would
@@ -272,7 +272,7 @@ and gets 481. No new rule needed.
 
 Defaults live in TS `AppConfig` (`referSubscriptionExpirySec=60`,
 `referReinviteAnswerSec=32`, `referOverallSafetySec=120`; `no_answer_timeout` is
-per-allow `no_answer_timeout_sec`, no fixed REFER default — the C no-answer uses
+per-allow `no_answer_ms`, no fixed REFER default — the C no-answer uses
 the same `NoAnswer` timer the create-leg arms). The Rust `TimerType` enum already
 carries `ReferSubscriptionExpiry`, `ReferReinviteAnswer`, `ReferOverallSafety`
 (`crates/call/src/model.rs:258-263`) and `NoAnswer`. **`B2buaConfig` has no refer
@@ -296,7 +296,7 @@ schedule and cancel sides so they can never drift (CLAUDE.md timer-aliasing haza
 | Timer | TimerType | Armed by | Cancelled by | Fires → |
 |---|---|---|---|---|
 | subscription-expiry (60s) | `ReferSubscriptionExpiry` | seed (`transfer-intercept-refer`) | C 200-initial, C fail-initial, C no-answer, HTTP reject, overall-timeout | `transfer-http-timeout` (only in refer-authorizing): NOTIFY 500 term;timeout, cancel overall, clear |
-| no-answer (per-allow) | `NoAnswer` (leg=cLegId) | `create-leg` (`no_answer_timeout_sec`) | C 200-initial, C fail-initial | `transfer-c-no-answer` (c-ringing, leg=cLegId): NOTIFY 408 term;timeout, destroy C, clear |
+| no-answer (per-allow) | `NoAnswer` (leg=cLegId) | `create-leg` (`no_answer_ms`) | C 200-initial, C fail-initial | `transfer-c-no-answer` (c-ringing, leg=cLegId): NOTIFY 408 term;timeout, destroy C, clear |
 | reinvite-answer (32s) | `ReferReinviteAnswer` | C 200-initial (leg cLegId), then c-realign-200 (leg "a") | c-realign-200 (cancels C's), a-realign-200 (cancels A's), both fail rules, overall-timeout | `transfer-c-realign-timeout` (c-realigning) OR `transfer-a-realign-timeout` (a-realigning, leg "a") → rollback |
 | overall-safety (120s) | `ReferOverallSafety` | seed | every terminal rule (allow→c-200 keeps it; cleared on a-realign-200, all fail/reject rules, http-reject/timeout, c-fail, c-no-answer) | `transfer-overall-timeout` (any of 4 phases): cancel sub-expiry + both reinvite-answer ids, CDR, begin-termination |
 
@@ -337,7 +337,7 @@ Request (`CallReferRequest`): `call_id` (A-leg Call-ID), `dialog_id`
 
 Response (`CallReferResponse`):
 - `allow`: `destination {host,port?,transport?}`, `new_refer_to?`,
-  `update_headers?`, `no_answer_timeout_sec?`, `call_limiter?`, `callback_context?`,
+  `update_headers?`, `no_answer_ms?`, `call_limiter?`, `callback_context?`,
   `relay_first_18x_to_180?`, `features?` (synthesized).
 - `reject`: `reject_code?`, `reject_reason?` (carried in the NOTIFY sipfrag, NOT
   the REFER).
@@ -350,7 +350,7 @@ Response (`CallReferResponse`):
   to match TS.
 - `CallReferResponse` (schemas.rs:133-137) is `Allow { destination }` /
   `Reject { code, reason }`. **Gap:** `Allow` is missing `new_refer_to`,
-  `update_headers`, `no_answer_timeout_sec`, `callback_context`, `features`. Add
+  `update_headers`, `no_answer_ms`, `callback_context`, `features`. Add
   them (mirror `RouteDecision`; the C-leg reuses route levers).
 - `ScriptedDecisionEngine::call_refer` (test_adapter.rs:153-162) is a stub that
   always rejects 501. **Gap:** implement scripted `call_refer` driven by the
@@ -365,7 +365,7 @@ Response (`CallReferResponse`):
     sub-expiry timer is what fires. Implement by simply NOT firing the re-entry
     for this key (or sleeping past test horizon). See §9 fire-and-forget wiring.
   - `refer-allow-c` → allow with `destination` (default 127.0.0.1:5667),
-    optional `new_refer_to`/`update_headers`/`no_answer_timeout_sec`/`callback_context`.
+    optional `new_refer_to`/`update_headers`/`no_answer_ms`/`callback_context`.
   - default (no X-Api-Call) → reject 603/"Declined".
 
 **Driving from a test:** the Rust scenarios use a `ScriptedDecisionEngine` whose
@@ -449,7 +449,7 @@ Implement the loop:
 - `FireAndForgetEffect::Reenter(ev)`: `on_event(&ctx, *ev).await` (general path).
 
 The payload must carry what `transfer-http-allow`/`transfer-http-reject` read:
-allow→`{destination, new_refer_to?, update_headers?, no_answer_timeout_sec?,
+allow→`{destination, new_refer_to?, update_headers?, no_answer_ms?,
 callback_context?}`; reject→`{reject_code?, reject_reason?}`. The Rust rules read
 these out of `CallEvent::InternalEvent.payload` (serde_json::Value) inside the
 handler — add a `RuleContext` accessor or read `ctx.event` directly.

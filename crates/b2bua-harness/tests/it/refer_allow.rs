@@ -305,7 +305,7 @@ async fn refer_allow_c_no_answer() {
     let mut refer = bob_dialog
         .send_request(InDialogMethod::Refer)
         .with_header("Refer-To", &refer_to_charlie())
-        .with_header("X-Api-Call", &x_api_allow_c(r#","no_answer_timeout_sec":5"#))
+        .with_header("X-Api-Call", &x_api_allow_c(r#","no_answer_ms":5000"#))
         .send()
         .await;
     refer.expect(202).await;

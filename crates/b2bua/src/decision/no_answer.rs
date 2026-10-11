@@ -6,9 +6,9 @@ use call::features::FeatureActivations;
 use call::Deadline;
 
 /// The ring deadline of a routing answer: the one it states, else its
-/// features'. Absent, zero or negative is off; otherwise the seconds stated.
+/// features'. Absent, zero or negative is off; otherwise the milliseconds stated.
 pub fn no_answer_deadline(stated: Option<i64>, features: Option<&FeatureActivations>) -> Deadline {
-    Deadline::of_secs(stated.or(features.and_then(|f| f.no_answer_timeout_sec)))
+    Deadline::of_millis(stated.or(features.and_then(|f| f.no_answer_ms)))
 }
 
 #[cfg(test)]
@@ -20,10 +20,10 @@ mod tests {
     #[test]
     fn the_stated_deadline_wins_over_the_features() {
         let mut features = crate::decision::default_platform_features();
-        features.no_answer_timeout_sec = Some(20);
+        features.no_answer_ms = Some(20_000);
         assert_eq!(
-            no_answer_deadline(Some(5), Some(&features)),
-            Deadline::After(Duration::from_secs(5))
+            no_answer_deadline(Some(800), Some(&features)),
+            Deadline::After(Duration::from_millis(800))
         );
         assert_eq!(
             no_answer_deadline(None, Some(&features)),

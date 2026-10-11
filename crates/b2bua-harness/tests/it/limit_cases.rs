@@ -66,7 +66,7 @@ fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 
 /// A decision that routes every call to `host:port`, takes a limiter hold under
 /// `id` (capacity `limit`), and arms the call's `GlobalDuration` at
-/// `max_duration_sec` (the per-call `features.platform.max_duration_sec` the
+/// `max_duration_sec` (the per-call `features.platform.max_duration_ms` the
 /// `max-duration` rule reads — see `rules/defaults.rs`).
 fn route_limited(
     host: &str,
@@ -82,7 +82,7 @@ fn route_limited(
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
                 r.call_limiter = vec![LimiterEntry { id: id.clone(), limit }];
-                r.features.platform.max_duration_sec = max_duration_sec;
+                r.features.platform.max_duration_ms = max_duration_sec * 1000;
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -498,7 +498,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
             let mut r = route_to("127.0.0.1", 5073);
             r.callback_context = Some("cap-failover".into());
             r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 1 }];
-            r.features.platform.max_duration_sec = 3_600;
+            r.features.platform.max_duration_ms = 3_600_000;
             Ok(NewCallResponse::Route(r))
         }
         async fn call_failure(

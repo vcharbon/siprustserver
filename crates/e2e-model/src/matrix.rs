@@ -86,7 +86,7 @@ const ESTS: &[Est] = &[
     Est {
         frag: "reroute_noanswer",
         make: Establishment::RerouteOnNoAnswer {
-            no_answer_sec: callshapes::shapes::NOANSWER_RING_SEC,
+            no_answer_ms: callshapes::shapes::NOANSWER_RING_MS,
             winner_reliable: false,
         },
         needs_bob2: true,

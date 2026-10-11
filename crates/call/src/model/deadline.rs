@@ -17,11 +17,6 @@ pub enum Deadline {
 }
 
 impl Deadline {
-    /// A wait stated in seconds: absent, zero or negative is off.
-    pub fn of_secs(secs: Option<i64>) -> Self {
-        Self::of_millis(secs.map(|s| s.saturating_mul(1000)))
-    }
-
     /// A wait stated in milliseconds: absent, zero or negative is off.
     pub fn of_millis(millis: Option<i64>) -> Self {
         match millis {
@@ -50,15 +45,13 @@ mod tests {
 
     #[test]
     fn absent_zero_and_negative_are_off() {
-        assert_eq!(Deadline::of_secs(None), Deadline::Off);
-        assert_eq!(Deadline::of_secs(Some(0)), Deadline::Off);
-        assert_eq!(Deadline::of_secs(Some(-3)), Deadline::Off);
+        assert_eq!(Deadline::of_millis(None), Deadline::Off);
         assert_eq!(Deadline::of_millis(Some(0)), Deadline::Off);
+        assert_eq!(Deadline::of_millis(Some(-3)), Deadline::Off);
     }
 
     #[test]
     fn a_positive_wait_keeps_its_milliseconds() {
-        assert_eq!(Deadline::of_secs(Some(30)).millis(), Some(30_000));
         assert_eq!(Deadline::of_millis(Some(750)).millis(), Some(750));
     }
 }

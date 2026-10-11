@@ -180,7 +180,7 @@ struct ReferAllowPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     update_headers: Option<SipHeaderUpdates>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    no_answer_timeout_sec: Option<i64>,
+    no_answer_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     callback_context: Option<String>,
     /// The decision's label, for the fold's `MarkDecision`.
@@ -211,7 +211,7 @@ pub(super) fn spawn_refer_callout(
                 destination,
                 new_refer_to,
                 update_headers,
-                no_answer_timeout_sec,
+                no_answer_ms,
                 callback_context,
                 label,
             }) => (
@@ -225,7 +225,7 @@ pub(super) fn spawn_refer_callout(
                     },
                     new_refer_to,
                     update_headers,
-                    no_answer_timeout_sec,
+                    no_answer_ms,
                     callback_context,
                     label,
                 }),

@@ -214,7 +214,7 @@ async fn a_fork_being_cancelled_answers_its_early_dialog_until_the_invites_final
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&first.ip().to_string(), first.port());
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("reroute".into());
                 NewCallResponse::Route(r)
             })
@@ -225,7 +225,7 @@ async fn a_fork_being_cancelled_answers_its_early_dialog_until_the_invites_final
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())

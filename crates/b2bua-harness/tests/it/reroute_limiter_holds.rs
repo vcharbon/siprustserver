@@ -825,7 +825,7 @@ async fn release_reroute_replaces_the_route_holds() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(&["x", "y"]);
@@ -910,7 +910,7 @@ async fn release_reroute_admit_answer_lost(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(&["x"]);
@@ -1080,7 +1080,7 @@ async fn release_consult_in_flight_is_the_only_one_of_the_call() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = CAP_SEC;
+                    r.features.platform.max_duration_ms = CAP_SEC * 1000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiters(&["x", "y"]);

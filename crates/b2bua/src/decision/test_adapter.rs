@@ -292,7 +292,7 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     // Per-route no-answer ring timer: `apply_route` arms
     // `TimerType::NoAnswer` on the dialed b-leg, so a ring-forever hop advances
     // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
-    r.no_answer_timeout_sec = obj.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
+    r.no_answer_ms = obj.get("no_answer_ms").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
     // The route's stated headers by scope (`StatedHeaders`); absent or
     // unreadable states none.
@@ -473,8 +473,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 .unwrap_or(5667);
             let new_refer_to =
                 instruction.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
-            let no_answer_timeout_sec =
-                instruction.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
+            let no_answer_ms = instruction.get("no_answer_ms").and_then(|v| v.as_i64());
             let callback_context =
                 instruction.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
             let update_headers = parse_update_headers(instruction.get("update_headers"));
@@ -482,7 +481,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 destination: SipDestination::new(host, port),
                 new_refer_to,
                 update_headers,
-                no_answer_timeout_sec,
+                no_answer_ms,
                 callback_context,
                 label: parse_label(&instruction),
             })
@@ -624,7 +623,7 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
         new_to: None,
         update_headers: None,
         update_body: BodyUpdate::Keep,
-        no_answer_timeout_sec: None,
+        no_answer_ms: None,
         call_limiter: Vec::new(),
         callback_context: None,
         features: default_platform_features(),

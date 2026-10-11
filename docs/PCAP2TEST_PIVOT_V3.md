@@ -2564,8 +2564,7 @@ says. A window stated there is honoured and reported all the same, just rarely
 exercised; its consumer is the real-clock lane.
 
 **A dwell the LANE cannot arm is refused, not rounded.** Where the lane's own
-grain is coarser than the document's dwell — a route decision that speaks whole
-seconds against a `no_answer_ms` of 15 139 — the driver arms the nearest value it
+grain is coarser than the document's dwell, the driver arms the nearest value it
 can and the difference rides this same window. A difference the window does not
 cover refuses the run before it dials (§14): a ring half a second short of what
 the document measured proves a different thing than the document does.

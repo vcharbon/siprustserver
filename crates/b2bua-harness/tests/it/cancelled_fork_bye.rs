@@ -93,7 +93,7 @@ async fn a_callee_bye_on_a_fork_being_cancelled_ends_that_fork_alone() {
     let b2bua = B2buaSut::builder(decision)
         .services(vec![retarget::service_def()])
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())
@@ -150,7 +150,7 @@ async fn a_caller_cancel_leaves_a_fork_already_being_cancelled_to_its_cancel() {
     let b2bua = B2buaSut::builder(decision)
         .services(vec![retarget::service_def()])
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())
@@ -212,7 +212,7 @@ async fn the_ack_of_a_crossing_200_names_its_own_fork() {
     let b2bua = B2buaSut::builder(decision)
         .services(vec![retarget::service_def()])
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())
@@ -309,7 +309,7 @@ async fn sut(
     B2buaSut::builder(decision)
         .services(services)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(h, "b2bua", &h.next_addr().to_string())

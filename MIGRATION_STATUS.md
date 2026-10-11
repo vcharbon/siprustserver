@@ -926,7 +926,7 @@ no 1:1 TS scenario (the TS enforces the same limits in `SipRouter.ts` /
 | Limit / race | Behaviour exercised | Rust home | Status |
 |---|---|---|---|
 | No-answer / ring forever | a-leg `SetupTimeout` (150 s; >180 s unreachable — sip-txn `INVITE_INITIAL_TIMEOUT` backstop is 158 s) → 408 + CANCEL b-leg + limiter release | `b2bua-harness/tests/setup_timeout.rs` | ✅ 2 |
-| Max call duration (never hung up) | established call → `GlobalDuration` (`features.platform.max_duration_sec`) → BYE both legs + `max_duration` CDR + limiter release | `limit_cases.rs::max_duration_byes_both_legs_*` | ✅ 1 |
+| Max call duration (never hung up) | established call → `GlobalDuration` (`features.platform.max_duration_ms`) → BYE both legs + `max_duration` CDR + limiter release | `limit_cases.rs::max_duration_byes_both_legs_*` | ✅ 1 |
 | Max-duration mid-re-INVITE | cap fires while a re-INVITE is pending → teardown abandons the re-INVITE + limiter release | `limit_cases.rs::max_duration_fires_mid_reinvite_*` | ✅ 1 |
 | Provisional storm before connect | >200 `18x` to the initial INVITE → `MAX_MESSAGES_PER_CALL` cap → 503 to caller + CANCEL b-leg + limiter release | `limit_cases.rs::provisional_storm_*` | ✅ 1 |
 | Reliable-provisional / PRACK-loop storm | >200 events from a `183(100rel)`/PRACK/`200(PRACK)` loop → cap trips with an in-flight PRACK txn open → 503 to a-leg + CANCEL b-leg, PRACK abandoned with no leak, RFC gate clean + limiter release | `limit_cases.rs::prack_loop_storm_*` | ✅ 1 |

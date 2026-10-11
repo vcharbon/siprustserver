@@ -72,8 +72,8 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
 /// answers, the ring timer the lane armed from the document's own
 /// `no_answer_ms` fires, the system CANCELs that attempt and hunts on.
 ///
-/// The dwell is the DOCUMENT's (§4.1): the driver lowers `no_answer_ms` to the
-/// route's whole-second `no_answer_timeout_sec` and nothing else picks it. On a
+/// The dwell is the DOCUMENT's (§4.1): the driver hands its `no_answer_ms` to the
+/// route as stated and nothing else picks it. On a
 /// paused runtime the callee simply stays silent, so the only thing that can
 /// end the ring is the system's own timer.
 ///
@@ -142,16 +142,14 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
     scene.finish().await;
 }
 
-/// Rung three, the SUB-SECOND ring: a `no_answer_ms` this lane's whole-second
-/// route decision cannot arm exactly, replayed under a stated timing tolerance
-/// (§9.2).
+/// Rung three, the SUB-SECOND ring: a `no_answer_ms` the route decision arms
+/// to the millisecond, replayed under a stated timing tolerance (§9.2).
 ///
 /// A captured platform states its ring where its timer actually fired —
-/// 15 139 ms here, not a round 15 000 — and no lane arms every
-/// grain. The driver arms the NEAREST value it can, the run states the window it
-/// will accept, and the difference is REPORTED rather than rounded away: the
-/// verdict's timing note carries declared, observed and the window that covered
-/// the gap, so a reader sees what the run absorbed.
+/// 15 139 ms here, not a round 15 000 — and the route decision carries it as
+/// stated. The verdict's timing note carries declared, observed and the window
+/// the run stated, so a reader sees the system rang exactly what the document
+/// measured.
 ///
 /// The document is the no-answer draft with ONE number changed, built here
 /// rather than authored beside it: a second twenty-step copy of one flow to vary
@@ -160,11 +158,9 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
 ///
 /// It skips loudly when no case library is configured.
 #[tokio::test(start_paused = true)]
-async fn a_ring_this_lane_cannot_arm_exactly_rides_the_run_s_stated_tolerance() {
-    /// What the capture measured, and what no whole-second lane arms.
+async fn a_sub_second_ring_is_armed_to_the_millisecond() {
+    /// What the capture measured, and what the lane arms.
     const RING_MS: u64 = 15_139;
-    /// What this lane arms instead: the nearest second.
-    const ARMED_MS: u64 = 15_000;
 
     let Some(mut case) = case_dir("reroute-on-no-answer") else {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
@@ -198,42 +194,25 @@ async fn a_ring_this_lane_cannot_arm_exactly_rides_the_run_s_stated_tolerance() 
     assert_bundle_is_complete(&outcome, &dir);
 
     // The reading, in the verdict: what the document declares, what the system's
-    // timer actually measured, and the window that covered the difference.
+    // timer actually measured, and the window the run stated.
     assert_eq!(outcome.verdict.timings.len(), 1, "{:#?}", outcome.verdict.timings);
     let note = &outcome.verdict.timings[0];
     assert_eq!(note.step, "s6");
     assert_eq!(note.leg, "B");
     assert_eq!(note.declared_ms, RING_MS);
-    assert_eq!(note.observed_ms, ARMED_MS);
-    assert_eq!(note.delta_ms, -139, "the system rang 139 ms short of the document");
+    assert_eq!(note.observed_ms, RING_MS);
+    assert_eq!(note.delta_ms, 0, "the system rang what the document measured");
     assert_eq!(note.tolerance_ms, 200);
 
-    // And the wire agrees: the ring really was the armed 15 s, not the declared
-    // 15.139 s — the tolerance absorbs a difference, it does not invent one.
+    // And the wire agrees: the ring really was the declared 15.139 s.
     let b_leg = &outcome.recording.legs()["B"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
         b_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
     let invited = at(&|raw: &str| raw.starts_with("INVITE sip:+1999999bob5070"));
     let cancelled = at(&|raw: &str| raw.starts_with("CANCEL "));
-    assert_eq!(cancelled - invited, ARMED_MS * 1000);
+    assert_eq!(cancelled - invited, RING_MS * 1000);
 
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     scene.finish().await;
-}
-
-/// The lane's own arming rule (§9.2), on the grain it actually has: a whole
-/// second. What it cannot arm exactly it arms nearest, and what the window does
-/// not cover it REFUSES rather than rounding.
-#[test]
-fn a_ring_between_two_seconds_arms_at_the_nearest_one_inside_the_stated_window() {
-    assert_eq!(no_answer_sec("called-0-0", 15_000, 0), 15, "an armable ring needs no window");
-    assert_eq!(no_answer_sec("called-0-0", 15_139, 200), 15, "139 ms below the nearest second");
-    assert_eq!(no_answer_sec("called-0-0", 14_800, 200), 15, "200 ms above it, at the edge");
-}
-
-#[test]
-#[should_panic(expected = "this lane arms whole seconds")]
-fn a_ring_the_window_does_not_cover_is_refused_rather_than_rounded() {
-    no_answer_sec("called-0-0", 15_139, 100);
 }

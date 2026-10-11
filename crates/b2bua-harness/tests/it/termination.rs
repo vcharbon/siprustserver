@@ -277,7 +277,7 @@ async fn a_max_duration_end_is_recorded_by_no_leg_and_cut_after_both_byes() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut route = route_to("127.0.0.1", 5070);
-                route.features.platform.max_duration_sec = 20;
+                route.features.platform.max_duration_ms = 20_000;
                 NewCallResponse::Route(route)
             })
             .build(),
@@ -330,7 +330,7 @@ async fn a_setup_timeout_is_recorded_as_a_setup_deadline() {
     let sut = Sut::spawn_tuned(
         &h,
         Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
-        |c| c.setup_timeout_sec = 10,
+        |c| c.setup_timeout_ms = 10_000,
     )
     .await;
 
@@ -525,7 +525,7 @@ fn ringing_route(no_answer_sec: i64, consult: bool) -> Arc<dyn CallDecisionEngin
         ScriptedDecisionEngine::builder()
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(no_answer_sec);
+                r.no_answer_ms = Some(no_answer_sec * 1000);
                 r.callback_context = consult.then(|| "ctx".to_string());
                 NewCallResponse::Route(r)
             })
@@ -543,7 +543,7 @@ fn released_route(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.features.platform.max_duration_sec = 20;
+                r.features.platform.max_duration_ms = 20_000;
                 r.callback_context = Some("ctx".into());
                 r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)

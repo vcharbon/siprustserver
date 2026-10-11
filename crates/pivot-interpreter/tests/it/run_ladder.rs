@@ -206,30 +206,8 @@ struct Egress {
     user: String,
     /// `host:port`, as the route decision states a destination.
     dest: String,
-    /// The whole-second `no_answer_timeout_sec` the attempt's `no_answer_ms`
-    /// lowers to, where the attempt states one.
-    no_answer_sec: Option<i64>,
-}
-
-/// The route timer this lane arms for an attempt's stated ring, in the whole
-/// seconds its decision backend speaks.
-///
-/// This lane's grain is one second, so a dwell the document measured between two
-/// seconds is armed at the NEAREST one and the difference rides the run's stated
-/// timing tolerance (§9.2). A difference the tolerance does not cover is REFUSED
-/// rather than rounded: a run whose ring is half a second short of what the
-/// document measured proves a different thing than the document does, and
-/// quietly proving something else is the one outcome §14 rules out.
-fn no_answer_sec(identity: &str, ms: u64, tolerance_ms: u64) -> i64 {
-    let secs = (ms as f64 / 1000.0).round() as i64;
-    let armed = (secs * 1000) as u64;
-    assert!(
-        armed.abs_diff(ms) <= tolerance_ms,
-        "{identity}: this lane arms whole seconds, so {ms} ms arms at {armed} ms — \
-         a difference of {} ms, and this run states a tolerance of ±{tolerance_ms} ms",
-        armed.abs_diff(ms)
-    );
-    secs
+    /// The ring timer the attempt's `no_answer_ms` states, where it states one.
+    no_answer_ms: Option<i64>,
 }
 
 /// The lane's egress for every attempt the document declares (§4.3).
@@ -245,7 +223,6 @@ fn lane_egress(
     plan: &Plan,
     composer: &DemoComposer,
     identities: &IdentityBindings,
-    tolerance_ms: u64,
     agents: &BTreeMap<String, scenario_harness::Agent>,
 ) -> Vec<Egress> {
     let document = plan.document();
@@ -296,7 +273,7 @@ fn lane_egress(
                 identity: name.clone(),
                 user,
                 dest,
-                no_answer_sec: attempt.no_answer_ms.map(|ms| no_answer_sec(name, ms, tolerance_ms)),
+                no_answer_ms: attempt.no_answer_ms.map(|ms| ms as i64),
             });
         }
     }
@@ -333,8 +310,8 @@ fn hunt_plan(egress: &[Egress], call: &pivot_schema::call::Call) -> Option<serde
                 "destination": { "host": host, "port": port.parse::<u16>().ok()? },
                 "new_ruri": format!("sip:{}@{}", hop.user, hop.dest),
             });
-            if let Some(secs) = hop.no_answer_sec {
-                route["no_answer_timeout_sec"] = serde_json::json!(secs);
+            if let Some(ms) = hop.no_answer_ms {
+                route["no_answer_ms"] = serde_json::json!(ms);
             }
             Some(route)
         })
@@ -635,8 +612,7 @@ async fn replay_directed(
     // §4.3 is the DRIVER's: bind each callee identity to the Request-URI
     // userpart this lane's system will egress its leg under, and — where the
     // call states a hunt — hand the system the route list that walks it.
-    let egress =
-        lane_egress(&plan, &composer, &identities, directives.timing_tolerance_ms, &agents);
+    let egress = lane_egress(&plan, &composer, &identities, &agents);
     // EACH call's own egress directive — a hunt where its chain states one, a
     // single destination otherwise — carrying whatever the rung armed. Nothing
     // armed and no hunt: the lane states nothing at all, so the system's own

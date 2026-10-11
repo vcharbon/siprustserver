@@ -86,7 +86,7 @@ impl CallDecisionEngine for Unanswering {
         r.new_ruri = None;
         r.call_limiter = vec![LimiterEntry { id: "trunk".into(), limit: 10 }];
         r.callback_context = Some("ctx".into());
-        r.features.platform.max_duration_sec = self.max_duration_sec;
+        r.features.platform.max_duration_ms = self.max_duration_sec * 1000;
         r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
         Ok(NewCallResponse::Route(r))
     }

@@ -155,7 +155,7 @@ pub(super) fn http_allow() -> RuleDefinition {
                 }
             };
             let no_answer = crate::decision::no_answer_deadline(
-                payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
+                payload.get("no_answer_ms").and_then(|v| v.as_i64()),
                 None,
             );
             let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);

@@ -292,14 +292,14 @@ impl<'a> CallEnv<'a> {
     }
 
     /// [`Self::invite_plan`] with a per-route NO-ANSWER ring timer: on a
-    /// pinned layout the `routes` failover plan arms `no_answer_timeout_sec` on
+    /// pinned layout the `routes` failover plan arms `no_answer_ms` on
     /// every hop, so the SUT reroutes on ring-timeout as well as on reject
     /// (`EgressPolicy::rewrite_with_no_answer`). Other layouts ignore the knob.
-    pub fn invite_plan_no_answer(&self, callees: &[&str], no_answer_sec: i64) -> InvitePlan {
-        self.invite_plan_with(callees, Some(no_answer_sec))
+    pub fn invite_plan_no_answer(&self, callees: &[&str], no_answer_ms: i64) -> InvitePlan {
+        self.invite_plan_with(callees, Some(no_answer_ms))
     }
 
-    fn invite_plan_with(&self, callees: &[&str], no_answer_sec: Option<i64>) -> InvitePlan {
+    fn invite_plan_with(&self, callees: &[&str], no_answer_ms: Option<i64>) -> InvitePlan {
         // (3) the per-call identity — the correlation stamp + emergency marker.
         // A To-user stamp supersedes the authored core `to` (`apply_identity`
         // applies AFTER `apply_core` on the builder; eager form: override here).
@@ -324,7 +324,7 @@ impl<'a> CallEnv<'a> {
             to,
             ruri: self.core.ruri.clone(),
             headers,
-            rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_sec),
+            rewrite: self.egress.rewrite_with_no_answer(&targets, no_answer_ms),
         }
     }
 

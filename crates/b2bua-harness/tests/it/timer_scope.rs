@@ -74,12 +74,12 @@ fn failing_over(bob: u16, carol: u16, no_answer_sec: i64) -> Arc<SlowFailure> {
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", bob);
                 r.callback_context = Some("timer-scope".into());
-                r.no_answer_timeout_sec = Some(no_answer_sec);
+                r.no_answer_ms = Some(no_answer_sec * 1000);
                 NewCallResponse::Route(r)
             })
             .on_failure(move |_| {
                 let mut r = route_to("127.0.0.1", carol);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 CallTreatment::Route(r)
             })
             .build(),

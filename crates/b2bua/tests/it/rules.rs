@@ -5774,13 +5774,13 @@ mod charging_in_dialog {
     fn features(option: bool, uncharged: bool) -> FeatureActivations {
         FeatureActivations {
             platform: PlatformActivations {
-                max_duration_sec: 7200,
+                max_duration_ms: 7_200_000,
                 max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 3 },
             },
             refer: None,
             relay_first_18x_to_180: None,
-            no_answer_timeout_sec: None,
+            no_answer_ms: None,
             advertise_capabilities: None,
             charging_vector: Some(ChargingVectorFeature {
                 generated_at: None,

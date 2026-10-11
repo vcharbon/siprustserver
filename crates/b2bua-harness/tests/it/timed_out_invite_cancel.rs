@@ -23,7 +23,7 @@ async fn a_callee_silent_past_the_invite_bound_is_cancelled_and_its_487_acked() 
     let s = B2buaScene::with_b2bua("timed-out-invite-487-acked", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
             c.invite_txn_timeout_sec = BOUND_SEC;
-            c.setup_timeout_sec = 0;
+            c.setup_timeout_ms = 0;
             c.keepalive_interval_sec = 300;
         })
     })
@@ -57,7 +57,7 @@ async fn a_callee_silent_past_the_invite_bound_is_cancelled_and_its_487_acked() 
 async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
     let s = one_permit_one_deep_with("timed-out-invite-late-turn", |c| {
         c.invite_txn_timeout_sec = BOUND_SEC;
-        c.setup_timeout_sec = 0;
+        c.setup_timeout_ms = 0;
         c.call_control_timeout_ms = 40_000;
         c.keepalive_interval_sec = 300;
     })

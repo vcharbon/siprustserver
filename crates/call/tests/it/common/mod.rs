@@ -271,7 +271,7 @@ pub fn representative_call() -> Call {
         emergency: Some(true),
         features: Some(FeatureActivations {
             platform: PlatformActivations {
-                max_duration_sec: 3600,
+                max_duration_ms: 3_600_000,
                 max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
@@ -280,7 +280,7 @@ pub fn representative_call() -> Call {
                 strategy: RelayFirst18xStrategy::FakePrack,
                 messages: Default::default(),
             }),
-            no_answer_timeout_sec: Some(45),
+            no_answer_ms: Some(45_000),
             advertise_capabilities: None,
             charging_vector: None,
             withhold_option_tags: None,
@@ -775,8 +775,8 @@ fn arb_active_rule() -> impl Strategy<Value = ActiveRule> {
 }
 fn arb_features() -> impl Strategy<Value = FeatureActivations> {
     let platform = (any::<i64>(), any::<i64>(), any::<i64>()).prop_map(
-        |(max_duration_sec, interval_sec, max_missed)| PlatformActivations {
-            max_duration_sec,
+        |(max_duration_ms, interval_sec, max_missed)| PlatformActivations {
+            max_duration_ms,
             max_duration_anchor: Default::default(),
             keepalive: KeepaliveActivation { interval_sec, max_missed },
         },
@@ -807,7 +807,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
                     .map(|max_chain_depth| call::features::ReferFeature { max_chain_depth }),
                 relay_first_18x_to_180: strategy
                     .map(|(strategy, messages)| RelayFirst18xTo180Feature { strategy, messages }),
-                no_answer_timeout_sec: no_answer,
+                no_answer_ms: no_answer,
                 advertise_capabilities: None,
                 charging_vector: None,
                 withhold_option_tags: None,

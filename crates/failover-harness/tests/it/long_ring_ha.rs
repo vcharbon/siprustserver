@@ -75,7 +75,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     let mut fh = FailoverHarness::new("long-ring-ha-crash-reclaim", &["b1", "b2"])
         .with_worker_tune(|c| {
             c.invite_txn_timeout_sec = INVITE_TXN_SEC;
-            c.setup_timeout_sec = SETUP_SEC;
+            c.setup_timeout_ms = SETUP_SEC * 1000;
         });
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

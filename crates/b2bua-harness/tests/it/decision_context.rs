@@ -183,7 +183,7 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     // transaction timeout is what fires; keepalive far out for a quiet tail.
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")
@@ -364,7 +364,7 @@ async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_
         .tune(|c| {
             c.invite_first_response_timeout_sec = 5;
             c.invite_txn_timeout_sec = 40;
-            c.setup_timeout_sec = 60;
+            c.setup_timeout_ms = 60_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")

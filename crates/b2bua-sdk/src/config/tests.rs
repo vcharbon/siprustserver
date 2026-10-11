@@ -92,19 +92,22 @@ fn allows_zero_cps_rate_when_gate_disabled() {
 
 #[test]
 fn rejects_setup_deadline_at_or_above_the_txn_bound() {
-    // 300 >= 158: the txn layer would CANCEL the b-leg before the app
+    // 300 s >= 158 s: the txn layer would CANCEL the b-leg before the app
     // gives up (the ordering inversion) — refuse to start.
-    let c =
-        B2buaConfig { setup_timeout_sec: 300, invite_txn_timeout_sec: 158, ..Default::default() };
+    let c = B2buaConfig {
+        setup_timeout_ms: 300_000,
+        invite_txn_timeout_sec: 158,
+        ..Default::default()
+    };
     let e = c.validate().expect_err("setup >= txn bound must be rejected");
-    assert!(e.contains("setup_timeout_sec"), "msg was: {e}");
+    assert!(e.contains("setup_timeout_ms"), "msg was: {e}");
 }
 
 #[test]
 fn rejects_txn_bound_outside_the_supported_range() {
     for bad in [700, 20] {
         let c =
-            B2buaConfig { invite_txn_timeout_sec: bad, setup_timeout_sec: 0, ..Default::default() };
+            B2buaConfig { invite_txn_timeout_sec: bad, setup_timeout_ms: 0, ..Default::default() };
         let e = c.validate().expect_err("out-of-range invite_txn_timeout_sec must be rejected");
         assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
     }
@@ -139,15 +142,18 @@ fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
 
 #[test]
 fn allows_setup_deadline_strictly_below_a_raised_txn_bound() {
-    let c =
-        B2buaConfig { setup_timeout_sec: 300, invite_txn_timeout_sec: 400, ..Default::default() };
+    let c = B2buaConfig {
+        setup_timeout_ms: 300_000,
+        invite_txn_timeout_sec: 400,
+        ..Default::default()
+    };
     assert!(c.validate().is_ok());
 }
 
 #[test]
 fn disabled_setup_deadline_skips_the_ordering_check() {
     // <= 0 disables the app deadline; only the range check applies.
-    let c = B2buaConfig { setup_timeout_sec: 0, invite_txn_timeout_sec: 158, ..Default::default() };
+    let c = B2buaConfig { setup_timeout_ms: 0, invite_txn_timeout_sec: 158, ..Default::default() };
     assert!(c.validate().is_ok());
 }
 
@@ -188,7 +194,7 @@ fn rejects_explicit_reaper_idle_window_at_or_under_the_txn_bound() {
     // ring.
     let c = B2buaConfig {
         invite_txn_timeout_sec: 400,
-        setup_timeout_sec: 300,
+        setup_timeout_ms: 300_000,
         keepalive_interval_sec: 150,
         reaper_idle_max_sec: 400,
         ..Default::default()

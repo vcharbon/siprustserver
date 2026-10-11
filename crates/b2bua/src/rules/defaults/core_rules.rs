@@ -141,7 +141,7 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
     ctx.config.keepalive_timeout_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
-    ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+    ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000)
 }
 /// The obligation of a fired ladder give-up.
 fn fired_give_up<'a>(ctx: &'a RuleContext) -> Option<&'a Obligation> {
@@ -592,7 +592,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
                     RuleAction::arm(
                         TimerKey::call(TimerType::GlobalDuration),
-                        TimerDelay::secs(max_duration(ctx)),
+                        TimerDelay::millis(max_duration(ctx)),
                     ),
                     RuleAction::arm(
                         TimerKey::call(TimerType::Keepalive),

@@ -170,7 +170,7 @@ fn failing_over(bob: u16, carol: u16, no_answer_sec: Option<i64>) -> Arc<dyn Cal
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", bob);
                 r.callback_context = Some("attempts".into());
-                r.no_answer_timeout_sec = no_answer_sec;
+                r.no_answer_ms = no_answer_sec.map(|s| s * 1000);
                 NewCallResponse::Route(r)
             })
             .on_failure(move |_| CallTreatment::Route(route_to("127.0.0.1", carol)))
@@ -476,7 +476,7 @@ async fn a_fold_landing_on_a_call_going_away_records_no_refused_route() {
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
                     r.callback_context = Some("attempts".into());
-                    r.no_answer_timeout_sec = Some(2);
+                    r.no_answer_ms = Some(2_000);
                     NewCallResponse::Route(r)
                 })
                 .on_failure(|req| {

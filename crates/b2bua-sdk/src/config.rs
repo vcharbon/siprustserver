@@ -182,7 +182,7 @@ pub struct B2buaConfig {
     /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
-    /// **Setup timeout**, seconds — the call-level a-leg initial-INVITE deadline:
+    /// **Setup timeout**, milliseconds — the call-level a-leg initial-INVITE deadline:
     /// armed at route time, cancelled at answer, deliberately NOT reset by
     /// reroute/failover (each new b-leg gets its own `NoAnswer`; this caps the
     /// caller's *total* wait for a final response). It rides the replicated
@@ -191,20 +191,20 @@ pub struct B2buaConfig {
     /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) cannot (the
     /// transactions die with the node), so without it a worker kill strands
     /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration.
-    /// Default **150 s**: strictly below the configured transaction bound
+    /// Default **150 000 ms**: strictly below the configured transaction bound
     /// (enforced by [`validate`](Self::validate)) so the rules path owns the
     /// teardown (408 to the caller, CANCEL to pending b-legs, obligations
     /// settled), above any sane no-answer timeout so a route-supplied `NoAnswer`
     /// still fires first. `<= 0` disables (the txn backstop and GlobalDuration
-    /// remain). Overridable via `B2BUA_SETUP_TIMEOUT_SEC`.
-    pub setup_timeout_sec: i64,
+    /// remain). Overridable via `B2BUA_SETUP_TIMEOUT_MS`.
+    pub setup_timeout_ms: i64,
     /// **Initial-INVITE transaction bound**, seconds — the sip-txn
     /// out-of-dialog INVITE give-up window
     /// (`TransactionConfig::invite_initial_timeout_ms`), bounding BOTH halves
     /// of a call: the b-leg client txn's give-up AND the a-leg server txn's
     /// pre-final backstop derive from it. The last-resort backstop under every
     /// app-level setup deadline: [`validate`](Self::validate) requires
-    /// `setup_timeout_sec < invite_txn_timeout_sec` (when enabled) and
+    /// `setup_timeout_ms < invite_txn_timeout_sec × 1000` (when enabled) and
     /// range-checks [`MIN_INVITE_TXN_TIMEOUT_SEC`](Self::MIN_INVITE_TXN_TIMEOUT_SEC)
     /// `..=` [`MAX_INVITE_TXN_TIMEOUT_SEC`](Self::MAX_INVITE_TXN_TIMEOUT_SEC);
     /// a route-supplied `NoAnswer` above
@@ -527,7 +527,7 @@ impl Default for B2buaConfig {
             model_invariants: cfg!(debug_assertions),
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
-            setup_timeout_sec: 150,
+            setup_timeout_ms: 150_000,
             invite_txn_timeout_sec: 158,
             invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
             cancel_strict_rfc3261_wait: false,
@@ -758,17 +758,17 @@ impl B2buaConfig {
                 Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
             ));
         }
-        // Above the transaction bound the ordering inverts: the txn layer
-        // CANCELs the b-leg on its own, the app give-up authors a SECOND final,
-        // and the callee's 487 lands on a dead client txn (never ACKed). The
-        // app setup deadline must therefore fire strictly first.
-        if self.setup_timeout_sec > 0 && self.setup_timeout_sec >= self.invite_txn_timeout_sec {
+        // Above the transaction bound the ordering inverts: the txn layer CANCELs the b-leg on
+        // its own, the app give-up authors a SECOND final, and the callee's 487 lands on a dead
+        // client txn (never ACKed). The app setup deadline must therefore fire strictly first.
+        if self.setup_timeout_ms > 0 && self.setup_timeout_ms >= self.invite_txn_timeout_sec * 1000
+        {
             return Err(format!(
-                "setup_timeout_sec={} >= invite_txn_timeout_sec={}: the app setup \
+                "setup_timeout_ms={} >= invite_txn_timeout_sec={} s: the app setup \
                  deadline must fire strictly before the transaction bound, or the \
                  txn layer tears the b-leg down first and the caller takes two \
                  finals on one INVITE",
-                self.setup_timeout_sec, self.invite_txn_timeout_sec
+                self.setup_timeout_ms, self.invite_txn_timeout_sec
             ));
         }
         // A ringing call stamps no ledger liveness until its setup resolves, so
@@ -815,7 +815,7 @@ impl B2buaConfig {
 
     /// The configured initial-INVITE transaction bound in ms — the value wired
     /// into `TransactionConfig::invite_initial_timeout_ms`. `<= 0` is NOT
-    /// "disabled" (unlike [`setup_timeout_sec`](Self::setup_timeout_sec)):
+    /// "disabled" (unlike [`setup_timeout_ms`](Self::setup_timeout_ms)):
     /// a non-positive value falls back to the 158 s default rather than arming
     /// a degenerate bound.
     pub fn invite_txn_timeout_ms(&self) -> u64 {
@@ -861,7 +861,7 @@ impl B2buaConfig {
 
     /// The un-ACKed 2xx give-up deadline in ms — what arms a 2xx ladder's
     /// give-up. `<= 0` is NOT "disabled" (unlike
-    /// [`setup_timeout_sec`](Self::setup_timeout_sec)): a non-positive value
+    /// [`setup_timeout_ms`](Self::setup_timeout_ms)): a non-positive value
     /// falls back to the 32 s default rather than leaving a 2xx's silence
     /// unanswered (RFC 3261 §13.3.1.4).
     pub fn ack_timeout_ms(&self) -> u64 {

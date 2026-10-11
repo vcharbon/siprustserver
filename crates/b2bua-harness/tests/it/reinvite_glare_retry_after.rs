@@ -322,7 +322,7 @@ async fn a_newcomer_during_a_reroute_over_its_unanswered_reinvite_is_refused_500
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 6328);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)

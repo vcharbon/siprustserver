@@ -353,15 +353,15 @@ pub struct RunnerEnv {
     /// `B2BUA_REBOOT_BUDGET_SEC` — replicated-backup TTL / reboot budget
     /// (default 600; `config.validate()` forces it to outlast the keepalive).
     pub reboot_budget_sec: i64,
-    /// `B2BUA_SETUP_TIMEOUT_SEC` — a-leg total setup deadline, reroutes
-    /// included (default 150; must stay strictly below
+    /// `B2BUA_SETUP_TIMEOUT_MS` — a-leg total setup deadline, reroutes
+    /// included, in ms (default 150000; must stay strictly below
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
-    pub setup_timeout_sec: i64,
+    pub setup_timeout_ms: i64,
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` — the sip-txn out-of-dialog INVITE bound
     /// for BOTH call halves (b-leg client give-up + a-leg pre-final backstop).
     /// Default 158; supported range 33..=600 (telephony deployments raise it —
     /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
-    /// `B2BUA_SETUP_TIMEOUT_SEC` does not sit strictly below it.
+    /// `B2BUA_SETUP_TIMEOUT_MS` does not sit strictly below it.
     pub invite_txn_timeout_sec: i64,
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long a b-leg initial
     /// INVITE waits for a response of ANY kind before its transaction gives up
@@ -515,9 +515,9 @@ impl RunnerEnv {
             reboot_budget_sec: env_or("B2BUA_REBOOT_BUDGET_SEC", "600")
                 .parse()
                 .expect("B2BUA_REBOOT_BUDGET_SEC"),
-            setup_timeout_sec: env_or("B2BUA_SETUP_TIMEOUT_SEC", "150")
+            setup_timeout_ms: env_or("B2BUA_SETUP_TIMEOUT_MS", "150000")
                 .parse()
-                .expect("B2BUA_SETUP_TIMEOUT_SEC"),
+                .expect("B2BUA_SETUP_TIMEOUT_MS"),
             invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
                 .parse()
                 .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
@@ -751,7 +751,7 @@ impl RunnerEnv {
             limiter_release_queue_cap: self.limiter_release_queue_cap,
             limiter_breaker_failures: self.limiter_breaker_failures,
             limiter_breaker_probe_ms: self.limiter_breaker_probe_ms,
-            setup_timeout_sec: self.setup_timeout_sec,
+            setup_timeout_ms: self.setup_timeout_ms,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
             cancel_strict_rfc3261_wait: self.cancel_strict_rfc_wait,

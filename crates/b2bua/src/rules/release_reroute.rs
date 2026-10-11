@@ -55,8 +55,8 @@ use b2bua_sdk::model::{
 /// not arm it at route time.
 fn cap_at_answer(ctx: &RuleContext) -> Option<TimerDelay> {
     let platform = &ctx.call.features()?.platform;
-    (!platform.arms_cap_at_creation(ctx.config.setup_timeout_sec))
-        .then(|| TimerDelay::secs(platform.max_duration_sec))
+    (!platform.arms_cap_at_creation(ctx.config.setup_timeout_ms))
+        .then(|| TimerDelay::millis(platform.max_duration_ms))
 }
 
 /// The reroute's overall guard.

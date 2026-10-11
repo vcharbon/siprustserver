@@ -96,7 +96,7 @@ async fn a_caller_request_on_a_masked_face_goes_to_the_fork_she_was_last_shown()
     let b2bua = B2buaSut::builder(decision)
         .services(vec![fork_out::service_def()])
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())

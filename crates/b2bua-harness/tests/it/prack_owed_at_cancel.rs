@@ -108,7 +108,7 @@ async fn a_leg_abandoned_at_its_no_answer_deadline_is_pracked_as_it_is_cancelled
             .fallback(|_req| {
                 let mut r = route_to("127.0.0.1", 5225);
                 r.callback_context = Some("no-answer-reroute".into());
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 NewCallResponse::Route(r)
             })
             .on_failure(|_req| CallFailureResponse::Route(route_to("127.0.0.1", 5226)))

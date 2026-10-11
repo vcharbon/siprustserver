@@ -55,7 +55,7 @@ async fn the_enforced_teardown_of_an_unanswered_a_leg_shows_on_the_trace() {
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
                 let mut route = route_to("127.0.0.1", 5074);
-                route.features.platform.max_duration_sec = MAX_DURATION_SEC;
+                route.features.platform.max_duration_ms = MAX_DURATION_SEC * 1000;
                 NewCallResponse::Route(route)
             })
             .build(),

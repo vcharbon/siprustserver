@@ -225,7 +225,7 @@ fn release_reroute_decision(
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.new_ruri = None;
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("release-ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 r.call_limiter = limiters(ids);

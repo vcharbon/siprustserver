@@ -41,19 +41,19 @@ pub enum MaxDurationAnchor {
 /// Platform-mandatory cap + keepalive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformActivations {
-    /// Overall call ceiling (seconds). Adapter supplies; platform caps it.
-    pub max_duration_sec: i64,
+    /// Overall call ceiling (ms). Adapter supplies; platform caps it.
+    pub max_duration_ms: i64,
     pub max_duration_anchor: MaxDurationAnchor,
     pub keepalive: KeepaliveActivation,
 }
 
 impl PlatformActivations {
     /// Whether the cap is armed at route time, given the configured setup
-    /// deadline (`setup_timeout_sec`, `<= 0` disabled).
-    pub fn arms_cap_at_creation(&self, setup_timeout_sec: i64) -> bool {
+    /// deadline (`setup_timeout_ms`, `<= 0` disabled).
+    pub fn arms_cap_at_creation(&self, setup_timeout_ms: i64) -> bool {
         match self.max_duration_anchor {
             MaxDurationAnchor::Creation => true,
-            MaxDurationAnchor::Answer => setup_timeout_sec <= 0,
+            MaxDurationAnchor::Answer => setup_timeout_ms <= 0,
         }
     }
 }
@@ -169,7 +169,7 @@ pub struct FeatureActivations {
     pub platform: PlatformActivations,
     pub refer: Option<ReferFeature>,
     pub relay_first_18x_to_180: Option<RelayFirst18xTo180Feature>,
-    pub no_answer_timeout_sec: Option<i64>,
+    pub no_answer_ms: Option<i64>,
     /// Per-face `Allow`/`Supported` advertisement. Absent — and absent for one
     /// face — means "advertise the stack default there".
     pub advertise_capabilities: Option<AdvertiseCapabilitiesFeature>,
@@ -290,13 +290,13 @@ mod tests {
     fn features(withheld: Option<&[&str]>) -> FeatureActivations {
         FeatureActivations {
             platform: PlatformActivations {
-                max_duration_sec: 3_600,
+                max_duration_ms: 3_600_000,
                 max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
             relay_first_18x_to_180: None,
-            no_answer_timeout_sec: None,
+            no_answer_ms: None,
             advertise_capabilities: None,
             charging_vector: None,
             withhold_option_tags: withheld.map(|w| w.iter().map(|t| t.to_string()).collect()),

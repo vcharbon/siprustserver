@@ -94,7 +94,7 @@ fn limiters(ids: &[&str]) -> Vec<LimiterEntry> {
 /// (so a failure consults the decision), and `ids` as its call limiters.
 fn initial_route(port: u16, ids: &[&str]) -> NewCallResponse {
     let mut r = route_to("127.0.0.1", port);
-    r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+    r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
     r.callback_context = Some("failover-ctx".into());
     r.call_limiter = limiters(ids);
     NewCallResponse::Route(r)
@@ -259,7 +259,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = 60;
+                    r.features.platform.max_duration_ms = 60_000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiters(&["x", "y"]);
@@ -511,7 +511,7 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = 60;
+                    r.features.platform.max_duration_ms = 60_000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiters(&["x", "y"]);

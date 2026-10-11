@@ -59,7 +59,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
                 // Short no-answer deadline + a callback context so the no-answer
                 // path CANCELs the ringing leg AND keeps the call alive for the
                 // /call/failure consult (the reroute below).
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -71,7 +71,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
             // Setup deadline past the no-answer so the NoAnswer timer is what
             // fires; keepalive far out for a quiet tail; reaper off to isolate
             // the crossing-200 mechanism from the liveness sweep.
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -156,7 +156,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5072);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -166,7 +166,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
             // Setup deadline past the no-answer so the NoAnswer timer is what
             // fires; keepalive far out; reaper off to isolate the crossing-200
             // mechanism from the liveness sweep.
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -233,7 +233,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to_with_18x("127.0.0.1", 5074, RelayFirst18xStrategy::DropSdp);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -250,7 +250,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -345,7 +345,7 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     // txn-backstop treatment itself.
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -410,7 +410,7 @@ async fn a_reaped_crossing_200_leaves_the_caller_unanswered_for_the_reroute_fina
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5076);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -426,7 +426,7 @@ async fn a_reaped_crossing_200_leaves_the_caller_unanswered_for_the_reroute_fina
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })
@@ -480,7 +480,7 @@ async fn after_a_reaped_crossing_200_the_reroute_rings_and_answers_as_any_rerout
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5076);
-                r.no_answer_timeout_sec = Some(30);
+                r.no_answer_ms = Some(30_000);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
             })
@@ -496,7 +496,7 @@ async fn after_a_reaped_crossing_200_the_reroute_rings_and_answers_as_any_rerout
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })

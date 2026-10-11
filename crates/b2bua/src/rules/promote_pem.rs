@@ -237,7 +237,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)));
                 actions.push(RuleAction::arm(
                     TimerKey::call(TimerType::GlobalDuration),
-                    TimerDelay::secs(max_duration(ctx)),
+                    TimerDelay::millis(max_duration(ctx)),
                 ));
                 actions.push(RuleAction::arm(
                     TimerKey::call(TimerType::Keepalive),
@@ -417,7 +417,7 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     ctx.config.keepalive_interval_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
-    ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
+    ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000)
 }
 
 #[cfg(test)]

@@ -220,7 +220,7 @@ pub(crate) fn dialling_invite(leg: &Leg) -> Option<SipRequest> {
 }
 
 /// Clamp a decision-supplied ring deadline for an originated leg under the
-/// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_sec`),
+/// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_ms`),
 /// with the per-call `debug!` note on a clamp — the ONE clamp site both
 /// `NoAnswer` arming paths (`decision::apply_route`, `actions::create_leg`)
 /// funnel through. A deadline that is off stays off.

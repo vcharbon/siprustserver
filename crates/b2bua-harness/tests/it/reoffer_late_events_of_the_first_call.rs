@@ -44,7 +44,7 @@ async fn scene(name: &str, no_answer: Option<Duration>) -> B2buaScene {
             ScriptedDecisionEngine::builder()
                 .fallback(move |_| {
                     let mut r = route_to("127.0.0.1", bob_port);
-                    r.no_answer_timeout_sec = no_answer.map(|d| d.as_secs() as i64);
+                    r.no_answer_ms = no_answer.map(|d| d.as_millis() as i64);
                     NewCallResponse::Route(r)
                 })
                 .build(),

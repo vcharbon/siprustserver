@@ -445,13 +445,13 @@ Content-Length: 0\r\n\r\n";
     ) -> call::features::FeatureActivations {
         call::features::FeatureActivations {
             platform: call::features::PlatformActivations {
-                max_duration_sec: 3_600,
+                max_duration_ms: 3_600_000,
                 max_duration_anchor: Default::default(),
                 keepalive: call::features::KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
             relay_first_18x_to_180: None,
-            no_answer_timeout_sec: None,
+            no_answer_ms: None,
             charging_vector: None,
             withhold_option_tags: None,
             stated_headers: None,

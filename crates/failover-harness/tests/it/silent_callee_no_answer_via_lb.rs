@@ -62,7 +62,7 @@ fn reject_decision(dest_port: u16) -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", dest_port);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -256,7 +256,7 @@ async fn silent_callee_no_answer_via_lb__reroute__reaps_crossing_200_and_reroute
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("silent-callee-reroute-ctx".into());
                 NewCallResponse::Route(r)
             })

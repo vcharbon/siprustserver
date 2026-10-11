@@ -141,7 +141,7 @@ pub struct RouteDecision {
     pub new_to: Option<String>,
     pub update_headers: Option<SipHeaderUpdates>,
     pub update_body: BodyUpdate,
-    pub no_answer_timeout_sec: Option<i64>,
+    pub no_answer_ms: Option<i64>,
     pub call_limiter: Vec<call::LimiterEntry>,
     pub callback_context: Option<String>,
     pub features: FeatureActivations,
@@ -166,7 +166,7 @@ pub struct RouteDecision {
 impl RouteDecision {
     /// The ring deadline the route states for the leg it dials.
     pub fn no_answer(&self) -> call::Deadline {
-        super::no_answer_deadline(self.no_answer_timeout_sec, Some(&self.features))
+        super::no_answer_deadline(self.no_answer_ms, Some(&self.features))
     }
 }
 
@@ -432,8 +432,8 @@ pub enum CallReferResponse {
         new_refer_to: Option<String>,
         /// Header set/remove directives applied to the C INVITE.
         update_headers: Option<SipHeaderUpdates>,
-        /// No-answer timeout for the C leg (seconds).
-        no_answer_timeout_sec: Option<i64>,
+        /// No-answer timeout for the C leg (ms).
+        no_answer_ms: Option<i64>,
         /// Callback context propagated onto the transfer slice.
         callback_context: Option<String>,
         /// See [`RouteDecision::label`].
@@ -453,13 +453,13 @@ pub fn default_platform_features() -> FeatureActivations {
     use call::features::{KeepaliveActivation, PlatformActivations};
     FeatureActivations {
         platform: PlatformActivations {
-            max_duration_sec: 3_600,
+            max_duration_ms: 3_600_000,
             max_duration_anchor: Default::default(),
             keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
         },
         refer: None,
         relay_first_18x_to_180: None,
-        no_answer_timeout_sec: None,
+        no_answer_ms: None,
         advertise_capabilities: None,
         charging_vector: None,
         withhold_option_tags: None,

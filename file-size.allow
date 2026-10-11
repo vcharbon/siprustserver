@@ -26,7 +26,7 @@ crates/b2bua-runner-kit/src/lib.rs 1137
 crates/b2bua-sdk/src/config.rs 921
 crates/b2bua-sdk/src/model.rs 1329
 crates/b2bua/src/b2bua_core.rs 958
-crates/b2bua/src/decision/test_adapter.rs 819
+crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 520
 crates/b2bua/src/limiter/release_queue.rs 513
 crates/b2bua/src/metrics/limiter.rs 554

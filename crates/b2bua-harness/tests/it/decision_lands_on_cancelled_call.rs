@@ -318,7 +318,7 @@ async fn fold_lands_on_terminating_call(
     let inner = ScriptedDecisionEngine::builder()
         .fallback(|_req| {
             let mut r = route_to("127.0.0.1", 5070);
-            r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+            r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
             r.callback_context = Some("nk069".into());
             NewCallResponse::Route(r)
         })

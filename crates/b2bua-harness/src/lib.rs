@@ -852,7 +852,7 @@ impl B2buaSut {
                     r.callback_context = Some("failover-test".into());
                     // The TS relies on the 30 s platform no-answer default the Rust
                     // default route omits — set it so the no-answer failover fires.
-                    r.no_answer_timeout_sec = Some(30);
+                    r.no_answer_ms = Some(30_000);
                     NewCallResponse::Route(r)
                 })
                 .on_failure(move |_req| {

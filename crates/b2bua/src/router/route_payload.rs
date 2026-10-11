@@ -32,7 +32,7 @@ struct RoutePayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     update_headers: Option<SipHeaderUpdates>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    no_answer_timeout_sec: Option<i64>,
+    no_answer_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     callback_context: Option<String>,
     // Route parity: the fields the initial `apply_route` honors, forwarded to
@@ -67,7 +67,7 @@ pub(super) fn route_result_payload(
     admitted: AdmitReport,
     failed_leg_id: Option<String>,
 ) -> serde_json::Value {
-    let no_answer_timeout_sec = route.no_answer().millis().map(|ms| ms / 1000);
+    let no_answer_ms = route.no_answer().millis();
     super::callouts::to_payload(RoutePayload {
         destination: RouteDestinationPayload {
             host: route.destination.host,
@@ -77,7 +77,7 @@ pub(super) fn route_result_payload(
         new_from: route.new_from,
         new_to: route.new_to,
         update_headers: route.update_headers,
-        no_answer_timeout_sec,
+        no_answer_ms,
         callback_context: route.callback_context,
         features: route.features,
         service_ext: route.service_ext,
@@ -96,3 +96,6 @@ pub(super) fn route_result_payload(
         label: route.label,
     })
 }
+
+#[cfg(test)]
+mod tests;

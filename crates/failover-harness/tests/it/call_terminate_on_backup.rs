@@ -74,7 +74,7 @@ fn limited_decision_with_max_duration(max_duration_sec: i64) -> Arc<dyn CallDeci
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.call_limiter = vec![LimiterEntry { id: "trunk-A".into(), limit: 8 }];
-                r.features.platform.max_duration_sec = max_duration_sec;
+                r.features.platform.max_duration_ms = max_duration_sec * 1000;
                 r.label = Some("trunk-route".into());
                 NewCallResponse::Route(r)
             })

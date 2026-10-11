@@ -82,7 +82,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
         new_from: payload.get("new_from").and_then(|v| v.as_str()).map(str::to_string),
         new_to: payload.get("new_to").and_then(|v| v.as_str()).map(str::to_string),
         no_answer: crate::decision::no_answer_deadline(
-            payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
+            payload.get("no_answer_ms").and_then(|v| v.as_i64()),
             features.as_ref(),
         ),
         callback_context: payload
@@ -174,10 +174,10 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // path does at route time (ScheduleTimer id-dedups) — under the same
         // anchor: with the cap anchored at the answer, the answer this fold leads
         // to arms it (`MaxDurationAnchor`).
-        if f.platform.arms_cap_at_creation(ctx.config.setup_timeout_sec) {
+        if f.platform.arms_cap_at_creation(ctx.config.setup_timeout_ms) {
             actions.push(RuleAction::arm(
                 TimerKey::call(TimerType::GlobalDuration),
-                TimerDelay::secs(f.platform.max_duration_sec),
+                TimerDelay::millis(f.platform.max_duration_ms),
             ));
         }
         actions.push(RuleAction::SetFeatures { features: f.clone() });

@@ -517,7 +517,7 @@ pub fn project_cursor(call: &mut Call) {
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg().leg_id.clone();
-    let max_duration = ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600);
+    let cap = ctx.call.features().map(|f| f.platform.max_duration_ms).unwrap_or(3_600_000);
     // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production
     // default 300 s) — not the per-call feature; see `defaults::keepalive_interval`.
     let keepalive = ctx.config.keepalive_interval_sec;
@@ -535,7 +535,7 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     actions.extend(vec![
         RuleAction::cancel(TimerKey::leg(TimerType::NoAnswer, &b)),
         RuleAction::cancel(TimerKey::call(TimerType::SetupTimeout)),
-        RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::secs(max_duration)),
+        RuleAction::arm(TimerKey::call(TimerType::GlobalDuration), TimerDelay::millis(cap)),
         RuleAction::arm(TimerKey::call(TimerType::Keepalive), TimerDelay::secs(keepalive)),
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Answer,

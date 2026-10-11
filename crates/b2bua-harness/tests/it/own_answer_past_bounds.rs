@@ -68,7 +68,7 @@ impl CallDecisionEngine for SlowConsults {
             return std::future::pending().await;
         }
         let mut route = route_to("127.0.0.1", self.bob_port);
-        route.features.platform.max_duration_sec = MAX_DURATION.as_secs() as i64;
+        route.features.platform.max_duration_ms = MAX_DURATION.as_millis() as i64;
         route.callback_context = Some("ctx-release".into());
         route.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
         Ok(NewCallResponse::Route(route))

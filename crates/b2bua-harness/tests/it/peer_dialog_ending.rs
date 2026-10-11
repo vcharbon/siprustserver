@@ -70,7 +70,7 @@ async fn a_caller_request_toward_a_peer_dialog_being_ended_is_told_to_retry() {
     let b2bua = B2buaSut::builder(decision)
         .services(vec![release::service_def()])
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
         })
         .start(&h, "b2bua", &h.next_addr().to_string())

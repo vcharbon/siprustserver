@@ -16,7 +16,7 @@ async fn route_all_to_routes_every_call() {
         NewCallResponse::Route(r) => {
             assert_eq!(r.destination.host, "127.0.0.1");
             assert_eq!(r.destination.port(), 5070);
-            assert_eq!(r.features.platform.max_duration_sec, 3_600);
+            assert_eq!(r.features.platform.max_duration_ms, 3_600_000);
         }
         _ => panic!("expected route"),
     }
@@ -359,26 +359,26 @@ async fn plan_reroute_walks_list_then_rejects_on_exhaustion() {
 
 #[tokio::test]
 async fn plan_route_carries_per_route_no_answer_timeout() {
-    // Each plan route's `no_answer_timeout_sec` reaches the
+    // Each plan route's `no_answer_ms` reaches the
     // RouteDecision — on the FIRST route (apply_route arms the NoAnswer
     // ring timer) AND on the failover route popped by call_failure.
     let eng = ScriptedDecisionEngine::numbering_plan();
     let plan = serde_json::json!({
         "action": "route",
         "routes": [
-            {"destination": {"host": "10.0.0.1", "port": 5070}, "no_answer_timeout_sec": 2},
-            {"destination": {"host": "10.0.0.2", "port": 5070}, "no_answer_timeout_sec": 3}
+            {"destination": {"host": "10.0.0.1", "port": 5070}, "no_answer_ms": 2000},
+            {"destination": {"host": "10.0.0.2", "port": 5070}, "no_answer_ms": 3000}
         ]
     });
     let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
         NewCallResponse::Route(r) => {
-            assert_eq!(r.no_answer_timeout_sec, Some(2));
+            assert_eq!(r.no_answer_ms, Some(2_000));
             r.callback_context.expect("remainder context")
         }
         _ => panic!("expected route #1"),
     };
     match eng.call_failure(failure_req(Some(&ctx))).await.unwrap() {
-        CallTreatment::Route(r) => assert_eq!(r.no_answer_timeout_sec, Some(3)),
+        CallTreatment::Route(r) => assert_eq!(r.no_answer_ms, Some(3_000)),
         _ => panic!("expected route #2"),
     }
 }

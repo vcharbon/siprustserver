@@ -26,7 +26,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     let s = B2buaScene::with_b2bua("long-ring-app-deadline", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
             c.invite_txn_timeout_sec = 400;
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             // No keepalive/reaper tuning: the derived reaper idle window is
             // floored above the configured bound (`reaper_idle_max_ms`), so
             // the quiet 300 s ring is reaper-safe by construction.
@@ -80,7 +80,7 @@ async fn answer_after_158s_establishes_end_to_end() {
     let s = B2buaScene::with_b2bua("long-ring-late-answer", |bob_port| {
         B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
             c.invite_txn_timeout_sec = 400;
-            c.setup_timeout_sec = 350;
+            c.setup_timeout_ms = 350_000;
         })
     })
     .await;
@@ -122,7 +122,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
                 .fallback(move |_req| {
                     let mut r = route_to("127.0.0.1", bob_port);
                     // 250 s meets/exceeds the 200 s bound → clamped to 192 s.
-                    r.no_answer_timeout_sec = Some(250);
+                    r.no_answer_ms = Some(250_000);
                     NewCallResponse::Route(r)
                 })
                 .build(),
@@ -131,7 +131,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
             c.invite_txn_timeout_sec = 200;
             // Disable the setup deadline so the clamped NoAnswer is
             // unambiguously what tears the ring down.
-            c.setup_timeout_sec = 0;
+            c.setup_timeout_ms = 0;
         })
     })
     .await;

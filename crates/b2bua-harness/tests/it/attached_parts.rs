@@ -286,7 +286,7 @@ async fn a_release_reroute_attaches_its_parts() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5170);
-                r.features.platform.max_duration_sec = 60;
+                r.features.platform.max_duration_ms = 60_000;
                 r.callback_context = Some("ctx".into());
                 r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                 NewCallResponse::Route(r)

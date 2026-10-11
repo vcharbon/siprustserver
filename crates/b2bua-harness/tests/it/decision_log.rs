@@ -403,7 +403,7 @@ async fn a_release_decision_merges_its_service_ext() {
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
                 let mut r = route_to("127.0.0.1", 5071);
-                r.features.platform.max_duration_sec = 5;
+                r.features.platform.max_duration_ms = 5_000;
                 r.callback_context = Some("ctx".into());
                 r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
                 r.service_ext = svc_slice("t-route");
@@ -447,7 +447,7 @@ async fn a_release_decision_merges_its_service_ext() {
 /// its own `svc` slice.
 fn capped_route() -> NewCallResponse {
     let mut r = route_to("127.0.0.1", 5071);
-    r.features.platform.max_duration_sec = 5;
+    r.features.platform.max_duration_ms = 5_000;
     r.callback_context = Some("ctx".into());
     r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
     r.service_ext = svc_slice("t-route");

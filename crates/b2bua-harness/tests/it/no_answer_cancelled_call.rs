@@ -52,7 +52,7 @@ fn failover_capable_decision(port: u16, consults: Arc<AtomicUsize>) -> Arc<dyn C
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", port);
-                r.no_answer_timeout_sec = Some(NO_ANSWER_SEC);
+                r.no_answer_ms = Some(NO_ANSWER_SEC * 1000);
                 r.callback_context = Some("nk068".into());
                 NewCallResponse::Route(r)
             })
@@ -358,7 +358,7 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
     );
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
-            c.setup_timeout_sec = 300;
+            c.setup_timeout_ms = 300_000;
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
         })

@@ -78,7 +78,7 @@ fn rerouting(delay: Duration, releases: Arc<AtomicUsize>) -> Arc<dyn CallDecisio
             ScriptedDecisionEngine::builder()
                 .fallback(move |_| {
                     let mut r = route_to("127.0.0.1", 5070);
-                    r.features.platform.max_duration_sec = CAP_SEC;
+                    r.features.platform.max_duration_ms = CAP_SEC * 1000;
                     r.callback_context = Some("release-ctx".into());
                     r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
                     r.call_limiter = limiter();

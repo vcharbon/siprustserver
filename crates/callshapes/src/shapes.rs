@@ -237,11 +237,9 @@ pub fn rerouting_prack(binder: Arc<dyn RouteBinder>) -> ShapePlan {
     }
 }
 
-/// The SUT no-answer ring timer (seconds) the shipped no-answer shapes arm —
-/// the smallest value the seconds-granularity `no_answer_timeout_sec` knob
-/// admits above 1 s of ring headroom; free on the paused-clock lane, ~2 s of
-/// per-call dwell on a real clock.
-pub const NOANSWER_RING_SEC: u32 = 2;
+/// The SUT no-answer ring timer (milliseconds) the shipped no-answer shapes
+/// arm: free on the paused-clock lane, ~2 s of per-call dwell on a real clock.
+pub const NOANSWER_RING_MS: u32 = 2_000;
 
 /// `rerouting_noanswer` — bob rings then NEVER answers; the
 /// SUT's own no-answer timer (armed per-route by the plan) fires, CANCELs bob
@@ -251,7 +249,7 @@ pub fn rerouting_noanswer(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         id: "rerouting_noanswer",
         binder,
         establish: Establishment::RerouteOnNoAnswer {
-            no_answer_sec: NOANSWER_RING_SEC,
+            no_answer_ms: NOANSWER_RING_MS,
             winner_reliable: false,
         },
         stages: vec![],

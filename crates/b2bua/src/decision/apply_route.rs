@@ -97,7 +97,7 @@ pub async fn apply_route(
     // read it.
     let answer = RouteAnswer { label: route.label.clone(), service_ext: route.service_ext.clone() };
     let cause = if depth == 0 { AttemptCause::Route } else { AttemptCause::Failover };
-    let ring = no_answer_deadline(route.no_answer_timeout_sec, Some(&route.features));
+    let ring = no_answer_deadline(route.no_answer_ms, Some(&route.features));
 
     // Seed per-service ext slices (service-layer activation gate).
     call = super::apply_reject::seed_service_ext(call, route.service_ext);
@@ -167,15 +167,15 @@ pub async fn apply_route(
     // media leg toward an MRF, dialing the real destination later). The
     // GlobalDuration backstop below still arms for the call under its anchor.
     if defers_routing(&call) {
-        if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
+        if route.features.platform.arms_cap_at_creation(config.setup_timeout_ms) {
             arm_global_duration(
                 &mut call,
                 &mut fx,
-                route.features.platform.max_duration_sec,
+                route.features.platform.max_duration_ms,
                 now_ms,
             );
         }
-        arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
+        arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_ms, now_ms);
         return HandlerResult { call, effects: fx };
     }
 
@@ -320,7 +320,7 @@ pub async fn apply_route(
     // b-leg INVITE never reaches a final response (lost 200, a UAS that drops the
     // INVITE under load, ring-forever) sits `Active` with NEITHER. Its only other
     // reaper is the NoAnswer ring timer, but that is armed *only* when the route
-    // supplies `no_answer_timeout_sec` (the scripted endurance adapter supplies
+    // supplies `no_answer_ms` (the scripted endurance adapter supplies
     // `None`). The result: ~0.4% of calls reach `Active` with an empty
     // `call.timers`, so no timer ever fires and they leak forever — surviving past
     // even the 1h GlobalDuration cap because it was never armed (observed:
@@ -328,7 +328,7 @@ pub async fn apply_route(
     //
     // Arming GlobalDuration here gives every call the absolute duration cap as a
     // backstop. `confirm-dialog` (and the promote/18x confirm paths) re-arm the
-    // same `GlobalDuration` key at answer with the same `max_duration_sec`, so
+    // same `GlobalDuration` key at answer with the same `max_duration_ms`, so
     // an answered call is unaffected (the re-arm replaces the instance); a
     // stuck-in-setup call is now reaped at the cap by the existing
     // `max-duration` rule.
@@ -337,10 +337,10 @@ pub async fn apply_route(
     // established call only, so it is armed at the answer alone whenever the
     // `SetupTimeout` deadline bounds the setup; with that deadline disabled the
     // creation-time backstop arms as above.
-    if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
-        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    if route.features.platform.arms_cap_at_creation(config.setup_timeout_ms) {
+        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_ms, now_ms);
     }
-    arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
+    arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_ms, now_ms);
 
     HandlerResult { call, effects: fx }
 }
@@ -396,10 +396,10 @@ async fn admit_route(
 fn arm_global_duration(
     call: &mut Call,
     fx: &mut HandlerEffects,
-    max_duration_sec: i64,
+    max_duration_ms: i64,
     now_ms: i64,
 ) {
-    let fire_at = now_ms + max_duration_sec * 1000;
+    let fire_at = now_ms + max_duration_ms;
     arm(call, fx, TimerKey::call(TimerType::GlobalDuration), fire_at);
 }
 
@@ -411,15 +411,10 @@ fn arm_global_duration(
 /// pending b-legs). Lives in `call.timers`, so a reclaimed mid-setup call
 /// still carries its deadline — the configured sip-txn initial-INVITE bound
 /// dies with a crashed node and would leave such calls holding their limiter
-/// slots for the full GlobalDuration. A non-positive `setup_timeout_sec` is
+/// slots for the full GlobalDuration. A non-positive `setup_timeout_ms` is
 /// off.
-fn arm_setup_timeout(
-    call: &mut Call,
-    fx: &mut HandlerEffects,
-    setup_timeout_sec: i64,
-    now_ms: i64,
-) {
-    if let Some(ms) = Deadline::of_secs(Some(setup_timeout_sec)).millis() {
+fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_ms: i64, now_ms: i64) {
+    if let Some(ms) = Deadline::of_millis(Some(setup_timeout_ms)).millis() {
         arm(call, fx, TimerKey::call(TimerType::SetupTimeout), now_ms + ms);
     }
 }

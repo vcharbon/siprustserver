@@ -1,7 +1,7 @@
 //! The overall call ceiling under `MaxDurationAnchor::Answer`: the cap bounds
 //! the ESTABLISHED call and runs from the answer the caller receives. A callee
 //! that rings longer than the cap is not torn down at the cap (the setup is the
-//! `SetupTimeout` deadline's to bound); the call is torn down `max_duration_sec`
+//! `SetupTimeout` deadline's to bound); the call is torn down `max_duration_ms`
 //! after the answer. Under the default `Creation` anchor the same ring is reaped
 //! at the cap (`setup_stall_global_duration_reap`). A call the cap's release
 //! reroutes runs under the reroute's cap from the replacement leg's answer.
@@ -36,13 +36,13 @@ async fn the_cap_runs_from_the_answer_under_the_answer_anchor() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut route = route_to("127.0.0.1", 5079);
-                route.features.platform.max_duration_sec = MAX_DURATION_SEC;
+                route.features.platform.max_duration_ms = MAX_DURATION_SEC * 1000;
                 route.features.platform.max_duration_anchor = MaxDurationAnchor::Answer;
                 NewCallResponse::Route(route)
             })
             .build(),
     );
-    // The default configuration bounds the setup (`setup_timeout_sec` 150 s), so
+    // The default configuration bounds the setup (`setup_timeout_ms` 150 000 ms), so
     // the cap is armed at the answer alone.
     let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5089").await;
 
@@ -88,7 +88,7 @@ async fn a_rerouted_call_runs_under_the_reroute_s_cap_from_its_answer() {
     let releases = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = releases.clone();
     let anchored = |mut route: b2bua::decision::RouteDecision| {
-        route.features.platform.max_duration_sec = MAX_DURATION_SEC;
+        route.features.platform.max_duration_ms = MAX_DURATION_SEC * 1000;
         route.features.platform.max_duration_anchor = MaxDurationAnchor::Answer;
         route
     };

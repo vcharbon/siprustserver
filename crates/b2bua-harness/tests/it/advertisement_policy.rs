@@ -96,7 +96,7 @@ impl CallDecisionEngine for Engine {
             Initial::Route(no_answer) => {
                 let mut r = route_to("127.0.0.1", 5170);
                 r.callback_context = Some("ctx".into());
-                r.no_answer_timeout_sec = no_answer;
+                r.no_answer_ms = no_answer;
                 Ok(NewCallResponse::Route(r))
             }
         }
@@ -206,7 +206,10 @@ async fn a_reject_after_a_ring_timeout_carries_the_tables_accept() {
     let carol = h.agent("carol", CAROL).await;
     let (addr, b2bua) = sut(
         &h,
-        Engine { initial: Initial::Route(Some(5)), failure: Failure::Reject(480, Stated::Nothing) },
+        Engine {
+            initial: Initial::Route(Some(5_000)),
+            failure: Failure::Reject(480, Stated::Nothing),
+        },
     )
     .await;
     let mut call = alice.invite(&carol).with_sdp(OFFER).through(addr).send().await;
@@ -244,8 +247,10 @@ async fn a_consult_reject_removing_accept_after_a_timeout_states_none() {
     let h = Harness::new("advert-consult-removes-accept");
     let alice = h.agent("alice", ALICE).await;
     let carol = h.agent("carol", CAROL).await;
-    let engine =
-        Engine { initial: Initial::Route(Some(5)), failure: Failure::Reject(480, Stated::Removal) };
+    let engine = Engine {
+        initial: Initial::Route(Some(5_000)),
+        failure: Failure::Reject(480, Stated::Removal),
+    };
     let (addr, b2bua) = sut(&h, engine).await;
     let mut call = alice.invite(&carol).with_sdp(OFFER).through(addr).send().await;
     let mut uas = carol.receive("INVITE").await;
