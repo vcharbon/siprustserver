@@ -175,52 +175,38 @@ fn has_uri_port_trailing_garbage(uri: &str) -> bool {
     s[i].is_ascii_alphabetic()
 }
 
-/// True iff `via` carries a port followed by alphabetic trailing garbage,
-/// quote-aware.
+/// True iff the sent-by of `via` carries a port followed by alphabetic
+/// trailing garbage (`host:5060abc`). Only the sent-by is read (RFC 3261
+/// §20.42: `sent-protocol LWS sent-by`, `sent-by = host [COLON port]`): an
+/// IPv6 reference is skipped whole, so its groups are never taken for a port,
+/// and the parameters after it (`received`, `maddr`) are not ports.
 fn has_via_port_trailing_garbage(via: &str) -> bool {
-    let s = via.as_bytes();
-    if s.is_empty() {
+    let s = via.trim_start().as_bytes();
+    let skip_ws = |mut i: usize| {
+        while i < s.len() && s[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    let Some(protocol_end) = s.iter().position(u8::is_ascii_whitespace) else { return false };
+    let mut i = skip_ws(protocol_end);
+    if s.get(i) == Some(&b'[') {
+        match s[i..].iter().position(|&b| b == b']') {
+            Some(close) => i += close + 1,
+            None => return false,
+        }
+    } else {
+        while i < s.len() && !matches!(s[i], b':' | b';' | b',') && !s[i].is_ascii_whitespace() {
+            i += 1;
+        }
+    }
+    i = skip_ws(i);
+    if s.get(i) != Some(&b':') {
         return false;
     }
-    let mut in_quote = false;
-    let mut i = 0usize;
-    while i + 1 < s.len() {
-        let c = s[i];
-        if in_quote {
-            if c == b'\\' {
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_quote = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            in_quote = true;
-            i += 1;
-            continue;
-        }
-        if c != b':' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        let port_start = j;
-        while j < s.len() && s[j].is_ascii_digit() {
-            j += 1;
-        }
-        if j == port_start || j >= s.len() {
-            i += 1;
-            continue;
-        }
-        if s[j].is_ascii_alphabetic() {
-            return true;
-        }
-        i += 1;
-    }
-    false
+    let port_start = skip_ws(i + 1);
+    let port_end = port_start + s[port_start..].iter().take_while(|b| b.is_ascii_digit()).count();
+    port_end > port_start && s.get(port_end).is_some_and(u8::is_ascii_alphabetic)
 }
 
 /// Count `;tag=` occurrences outside quoted-strings (RFC 3261 permits one).

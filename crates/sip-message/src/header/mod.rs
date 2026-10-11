@@ -17,6 +17,7 @@
 //! module would shadow the prelude's `From` trait.
 
 mod aliases;
+mod authority;
 mod charging;
 mod class;
 mod credentials;
@@ -38,6 +39,7 @@ mod token_params;
 mod uri;
 mod value;
 mod via;
+mod warning;
 mod wire;
 
 pub use aliases::{
@@ -49,6 +51,7 @@ pub use aliases::{
     ServiceRouteEntry, SessionExpires, SubscriptionState, Supported, To, Unsupported,
     WwwAuthenticate,
 };
+pub use authority::network_host;
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use credentials::Credentials;
@@ -68,4 +71,5 @@ pub use token_params::{parse_token_params, TokenParamsHeader};
 pub use uri::{HostPort, Uri};
 pub use value::{Folding, HeaderValue};
 pub use via::{Rport, Via, BRANCH_MAGIC_COOKIE};
+pub use warning::warn_agents;
 pub use wire::Wire;

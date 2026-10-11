@@ -21,6 +21,12 @@ impl CallId {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// The host a Call-ID written `localid@host` names (RFC 3261 §8.1.1.4):
+    /// the text after its last `@`, or `None` where it has none.
+    pub fn host(&self) -> Option<&str> {
+        self.0.as_str().trim().rsplit_once('@').map(|(_, host)| host).filter(|h| !h.is_empty())
+    }
 }
 
 /// A Call-ID is an opaque token compared byte-exactly, so comparing one to the
@@ -232,5 +238,13 @@ mod tests {
     fn an_empty_call_id_is_rejected() {
         assert!(CallId::parse(&SipStr::owned("   ")).is_err());
         assert_eq!(CallId::parse(&SipStr::owned(" a84b4c ")).unwrap().as_str(), "a84b4c");
+    }
+
+    #[test]
+    fn a_call_id_names_the_host_after_its_last_at() {
+        assert_eq!(CallId::new("a84b4c76e66710@pc33.example.com").host(), Some("pc33.example.com"));
+        assert_eq!(CallId::new("x@y@10.0.0.1").host(), Some("10.0.0.1"));
+        assert_eq!(CallId::new("a84b4c76e66710").host(), None);
+        assert_eq!(CallId::new("a84b@").host(), None);
     }
 }
