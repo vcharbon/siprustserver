@@ -8,7 +8,7 @@
 //! evaluated each time a request ends without a response. Pure: the caller
 //! feeds it the instants.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -46,20 +46,19 @@ impl BreakerConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sent(u64);
 
-/// A request counted, and when it ended once over.
-#[derive(Debug)]
-struct Request {
-    id: u64,
-    ended: Option<Instant>,
-}
-
-/// The breaker's state under the window rule.
+/// The breaker's state under the window rule. An answered request is
+/// dropped at once: an answer inside the window keeps the breaker closed
+/// anyway, so only the requests in flight and those that ended unanswered
+/// inside the window are kept.
 #[derive(Debug)]
 pub struct WindowBreaker {
     window: Duration,
     min_sent: usize,
-    /// Every request in flight, and every one that ended inside the window.
-    requests: VecDeque<Request>,
+    /// The requests in flight.
+    in_flight: HashSet<u64>,
+    /// When each request that ended unanswered inside the window ended,
+    /// oldest first.
+    unanswered: VecDeque<Instant>,
     next: u64,
     /// The last HTTP response.
     answered: Option<Instant>,
@@ -72,7 +71,8 @@ impl WindowBreaker {
         Self {
             window: config.window,
             min_sent: config.min_sent.max(1),
-            requests: VecDeque::new(),
+            in_flight: HashSet::new(),
+            unanswered: VecDeque::new(),
             next: 0,
             answered: None,
             open: false,
@@ -89,32 +89,32 @@ impl WindowBreaker {
         self.forget_before(now);
         let id = self.next;
         self.next += 1;
-        self.requests.push_back(Request { id, ended: None });
+        self.in_flight.insert(id);
         Sent(id)
     }
 
     /// `request` got an HTTP response, of any status, at `now`.
     pub fn answered(&mut self, request: Sent, now: Instant) {
         self.answered = Some(now);
-        self.end(request, now);
+        self.in_flight.remove(&request.0);
     }
 
     /// `request` ended at `now`, its caller having given up on it: it stays
     /// counted inside the window, and is not evaluated.
     pub fn dropped(&mut self, request: Sent, now: Instant) {
-        self.end(request, now);
+        self.ended_unanswered(request, now);
     }
 
     /// `request` ended at `now` without a response: whether this opens the
     /// breaker.
     pub fn unanswered(&mut self, request: Sent, now: Instant) -> bool {
-        self.end(request, now);
+        self.ended_unanswered(request, now);
         if self.open {
             return false;
         }
         self.forget_before(now);
         let answered_inside = self.answered.is_some_and(|t| now.duration_since(t) <= self.window);
-        if self.requests.len() < self.min_sent || answered_inside {
+        if self.in_flight.len() + self.unanswered.len() < self.min_sent || answered_inside {
             return false;
         }
         self.open = true;
@@ -129,21 +129,25 @@ impl WindowBreaker {
     /// A probe answered at `now`: close it, the window starting afresh.
     /// Whether it was open.
     pub fn close(&mut self, now: Instant) -> bool {
-        self.requests.clear();
+        self.in_flight.clear();
+        self.unanswered.clear();
         self.answered = Some(now);
         std::mem::replace(&mut self.open, false)
     }
 
-    fn end(&mut self, request: Sent, now: Instant) {
-        if let Some(r) = self.requests.iter_mut().find(|r| r.id == request.0) {
-            r.ended.get_or_insert(now);
+    /// `request` ended without an answer: counted while inside the window.
+    /// A request the breaker no longer holds (a close forgot it) is not.
+    fn ended_unanswered(&mut self, request: Sent, now: Instant) {
+        if self.in_flight.remove(&request.0) {
+            self.unanswered.push_back(now);
         }
     }
 
-    /// Drop the requests that ended before the window.
+    /// Drop the unanswered requests that ended before the window.
     fn forget_before(&mut self, now: Instant) {
-        let window = self.window;
-        self.requests.retain(|r| r.ended.is_none_or(|t| now.duration_since(t) <= window));
+        while self.unanswered.front().is_some_and(|t| now.duration_since(*t) > self.window) {
+            self.unanswered.pop_front();
+        }
     }
 }
 

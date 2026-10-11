@@ -231,6 +231,14 @@ impl BackendClient {
             return Err(AttemptError::BreakerOpen);
         }
         let mut sent = InFlight::sent(&self.inner);
+        // The name first, under the same budget: out of time or no address
+        // is a name that does not resolve, never a timeout to retry.
+        let resolved = tokio::time::timeout_at(deadline, self.inner.target.resolve_all()).await;
+        if !matches!(resolved, Ok(Some(_))) {
+            sent.unanswered();
+            crate::failures::record(&self.inner.peer, crate::failures::FailureCause::Dns);
+            return Err(AttemptError::Transport(HttpError::dns(&self.inner.peer)));
+        }
         let outcome = tokio::time::timeout_at(deadline, client.request(req)).await;
         drop(slot);
         match outcome {

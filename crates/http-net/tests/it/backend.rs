@@ -358,10 +358,10 @@ async fn the_in_flight_cap_holds_under_a_flood() {
 
 // ── rotation ────────────────────────────────────────────────────────────────
 
-/// Period 1 s: a request after the period rides a new client; the name is
-/// looked up afresh behind it, so the request after that reaches a name
-/// moved to a new address; a request in flight across the boundary completes
-/// on the old client, which is dropped after it.
+/// Period 1 s: a request after the period starts the name's fresh lookup and
+/// rides the current client to the kept address; once the lookup landed, the
+/// next one rides a new client to the moved address; a request in flight
+/// across the boundary completes on the old client, which is dropped after it.
 #[tokio::test(start_paused = true)]
 async fn after_one_period_new_requests_ride_a_new_client() {
     let settings = ClientSettings { rotation: Duration::from_secs(1), ..ClientSettings::default() };
@@ -386,11 +386,12 @@ async fn after_one_period_new_requests_ride_a_new_client() {
     assert_eq!(rig.backend.served("/crossing"), 1, "served, its answer in transit");
     rig.net.apply_fault(Fault::Resume { dst: rig.dst });
     assert_eq!(rig.client.attempt(HttpRequest::get("/b"), ATTEMPT).await.unwrap().status, 200);
-    assert_eq!(rig.client.generation(), 2, "a new client after the period");
-    assert_eq!(rig.backend.served("/b"), 1, "the kept address, at once, while the lookup runs");
+    assert_eq!(rig.client.generation(), 1, "the current client while the lookup runs");
+    assert_eq!(rig.backend.served("/b"), 1, "the kept address, at once");
     settle().await;
     assert_eq!(rig.client.attempt(HttpRequest::get("/c"), ATTEMPT).await.unwrap().status, 200);
-    assert_eq!(mover.served("/c"), 1, "the moved name, once the lookup landed");
+    assert_eq!(rig.client.generation(), 2, "a new client once the lookup landed");
+    assert_eq!(mover.served("/c"), 1, "its first connection to the moved address");
     assert_eq!(rig.resolver.lookups(), 2);
     assert_eq!(rig.transport.alive.load(Ordering::SeqCst), 2, "the old one carries a request");
 
@@ -399,8 +400,10 @@ async fn after_one_period_new_requests_ride_a_new_client() {
     assert_eq!(rig.transport.alive.load(Ordering::SeqCst), 1, "the old client is dropped");
 }
 
-/// A rotation while DNS hangs: the request after the period is sent at once
-/// to the kept address; the fresh lookup runs behind it.
+/// A rotation while DNS hangs: the requests after the period are sent at once
+/// to the kept address on the current client while the fresh lookup runs;
+/// once it passes its 2 s bound, a new client takes over, still on the kept
+/// address.
 #[tokio::test(start_paused = true)]
 async fn a_rotation_while_dns_hangs_serves_the_kept_address_at_once() {
     let settings = ClientSettings { rotation: Duration::from_secs(1), ..ClientSettings::default() };
@@ -414,8 +417,16 @@ async fn a_rotation_while_dns_hangs_serves_the_kept_address_at_once() {
         assert_eq!(answer.map(|r| r.status), Ok(200), "{path}");
         assert!(start.elapsed() < Duration::from_millis(10), "{path}: {:?}", start.elapsed());
     }
-    assert_eq!(rig.client.generation(), 2);
+    assert_eq!(rig.client.generation(), 1, "the lookup still runs");
     assert_eq!(rig.resolver.lookups(), 2, "one fresh lookup, single-flight");
+    advance_settled(http_net::LOOKUP_BOUND).await;
+    let start = Instant::now();
+    assert_eq!(
+        rig.client.attempt(HttpRequest::get("/d"), ATTEMPT).await.map(|r| r.status),
+        Ok(200)
+    );
+    assert!(start.elapsed() < Duration::from_millis(10), "{:?}", start.elapsed());
+    assert_eq!(rig.client.generation(), 2, "past the bound, a new client on the kept address");
 }
 
 // ── the breaker ─────────────────────────────────────────────────────────────
@@ -518,6 +529,27 @@ async fn a_hanging_resolver_bounds_each_request_and_then_fails_at_once() {
         assert_eq!(start.elapsed(), bound, "request {n}");
     }
     assert_eq!(metrics::retries("dns-hang:8080"), 0);
+}
+
+/// An attempt whose budget (150 ms) ends while its name lookup is still
+/// pending (bound 2 s) fails as a name that does not resolve, and is not
+/// retried.
+#[tokio::test(start_paused = true)]
+async fn an_attempt_ending_inside_its_lookup_is_a_name_that_does_not_resolve() {
+    let net = SimulatedHttpNetwork::new();
+    let target = Arc::new(ResolvedTarget::name_with("dns-short:8080", Arc::new(Hanging)));
+    let client = BackendClient::new(
+        Arc::new(net),
+        target,
+        ClientSettings::default(),
+        BreakerConfig::probing("/"),
+    );
+    let short = Budgets { attempt: Duration::from_millis(150), total: Duration::from_millis(300) };
+    let start = Instant::now();
+    let outcome = client.send_with_retry(HttpRequest::get("/"), short).await;
+    assert_eq!(transport_cause(&outcome), Some(FailureCause::Dns), "{outcome:?}");
+    assert_eq!(start.elapsed(), Duration::from_millis(150), "one attempt");
+    assert_eq!(metrics::retries("dns-short:8080"), 0);
 }
 
 /// The lookup cap alone: four lookups stuck, the next request fails at once.

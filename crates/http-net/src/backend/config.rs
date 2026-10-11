@@ -6,7 +6,7 @@
 //! | variable (`<P>` the backend's prefix) | meaning | default |
 //! |---|---|---|
 //! | `<P>_TIMEOUT_MS` | one attempt's budget, its slot wait included | per backend |
-//! | `<P>_BREAKER_REQUESTS` | requests sent inside the window, none answered, that open the breaker | 3 |
+//! | `<P>_BREAKER_REQUESTS` | requests in flight during the window, none answered, that open the breaker | 3 |
 //! | `<P>_BREAKER_WINDOW_MS` | the window the breaker looks back over | 2000 |
 //! | `<P>_BREAKER_PROBE_MS` | the probe period while open | 1000 |
 //! | `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request's budget, after its lookup | the attempt budget, at most the probe period |

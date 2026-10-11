@@ -302,6 +302,15 @@ impl ResolvedTarget {
         }
     }
 
+    /// Whether a [`refresh`](Self::refresh) is still waiting for its lookup
+    /// to be over (landed, past its bound, or refused by the stuck cap).
+    pub fn is_refreshing(&self) -> bool {
+        match &self.kind {
+            Kind::Addr(_) => false,
+            Kind::Name(named) => named.lock().stale,
+        }
+    }
+
     /// The host part of the target as a URL authority writes it, and its
     /// port.
     pub fn host_port(&self) -> (String, u16) {

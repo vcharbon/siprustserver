@@ -36,13 +36,14 @@ worker reporting itself healthy.
    resolver thread cannot be cancelled), and no new lookup starts while a cap
    of them is stuck. Every address found is returned. The addresses are
    **forgotten** when the breaker opens and when a probe fails; at each client
-   **rotation** they are **refreshed**: the next request starts a new lookup
-   and is sent at once to the last good addresses, never waiting for it; what
-   the lookup finds replaces them, and when it finds nothing they keep serving
-   until the next rotation (serve stale). A request resolves its target
-   before the transport connects, so a lookup is bounded by the lookup bound,
-   never cut by the connect timeout, and a name with no address fails as one
-   (`Dns`). A client whose name has no address at boot opens its breaker once
+   **rotation** they are **refreshed**: the first request past the period
+   starts a new lookup and is sent at once to the last good addresses, never
+   waiting for it; what the lookup finds replaces them, and when it finds
+   nothing they keep serving until the next rotation (serve stale). A request
+   resolves its target before the transport connects, under its own attempt
+   budget, so a lookup is bounded by the lookup bound or the attempt, never cut
+   by the connect timeout, and an attempt that ends with no address fails as a
+   name that does not resolve (`Dns`), never as a timeout. A client whose name has no address at boot opens its breaker once
    that first lookup finds nothing (`BackendClient::trip_unless_resolved`).
 3. **Transport settings** (`ClientSettings`): connect timeout, an idle timeout
    below a typical backend keep-alive, TCP keepalive and `TCP_USER_TIMEOUT`, a
@@ -53,9 +54,13 @@ worker reporting itself healthy.
    budget runs out waiting is never sent, and the wait never reaches the
    breaker. Waits, their time and the requests that never got a slot are
    counted (`http_client_slot_*`).
-5. **Rotation**: a new client takes new requests once the rotation period has
-   passed; the old one finishes its in-flight requests and closes its
-   connections when the last of them drops it.
+5. **Rotation**: once the rotation period has passed, the target's fresh
+   lookup starts and the current client keeps taking requests; a new client
+   takes over once that lookup is over (landed, past its bound, or refused by
+   the stuck cap), so its first connections go to what the lookup found and a
+   moved name is reached within one period. The old client finishes its
+   in-flight requests and closes its connections when the last of them drops
+   it.
 6. **Budgets**: one attempt has its own budget, inside a total. The total is
    the caller's (the decision deadline, `call_control_timeout_ms`), or the
    ceiling when the caller has none (`BackendClient::budgets` with a total
@@ -63,7 +68,9 @@ worker reporting itself healthy.
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same
    client, after a connection-level failure (refused, unreachable, connect
    timeout, reset, EOF, broken pipe) or a request timeout, when the total
-   budget leaves room for a whole attempt. Never after an HTTP response of any status, never while the breaker
+   budget leaves room for a whole attempt after the first one was due to end
+   (read from its deadline, not from the clock after it, so a total of two
+   attempts always holds the second). Never after an HTTP response of any status, never while the breaker
    is open, never for a name that does not resolve or a request never sent.
    The pool hands out the most recently returned idle connection first, so a
    retry lands on a connection that just proved itself. `hyper-util`'s own
@@ -165,7 +172,8 @@ burst of a few lost requests should not open it.
 - Pinned by: `http-net` `tests/it/backend.rs` (retry, cap, rotation, breaker,
   lookup bound), `tests/it/backend_breaker.rs` (a hung burst, slot waits, a
   panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
-  classifier, a hanging lookup on the real client),
+  classifier, a hanging lookup on the real client), `tests/it/real_backend.rs`
+  (the retry's room and a moved name, on the real clock),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
   `service_http` (the adaptation port's retry),
