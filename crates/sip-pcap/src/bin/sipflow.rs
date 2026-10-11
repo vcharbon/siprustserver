@@ -31,6 +31,8 @@
 //!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
 //!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
 //!   sipflow --list-rules
+//!   sipflow index capture.flows.json
+//!   sipflow get capture-dir/ --call-id 7f3a... --cseq 2 --method BYE --raw
 //!
 //! `--rfc` reviews the SELECTED calls: the same rules the census runs, on the
 //! document the selection would emit, with every hit placed on a side by
@@ -51,6 +53,11 @@ use sip_pcap::flow::{
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
 use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 
+#[path = "sipflow/captures.rs"]
+mod captures;
+use captures::expand_inputs;
+#[path = "sipflow/get.rs"]
+mod get;
 #[path = "sipflow/walk.rs"]
 mod walk;
 use walk::{capture_of, expand_flows_documents};
@@ -292,6 +299,7 @@ struct Args {
 }
 
 fn main() {
+    get::dispatch();
     let args = Args::parse();
     if args.list_rules {
         for rule in rfc_rules::RuleId::ALL {
@@ -834,36 +842,6 @@ fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::Rule
 
     eprint!("{}", census.summary());
     println!("{}", serde_json::to_string_pretty(&census).expect("census serializes"));
-}
-
-fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for p in inputs {
-        if p.is_dir() {
-            let mut in_dir: Vec<PathBuf> = std::fs::read_dir(p)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok().map(|e| e.path()))
-                        .filter(|p| {
-                            // Name-based, and deliberately loose: `.pcap`,
-                            // `.pcapng` and either gzipped. The container and
-                            // compression are re-detected from the bytes.
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|n| n.contains(".pcap"))
-                                .unwrap_or(false)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Ring files: oldest-first by mtime so fragment reassembly and
-            // ladders see time monotonically.
-            in_dir.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-            files.extend(in_dir);
-        } else {
-            files.push(p.clone());
-        }
-    }
-    files
 }
 
 fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args, sut: Option<&SutSet>) -> bool {

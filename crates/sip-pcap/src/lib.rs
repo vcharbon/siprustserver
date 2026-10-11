@@ -25,6 +25,7 @@
 pub mod align;
 mod bytes;
 mod callfacts;
+pub mod callindex;
 mod classic;
 pub mod doc;
 pub mod emit;

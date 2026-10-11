@@ -123,7 +123,7 @@ crates/sip-message/src/sdp_answer.rs 586
 crates/sip-message/src/sniff.rs 687
 crates/sip-message/tests/it/generators.rs 1402
 crates/sip-net/src/contracts.rs 870
-crates/sip-pcap/src/bin/sipflow.rs 1081
+crates/sip-pcap/src/bin/sipflow.rs 1059
 crates/sip-pcap/src/flow.rs 820
 crates/sip-pcap/src/flow/tests.rs 1000
 crates/sip-proxy-runner/src/main.rs 1166

@@ -88,6 +88,22 @@ Encodes an emitted (typically anonymized) flows document as a classic pcap
 is a capture again for every reader. The review's own regression fixture,
 `crates/sip-pcap/tests/fixtures/rfc-review/`, is made that way.
 
+## One call of a document
+
+```sh
+$SF index capture.flows.json
+$SF get capture.flows.json --call-id 7f3a... [--cseq 2 --method BYE] [--raw]
+```
+
+`index` writes `capture.flows.json.idx`: the byte span and Call-ID of every
+leg, and the size and modification time of the document it describes. `get`
+reads one leg through it — one line per message (`m<i> +<seconds> src -> dst |
+start line | CSeq`), or the wire text with `--raw` — so a call of a document of
+hundreds of megabytes is read without loading the document. `--cseq` and
+`--method` select one transaction, its request and every response. The
+argument may name a directory holding exactly one `*.flows.json`. A missing or
+stale index is replaced by one scan of the document, said on stderr.
+
 ## Corpus census
 
 `--rfc-census <flows.json…|dir…>` sweeps already-emitted documents under the
