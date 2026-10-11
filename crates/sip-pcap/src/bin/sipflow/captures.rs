@@ -33,3 +33,7 @@ pub(crate) fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
     }
     files
 }
+
+#[cfg(all(test, unix))]
+#[path = "captures/tests.rs"]
+mod tests;

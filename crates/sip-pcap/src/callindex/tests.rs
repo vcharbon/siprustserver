@@ -83,6 +83,12 @@ fn a_stored_index_serves_until_the_document_changes() {
     let (fresh, served) = load(&doc).expect("loads");
     assert!(!served, "a changed document is scanned again");
     assert_eq!(fresh.legs.len(), 2);
+    assert_eq!(load(&doc).expect("loads").1, true, "and its index rewritten beside it");
+    let mut old = fresh.clone();
+    old.version = INDEX_VERSION + 1;
+    std::fs::write(index_path(&doc), serde_json::to_string(&old).unwrap()).unwrap();
+    assert!(!load(&doc).expect("loads").1, "an index of another version is stale");
+    assert_eq!(load(&doc).expect("loads").0.version, INDEX_VERSION, "and rewritten");
     let _ = std::fs::remove_file(index_path(&doc));
     let _ = std::fs::remove_file(&doc);
 }

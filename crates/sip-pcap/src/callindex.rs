@@ -69,7 +69,10 @@ pub fn write(doc: &Path) -> Result<CallIndex, String> {
 }
 
 /// The index of `doc`: the one beside it when it still describes the
-/// document, else a fresh scan. The flag says whether the stored one served.
+/// document, else a fresh scan, written back beside it where the directory
+/// allows, so an index of another version or of an older document is
+/// replaced the first time it is read. The flag says whether the stored one
+/// served.
 pub fn load(doc: &Path) -> Result<(CallIndex, bool), String> {
     let stored = std::fs::read_to_string(index_path(doc))
         .ok()
@@ -83,7 +86,13 @@ pub fn load(doc: &Path) -> Result<(CallIndex, bool), String> {
         {
             Ok((index, true))
         }
-        _ => Ok((build(doc)?, false)),
+        _ => {
+            let index = build(doc)?;
+            if let Ok(json) = serde_json::to_string(&index) {
+                let _ = std::fs::write(index_path(doc), json);
+            }
+            Ok((index, false))
+        }
     }
 }
 
