@@ -13,6 +13,7 @@
 //! so a run driven on one thread mints the same ids each time it is replayed.
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hex length of a trace id.
@@ -33,15 +34,23 @@ thread_local! {
 /// While held, every id minted on the thread that took it comes from a stream
 /// seeded `seed`, its n-th id the same on every replay; dropping it restores
 /// the stream the thread minted from before. Ids minted on other threads keep
-/// the process stream.
+/// the process stream. The guard is neither `Send` nor `Sync`: it seeds the
+/// thread that took it, so it cannot move to another one.
+///
+/// ```compile_fail
+/// fn send<T: Send>(_: T) {}
+/// send(observe::trace_ids::seed_thread(1));
+/// ```
 #[must_use = "the thread mints from the seeded stream only while the guard is held"]
 pub struct ThreadSeed {
     previous: Option<(u64, u64)>,
+    _this_thread: PhantomData<*const ()>,
 }
 
 /// Mint this thread's ids from `seed` until the returned guard drops.
 pub fn seed_thread(seed: u64) -> ThreadSeed {
-    ThreadSeed { previous: THREAD_STREAM.with(|s| s.replace(Some((spread(seed), 0)))) }
+    let previous = THREAD_STREAM.with(|s| s.replace(Some((spread(seed), 0))));
+    ThreadSeed { previous, _this_thread: PhantomData }
 }
 
 /// SplitMix64's finaliser: a bijection, so two seeds never share a stream, and
@@ -156,15 +165,58 @@ mod tests {
         assert!(is_valid_id(&first.0, TRACE_ID_HEX) && is_valid_id(&first.1, SPAN_ID_HEX));
     }
 
+    /// The trace ids `seed` mints on a thread of their own, a span id minted
+    /// between each two.
+    fn seeded_traces(seed: u64, count: usize) -> Vec<String> {
+        std::thread::spawn(move || {
+            let _seed = seed_thread(seed);
+            (0..count).map(|_| (new_trace_id(), new_span_id()).0).collect()
+        })
+        .join()
+        .unwrap()
+    }
+
     #[test]
-    fn the_seed_is_the_holding_threads_alone_and_ends_with_its_guard() {
+    fn the_seed_is_the_holding_threads_alone() {
         let seeded = seeded_pair(7);
-        let guard = seed_thread(7);
-        let other = std::thread::spawn(|| (new_trace_id(), new_span_id())).join().unwrap();
-        assert_ne!(other, seeded, "another thread keeps the process stream");
-        assert_eq!((new_trace_id(), new_span_id()), seeded, "the holder mints from the seed");
-        drop(guard);
-        assert_ne!(new_trace_id(), seeded_pair(7).0, "the dropped guard restores the stream");
+        std::thread::spawn(move || {
+            let _guard = seed_thread(7);
+            let other = std::thread::spawn(|| (new_trace_id(), new_span_id())).join().unwrap();
+            assert_ne!(other, seeded, "another thread keeps the process stream");
+            assert_eq!((new_trace_id(), new_span_id()), seeded, "the holder mints from the seed");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_dropped_guard_ends_the_seeded_stream() {
+        let stream = seeded_traces(7, 2);
+        let after = std::thread::spawn(|| {
+            let guard = seed_thread(7);
+            let _ = (new_trace_id(), new_span_id());
+            drop(guard);
+            new_trace_id()
+        })
+        .join()
+        .unwrap();
+        assert_ne!(after, stream[1], "past its guard the thread no longer draws the seed's ids");
+    }
+
+    #[test]
+    fn a_dropped_inner_guard_restores_the_outer_seeds_stream() {
+        let outer = seeded_traces(7, 2);
+        let resumed = std::thread::spawn(|| {
+            let _outer = seed_thread(7);
+            let _ = (new_trace_id(), new_span_id());
+            let inner = seed_thread(9);
+            let _ = (new_trace_id(), new_span_id());
+            drop(inner);
+            new_trace_id()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(resumed, outer[1], "the outer seed's stream goes on where it stopped");
     }
 
     #[test]
