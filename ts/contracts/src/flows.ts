@@ -344,6 +344,8 @@ export const FlowsDoc = Schema.Struct({
   schema: Schema.Int,
   /** The header allow-list `msgs[].headers` projects, canonical names in the order requested. */
   emit_headers: defaulted(Schema.Array(Schema.String), []),
+  /** The transformation a tool applied to the message bytes after they were read (`anonymised`, …); absent on a document as read. */
+  rewritten: Schema.optionalKey(Schema.String),
   decode_stats: DecodeStats,
   flow_stats: FlowStats,
   /** Index = the leg id `groups[].legs` and every evidence entry reference. */

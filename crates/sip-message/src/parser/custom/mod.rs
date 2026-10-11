@@ -22,6 +22,7 @@ pub mod extract_fields;
 pub mod header_index;
 pub mod headers;
 pub mod optional_headers;
+mod port_garbage;
 pub mod scanner;
 pub mod start_line;
 pub mod structured_headers;

@@ -52,6 +52,7 @@ pub fn flows_to_doc_selected(
     let mut doc = FlowsDoc {
         schema: EMIT_SCHEMA_VERSION,
         emit_headers: Vec::new(),
+        rewritten: None,
         decode_stats: DecodeStatsJson {
             records: decode.records,
             non_ip: decode.non_ip,

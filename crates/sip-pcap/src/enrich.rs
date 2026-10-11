@@ -183,4 +183,15 @@ Content-Length: 0\r\n\r\n";
         assert!(matches!(back.legs[0].msgs[0].summary, Summary::Request { .. }));
         assert_eq!(back.groups[0].final_status, Some(200));
     }
+
+    #[test]
+    fn a_rewritten_document_keeps_its_mark_through_re_enrichment() {
+        let opts = EnrichOptions::with_headers(&["X-Api-Call"]);
+        let mut marked = doc();
+        assert_eq!(marked.rewritten, None, "a document as read carries no mark");
+        marked.rewritten = Some("anonymised".to_string());
+        let again = enrich_str(&serde_json::to_string(&marked).unwrap(), &opts).unwrap();
+        let back: FlowsDoc = serde_json::from_str(&again).unwrap();
+        assert_eq!(back.rewritten.as_deref(), Some("anonymised"));
+    }
 }

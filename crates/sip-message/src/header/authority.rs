@@ -24,6 +24,21 @@ pub fn network_host(uri: &str) -> Option<&str> {
     (!host.is_empty()).then_some(host)
 }
 
+/// The host of a `hostport` (RFC 3261 §25.1: `host [":" port]`), an IPv6
+/// reference with its brackets: the port, which names no one, left out.
+pub fn host_of(hostport: &str) -> &str {
+    let hostport = hostport.trim();
+    if hostport.starts_with('[') {
+        return hostport.find(']').map_or(hostport, |end| &hostport[..=end]);
+    }
+    match hostport.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host
+        }
+        _ => hostport,
+    }
+}
+
 /// The domain of a message id: a `cid:` or `mid:` URI (RFC 2392) or a
 /// `Content-ID` value (`<id-left@id-right>`, RFC 5322 §3.6.4), the text
 /// after its last `@`; `None` for any other value.
@@ -44,7 +59,16 @@ pub fn message_id_domain(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_id_domain, network_host};
+    use super::{host_of, message_id_domain, network_host};
+
+    #[test]
+    fn a_hostport_names_its_host_without_the_port() {
+        assert_eq!(host_of("sbc.example.com:5070"), "sbc.example.com");
+        assert_eq!(host_of("192.0.2.1:5080"), "192.0.2.1");
+        assert_eq!(host_of("[2001:db8::1]:5060"), "[2001:db8::1]");
+        assert_eq!(host_of("2001:db8::1"), "2001:db8::1");
+        assert_eq!(host_of("pseudonym"), "pseudonym");
+    }
 
     #[test]
     fn a_message_id_names_its_domain() {

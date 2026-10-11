@@ -31,6 +31,12 @@ pub struct FlowsDoc {
     /// order requested. Empty ⇒ no message carries a `headers` projection.
     #[serde(default)]
     pub emit_headers: Vec<String>,
+    /// The transformation a tool applied to the message bytes after they were
+    /// read from the capture (`anonymised`, …); absent on a document as read.
+    /// A tool that must start from captured bytes refuses a document carrying
+    /// one, and a re-derivation of the enrichment keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten: Option<String>,
     pub decode_stats: DecodeStatsJson,
     pub flow_stats: FlowStatsJson,
     /// Index = the leg id `groups[].legs` and every evidence entry reference.

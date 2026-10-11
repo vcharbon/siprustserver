@@ -22,6 +22,7 @@ fn an_ipv6_sent_by_whose_group_starts_with_digits_parses() {
         "SIP/2.0/UDP [2001:db8:1:6d0::5];branch=z9hG4bK1",
         "SIP/2.0/UDP host.example.com:5060;received=2001:db8:1:6d0::5;branch=z9hG4bK1",
         "SIP/2.0/UDP host.example.com;maddr=2001:db8:0:7ab::1;branch=z9hG4bK1",
+        "SIP / 2.0 / UDP host.example.com:5060;branch=z9hG4bK1",
     ] {
         assert!(request(via).is_ok(), "{via}: {:?}", request(via).err().map(|e| e.reason));
     }
@@ -32,6 +33,8 @@ fn a_port_followed_by_letters_is_still_refused() {
     for via in [
         "SIP/2.0/UDP host.example.com:5060abc;branch=z9hG4bK1",
         "SIP/2.0/UDP [2001:db8::5]:5060x;branch=z9hG4bK1",
+        // RFC 4475 §3.1.1.1 `wsinv`: whitespace around the sent-protocol's slashes.
+        "SIP / 2.0 / UDP host.example.com:5060abc;branch=z9hG4bK1",
     ] {
         let err = request(via).expect_err(via);
         assert!(err.reason.contains("Trailing non-digit after Via port"), "{}", err.reason);

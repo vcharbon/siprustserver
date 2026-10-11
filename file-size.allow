@@ -117,7 +117,7 @@ crates/scenario-harness/src/realcall/env.rs 588
 crates/scenario-harness/tests/it/template_emission.rs 1016
 crates/seq-report/src/html.rs 1005
 crates/sip-message/src/generators/relay.rs 504
-crates/sip-message/src/parser/custom/extract_fields.rs 718
+crates/sip-message/src/parser/custom/extract_fields.rs 649
 crates/sip-message/src/parser/custom/structured_headers.rs 871
 crates/sip-message/src/sdp_answer.rs 586
 crates/sip-message/src/sniff.rs 687
