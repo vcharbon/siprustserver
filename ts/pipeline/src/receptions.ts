@@ -1,12 +1,13 @@
 /**
  * What each leg's scripted actor received, and what it sent, one summary per
  * datagram, read off the run's recording: which step claimed it, its start line
- * and CSeq method, its From, and the subscription state, sipfrag status and
- * session origin it carries. The run-side facts a rule reads beside a
- * confrontation row, which states only the one message it compares.
+ * and CSeq method, its From and Record-Route, and the subscription state,
+ * sipfrag status and session origin it carries. The run-side facts a rule reads
+ * beside a confrontation row, which states only the one message it compares.
  */
 import type { Bundle } from "@sip/contracts"
 import type { Reception } from "./classifier.js"
+import { items } from "./fold.js"
 import { bodyBytesOf, headersInOrderRaw, headerValuesOf, headText, startLineOf } from "./wire.js"
 
 const ORIGIN_LINE = /^o=[^\r\n]*/m
@@ -27,6 +28,7 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
   const cseqMethod = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)[1]?.toUpperCase() ?? ""
   const state = headerValuesOf(headers, "Subscription-State")[0]?.split(";")[0]?.trim().toLowerCase()
   const from = headerValuesOf(headers, "From")[0]?.trim()
+  const recordRoute = items("record-route", headerValuesOf(headers, "Record-Route"))
   const text = bodyText(message)
   const mediaType = (message.body?.content_type ?? "").split(";")[0]!.trim().toLowerCase()
   const frag = mediaType === "message/sipfrag" ? FRAG_STATUS.exec(text.trim()) : null
@@ -38,7 +40,8 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
     ...(state === undefined || state === "" ? {} : { subscriptionState: state }),
     ...(frag === null ? {} : { fragStatus: Number(frag[1]) }),
     ...(origin === undefined ? {} : { origin }),
-    ...(from === undefined || from === "" ? {} : { from })
+    ...(from === undefined || from === "" ? {} : { from }),
+    ...(recordRoute.length === 0 ? {} : { recordRoute })
   }
 }
 

@@ -68,3 +68,17 @@ describe("sentOf", () => {
     expect(got.has("B")).toBe(false)
   })
 })
+
+describe("a summary's Record-Route", () => {
+  it("states every Record-Route value the datagram carries, in order, and none where it carries none", () => {
+    const answer = line(
+      crlf(["SIP/2.0 200 OK", "Record-Route: <sip:192.0.2.7;lr>, <sip:192.0.2.8;lr>", "Record-Route: <sip:192.0.2.9;lr>", "CSeq: 1 INVITE", "Content-Length: 0", ""]),
+      { dir: "out" }
+    )
+    const plain = line(crlf(["SIP/2.0 200 OK", "CSeq: 2 BYE", "Content-Length: 0", ""]), { dir: "out" })
+    expect(sentOf(new Map([["B", [answer, plain]]])).get("B")).toEqual([
+      { status: 200, cseqMethod: "INVITE", recordRoute: ["<sip:192.0.2.7;lr>", "<sip:192.0.2.8;lr>", "<sip:192.0.2.9;lr>"] },
+      { status: 200, cseqMethod: "BYE" }
+    ])
+  })
+})

@@ -191,6 +191,8 @@ export interface Reception {
   readonly origin?: string
   /** The From header's value, as written (RFC 3261 §20.20). */
   readonly from?: string
+  /** Every Record-Route value it carries, in header order (RFC 3261 §20.30); absent where it carries none. */
+  readonly recordRoute?: ReadonlyArray<string>
 }
 
 /** What one lane's rule lists say about one probe. */
