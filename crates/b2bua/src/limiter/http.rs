@@ -139,14 +139,15 @@ impl Endpoint {
 
     /// One probe of the breaker's: a health request, its answer reported
     /// as an admit's is.
-    fn probed(&self, answer: Option<&HttpResponse>) {
+    fn probed(&self, answer: Result<&HttpResponse, &AttemptError>) {
         self.sent(LimiterOp::Health);
         match answer {
-            None => self.failed(LimiterOp::Health, LimiterFailure::Transport),
-            Some(resp) if resp.status != 200 => {
+            Err(AttemptError::Timeout) => self.failed(LimiterOp::Health, LimiterFailure::Timeout),
+            Err(_) => self.failed(LimiterOp::Health, LimiterFailure::Transport),
+            Ok(resp) if resp.status != 200 => {
                 self.failed(LimiterOp::Health, LimiterFailure::Status);
             }
-            Some(resp) => match read_health(&resp.body) {
+            Ok(resp) => match read_health(&resp.body) {
                 Some(lease_ms) => {
                     self.answered();
                     self.stated_lease(lease_ms);

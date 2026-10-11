@@ -1,8 +1,7 @@
 //! The generic retry rule (ADR-0043): a request whose attempt failed at the
 //! connection level (refused, unreachable, connect timeout, reset, EOF,
-//! broken pipe) or timed out is sent once more, on the same client, while
-//! the total budget has time left; the second attempt gets what remains,
-//! at most one attempt's budget. Never after an HTTP response of any status,
+//! broken pipe) or timed out is sent once more, on the same client, when the
+//! total budget leaves room for a whole attempt. Never after an HTTP response of any status,
 //! never while the breaker is open, never for a request that was not sent.
 //! The pool hands out the most recently returned idle connection first, so a
 //! retry lands on a connection that has just proven itself.
@@ -36,12 +35,12 @@ impl BackendClient {
         let first = self.attempt_on(&client, req.clone(), budgets.attempt.min(budgets.total)).await;
         match first {
             Err(e) if e.is_retryable() && !self.is_open() => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
+                let attempt = budgets.attempt.min(budgets.total);
+                if deadline.saturating_duration_since(Instant::now()) < attempt {
                     return Err(e);
                 }
                 super::metrics::retried(&self.inner.peer);
-                self.attempt_on(&client, req, budgets.attempt.min(left)).await
+                self.attempt_on(&client, req, attempt).await
             }
             outcome => outcome,
         }

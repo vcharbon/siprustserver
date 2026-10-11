@@ -9,7 +9,7 @@
 //! | `<P>_BREAKER_REQUESTS` | requests sent inside the window, none answered, that open the breaker | 3 |
 //! | `<P>_BREAKER_WINDOW_MS` | the window the breaker looks back over | 2000 |
 //! | `<P>_BREAKER_PROBE_MS` | the probe period while open | 1000 |
-//! | `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request's budget, after its lookup | per backend |
+//! | `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request's budget, after its lookup | the attempt budget, at most the probe period |
 //! | `<P>_HEALTH_PATH` | the path the probe asks with `GET` | per backend |
 //! | `<P>_LOOKUP_TIMEOUT_MS` | the bound on one name lookup | 2000 |
 //! | `<P>_LOOKUP_MAX_STUCK` | lookups left running past their bound before none starts | 4 |
@@ -40,14 +40,13 @@ pub struct BackendConfig {
 impl BackendConfig {
     /// The defaults of a backend capped at `max_in_flight` requests in
     /// flight, each attempt under `attempt`, its probe asking `health_path`
-    /// under `attempt`.
+    /// under `attempt`, at most the probe period, so a probe runs about once
+    /// a period.
     pub fn new(max_in_flight: usize, attempt: Duration, health_path: &str) -> Self {
+        let breaker = BreakerConfig::probing(health_path);
         Self {
             client: ClientSettings::with_max_in_flight(max_in_flight),
-            breaker: BreakerConfig {
-                probe_timeout: attempt,
-                ..BreakerConfig::probing(health_path)
-            },
+            breaker: BreakerConfig { probe_timeout: attempt.min(breaker.probe_period), ..breaker },
             lookup: LookupSettings::default(),
             attempt,
         }
@@ -125,7 +124,7 @@ mod tests {
         assert_eq!(config.breaker.min_sent, 3);
         assert_eq!(config.breaker.window, Duration::from_secs(2));
         assert_eq!(config.breaker.probe_period, Duration::from_secs(1));
-        assert_eq!(config.breaker.probe_timeout, Duration::from_millis(2_500));
+        assert_eq!(config.breaker.probe_timeout, Duration::from_secs(1), "at most the period");
         assert_eq!(config.lookup, LookupSettings { bound: Duration::from_secs(2), max_stuck: 4 });
         assert_eq!(config.attempt, Duration::from_millis(2_500));
     }

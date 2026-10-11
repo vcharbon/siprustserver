@@ -29,7 +29,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-pub use breaker::{BreakerConfig, WindowBreaker};
+pub use breaker::{BreakerConfig, Sent, WindowBreaker};
 pub use config::BackendConfig;
 pub use retry::Budgets;
 
@@ -67,8 +67,8 @@ impl AttemptError {
     }
 }
 
-/// What a probe saw: the response, or none.
-pub type ProbeReport = Arc<dyn Fn(Option<&HttpResponse>) + Send + Sync>;
+/// What a probe saw: the response, or why it got none.
+pub type ProbeReport = Arc<dyn Fn(Result<&HttpResponse, &AttemptError>) + Send + Sync>;
 
 /// One backend's client. Clone shares it.
 #[derive(Clone)]
@@ -161,6 +161,21 @@ impl BackendClient {
         }
     }
 
+    /// Look the target's name up now, off the caller, and open the breaker
+    /// when the lookup finds no address: until a probe is answered, a request
+    /// fails at once instead of waiting for a lookup of its own.
+    pub fn trip_unless_resolved(&self) {
+        let inner = Arc::downgrade(&self.inner);
+        let target = self.inner.target.clone();
+        tokio::spawn(async move {
+            if target.resolve_all().await.is_none() {
+                if let Some(inner) = inner.upgrade() {
+                    BackendClient { inner }.trip();
+                }
+            }
+        });
+    }
+
     /// From now on, `report` hears each probe's outcome.
     pub fn report_probes_to(&self, report: ProbeReport) {
         *self.inner.report.lock().unwrap_or_else(PoisonError::into_inner) = Some(report);
@@ -215,20 +230,20 @@ impl BackendClient {
         if self.is_open() {
             return Err(AttemptError::BreakerOpen);
         }
-        self.inner.lock_breaker().sent(Instant::now());
+        let mut sent = InFlight::sent(&self.inner);
         let outcome = tokio::time::timeout_at(deadline, client.request(req)).await;
         drop(slot);
         match outcome {
             Ok(Ok(resp)) => {
-                self.inner.lock_breaker().answered(Instant::now());
+                sent.answered();
                 Ok(resp)
             }
             Ok(Err(e)) => {
-                self.inner.unanswered();
+                sent.unanswered();
                 Err(AttemptError::Transport(e))
             }
             Err(_) => {
-                self.inner.unanswered();
+                sent.unanswered();
                 Err(AttemptError::Timeout)
             }
         }
@@ -242,9 +257,9 @@ impl Inner {
         self.breaker.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A request ended without a response: the rule may open the breaker.
-    fn unanswered(self: &Arc<Self>) {
-        let opened = self.lock_breaker().unanswered(Instant::now());
+    /// `request` ended without a response: the rule may open the breaker.
+    fn unanswered(self: &Arc<Self>, request: Sent) {
+        let opened = self.lock_breaker().unanswered(request, Instant::now());
         if opened {
             self.opened();
         }
@@ -277,6 +292,43 @@ impl Inner {
             self.open.send_replace(false);
             metrics::breaker_moved(&self.peer, false);
             tracing::info!(backend = %self.peer, "backend breaker closed: a probe was answered");
+        }
+    }
+}
+
+/// A request counted by the breaker until it ends: a request whose caller
+/// drops it mid-flight ends as [`WindowBreaker::dropped`].
+struct InFlight<'a> {
+    inner: &'a Arc<Inner>,
+    request: Option<Sent>,
+}
+
+impl<'a> InFlight<'a> {
+    /// A request leaving now.
+    fn sent(inner: &'a Arc<Inner>) -> Self {
+        let request = inner.lock_breaker().sent(Instant::now());
+        Self { inner, request: Some(request) }
+    }
+
+    /// It got an HTTP response.
+    fn answered(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.inner.lock_breaker().answered(request, Instant::now());
+        }
+    }
+
+    /// It ended without one.
+    fn unanswered(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.inner.unanswered(request);
+        }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            self.inner.lock_breaker().dropped(request, Instant::now());
         }
     }
 }

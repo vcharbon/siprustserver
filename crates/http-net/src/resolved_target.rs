@@ -20,11 +20,12 @@
 //! The addresses a name resolves to are kept until
 //! [`ResolvedTarget::forget`]; the next request then looks the name up
 //! again. [`ResolvedTarget::refresh`] asks for a fresh lookup but serves
-//! stale: the next request waits for the new lookup, and when it finds
-//! nothing (no answer, past its bound, too many stuck) the addresses kept
-//! stay in use until the next refresh. A lookup only starts while no fresh
-//! address is kept, so the one in flight at a forget is already a fresh one:
-//! it lands and is kept.
+//! stale: the next request starts the lookup and is answered the addresses
+//! kept at once, never waiting for it; a lookup that finds something
+//! replaces them, one that finds nothing (no answer, past its bound, too many
+//! stuck) leaves them in use until the next refresh. A lookup only starts
+//! while no fresh address is kept, so the one in flight at a forget is
+//! already a fresh one: it lands and is kept.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -108,27 +109,34 @@ impl Named {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The addresses kept, or the lookup in flight, started when none is
-    /// and fewer than [`MAX_STUCK`] are stuck.
+    /// The addresses kept (a stale set starting its fresh lookup behind
+    /// the caller), or the lookup in flight, started when none is and fewer
+    /// than [`MAX_STUCK`] are stuck.
     fn address_or_lookup(self: &Arc<Self>) -> Found {
         let mut state = self.lock();
-        match state.addrs.as_ref() {
-            Some(addrs) if !state.stale => return Found::Kept(addrs.clone()),
-            _ => {}
+        if let Some(addrs) = state.addrs.clone() {
+            if state.stale && state.lookup.is_none() {
+                if state.stuck >= self.lookup.max_stuck {
+                    state.stale = false;
+                } else {
+                    let _ = self.start(&mut state);
+                }
+            }
+            return Found::Kept(addrs);
         }
         if let Some(waiting) = state.lookup.as_ref() {
             return Found::Wait(waiting.clone());
         }
         if state.stuck >= self.lookup.max_stuck {
-            state.stale = false;
-            return match state.addrs.as_ref() {
-                Some(addrs) => Found::Kept(addrs.clone()),
-                None => Found::Refused,
-            };
+            return Found::Refused;
         }
+        Found::Wait(self.start(&mut state))
+    }
+
+    /// Start a lookup, its answer landing for every request after it.
+    fn start(self: &Arc<Self>, state: &mut NameState) -> watch::Receiver<Answer> {
         let (tx, rx) = watch::channel(None);
         state.lookup = Some(rx.clone());
-        drop(state);
         let done = LookupDone(self.clone());
         tokio::spawn(async move {
             let found = done.run().await;
@@ -136,7 +144,7 @@ impl Named {
             drop(done);
             let _ = tx.send(Some(found));
         });
-        Found::Wait(rx)
+        rx
     }
 }
 
@@ -228,7 +236,7 @@ impl ResolvedTarget {
     /// Every address to send to; `None` when the name does not resolve.
     /// Waits for the lookup in flight, or starts one; a lookup is bounded,
     /// and a caller that gives up sooner leaves it to finish for the next. A
-    /// refresh that finds nothing answers the stale addresses.
+    /// name with addresses kept answers them at once, stale ones included.
     pub async fn resolve_all(&self) -> Option<Addresses> {
         let named = match &self.kind {
             Kind::Addr(addr) => return Some(Arc::from([*addr])),
@@ -284,8 +292,9 @@ impl ResolvedTarget {
         }
     }
 
-    /// Look the name up again on the next request, serving the addresses
-    /// kept when that lookup finds nothing. A socket address is kept.
+    /// Look the name up again from the next request on, which is answered
+    /// the addresses kept at once; they serve until a lookup finds others. A
+    /// socket address is kept.
     pub fn refresh(&self) {
         if let Kind::Name(named) = &self.kind {
             let mut state = named.lock();

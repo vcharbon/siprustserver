@@ -316,13 +316,16 @@ async fn binprobe_round_trip(name: &str, script: Vec<Behaviour>) -> Vec<(String,
     }
 
     let decision = Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070));
+    // Two attempts of 1.5 s inside each request's 3 s: room for a retry.
+    let mut port = AdaptationHttpPort::addressed(
+        Arc::new(http.clone()) as Arc<dyn HttpTransport>,
+        laddr(),
+        Duration::from_secs(3),
+    );
+    port.attempt = Duration::from_millis(1_500);
     let b2bua = B2buaSut::builder(decision)
         .services(vec![binprobe::service_def()])
-        .adaptation_http(AdaptationHttpPort::addressed(
-            Arc::new(http.clone()) as Arc<dyn HttpTransport>,
-            laddr(),
-            Duration::from_secs(3),
-        ))
+        .adaptation_http(port)
         .tune(|c| c.keepalive_interval_sec = 3_600)
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;

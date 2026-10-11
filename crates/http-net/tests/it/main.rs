@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=http-net) & binary(it)' <module>::`.
 
 mod backend;
+mod backend_breaker;
 mod classify;
 mod real;
 mod recording;

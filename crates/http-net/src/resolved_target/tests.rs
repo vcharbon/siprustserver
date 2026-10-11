@@ -257,33 +257,39 @@ async fn a_stuck_lookup_that_ends_frees_its_count() {
     assert_eq!(target.resolve().await, Some(addr()), "the stuck lookups ended");
 }
 
-/// A refresh looks the name up again; when the lookup finds nothing, the
-/// addresses kept still serve until the next refresh. A forget drops them.
-#[tokio::test]
-async fn a_refresh_that_finds_nothing_serves_stale() {
+/// A refresh looks the name up again behind the next request, which is
+/// answered the addresses kept; when the lookup finds nothing they still
+/// serve until the next refresh, when it finds others they replace them. A
+/// forget drops them.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_serves_stale_and_takes_what_its_lookup_finds() {
     let resolver = Arc::new(crate::MemoryResolver::new());
     resolver.point("limiter:8080", [addr()]);
     let target = ResolvedTarget::name_with("limiter:8080", resolver.clone());
     assert_eq!(target.resolve().await, Some(addr()));
     resolver.unpoint("limiter:8080");
     target.refresh();
-    assert_eq!(target.resolve().await, Some(addr()), "stale, served");
+    assert_eq!(target.resolve().await, Some(addr()), "stale, served at once");
+    sip_clock::testkit::settle().await;
     assert_eq!(resolver.lookups(), 2, "the refresh looked the name up");
     assert_eq!(target.resolve().await, Some(addr()), "kept until the next refresh");
     assert_eq!(resolver.lookups(), 2);
     let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
     resolver.point("limiter:8080", [moved]);
     target.refresh();
-    assert_eq!(target.resolve().await, Some(moved), "a refresh that finds one takes it");
+    assert_eq!(target.resolve().await, Some(addr()), "stale while the lookup runs");
+    sip_clock::testkit::settle().await;
+    assert_eq!(target.resolve().await, Some(moved), "the lookup's find, from then on");
     resolver.unpoint("limiter:8080");
     target.forget();
     assert_eq!(target.resolve().await, None, "a forget drops them outright");
 }
 
-/// A refresh whose lookup hangs past its bound serves the stale addresses at
-/// the bound.
+/// A refresh whose lookup hangs serves the stale addresses at once, the
+/// lookup running past its bound behind the requests; once the cap of stuck
+/// lookups is reached, a refresh starts none.
 #[tokio::test(start_paused = true)]
-async fn a_refresh_past_its_bound_serves_stale() {
+async fn a_refresh_whose_lookup_hangs_serves_stale_at_once() {
     let resolver = Arc::new(StuckResolver { stuck: usize::MAX, ..Default::default() });
     let target2 = ResolvedTarget::name_with_lookup(
         "limiter:8080",
@@ -296,10 +302,12 @@ async fn a_refresh_past_its_bound_serves_stale() {
     }
     target2.refresh();
     let start = tokio::time::Instant::now();
-    assert_eq!(target2.resolve().await, Some(addr()), "stale, at the bound");
-    assert_eq!(start.elapsed(), std::time::Duration::from_millis(300));
-    target2.refresh();
-    let start = tokio::time::Instant::now();
-    assert_eq!(target2.resolve().await, Some(addr()), "one stuck: stale at once");
+    assert_eq!(target2.resolve().await, Some(addr()), "stale, at once");
     assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(resolver.started.load(Ordering::SeqCst), 1, "one lookup, now stuck");
+    target2.refresh();
+    assert_eq!(target2.resolve().await, Some(addr()), "one stuck: stale, no new lookup");
+    sip_clock::testkit::settle().await;
+    assert_eq!(resolver.started.load(Ordering::SeqCst), 1);
 }

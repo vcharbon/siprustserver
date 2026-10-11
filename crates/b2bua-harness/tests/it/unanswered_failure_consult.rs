@@ -51,7 +51,7 @@ impl CallDecisionEngine for ErringFailover {
 
 /// An unanswered failure consult is no decision: the caller gets the
 /// stack's own bare `503`, no `Reason` and no `Retry-After`, never the failed
-/// leg's final; it adds no mark, and everything it emits keeps the route's
+/// leg's final nor its headers; it adds no mark, and everything it emits keeps the route's
 /// ordinal.
 #[tokio::test(start_paused = true)]
 async fn an_unanswered_failure_consult_answers_503_and_marks_nothing() {
@@ -71,7 +71,14 @@ async fn an_unanswered_failure_consult_answers_503_and_marks_nothing() {
     let sut = Sut::spawn(&h, decision).await;
 
     let mut call = alice.invite(&carol).with_sdp(OFFER).through(sut.addr).send().await;
-    carol.receive("INVITE").await.respond(486, "Busy Here").await;
+    // The failed leg's final states what a relayed final would carry.
+    carol
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Reason", "Q.850;cause=17")
+        .with_header("Retry-After", "60")
+        .await;
     carol.receive("ACK").await;
     let resp = call.expect(503).await;
     assert_bare_503(&resp);

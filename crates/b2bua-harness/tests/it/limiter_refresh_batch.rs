@@ -465,10 +465,11 @@ async fn a_refresh_answered_slower_than_the_admit_budget_reaches_its_call() {
 }
 
 /// The limiter is cut: the batch backs off on consecutive unanswered
-/// requests instead of resending every tick, whether or not the breaker
-/// opens on them and holds it. Once the limiter is back, the next retry (or
-/// the probe's close) is answered and the backoff is gone: the next refresh
-/// leaves within one tick of falling due.
+/// requests instead of resending every tick; its first unanswered requests
+/// fall inside one 2 s window and open the breaker, which holds the batch.
+/// Once the limiter is back, the probe closes it, the held retry is answered
+/// and the backoff is gone: the next refresh leaves within one tick of
+/// falling due.
 #[tokio::test(start_paused = true)]
 async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     let s = Scene::new("refresh-batch-backoff", Setup::default()).await;
@@ -479,12 +480,16 @@ async fn a_dead_limiter_is_retried_under_a_backoff_and_answered_once_back() {
     s.advance_to(REFRESH + Duration::from_secs(30)).await;
     let sent = s.sent_on("/v1/refresh");
     assert!(sent <= 10, "{sent} refresh requests in 30 s of a dead limiter (one per tick: 30)");
+    let m = s.b2bua.metrics().limiter();
+    assert_eq!(m.breaker_transitions_total(true), 1, "the dead limiter opens the breaker once");
+    assert!(m.breaker_open(), "and it stays open while the limiter is cut");
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
     let resumed = s.start.elapsed();
     // The backoff waits 5 s at most; the call's own refresh is due at 40 s.
     s.advance_to(resumed + Duration::from_secs(5) + Duration::from_millis(100)).await;
     let metrics = s.b2bua.metrics();
+    assert!(!metrics.limiter().breaker_open(), "a probe answered closes it");
     assert_eq!(answered_refreshes(metrics), 1, "the retry is answered");
     assert_eq!(s.holds(), [1, 1, 1], "the call stays counted");
 

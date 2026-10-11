@@ -3,8 +3,9 @@
 //! target's lookup bound), then asks `GET` [`BreakerConfig::health_path`]
 //! under [`BreakerConfig::probe_timeout`] on a client of its own that keeps
 //! no pool, so each probe opens a new connection. Any HTTP response, of any status,
-//! closes the breaker; a probe with none forgets the addresses again. Closed,
-//! the probe waits for the next opening; it ends with the client.
+//! closes the breaker; a probe with none forgets the addresses again. A probe
+//! that panics runs again the next period. Closed, the probe waits for the
+//! next opening; it ends with the client.
 //!
 //! [`BreakerConfig::probe_period`]: super::BreakerConfig::probe_period
 //! [`BreakerConfig::health_path`]: super::BreakerConfig::health_path
@@ -14,12 +15,12 @@ use std::sync::{PoisonError, Weak};
 
 use tokio::sync::watch;
 
-use crate::transport::HttpRequest;
+use crate::transport::{HttpError, HttpRequest};
 
-use super::Inner;
+use super::{AttemptError, Inner};
 
 /// Probe while the breaker is open, until `inner` is gone; `open` is the
-/// breaker's state.
+/// breaker's state. A probe that panics is run again the next period.
 pub(super) async fn run(inner: Weak<Inner>, mut open: watch::Receiver<bool>) {
     loop {
         while !*open.borrow_and_update() {
@@ -27,14 +28,19 @@ pub(super) async fn run(inner: Weak<Inner>, mut open: watch::Receiver<bool>) {
                 return;
             }
         }
-        if !probe_until_closed(&inner).await {
-            return;
+        match tokio::spawn(probe_until_closed(inner.clone())).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) if e.is_panic() => {
+                tracing::warn!("backend breaker probe panicked: probing again next period");
+            }
+            Err(_) => return,
         }
     }
 }
 
 /// Probe every period until one is answered; `false` once `inner` is gone.
-async fn probe_until_closed(inner: &Weak<Inner>) -> bool {
+async fn probe_until_closed(inner: Weak<Inner>) -> bool {
     loop {
         let Some(period) = inner.upgrade().map(|i| i.config.probe_period) else {
             return false;
@@ -51,23 +57,25 @@ async fn probe_until_closed(inner: &Weak<Inner>) -> bool {
             Some(_) => {
                 let client = inner.rotation.pool_less();
                 let health = HttpRequest::get(inner.config.health_path.clone());
-                tokio::time::timeout(inner.config.probe_timeout, client.request(health))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
+                match tokio::time::timeout(inner.config.probe_timeout, client.request(health)).await
+                {
+                    Ok(Ok(resp)) => Ok(resp),
+                    Ok(Err(e)) => Err(AttemptError::Transport(e)),
+                    Err(_) => Err(AttemptError::Timeout),
+                }
             }
-            None => None,
+            None => Err(AttemptError::Transport(HttpError::dns(&inner.peer))),
         };
         let report = inner.report.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if let Some(report) = report {
             report(answer.as_ref());
         }
         match answer {
-            Some(_) => {
+            Ok(_) => {
                 inner.closed();
                 return true;
             }
-            None => inner.target.forget(),
+            Err(_) => inner.target.forget(),
         }
     }
 }

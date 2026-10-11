@@ -75,8 +75,14 @@ pub(super) async fn send(
 }
 
 /// One backend's `reqwest` client: its own pool, its URL naming the target.
+/// A request resolves the target before `reqwest` connects, so a lookup is
+/// bounded by the target's lookup bound, never cut by the connect timeout,
+/// and a name that does not resolve fails as one ([`FailureCause::Dns`]).
+///
+/// [`FailureCause::Dns`]: crate::failures::FailureCause::Dns
 pub(super) struct NamedClient {
     client: reqwest::Client,
+    target: Arc<ResolvedTarget>,
     /// `http://<target>`, the authority as configured.
     base: String,
     /// The target as configured: the failure counters' `peer`.
@@ -87,13 +93,22 @@ impl NamedClient {
     pub(super) fn new(target: Arc<ResolvedTarget>, settings: &ClientSettings) -> Self {
         let (host, port) = target.host_port();
         let peer = target.to_string();
-        Self { client: build(settings, Some(target)), base: format!("http://{host}:{port}"), peer }
+        Self {
+            client: build(settings, Some(target.clone())),
+            target,
+            base: format!("http://{host}:{port}"),
+            peer,
+        }
     }
 }
 
 #[async_trait]
 impl HttpClient for NamedClient {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        if self.target.resolve_all().await.is_none() {
+            crate::failures::record(&self.peer, crate::failures::FailureCause::Dns);
+            return Err(HttpError::dns(&self.peer));
+        }
         let url = format!("{}{}", self.base, req.path);
         send(&self.client, &self.peer, &url, req).await
     }

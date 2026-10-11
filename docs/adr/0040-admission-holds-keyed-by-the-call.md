@@ -389,7 +389,7 @@ cells that prove re-registration run the deployed relation.
   period plus a tick below the lease),
   `LIMITER_REFRESH_BATCH_MAX` (1000), `LIMITER_REFRESH_TIMEOUT_MS` (2000),
   `LIMITER_RELEASE_TIMEOUT_MS`, `LIMITER_RELEASE_QUEUE_CAP`,
-  `LIMITER_BREAKER_FAILURES` (3), `LIMITER_BREAKER_PROBE_MS` (1000) and the
+  the breaker's `LIMITER_BREAKER_*` knobs (ADR-0043) and the
   exit's release flush bound `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the
   workers.
 - The breaker trades counts for latency: the calls a worker starts while its

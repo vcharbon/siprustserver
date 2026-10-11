@@ -52,12 +52,18 @@ async fn the_breaker_probe_follows_the_limiter() {
 
 /// Five admits of distinct calls sent at once through `limiter`.
 async fn five_at_once(limiter: &Arc<dyn CallLimiter>) -> Vec<AdmitOutcome> {
+    five_calls_at_once(limiter, "c").await
+}
+
+/// Five admits of the calls named `prefix0`…`prefix4`, sent at once.
+async fn five_calls_at_once(limiter: &Arc<dyn CallLimiter>, prefix: &str) -> Vec<AdmitOutcome> {
     let admits: Vec<_> = (0..5)
         .map(|n| {
             let limiter = limiter.clone();
             let wide = vec![LimiterEntry { id: "x".into(), limit: 100 }];
+            let key = format!("{prefix}{n}#k");
             tokio::spawn(async move {
-                limiter.admit(&format!("c{n}#k"), 1, &LimiterHeld::default(), &wide, false).await
+                limiter.admit(&key, 1, &LimiterHeld::default(), &wide, false).await
             })
         })
         .collect();
@@ -88,7 +94,8 @@ async fn admits_during_a_lookup_slower_than_the_budget_fail_and_the_lookup_still
     names.slow(Duration::from_millis(300));
     names.point("limiter:8080", [laddr()]);
     let target = ResolvedTarget::name_with("limiter:8080", names.clone());
-    // A breaker that five failures do not open: this test reads the lookup.
+    // Five admits failing at once on a first lookup open the default
+    // breaker (five in flight, none answered); this test reads the lookup.
     let breaker = BreakerConfig { min_sent: 100, ..breaker_config(BUDGET) };
     let client = BackendClient::new(
         Arc::new(net),
@@ -101,6 +108,29 @@ async fn admits_during_a_lookup_slower_than_the_budget_fail_and_the_lookup_still
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
     assert_eq!(names.lookups(), 1);
+}
+
+/// A rotation while the name's lookups are slower than the admit budget:
+/// the admits after it ride the kept address at once, under the default
+/// breaker, and the fresh lookup runs behind them.
+#[tokio::test(start_paused = true)]
+async fn admits_after_a_rotation_while_dns_is_slow_ride_the_kept_address() {
+    let (net, _server) = served().await;
+    let names = Arc::new(MemoryResolver::new());
+    names.point("limiter:8080", [laddr()]);
+    let target = ResolvedTarget::name_with("limiter:8080", names.clone());
+    let settings = ClientSettings {
+        rotation: Duration::from_secs(1),
+        ..ClientSettings::with_max_in_flight(MAX_IN_FLIGHT)
+    };
+    let client =
+        BackendClient::new(Arc::new(net), Arc::new(target), settings, breaker_config(BUDGET));
+    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::with_client(client, BUDGET));
+    assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
+    names.slow(Duration::from_secs(30));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(five_calls_at_once(&limiter, "d").await, vec![AdmitOutcome::Admitted; 5]);
+    assert_eq!(names.lookups(), 2, "the fresh lookup, behind the admits");
 }
 
 fn resolver() -> Arc<MemoryResolver> {
@@ -375,6 +405,24 @@ async fn every_request_and_every_failure_is_counted_by_its_cause() {
         assert_eq!(m.failures_of(op), 3, "{op:?}");
     }
     assert_eq!(m.failures_total(LimiterOp::Admit, LimiterFailure::BreakerOpen), 0);
+}
+
+/// A probe the limiter leaves silent is counted a timeout; one it refuses, a
+/// transport failure.
+#[tokio::test(start_paused = true)]
+async fn a_probe_is_counted_by_its_cause() {
+    let (net, _server) = served().await;
+    let client = HttpCallLimiter::new(Arc::new(net.clone()), laddr(), BUDGET);
+    let lease = LimiterLease::starting_at(Duration::from_secs(20));
+    let metrics = B2buaMetrics::new();
+    client.report_to(LimiterReports::new(&lease, metrics.clone()));
+    let m = metrics.limiter();
+    net.apply_fault(Fault::Stall { dst: laddr() });
+    assert!(!probe(&client).await);
+    assert_eq!(m.failures_total(LimiterOp::Health, LimiterFailure::Timeout), 1);
+    net.apply_fault(Fault::Cut { dst: laddr() });
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert_eq!(m.failures_total(LimiterOp::Health, LimiterFailure::Transport), 1);
 }
 
 #[tokio::test(start_paused = true)]

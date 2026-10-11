@@ -17,7 +17,8 @@
 //! (the limiter's default, 120 s, before any answer).
 //!
 //! Unset or blank takes the default; a value that is not a positive integer
-//! refuses boot. A `LIMITER_URL` that is not `host:port` over plain HTTP (an
+//! refuses boot, and so does `LIMITER_BREAKER_FAILURES`, which names no knob.
+//! A `LIMITER_URL` that is not `host:port` over plain HTTP (an
 //! other scheme, no port, a path) refuses boot; a well-formed name that does
 //! not resolve at boot starts the breaker open (ADR-0040 decision 10). The
 //! breaker and the client follow ADR-0043.
@@ -66,6 +67,12 @@ pub(crate) fn limiter_from_lookup(
         let n = positive(key, default)?;
         i64::try_from(n).map_err(|_| format!("{key}={n}: too large"))
     };
+    if let Some(v) = stated(lookup("LIMITER_BREAKER_FAILURES")) {
+        return Err(format!(
+            "LIMITER_BREAKER_FAILURES={v:?} is not a knob: the breaker opens on \
+             LIMITER_BREAKER_REQUESTS in LIMITER_BREAKER_WINDOW_MS (ADR-0043)"
+        ));
+    }
     let timeout_ms = positive("LIMITER_TIMEOUT_MS", 150)?;
     let defaults = BackendConfig::new(
         b2bua::limiter::http::MAX_IN_FLIGHT,
@@ -212,6 +219,12 @@ mod tests {
             let e = url(value).expect_err(value);
             assert!(e.contains("LIMITER_URL"), "{e}");
         }
+    }
+
+    #[test]
+    fn the_consecutive_failures_knob_refuses_boot() {
+        let e = from(&[("LIMITER_BREAKER_FAILURES", "3")]).expect_err("not a knob");
+        assert!(e.contains("LIMITER_BREAKER_REQUESTS"), "{e}");
     }
 
     #[test]

@@ -19,26 +19,26 @@ use http_net::{
 use sip_clock::testkit::{advance_settled, settle};
 use tokio::time::Instant;
 
-const ATTEMPT: Duration = Duration::from_millis(2_500);
-const TOTAL: Duration = Duration::from_millis(5_000);
+pub(crate) const ATTEMPT: Duration = Duration::from_millis(2_500);
+pub(crate) const TOTAL: Duration = Duration::from_millis(5_000);
 
-fn budgets() -> Budgets {
+pub(crate) fn budgets() -> Budgets {
     Budgets { attempt: ATTEMPT, total: TOTAL }
 }
 
 /// Answers every request `status`, counting what it served by path.
 #[derive(Default)]
-struct Backend {
-    status: Mutex<u16>,
+pub(crate) struct Backend {
+    pub(crate) status: Mutex<u16>,
     served: Mutex<Vec<String>>,
 }
 
 impl Backend {
-    fn answering(status: u16) -> Arc<Self> {
+    pub(crate) fn answering(status: u16) -> Arc<Self> {
         Arc::new(Self { status: Mutex::new(status), ..Default::default() })
     }
 
-    fn served(&self, path: &str) -> usize {
+    pub(crate) fn served(&self, path: &str) -> usize {
         self.served.lock().unwrap().iter().filter(|p| *p == path).count()
     }
 }
@@ -53,11 +53,11 @@ impl HttpService for Backend {
 
 /// The simulated fabric, counting every request sent and every client
 /// built (with the idle pool it was asked for) and alive.
-struct Counting {
+pub(crate) struct Counting {
     net: SimulatedHttpNetwork,
     sent: AtomicUsize,
-    built: Mutex<Vec<usize>>,
-    alive: Arc<AtomicUsize>,
+    pub(crate) built: Mutex<Vec<usize>>,
+    pub(crate) alive: Arc<AtomicUsize>,
 }
 
 impl Counting {
@@ -70,7 +70,7 @@ impl Counting {
         })
     }
 
-    fn sent(&self) -> usize {
+    pub(crate) fn sent(&self) -> usize {
         self.sent.load(Ordering::SeqCst)
     }
 }
@@ -126,19 +126,29 @@ impl HttpTransport for Counting {
 }
 
 /// A backend at `addr` named `name`, served on its own fabric.
-struct Rig {
-    net: SimulatedHttpNetwork,
-    transport: Arc<Counting>,
-    backend: Arc<Backend>,
-    resolver: Arc<MemoryResolver>,
-    client: BackendClient,
-    dst: SocketAddr,
+pub(crate) struct Rig {
+    pub(crate) net: SimulatedHttpNetwork,
+    pub(crate) transport: Arc<Counting>,
+    pub(crate) backend: Arc<Backend>,
+    pub(crate) resolver: Arc<MemoryResolver>,
+    pub(crate) client: BackendClient,
+    pub(crate) dst: SocketAddr,
     _server: Box<dyn HttpServerHandle>,
 }
 
 impl Rig {
-    async fn new(name: &str, settings: ClientSettings) -> Self {
-        let net = SimulatedHttpNetwork::new();
+    pub(crate) async fn new(name: &str, settings: ClientSettings) -> Self {
+        Self::on(name, settings, BreakerConfig::probing("/health"), SimulatedHttpNetwork::new())
+            .await
+    }
+
+    /// A rig on `net`, its breaker under `breaker`.
+    pub(crate) async fn on(
+        name: &str,
+        settings: ClientSettings,
+        breaker: BreakerConfig,
+        net: SimulatedHttpNetwork,
+    ) -> Self {
         let dst: SocketAddr = "10.0.0.1:8080".parse().unwrap();
         let backend = Backend::answering(200);
         let server = net.serve(dst, backend.clone()).await.unwrap();
@@ -146,29 +156,26 @@ impl Rig {
         let resolver = Arc::new(MemoryResolver::new());
         resolver.point(name, [dst]);
         let target = Arc::new(ResolvedTarget::name_with(name, resolver.clone()));
-        let client = BackendClient::new(
-            transport.clone(),
-            target,
-            settings,
-            BreakerConfig::probing("/health"),
-        );
+        let client = BackendClient::new(transport.clone(), target, settings, breaker);
         Self { net, transport, backend, resolver, client, dst, _server: server }
     }
 
-    fn script(&self, steps: Vec<Behaviour>) {
+    pub(crate) fn script(&self, steps: Vec<Behaviour>) {
         self.net.apply_fault(Fault::Script { dst: self.dst, steps });
     }
 
-    fn behave(&self, behaviour: Behaviour) {
+    pub(crate) fn behave(&self, behaviour: Behaviour) {
         self.net.apply_fault(Fault::Behave { dst: self.dst, behaviour });
     }
 
-    async fn send(&self) -> Result<HttpResponse, AttemptError> {
+    pub(crate) async fn send(&self) -> Result<HttpResponse, AttemptError> {
         self.client.send_with_retry(HttpRequest::post("/call", Vec::new()), budgets()).await
     }
 }
 
-fn transport_cause(outcome: &Result<HttpResponse, AttemptError>) -> Option<FailureCause> {
+pub(crate) fn transport_cause(
+    outcome: &Result<HttpResponse, AttemptError>,
+) -> Option<FailureCause> {
     match outcome {
         Err(AttemptError::Transport(e)) => Some(e.cause),
         _ => None,
@@ -244,6 +251,21 @@ async fn an_unbounded_caller_is_bounded_by_the_ceiling() {
     assert_eq!(rig.transport.sent(), 1, "no time left for a retry");
 }
 
+/// A retry is sent only when the total leaves room for a whole attempt: a
+/// silent first attempt of 2.5 s inside a 2.6 s total is not retried.
+#[tokio::test(start_paused = true)]
+async fn no_retry_without_room_for_a_whole_attempt() {
+    let rig = Rig::new("retry-no-room:8080", ClientSettings::default()).await;
+    rig.behave(Behaviour::Silent);
+    let tight = Budgets { attempt: ATTEMPT, total: Duration::from_millis(2_600) };
+    let start = Instant::now();
+    let outcome = rig.client.send_with_retry(HttpRequest::get("/"), tight).await;
+    assert_eq!(outcome, Err(AttemptError::Timeout));
+    assert_eq!(start.elapsed(), ATTEMPT);
+    assert_eq!(rig.transport.sent(), 1);
+    assert_eq!(metrics::retries("retry-no-room:8080"), 0);
+}
+
 /// Any HTTP response is final: a 500 is never retried.
 #[tokio::test(start_paused = true)]
 async fn an_http_response_is_never_retried() {
@@ -288,15 +310,19 @@ async fn the_failure_that_opens_the_breaker_is_not_retried() {
 
 // ── the in-flight cap ───────────────────────────────────────────────────────
 
-/// Cap 4, ten requests to a silent backend: at most 4 in flight at any
-/// instant, the 6 others wait for a slot and fail at their budget unsent; the
-/// wait never opens the breaker, it is counted, and another backend answers
-/// throughout.
+/// Cap 4, ten requests to a blackholed backend (its connects never complete
+/// within any budget): at most 4 in flight at any instant, the 6 others wait
+/// for a slot and fail at their budget unsent; the wait is counted, and
+/// another backend answers throughout. That a wait never reaches the breaker
+/// is `backend_breaker::requests_that_never_got_a_slot_never_reach_the_breaker`.
 #[tokio::test(start_paused = true)]
 async fn the_in_flight_cap_holds_under_a_flood() {
-    let rig = Rig::new("cap-flood:8080", ClientSettings::with_max_in_flight(4)).await;
+    let net = SimulatedHttpNetwork::new().with_connect_timeout(Duration::from_secs(60));
+    let breaker = BreakerConfig::probing("/health");
+    let settings = ClientSettings::with_max_in_flight(4);
+    let rig = Rig::on("cap-flood:8080", settings, breaker, net).await;
     let other = Rig::new("cap-other:8080", ClientSettings::default()).await;
-    rig.behave(Behaviour::Silent);
+    rig.behave(Behaviour::Blackhole);
     let rig = Arc::new(rig);
     let flood: Vec<_> = (0..10)
         .map(|_| {
@@ -325,7 +351,6 @@ async fn the_in_flight_cap_holds_under_a_flood() {
     let timed_out = outcomes.iter().filter(|o| **o == Err(AttemptError::Timeout)).count();
     assert_eq!((timed_out, saturated), (4, 6), "{outcomes:?}");
     assert_eq!(rig.transport.sent(), 4, "the waiting requests were never sent");
-    assert!(!rig.client.is_open(), "the slot wait never reaches the breaker");
     assert_eq!(metrics::slot_waits("cap-flood:8080"), 6, "every request past the 4th waited");
     assert_eq!(metrics::slot_expired("cap-flood:8080"), 6);
     assert_eq!(metrics::slot_wait_ms("cap-flood:8080"), 6 * 2_500);
@@ -333,10 +358,10 @@ async fn the_in_flight_cap_holds_under_a_flood() {
 
 // ── rotation ────────────────────────────────────────────────────────────────
 
-/// Period 1 s: a request after the period rides a new client that looked
-/// the name up afresh, so a name moved to a new address is reached; a
-/// request in flight across the boundary completes on the old client, which
-/// is dropped after it.
+/// Period 1 s: a request after the period rides a new client; the name is
+/// looked up afresh behind it, so the request after that reaches a name
+/// moved to a new address; a request in flight across the boundary completes
+/// on the old client, which is dropped after it.
 #[tokio::test(start_paused = true)]
 async fn after_one_period_new_requests_ride_a_new_client() {
     let settings = ClientSettings { rotation: Duration::from_secs(1), ..ClientSettings::default() };
@@ -359,15 +384,38 @@ async fn after_one_period_new_requests_ride_a_new_client() {
 
     advance_settled(Duration::from_millis(200)).await;
     assert_eq!(rig.backend.served("/crossing"), 1, "served, its answer in transit");
+    rig.net.apply_fault(Fault::Resume { dst: rig.dst });
     assert_eq!(rig.client.attempt(HttpRequest::get("/b"), ATTEMPT).await.unwrap().status, 200);
     assert_eq!(rig.client.generation(), 2, "a new client after the period");
-    assert_eq!(mover.served("/b"), 1, "the new client looked the moved name up");
+    assert_eq!(rig.backend.served("/b"), 1, "the kept address, at once, while the lookup runs");
+    settle().await;
+    assert_eq!(rig.client.attempt(HttpRequest::get("/c"), ATTEMPT).await.unwrap().status, 200);
+    assert_eq!(mover.served("/c"), 1, "the moved name, once the lookup landed");
     assert_eq!(rig.resolver.lookups(), 2);
     assert_eq!(rig.transport.alive.load(Ordering::SeqCst), 2, "the old one carries a request");
 
     assert_eq!(crossing.await.unwrap().unwrap().status, 200, "completes on the old client");
     assert_eq!(rig.backend.served("/crossing"), 1);
     assert_eq!(rig.transport.alive.load(Ordering::SeqCst), 1, "the old client is dropped");
+}
+
+/// A rotation while DNS hangs: the request after the period is sent at once
+/// to the kept address; the fresh lookup runs behind it.
+#[tokio::test(start_paused = true)]
+async fn a_rotation_while_dns_hangs_serves_the_kept_address_at_once() {
+    let settings = ClientSettings { rotation: Duration::from_secs(1), ..ClientSettings::default() };
+    let rig = Rig::new("rotate-hang:8080", settings).await;
+    assert_eq!(rig.client.attempt(HttpRequest::get("/a"), ATTEMPT).await.unwrap().status, 200);
+    rig.resolver.slow(Duration::from_secs(30));
+    advance_settled(Duration::from_millis(1_100)).await;
+    for path in ["/b", "/c"] {
+        let start = Instant::now();
+        let answer = rig.client.attempt(HttpRequest::get(path), ATTEMPT).await;
+        assert_eq!(answer.map(|r| r.status), Ok(200), "{path}");
+        assert!(start.elapsed() < Duration::from_millis(10), "{path}: {:?}", start.elapsed());
+    }
+    assert_eq!(rig.client.generation(), 2);
+    assert_eq!(rig.resolver.lookups(), 2, "one fresh lookup, single-flight");
 }
 
 // ── the breaker ─────────────────────────────────────────────────────────────
@@ -453,29 +501,23 @@ impl http_net::NameResolver for Hanging {
     }
 }
 
-/// Hanging DNS: a request fails at the 2 s lookup bound, inside its budget,
-/// and once 4 lookups are stuck the next request fails at once.
+/// Hanging DNS: each request fails at the 2 s lookup bound, inside its
+/// budget, unretried; once 4 lookups are stuck the next request fails at
+/// once. The breaker is held closed to read the lookup bound alone.
 #[tokio::test(start_paused = true)]
 async fn a_hanging_resolver_bounds_each_request_and_then_fails_at_once() {
     let net = SimulatedHttpNetwork::new();
     let target = Arc::new(ResolvedTarget::name_with("dns-hang:8080", Arc::new(Hanging)));
-    let client = BackendClient::new(
-        Arc::new(net),
-        target,
-        ClientSettings::default(),
-        BreakerConfig::probing("/"),
-    );
-    for n in 0..http_net::MAX_STUCK {
+    let breaker = BreakerConfig { min_sent: 100, ..BreakerConfig::probing("/") };
+    let client = BackendClient::new(Arc::new(net), target, ClientSettings::default(), breaker);
+    for n in 0..=http_net::MAX_STUCK {
         let start = Instant::now();
         let outcome = client.send_with_retry(HttpRequest::get("/"), budgets()).await;
         assert_eq!(transport_cause(&outcome), Some(FailureCause::Dns), "request {n}");
-        assert_eq!(start.elapsed(), http_net::LOOKUP_BOUND, "request {n}");
-        // The breaker would fail the next ones at once; this test reads
-        // the lookup bound alone.
-        if client.is_open() {
-            break;
-        }
+        let bound = if n < http_net::MAX_STUCK { http_net::LOOKUP_BOUND } else { Duration::ZERO };
+        assert_eq!(start.elapsed(), bound, "request {n}");
     }
+    assert_eq!(metrics::retries("dns-hang:8080"), 0);
 }
 
 /// The lookup cap alone: four lookups stuck, the next request fails at once.

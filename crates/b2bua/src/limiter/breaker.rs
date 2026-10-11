@@ -96,14 +96,6 @@ impl BreakerLimiter {
         }
         self.metrics.limiter().count_breaker_transition(open);
         drop(applied);
-        if open {
-            tracing::warn!(
-                "call limiter breaker open: admits send no request until the limiter answers \
-                 a probe"
-            );
-        } else {
-            tracing::info!("call limiter breaker closed: the limiter answered a probe");
-        }
     }
 
     /// Follow the breaker until it is gone: every transition holds or

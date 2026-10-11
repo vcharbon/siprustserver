@@ -36,9 +36,14 @@ worker reporting itself healthy.
    resolver thread cannot be cancelled), and no new lookup starts while a cap
    of them is stuck. Every address found is returned. The addresses are
    **forgotten** when the breaker opens and when a probe fails; at each client
-   **rotation** they are **refreshed**: the next request waits for a new
-   lookup and, when it finds nothing, the last good addresses keep serving
-   until the next rotation (serve stale).
+   **rotation** they are **refreshed**: the next request starts a new lookup
+   and is sent at once to the last good addresses, never waiting for it; what
+   the lookup finds replaces them, and when it finds nothing they keep serving
+   until the next rotation (serve stale). A request resolves its target
+   before the transport connects, so a lookup is bounded by the lookup bound,
+   never cut by the connect timeout, and a name with no address fails as one
+   (`Dns`). A client whose name has no address at boot opens its breaker once
+   that first lookup finds nothing (`BackendClient::trip_unless_resolved`).
 3. **Transport settings** (`ClientSettings`): connect timeout, an idle timeout
    below a typical backend keep-alive, TCP keepalive and `TCP_USER_TIMEOUT`, a
    ceiling on any one request, so no request is ever unbounded.
@@ -58,8 +63,7 @@ worker reporting itself healthy.
 7. **Retry rule** (`BackendClient::send_with_retry`): one retry, on the same
    client, after a connection-level failure (refused, unreachable, connect
    timeout, reset, EOF, broken pipe) or a request timeout, when the total
-   budget has time left; the retry gets what is left, at most one attempt's
-   budget. Never after an HTTP response of any status, never while the breaker
+   budget leaves room for a whole attempt. Never after an HTTP response of any status, never while the breaker
    is open, never for a name that does not resolve or a request never sent.
    The pool hands out the most recently returned idle connection first, so a
    retry lands on a connection that just proved itself. `hyper-util`'s own
@@ -68,14 +72,19 @@ worker reporting itself healthy.
    attempt (`BackendClient::attempt`). A service's requests through the
    adaptation port (`AdaptationHttpPort`) follow the rule, each attempt under
    the port's attempt budget inside the request's own.
-8. **Breaker** (`WindowBreaker`, one per backend): it opens when the last
-   window saw at least the configured number of requests sent and not one
-   HTTP response of any status, evaluated each time a request ends without
-   one. One dead peer among several never opens it (the others answer); a
-   total outage or a hung application does. While open, a request fails at
-   once, nothing sent, and a probe runs every period: it forgets the
-   addresses, looks the name up afresh, and asks the backend's health path on
-   a client that keeps no pool; any HTTP response closes the breaker.
+8. **Breaker** (`WindowBreaker`, one per backend): it opens when at least
+   the configured number of requests were in flight during the last window
+   (sent inside it, or sent before it and unanswered when it began) and not
+   one HTTP response of any status arrived inside it, evaluated each time a
+   request ends without one. One dead peer among several never opens it (the
+   others answer); a total outage or a hung application does, whatever the
+   attempt budget against the window. A request never sent (no slot) is not
+   counted; one its caller gives up on stays counted but opens nothing. While
+   open, a request fails at once, nothing sent, and a probe runs every period:
+   it forgets the addresses, looks the name up afresh, and asks the backend's
+   health path, under at most one period by default, on a client that keeps
+   no pool; any HTTP response closes the breaker. A probe that panics runs
+   again the next period.
 9. **Policy while open is the caller's.** The limiter lets the call through
    uncounted and holds its release queue and refresh batch until the close
    (ADR-0040); a decision backend fails the call (10).
@@ -119,7 +128,7 @@ positive integer (or a health path not starting with `/`) refuses boot.
 | `<P>_BREAKER_REQUESTS` | requests in the window, none answered, that open the breaker | 3 |
 | `<P>_BREAKER_WINDOW_MS` | the breaker window | 2000 |
 | `<P>_BREAKER_PROBE_MS` | probe period while open | 1000 |
-| `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request, after its lookup | the attempt budget |
+| `<P>_BREAKER_PROBE_TIMEOUT_MS` | one probe request, after its lookup | the attempt budget, at most the probe period |
 | `<P>_HEALTH_PATH` | the path the probe asks with `GET` | per backend (limiter: `/v1/health`) |
 | `<P>_LOOKUP_TIMEOUT_MS` | one name lookup | 2000 |
 | `<P>_LOOKUP_MAX_STUCK` | lookups past their bound before none starts | 4 |
@@ -143,16 +152,20 @@ burst of a few lost requests should not open it.
 
 ## Consequences
 
-- A worker whose decision backend does not resolve at boot starts, answers
-  503 at once while its breaker is open, and routes through the backend once
-  the name resolves and a probe is answered.
+- A worker whose decision backend does not resolve at boot starts without
+  waiting for the lookup; its breaker opens once that first lookup finds
+  nothing (within the lookup bound), from then on it answers 503 at once, and
+  it routes through the backend once the name resolves and a probe is
+  answered.
 - The limiter's breaker follows the same rule: a limiter answering every
   request `5xx` keeps it closed (each admit fails open on its own budget);
   only silence opens it. Refreshes and releases count as requests.
 - The unanswered `/call/failure` consult no longer relays the failed leg's
   final (ADR-0039's fold of an unanswered consult is this 503).
 - Pinned by: `http-net` `tests/it/backend.rs` (retry, cap, rotation, breaker,
-  lookup bound), `tests/it/classify.rs` (the loopback classifier),
+  lookup bound), `tests/it/backend_breaker.rs` (a hung burst, slot waits, a
+  panicking probe, the boot lookup), `tests/it/classify.rs` (the loopback
+  classifier, a hanging lookup on the real client),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
   `service_http` (the adaptation port's retry),

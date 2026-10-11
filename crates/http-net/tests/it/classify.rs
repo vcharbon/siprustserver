@@ -149,3 +149,41 @@ async fn a_backend_client_sends_the_name_and_resolves_it_through_its_target() {
     let head = rx.await.unwrap().to_ascii_lowercase();
     assert!(head.contains(&format!("host: {}", name.to_ascii_lowercase())), "{head}");
 }
+
+/// A resolver that never answers.
+struct Hanging;
+
+#[async_trait::async_trait]
+impl http_net::NameResolver for Hanging {
+    async fn resolve(&self, _: &str) -> Vec<SocketAddr> {
+        std::future::pending().await
+    }
+}
+
+/// Hanging DNS on the real client, a lookup bound (300 ms) above the connect
+/// timeout (100 ms): the request fails at the lookup bound as a name that
+/// does not resolve, never as a connect timeout, and is not retried.
+#[tokio::test]
+async fn a_hanging_lookup_is_a_name_that_does_not_resolve() {
+    let name = "hang.test:8080";
+    let lookup = http_net::LookupSettings { bound: Duration::from_millis(300), max_stuck: 4 };
+    let target = Arc::new(ResolvedTarget::name_with_lookup(name, Arc::new(Hanging), lookup));
+    let settings =
+        ClientSettings { connect_timeout: Duration::from_millis(100), ..ClientSettings::default() };
+    let breaker = http_net::BreakerConfig::probing("/");
+    let client = http_net::BackendClient::new(Arc::new(net()), target, settings, breaker);
+    let budgets = http_net::Budgets {
+        attempt: Duration::from_millis(400),
+        total: Duration::from_millis(800),
+    };
+    let start = std::time::Instant::now();
+    let outcome = client.send_with_retry(HttpRequest::get("/"), budgets).await;
+    let cause = match &outcome {
+        Err(http_net::AttemptError::Transport(e)) => Some(e.cause),
+        _ => None,
+    };
+    assert_eq!(cause, Some(FailureCause::Dns), "{outcome:?}");
+    let took = start.elapsed();
+    assert!(took >= Duration::from_millis(300) && took < Duration::from_millis(400), "{took:?}");
+    assert_eq!(http_net::backend::metrics::retries(name), 0);
+}
