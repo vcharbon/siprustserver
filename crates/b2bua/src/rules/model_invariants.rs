@@ -28,10 +28,11 @@
 use std::fmt;
 use std::sync::Mutex;
 
-use call::helpers::{
-    callee_dialog, find_b_leg, find_leg, unacknowledged_relayed_provisionals, OwedPrack,
+use call::helpers::{callee_dialog, find_b_leg, find_leg};
+use call::{
+    Call, Ceased, DialogState, EndingBy, Ladder, Leg, LegDisposition, LegState, MessageDirection,
+    Obligation, ResponderAck, TimerType,
 };
-use call::{Call, DialogState, EndingBy, Leg, LegState, MessageDirection};
 use sip_message::{Method, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
@@ -63,7 +64,8 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("no-early-dialog-past-its-invite", no_early_dialog_past_its_invite),
     ("no-cancelled-dialog-past-its-invites-final", no_cancelled_dialog_past_its_invites_final),
     ("in-dialog-request-answered-or-relayed", in_dialog_request_answered_or_relayed),
-    ("reliable-1xx-acknowledged-at-final", reliable_1xx_acknowledged_at_final),
+    ("no-owed-prack-past-its-invite", no_owed_prack_past_its_invite),
+    ("shown-ladder-armed-while-repeating", shown_ladder_armed_while_repeating),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
     ("no-timer-on-a-terminated-leg", no_timer_on_a_terminated_leg),
     ("no-timer-on-an-ended-attempt", no_timer_on_an_ended_attempt),
@@ -87,6 +89,22 @@ pub fn check(turn: &Turn<'_>, label: &(dyn fmt::Display + Sync)) {
                 Kept::Repeat(head) => std::panic::resume_unwind(Box::new(head)),
             }
         }
+    }
+}
+
+/// Report a model defect a turn met mid-way — a step that found the record
+/// unable to carry what it must do — named `name` with `detail`: in debug
+/// builds it is kept and panics as a violated invariant does, the call's dump
+/// printed once per run; in release builds it is logged and the turn goes on.
+pub fn defect(name: &str, detail: String, call: &Call) {
+    if !cfg!(debug_assertions) {
+        tracing::error!(call_ref = %call.call_ref, defect = name, "{detail}");
+        return;
+    }
+    let head = format!("model defect {name}: {detail}");
+    match record(format!("{name}: {detail}"), head, || format!("{call:#?}")) {
+        Kept::New(violation) => panic!("{violation}"),
+        Kept::Repeat(head) => std::panic::resume_unwind(Box::new(head)),
     }
 }
 
@@ -305,53 +323,62 @@ fn dialog_cseq_never_decreases(turn: &Turn<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// No relayed reliable provisional is left unacknowledged — PRACKed by
-/// neither the party shown it nor this stack — once its INVITE has its final
-/// or its leg is being cancelled or has ended (RFC 3262 §4), except an offer
-/// it carried on the dialog a 2xx confirmed, whose PRACK carries the answer
-/// of the ACK still awaited there (RFC 3264).
-fn reliable_1xx_acknowledged_at_final(turn: &Turn<'_>) -> Result<(), String> {
+/// No reliable provisional's responder is still owed a PRACK pending once its
+/// INVITE has its final, or its leg is being cancelled or has ended (RFC 3262
+/// §4): the engine settles it then. One whose offer waits for the ACK a 2xx
+/// awaits is not pending.
+fn no_owed_prack_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
     let call = turn.after;
-    for leg in legs(call) {
-        for owed in unacknowledged_relayed_provisionals(call, &leg.leg_id, None) {
-            if invite_open(leg, owed.invite_cseq) || deferred_to_ack(leg, &owed) {
-                continue;
-            }
+    for p in call.provisionals.iter().filter(|p| p.responder == ResponderAck::Pending) {
+        let leg = find_leg(call, &p.id.leg);
+        let ended = leg.is_none_or(|l| {
+            l.state() == LegState::Terminated || l.disposition() == LegDisposition::Cancelling
+        });
+        if ended || !call::helpers::invite_open(call, &p.id) {
             return Err(format!(
-                "leg {} ({:?}, {:?}): reliable 1xx RSeq {} of INVITE CSeq {} on dialog {} is \
-                 un-PRACKed",
-                leg.leg_id,
-                leg.state(),
-                leg.disposition(),
-                owed.rseq,
-                owed.invite_cseq,
-                owed.b_tag
+                "leg {} ({:?}): reliable 1xx RSeq {} of INVITE CSeq {} on dialog {} is still \
+                 owed its PRACK",
+                p.id.leg,
+                leg.map(|l| (l.state(), l.disposition())),
+                p.id.rseq.0,
+                p.id.invite_cseq.0,
+                p.id.responder_tag
             ));
         }
     }
     Ok(())
 }
 
-/// Whether `leg`'s INVITE of CSeq `invite_cseq` still awaits its final and
-/// the leg is not ended: the leg's initial INVITE while it is in setup, a
-/// relayed re-INVITE while its relay is open on a confirmed leg.
-fn invite_open(leg: &Leg, invite_cseq: i64) -> bool {
-    match leg.state() {
-        LegState::Trying | LegState::Early => true,
-        LegState::Terminated => false,
-        LegState::Confirmed => leg.dialogs.iter().any(|d| {
-            d.inbound_pending_requests
-                .iter()
-                .any(|p| p.method == "INVITE" && p.outbound_cseq == invite_cseq)
-        }),
+/// A shown provisional's ladder holds its timers exactly while it repeats
+/// (RFC 3262 §3): repeating, its rung and its give-up are armed; ceased at its
+/// last rung, its give-up alone stands; unsent, acknowledged or ceased with
+/// its final, no timer of its ladder is armed.
+fn shown_ladder_armed_while_repeating(turn: &Turn<'_>) -> Result<(), String> {
+    let call = turn.after;
+    let armed = |o: &Obligation, ty: TimerType| {
+        call.timers.iter().any(|t| t.key.timer_type == ty && t.key.obligation_of() == Some(o))
+    };
+    for s in call.provisionals.iter().filter_map(|p| p.shown.as_ref()) {
+        let o = Obligation::AwaitPrack { tag: s.tag.clone(), rseq: s.rseq };
+        let (rung, give_up) = (armed(&o, TimerType::Rung), armed(&o, TimerType::RepeatGiveUp));
+        let held = match s.ladder {
+            Ladder::Repeating(_) => rung && give_up,
+            Ladder::Ceased(Ceased::GiveUp) => !rung,
+            Ladder::Unsent | Ladder::Acknowledged | Ladder::Ceased(Ceased::Final) => {
+                !rung && !give_up
+            }
+        };
+        if !held {
+            let state = match &s.ladder {
+                Ladder::Repeating(_) => "repeating".to_string(),
+                other => format!("{other:?}"),
+            };
+            return Err(format!(
+                "shown 1xx {o:?} is {state} with rung armed {rung} and give-up armed {give_up}"
+            ));
+        }
     }
-}
-
-/// Whether `owed` carried the offer of the dialog a 2xx confirmed on `leg`,
-/// whose ACK is still awaited: the PRACK carries that ACK's answer.
-fn deferred_to_ack(leg: &Leg, owed: &OwedPrack) -> bool {
-    owed.offer.is_some()
-        && leg.dialogs.iter().any(|d| d.peer_tag == owed.b_tag && d.awaited_ack_cseq.is_some())
+    Ok(())
 }
 
 /// A non-2xx final sent on the caller's INVITE ends every a-dialog it could

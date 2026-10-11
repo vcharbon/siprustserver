@@ -47,7 +47,7 @@ use b2bua_sdk::provisional::{absorbed_provisional_actions, shown_to_no_one};
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerKey, TimerType};
-use sip_message::{answer_reoffer_both_ways, Method};
+use sip_message::answer_reoffer_both_ways;
 
 use super::relay;
 use b2bua_sdk::model::{
@@ -126,9 +126,8 @@ define_service! {
         // FIRST (default) suppresses them all; ALL relays each one (downgraded to
         // a bare 180 under the SAME stored a-facing tag — the mask stays one
         // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
-        // *upstream* status value and suppresses repeats. Reliable 1xx is PRACKed
-        // by the B2BUA itself (alice never saw it), once per provisional — the
-        // responder's §3 retransmission of one is discarded (RFC 3262 §4);
+        // *upstream* status value and suppresses repeats. A reliable 1xx alice
+        // never saw is PRACKed by the engine, never by this rule (RFC 3262 §4);
         // `fake-prack` caches bob's SDP per `(leg, To-tag)` dialog — strictly,
         // one cache per fork. Once alice's INVITE transaction sent its final
         // no 18x is shown to her at all, first or later, whatever the
@@ -143,7 +142,6 @@ define_service! {
             transitions: [ Phase::Masking => Phase::Suppressing ],
             effects: [
                 Effect::Provisional { status: 180, label: "first 18x → bare 180 → A (drop SDP/100rel)" },
-                Effect::Originate { method: Method::Prack, label: "PRACK → B (B2BUA absorbs reliable 1xx)" },
             ],
             matcher: Match::response()
                 .method("INVITE")
@@ -154,25 +152,9 @@ define_service! {
                 let resp = ctx.response()?;
                 let b_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
                 let rseq = relay::reliable_rseq(resp);
-                let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let fake_prack = is_fake_prack(ctx);
 
-                // The responder's retransmission of a provisional this stack
-                // already acknowledged: discarded outright (RFC 3262 §4) —
-                // not relayed again, not PRACKed again, not accounted again.
-                if rseq.is_some_and(|rseq| ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)) {
-                    return ok(vec![]);
-                }
-
-                // Reliable 1xx → the B2BUA PRACKs the b-leg itself (alice never
-                // sees the reliable provisional, so she won't PRACK).
-                let prack_action = rseq.map(|rseq| RuleAction::SendPrackToLeg {
-                    leg_id: leg.clone(),
-                    rseq,
-                    invite_cseq,
-                    b_tag: b_tag.to_string(),
-                });
                 // fake-prack: cache bob's SDP per dialog when 100rel is in play —
                 // the description alone, wherever the body framed it.
                 let cache_action = match resp.sdp() {
@@ -190,8 +172,8 @@ define_service! {
                 // `Relay18xMessages` policy decides — again (downgraded, under
                 // the stored a-facing tag) or not. One shown to no one (an
                 // answered caller, a leg with no relay peer) is never relayed
-                // and is not her first. Either way it is PRACKed + cached
-                // (per-fork dialog state is policy-independent).
+                // and is not her first. Either way it is cached (per-fork
+                // dialog state is policy-independent).
                 let relayed = !shown_to_no_one(ctx)
                     && (!ctx.call.relay_first_18x_first_relayed()
                         || match ctx.call.relay_first_18x_messages() {
@@ -202,9 +184,8 @@ define_service! {
                             }
                         });
                 if !relayed {
-                    // The suppressed provisional's due — Early, PRACK, CDR —
-                    // plus the fake-prack cache, which keys on the early
-                    // dialog the PRACK registers.
+                    // The suppressed provisional's due — Early, CDR — plus
+                    // the fake-prack cache, which keys on its early dialog.
                     let mut actions = absorbed_provisional_actions(ctx);
                     if let Some(a) = cache_action {
                         actions.push(a);
@@ -228,9 +209,6 @@ define_service! {
                         reason: None,
                     },
                 ];
-                if let Some(a) = prack_action {
-                    actions.push(a);
-                }
                 // Cache MUST run after relay-to-peer — the relay creates the
                 // early dialog the cache keys on (by b_tag).
                 if let Some(a) = cache_action {

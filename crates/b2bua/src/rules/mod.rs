@@ -9,7 +9,6 @@ pub mod actions;
 pub mod capabilities;
 pub mod charging;
 pub mod defaults;
-pub mod delayed_offer;
 pub mod docgen;
 pub mod executor;
 pub mod invariants;

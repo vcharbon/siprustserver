@@ -3,7 +3,7 @@
 //! the session description riding that PRACK still crosses.
 //!
 //! `crates/call/src/model/record.rs` states that contract on
-//! `reliable_provisionals`; `crates/call/tests/it/codec_roundtrip.rs` proves the
+//! `provisionals`; `crates/call/tests/it/codec_roundtrip.rs` proves the
 //! bytes survive `MsgpackCodec`. Neither proves a survivor node answering a
 //! real PRACK on the wire, which is what these cells do.
 //!
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use call::{CallBodyCodec, MsgpackCodec, ReliableProvisional, Repeat};
+use call::{CallBodyCodec, Ladder, MsgpackCodec, Provisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -58,17 +58,17 @@ fn rseq_of(resp: &SipResponse) -> u32 {
     resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
 }
 
-/// The replicated `ReliableProvisional` entries the backup holds for `call_ref`.
+/// The replicated `Provisional` records the backup holds for `call_ref`.
 async fn replicated_provisionals(
     backup: &ReplicatedB2buaSut,
     primary: &str,
     call_ref: &str,
-) -> Vec<ReliableProvisional> {
+) -> Vec<Provisional> {
     let body = backup
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the early call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").reliable_provisionals
+    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its
@@ -154,19 +154,16 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
         "the backup must hold the reliable provisional's mapping at the moment of \
          the kill; got {entries:?}",
     );
-    let entry = &entries[0];
-    assert_eq!(entry.a_tag, a_tag, "the replicated entry names the dialog the number was shown in");
-    assert_eq!(entry.a_rseq, a_rseq as i64, "the replicated entry carries the a-facing RSeq");
-    assert_eq!(entry.b_rseq, BOB_RSEQ as i64, "the replicated entry carries bob's own RSeq");
-    assert_eq!(
-        entry.a_cseq, a_cseq as i64,
-        "the replicated entry carries the a-facing INVITE CSeq the RAck names",
-    );
+    let shown = entries[0].shown.as_ref().expect("the replicated entry was shown to alice");
+    assert_eq!(shown.tag, a_tag, "the replicated entry names the dialog the number was shown in");
+    assert_eq!(shown.rseq.0, a_rseq, "the replicated entry carries the a-facing RSeq");
+    assert_eq!(entries[0].id.rseq.0, BOB_RSEQ, "the replicated entry carries bob's own RSeq");
+    assert_eq!(shown.invite_cseq.0, a_cseq, "the replicated entry carries the RAck's INVITE CSeq");
     // The write the backup holds is the provisional's own — its ladder armed
     // at the first rung — whatever rungs the primary has walked since: a rung
     // repeats retained bytes and changes no replicated fact (ADR-0014), so it
     // is not a write. A body carrying rung 2 here is a rung that wrote.
-    let emission = entry.emission.as_ref().expect("the replicated entry retains the provisional");
+    let Ladder::Repeating(emission) = &shown.ladder else { panic!("the entry retains it") };
     assert_eq!(emission.repeat().ladder(), "reliable-provisional", "paced by the §3 ladder");
     let armed_rung = match emission.repeat() {
         Repeat::Paced { rung, .. } => rung,

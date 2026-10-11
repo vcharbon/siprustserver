@@ -21,12 +21,20 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 /// The callee skips an `RSeq`: the non-compliant provisional whose handling
-/// is the subject.
+/// is the subject. Dropped unPRACKed, it is still outstanding when bob
+/// answers: the 2xx he sends over it is his own fixture's consequence.
 fn callee_skips_an_rseq(h: &Harness) {
     h.waive(
         WaiverScope::rule(
             "non-contiguous-rseq",
             "bob skips an RSeq — the provisional this stack must drop unprocessed is the subject",
+        )
+        .on_party("bob"),
+    );
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "bob answers over his own out-of-order provisional, which §4 leaves unPRACKed",
         )
         .on_party("bob"),
     );

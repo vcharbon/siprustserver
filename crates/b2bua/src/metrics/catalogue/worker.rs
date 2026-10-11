@@ -76,7 +76,7 @@ const PEER_FAILURE_KIND_VALUES: [&str; 4] =
 /// A per-peer failure's kind, indexed like [`PeerFailureKind::ALL`].
 pub const PEER_FAILURE_KIND: Dim = Dim::new("kind", &PEER_FAILURE_KIND_VALUES);
 
-assert_exposition_order!(ObligationKind: AckOf2xx, PrackOf);
+assert_exposition_order!(ObligationKind: AckOf2xx, AwaitPrack);
 assert_exposition_order!(QuietTurn: OwnRung, ReAck);
 assert_exposition_order!(DrainExit: Quiescent, CaughtUp, Grace, GracePeersBehind);
 assert_exposition_order!(RemovalClass: Terminated, SelfRelease, Orphan);
@@ -166,7 +166,7 @@ pub const UNROUTABLE_INTERNAL: Family = Family::counter(
 pub const REPEAT_GIVE_UPS: Family = Family::counter(
     "b2bua_repeat_give_ups_total",
     Labels::Product(&[OBLIGATION]),
-    "dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4, prack-of: RFC 3262 §3); the rate a peer goes deaf at",
+    "dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4, await-prack: RFC 3262 §3); the rate a peer goes deaf at",
 );
 
 pub const REPL_QUIET_TURNS: Family = Family::counter(

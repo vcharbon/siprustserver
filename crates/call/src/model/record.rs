@@ -10,108 +10,14 @@ use super::limiter::CallLimiterState;
 
 use super::cdr::CdrEvent;
 use super::decision_log::DecisionMark;
-use super::emission::RetainedEmission;
 use super::leg::Leg;
+use super::provisional::Provisional;
 use super::services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, RerouteState, TransferState,
 };
 use super::sm::{MachineId, StateLabel};
 use super::termination::Termination;
 use super::timer::TimerEntry;
-
-/// One reliable provisional relayed toward the caller (RFC 3262): the a-facing
-/// early dialog it was shown in, the `RSeq` this stack minted for it, and the
-/// b-leg response it stands for. The caller PRACKs the number she was shown, so
-/// the relayed `RAck` translates back through this map before it reaches the
-/// callee that owns the other sequence.
-///
-/// `(b_leg_id, b_tag, b_cseq, b_rseq)` identifies the provisional. Every part
-/// earns its place: RFC 3262 §3 (errata 4600) makes each callee fork's sequence
-/// independent, so two forks of one leg may state the SAME `RSeq` and only the
-/// fork tag tells them apart; and §3 restarts the sequence per INVITE
-/// transaction, so without the `CSeq` a re-INVITE's first provisional could
-/// collide with the initial INVITE's. Either collision would be misread as a
-/// retransmission and answered with a number minted for another provisional.
-/// `(a_tag, a_rseq)` identifies it from the caller's side, which is the side a
-/// PRACK arrives from.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReliableProvisional {
-    /// The dialog the provisional was SHOWN in — the To-tag of this stack's
-    /// own on the face it relayed toward: the a-face on an initial INVITE or a
-    /// caller re-INVITE, the b-face on a callee re-INVITE. Each such dialog
-    /// carries its own sequence (RFC 3262 §4, errata 4603).
-    pub a_tag: String,
-    /// The `RSeq` shown there — this stack's own sequence.
-    pub a_rseq: i64,
-    /// The leg the provisional came from — the responder's.
-    pub b_leg_id: String,
-    /// The responder's own tag on that leg's dialog — a callee fork's early
-    /// dialog, or the caller's confirmed one.
-    pub b_tag: String,
-    /// The `CSeq` number of the responder-facing INVITE transaction it answers.
-    pub b_cseq: i64,
-    /// The `RSeq` the responder stated.
-    pub b_rseq: i64,
-    /// Whether the matching PRACK has been received on the face the number
-    /// was shown (RFC 3262 §3): a `true` entry is off the unacknowledged list
-    /// — its retransmissions there have ceased, so a responder repeat of it
-    /// is absorbed rather than relayed. The entry itself stays for the life of
-    /// the call: it still translates a re-PRACK's `RAck` and anchors the
-    /// ladder.
-    pub acknowledged: bool,
-    /// The provisional as it left on the face the number was shown, on the
-    /// RFC 3262 §3 ladder this stack's retransmissions repeat
-    /// ([`RetainedEmission`], paced). `Some` while the ladder is live; `None`
-    /// before the provisional leaves, once the PRACK retires it, and once the
-    /// ladder ceases — retained bytes are never sent again after any of those.
-    pub emission: Option<RetainedEmission>,
-    /// The `CSeq` number of the INVITE the provisional answers on the face it
-    /// was shown — the second `RAck` token a PRACK names beside `a_rseq`
-    /// (RFC 3262 §7.2).
-    pub a_cseq: i64,
-    /// The provisional carried a description toward the face it was shown
-    /// (RFC 3311 §5.1).
-    #[serde(default)]
-    pub carried_sdp: bool,
-    /// The responder's provisional carried a description.
-    #[serde(default)]
-    pub responder_sdp: bool,
-    /// The description the responder's provisional carried where it was the
-    /// OFFER — the INVITE it answers carried none (RFC 3264 §4) — kept so a
-    /// PRACK this stack sends in the originator's place answers it (RFC 3262
-    /// §5). `None` for an answer, or no description.
-    #[serde(default, with = "serde_bytes")]
-    pub responder_offer: Option<Vec<u8>>,
-}
-
-/// A reliable provisional this stack acknowledged ITSELF, on the responder's
-/// face: the originator never offered `100rel`, or a masking policy hid the
-/// provisional from it, so the PRACK the responder is owed is this stack's own
-/// and no shown number exists. Keyed the way the responder identifies the
-/// provisional (RFC 3262 §3, §7.1): its leg, its tag on that leg's dialog, the
-/// `CSeq` of the INVITE it answers and the `RSeq` it stated. One entry per
-/// provisional, for the life of the call: a repeat of it is the responder's §3
-/// retransmission — discarded where it arrives (§4), never PRACKed twice.
-/// Replicated with the call, so a takeover node discards the repeat too.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrackedProvisional {
-    /// The responder's leg.
-    pub leg_id: String,
-    /// The responder's own tag on that leg's dialog.
-    pub remote_tag: String,
-    /// The `CSeq` number of the responder-facing INVITE transaction it answers.
-    pub invite_cseq: i64,
-    /// The `RSeq` the responder stated.
-    pub rseq: i64,
-    /// The responder's provisional carried a description.
-    #[serde(default)]
-    pub responder_sdp: bool,
-    /// The top-Via branch of the PRACK client transaction this stack sent, so
-    /// its timeout is recognised as its own (RFC 3261 §17.1.2.2); empty until
-    /// the PRACK leaves.
-    #[serde(default)]
-    pub branch: String,
-}
 
 /// A single `name: value` header line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,17 +182,13 @@ pub struct Call {
     /// presence is the activation guard for the `release-reroute` rules).
     /// `None` when no reroute is in flight.
     pub reroute: Option<RerouteState>,
-    /// The reliable provisionals relayed toward the caller, in mint order
-    /// (RFC 3262 §7.1) — one entry per provisional this stack renumbered, for
-    /// the life of the call. It survives here because a PRACK arriving after a
-    /// takeover still translates onto the b-leg number it acknowledges.
-    pub reliable_provisionals: Vec<ReliableProvisional>,
-    /// The reliable provisionals this stack PRACKed itself (RFC 3262 §4) —
-    /// one shown to no one, or one relayed and left unacknowledged when this
-    /// stack CANCELled its INVITE — one per provisional for the life of the
-    /// call: the books that make a responder's retransmission of one
-    /// recognisable as such, and a later PRACK naming it answerable here.
-    pub pracked_provisionals: Vec<PrackedProvisional>,
+    /// Every reliable provisional the call received (RFC 3262), in arrival
+    /// order, for the life of the call: the engine records each one before
+    /// any rule reads it ([`crate::helpers::reliable`] is the one writer).
+    /// Replicated with the call, so a takeover node discards a responder's
+    /// retransmission, translates a PRACK's `RAck` and answers a late PRACK
+    /// as the primary would.
+    pub provisionals: Vec<Provisional>,
     /// The `seq` of the last message recorded on any leg's ring — the
     /// call-wide sequence [`crate::helpers::record_message`] draws from; `0`
     /// while nothing is recorded.

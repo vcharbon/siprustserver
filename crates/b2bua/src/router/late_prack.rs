@@ -1,19 +1,22 @@
 //! The PRACKs a released call still answers (RFC 3262 §3): a PRACK's server
 //! transaction is not the INVITE's and does not end with it, so a PRACK naming
-//! a reliable provisional this stack showed, reaching it after the call was
-//! released, draws 200 rather than the 481 of a request naming nothing.
+//! a reliable provisional this stack showed and its party never acknowledged,
+//! reaching it after the call was released, draws the 200 it draws in-call
+//! rather than the 481 of a request naming nothing.
 //!
-//! A call released with shown provisionals its party never PRACKed leaves
-//! their `RAck` tokens here, keyed by the shown dialog's `Call-ID` and this
-//! stack's tag in it, for 64·T1 — the §3 bound past which no UAS waits for a
-//! PRACK. The book is node-local: a late PRACK landing on another node after a
-//! failover draws that node's 481.
+//! A released call leaves here the `RAck` tokens a PRACK draws 200 for
+//! ([`call::helpers::answerable_shown`]), keyed by the shown dialog's
+//! `Call-ID` and this stack's tag in it, for 64·T1 — the §3 bound past which
+//! no UAS waits for a PRACK. The first PRACK naming one takes it off the book,
+//! as it takes it off the unacknowledged list in-call. The book is node-local:
+//! a late PRACK landing on another node after a failover draws that node's
+//! 481.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use call::helpers::UnackedShown;
-use call::Call;
+use call::helpers::AnswerableShown;
+use call::{CSeq, Call, RSeq};
 use sip_message::header::RAck;
 use sip_message::{Method, SipRequest, SipResponse};
 
@@ -31,7 +34,7 @@ type DialogKey = (String, String);
 /// latest expiry, and an older queue entry for it removes nothing.
 #[derive(Default)]
 struct Inner {
-    racks: HashMap<DialogKey, (i64, Vec<(i64, i64)>)>,
+    racks: HashMap<DialogKey, (i64, Vec<(RSeq, CSeq)>)>,
     expiry: VecDeque<(i64, DialogKey)>,
 }
 
@@ -54,13 +57,14 @@ pub struct LatePrackBook {
 }
 
 impl LatePrackBook {
-    /// Keep what `call`, released at `now_ms`, showed and was never PRACKed.
+    /// Keep what a PRACK to `call`, released at `now_ms`, draws 200 for.
     pub fn remember(&self, call: &Call, now_ms: i64) {
-        self.keep(call::helpers::unacknowledged_shown(call), now_ms);
+        self.keep(call::helpers::answerable_shown(call), now_ms);
     }
 
     /// Whether `req` is a PRACK naming, on every §7.2 token, a provisional a
-    /// released call showed in the dialog the PRACK's `To` tag names.
+    /// released call showed in the dialog the PRACK's `To` tag names and no
+    /// PRACK acknowledged yet; the first such PRACK acknowledges it.
     pub fn answers(&self, req: &SipRequest, now_ms: i64) -> bool {
         if req.method() != Method::Prack {
             return false;
@@ -68,15 +72,10 @@ impl LatePrackBook {
         let Some(tag) = req.to().tag() else { return false };
         let Some(rack) = req.header::<RAck>().and_then(Result::ok) else { return false };
         *rack.method() == Method::Invite
-            && self.names(
-                req.call_id().as_str(),
-                tag,
-                (i64::from(rack.rseq()), i64::from(rack.seq())),
-                now_ms,
-            )
+            && self.take(req.call_id().as_str(), tag, (RSeq(rack.rseq()), CSeq(rack.seq())), now_ms)
     }
 
-    fn keep(&self, shown: Vec<UnackedShown>, now_ms: i64) {
+    fn keep(&self, shown: Vec<AnswerableShown>, now_ms: i64) {
         if shown.is_empty() {
             return;
         }
@@ -90,11 +89,16 @@ impl LatePrackBook {
         }
     }
 
-    fn names(&self, call_id: &str, tag: &str, rack: (i64, i64), now_ms: i64) -> bool {
+    /// Whether `rack` is answerable in the `(call_id, tag)` dialog at
+    /// `now_ms`, taking it off the book when it is.
+    fn take(&self, call_id: &str, tag: &str, rack: (RSeq, CSeq), now_ms: i64) -> bool {
         let Ok(mut inner) = self.inner.lock() else { return false };
         inner.prune(now_ms);
         let key = (call_id.to_string(), tag.to_string());
-        inner.racks.get(&key).is_some_and(|(_, racks)| racks.contains(&rack))
+        let Some((_, racks)) = inner.racks.get_mut(&key) else { return false };
+        let Some(at) = racks.iter().position(|r| *r == rack) else { return false };
+        racks.swap_remove(at);
+        true
     }
 }
 
@@ -113,16 +117,19 @@ pub(super) fn answer(ctx: &RouterCtx, req: &SipRequest) -> Option<SipResponse> {
 mod tests {
     use super::*;
 
-    fn shown() -> Vec<UnackedShown> {
-        vec![UnackedShown { call_id: "a-call".into(), tag: "shown".into(), racks: vec![(7, 3)] }]
+    const RACK: (RSeq, CSeq) = (RSeq(7), CSeq(3));
+
+    fn shown() -> Vec<AnswerableShown> {
+        vec![AnswerableShown { call_id: "a-call".into(), tag: "shown".into(), racks: vec![RACK] }]
     }
 
     #[test]
     fn a_shown_provisional_is_answerable_inside_the_window_only() {
         let book = LatePrackBook::default();
         book.keep(shown(), 1_000);
-        assert!(book.names("a-call", "shown", (7, 3), 1_000 + WINDOW_MS - 1));
-        assert!(!book.names("a-call", "shown", (7, 3), 1_000 + WINDOW_MS));
+        assert!(!book.take("a-call", "shown", RACK, 1_000 + WINDOW_MS));
+        book.keep(shown(), 1_000);
+        assert!(book.take("a-call", "shown", RACK, 1_000 + WINDOW_MS - 1));
     }
 
     #[test]
@@ -130,17 +137,24 @@ mod tests {
         let book = LatePrackBook::default();
         book.keep(shown(), 0);
         book.keep(shown(), 1_000);
-        assert!(book.names("a-call", "shown", (7, 3), WINDOW_MS + 1), "the later window holds");
-        assert!(!book.names("a-call", "shown", (7, 3), 1_000 + WINDOW_MS));
+        assert!(book.take("a-call", "shown", RACK, WINDOW_MS + 1), "the later window holds");
+    }
+
+    #[test]
+    fn the_first_prack_naming_a_provisional_acknowledges_it() {
+        let book = LatePrackBook::default();
+        book.keep(shown(), 0);
+        assert!(book.take("a-call", "shown", RACK, 1), "the first PRACK is answered");
+        assert!(!book.take("a-call", "shown", RACK, 2), "a second names nothing unacknowledged");
     }
 
     #[test]
     fn a_prack_naming_anything_else_is_not_answerable() {
         let book = LatePrackBook::default();
         book.keep(shown(), 0);
-        assert!(!book.names("a-call", "shown", (8, 3), 1), "another RSeq");
-        assert!(!book.names("a-call", "shown", (7, 2), 1), "another INVITE");
-        assert!(!book.names("a-call", "other", (7, 3), 1), "another dialog");
-        assert!(!book.names("b-call", "shown", (7, 3), 1), "another call");
+        assert!(!book.take("a-call", "shown", (RSeq(8), CSeq(3)), 1), "another RSeq");
+        assert!(!book.take("a-call", "shown", (RSeq(7), CSeq(2)), 1), "another INVITE");
+        assert!(!book.take("a-call", "other", RACK, 1), "another dialog");
+        assert!(!book.take("b-call", "shown", RACK, 1), "another call");
     }
 }

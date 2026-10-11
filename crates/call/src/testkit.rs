@@ -1,9 +1,45 @@
-//! Fixture support: a bare dialled [`Leg`], and the facts its derived state
-//! reads ([`Leg::state`]), for tests that start a call mid-flight.
+//! Fixture support: a bare dialled [`Leg`], the facts its derived state
+//! reads ([`Leg::state`]), and a shown reliable provisional, for tests that
+//! start a call mid-flight.
 
 use crate::model::{
-    Dialog, DialogEnd, DialogState, Leg, LegKind, LegState, OutboundInvite, RemoteInfo,
+    CSeq, Dialog, DialogEnd, DialogState, Ladder, Leg, LegKind, LegState, OutboundInvite,
+    Provisional, ProvisionalId, RSeq, RemoteInfo, ResponderAck, Shown,
 };
+
+/// A reliable provisional `rseq` of the responder `responder_tag` on
+/// `leg_id`, answering its INVITE `cseq`, shown as `shown_rseq` in this
+/// stack's `shown_tag` dialog under that same CSeq, its ladder at `ladder`,
+/// its responder owed `responder`. No description either way.
+#[allow(clippy::too_many_arguments)]
+pub fn shown_provisional(
+    leg_id: &str,
+    responder_tag: &str,
+    cseq: u32,
+    rseq: u32,
+    shown_tag: &str,
+    shown_rseq: u32,
+    ladder: Ladder,
+    responder: ResponderAck,
+) -> Provisional {
+    Provisional {
+        id: ProvisionalId {
+            leg: leg_id.into(),
+            responder_tag: responder_tag.into(),
+            invite_cseq: CSeq(cseq),
+            rseq: RSeq(rseq),
+        },
+        responder_sdp: false,
+        responder,
+        shown: Some(Shown {
+            tag: shown_tag.into(),
+            rseq: RSeq(shown_rseq),
+            invite_cseq: CSeq(cseq),
+            carried_sdp: false,
+            ladder,
+        }),
+    }
+}
 
 /// Give `leg` the facts that make it read `state`, touching only what that
 /// takes. `Early`: an early dialog. `Confirmed`: its first early dialog

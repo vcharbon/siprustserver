@@ -16,6 +16,9 @@ use call::model::*;
 use proptest::prelude::*;
 use sip_retransmit::Class;
 
+mod provisional;
+use provisional::{arb_owed_answer, arb_provisional};
+
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
 
 const SDP_BODY: &[u8] = b"v=0\r\no=alice 53655765 2353687637 IN IP4 192.0.2.1\r\n\
@@ -307,8 +310,7 @@ pub fn representative_call() -> Call {
             old_leg_id: Some("b-1".into()),
             started_at_ms: 1_779_440_050_000,
         }),
-        reliable_provisionals: Vec::new(),
-        pracked_provisionals: Vec::new(),
+        provisionals: Vec::new(),
         message_seq: 0,
         decision_log: vec![representative_mark()],
         decision_ordinal: 1,
@@ -495,7 +497,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
         proptest::option::of(arb_unacked_2xx()),
         proptest::option::of(arb_retained_emission()),
         proptest::option::of(any::<i64>()),
-        proptest::option::of(arb_sdp_session()),
+        (proptest::option::of(arb_sdp_session()), proptest::option::of(arb_owed_answer())),
         any::<bool>(),
     );
     (sip, ext)
@@ -512,7 +514,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                     answered_2xx,
                     emitted_ack,
                     awaited_ack_cseq,
-                    sdp_session,
+                    (sdp_session, owed_answer),
                     shown,
                 ),
             )| Dialog {
@@ -534,6 +536,7 @@ fn arb_dialog() -> BoxedStrategy<Dialog> {
                 answered_2xx,
                 emitted_ack,
                 sdp_session,
+                owed_answer,
             },
         )
         .boxed()
@@ -594,40 +597,6 @@ fn arb_retained_emission() -> impl Strategy<Value = RetainedEmission> {
 fn arb_unacked_2xx() -> impl Strategy<Value = Unacked2xx> {
     (arb_tag(), any::<i64>(), arb_retained_emission())
         .prop_map(|(dialog_tag, cseq, emission)| Unacked2xx { dialog_tag, cseq, emission })
-}
-
-/// A reliable provisional this stack renumbered, PRACKed or with a live §3
-/// ladder (RFC 3262).
-fn arb_reliable_provisional() -> impl Strategy<Value = ReliableProvisional> {
-    (
-        arb_tag(),
-        any::<i64>(),
-        "(a|b-[0-9]{1,2})",
-        arb_tag(),
-        any::<i64>(),
-        any::<i64>(),
-        any::<bool>(),
-        proptest::option::of(arb_retained_emission()),
-        any::<i64>(),
-    )
-        .prop_map(
-            |(a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq)| {
-                ReliableProvisional {
-                    a_tag,
-                    a_rseq,
-                    b_leg_id,
-                    b_tag,
-                    b_cseq,
-                    b_rseq,
-                    acknowledged,
-                    emission,
-                    a_cseq,
-                    carried_sdp: false,
-                    responder_sdp: false,
-                    responder_offer: None,
-                }
-            },
-        )
 }
 
 /// Boxed: a value tree this size, held by value in every enclosing tuple, is
@@ -962,7 +931,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
     // Release-event subscriptions + the in-flight reroute slice
     // ride the replicated body like `features`/`transfer` do.
     let release = (
-        proptest::collection::vec(arb_reliable_provisional(), 0..3),
+        proptest::collection::vec(arb_provisional(), 0..3),
         arb_decision_log(),
         arb_termination(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
@@ -1001,14 +970,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 sm_cursors,
                 message_seq,
             ),
-            (
-                reliable_provisionals,
-                decision_log,
-                termination,
-                subscriptions,
-                reroute,
-                message_turn,
-            ),
+            (provisionals, decision_log, termination, subscriptions, reroute, message_turn),
         )| Call {
             call_ref,
             a_leg,
@@ -1042,8 +1004,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             transfer: None,
             subscriptions,
             reroute,
-            reliable_provisionals,
-            pracked_provisionals: Vec::new(),
+            provisionals,
             message_seq,
             decision_ordinal: decision_log.len() as u32,
             decision_log,

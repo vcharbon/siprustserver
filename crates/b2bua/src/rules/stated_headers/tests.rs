@@ -127,20 +127,16 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
         sip_retransmit::Class::Final2xx,
         call::Repeated::response("INVITE", 200),
     );
-    call.reliable_provisionals.push(call::ReliableProvisional {
-        a_tag: "t".into(),
-        a_rseq: 1,
-        b_leg_id: "b-1".into(),
-        b_tag: "u".into(),
-        b_cseq: 1,
-        b_rseq: 1,
-        acknowledged: false,
-        emission: Some(emission),
-        a_cseq: 1,
-        carried_sdp: false,
-        responder_sdp: false,
-        responder_offer: None,
-    });
+    call.provisionals.push(call::testkit::shown_provisional(
+        "b-1",
+        "u",
+        1,
+        1,
+        "t",
+        1,
+        call::Ladder::Repeating(emission),
+        call::ResponderAck::Pending,
+    ));
     let mut stated = StatedHeaders::default();
     stated.every_message.insert("X-Late".into(), HeaderUpdate::line("late"));
     let mut features = crate::decision::default_platform_features();
@@ -158,7 +154,11 @@ fn the_end_of_turn_stamp_rebinds_a_retained_copy_of_what_it_changes() {
     let result = stamp_outbound(HandlerResult { call, effects: fx });
     let OutboundBody::Request(sent) = &result.effects.outbound[0].body else { unreachable!() };
     assert_eq!(sent.raw(HeaderName::from("X-Late")).collect::<Vec<_>>(), ["late"]);
-    let retained = result.call.reliable_provisionals[0].emission.as_ref().unwrap();
+    let Some(call::Ladder::Repeating(retained)) =
+        result.call.provisionals[0].shown.as_ref().map(|s| &s.ladder)
+    else {
+        panic!("the ladder repeats");
+    };
     assert_eq!(retained.wire().0, sent.image().as_ref(), "the retained copy is what left");
 }
 

@@ -1,11 +1,13 @@
 //! The confirmation a 2xx to a callee leg's INVITE makes (RFC 3261 §12.1.2,
 //! §13.2.2.4): one chain of steps whose order the types carry. The winner is
-//! promoted ([`Promoted`]), the losers retire ([`Retired`]), and only a
-//! retired fork set lets the caller's dialog be re-identified and the ACK
-//! obligation be armed.
+//! promoted ([`Promoted`]), the PRACKs the INVITE's responders are owed leave,
+//! the losers retire ([`Retired`]), and only a retired fork set lets the
+//! caller's dialog be re-identified and the ACK obligation be armed.
 
 use call::helpers::{callee_dialog_mut, fronting_dialog, is_adopted};
-use call::{Call, CallModelState, DialogId, DialogState, LegDisposition, RetiredDialog};
+use call::{
+    Call, CallModelState, DialogId, DialogState, LegDisposition, OwedAnswer, RetiredDialog,
+};
 use sip_message::header;
 use sip_message::SipResponse;
 
@@ -13,7 +15,9 @@ use crate::rules::relay;
 use b2bua_sdk::model::RuleContext;
 
 use super::dialog_track::{adopt_a_tag, contact_uri, own_a_dialog_mut, uac_route_set};
-use super::ActionExecutor;
+use crate::effects::HandlerEffects;
+
+use super::{ActionExecutor, Owed, Settle};
 
 /// The callee dialog the 2xx carries is confirmed; the leg's other early
 /// dialogs, `losers`, are still early.
@@ -35,13 +39,26 @@ struct Retired {
 }
 
 impl ActionExecutor<'_> {
-    /// Confirm the callee dialog the turn's 2xx answers on `leg_id`, retire
-    /// the leg's other forks, give the caller the dialog that 2xx is relayed
-    /// on, and arm the ACK the 2xx owes. Nothing happens without a response
-    /// event.
-    pub(super) fn confirm(&self, call: &mut Call, ctx: &RuleContext, leg_id: &str) {
+    /// Confirm the callee dialog the turn's 2xx answers on `leg_id`, PRACK
+    /// what the INVITE's responders are still owed (RFC 3262 §4) — the
+    /// winner's offer left to the ACK — on each fork before the losers
+    /// retire, give the caller the dialog that 2xx is relayed on, and arm the
+    /// ACK the 2xx owes. Nothing happens without a response event.
+    pub(super) fn confirm(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        leg_id: &str,
+    ) {
         let Some(resp) = ctx.response() else { return };
         let promoted = self.promote_winner(call, resp, leg_id);
+        self.settle_owed_pracks(
+            call,
+            fx,
+            Owed::Invite { leg: leg_id, cseq: i64::from(resp.cseq().seq()) },
+            Settle::AtFinal { confirmed: Some(&promoted.winner) },
+        );
         let retired = retire_losers(call, promoted);
         self.reidentify_caller_dialog(call, resp, &retired);
         arm_ack_obligation(call, resp, retired);
@@ -157,18 +174,18 @@ fn retire_losers(call: &mut Call, promoted: Promoted) -> Retired {
 /// branch every repeat of the 2xx is re-ACKed on. A delayed offer — the
 /// INVITE this stack sent carried none, and no reliable provisional of the
 /// dialog carried one first (RFC 3262 §5) — makes the 2xx's description the
-/// offer that ACK answers.
+/// offer that ACK answers ([`OwedAnswer::InAck`]).
 fn arm_ack_obligation(call: &mut Call, resp: &SipResponse, retired: Retired) {
     let Retired { leg_id, winner, .. } = retired;
     let awaited_ack_cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
     let invite_cseq = i64::from(resp.cseq().seq());
-    let offered_reliably =
-        call::helpers::offered_in_reliable_provisional(call, &leg_id, &winner, invite_cseq);
+    let offered_reliably = relay::offered_reliably(call, &leg_id, &winner, invite_cseq);
     let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) else { return };
     let Some(d) = leg.dialogs.confirmed_mut() else { return };
     d.awaited_ack_cseq = Some(awaited_ack_cseq);
     let delayed = !offered_reliably && !relay::acked_invite_carries_offer(d);
     if let Some(offer) = resp.sdp().filter(|_| delayed) {
-        crate::rules::delayed_offer::note(leg, awaited_ack_cseq, offer);
+        d.owed_answer =
+            Some(OwedAnswer::InAck { ack_cseq: awaited_ack_cseq, offer: offer.to_vec() });
     }
 }

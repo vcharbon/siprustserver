@@ -7,8 +7,8 @@
 //! is THIS STACK's to acknowledge.
 //! RFC 3262 §3 has the responder repeat until his PRACK arrives, so a copy
 //! crossing the acknowledgement is ordinary — and §4 makes every copy after the
-//! first a retransmission the receiver discards. `Call.pracked_provisionals`
-//! carries that answer, and it is replicated for exactly this moment: a repeat
+//! first a retransmission the receiver discards. `Call.provisionals` carries
+//! that answer, and it is replicated for exactly this moment: a repeat
 //! arriving on a node that never sent the PRACK must still die there. A survivor
 //! that re-PRACKed would draw §3's 481 from a responder who has already
 //! acknowledged — and that 481 is what `prack_481_keeps_the_call.rs` pins.
@@ -21,7 +21,7 @@
 //!          → 200 → ACK → BYE → 200(BYE)
 //! ```
 //!
-//! The sibling cell for `reliable_provisionals` — a PRACK the SURVIVOR must
+//! The sibling cell for a shown provisional — a PRACK the SURVIVOR must
 //! translate — is `prack_takeover.rs`.
 
 use std::net::SocketAddr;
@@ -32,7 +32,7 @@ use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use call::features::RelayFirst18xStrategy;
-use call::{CallBodyCodec, MsgpackCodec, PrackedProvisional};
+use call::{CallBodyCodec, MsgpackCodec, Provisional};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -73,17 +73,17 @@ fn decision_masking_the_first_18x() -> Arc<dyn CallDecisionEngine> {
     )
 }
 
-/// The replicated `PrackedProvisional` entries the backup holds for `call_ref`.
+/// The replicated `Provisional` records the backup holds for `call_ref`.
 async fn replicated_pracked(
     backup: &ReplicatedB2buaSut,
     primary: &str,
     call_ref: &str,
-) -> Vec<PrackedProvisional> {
+) -> Vec<Provisional> {
     let body = backup
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the call");
-    MsgpackCodec::new().decode(&body).expect("replica body decodes").pracked_provisionals
+    MsgpackCodec::new().decode(&body).expect("replica body decodes").provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP and let the
@@ -187,7 +187,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
          the kill; got {entries:?}",
     );
     assert_eq!(
-        entries[0].rseq, BOB_RSEQ as i64,
+        entries[0].id.rseq.0, BOB_RSEQ,
         "the replicated entry carries the number bob stated",
     );
 

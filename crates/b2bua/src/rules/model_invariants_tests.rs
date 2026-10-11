@@ -1,7 +1,7 @@
 //! Each model invariant holds on a sound record and names the violation on a
 //! broken one.
 
-use call::{Call, Dialog, DialogState, LegState, OutboundInvite, PeerDialog, ReliableProvisional};
+use call::{Call, Dialog, DialogState, LegState, OutboundInvite, PeerDialog};
 use sip_message::generators::{
     generate_out_of_dialog_request, generate_response, GenerateOutOfDialogRequestOpts,
     GenerateResponseOpts, OutOfDialogMethod,
@@ -113,27 +113,55 @@ fn a_remote_cseq_going_down_breaks_the_monotonic_invariant() {
 }
 
 #[test]
-fn an_unacknowledged_reliable_1xx_on_an_ended_leg_breaks_the_prack_invariant() {
+fn an_owed_prack_on_an_ended_leg_breaks_the_prack_invariant() {
     let mut call = call();
-    call.reliable_provisionals.push(ReliableProvisional {
-        a_tag: "a1".into(),
-        a_rseq: 1,
-        b_leg_id: "b-1".into(),
-        b_tag: "b1".into(),
-        b_cseq: 1,
-        b_rseq: 7,
-        acknowledged: false,
-        emission: None,
-        a_cseq: 1,
-        carried_sdp: false,
-        responder_sdp: false,
-        responder_offer: None,
-    });
+    call.provisionals.push(call::testkit::shown_provisional(
+        "b-1",
+        "b1",
+        1,
+        7,
+        "a1",
+        1,
+        Ladder::Unsent,
+        ResponderAck::Pending,
+    ));
     call::testkit::stage_leg(&mut call.b_legs[0], LegState::Early);
-    assert_eq!(reliable_1xx_acknowledged_at_final(&after(&call)), Ok(()), "INVITE still open");
+    assert_eq!(no_owed_prack_past_its_invite(&after(&call)), Ok(()), "INVITE still open");
     call::testkit::stage_leg(&mut call.b_legs[0], LegState::Terminated);
-    let err = reliable_1xx_acknowledged_at_final(&after(&call)).unwrap_err();
+    let err = no_owed_prack_past_its_invite(&after(&call)).unwrap_err();
     assert!(err.contains("RSeq 7"), "{err}");
+    call.provisionals[0].responder = ResponderAck::DeferredToAck;
+    assert_eq!(no_owed_prack_past_its_invite(&after(&call)), Ok(()), "waiting for the ACK");
+}
+
+#[test]
+fn a_repeating_ladder_without_its_timers_breaks_the_ladder_invariant() {
+    let mut call = call();
+    let emission = call::RetainedEmission::paced(
+        b"SIP/2.0 183 Session Progress\r\n\r\n".to_vec(),
+        ("192.0.2.1".into(), 5060),
+        sip_retransmit::Class::ReliableProvisional,
+        call::Repeated::response("INVITE", 183),
+    )
+    .0;
+    call.provisionals.push(call::testkit::shown_provisional(
+        "b-1",
+        "b1",
+        1,
+        7,
+        "a1",
+        1,
+        Ladder::Repeating(emission),
+        ResponderAck::Pending,
+    ));
+    let err = shown_ladder_armed_while_repeating(&after(&call)).unwrap_err();
+    assert!(err.contains("repeating"), "{err}");
+    call.provisionals[0].shown.as_mut().unwrap().ladder = Ladder::Acknowledged;
+    assert_eq!(
+        shown_ladder_armed_while_repeating(&after(&call)),
+        Ok(()),
+        "nothing armed, acknowledged"
+    );
 }
 
 #[test]

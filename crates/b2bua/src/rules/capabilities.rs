@@ -251,9 +251,9 @@ pub fn withheld_by_strategy_in(
 /// Every option tag withheld from an INVITE `call` originates toward a leg of
 /// `kind`: the call-scoped declaration (`features.withhold_option_tags`), the
 /// armed strategy's own ([`withheld_by_strategy_in`]) and, toward a media leg,
-/// `100rel` — no service acknowledges a media leg's reliable provisionals
-/// (RFC 3262 §4) — as one set: what `build_b_leg` narrows the assembled
-/// `Supported`/`Require` lines by.
+/// `100rel` — a media leg's provisionals are shown to no one, so none is
+/// invited reliably (RFC 3262 §3) — as one set: what `build_b_leg` narrows the
+/// assembled `Supported`/`Require` lines by.
 pub fn withheld_option_tags(call: &Call, kind: Option<LegKind>, offers_sdp: bool) -> Vec<String> {
     withheld_option_tags_in(call.features.as_ref(), kind, offers_sdp)
 }

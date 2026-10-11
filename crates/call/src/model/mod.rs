@@ -31,6 +31,8 @@
 //!   - [`outbound_invite`] — the dialog-creating INVITE a leg sent
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
 //!     and the key that discharges it (ADR-0032)
+//!   - [`provisional`] — one reliable provisional the call received (RFC 3262)
+//!   - [`owed_answer`] — the offer a dialog's responder awaits an answer to
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`], [`TimerScope`],
 //!     [`TimerKey`], [`TimerEntry`])
@@ -56,6 +58,8 @@ pub mod limiter;
 pub mod message_ring;
 pub mod obligation;
 pub mod outbound_invite;
+pub mod owed_answer;
+pub mod provisional;
 pub mod record;
 pub mod sdp_session;
 pub mod services;
@@ -83,9 +87,13 @@ pub use limiter::{
 pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::{Obligation, ObligationKind};
 pub use outbound_invite::OutboundInvite;
+pub use owed_answer::OwedAnswer;
+pub use provisional::{
+    CSeq, Ceased, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown,
+};
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology,
-    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
+    PolicyUpdateBody, SipHeader,
 };
 pub use sdp_session::LegSdpSession;
 pub use services::{

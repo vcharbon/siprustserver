@@ -519,20 +519,12 @@ fn an_update_inside_the_peers_open_offer_invite_opens_no_exchange() {
 fn an_update_after_a_reliable_answer_to_the_peers_invite_opens_an_exchange() {
     let mut c = spliced();
     peer_relays(&mut c, "a", "INVITE", true);
-    c.reliable_provisionals.push(call::ReliableProvisional {
-        a_tag: "b".into(),
-        a_rseq: 1,
-        b_leg_id: "b-2".into(),
-        b_tag: "carol".into(),
-        b_cseq: 7,
-        b_rseq: 1,
-        acknowledged: true,
-        emission: None,
-        a_cseq: 7,
-        carried_sdp: true,
-        responder_sdp: true,
-        responder_offer: None,
-    });
+    let (ladder, responder) = (call::Ladder::Acknowledged, call::ResponderAck::RelayedPrack);
+    let mut shown =
+        call::testkit::shown_provisional("b-2", "carol", 7, 1, "b", 1, ladder, responder);
+    shown.responder_sdp = true;
+    shown.shown.as_mut().expect("shown").carried_sdp = true;
+    c.provisionals.push(shown);
     let opened = c.a_leg.sdp_session.exchanges_opened;
     peer_sends(&mut c, "a", "UPDATE", true);
     assert_eq!(c.a_leg.sdp_session.exchanges_opened, opened + 1);

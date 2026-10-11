@@ -28,7 +28,6 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
         transitions: [],
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY active (C progress) → referrer" },
-            Effect::Originate { method: Method::Prack, label: "PRACK → C (reliable 1xx, nothing shown to A)" },
         ],
         matcher: Match::response()
             .method("INVITE")

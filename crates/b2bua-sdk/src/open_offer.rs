@@ -4,7 +4,7 @@
 //! on a dialog. Only a reliable provisional carrying a description answers an
 //! INVITE offer before the final (§5.1); an unreliable one answers nothing.
 
-use call::{Call, Dialog, DialogId, Leg, LegState, PendingRequest};
+use call::{Call, Dialog, DialogId, Ladder, Leg, LegState, PendingRequest, Shown};
 use sip_message::header::{HeaderValue, MediaType};
 use sip_message::sip_str::SipStr;
 use sip_message::{HeaderName, SipMessage, SipParser};
@@ -99,27 +99,33 @@ fn dialled(call: &Call, leg: &Leg, callee_tag: &str) -> Option<OpenOffer> {
 /// A reliable provisional shown in the `shown` dialog for the INVITE of CSeq
 /// `cseq` carried a description: the answer to that INVITE's offer.
 fn shown_answer(call: &Call, shown: &str, cseq: i64) -> bool {
-    call.reliable_provisionals.iter().any(|r| r.a_tag == shown && r.a_cseq == cseq && r.carried_sdp)
+    shown_on(call, shown, cseq).any(|s| s.carried_sdp)
 }
 
 /// A reliable provisional shown in the `shown` dialog for the offerless INVITE
 /// of CSeq `cseq` carried a description, the offer, and is not yet PRACKed.
 fn shown_unpracked_offer(call: &Call, shown: &str, cseq: i64) -> bool {
-    call.reliable_provisionals
+    shown_on(call, shown, cseq).any(|s| s.carried_sdp && s.ladder != Ladder::Acknowledged)
+}
+
+/// The reliable provisionals shown in the `shown` dialog for the INVITE of
+/// CSeq `cseq` on that face.
+fn shown_on<'a>(call: &'a Call, shown: &'a str, cseq: i64) -> impl Iterator<Item = &'a Shown> {
+    call.provisionals
         .iter()
-        .any(|r| r.a_tag == shown && r.a_cseq == cseq && r.carried_sdp && !r.acknowledged)
+        .filter_map(|p| p.shown.as_ref())
+        .filter(move |s| s.tag == shown && s.invite_cseq.as_i64() == cseq)
 }
 
 /// The responder on `leg_id`'s dialog `tag` sent a reliable provisional with a
 /// description, to the INVITE of CSeq `cseq` where given.
 fn responder_answered(call: &Call, leg_id: &str, tag: &str, cseq: Option<i64>) -> bool {
-    let of = |c: i64| cseq.is_none_or(|want| want == c);
-    call.reliable_provisionals
-        .iter()
-        .any(|r| r.b_leg_id == leg_id && r.b_tag == tag && of(r.b_cseq) && r.responder_sdp)
-        || call.pracked_provisionals.iter().any(|p| {
-            p.leg_id == leg_id && p.remote_tag == tag && of(p.invite_cseq) && p.responder_sdp
-        })
+    call.provisionals.iter().any(|p| {
+        p.id.leg == leg_id
+            && p.id.responder_tag == tag
+            && cseq.is_none_or(|want| want == p.id.invite_cseq.as_i64())
+            && p.responder_sdp
+    })
 }
 
 /// The caller's INVITE carried a session description (RFC 5621 §3.1).

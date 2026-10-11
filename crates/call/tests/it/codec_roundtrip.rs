@@ -277,66 +277,69 @@ fn a_pending_requests_timestamp_survives_a_takeover_copy() {
     assert_eq!(echoed.as_deref(), Some("54.2"));
 }
 
-/// RFC 3262 §7.1: the a-facing reliable-provisional map is replicated state —
-/// a PRACK arriving after a takeover must still translate onto the b-leg number
-/// it acknowledges, so the map has to survive the replication codec.
+/// RFC 3262: the record of the reliable provisionals is replicated state — a
+/// PRACK arriving after a takeover must still translate onto the responder's
+/// number it acknowledges, and a responder's repeat must still be discarded —
+/// so the record has to survive the replication codec.
 #[test]
-fn the_reliable_provisional_map_round_trips() {
-    use call::ReliableProvisional;
+fn the_reliable_provisional_record_round_trips() {
+    use call::{CSeq, Ladder, Provisional, ProvisionalId, RSeq, ResponderAck, Shown};
 
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
 
-    call.reliable_provisionals = Vec::new();
+    call.provisionals = Vec::new();
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
-    assert_eq!(decoded, call, "no reliable provisional relayed yet");
+    assert_eq!(decoded, call, "no reliable provisional received yet");
 
-    call.reliable_provisionals = vec![
-        ReliableProvisional {
-            a_tag: "a1".into(),
-            a_rseq: 9_000,
-            b_leg_id: "b-1".into(),
-            b_tag: "bf1".into(),
-            b_cseq: 1,
-            b_rseq: 4711,
-            acknowledged: true,
-            emission: None,
-            a_cseq: 1,
-            carried_sdp: false,
+    let id = |leg: &str, tag: &str, rseq: u32| ProvisionalId {
+        leg: leg.into(),
+        responder_tag: tag.into(),
+        invite_cseq: CSeq(1),
+        rseq: RSeq(rseq),
+    };
+    let shown = |tag: &str, rseq: u32, ladder: Ladder| Shown {
+        tag: tag.into(),
+        rseq: RSeq(rseq),
+        invite_cseq: CSeq(1),
+        carried_sdp: false,
+        ladder,
+    };
+    call.provisionals = vec![
+        Provisional {
+            id: id("b-1", "bf1", 4711),
             responder_sdp: false,
-            responder_offer: None,
+            responder: ResponderAck::RelayedPrack,
+            shown: Some(shown("a1", 9_000, Ladder::Acknowledged)),
         },
-        ReliableProvisional {
-            a_tag: "a2".into(),
-            a_rseq: 40,
-            b_leg_id: "b-2".into(),
-            b_tag: "bf2".into(),
-            b_cseq: 1,
-            b_rseq: 1,
-            acknowledged: false,
-            emission: None,
-            a_cseq: 1,
-            carried_sdp: false,
+        Provisional {
+            id: id("b-2", "bf2", 1),
+            responder_sdp: true,
+            responder: ResponderAck::Pending,
+            shown: Some(shown("a2", 40, Ladder::Unsent)),
+        },
+        Provisional {
+            id: id("b-2", "bf3", 1),
             responder_sdp: false,
-            responder_offer: None,
+            responder: ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() },
+            shown: None,
         },
     ];
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
-    assert_eq!(decoded, call, "both early dialogs' provisionals survive");
-    assert_eq!(decoded.reliable_provisionals[1].b_rseq, 1);
-    assert!(
-        decoded.reliable_provisionals[0].acknowledged,
-        "the retirement survives a takeover — the survivor must not re-relay a repeat",
-    );
+    assert_eq!(decoded, call, "every provisional survives, shown or not");
 
     // A live §3 ladder emission is replicated state too: the exact datagram a
     // takeover node re-sends, its destination, and the rung the ladder stands on.
     let datagram = b"SIP/2.0 183 Session Progress\r\nRSeq: 40\r\n\r\n";
-    call.reliable_provisionals[1].emission =
-        Some(paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3));
+    let emission = paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3);
+    call.provisionals[1].shown = Some(shown("a2", 40, Ladder::Repeating(emission)));
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "the retained emission survives byte-exact");
-    let emission = decoded.reliable_provisionals[1].emission.as_ref().unwrap();
+    let Some(Ladder::Repeating(emission)) =
+        decoded.provisionals[1].shown.as_ref().map(|s| &s.ladder)
+    else {
+        panic!("the ladder is repeating");
+    };
     assert_eq!(emission.wire(), (&datagram[..], ("10.0.0.7", 5060)));
     assert_eq!(
         emission.repeat(),

@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, LegState, Obligation, TerminationCause, TimerType};
+use call::helpers::Arrival;
+use call::{Call, CallModelState, Obligation, TimerType};
 use sip_message::{Method, SipMessage};
 
 use super::admit::UnbornCall;
@@ -24,10 +25,10 @@ use super::RouterCtx;
 use crate::answer_deadline::Screened;
 use crate::effects::{HandlerEffects, HandlerResult, QuietTurn};
 use crate::limiter::refresh_batch::RefreshAnswered;
+use crate::rules::actions::{Owed, Settle};
 use crate::rules::lifecycle_delivery::{close_turn, TurnStart};
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
 use b2bua_sdk::event::CallEvent;
-use b2bua_sdk::model::RuleAction;
 
 /// The per-call handler body: check the call out, run the handler, interpret.
 /// `unborn` holds a new call admitted at ingress until its call is created;
@@ -502,6 +503,12 @@ pub(super) fn rule_chain_turn(
         );
     }
     let start = TurnStart::of(&call);
+    // A reliable provisional is the engine's before it is any rule's (RFC
+    // 3262): recorded with its early dialog and offer, or — a repeat, or out
+    // of `RSeq` order — dropped unread, its turn a write of nothing else.
+    let arrival = exec.take_reliable_provisional(&mut call, event, &res.source_leg_id);
+    let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
+    let rules_read = rules_read && !screened;
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
     // A non-2xx INVITE final ends the transaction it answers (RFC 3261
     // §17.1.1.3, hop-ACKed below the TU): the record stops naming that round
@@ -509,12 +516,20 @@ pub(super) fn rule_chain_turn(
     // dialled the leg ends every early dialog it created (§12.1).
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
-            exec.prack_owed_at_final(&mut call, &mut ladder_fx, &res.source_leg_id, resp);
             // The callee rang: its INVITE drew a 180–189.
             if (180..=189).contains(&resp.status()) && resp.cseq().method() == Method::Invite {
                 call::helpers::mark_rang(&mut call, &res.source_leg_id);
             }
             if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
+                // The rejection ends the INVITE and the early dialogs it
+                // created: the PRACKs its responders are owed leave first
+                // (RFC 3262 §4).
+                exec.settle_owed_pracks(
+                    &mut call,
+                    &mut ladder_fx,
+                    Owed::Invite { leg: &res.source_leg_id, cseq: i64::from(resp.cseq().seq()) },
+                    Settle::AtFinal { confirmed: None },
+                );
                 if let Some(branch) = resp.top_via().branch() {
                     call = call::helpers::close_rejected_invite_round(
                         call,
@@ -551,7 +566,16 @@ pub(super) fn rule_chain_turn(
     // turn sends follows what it received.
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         let dialog = resolved.dialog.as_ref();
-        call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), dialog, now_ms);
+        let repeat = arrival == Some(Arrival::Repeat);
+        call = ring.received(
+            call,
+            &res.source_leg_id,
+            event,
+            repeat,
+            discharged.as_ref(),
+            dialog,
+            now_ms,
+        );
     }
     // An INVITE (offerless included) or an UPDATE offer the leg's peer sends
     // opens an exchange on that leg, counted once as it is received, before
@@ -633,67 +657,12 @@ pub(super) fn rule_chain_turn(
     if cap_exceeded
         && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
     {
-        // Tear the runaway call down through the standard executor so per-leg
-        // BYE/CANCEL, dialog-tag ownership and the safety-timer contract apply
-        // exactly as a rule-driven termination would, and close the turn with
-        // the terminal invariants as a rule-driven termination does: a call
-        // whose legs are all resolved here is `Terminated` — CDR written,
-        // limiter released, removed — in this turn. The RFC-3326 cause rides
-        // the reason (must start with "SIP").
-        let cap_ctx = RuleContext {
-            call: RuleCall::new(&result.call),
-            call_ref,
-            event,
-            source_leg_id: &res.source_leg_id,
-            direction: res.direction,
-            now_ms,
-            config: &ctx.config,
-            discharged: discharged.as_ref(),
-            resolved: &resolved,
-        };
-        // An UNANSWERED a-leg (still trying/early) has no final response yet:
-        // `begin_termination` assumes the firing *rule* already replied (as
-        // `setup-timeout` does via RespondToALeg) and so only settles the leg's
-        // disposition. The cap fires from the router, not a rule, so nobody
-        // replied — without this the caller's INVITE hangs until its own
-        // Timer B and the limiter slot is held until the ~32 s
-        // TerminatingTimeout. Send the 503 cap cause as the caller's final so
-        // the INVITE resolves now and the call terminates (decrementing the
-        // limiter) immediately. An answered a-leg (confirmed) takes the BYE
-        // path inside begin_termination — no response then.
-        let mut cap_actions = Vec::new();
-        if matches!(result.call.a_leg.state(), LegState::Trying | LegState::Early) {
-            cap_actions.push(RuleAction::RespondToALeg {
-                status: 503,
-                reason: "Service Unavailable".into(),
-                header_updates: vec![],
-                contacts: vec![],
-            });
-        }
-        cap_actions.push(RuleAction::BeginTermination {
-            reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
-            cause: TerminationCause::MessageCap,
-            by_leg: None,
-        });
-        let before = result.call.clone();
-        let cap = exec.execute(&cap_actions, &result.call, &cap_ctx);
-        result.call = cap.call;
-        result.effects.critical.extend(cap.effects.critical);
-        result.effects.outbound.extend(cap.effects.outbound);
-        result.effects.soft.extend(cap.effects.soft);
-        result.effects.buffered.extend(cap.effects.buffered);
-        result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
-        ctx.metrics.bump_message_cap_terminated();
-        result = crate::rules::invariants::enforce(
-            &ctx.obligations,
-            &before,
-            crate::rules::invariants::finalize(result),
-            now_ms,
-            crate::rules::invariants::UnansweredCaller::Answer(
-                &ctx.config.minted_final_advertisement,
-            ),
-        );
+        result = super::message_cap::tear_down_runaway(ctx, &exec, result, &rule_ctx);
     }
+    // A reliable provisional shown to no one, or whose INVITE, leg or dialog
+    // the turn ended, is PRACKed by the engine whatever the rules made of it
+    // (RFC 3262 §4).
+    exec.settle_owed_pracks(&mut result.call, &mut result.effects, Owed::Call, Settle::TurnEnd);
     // The turn's lifecycle closes over what every layer above made of it.
     close_turn(&ctx.rules, &start, result, &exec)
 }

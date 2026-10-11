@@ -717,18 +717,6 @@ pub enum RuleAction {
         p_early_media: Option<String>,
     },
     // ── relayFirst18xTo180 (SERVICE_LAYER) ──────────────────────────────────
-    /// Originate a PRACK toward `leg_id`'s early dialog (selected by `b_tag`),
-    /// acknowledging the reliable 1xx with RAck `<rseq> <invite_cseq> INVITE`
-    /// (RFC 3262 §7.2). The B2BUA PRACKs the b-leg itself because alice never
-    /// saw the reliable provisional (it was downgraded to a bare 180). Once per
-    /// provisional: a repeat of one already acknowledged is the responder's
-    /// retransmission and sends nothing (§4).
-    SendPrackToLeg {
-        leg_id: String,
-        rseq: i64,
-        invite_cseq: i64,
-        b_tag: String,
-    },
     /// Cache an SDP body on a b-leg dialog (selected by `b_tag`) for later
     /// substitution into the 200 OK toward alice (`fake-prack`).
     CacheSdpOnLegDialog {
@@ -739,7 +727,9 @@ pub enum RuleAction {
     /// Register the early dialog the current event's provisional establishes
     /// on `leg_id` under the callee tag `b_tag` (RFC 3261 §12.1.2: its
     /// Contact and recorded route), when the provisional is relayed to no one.
-    /// Idempotent per tag; only the event's own response can seed it.
+    /// Idempotent per tag; only the event's own response can seed it. A
+    /// reliable provisional's dialog is the engine's, opened as it is
+    /// recorded.
     TrackEarlyDialog {
         leg_id: String,
         b_tag: String,
@@ -1031,7 +1021,6 @@ impl RuleAction {
             | RuleAction::TerminateLeg { .. }
             | RuleAction::SendRequestToLeg { .. }
             | RuleAction::SendProvisionalToLeg { .. }
-            | RuleAction::SendPrackToLeg { .. }
             | RuleAction::SendReinvite { .. }
             | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).

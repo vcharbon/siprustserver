@@ -5,7 +5,7 @@
 //! here — see [`super::relay_request`].
 
 use call::helpers::{PendingHolder, Scope};
-use call::{Call, PendingRequest};
+use call::{CSeq, Call, PendingRequest, RSeq};
 use sip_message::draft::Entry;
 use sip_message::generators::{
     self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
@@ -22,18 +22,18 @@ use b2bua_sdk::model::{MessageTransform, RuleContext};
 use b2bua_sdk::relayed_final::invite_timestamp;
 
 use super::select::resolve_peer;
-use super::ActionExecutor;
+use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
     /// Restate a relayed reliable provisional's `RSeq` with the shown dialog's
-    /// own number (RFC 3262 §4, errata 4603) and remember what it stands for,
-    /// so the PRACK naming it translates back onto the responder's sequence.
+    /// own number (RFC 3262 §4, errata 4603) and record it shown there, so the
+    /// PRACK naming it translates back onto the responder's sequence.
     /// `shown_tag` is this stack's tag on the dialog the provisional is
     /// relayed into and `shown_invite_cseq` the CSeq of the INVITE it answers
     /// on that face — the two the PRACK's `RAck` names beside the number
-    /// (§7.2). A retransmitted provisional recalls the number already shown; a
-    /// provisional relayed without an `RSeq` (a masking policy stripped it) is
-    /// not a reliable one and takes no number. `carried_sdp`: the provisional
+    /// (§7.2). A provisional relayed without an `RSeq` (a masking policy
+    /// stripped it) is not a reliable one and takes no number; one the engine
+    /// did not record leaves unreliably. `carried_sdp`: the provisional
     /// carries a description toward that face. Returns the number taken, so
     /// the emission arms its §3 ladder.
     #[allow(clippy::too_many_arguments)]
@@ -44,49 +44,32 @@ impl ActionExecutor<'_> {
         shown_invite_cseq: i64,
         source_leg_id: &str,
         resp: &sip_message::SipResponse,
-        headers: &mut [SipHeader],
+        headers: &mut Vec<SipHeader>,
         carried_sdp: bool,
-    ) -> Option<i64> {
+    ) -> Option<RSeq> {
         if !headers.iter().any(|h| HeaderName::RSeq.matches(&h.name)) {
             return None;
         }
-        let b_rseq = relay::reliable_rseq(resp)?;
-        let b_tag = resp.to().tag().unwrap_or_default().to_string();
-        let initial = if call::helpers::starts_reliable_ladder(call, shown_tag) {
-            self.id_gen.new_sequence_number() as i64
-        } else {
-            0
+        let recorded = super::provisional_arrival::recorded(call, source_leg_id, resp);
+        let Some(id) = recorded else {
+            relay::strip_reliability(headers);
+            return None;
         };
-        let b_cseq = i64::from(resp.cseq().seq());
-        let (updated, a_rseq) = call::helpers::assign_a_rseq(
-            call.clone(),
+        let initial = if call::helpers::starts_shown_sequence(call, shown_tag) {
+            RSeq(self.id_gen.new_sequence_number())
+        } else {
+            RSeq(0)
+        };
+        let shown = call::helpers::show_provisional(
+            call,
+            &id,
             shown_tag,
-            shown_invite_cseq,
-            source_leg_id,
-            &b_tag,
-            b_cseq,
-            b_rseq,
-            initial,
+            CSeq::of_i64(shown_invite_cseq),
             carried_sdp,
-            resp.sdp().is_some(),
-        );
-        *call = updated;
-        // Kept for a PRACK this stack may yet owe in the originator's place:
-        // the description is the OFFER where the INVITE carried none (§5).
-        if let Some(offer) = resp.sdp() {
-            if !relay::invite_carried_offer(call, source_leg_id, b_cseq) {
-                *call = call::helpers::note_responder_offer(
-                    call.clone(),
-                    source_leg_id,
-                    &b_tag,
-                    b_cseq,
-                    b_rseq,
-                    offer,
-                );
-            }
-        }
-        relay::own_the_rseq(headers, a_rseq);
-        Some(a_rseq)
+            initial,
+        )?;
+        relay::own_the_rseq(headers, shown);
+        Some(shown)
     }
 
     /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
@@ -172,20 +155,6 @@ impl ActionExecutor<'_> {
         let to_tag = resp.to().tag().unwrap_or_default().to_string();
         let source_leg_id = ctx.source_leg_id.to_string();
 
-        // ── A repeat of a reliable provisional already handled is absorbed ──
-        // A recorded entry — relayed under a shown number, or PRACKed by this
-        // stack itself where the originator was shown it unreliably — proves
-        // this datagram has been dealt with once, so a repeat is a
-        // retransmission the UAC discards outright (RFC 3262 §4 —
-        // unconditionally, PRACKed or not); it dies here, before
-        // `own_relayed_rseq` and any emission, on either relay path. The far
-        // party's own further copies are this stack's §3 ladder
-        // (`arm_reliable_provisional_ladder`), never the responder's clock; a
-        // responder's DISTINCT next provisional matches no entry and relays.
-        if relay::repeated_reliable_provisional(call, &source_leg_id, resp) {
-            return;
-        }
-
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
         // The relay this response answers, as the engine's dialog gate
         // resolved it: kept on the dialog the response's tags name (our
@@ -255,15 +224,11 @@ impl ActionExecutor<'_> {
             // recorded so the PRACK naming it translates back, and only
             // where §3 admits one at all (`admits_reliable_provisional`:
             // an INVITE whose originator offered `100rel`). Otherwise it
-            // leaves as an ordinary provisional, and the responder's
-            // reliable one is this stack's to acknowledge: it offered the
-            // extension there, the originator did not. No rule relays a
-            // non-INVITE provisional here (RFC 4320 §4.1 discards it);
-            // the method guard on the PRACK states that, nothing more.
-            let mut ladder: Option<(String, i64)> = None;
-            if let Some(b_rseq) =
-                relay::reliable_rseq(resp).filter(|_| (101..200).contains(&status))
-            {
+            // leaves as an ordinary provisional, shown to no one, and the
+            // engine PRACKs the responder: it offered the extension there,
+            // the originator did not.
+            let mut ladder: Option<(String, RSeq)> = None;
+            if relay::reliable_rseq(resp).is_some() && (101..200).contains(&status) {
                 let shown_tag = call::helpers::admits_reliable_provisional(&pending)
                     .then(|| shown_tag_of(&pending))
                     .flatten();
@@ -279,23 +244,9 @@ impl ActionExecutor<'_> {
                                 &mut transparent_headers,
                                 carried_sdp,
                             )
-                            .map(|a_rseq| (shown_tag, a_rseq));
+                            .map(|rseq| (shown_tag, rseq));
                     }
-                    None => {
-                        relay::strip_reliability(&mut transparent_headers);
-                        if cseq_method == "INVITE" {
-                            self.send_prack_to_leg(
-                                call,
-                                fx,
-                                &source_leg_id,
-                                b_rseq,
-                                cseq_num,
-                                &to_tag,
-                                resp.sdp().is_some(),
-                                None,
-                            );
-                        }
-                    }
+                    None => relay::strip_reliability(&mut transparent_headers),
                 }
             }
             // The dialog the answered request came in on: its sender's tag. A
@@ -335,18 +286,27 @@ impl ActionExecutor<'_> {
             // `route-failure`, and wrongly tear the call down). Remove it only
             // on the FINAL (>= 200); the transaction has no later response then.
             if status >= 200 {
-                *call = call::helpers::close_relay(call.clone(), &source_leg_id, &holder, cseq_num);
-                // The final ends this transaction's reliable provisionals
-                // on the face they were shown: no rung follows it (RFC
-                // 3262 §3, RFC 3261 §17.2.1). This transaction's alone —
-                // a re-INVITE's final is not the setup's.
+                // The final ends this transaction: the PRACKs its responder
+                // is owed leave first, a 2xx leaving the offer of the dialog
+                // it confirms to the ACK (RFC 3262 §4, §5), and its
+                // provisionals stop repeating on the face they were shown
+                // (§3, RFC 3261 §17.2.1). This transaction's alone — a
+                // re-INVITE's final is not the setup's.
                 if cseq_method == "INVITE" {
+                    let confirmed = (200..300).contains(&status).then_some(to_tag.as_str());
+                    self.settle_owed_pracks(
+                        call,
+                        fx,
+                        Owed::Invite { leg: &source_leg_id, cseq: cseq_num },
+                        Settle::AtFinal { confirmed },
+                    );
                     self.retire(
                         call,
                         fx,
                         Scope::Transaction { leg_id: &source_leg_id, cseq: cseq_num },
                     );
                 }
+                *call = call::helpers::close_relay(call.clone(), &source_leg_id, &holder, cseq_num);
             }
             // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
             // originator (either face) issued** was relayed via that face's
@@ -389,8 +349,8 @@ impl ActionExecutor<'_> {
             // A reliable provisional leaving under our own number is ours
             // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
             // ladder on the face it left on.
-            if let Some((shown_tag, a_rseq)) = ladder {
-                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &shown_tag, a_rseq);
+            if let Some((shown_tag, rseq)) = ladder {
+                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &shown_tag, rseq);
             }
             fx.outbound.push(effect);
             return;
@@ -398,29 +358,14 @@ impl ActionExecutor<'_> {
 
         // A provisional to the originator's initial INVITE after its final:
         // the seam refuses it before any a-facing tag or RSeq is minted for
-        // it (RFC 3261 §17.2.1), and the ringing leg keeps what it is owed —
-        // its early dialog, and the acknowledgement of a reliable provisional
-        // no one else saw (RFC 3262 §4).
+        // it (RFC 3261 §17.2.1), and the ringing leg keeps its early dialog;
+        // a reliable one, shown to no one, the engine PRACKs (RFC 3262 §4).
         if cseq_method == "INVITE"
             && status < 200
             && relay::provisional_after_final(call, fx, status)
         {
             if !to_tag.is_empty() && call::helpers::find_b_leg(call, &source_leg_id).is_some() {
                 self.ensure_b_early_dialog(call, ctx, &source_leg_id, &to_tag);
-                if let Some(rseq) = relay::reliable_rseq(resp) {
-                    let invite_cseq = i64::from(resp.cseq().seq());
-                    let responder_sdp = resp.sdp().is_some();
-                    self.send_prack_to_leg(
-                        call,
-                        fx,
-                        &source_leg_id,
-                        rseq,
-                        invite_cseq,
-                        &to_tag,
-                        responder_sdp,
-                        None,
-                    );
-                }
             }
             return;
         }
@@ -475,7 +420,7 @@ impl ActionExecutor<'_> {
                     &caps,
                 );
             }
-            let a_rseq = self.own_relayed_rseq(
+            let shown = self.own_relayed_rseq(
                 call,
                 &a_face,
                 i64::from(a_invite.cseq().seq()),
@@ -509,8 +454,8 @@ impl ActionExecutor<'_> {
                 // A reliable provisional leaving under our own number is ours
                 // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
                 // caller-facing ladder.
-                if let Some(a_rseq) = a_rseq.filter(|_| (101..200).contains(&status)) {
-                    self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_face, a_rseq);
+                if let Some(rseq) = shown.filter(|_| (101..200).contains(&status)) {
+                    self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_face, rseq);
                 }
                 fx.outbound.push(effect);
             }
@@ -556,7 +501,7 @@ impl ActionExecutor<'_> {
             let caps = capabilities::relaying(call, Face::Originator, &passthrough);
             relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
         }
-        let a_rseq = self.own_relayed_rseq(
+        let shown = self.own_relayed_rseq(
             call,
             &a_tag,
             i64::from(a_invite.cseq().seq()),
@@ -596,8 +541,8 @@ impl ActionExecutor<'_> {
             // A reliable provisional leaving under our own number is ours to
             // repeat until PRACKed (RFC 3262 §3): retain it + arm the
             // caller-facing ladder.
-            if let Some(a_rseq) = a_rseq.filter(|_| (101..200).contains(&status)) {
-                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_tag, a_rseq);
+            if let Some(rseq) = shown.filter(|_| (101..200).contains(&status)) {
+                self.arm_reliable_provisional_ladder(call, fx, &mut effect, &a_tag, rseq);
             }
             fx.outbound.push(effect);
         }

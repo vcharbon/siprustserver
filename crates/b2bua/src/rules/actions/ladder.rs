@@ -5,15 +5,15 @@
 //! class, and keyed into the timer ledger by that obligation — so the same key
 //! arms it, repeats it, retires it when the discharging ACK or PRACK arrives,
 //! and names the one give-up a rule sees. No rule cancels a ladder timer.
-//! The numbers' books live in `call::helpers`; the relays that emit the
+//! The provisionals' books live in `call::helpers`; the relays that emit the
 //! originals live in [`super::relay_response`] and [`super::respond`].
 
 use std::time::Duration;
 
 use call::helpers::{RAckTokens, Scope};
 use call::{
-    Call, CallModelState, LegState, Obligation, Repeated, RetainedEmission, TimerKey, TimerType,
-    Unacked2xx,
+    CSeq, Call, CallModelState, Ceased, LegState, Obligation, RSeq, Repeated, RetainedEmission,
+    TimerKey, TimerType, Unacked2xx,
 };
 use sip_message::header::RAck;
 use sip_message::{Method, SipMessage, SipResponse};
@@ -108,20 +108,20 @@ impl ActionExecutor<'_> {
     }
 
     /// Retain the reliable provisional as its `image()` — the datagram the
-    /// transaction layer sends verbatim — and arm its first §3
-    /// rung under `PrackOf`. The obligation is this stack's: the `RSeq` the
-    /// peer must PRACK is our own mint (`assign_a_rseq`), so the ladder under
-    /// its copies is ours — per `(a_tag, a_rseq)`, one per shown dialog (§4,
-    /// errata 4603). Idempotent: a recalled number keeps the ladder it already
-    /// anchors, and the give-up is armed once with the first rung so a
-    /// re-emission cannot push it out.
+    /// transaction layer sends verbatim — and arm its first §3 rung under
+    /// `AwaitPrack`. The obligation is this stack's: the `RSeq` the peer must
+    /// PRACK is our own number, so the ladder under its copies is ours — per
+    /// shown `(tag, rseq)`, one sequence per shown dialog (§4, errata 4603).
+    /// Idempotent: a recalled number keeps the ladder it already anchors, and
+    /// the give-up is armed once with the first rung so a re-emission cannot
+    /// push it out.
     pub(super) fn arm_reliable_provisional_ladder(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         effect: &mut OutboundSipEffect,
-        a_tag: &str,
-        a_rseq: i64,
+        tag: &str,
+        rseq: RSeq,
     ) {
         let OutboundBody::Response(resp) = &effect.body else {
             return;
@@ -132,17 +132,10 @@ impl ActionExecutor<'_> {
             Class::ReliableProvisional,
             Repeated::response(resp.cseq().method().as_str(), resp.status()),
         );
-        let (updated, armed) = call::helpers::record_reliable_provisional_emission(
-            call.clone(),
-            a_tag,
-            a_rseq,
-            emission,
-        );
-        *call = updated;
-        if !armed {
+        if !call::helpers::start_shown_ladder(call, tag, rseq, emission) {
             return;
         }
-        let obligation = Obligation::PrackOf { a_tag: a_tag.to_string(), a_rseq };
+        let obligation = Obligation::AwaitPrack { tag: tag.to_string(), rseq };
         self.schedule(
             call,
             fx,
@@ -183,7 +176,7 @@ impl ActionExecutor<'_> {
         fx.outbound.push(effect);
         let give_up = match obligation {
             Obligation::AckOf2xx { .. } => Some(self.ack_ladder_bound()),
-            Obligation::PrackOf { .. } => None,
+            Obligation::AwaitPrack { .. } => None,
         };
         let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
         *call = updated;
@@ -196,8 +189,8 @@ impl ActionExecutor<'_> {
                 // retained until then: it is also the RFC 6026 *Accepted*
                 // marker `reinvite-glare` reads.
                 self.disarm(call, fx, &rung);
-                if let Obligation::PrackOf { .. } = obligation {
-                    *call = call::helpers::clear_retained(call.clone(), obligation);
+                if let Obligation::AwaitPrack { tag, rseq } = obligation {
+                    call::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::GiveUp);
                 }
             }
         }
@@ -210,8 +203,8 @@ impl ActionExecutor<'_> {
     /// call's own answer from a re-INVITE's.
     pub fn give_up(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         self.scrub_timers(call, fx, obligation);
-        if let Obligation::PrackOf { .. } = obligation {
-            *call = call::helpers::clear_retained(call.clone(), obligation);
+        if let Obligation::AwaitPrack { tag, rseq } = obligation {
+            call::helpers::cease_shown_ladder(call, tag, *rseq, Ceased::GiveUp);
         }
     }
 
@@ -255,15 +248,15 @@ impl ActionExecutor<'_> {
         HandlerResult { call: forced.call, effects }
     }
 
-    /// The engine's match of an inbound ACK or PRACK against the ladders the
-    /// call owes, run before the rules: an ACK whose To-tag and CSeq name a
-    /// 2xx awaiting it (RFC 3261 §13.3.1.4), or a PRACK whose `RAck` names a
-    /// reliable provisional this stack showed on `source_leg_id` on all three
-    /// §7.2 tokens (RFC 3262 §3) — the same match `relay-prack` refuses with
-    /// 481, so the two cannot disagree. Retires that obligation's ladder and
-    /// retained emission and returns the key, for the rules to read as a fact.
-    /// `None` when nothing live was named — a retransmitted ACK, a repeat
-    /// PRACK, any other request.
+    /// The engine's match of an inbound ACK or PRACK against what the call
+    /// awaits, run before the rules: an ACK whose To-tag and CSeq name a 2xx
+    /// awaiting it (RFC 3261 §13.3.1.4), or a PRACK whose `RAck` names, on all
+    /// three §7.2 tokens, a reliable provisional this stack showed in the
+    /// dialog it arrives in and its party had not acknowledged (RFC 3262 §3).
+    /// The provisional is then acknowledged and its ladder retired, repeating
+    /// or not. Returns the key, for the rules to read as a fact; `None` when
+    /// nothing awaited was named — a retransmitted ACK, a PRACK of an
+    /// acknowledged provisional, any other request.
     pub fn discharge(
         &self,
         call: &mut Call,
@@ -285,21 +278,15 @@ impl ActionExecutor<'_> {
             Method::Prack => {
                 let rack = req.header::<RAck>().and_then(Result::ok)?;
                 let tokens = RAckTokens {
-                    rseq: i64::from(rack.rseq()),
-                    cseq: i64::from(rack.seq()),
+                    rseq: RSeq(rack.rseq()),
+                    cseq: CSeq(rack.seq()),
                     names_invite: *rack.method() == Method::Invite,
                 };
-                if call::helpers::unacknowledgeable_rack(call, source_leg_id, dialog_tag, tokens) {
+                call::helpers::named_by(call, dialog_tag, tokens)?;
+                if !call::helpers::acknowledge_shown(call, dialog_tag, tokens.rseq) {
                     return None;
                 }
-                let obligation =
-                    Obligation::PrackOf { a_tag: dialog_tag.to_string(), a_rseq: tokens.rseq };
-                let live = call::helpers::retained_for(call, &obligation).is_some()
-                    || call.timers.iter().any(|t| t.key.obligation_of() == Some(&obligation));
-                if !live {
-                    return None;
-                }
-                obligation
+                Obligation::AwaitPrack { tag: dialog_tag.to_string(), rseq: tokens.rseq }
             }
             _ => return None,
         };
@@ -351,19 +338,16 @@ fn repeat_toward(call: &Call, obligation: &Obligation) -> Option<OutboundSipEffe
             };
             (format!("200 ({what} retransmit, no ACK) → {leg}"), leg.clone())
         }
-        Obligation::PrackOf { a_tag, a_rseq } => {
-            let raised_by_live_leg = call
-                .reliable_provisionals
-                .iter()
-                .find(|r| r.a_tag == *a_tag && r.a_rseq == *a_rseq)
-                .and_then(|r| call::helpers::find_leg(call, &r.b_leg_id))
+        Obligation::AwaitPrack { tag, rseq } => {
+            let raised_by_live_leg = call::helpers::responder_of(call, tag, *rseq)
+                .and_then(|id| call::helpers::find_leg(call, &id.leg))
                 .is_some_and(|l| l.state() != LegState::Terminated);
             if !raised_by_live_leg {
                 return None;
             }
             // The rung goes to the leg the number was shown on; an a-facing
             // fork tag names no dialog of its own and is the a-leg's.
-            let shown = call::helpers::leg_shown(call, a_tag)
+            let shown = call::helpers::leg_shown(call, tag)
                 .unwrap_or(call.a_leg.leg_id.as_str())
                 .to_string();
             (format!("1xx (reliable retransmit, no PRACK) → {shown}"), shown)

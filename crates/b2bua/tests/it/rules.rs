@@ -1498,6 +1498,8 @@ fn requests_to(result: &HandlerResult, leg: &str, method: &str) -> usize {
         .count()
 }
 
+mod reliable_after_final;
+
 #[test]
 fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed() {
     // The caller's INVITE carries its 200; a b-leg dialled later rings. The
@@ -1550,52 +1552,6 @@ fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed(
 }
 
 #[test]
-fn a_reliable_provisional_under_an_answered_caller_is_acknowledged_by_the_stack() {
-    // The same, reliable: the caller never sees the provisional a PRACK would
-    // name, so this stack — the ringing leg's UAC — acknowledges it (RFC 3262 §4).
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    confirm_a(&mut call);
-    call = call::helpers::add_b_leg(call, b_leg_pending());
-
-    let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(true));
-    assert!(
-        !actions.iter().any(|a| matches!(a, RuleAction::RelayToPeer { .. })),
-        "nothing is relayed toward the answered caller: {actions:?}"
-    );
-    assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            RuleAction::SendPrackToLeg { leg_id, rseq: 1, invite_cseq: 1, b_tag } if leg_id == "b-1" && b_tag == "bobtag"
-        )),
-        "the reliable provisional is PRACKed by the stack: {actions:?}"
-    );
-}
-
-#[test]
-fn a_relayed_reliable_provisional_after_the_final_is_refused_and_acknowledged() {
-    // A rule that still relays a reliable 1xx under an answered caller: the
-    // seam refuses it toward her, and the ringing leg — which saw no PRACK
-    // from anyone — is acknowledged by this stack (RFC 3262 §4), once.
-    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
-    confirm_a(&mut call);
-    call = call::helpers::add_b_leg(call, b_leg_pending());
-    let event = b_leg_ringing_event(true);
-    let relay = [RuleAction::RelayToPeer { transform: Default::default() }];
-
-    let result = execute_from_b1(&call, &event, &relay);
-    assert!(
-        provisionals_to_a(&result).is_empty(),
-        "nothing provisional reaches the caller: {:?}",
-        result.effects.outbound
-    );
-    assert_eq!(late_provisional_refusals(&result), vec![(180, 200)]);
-    assert_eq!(requests_to(&result, "b-1", "PRACK"), 1, "the reliable 180 is PRACKed by the stack");
-
-    let repeat = execute_from_b1(&result.call, &event, &relay);
-    assert_eq!(requests_to(&repeat, "b-1", "PRACK"), 0, "its retransmission draws no second PRACK");
-}
-
-#[test]
 fn a_bare_180_after_the_final_mints_no_mask_state() {
     // The bare-180 downgrade asked to ring an answered caller: refused at the
     // seam before the mask's own bookkeeping — no a-facing tag mapping, the
@@ -1624,7 +1580,7 @@ fn a_bare_180_after_the_final_mints_no_mask_state() {
 fn a_repeated_transfer_target_provisional_is_accounted_once() {
     // The REFER machine's C leg repeats a 180 the referrer was already
     // notified of: the NOTIFY is deduped and so is the CDR event — the leg's
-    // due (Early, a PRACK when reliable) still rides.
+    // due (Early) still rides.
     let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
     confirm_a(&mut call);
     let mut referrer = b_leg_pending();
@@ -2914,21 +2870,26 @@ mod answer_a_leg_new_dialog {
         call = call::helpers::add_b_leg(call, b);
         let reinvite_2xx =
             call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
-        call.reliable_provisionals.push(call::ReliableProvisional {
-            a_tag: "A1early".into(),
-            a_rseq: 1,
-            a_cseq: 1,
-            b_leg_id: "b-1".into(),
-            b_tag: "svc".into(),
-            b_cseq: 1,
-            b_rseq: 9,
-            acknowledged: false,
-            emission: None,
-            carried_sdp: false,
-            responder_sdp: false,
-            responder_offer: None,
-        });
-        let provisional = call::Obligation::PrackOf { a_tag: "A1early".into(), a_rseq: 1 };
+        call.provisionals.push(call::testkit::shown_provisional(
+            "b-1",
+            "svc",
+            1,
+            9,
+            "A1early",
+            1,
+            call::Ladder::Repeating(
+                call::RetainedEmission::paced(
+                    b"SIP/2.0 183 Session Progress\r\n\r\n".to_vec(),
+                    ("10.0.0.2".into(), 5070),
+                    sip_retransmit::Class::ReliableProvisional,
+                    call::Repeated::response("INVITE", 183),
+                )
+                .0,
+            ),
+            call::ResponderAck::RelayedPrack,
+        ));
+        let provisional =
+            call::Obligation::AwaitPrack { tag: "A1early".into(), rseq: call::RSeq(1) };
         for (key, fire_at) in [
             (TimerKey::obligation(TimerType::Rung, reinvite_2xx.clone()), 500),
             (TimerKey::obligation(TimerType::RepeatGiveUp, reinvite_2xx.clone()), 32_000),
@@ -2975,9 +2936,9 @@ mod answer_a_leg_new_dialog {
             0,
             "the caller-facing §3 ladder ends with the final"
         );
-        assert!(
-            result.call.reliable_provisionals.is_empty()
-                || result.call.reliable_provisionals[0].emission.is_none(),
+        assert_eq!(
+            result.call.provisionals[0].shown.as_ref().map(|s| &s.ladder),
+            Some(&call::Ladder::Ceased(call::Ceased::Final)),
             "the provisional repeats nothing more",
         );
         let cancelled: Vec<String> = result
@@ -2991,7 +2952,7 @@ mod answer_a_leg_new_dialog {
             .collect();
         assert_eq!(
             cancelled,
-            vec!["Rung on PrackOf:A1early:1", "RepeatGiveUp on PrackOf:A1early:1"],
+            vec!["Rung on AwaitPrack:A1early:1", "RepeatGiveUp on AwaitPrack:A1early:1"],
             "only the provisional's timers leave the driver",
         );
         assert!(
@@ -4921,7 +4882,7 @@ mod ladder_give_up {
         ctx.timer_type() == Some(&TimerType::RepeatGiveUp)
             && matches!(
                 ctx.timer_key().and_then(TimerKey::obligation_of),
-                Some(Obligation::PrackOf { .. })
+                Some(Obligation::AwaitPrack { .. })
             )
     }
 
@@ -5077,16 +5038,14 @@ mod ladder_give_up {
         // 2xx's alone.
         let mut call = answered_call();
         call.a_leg.dialogs.confirmed_mut().unwrap().answered_2xx = None;
-        call.reliable_provisionals.push(call::ReliableProvisional {
-            a_tag: A_TAG.into(),
-            a_rseq: 1,
-            a_cseq: 1,
-            b_leg_id: "b-1".into(),
-            b_tag: "bobtag".into(),
-            b_cseq: 1,
-            b_rseq: 9,
-            acknowledged: false,
-            emission: Some(
+        call.provisionals.push(call::testkit::shown_provisional(
+            "b-1",
+            "bobtag",
+            1,
+            9,
+            A_TAG,
+            1,
+            call::Ladder::Repeating(
                 RetainedEmission::paced(
                     b"SIP/2.0 183 Session Progress\r\n\r\n".to_vec(),
                     ("127.0.0.1".into(), 5060),
@@ -5095,11 +5054,9 @@ mod ladder_give_up {
                 )
                 .0,
             ),
-            carried_sdp: false,
-            responder_sdp: false,
-            responder_offer: None,
-        });
-        let obligation = Obligation::PrackOf { a_tag: A_TAG.into(), a_rseq: 1 };
+            call::ResponderAck::RelayedPrack,
+        ));
+        let obligation = Obligation::AwaitPrack { tag: A_TAG.into(), rseq: call::RSeq(1) };
         let mut rules = vec![parking_rule(is_prack_give_up)];
         rules.extend(default_rules());
 
@@ -5112,8 +5069,9 @@ mod ladder_give_up {
             "a PRACK give-up is the rules' to answer"
         );
         assert!(byes_in(&settled).is_empty(), "no forced teardown");
-        assert!(
-            settled.call.reliable_provisionals[0].emission.is_none(),
+        assert_eq!(
+            settled.call.provisionals[0].shown.as_ref().map(|s| &s.ladder),
+            Some(&call::Ladder::Ceased(call::Ceased::GiveUp)),
             "the provisional's emission is spent with its ladder"
         );
     }
@@ -5698,21 +5656,24 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
     call = call::helpers::add_b_leg(call, bob);
     call.a_leg.dialogs.by_tags_mut("a1", &call.a_leg_invite.from_tag.clone()).unwrap().fronts =
         vec![PeerDialog { leg_id: "b-2".into(), peer_tag: "b2".into() }];
-    let shown = |b_leg_id: &str, b_tag: &str| call::ReliableProvisional {
-        a_tag: "a1".into(),
-        a_rseq: 1,
-        b_leg_id: b_leg_id.into(),
-        b_tag: b_tag.into(),
-        b_cseq: 1,
-        b_rseq: 1,
-        acknowledged: true,
-        emission: None,
-        a_cseq: 1,
-        carried_sdp: true,
-        responder_sdp: true,
-        responder_offer: None,
+    let shown = |b_leg_id: &str, b_tag: &str| {
+        let mut p = call::testkit::shown_provisional(
+            b_leg_id,
+            b_tag,
+            1,
+            1,
+            "a1",
+            1,
+            call::Ladder::Acknowledged,
+            call::ResponderAck::RelayedPrack,
+        );
+        p.responder_sdp = true;
+        if let Some(s) = p.shown.as_mut() {
+            s.carried_sdp = true;
+        }
+        p
     };
-    call.reliable_provisionals.push(shown("b-1", "c1"));
+    call.provisionals.push(shown("b-1", "c1"));
 
     let raw = "UPDATE sip:b2bua@127.0.0.1:5080 SIP/2.0\r\n\
                Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKupd\r\n\
@@ -5748,7 +5709,7 @@ fn an_update_offer_answered_on_the_caller_face_waits_on_the_current_peer() {
         ctx.update_refusal()
     };
     assert_eq!(refusal(&call), Some(b2bua_sdk::model::GlareRefusal::Crossing));
-    call.reliable_provisionals.push(shown("b-2", "b2"));
+    call.provisionals.push(shown("b-2", "b2"));
     assert_eq!(refusal(&call), None, "b-2 answered reliably: the offer relays");
 }
 

@@ -102,7 +102,7 @@ fn retransmit_and_give_up_families_render() {
         "a request row carries no code"
     );
     assert_eq!(m.repeat_give_ups_total("ack-of-2xx"), 1);
-    assert_eq!(m.repeat_give_ups_total("prack-of"), 0);
+    assert_eq!(m.repeat_give_ups_total("await-prack"), 0);
     let txt = m.prometheus_text();
     assert!(
         txt.contains(

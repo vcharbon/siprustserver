@@ -76,7 +76,7 @@ impl ActionExecutor<'_> {
                 self.release_straggler(call, fx, ctx, leg_id);
             }
             RuleAction::ConfirmDialog { leg_id } => {
-                self.confirm(call, ctx, leg_id);
+                self.confirm(call, fx, ctx, leg_id);
             }
             RuleAction::MapUnshownDialog { b_leg_id, b_tag } => {
                 self.map_unshown_dialog(call, b_leg_id, b_tag);
@@ -226,39 +226,11 @@ impl ActionExecutor<'_> {
                     author,
                 );
             }
-            RuleAction::SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag } => {
-                // A *suppressed* fork's reliable 1xx never rode the relay path
-                // (the only other early-dialog tracker), so register its
-                // per-To-tag dialog here — the PRACK targets strictly `(leg,
-                // b_tag)` (no first-dialog fallback).
-                self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
-                let responder_sdp = ctx.response().is_some_and(|r| r.sdp().is_some());
-                // A leg this stack is CANCELling answers a crossing offer here
-                // (RFC 3262 §5); a live setup leaves the answer to its owner.
-                let cancelling = call::helpers::find_leg(call, leg_id)
-                    .is_some_and(|l| l.disposition() == call::LegDisposition::Cancelling);
-                let answer = ctx
-                    .response()
-                    .and_then(|r| r.sdp())
-                    .filter(|_| cancelling)
-                    .filter(|_| !relay::invite_carried_offer(call, leg_id, *invite_cseq))
-                    .and_then(|offer| self.rejecting_answer(offer));
-                self.send_prack_to_leg(
-                    call,
-                    fx,
-                    leg_id,
-                    *rseq,
-                    *invite_cseq,
-                    b_tag,
-                    responder_sdp,
-                    answer,
-                );
-            }
             RuleAction::TrackEarlyDialog { leg_id, b_tag } => {
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
             }
             RuleAction::CacheSdpOnLegDialog { leg_id, b_tag, body } => {
-                // Same suppressed-fork registration as SendPrackToLeg: the cache
+                // The suppressed fork's dialog registration: the cache
                 // is keyed strictly on `(leg, b_tag)` — a fallback write would
                 // overwrite a different fork's cached answer.
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);

@@ -32,6 +32,7 @@ mod initial_turn;
 mod interpret;
 pub(crate) mod late_prack;
 mod materialise;
+mod message_cap;
 mod owed;
 mod peer_metrics;
 mod process;

@@ -65,12 +65,7 @@ impl ActionExecutor<'_> {
         }
         straggler.route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         let released = straggler.retired().and_then(|r| r.release.clone());
-        let offered_reliably = call::helpers::offered_in_reliable_provisional(
-            call,
-            leg_id,
-            &tag,
-            i64::from(invite_cseq),
-        );
+        let offered_reliably = relay::offered_reliably(call, leg_id, &tag, i64::from(invite_cseq));
         let answer = (!relay::acked_invite_carries_offer(&straggler) && !offered_reliably)
             .then(|| resp.sdp())
             .flatten()

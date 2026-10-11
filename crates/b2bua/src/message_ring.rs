@@ -50,14 +50,18 @@ impl Ring {
     /// autonomously for it: the 100 Trying every INVITE server transaction
     /// answers with, the hop-by-hop ACK of a non-2xx INVITE final on a client
     /// transaction this node holds, the 200 and 487 a matched CANCEL draws.
-    /// `discharged` is the obligation the received request retired, the
-    /// executor's own verdict on whether an ACK is the first of its 2xx;
-    /// `dialog` is the dialog the dialog gate resolved the message to.
+    /// `repeat` is the engine's verdict that the message is a reliable
+    /// provisional it already recorded (RFC 3262 §3); `discharged` is the
+    /// obligation the received request retired, the executor's own verdict on
+    /// whether an ACK is the first of its 2xx; `dialog` is the dialog the
+    /// dialog gate resolved the message to.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn received(
         &self,
         call: Call,
         leg_id: &str,
         event: &CallEvent,
+        repeat: bool,
         discharged: Option<&Obligation>,
         dialog: Option<&DialogId>,
         now_ms: i64,
@@ -67,7 +71,8 @@ impl Ring {
                 let named = dialog.and_then(|id| {
                     find_leg(&call, leg_id)?.dialogs.by_tags(&id.our_tag, &id.peer_tag)
                 });
-                if repeated(&call, leg_id, message, discharged, named)
+                if repeat
+                    || repeated(&call, leg_id, message, discharged, named)
                     || probe_answer(message, named)
                 {
                     return call;
@@ -249,9 +254,8 @@ impl Ring {
 /// Whether the layer handed the TU a message it already handled: an ACK that
 /// discharges no 2xx awaiting it while the ring already holds the peer's ACK
 /// of that same (tag, CSeq) — a late first ACK after the ladder gave up is
-/// still the first — a copy of an INVITE 2xx the dialog already took
-/// (RFC 3261 §13.3.1.4), or a reliable provisional already relayed or
-/// PRACKed (RFC 3262 §4) — the readings the executor absorbs and re-ACKs by.
+/// still the first — or a copy of an INVITE 2xx the dialog already took
+/// (RFC 3261 §13.3.1.4) — the readings the executor absorbs and re-ACKs by.
 fn repeated(
     call: &Call,
     leg_id: &str,
@@ -273,7 +277,6 @@ fn repeated(
         }
         SipMessage::Response(resp) => {
             named.is_some_and(|d| crate::rules::relay::retransmitted_2xx(d, resp))
-                || crate::rules::relay::repeated_reliable_provisional(call, leg_id, resp)
         }
     }
 }

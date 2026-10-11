@@ -42,7 +42,12 @@ pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallModelState, CallTopology, Leg,
-    PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
+    PolicyUpdateBody, SipHeader,
+};
+// The reliable provisionals a call received (RFC 3262) and the answers its
+// dialogs owe (RFC 3264).
+pub use model::{
+    CSeq, Ceased, Ladder, OwedAnswer, Provisional, ProvisionalId, RSeq, ResponderAck, Shown,
 };
 // The call's admission state on the call limiter (ADR-0040).
 pub use model::{

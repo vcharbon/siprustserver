@@ -5,20 +5,26 @@
 //! module per action family:
 //!
 //! - `dispatch` — the `RuleAction` → handler table (+ inline state mutations)
+//! - `ack_leg` — the ACK of a 2xx toward a leg, relayed or this stack's own
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
 //! - `create_leg` — the new leg's INVITE, opening the attempt it dials
 //! - `originate` — requests the B2BUA sends itself (re-INVITE,
-//!   NOTIFY, PRACK, in-dialog probes)
+//!   NOTIFY, in-dialog probes)
+//! - `prack` — the PRACKs this stack owes responders, settled in one step
+//! - `provisional_arrival` — the engine's record of a reliable provisional
+//!   as it arrives, before the rules
 //! - `respond` — response synthesis toward a leg (finals, provisionals)
 //! - `ladder` — the dialog-level retransmission ladders the framework owns
 //!   (ADR-0032 X4): arm / repeat / discharge, keyed by obligation
 //! - `retire` — leaving a scope: its ladders end and its timers are disarmed
 //! - `teardown` — termination policy + BYE/CANCEL builders
+//! - `reinvite_cancel` — the transaction-scoped CANCEL of a relayed re-INVITE
 //! - `select` — shared leg/dialog selection views
 //! - `straggler` — the ACK and BYE a fork straggler's 2xx draws
 
+mod ack_leg;
 mod confirm;
 mod create_leg;
 mod dialog_end;
@@ -26,6 +32,9 @@ mod dialog_track;
 mod dispatch;
 mod ladder;
 mod originate;
+mod prack;
+mod provisional_arrival;
+mod reinvite_cancel;
 mod relay_request;
 mod relay_response;
 mod respond;
@@ -43,6 +52,8 @@ use crate::config::B2buaConfig;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 
 use b2bua_sdk::model::{RuleAction, RuleContext};
+
+pub use prack::{Owed, Settle};
 
 /// Executes rule actions against a working copy of the call.
 pub struct ActionExecutor<'a> {

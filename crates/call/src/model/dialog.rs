@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
+use super::owed_answer::OwedAnswer;
 use super::sdp_session::LegSdpSession;
 
 /// Direction of an original relayed request.
@@ -251,6 +252,11 @@ pub struct Dialog {
     /// and the one that confirms hands this state to its leg. `None` while the
     /// dialog carries what the leg's opening INVITE stated.
     pub sdp_session: Option<LegSdpSession>,
+    /// The offer the dialog's responder made that this side still owes an
+    /// answer to, and the message that carries it (RFC 3264 §4); `None` when
+    /// nothing is owed.
+    #[serde(default)]
+    pub owed_answer: Option<OwedAnswer>,
 }
 
 impl Dialog {
@@ -281,6 +287,7 @@ impl Dialog {
             answered_2xx: None,
             emitted_ack: None,
             sdp_session: None,
+            owed_answer: None,
         }
     }
 

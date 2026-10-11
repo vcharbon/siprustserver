@@ -38,6 +38,12 @@ pub fn dialog_with_peer<'a>(leg: &'a Leg, peer_tag: &str) -> Option<&'a Dialog> 
     leg.dialogs.carrying().filter(|d| d.peer_tag == peer_tag)
 }
 
+/// [`dialog_with_peer`], to update.
+pub fn dialog_with_peer_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
+    let id = dialog_with_peer(leg, peer_tag)?.id();
+    leg.dialogs.by_tags_mut(&id.our_tag, &id.peer_tag)
+}
+
 /// [`callee_dialog`], to update.
 pub fn callee_dialog_mut<'a>(leg: &'a mut Leg, peer_tag: &str) -> Option<&'a mut Dialog> {
     let ours = leg.outbound_invite.as_ref()?.our_tag.clone();

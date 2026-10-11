@@ -18,7 +18,6 @@ use sip_message::sdp_media_equivalent;
 use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
-use super::relay;
 use b2bua_sdk::model::{
     Body, LegEnd, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition,
     RuleHandleResult, TimerDelay, SERVICE_LAYER,
@@ -102,9 +101,6 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             ),
             |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to().tag().unwrap_or_default().to_string();
-                let rseq = relay::reliable_rseq(resp);
-                let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let promoted_sdp = resp.body().clone();
 
@@ -139,14 +135,6 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         reason: Some("promote-pem-to-200".to_string()),
                     },
                 ];
-                if let Some(rseq) = rseq {
-                    actions.push(RuleAction::SendPrackToLeg {
-                        leg_id: leg,
-                        rseq,
-                        invite_cseq,
-                        b_tag: b_tag.to_string(),
-                    });
-                }
                 actions.push(RuleAction::SetPromotePem {
                     state: Some(PromotePemState {
                         promoted: true,
@@ -169,32 +157,12 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| promote_pem_active(ctx) && promoted(ctx)),
             |ctx| {
                 let resp = ctx.response()?;
-                let b_tag = resp.to().tag().unwrap_or_default().to_string();
-                let rseq = relay::reliable_rseq(resp);
-                let invite_cseq = resp.cseq().seq() as i64;
-                let leg = ctx.source_leg_id.to_string();
-                // The responder's retransmission of a provisional this stack
-                // already acknowledged: discarded outright (RFC 3262 §4).
-                if rseq.is_some_and(|rseq| {
-                    ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)
-                }) {
-                    return ok(vec![]);
-                }
-                let mut actions = vec![RuleAction::AddCdrEvent {
+                ok(vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
-                    leg_id: leg.clone(),
+                    leg_id: ctx.source_leg_id.to_string(),
                     status_code: Some(resp.status() as i64),
                     reason: Some("promote-pem-to-200:suppressed".to_string()),
-                }];
-                if let Some(rseq) = rseq {
-                    actions.push(RuleAction::SendPrackToLeg {
-                        leg_id: leg,
-                        rseq,
-                        invite_cseq,
-                        b_tag: b_tag.to_string(),
-                    });
-                }
-                ok(actions)
+                }])
             },
         ),
         // ── Rule 3: confirm-after-promote (beats confirm-dialog) ─────────────

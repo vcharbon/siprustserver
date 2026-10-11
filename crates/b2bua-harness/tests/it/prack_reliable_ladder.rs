@@ -4,7 +4,7 @@
 //! lives in `prack.rs`; forking lives in `prack_forking.rs`.
 //!
 //! §3 attaches the obligation to whoever assigns the sequence, and the number
-//! the caller sees is this stack's own (`assign_a_rseq`). So the ladder under
+//! the caller sees is this stack's own (`show_provisional`). So the ladder under
 //! the caller's copies is ours: it starts at T1 and doubles, it stops the
 //! moment her PRACK names the number, and it is bounded by 64·T1. What the
 //! callee does on its own leg pays for none of it — a callee that never repeats
@@ -225,7 +225,7 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     assert_one_number(&seen);
     assert_eq!(counted(), 3, "the PRACK stopped the ladder: nothing more was counted");
     assert_eq!(
-        b2bua.metrics().repeat_give_ups_total("prack-of"),
+        b2bua.metrics().repeat_give_ups_total("await-prack"),
         0,
         "a PRACKed ladder never gives up"
     );
@@ -351,7 +351,7 @@ async fn the_ladder_gives_up_at_64_t1() {
     // The give-up is counted once, under the obligation alice left
     // undischarged; every rung before it was counted as it left.
     assert_eq!(
-        b2bua.metrics().repeat_give_ups_total("prack-of"),
+        b2bua.metrics().repeat_give_ups_total("await-prack"),
         1,
         "one give-up: her PRACK never came"
     );
@@ -672,7 +672,7 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
 /// early dialog (§4, errata 4603/4604): two a-facing dialogs each carrying one
 /// outstanding provisional are legal, one dialog carrying two is the violation.
 /// In transparent mode the caller's dialog set mirrors the callee's, so the
-/// rerouted attempt mints its own a-facing tag — and `assign_a_rseq` seeds that
+/// rerouted attempt mints its own a-facing tag — and `show_provisional` seeds that
 /// dialog its own `RSeq` space, because §4 has a conformant caller drop
 /// everything after a gap.
 ///

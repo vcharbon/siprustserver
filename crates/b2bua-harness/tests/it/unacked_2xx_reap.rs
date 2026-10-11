@@ -130,7 +130,7 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
         1,
         "one give-up: alice's ACK never came"
     );
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0);
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("await-prack"), 0);
 
     let _report = h.finish().await;
 }
