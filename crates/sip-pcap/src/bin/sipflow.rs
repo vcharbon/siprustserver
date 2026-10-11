@@ -51,6 +51,10 @@ use sip_pcap::flow::{
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
 use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 
+#[path = "sipflow/walk.rs"]
+mod walk;
+use walk::expand_flows_documents;
+
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
 fn emit_json(doc: Result<FlowsDoc, String>) -> String {
@@ -776,50 +780,6 @@ fn run_query(
         }
     }
     hits
-}
-
-/// Every flows document under `inputs`: a named file is taken as given, a
-/// directory is walked recursively for `*.flows.json`.
-///
-/// The recursion does NOT descend a symlinked directory, and the result is
-/// deduplicated by canonical path: a corpus that classifies its captures by
-/// symlinking them into bucket directories would otherwise present the same
-/// document several times and inflate every count the census reports. A path
-/// named DIRECTLY on the command line is still followed — that one is a
-/// deliberate choice.
-///
-/// Sorted, so the sweep's work order — and therefore its report — does not
-/// depend on the filesystem.
-fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.filter_map(Result::ok) {
-            let Ok(kind) = entry.file_type() else { continue };
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(&path, out);
-            } else if kind.is_file()
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".flows.json"))
-            {
-                out.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    for input in inputs {
-        if input.is_dir() {
-            walk(input, &mut files);
-        } else {
-            files.push(input.clone());
-        }
-    }
-    files.sort();
-    let mut seen = std::collections::HashSet::new();
-    files.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
-    files
 }
 
 /// Sweep the census over flows documents and print it.

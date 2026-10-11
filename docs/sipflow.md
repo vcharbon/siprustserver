@@ -92,4 +92,6 @@ is a capture again for every reader. The review's own regression fixture,
 
 `--rfc-census <flows.json…|dir…>` sweeps already-emitted documents under the
 `wire` vocabulary and prints the aggregate report; `--rfc-census-with <tok,…>`
-takes a candidate rule's baseline beside it. Reads no capture.
+takes a candidate rule's baseline beside it. Reads no capture. A directory is
+walked for `*.flows.json` through symlinks, each document swept once (by its
+real path where the walk also reaches it through no link).
