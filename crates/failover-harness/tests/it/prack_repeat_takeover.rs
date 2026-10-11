@@ -115,6 +115,11 @@ async fn reboot_and_reclaim(
 #[tokio::test(start_paused = true)]
 async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let mut fh = FailoverHarness::new("prack-repeat-takeover", &["b1", "b2"]);
+    fh.allow_rfc_violation(
+        "reliable-needs-client-opt-in",
+        "bob answers reliably although the mask withheld 100rel from his INVITE — the PRACK \
+         this stack owes such a provisional, across a takeover, is the subject",
+    );
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 

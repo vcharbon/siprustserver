@@ -332,7 +332,20 @@ async fn observe_final_pinned_to_invite_skips_prack_200() {
                 &alice,
                 ("bob", bob.clone()),
                 vec![
-                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::Invite {
+                            callee: "bob",
+                            plan: Some(crate::realcall::InvitePlan {
+                                via: bob.addr(),
+                                from: None,
+                                to: None,
+                                ruri: None,
+                                headers: vec![("Supported".into(), "100rel".into())],
+                                rewrite: Default::default(),
+                            }),
+                        },
+                    ),
                     Goal::new(
                         Barrier::pred("prack_200", prack_200),
                         GoalStep::Cancel { stated: Vec::new() },
