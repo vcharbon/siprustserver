@@ -116,11 +116,34 @@ equivalent message (ADR-0032 X3).
 
 **Obligation**:
 What discharges a dialog-level ladder, as a key the framework matches on:
-`AckOf2xx` and `PrackOf`. The engine cancels the ladder when the matching ACK
-or PRACK arrives; a rule sees only the give-up. A transaction ladder needs no
-obligation — the transaction layer owns its own.
+`AckOf2xx` and `AwaitPrack`. The engine cancels the ladder when the matching
+ACK or PRACK arrives; a rule sees only the give-up. A transaction ladder needs
+no obligation — the transaction layer owns its own.
 _Avoid_: "watchdog" for the 2xx pair (it names the timer, not the thing
 owed).
+
+**Provisional record**:
+One reliable provisional (RFC 3262) the call received, written by the engine
+before any rule reads it: the responder's identity of it (leg, tag, INVITE
+CSeq, `RSeq`), where the PRACK the responder is owed stands (pending, relayed,
+this stack's own, deferred to the ACK, waived), and where it was shown under
+this stack's own number, with its ladder. A repeat of one, or one out of
+`RSeq` order, is dropped before the rules. A rule decides only whether it is
+shown; the engine sends the PRACK this stack owes.
+_Avoid_: "relayed provisional" for the record (one shown to no one has a
+record too); "owed PRACK" for a PRACK owed TO this stack (that is
+`AwaitPrack`).
+
+**PRACK disposition**:
+What a PRACK this stack receives draws on the face it showed the
+provisional: relayed, answered 200 here, or refused 481. One reading serves
+the live call and the released call's late-PRACK book.
+
+**Dialog owed answer**:
+The offer a dialog's responder made that this side still owes an answer to
+(RFC 3264 §4), with the message that carries it: the ACK of a 2xx that
+carried a delayed offer, the PRACK of the reliable provisional that carried
+it, or that PRACK deferred to the ACK a 2xx awaits. One per dialog.
 
 **Message ring**:
 The capped per-leg history of the distinct SIP messages a leg received or sent,
@@ -292,7 +315,8 @@ unrun, by the discard's reason: an answer through the request's transaction
 call's refusal), a forget of the transaction so its retransmission is
 admitted afresh, or nothing. Exactly one per discard; the queue hands the
 event back with it and the router renders it.
-_Avoid_: "discard hook" (the answer is a value, not a callback).
+_Avoid_: "discard hook" (the answer is a value, not a callback); the
+**Dialog owed answer** is RFC 3264's, not this.
 
 ## HA replication glossary
 
