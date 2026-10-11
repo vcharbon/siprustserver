@@ -13,8 +13,10 @@
  * A cell that never produced a result is not silently red. It leaves an
  * `error.txt` beside where its bundle would have been, and the summary carries
  * the same line, so a reader never has to guess whether a cell failed or never
- * ran. A cell whose document declares its lane BLOCKED is not red either: it
- * leaves a `skipped.json` and never reaches the interpreter.
+ * ran. A cell that ran its interpreter and did not pass keeps what the
+ * interpreter wrote on stderr in `stderr.txt`, whatever the verdict says. A
+ * cell whose document declares its lane BLOCKED is not red either: it leaves
+ * a `skipped.json` and never reaches the interpreter.
  *
  * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
  * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
@@ -39,6 +41,7 @@ import {
   CONFRONTATION_FILE,
   ERROR_FILE,
   RESULT_FILE,
+  STDERR_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
   RUN_CONFIG_FILE,
@@ -131,6 +134,10 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
     yield* fs.makeDirectory(absolute, { recursive: true })
     yield* fs.writeFileString(path.join(absolute, ERROR_FILE), `${outcome.detail}\n`)
   }
+  if (!outcome.passed && outcome.stderr !== undefined && outcome.stderr !== "") {
+    yield* fs.makeDirectory(absolute, { recursive: true })
+    yield* fs.writeFileString(path.join(absolute, STDERR_FILE), outcome.stderr)
+  }
   if (outcome.skipped !== undefined) {
     yield* fs.makeDirectory(absolute, { recursive: true })
     yield* fs.writeFileString(
@@ -167,6 +174,8 @@ interface CellOutcome {
   readonly detail: string
   /** Whether the cell never reached a result at all. */
   readonly crashed: boolean
+  /** What the interpreter wrote on stderr, where the cell ran one; kept beside a cell that did not pass. */
+  readonly stderr?: string
   /**
    * The lane verdict that kept the cell from running; absent where it ran. A
    * skipped cell is the third outcome: `passed` is false because nothing passed,
@@ -240,7 +249,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       detail:
         `replay exited ${report.exitCode} (${report.outcome._tag}) and left no bundle:\n` +
         report.stderr,
-      crashed: true
+      crashed: true,
+      stderr: report.stderr
     } satisfies CellOutcome
   }
 
@@ -294,7 +304,8 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
             `${classification.unknown} unknown (see ${CONFRONTATION_FILE})`
         : `${verdict.status} restated as ${final.passed ? "passed" : "failed"}: ` +
           `${final.reason ?? "no reason stated"}`,
-    crashed: false
+    crashed: false,
+    stderr: report.stderr
   } satisfies CellOutcome
 })
 

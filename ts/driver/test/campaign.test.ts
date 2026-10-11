@@ -10,7 +10,15 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
-import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
+import {
+  CAMPAIGN_INDEX,
+  CONFRONTATION_FILE,
+  ERROR_FILE,
+  RULE_HITS_FILE,
+  SKIP_FILE,
+  SPECS_DIR,
+  STDERR_FILE
+} from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
 import { RoutingCompiler } from "../src/routing.js"
 import {
@@ -123,6 +131,23 @@ describe("a red cell", () => {
     expect(cell.passed).toBe(false)
     expect(cell.error).toBeUndefined()
     expect(exitCodeOf(run)).toBe(1)
+  })
+
+  it("keeps its interpreter's stderr, failing verdict or panic alike, and a green cell keeps none", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([
+      replayCell({ case: caseNamed(cases, "fails.v3.json") }),
+      replayCell({ case: caseNamed(cases, "panics.v3.json") }),
+      replayCell()
+    ])
+    const [failed, panicked, green] = run.index.cells
+    expect(fs.readFileSync(path.join(run.dir, failed!.dir, STDERR_FILE), "utf8")).toBe("the run failed\n")
+    expect(fs.readFileSync(path.join(run.dir, panicked!.dir, STDERR_FILE), "utf8")).toBe("the run body panicked\n")
+    expect(green!.passed).toBe(true)
+    expect(fs.existsSync(path.join(run.dir, green!.dir, STDERR_FILE))).toBe(false)
+    // A red cell is not a crashed one: it leaves no error file.
+    expect(fs.existsSync(path.join(run.dir, failed!.dir, ERROR_FILE))).toBe(false)
   })
 
   it("IS crashed where the interpreter refused before writing anything", async () => {

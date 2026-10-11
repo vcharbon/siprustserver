@@ -7,6 +7,7 @@
  *   specs/<cell>.run-spec.json    what the driver asked the interpreter for
  *   <cell>/                       IS the interpreter's out_dir — it wipes it
  *   <cell>/error.txt              a cell that never produced a result
+ *   <cell>/stderr.txt             a cell that ran and did not pass: its interpreter's stderr
  *   <cell>/skipped.json           a cell skipped on a lane the document blocks
  * ```
  *
@@ -34,6 +35,9 @@ export const CAMPAIGN_INDEX = "campaign.json"
 
 /** What a cell that never produced a result leaves behind. */
 export const ERROR_FILE = "error.txt"
+
+/** What a cell that ran and did not pass keeps of its interpreter: the stderr it wrote. */
+export const STDERR_FILE = "stderr.txt"
 
 /** What a cell SKIPPED on a blocked lane leaves behind, in place of a bundle. */
 export const SKIP_FILE = "skipped.json"
