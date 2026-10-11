@@ -49,21 +49,15 @@ impl Owner {
         // without creating a map entry. This closes the branch-collision foot-gun at
         // its source, so the branch-only key never has to disambiguate by method.
         if msg.method() == Method::Cancel || msg.method() == Method::Ack {
-            // RFC 3261 §9.1: a CANCEL for an INVITE client txn that has received
-            // NO response is held on the txn and flushed on the first provisional
-            // (`handle_inbound_response`). A CANCEL sent before any response is
-            // unmatchable at a UAS that has not built the server txn yet — it
-            // 481s while Timer A keeps re-ringing the callee for a call that no
-            // longer exists. A branch that never draws a provisional never
-            // sees the CANCEL: the INVITE ends at Timer B. The held CANCEL is
-            // cleared unsent when the txn takes a final first (§9.2 — the UAS
-            // already answered; cancellation is moot).
-            // A CANCEL whose txn already took its final (Completed, Accepted)
-            // or is gone (a 2xx deletes it) is suppressed outright: §9.1/§9.2 —
-            // a CANCEL has no effect on a request the UAS already answered, and
-            // sending it can put a pre-1xx CANCEL on the wire when the final
-            // raced the caller's decision. A takeover rebuilds the INVITE txn a
-            // CANCEL names from the record (ADR-0043 X1).
+            // RFC 3261 §9.1 (ADR-0043 X1): a CANCEL for an INVITE client txn that
+            // has received NO response is held on the txn and flushed on the
+            // first provisional (`handle_inbound_response`) — before one, a UAS
+            // that has not built the server txn answers it 481 while Timer A
+            // keeps ringing. A branch that never draws a provisional never sees
+            // it: the INVITE ends at Timer B. A final taking the txn first clears
+            // it unsent (§9.2). A CANCEL whose txn took its final (Completed,
+            // Accepted) or is gone (a 2xx deletes it) is suppressed outright: it
+            // has no effect on an answered request (§9.1/§9.2).
             #[derive(PartialEq)]
             enum CancelGate {
                 Hold,
@@ -167,6 +161,7 @@ impl Owner {
             .map(str::to_string)
             .unwrap_or_else(|| self.id_gen.new_branch());
         let ViaMarks { call_ref, leg_id, incarnation_mark } = extract_via_custom_params(&msg);
+        self.note_dialog_cseq(call_ref.as_deref(), &msg);
 
         // The transaction opens after the send, in the step that arms its
         // give-up timer, so `created_at` (the bound's origin) follows the send.
@@ -244,7 +239,7 @@ impl Owner {
     /// (direct pass-through, first-provisional flush) plus the pass-through of
     /// a superseding CANCEL (a fresh TU datagram earns a fresh ladder even
     /// after a ceiling).
-    pub(super) fn arm_cancel_retransmit(&mut self, branch: &str) {
+    fn arm_cancel_retransmit(&mut self, branch: &str) {
         let Some(txn) = self.clients.get_mut(branch) else { return };
         if txn.cancel_retransmit_key.is_some() {
             return;
@@ -572,7 +567,7 @@ impl Owner {
                     // re-draws the ACK already sent; anything else on the
                     // branch is absorbed until Timer M.
                     if (200..300).contains(&resp.status()) {
-                        self.re_ack_accepted(endpoint, branch).await;
+                        self.on_accepted_2xx(endpoint, branch, &resp).await;
                     }
                     return true;
                 }
@@ -635,14 +630,17 @@ impl Owner {
                     // A 2xx to an orphaned INVITE: the UAC core that owed its ACK
                     // (§13.2.2.4) is gone, so the layer sends the bare ACK on a
                     // fresh branch itself and holds the transaction in Accepted
-                    // for Timer M. A seeded transaction retains no request to
-                    // build it from and is deleted here, ACK-less.
+                    // for Timer M, then BYEs the dialog a 2xx to an initial
+                    // INVITE created.
                     self.accept_orphaned_2xx(endpoint, branch, &resp).await;
                     return true;
                 } else {
                     // 2xx INVITE (the TU ACKs end-to-end) or any non-INVITE final:
-                    // terminate the client txn immediately.
+                    // terminate the client txn; an orphan's final has no consumer.
                     self.delete_txn(TxnRef::Client(branch));
+                    if orphaned {
+                        return true;
+                    }
                     self.emit_critical(TransactionEvent::Message {
                         message: Box::new(SipMessage::Response(resp)),
                         src,

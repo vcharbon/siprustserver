@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    ReplicatedB2buaSut, WorkerHealth,
 };
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -62,10 +62,6 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_ring()
 
     // ── the serving node dies with the CANCEL held ──────────────────────────
     let (primary, survivor) = if pri_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
-    fh.accept_rfc_deviations_from_now(
-        RULE_CSEQ_IN_DIALOG_ORDER,
-        "ADR-0014 accepted trade-off: two potential owners of one leg in the takeover window",
-    );
     primary.crash();
     proxy.set_health(&pri_ord, WorkerHealth::Dead);
     survivor.simulate_peer_removed(&pri_ord);

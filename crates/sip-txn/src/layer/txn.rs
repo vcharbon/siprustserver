@@ -202,6 +202,8 @@ impl Transaction {
             ladder: None,
             timeout_kind: TimeoutKind::Response,
             dead_hop_reported: false,
+            dialog_cseq: 0,
+            accepted_to_tag: None,
             lifetime,
             orphaned: false,
             held: false,
@@ -315,6 +317,13 @@ pub(super) struct Transaction {
     /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
     /// reported again.
     pub(super) dead_hop_reported: bool,
+    /// On an INVITE client txn: the highest CSeq this layer sent on the
+    /// INVITE's Call-ID and From-tag inside a dialog it opened (a PRACK, an
+    /// UPDATE), so a BYE it sends on that dialog numbers above it (§12.2.1.1).
+    pub(super) dialog_cseq: u32,
+    /// On an orphaned INVITE client txn in Accepted: the To-tag of the 2xx it
+    /// ACKed — a 2xx under another tag is a forked dialog of its own.
+    pub(super) accepted_to_tag: Option<String>,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:

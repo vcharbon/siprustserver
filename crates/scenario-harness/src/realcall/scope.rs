@@ -4,12 +4,14 @@
 //! A leaked confirmed dialog would inflate `b2bua_active_calls`, hold a limiter
 //! token, and contaminate the leak detector and endurance gates — exactly the
 //! class of contamination the project's endurance work fights. So every call,
-//! however it ends, must CANCEL its early dialog or BYE its confirmed one.
+//! however it ends, CANCELs an INVITE that drew a provisional or BYEs its
+//! confirmed dialog; an INVITE that drew none is owed no CANCEL (RFC 3261
+//! §9.1) and is left to the SUT's own transaction timers.
 //!
 //! [`CallScope`] is owned by the runner **outside** the per-call `catch_unwind`
 //! boundary, so it survives a scenario panic. As the scenario progresses it
 //! registers a `Send + 'static` teardown snapshot: a [`CancelHandle`] once the
-//! INVITE is sent, upgraded to a [`Dialog`] clone once the call confirms (and
+//! INVITE draws a provisional, upgraded to a [`Dialog`] clone once the call confirms (and
 //! refreshed after each in-dialog request so the BYE CSeq stays valid), and
 //! cleared to [`Terminated`](TeardownState::Terminated) once the scenario sends
 //! its own BYE. After the scenario resolves (Ok / Err / panic) the runner calls

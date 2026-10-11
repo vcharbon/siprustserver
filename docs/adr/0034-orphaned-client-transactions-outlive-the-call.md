@@ -50,8 +50,7 @@ its own obligations with no consumer:
   same, which closes the transaction and leaves the callee nothing to repeat).
   A 2xx to an initial INVITE created a dialog nothing holds: the layer then
   sends its BYE (§15.1.1, `generate_bye_for_2xx_from_invite`) on an orphaned
-  non-INVITE transaction of its own. A seeded transaction retains no request
-  and is deleted at its 2xx, ACK-less.
+  non-INVITE transaction of its own, whose final reaches no consumer.
 - **Nothing** — Timer A keeps repeating an INVITE in Calling and the held
   CANCEL keeps its §9.1 wait or its Timer E ladder; **Timer B** (or the
   configured INVITE bound past a provisional) gives the transaction up with a

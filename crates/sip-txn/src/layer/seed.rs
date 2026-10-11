@@ -29,12 +29,7 @@ impl Owner {
     /// runs from the seed: its backstop is an active INVITE's, measured from
     /// now, so a taken-over INVITE lives at most one bound longer than it
     /// would have on the node that sent or admitted it.
-    pub(super) async fn do_seed(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        call_ref: &str,
-        seeds: Vec<TxnSeed>,
-    ) -> usize {
+    pub(super) fn do_seed(&mut self, call_ref: &str, seeds: Vec<TxnSeed>) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         let mut seeded = 0usize;
         for seed in seeds {
@@ -62,7 +57,7 @@ impl Owner {
                     let branch = invite.top_via().branch().unwrap_or_default().to_string();
                     self.seed_client_invite(call_ref, invite, dest, provisional);
                     if let Some(cancel) = cancel {
-                        self.seed_cancel(endpoint, &branch, cancel, dest, provisional).await;
+                        self.seed_held_cancel(&branch, *cancel, dest);
                     }
                 }
                 TxnSeed::ServerInvite {
@@ -138,28 +133,13 @@ impl Owner {
         txn.timeout_key = Some(bound);
     }
 
-    /// Park the CANCEL the record says was sent for the seeded client INVITE
-    /// at `branch`: held until its first provisional when the record holds
-    /// none (RFC 3261 §9.1), else put on the wire now on its Timer-E ladder —
-    /// the node that sent it is gone, and a repeat of a CANCEL is harmless.
-    async fn seed_cancel(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        branch: &str,
-        cancel: SipRequest,
-        dest: SocketAddr,
-        provisional: bool,
-    ) {
+    /// Hold the CANCEL the record says was sent for the seeded client INVITE
+    /// at `branch` and still awaits its first provisional (RFC 3261 §9.1).
+    fn seed_held_cancel(&mut self, branch: &str, cancel: SipRequest, dest: SocketAddr) {
         let buf = bytes::Bytes::from(serialize(&SipMessage::Request(cancel)));
-        let wire = if provisional { CancelWire::Sent } else { CancelWire::Held };
         let Some(txn) = self.clients.get_mut(branch) else { return };
-        txn.held_cancel = Some(HeldCancel::new(buf.clone(), dest, wire));
-        if provisional {
-            self.send_buffer(endpoint, &buf, dest).await;
-            self.arm_cancel_retransmit(branch);
-        } else {
-            self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        txn.held_cancel = Some(HeldCancel::new(buf, dest, CancelWire::Held));
+        self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Process `message` as an inbound datagram against the transactions now

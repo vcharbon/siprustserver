@@ -547,7 +547,7 @@ async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
         invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
         dest: addr(PEER),
         provisional: false,
-        cancel: Some(seed_cancel(branch, call_id)),
+        cancel: Some(Box::new(seed_cancel(branch, call_id))),
     };
     stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
     elapse_ms(5_000).await;
@@ -559,33 +559,6 @@ async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
     stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
-}
-
-/// On a seed whose record holds a provisional, the CANCEL the record says was
-/// sent goes on the wire at the seed and rides its Timer-E ladder until
-/// answered.
-#[tokio::test(start_paused = true)]
-async fn a_seeded_cancel_with_a_provisional_on_record_is_sent_at_the_seed() {
-    let stack = Stack::build(TRANSIT, 64, 64).await;
-    let branch = "z9hG4bK-seed-cancel-sent";
-    let call_id = "seed-cancel-sent";
-    let seed = TxnSeed::ClientInvite {
-        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
-        dest: addr(PEER),
-        provisional: true,
-        cancel: Some(seed_cancel(branch, call_id)),
-    };
-    stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
-    elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "sent at the seed");
-    elapse_ms(600).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "its first Timer-E rung");
-    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, call_id, true)).await;
-    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
-    elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
-    elapse_ms(5_000).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "the answer ends the ladder");
 }
 
 /// The CANCEL of the INVITE [`invite_with_cr_lg`] builds on `branch`.

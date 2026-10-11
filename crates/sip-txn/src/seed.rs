@@ -19,13 +19,13 @@ pub enum TxnSeed {
     /// `lg` params. The INVITE bound is armed; no retransmit ladder runs.
     /// `provisional` says the record holds a provisional for it: the seed opens
     /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261 §9.1).
-    /// `cancel` is the CANCEL the record says this side sent for it: held on a
-    /// `Trying` seed until its first provisional, sent on a `Proceeding` one.
+    /// `cancel` is a CANCEL the record says this side sent for it while it had
+    /// drawn no provisional: held until its first one (§9.1).
     ClientInvite {
         invite: SipRequest,
         dest: SocketAddr,
         provisional: bool,
-        cancel: Option<SipRequest>,
+        cancel: Option<Box<SipRequest>>,
     },
     /// A server INVITE this side admitted and has not answered: keyed by the
     /// top-Via `branch` and `sent_by` of the INVITE (RFC 3261 §17.2.3),

@@ -168,7 +168,10 @@ fn client_seed(
                 value: value.clone().into(),
             })
             .collect();
-        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &stated)
+        Box::new(generate_cancel(
+            &InviteClientTransactionHandle { original_invite: invite.clone() },
+            &stated,
+        ))
     });
     Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel })
 }

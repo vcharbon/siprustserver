@@ -13,12 +13,13 @@ use crate::types::{SipRequest, SipResponse};
 /// Build the BYE of the dialog `final_response`, a 2xx to the initial
 /// `original_invite`, created (RFC 3261 §12.1.2, §15.1.1): the 2xx's Contact
 /// is the Request-URI and its Record-Route, reversed, the route set; From is
-/// the INVITE's, To the 2xx's, the Call-ID the INVITE's, and the CSeq the
-/// INVITE's number plus one — the dialog's next request. `branch` names this
+/// the INVITE's, To the 2xx's, the Call-ID the INVITE's, and the CSeq `cseq`,
+/// the dialog's next number, which the caller tracks. `branch` names this
 /// hop's new transaction.
 pub fn generate_bye_for_2xx_from_invite(
     original_invite: &SipRequest,
     final_response: &SipResponse,
+    cseq: u32,
     branch: &str,
 ) -> SipRequest {
     let route_set: Vec<String> = final_response
@@ -41,6 +42,6 @@ pub fn generate_bye_for_2xx_from_invite(
         .push_raw(HeaderName::From, echoed(original_invite.raw_text(HeaderName::From).next()))
         .push_raw(HeaderName::To, echoed(final_response.raw_text(HeaderName::To).next()))
         .push_raw(HeaderName::CallId, echoed(original_invite.raw_text(HeaderName::CallId).next()))
-        .push(CSeq::new(original_invite.cseq().seq() + 1, Method::Bye));
+        .push(CSeq::new(cseq, Method::Bye));
     emit::request(with_routes(draft, &routes).push(ContentLength::new(0)))
 }

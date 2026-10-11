@@ -22,6 +22,7 @@ mod invite_give_up;
 mod late_cancel_hold;
 mod lifetime;
 mod long_ring_holds;
+mod orphan_bye;
 mod request_back_to_sender;
 mod response_leaves_as_its_image;
 mod seed;
