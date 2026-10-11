@@ -25,7 +25,7 @@ use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::run::RunReport;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::Supported;
 use sip_net::RecordedSipEntry;
@@ -214,6 +214,13 @@ async fn a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack() {
 #[tokio::test]
 async fn a_repeat_behind_the_18x_mask_draws_no_second_prack() {
     let h = Harness::with_transit_delay("b2bua-prack-repeat-masked", 0);
+    h.waive(
+        WaiverScope::rule(
+            "reliable-needs-client-opt-in",
+            "bob answers reliably although the mask withheld 100rel from his INVITE — his repeat of it is the subject",
+        )
+        .on_party("bob"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5174").await;
     let bob = h.agent("bob", "127.0.0.1:5175").await;
     let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5175, RelayFirst18xStrategy::DropSdp)

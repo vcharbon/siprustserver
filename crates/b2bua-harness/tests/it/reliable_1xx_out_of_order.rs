@@ -55,6 +55,13 @@ fn pracks_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr) -> 
 async fn the_mask_drops_an_out_of_order_reliable_1xx() {
     let h = Harness::with_transit_delay("b2bua-reliable-1xx-out-of-order-mask", 0);
     callee_skips_an_rseq(&h);
+    h.waive(
+        WaiverScope::rule(
+            "reliable-needs-client-opt-in",
+            "bob answers reliably although the mask withheld 100rel from his INVITE — the provisional the mask drops is the subject",
+        )
+        .on_party("bob"),
+    );
     let alice = h.agent("alice", "127.0.0.1:7511").await;
     let bob = h.agent("bob", "127.0.0.1:7512").await;
     let b2bua = B2buaSut::route_all_to_with_18x_messages(

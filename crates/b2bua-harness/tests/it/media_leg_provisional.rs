@@ -12,7 +12,7 @@ use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
 use b2bua::decision::{NewCallResponse, RouteDecision, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, stated, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -78,6 +78,16 @@ fn decision(shape: Shape, mrf: SocketAddr, dest: SocketAddr) -> Arc<ScriptedDeci
 /// answers; the caller hangs up. Checks the model the media leg's 1xx leaves.
 async fn media_leg_rings_first(name: &str, shape: Shape) {
     let h = Harness::with_transit_delay(name, 1);
+    if matches!(shape.ring, Ring::Reliable(_)) {
+        h.waive(
+            WaiverScope::rule(
+                "reliable-needs-client-opt-in",
+                "the media leg's INVITE withholds 100rel; the media server rings reliably all the \
+                 same — the PRACK this stack owes such a provisional is the subject",
+            )
+            .on_party("mrf"),
+        );
+    }
     let alice = h.agent_auto("alice").await;
     let mrf = h.agent_auto("mrf").await;
     let dest = h.agent_auto("dest").await;

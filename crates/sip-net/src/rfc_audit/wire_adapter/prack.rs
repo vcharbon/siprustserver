@@ -10,9 +10,10 @@ pub(super) const LIVE: &[Live] = &[
     Live::emitter(RuleId::NoPrackOfOutOfOrderRseq, no_prack_of_out_of_order_rseq),
     Live::emitter(RuleId::RequireReliable1xxOnRequire, require_reliable_1xx_on_require)
         .skip(Skip::RelayLanes),
+    // Gates: §3 binds each INVITE transaction on its own, whatever another leg's
+    // INVITE offered.
     Live::emitter(RuleId::ReliableNeedsClientOptIn, reliable_needs_client_opt_in)
         .roles(&[UaRole::Uas])
-        .advisory()
         .skip(Skip::RelayLanes),
     Live::emitter(RuleId::NoReliable1xxOnInDialog, no_reliable_1xx_on_in_dialog)
         .skip(Skip::RelayLanes),
