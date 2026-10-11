@@ -181,5 +181,5 @@ kills it, and a kill drops every call it serves.
   none.
 - A transaction ceiling also counts the transactions of rejected and finished
   INVITEs that linger for their timers, and of client INVITEs that gave up
-  (held 64·T1 past their `Timeout`, ADR-0028), so it is sized from the
+  (held 64·T1 past their `Timeout`, ADR-0043), so it is sized from the
   offered rate, not from live calls alone.

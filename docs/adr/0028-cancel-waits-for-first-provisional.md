@@ -1,6 +1,6 @@
 # The b-leg CANCEL waits for the first provisional — bounded by a grace window, then goes regardless
 
-**Status:** accepted (2026-08-09, amended 2026-08-10: the hold is bounded by
+**Status:** superseded by ADR-0043 (2026-10-11). Accepted (2026-08-09, amended 2026-08-10: the hold is bounded by
 default — a grace expiry sends the CANCEL unconditionally; the literal §9.1
 wait remains available as a configuration; amended 2026-08-26: an on-wire
 CANCEL retransmits on a Timer-E ladder, X4)

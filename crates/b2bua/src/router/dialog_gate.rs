@@ -71,7 +71,7 @@ pub(super) async fn admit(
         Verdict::OutOfOrder => (build_out_of_order_500(req), None),
         // An OPTIONS 200 states what this stack supports (§11.2).
         Verdict::Absorbed(resolved) if *req.method() == Method::Options => {
-            (build_200_advertising(req, &ctx.config.minted_final_advertisement), Some(resolved))
+            (build_200_advertising(req, &ctx.config.node_capabilities), Some(resolved))
         }
         Verdict::Absorbed(resolved) => (build_200(req), Some(resolved)),
         Verdict::Terminated(resolved) => (build_487(req), Some(resolved)),

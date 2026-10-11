@@ -38,27 +38,13 @@ pub struct TransactionConfig {
     /// app-level setup deadline strictly below it, or the txn layer CANCELs
     /// the callee before the app gives up.
     pub invite_initial_timeout_ms: u64,
-    /// The bound on an initial INVITE's wait for a response of ANY kind, ms —
-    /// the client txn's give-up while an out-of-dialog INVITE (no To-tag) sits
-    /// in `Calling`, and the bound its Timer A ladder is armed under, so no
-    /// rung lands past the give-up. Default [`TIMER_B`](crate::timers::TIMER_B)
-    /// (32 s), the RFC 3261 §17.1.1.2 value; a deployment may tighten it
-    /// (telephony policy: a hop drawing nothing is dead, and rerouting must not
-    /// wait 64·T1), never widen it — the effective bound is
-    /// `min(this, invite_initial_timeout_ms)`, and the first provisional still
-    /// swaps in `invite_initial_timeout_ms`. An in-dialog INVITE and a
-    /// non-INVITE never read it: they keep Timer B / Timer F.
+    /// The TU's first-response deadline on an initial INVITE (no To-tag), ms
+    /// (ADR-0044): with no response of any kind by then, the TU is told the
+    /// hop is dead (`TimeoutKind::Response`) while the transaction keeps Timer
+    /// A to Timer B and reports nothing again. Armed only below Timer B;
+    /// default [`TIMER_B`](crate::timers::TIMER_B), which arms nothing. An
+    /// in-dialog INVITE and a non-INVITE never read it.
     pub invite_first_response_timeout_ms: u64,
-    /// The held-CANCEL policy for a response-less INVITE client txn
-    /// (RFC 3261 §9.1 / ADR-0028). `Some(ms)` — the default,
-    /// [`CANCEL_HOLD_GRACE`](crate::timers::CANCEL_HOLD_GRACE) (1 s) — holds
-    /// the CANCEL for the branch's first provisional at most `ms`, then sends
-    /// it regardless: every emitted CANCEL reaches the wire; the grace is a
-    /// courtesy window, never a veto. `None` is the strict §9.1 wait: the
-    /// CANCEL is held until a provisional arrives and silently dropped if the
-    /// txn dies first — a callee that never sends one is never CANCELed
-    /// (ADR-0028 documents when that trade is acceptable).
-    pub cancel_hold_grace_ms: Option<u64>,
     /// Whether a response the TU hands over under a To-tag other than the
     /// bound one fails a debug build loudly (`debug_assert!`) besides being
     /// re-rendered. The wire is corrected either way; `true` — the default —
@@ -94,7 +80,6 @@ impl Default for TransactionConfig {
             id_gen: Arc::new(IdGen::from_entropy()),
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
-            cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
             strict_to_tag: true,
             deferred_bound: None,
             invite_refusals: None,

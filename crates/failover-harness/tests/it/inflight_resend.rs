@@ -521,7 +521,8 @@ async fn a_bye_in_flight_at_the_kill_is_served_on_the_peers_resend() {
 /// and can never be redelivered, so the seeded client transaction resolves the
 /// round on its own bound, and the survivor then ends the dialog it got no
 /// answer on (RFC 3261 §12.2.1.2): the caller's pending re-INVITE draws its
-/// 487 (§15.1.2) and the callee's a CANCEL, both parties draw a BYE, and the
+/// 487 (§15.1.2), the callee draws no CANCEL — the record holds no provisional
+/// for the round, so §9.1 forbids one — both parties draw a BYE, and the
 /// call ends with one CDR and full release on both nodes.
 ///
 /// The round must be in the replica before the kill: a round the dead node
@@ -590,9 +591,8 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     );
     reinvite.ack_non_2xx(&round_final).await.expect("the caller hop-ACKs the 487");
     alice.receive("BYE").await.respond(200, "OK").await;
-    // The callee's side of the round is CANCELled (§9.2: a CANCEL of an INVITE
-    // it already answered draws 200 and changes nothing), then its dialog ends.
-    bob.receive("CANCEL").await.respond(200, "OK").await;
+    // The callee's round drew no provisional the record holds, so no CANCEL
+    // goes (RFC 3261 §9.1): its dialog ends with the BYE.
     bob.receive("BYE").await.respond(200, "OK").await;
     fh.advance(Duration::from_millis(500)).await;
 
@@ -688,7 +688,7 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
     assert_eq!(round_final.status(), 487, "the pending re-INVITE ends with the dialog");
     reinvite.ack_non_2xx(&round_final).await.expect("the caller hop-ACKs the 487");
     alice.receive("BYE").await.respond(200, "OK").await;
-    bob.receive("CANCEL").await.respond(200, "OK").await;
+    // No provisional on record for the round: no CANCEL (RFC 3261 §9.1).
     bob.receive("BYE").await.respond(200, "OK").await;
     fh.advance(Duration::from_millis(500)).await;
 

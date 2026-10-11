@@ -123,30 +123,6 @@ fn invite_finals(legs: &BTreeMap<String, Vec<RecordedMessage>>) -> Vec<String> {
         .collect()
 }
 
-/// The SUT's INVITE to a callee that never rings retransmits on Timer A until
-/// a response (RFC 3261 §17.1.1.2). Here the only response is the `487` leg B
-/// composes for the CANCEL the flow never scripted: an answer the run authored
-/// ends that ladder exactly as a scripted one would, so the rungs it owes are
-/// the ones before it: its dwell runs to the 487.
-#[tokio::test(start_paused = true)]
-async fn an_unscripted_answer_closes_the_ladder_of_the_request_it_ends() {
-    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let text_doc = std::fs::read_to_string(base_dir.join("unscripted-cancel.v3.json")).unwrap();
-    let mut doc: serde_json::Value = serde_json::from_str(&text_doc).unwrap();
-    doc["case"]["id"] = "unscripted-cancel-unrung".into();
-    doc["flow"].as_array_mut().unwrap().retain(|s| s["id"] != "s4" && s["id"] != "s5");
-    let document = PivotV3::from_json(&doc.to_string()).expect("the case parses");
-    let scene = api_scene("pivot-unscripted-cancel-unrung").await;
-    let (outcome, _dir) = replay_case(&scene, Case { document, base_dir }, BTreeMap::new()).await;
-    let legs = outcome.recording.legs();
-    assert_eq!(invite_finals(&legs), ["SIP/2.0 487 Request Terminated"], "{:#?}", legs["B"]);
-    let note = outcome.verdict.retransmits.iter().find(|n| n.step == "s3").expect("s3's ladder");
-    assert_eq!(note.dwell_us, Some(1_260_000), "the 487 closed the INVITE's ladder: {note:#?}");
-    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
-    scene.b2bua.assert_fully_reaped();
-    scene.finish().await;
-}
-
 /// The generic close's act ends a ladder as a scripted send does: leg B never
 /// answers the SUT's INVITE before its script is abandoned (it waits on an
 /// INFO that never comes), and the final the close composes for that INVITE

@@ -60,8 +60,8 @@ pub enum CallEvent {
         /// then skips per-peer failure attribution.
         destination: Option<SocketAddr>,
         /// Response-detection (Timer B/F, or an initial INVITE's
-        /// `invite_first_response_timeout_sec`: nothing at all answered, the
-        /// hop is dead) vs the configured out-of-dialog INVITE bound
+        /// first-response deadline `invite_first_response_timeout_sec`:
+        /// nothing at all answered, the hop is dead) vs the configured out-of-dialog INVITE bound
         /// (`invite_txn_timeout_sec`, default 158 s: it answered, then went
         /// silent). Drives the per-peer metric's `response_timeout` vs
         /// `transaction_timeout` split and the `call_failure` consult's

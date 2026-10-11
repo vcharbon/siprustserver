@@ -441,6 +441,8 @@ async fn a_caller_request_under_a_tag_she_was_never_shown_is_refused_481() {
         .send()
         .await;
     let mut uas1 = bob1.receive("INVITE").await;
+    // A bare 100: the fork never rings, and the CANCEL may reach it (§9.1).
+    uas1.respond(100, "Trying").await;
     h.advance(Duration::from_secs(retarget::AT_SEC as u64) + Duration::from_millis(300)).await;
     bob1.receive("CANCEL").await.respond(200, "OK").await;
     let mut uas2 = bob2.receive("INVITE").await;

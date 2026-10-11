@@ -53,7 +53,7 @@ its own obligations with no consumer:
   CANCEL keeps its §9.1 wait or its Timer E ladder; **Timer B** (or the
   configured INVITE bound past a provisional) gives the transaction up with a
   `Timeout` naming no call, which the router drops, and 64·T1 later (the
-  §9.1 wait for the final its CANCEL provokes, ADR-0028) it is purged.
+  §9.1 wait for the final its CANCEL provokes, ADR-0043) it is purged.
 - **Non-INVITE** — Timer E to its final or Timer F, as before.
 
 Server transactions are not touched, as before: their Timer H / J / L holds
@@ -63,10 +63,8 @@ repeated on Timer G and held to Timer H whatever became of the call).
 
 The call attribution is dropped at once: `has_txns_for`, `ActiveTxnCount` and
 the ADR-0014 `CallQuiesced` timing see the call as quiesced. A never-sent held
-CANCEL is put on the wire at the release under the bounded policy (ADR-0028:
-the courtesy wait ends with the call) and rides its ladder from there; under
-the strict policy it stays parked on the orphan and leaves on the branch's
-first provisional, as for a live call.
+CANCEL stays parked on the orphan and leaves on the branch's first
+provisional, as for a live call (ADR-0043).
 
 The metrics name the state: `txn_orphaned_on_call_evict` counts orphans made,
 `orphaned_transactions` gauges those resident.

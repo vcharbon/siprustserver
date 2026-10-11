@@ -216,7 +216,7 @@ mod dualkeys {
 
 /// Fire path: bob never sends a provisional → the service's own timer fires at
 /// its deadline, the exact-key rule catches it, the caller gets the 480 and the
-/// b-leg is CANCELled — a service watchdog with zero core involvement.
+/// silent b-leg is reaped — a service watchdog with zero core involvement.
 #[tokio::test(start_paused = true)]
 async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     let h = Harness::new("service-timer-fires");
@@ -241,19 +241,14 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     assert_eq!(final_resp.status(), 480, "service watchdog authored the caller's final");
 
     // Bob never sent ANY response, so the b-leg CANCEL is HELD (RFC 3261 §9.1)
-    // for the grace window and then sent regardless (ADR-0028) — bob, gone
-    // dark, receives exactly one grace-expiry CANCEL and answers nothing. The
-    // terminating backstop (armed at BeginTermination) reaps the silent leg —
-    // advance exactly past it, so a regression that falls back to the 150 s
-    // SetupTimeout fails here instead of passing under a longer pump.
+    // and never reaches him. The terminating backstop (armed at
+    // BeginTermination) reaps the silent leg — advance exactly past it, so a
+    // regression that falls back to the 150 s SetupTimeout fails here instead
+    // of passing under a longer pump.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
-        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)"
-    );
-    assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "exactly one grace-expiry CANCEL — never a second"
+        "no CANCEL toward a branch that drew no provisional (§9.1)"
     );
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;

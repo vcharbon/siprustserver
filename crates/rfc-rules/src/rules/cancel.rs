@@ -36,8 +36,7 @@ crate::registry::rules! {
     /// RFC 3261 §9.1: a CANCEL carries the same Route values as the INVITE it cancels — the two
     /// take the same path. Charges the CANCEL's sender.
     CancelRouteEchoesInvite = "cancel-route-echoes-invite";
-    /// RFC 3261 §9.1, bounded by ADR-0028: a UAC CANCELs only once it has taken a provisional, or
-    /// once its own grace window has run out. Charges the UAC.
+    /// RFC 3261 §9.1: a UAC CANCELs only once it has taken a provisional. Charges the UAC.
     CancelAfter1xx = "cancel-after-1xx";
     /// RFC 3261 §9.1: a UAC CANCELs only a client transaction still in flight — after its final
     /// (§17.1.1.2) a CANCEL reaches no transaction (481, §9.2). Charges the CANCEL's sender.
@@ -331,29 +330,17 @@ impl Obligation for CancelRouteEchoesInvite {
     }
 }
 
-/// Acceptance floor for a pre-1xx CANCEL, microseconds: a CANCEL at least this
-/// far after its branch's first INVITE is a grace-expiry send, not the
-/// eager-CANCEL defect. Sits just below the transaction layer's
-/// `sip_txn::timers::CANCEL_HOLD_GRACE` — a floor equal to the window would
-/// false-fire on stamp granularity — and the two move together.
-pub const CANCEL_GRACE_FLOOR_US: u64 = 900_000;
-
-/// **RFC 3261 §9.1 — a UAC waits for a provisional before it CANCELs**, bounded
-/// by an implementation's grace window (ADR-0028). Advisory by consumer policy.
+/// **RFC 3261 §9.1 — a UAC waits for a provisional before it CANCELs.**
 ///
 /// A CANCEL is matchable only once the UAS has answered something: a UAS that
 /// has not responded may not have built the INVITE server transaction yet, so
 /// the early CANCEL draws a 481 while Timer-A retransmits keep ringing a call
-/// nobody can cancel any more. A bounded hold is the sanctioned answer — a
-/// callee that answers nothing must still hear the cancellation — so this rule
-/// separates the two by timing rather than forbidding the pre-1xx send.
+/// nobody can cancel any more.
 ///
 /// **The occasion is one CANCEL an endpoint SENT on a branch it had already
-/// sent the INVITE on** (§9.1 reuses that branch). Two things discharge it: a
-/// 1xx the emitter TOOK on the branch BEFORE the CANCEL in view order, or a
-/// CANCEL that left at least [`CANCEL_GRACE_FLOOR_US`] after the emitter's
-/// FIRST INVITE on the branch — the grace-expiry send toward a response-less
-/// callee. Everything else is the eager CANCEL.
+/// sent the INVITE on** (§9.1 reuses that branch). Only a 1xx the emitter TOOK
+/// on the branch BEFORE the CANCEL in view order discharges it; no elapsed
+/// time does.
 ///
 /// **The view carries the whole stream, so a 1xx is never lost to a slice.**
 /// The rule reads one vantage's entire observation, not a per-dialog slice of
@@ -370,8 +357,7 @@ impl Obligation for CancelAfter1xx {
         let mut out = Vec::new();
         for (key, branch) in &seen.branches {
             // An endpoint measured against an INVITE this vantage never saw it
-            // send is measured against nothing: no INVITE, no grace window, no
-            // occasion.
+            // send is measured against nothing: no INVITE, no occasion.
             let Some(invite) = branch.first_sent("INVITE") else { continue };
             for cancel in branch.sent_of("CANCEL") {
                 let finding = |decision| Finding {
@@ -389,10 +375,6 @@ impl Obligation for CancelAfter1xx {
                     continue;
                 }
                 let since_invite_us = cancel.ts_us.saturating_sub(invite.ts_us);
-                if since_invite_us >= CANCEL_GRACE_FLOOR_US {
-                    out.push(finding(Decision::Compliant));
-                    continue;
-                }
                 out.push(finding(Decision::Violated(Evidence::EagerCancel {
                     cancel_msg: cancel.msg,
                     cancel_hop: cancel.hop,

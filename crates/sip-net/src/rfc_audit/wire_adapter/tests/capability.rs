@@ -113,10 +113,10 @@ fn a_bare_415_and_a_bare_421_are_flagged_on_their_sender() {
     assert!(live(RuleId::UnsupportedExtension421).check_positioned(&listed).is_empty());
 }
 
-/// §11.2 is advisory and reads at the sender of the 2xx.
+/// §11.2 gates at the sender of the 2xx.
 #[test]
-fn a_bare_options_200_is_advisory_at_its_sender() {
-    assert!(live(RuleId::OptionsResponseEchoes).force_advisory());
+fn a_bare_options_200_gates_at_its_sender() {
+    assert!(!live(RuleId::OptionsResponseEchoes).force_advisory());
     let clean = vec![
         recv(SUT, req_with("OPTIONS", "z9hG4bK-o", ""), ALICE, 0),
         sent(SUT, resp_with(200, 1, "OPTIONS", "z9hG4bK-o", "Allow: INVITE\r\n"), ALICE, 1),

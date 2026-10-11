@@ -69,7 +69,7 @@ pub use sdp_session::{
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
 
 // Transparency + advertisement across the back-to-back UA.
-pub use advert::stamp_a_facing_invite_advert;
+pub use advert::stamp_advertisement;
 pub use b2bua_sdk::provisional::reliable_rseq;
 pub use passthrough::{
     own_the_rseq, relay_response_passthrough_headers, strip_reliability, toward_leg,

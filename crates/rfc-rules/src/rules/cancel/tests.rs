@@ -9,10 +9,7 @@ use crate::verdict::{Decision, Evidence, Finding, RuleId};
 use crate::wire::{Kind, Msg, Observation, WireView};
 
 use super::super::Obligation;
-use super::{
-    CancelAfter1xx, CancelRouteEchoesInvite, No200AfterCancel, NoCancelAfterFinal,
-    CANCEL_GRACE_FLOOR_US,
-};
+use super::{CancelAfter1xx, CancelRouteEchoesInvite, No200AfterCancel, NoCancelAfterFinal};
 
 const UAC: &str = "10.0.0.1:5060";
 const UAS: &str = "10.0.0.2:5060";
@@ -543,9 +540,8 @@ fn a_cancel_after_a_taken_provisional_is_compliant() {
     assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
 }
 
-/// The eager CANCEL: nothing had answered the INVITE and the sender's own
-/// grace window had not run out, so the UAS may not have built the server
-/// transaction the CANCEL needs.
+/// The eager CANCEL: nothing had answered the INVITE, so the UAS may not have
+/// built the server transaction the CANCEL needs.
 #[test]
 fn an_eager_cancel_before_any_provisional_is_violated() {
     let f =
@@ -561,24 +557,16 @@ fn an_eager_cancel_before_any_provisional_is_violated() {
     assert_eq!((*since_invite_us, branch.as_str()), (1_000, "z9hG4bK-1"));
 }
 
-/// Past the grace floor the pre-1xx CANCEL is the sanctioned grace-expiry
-/// send toward a response-less callee: compliant, and still an occasion —
-/// the denominator a report reads the eager-CANCEL rate against.
+/// No time discharges the wait: a CANCEL sent half a minute after its INVITE
+/// with nothing answered is the same §9.1 breach as an eager one.
 #[test]
-fn a_cancel_at_the_grace_floor_is_compliant() {
+fn a_pre_1xx_cancel_is_violated_however_late() {
     let f = waited(&[
         sent(1_000, "INVITE", "z9hG4bK-1", ""),
-        sent(1_000 + CANCEL_GRACE_FLOOR_US, "CANCEL", "z9hG4bK-1", ""),
+        sent(30_001_000, "CANCEL", "z9hG4bK-1", ""),
     ]);
     assert_eq!(f.len(), 1, "{f:?}");
-    assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-
-    // One microsecond under it is the eager send.
-    let under = waited(&[
-        sent(1_000, "INVITE", "z9hG4bK-1", ""),
-        sent(999 + CANCEL_GRACE_FLOOR_US, "CANCEL", "z9hG4bK-1", ""),
-    ]);
-    assert!(under[0].violated(), "{:?}", under[0].decision);
+    assert!(f[0].violated(), "{:?}", f[0].decision);
 }
 
 /// ORDER IN THE VIEW is the whole of the "before" test: a provisional that

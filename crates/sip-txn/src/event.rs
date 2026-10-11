@@ -62,7 +62,7 @@ pub enum TransactionEvent {
         /// attribution rather than fabricate an address.
         destination: Option<SocketAddr>,
         /// Which timeout fired: the short response-detection timer (Timer B/F,
-        /// or an initial INVITE's tightened
+        /// or an initial INVITE's first-response deadline,
         /// `TransactionConfig::invite_first_response_timeout_ms`) vs
         /// the configured out-of-dialog INVITE bound
         /// (`TransactionConfig::invite_initial_timeout_ms`, default 158 s). Lets
@@ -148,8 +148,8 @@ pub enum TxnKind {
 
 /// Which client-transaction timeout fired, so a consumer can split the metric.
 /// `Response` is the RFC 3261 §17.1 failure-detection timer (Timer B for INVITE,
-/// Timer F for non-INVITE — both 64×T1 — or, for an initial INVITE, the
-/// tightened `TransactionConfig::invite_first_response_timeout_ms`): no
+/// Timer F for non-INVITE — both 64×T1 — or, for an initial INVITE, the TU's
+/// first-response deadline `TransactionConfig::invite_first_response_timeout_ms`): no
 /// response of any kind arrived, the hop is dead; `Transaction` is the configured
 /// out-of-dialog INVITE bound (`TransactionConfig::invite_initial_timeout_ms`,
 /// default 158 s — the call-setup ring window).

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::testkit::*;
 use crate::actor::*;
-use crate::{Harness, OFFER_SDP};
+use crate::{Harness, WaiverScope, OFFER_SDP};
 
 /// Requeue-on-advance: two INFOs park while one `ExpectRequest{Info}`
 /// remains; consuming the first advances the cursor, and the second — now
@@ -354,11 +354,24 @@ async fn answer_100_trying_automatic_toggles_emission() {
 /// frozen `X-Cap: v1`; bob's `ExpectRequest{Initial}` matcher pins
 /// `X-Cap: expect_value` plus CAPTURE-time tier-1 rows (Call-ID/Via/CSeq —
 /// regenerated live, never value-compared). Returns the verdict.
-async fn run_initial_matcher_case(name: &'static str, expect_value: &str) -> CallVerdict {
+async fn run_initial_matcher_case(
+    name: &'static str,
+    expect_value: &str,
+    fails: bool,
+) -> CallVerdict {
     let h = Harness::new(name).describe(
         "ExpectRequest{matcher} on the initial INVITE: frozen X-Cap \
          compared; captured tier-1 values are structural-only",
     );
+    if fails {
+        h.waive(
+            WaiverScope::rule(
+                "cancel-after-1xx",
+                "the run fails before bob answers; its teardown CANCELs a ring that drew nothing",
+            )
+            .on_party("alice"),
+        );
+    }
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
@@ -429,10 +442,10 @@ async fn run_initial_matcher_case(name: &'static str, expect_value: &str) -> Cal
 /// (a silently-skipped matcher would make the sibling pass too).
 #[tokio::test(start_paused = true)]
 async fn content_matcher_holds_on_frozen_header() {
-    let ok = run_initial_matcher_case("actor-content-matcher-holds", "v1").await;
+    let ok = run_initial_matcher_case("actor-content-matcher-holds", "v1", false).await;
     assert!(ok.is_ok(), "the matching value must hold, got {ok:?}");
 
-    let bad = run_initial_matcher_case("actor-content-matcher-holds-neg", "v2").await;
+    let bad = run_initial_matcher_case("actor-content-matcher-holds-neg", "v2", true).await;
     match bad {
         CallVerdict::Failed(_, StepError::UnexpectedKind { who, detail }) => {
             assert_eq!(who, "bob");

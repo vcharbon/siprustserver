@@ -69,13 +69,18 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
         // its CANCEL sent or not (RFC 3261 §9.1).
         let initial = leg.outbound_invite.as_ref().filter(|i| i.final_received.is_none());
         let initial_in_flight = initial.is_some();
-        if let Some(seed) = initial.and_then(|i| i.txn.as_ref()).and_then(client_seed) {
+        // An early dialog is the record of a provisional; a 100 leaves none.
+        let provisional = leg.state() == call::LegState::Early;
+        if let Some(seed) =
+            initial.and_then(|i| i.txn.as_ref()).and_then(|t| client_seed(t, provisional))
+        {
             push(seed);
         }
         for dialog in &leg.dialogs {
             if let Some(handle) = &dialog.pending_invite_txn {
                 if initial_in_flight || round_open(dialog, handle) {
-                    if let Some(seed) = client_seed(handle) {
+                    // A re-INVITE round records no provisional.
+                    if let Some(seed) = client_seed(handle, initial_in_flight && provisional) {
                         push(seed);
                     }
                 }
@@ -136,14 +141,15 @@ fn pending_invite(p: &PendingRequest) -> bool {
     p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled
 }
 
-/// The client seed for an INVITE handle: the retained INVITE and the wire
-/// destination it was sent to. `None` for a handle whose bytes or destination
-/// do not read — nothing can be rebuilt from it.
-fn client_seed(handle: &InviteTxnHandle) -> Option<TxnSeed> {
+/// The client seed for an INVITE handle: the retained INVITE, the wire
+/// destination it was sent to, and whether the record holds a provisional for
+/// it. `None` for a handle whose bytes or destination do not read — nothing
+/// can be rebuilt from it.
+fn client_seed(handle: &InviteTxnHandle, provisional: bool) -> Option<TxnSeed> {
     let invite = parse_request(&handle.original_invite)?;
     let dest: SocketAddr =
         format!("{}:{}", handle.destination.host, handle.destination.port).parse().ok()?;
-    Some(TxnSeed::ClientInvite { invite, dest })
+    Some(TxnSeed::ClientInvite { invite, dest, provisional })
 }
 
 /// The server seed for a relayed INVITE pending on one of `leg`'s dialogs:

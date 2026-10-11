@@ -53,8 +53,8 @@ impl Owner {
                 continue;
             }
             match seed {
-                TxnSeed::ClientInvite { invite, dest } => {
-                    self.seed_client_invite(call_ref, invite, dest)
+                TxnSeed::ClientInvite { invite, dest, provisional } => {
+                    self.seed_client_invite(call_ref, invite, dest, provisional)
                 }
                 TxnSeed::ServerInvite {
                     branch,
@@ -92,14 +92,21 @@ impl Owner {
         seeded
     }
 
-    /// A `Proceeding` client INVITE keyed by `invite`'s branch, attributed
-    /// from its Via as `do_send_request` attributes the INVITEs it sends
-    /// (falling back to `call_ref` when the Via names no `cr`), with the INVITE
-    /// bound armed and no retransmit ladder: the peer answered the first copy
-    /// with a provisional the dead node consumed, so Timer A is over and Timer
-    /// B is not the deadline any more. The bound runs from the seed: the first
+    /// A client INVITE keyed by `invite`'s branch, attributed from its Via as
+    /// `do_send_request` attributes the INVITEs it sends (falling back to
+    /// `call_ref` when the Via names no `cr`), with the INVITE bound armed and
+    /// no retransmit ladder: the node that sent it ran Timer A, and the peer's
+    /// own retransmissions reach this one. It opens `Proceeding` when the
+    /// record holds a provisional for it, else `Trying`, so a CANCEL on it
+    /// waits for one (RFC 3261 §9.1). The bound runs from the seed: the first
     /// copy's send instant is not in the record.
-    fn seed_client_invite(&mut self, call_ref: &str, invite: SipRequest, dest: SocketAddr) {
+    fn seed_client_invite(
+        &mut self,
+        call_ref: &str,
+        invite: SipRequest,
+        dest: SocketAddr,
+        provisional: bool,
+    ) {
         let branch = invite.top_via().branch().unwrap_or_default().to_string();
         let ViaMarks { call_ref: via_call_ref, leg_id, incarnation_mark } =
             extract_via_custom_params(&invite);
@@ -116,7 +123,7 @@ impl Owner {
             call_ref: via_call_ref.or_else(|| Some(call_ref.to_string())),
             leg_id,
             incarnation_mark,
-            state: TxnState::Proceeding,
+            state: if provisional { TxnState::Proceeding } else { TxnState::Trying },
             destination: Some(dest),
         });
         txn.timeout_kind = TimeoutKind::Transaction;

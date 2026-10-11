@@ -284,16 +284,8 @@ pub(crate) struct MetricsInner {
     pub cancels_held: AtomicU64,
     /// Held CANCELs put on the wire when the first provisional arrived.
     pub held_cancels_flushed: AtomicU64,
-    /// Held CANCELs put on the wire pre-1xx when the grace window expired (or
-    /// the call was evicted) with the branch still response-less.
-    pub held_cancels_flushed_pre1xx: AtomicU64,
-    /// Grace-sent CANCELs re-sent once on the branch's late first provisional
-    /// (the UAS that 481'd the pre-1xx copy has its server txn by then).
-    /// Informational — outside the held == flushed + flushed_pre1xx + dropped
-    /// reconciliation.
-    pub held_cancels_reflushed: AtomicU64,
     /// Held CANCELs cleared without EVER reaching the wire — the txn took a
-    /// final first (cancellation moot, §9.2) or died inside the grace window.
+    /// final first (cancellation moot, §9.2) or died with no provisional.
     pub held_cancels_dropped: AtomicU64,
     /// CANCELs suppressed at send because their INVITE client txn had already
     /// taken its final (Completed) — §9.1/§9.2: a CANCEL has no effect on an
@@ -370,8 +362,6 @@ impl MetricsInner {
             orphaned_transactions: AtomicUsize::new(0),
             cancels_held: AtomicU64::new(0),
             held_cancels_flushed: AtomicU64::new(0),
-            held_cancels_flushed_pre1xx: AtomicU64::new(0),
-            held_cancels_reflushed: AtomicU64::new(0),
             held_cancels_dropped: AtomicU64::new(0),
             cancels_suppressed_on_final: AtomicU64::new(0),
             retransmits: RetransmitFamily::new(),
@@ -509,18 +499,8 @@ impl TransactionMetrics {
         self.inner.held_cancels_flushed.load(Ordering::Relaxed)
     }
 
-    /// Held CANCELs sent pre-1xx at grace expiry / evict (ADR-0028).
-    pub fn held_cancels_flushed_pre1xx(&self) -> u64 {
-        self.inner.held_cancels_flushed_pre1xx.load(Ordering::Relaxed)
-    }
-
-    /// Grace-sent CANCELs re-sent once on a late first provisional.
-    pub fn held_cancels_reflushed(&self) -> u64 {
-        self.inner.held_cancels_reflushed.load(Ordering::Relaxed)
-    }
-
-    /// Held CANCELs cleared without ever reaching the wire (final beat the
-    /// grace window, or the txn died inside it).
+    /// Held CANCELs cleared without ever reaching the wire (a final came
+    /// first, or the txn died with no provisional).
     pub fn held_cancels_dropped(&self) -> u64 {
         self.inner.held_cancels_dropped.load(Ordering::Relaxed)
     }

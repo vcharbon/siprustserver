@@ -30,6 +30,12 @@ async fn a_background_policy_does_not_absorb_the_arrival_an_open_expect_waits_fo
     let mut send_ok = step_of(&mut case, "s12").clone();
     send_ok.id = "s103".into();
     send_ok.msg.cseq_method = Some("OPTIONS".into());
+    // bob's 200 states what he supports (RFC 3261 §11.2).
+    send_ok.msg.headers.push(pivot_schema::msg::Header {
+        name: "Allow".into(),
+        value: sip_message::generators::B2BUA_ALLOW.into(),
+        class: None,
+    });
     send_ok.delay.from = "step:s102".parse().expect("s102 is a step id");
     let mut expect_ok = step_of(&mut case, "s13").clone();
     expect_ok.id = "s104".into();
@@ -117,6 +123,12 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
     let mut send_ok = step_of(&mut case, "s12").clone();
     send_ok.id = "s103".into();
     send_ok.msg.cseq_method = Some("OPTIONS".into());
+    // bob's 200 states what he supports (RFC 3261 §11.2).
+    send_ok.msg.headers.push(pivot_schema::msg::Header {
+        name: "Allow".into(),
+        value: sip_message::generators::B2BUA_ALLOW.into(),
+        class: None,
+    });
     send_ok.delay.from = "step:s102".parse().expect("s102 is a step id");
     let mut expect_ok = step_of(&mut case, "s13").clone();
     expect_ok.id = "s104".into();

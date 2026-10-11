@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 use sip_message::generators::{
-    generate_response, GenerateResponseOpts, StackDialog, B2BUA_ALLOW, B2BUA_SUPPORTED,
+    generate_response, GenerateResponseOpts, StackDialog, B2BUA_ACCEPT, B2BUA_ALLOW,
+    B2BUA_SUPPORTED,
 };
 use sip_message::header::{self, HeaderName, HeaderValue, MediaType};
 use sip_message::{
@@ -510,25 +511,23 @@ impl<'a> Respond<'a> {
         // Contact is required on 2xx and useful on 18x to establish the early
         // dialog's remote target; omit on plain 100.
         let contact = if self.status >= 180 { Some(txn.agent.contact()) } else { None };
-        // A conformant UAS lists its methods/extensions on a 2xx INVITE
-        // (RFC 3261 §13.2.1 SHOULD Allow, §20.37 Supported) so the peer can
-        // negotiate re-INVITE/UPDATE/PRACK. The test UA answers anything, so
-        // add them (unless the fixture already supplied one) — the UA stays
-        // RFC-compliant, matching the live SIPp endpoints.
+        // A conformant UAS lists its methods/extensions on a 2xx INVITE (RFC 3261
+        // §13.2.1 SHOULD Allow, §20.37 Supported) and its capabilities on a 2xx
+        // OPTIONS (§11.2). The test UA answers anything, so it adds each one the
+        // fixture did not supply — a frozen compact `k:` counts as Supported
+        // (§7.3.3) — matching the live SIPp endpoints.
         let mut extra_headers = self.extra_headers.clone();
-        if (200..300).contains(&self.status) && txn.request.cseq().method().as_str() == "INVITE" {
-            // Compact-aware probes: a frozen `k:` (compact Supported) must
-            // suppress the stack default, else the replayed 2xx advertises
-            // 100rel/timer the capture never did (RFC 3261 §7.3.3).
-            let has_allow = extra_headers.iter().any(|h| HeaderName::Allow.matches(&h.name));
-            let has_supported =
-                extra_headers.iter().any(|h| HeaderName::Supported.matches(&h.name));
-            if !has_allow {
-                extra_headers.push(SipHeader { name: "Allow".into(), value: B2BUA_ALLOW.into() });
-            }
-            if !has_supported {
+        let method = txn.request.cseq().method().as_str();
+        let advertises =
+            (200..300).contains(&self.status) && matches!(method, "INVITE" | "OPTIONS");
+        for (name, value, on) in [
+            (HeaderName::Allow, B2BUA_ALLOW, advertises),
+            (HeaderName::Supported, B2BUA_SUPPORTED, advertises),
+            (HeaderName::Accept, B2BUA_ACCEPT, advertises && method == "OPTIONS"),
+        ] {
+            if on && !extra_headers.iter().any(|h| name.matches(&h.name)) {
                 extra_headers
-                    .push(SipHeader { name: "Supported".into(), value: B2BUA_SUPPORTED.into() });
+                    .push(SipHeader { name: name.as_wire_str().into(), value: value.into() });
             }
         }
         let opts = GenerateResponseOpts {

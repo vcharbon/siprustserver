@@ -1,8 +1,9 @@
-//! RFC 3261 §9.1 / §17.1.1.3 for an INVITE client transaction that gives up:
-//! its TU abandons the INVITE with a CANCEL, which may provoke a 487. The
-//! transaction is held 64·T1 past its `Timeout`, so the CANCEL still matches
-//! it and the 487 is ACKed and handed up. It stops retransmitting at the
-//! give-up and never times out a second time.
+//! RFC 3261 §9.1 / §17.1.1.3 for an INVITE client transaction its TU gives up
+//! on: the TU abandons the INVITE with a CANCEL, which may provoke a 487. The
+//! transaction is held 64·T1 past its give-up, so the CANCEL still matches it
+//! and the 487 is ACKed and handed up, and it reports a timeout once. An
+//! unanswered initial INVITE reported at the TU's first-response deadline
+//! (ADR-0044) keeps Timer A to Timer B.
 
 use crate::common;
 use std::sync::Arc;
@@ -99,7 +100,7 @@ async fn a_ringing_invite_that_gave_up_acks_the_487_its_cancel_provokes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_invite_that_gave_up_unanswered_stops_retransmitting_and_never_times_out_again() {
+async fn an_invite_reported_dead_never_times_out_again() {
     let mut stack = stack().await;
     let branch = "z9hG4bK-gave-up-silent";
     stack
@@ -111,14 +112,15 @@ async fn an_invite_that_gave_up_unanswered_stops_retransmitting_and_never_times_
     assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
     let _ = stack.drain_peer();
 
-    // The late provisional does not start a new bound on the given-up INVITE.
+    // The late provisional stops Timer A and starts no new bound: Timer B
+    // ends the transaction unreported.
     stack
         .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
         .await;
     elapse_ms(BOUND_MS).await;
     let out = stack.drain_peer();
-    assert_eq!(count_requests(&out, "INVITE"), 0, "no Timer A re-send past the give-up: {out:?}");
-    assert!(timeouts(&stack.drain_events()).is_empty(), "the give-up fires once");
+    assert_eq!(count_requests(&out, "INVITE"), 0, "no Timer A re-send past the 1xx: {out:?}");
+    assert!(timeouts(&stack.drain_events()).is_empty(), "the hop is reported dead once");
 }
 
 #[tokio::test(start_paused = true)]
@@ -154,8 +156,8 @@ async fn an_invite_that_gave_up_is_forgotten_64_t1_later() {
 }
 
 /// RFC 3261 §9.1: a CANCEL MUST NOT be sent for a request that drew no
-/// provisional. The TU's CANCEL on an INVITE that gave up unanswered is held
-/// with no grace, and dies with the transaction.
+/// provisional. The TU's CANCEL on an INVITE reported dead is held, and dies
+/// with the transaction at the end of its hold past Timer B.
 #[tokio::test(start_paused = true)]
 async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
     let mut stack = stack().await;
@@ -174,7 +176,7 @@ async fn a_cancel_after_an_unanswered_give_up_never_reaches_the_wire() {
         .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
         .await
         .unwrap();
-    elapse_ms(40_000).await;
+    elapse_ms(60_000).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL without a 1xx");
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 1, "dropped with the transaction");
     assert_eq!(stack.txn.metrics().active_transactions(), 0);

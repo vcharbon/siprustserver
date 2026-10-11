@@ -85,16 +85,9 @@ pub(super) struct Owner {
     /// the client timeout of an INVITE that has drawn a provisional and the
     /// backstop of every active INVITE transaction both derive from it.
     pub(super) invite_initial_timeout_ms: u64,
-    /// The initial INVITE's first-response bound
-    /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)):
-    /// the client timeout of an out-of-dialog INVITE that has drawn nothing.
+    /// The TU's first-response deadline on an initial INVITE
+    /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)).
     pub(super) invite_first_response_timeout_ms: u64,
-    /// The held-CANCEL policy
-    /// ([`TransactionConfig::cancel_hold_grace_ms`](crate::TransactionConfig)):
-    /// `Some(ms)` bounds the wait for the branch's first provisional — then
-    /// the CANCEL is sent regardless (ADR-0028); `None` is the strict §9.1
-    /// wait (hold until provisional, drop with the txn).
-    pub(super) cancel_hold_grace_ms: Option<u64>,
     /// The To-tag this node bound to a dialog it answered as UAS, by
     /// (Call-ID, From-tag), kept for Timer L past the transaction so a
     /// CANCEL or a stray answered after the transaction is gone still carries
@@ -233,7 +226,6 @@ impl Owner {
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,
             invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
-            cancel_hold_grace_ms: config.cancel_hold_grace_ms,
             recent_uas_tags: HashMap::new(),
             strict_to_tag: config.strict_to_tag,
         }
@@ -291,12 +283,11 @@ impl Owner {
             self.cancel_timer(old.retransmit_key);
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
-            self.cancel_timer(old.cancel_grace_key);
             self.cancel_timer(old.cancel_retransmit_key);
             self.untrack_call_ref(&old.call_ref, id.as_ref());
             // The displaced txn's held CANCEL dies with it — a never-sent one
             // is counted dropped so the held counters reconcile
-            // (held == flushed + flushed_pre1xx + dropped).
+            // (held == flushed + dropped).
             if old.held_cancel.is_some_and(|h| h.wire == CancelWire::Held) {
                 self.metrics
                     .held_cancels_dropped
@@ -363,7 +354,6 @@ impl Owner {
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
-                self.cancel_timer(t.cancel_grace_key);
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, id);
                 if t.held {
@@ -375,14 +365,10 @@ impl Owner {
                         .orphaned_transactions
                         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                // A txn leaving with a never-sent CANCEL: the crossing-2xx
-                // final (cancellation moot), an
-                // INVITE that gave up unanswered (its CANCEL waits for a
-                // provisional, §9.1, to the end of the give-up hold), any
-                // INVITE under the strict §9.1 policy, and the sweep. Under
-                // the bounded policy grace expiry, evict and timeout of an
-                // active INVITE send it first. Counted dropped here; a
-                // grace-sent copy is already accounted.
+                // A txn leaving with a never-sent CANCEL — the crossing-2xx
+                // final (cancellation moot), an INVITE whose branch drew no
+                // provisional to the end of its hold (§9.1), the sweep — is
+                // counted dropped here.
                 if t.held_cancel.as_ref().is_some_and(|h| h.wire == CancelWire::Held) {
                     self.metrics
                         .held_cancels_dropped
@@ -464,19 +450,14 @@ impl Owner {
                 if let Some(t) = self.clients.get_mut(&branch) {
                     t.timeout_key = None;
                 }
-                self.fire_timeout(endpoint, &branch).await
+                self.fire_timeout(&branch)
             }
+            Timer::FirstResponse(branch) => self.fire_first_response(&branch),
             Timer::Cleanup(id) => {
                 if let Some(t) = self.txn_mut(id.as_ref()) {
                     t.cleanup_key = None;
                 }
                 self.expire(id.as_ref());
-            }
-            Timer::CancelGrace(branch) => {
-                if let Some(t) = self.clients.get_mut(&branch) {
-                    t.cancel_grace_key = None;
-                }
-                self.fire_cancel_grace(endpoint, &branch).await;
             }
             Timer::CancelRetransmit(branch) => {
                 if let Some(t) = self.clients.get_mut(&branch) {
@@ -542,7 +523,7 @@ impl Owner {
                 let _ = reply.send(disposition);
             }
             Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(endpoint, &call_ref).await;
+                self.do_cancel_txns_for_call(&call_ref);
                 let _ = reply.send(());
             }
             Command::ForgetUnanswered { key, call_id, from_tag } => {

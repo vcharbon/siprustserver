@@ -90,3 +90,16 @@ pub fn forward_all(target: SocketAddr) -> (Arc<dyn RoutingStrategy>, Arc<dyn Wor
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     (strategy, registry)
 }
+
+/// The capability lines a simulated worker states on its 200 to an OPTIONS
+/// (RFC 3261 §11.2): the stack set.
+pub fn options_capabilities() -> Vec<sip_message::types::SipHeader> {
+    sip_message::generators::CapabilitySet::default()
+        .lines()
+        .into_iter()
+        .map(|(name, value)| sip_message::types::SipHeader {
+            name: name.as_wire_str().into(),
+            value: value.into(),
+        })
+        .collect()
+}

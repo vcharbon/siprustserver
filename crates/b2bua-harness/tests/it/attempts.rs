@@ -631,6 +631,8 @@ async fn an_attempt_whose_leg_still_rings_stays_open_beside_the_next() {
     bob_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     let mut carol_uas = carol.receive("INVITE").await;
+    // carol's 100 lets the CANCEL to come reach her (RFC 3261 §9.1).
+    carol_uas.respond(100, "Trying").await;
     let live = b2bua.live_call(&call_ref).expect("the call is live");
     assert_eq!(
         live.attempts.iter().map(|a| a.outcome).collect::<Vec<_>>(),

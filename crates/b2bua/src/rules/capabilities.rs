@@ -21,9 +21,10 @@
 //! provisionals that offer solicits ([`offered_option_tags`]); and the one
 //! narrowing it makes on its own behalf is the twin of that offer: a strategy
 //! that acknowledges none withholds `100rel` from every leg it originates
-//! ([`withheld_by_strategy_in`]). The stack's own set
-//! ([`CapabilitySet::default`]) is for the messages the stack answers on its
-//! own behalf — the out-of-dialog OPTIONS — and for nothing it relays. A
+//! ([`withheld_by_strategy_in`]). The node's own set
+//! (`B2buaConfig::node_capabilities`) is stated on every 200 to an OPTIONS,
+//! answered or relayed, since that 200 describes this UA (RFC 3261 §11.2),
+//! and on nothing else it relays. A
 //! relayed value is not an explicit update and never outranks a declaration:
 //! the messages that carry one, the relayed requests, drop it (see
 //! [`declared_advert_headers`]).

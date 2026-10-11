@@ -59,7 +59,7 @@ pub enum Class {
     /// caller-side clamp, so a ladder that changes pace mid-flight does so by
     /// [`Ladder::retarget`] and keeps its elapsed time honest.
     NonInviteProceeding,
-    /// A CANCEL parked on its INVITE's branch (ADR-0028 X4): a non-INVITE
+    /// A CANCEL parked on its INVITE's branch (ADR-0043 X4): a non-INVITE
     /// request, so §17.1.2.2's pacing, bounded at 64·T1 — and the ceiling gives
     /// up on the CANCEL alone, never on the INVITE it answers.
     CancelClient,

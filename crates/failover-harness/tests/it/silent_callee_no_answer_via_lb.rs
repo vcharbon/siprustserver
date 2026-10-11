@@ -17,10 +17,9 @@
 //! OWN per-call `TimerType::NoAnswer` (armed at leg creation in
 //! `actions.rs::CreateLeg`, independent of any 18x), NOT by an 18x. When it
 //! fires the worker CANCELs the ringing b-leg — a CANCEL the transaction layer
-//! HOLDS (RFC 3261 §9.1: the branch never drew a provisional) for the ADR-0028
-//! grace window, then sends REGARDLESS: behind the 100-absorbing LB a 100-only
-//! b-leg is still CANCELed at grace expiry. A `200 OK` crossing the hold (or
-//! the grace-sent copy) resolves the `Cancelling` leg either way.
+//! HOLDS (RFC 3261 §9.1: the branch never drew a provisional) until one
+//! arrives: behind the 100-absorbing LB a 100-only b-leg is never CANCELed. A
+//! `200 OK` crossing the held CANCEL resolves the `Cancelling` leg.
 //!
 //! What `f14bb06` bought here: a leg in the `Cancelling` disposition is NOT
 //! resolved (`call::helpers::leg_is_resolved`), so finalization HOLDS the call
@@ -88,9 +87,9 @@ async fn assert_reaped(fh: &FailoverHarness, b1: &failover_harness::ReplicatedB2
     );
 }
 
-/// **Reject path, prompt crossing.** The worker's NoAnswer timer fires, the b-leg
-/// is CANCELed through the proxy, and the silent callee answers `200` crossing
-/// the CANCEL. The abandoned callee MUST be reaped (ACK + BYE via the proxy) and
+/// **Reject path, prompt crossing.** The worker's NoAnswer timer fires, the
+/// b-leg's CANCEL is held (no provisional reached the worker through the
+/// proxy), and the silent callee answers `200` crossing it. The abandoned callee MUST be reaped (ACK + BYE via the proxy) and
 /// the caller MUST still get its final reject — behind the retransmitting LB.
 #[tokio::test(start_paused = true)]
 #[allow(non_snake_case)]
@@ -128,9 +127,8 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
 
     // The worker's CANCEL is HELD (RFC 3261 §9.1): the proxy absorbed bob's
-    // bare 100 and never emits its own, so the b-leg branch is response-less —
-    // the CANCEL sits inside its ADR-0028 grace window (bob answers before it
-    // expires). The call MUST still outlive the held CANCEL: the b-leg sits
+    // bare 100 and never emits its own, so the b-leg branch is response-less.
+    // The call MUST still outlive the held CANCEL: the b-leg sits
     // `Cancelling`, unresolved.
 
     // ── CROSSING: bob answers 200 OK against the held CANCEL ─────────────────
@@ -155,7 +153,7 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
 
 /// **Reject path, DELAYED crossing — the timing-independence proof.** Identical to
 /// the prompt case, but the crossing `200` is delivered many seconds AFTER the
-/// CANCEL (well within the ~32 s terminating-safety backstop). Pre-`f14bb06` the
+/// worker's CANCEL was held (well within the ~32 s terminating-safety backstop). Pre-`f14bb06` the
 /// reject teardown promoted `Terminating → Terminated → RemoveCall` in the SAME
 /// turn as the CANCEL, so ANY later `200` landed on a removed call (no ACK, no
 /// BYE — the callee orphaned). Holding a `Cancelling` leg unresolved keeps the
@@ -165,14 +163,6 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
 #[allow(non_snake_case)]
 async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reaped() {
     let mut fh = FailoverHarness::new("s10b-silent-callee-noanswer-reject-delayed", &["b1"]);
-    // The deliberate corner this case is built on: bob's CANCEL handling is
-    // dead, so it TAKES the CANCEL and answers 200 ten seconds later instead of
-    // 487. The worker's own reap (ACK + BYE) is what the test gates.
-    fh.allow_rfc_violation(
-        "no-200-after-cancel",
-        "bob deliberately ignores the CANCEL it took and answers 200 much later (RFC 3261 §9.2) — the delayed crossing under test",
-    );
-
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
@@ -198,18 +188,13 @@ async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reap
 
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
     // The CANCEL is HELD (§9.1 — the branch never drew a provisional through
-    // the absorbing proxy) for the grace window…
-
-    // ── …then the grace expiry sends it through the proxy (ADR-0028) ─────────
-    // Bob receives the CANCEL but never answers it — a callee whose CANCEL
-    // handling is dead is exactly the peer whose 200 can land many seconds
-    // later. The call stays HELD Terminating (b-leg `Cancelling`, awaiting its
-    // 487 or a crossing 200) — the timing-independence under test.
+    // the absorbing proxy) and never reaches bob. The call stays HELD
+    // Terminating (b-leg `Cancelling`, awaiting a final) — the
+    // timing-independence under test.
     fh.advance(Duration::from_secs(10)).await;
     assert!(
-        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
-        "the grace expiry sends the b-leg CANCEL through the LB (ADR-0028 — a \
-         100-only branch is still CANCELed)"
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        "no CANCEL toward a branch that drew no provisional through the LB (§9.1)"
     );
 
     // ── CROSSING (late): bob finally answers 200 → still reaped ──────────────
@@ -290,8 +275,8 @@ async fn silent_callee_no_answer_via_lb__reroute__reaps_crossing_200_and_reroute
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
 
-    // NoAnswer fires → CANCEL bob (held inside its grace window — §9.1, the
-    // branch is response-less through the absorbing proxy) + /call/failure
+    // NoAnswer fires → CANCEL bob (held — §9.1, the branch is response-less
+    // through the absorbing proxy) + /call/failure
     // consult (call stays Active).
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
 

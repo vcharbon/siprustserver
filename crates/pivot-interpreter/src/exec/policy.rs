@@ -40,12 +40,28 @@ impl<'a, 'p> Runner<'a, 'p> {
     ) -> bool {
         let SipMessage::Request(request) = message else { return true };
         let Some(agent) = self.lane.agents.get(actor).cloned() else { return true };
+        // A 2xx to an OPTIONS states what the answering UA supports (RFC 3261
+        // §11.2).
+        let extra_headers =
+            if (200..300).contains(&status) && *request.method() == sip_message::Method::Options {
+                sip_message::generators::CapabilitySet::default()
+                    .lines()
+                    .into_iter()
+                    .map(|(name, value)| sip_message::SipHeader {
+                        name: name.as_wire_str().into(),
+                        value: value.into(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let response = sip_message::generators::generate_response(
             request,
             status,
             reason_for(status),
             &sip_message::generators::GenerateResponseOpts {
                 to_tag: Some(format!("{leg}-bg")),
+                extra_headers,
                 ..Default::default()
             },
         );

@@ -185,8 +185,7 @@ pub enum Evidence {
         /// The top-Via branch the CANCEL shares with its INVITE (§9.1).
         branch: String,
     },
-    /// The CANCEL sent before any provisional arrived and before the sender's
-    /// own grace window had run out.
+    /// The CANCEL sent before any provisional arrived.
     ///
     /// Untagged and unambiguous both ways: it is the only variant carrying
     /// `since_invite_us`, and it carries none of the required keys of any
@@ -197,12 +196,12 @@ pub enum Evidence {
         cancel_hop: usize,
         cancel_ts_us: u64,
         /// Index into the view's `msgs` of the emitter's first INVITE on the
-        /// branch — what the grace window is measured from.
+        /// branch.
         invite_msg: usize,
         invite_hop: usize,
         invite_ts_us: u64,
         /// Observation-time distance from that INVITE to the CANCEL,
-        /// microseconds: under the rule's grace floor, or there is no hit.
+        /// microseconds.
         since_invite_us: u64,
         /// The top-Via branch the CANCEL shares with its INVITE (§9.1).
         branch: String,

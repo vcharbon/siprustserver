@@ -208,17 +208,15 @@ pub struct B2buaConfig {
     /// supervision, hunting chains) raise it. Overridable via
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
     pub invite_txn_timeout_sec: i64,
-    /// **Initial-INVITE first-response bound**, seconds — how long a b-leg
-    /// initial INVITE waits for a response of ANY kind (not even a `100
-    /// Trying`) before its client transaction gives up with a
-    /// `TimeoutKind::Response` and the `call_failure` consult carries
+    /// **Initial-INVITE first-response deadline**, seconds — how long this TU
+    /// waits for a response of ANY kind (not even a `100 Trying`) to a b-leg
+    /// initial INVITE before it gives up on the hop (ADR-0044): the leg fails
+    /// with a `TimeoutKind::Response` and the `call_failure` consult carries
     /// `timeout_kind: "response"` — the "is this hop alive?" question, distinct
     /// from [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)'s "how
-    /// long may it ring?": the first provisional swaps the long bound in. Only
-    /// the initial INVITE reads it — an in-dialog INVITE keeps Timer B and a
-    /// non-INVITE Timer F.
-    /// The Timer A ladder is cut at the bound, so the bound buys a rung count:
-    /// 2 s → 2 re-sends (0.5/1.5), 5 s → 3 (0.5/1.5/3.5), 10 s → 4, 32 s → 6.
+    /// long may it ring?". The client transaction keeps Timer A to Timer B.
+    /// Only the initial INVITE reads it — an in-dialog INVITE and a
+    /// non-INVITE never do.
     /// [`validate`](Self::validate) range-checks
     /// [`MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
     /// `..=` [`MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC).
@@ -226,15 +224,6 @@ pub struct B2buaConfig {
     /// Overridable via
     /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`.
     pub invite_first_response_timeout_sec: i64,
-    /// **Strict RFC 3261 §9.1 CANCEL wait** (ADR-0028). `false` (the default)
-    /// is the bounded-hold policy: a b-leg CANCEL for a response-less branch
-    /// waits for the first provisional at most the sip-txn grace window
-    /// (`CANCEL_HOLD_GRACE`, 1 s), then goes on the wire regardless. `true` is
-    /// the literal §9.1 wait: no CANCEL is ever sent pre-provisional — a callee
-    /// that answers nothing is never CANCELed and rides the terminating
-    /// backstop instead. Overridable via `B2BUA_CANCEL_STRICT_RFC_WAIT` (truthy
-    /// = strict).
-    pub cancel_strict_rfc3261_wait: bool,
     /// **Un-ACKed 2xx give-up deadline**, seconds (RFC 3261 §13.3.1.4; the
     /// RFC's `64·T1` = 32 s is the default). When it elapses with no ACK for a
     /// 2xx to an INVITE — initial or re-INVITE — the peer is gone and the
@@ -362,12 +351,13 @@ pub struct B2buaConfig {
     /// The service's hook deciding the form an in-dialog session description
     /// leaves in ([`SdpFormPolicy`]); [`AsWritten`] by default.
     pub sdp_form: std::sync::Arc<dyn SdpFormPolicy>,
-    /// **Node capability advertisement.** The `Allow`/`Supported` set this
-    /// worker advertises on the out-of-dialog OPTIONS health reply (RFC 3261
-    /// §11.2) — a node-scoped statement, not a call-scoped one, so it is
-    /// declared here rather than by a routing decision. The default is the
-    /// stack set; the health path borrows this value, so a keepalive probe
-    /// resolves its advertisement without allocating.
+    /// **Node capability advertisement.** The `Allow`/`Supported`/`Accept`
+    /// set this worker states on every 200 it sends to an OPTIONS (RFC 3261
+    /// §11.2) — the out-of-dialog health reply, the one it answers in a
+    /// dialog, the one it relays — a node-scoped statement, not a call-scoped
+    /// one, so it is declared here rather than by a routing decision. The
+    /// default is the stack set; the health path borrows this value, so a
+    /// keepalive probe resolves its advertisement without allocating.
     pub node_capabilities: sip_message::generators::CapabilitySet,
     /// **Minted-final advertisement.** The `Allow`/`Supported`/`Accept` this
     /// worker states on a failure final to an INVITE it mints in its own name,
@@ -522,7 +512,6 @@ impl Default for B2buaConfig {
             setup_timeout_ms: 150_000,
             invite_txn_timeout_sec: 158,
             invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
-            cancel_strict_rfc3261_wait: false,
             ack_timeout_sec: Self::DEFAULT_ACK_TIMEOUT_SEC,
             // CPS bucket and panic-ELU rungs. Defaults match the env knobs
             // (B2BUA_CPS_BUCKET_SIZE / B2BUA_CPS_BUCKET_RATE /
@@ -576,12 +565,12 @@ impl B2buaConfig {
     /// Floor for
     /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
     /// (s): two Timer A re-sends (rungs at 0.5 s and 1.5 s) precede the
-    /// give-up, so a lossy path still gets more than one chance.
+    /// deadline, so a lossy path still gets more than one chance.
     pub const MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 2;
     /// Ceiling for
     /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
-    /// (s): Timer B itself (RFC 3261 §17.1.1.2, 64·T1) — nothing above the RFC
-    /// value is expressible.
+    /// (s): Timer B itself (RFC 3261 §17.1.1.2, 64·T1), past which the
+    /// transaction reports the hop dead on its own.
     pub const MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
     /// Default
     /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
@@ -726,9 +715,9 @@ impl B2buaConfig {
                 Self::MAX_INVITE_TXN_TIMEOUT_SEC
             ));
         }
-        // The first-response bound is a deadline between the two-rung floor
-        // and Timer B: below the floor the INVITE is effectively sent once,
-        // above Timer B the RFC value already owns the give-up.
+        // The first-response deadline sits between the two-rung floor and
+        // Timer B: below the floor the hop has heard the INVITE once, above
+        // Timer B the transaction reports the hop dead on its own.
         if !(Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
             ..=Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
             .contains(&self.invite_first_response_timeout_sec)
@@ -805,10 +794,10 @@ impl B2buaConfig {
         u64::try_from(sec).unwrap_or(158).saturating_mul(1000)
     }
 
-    /// The configured initial-INVITE first-response bound in ms — the value
+    /// The configured initial-INVITE first-response deadline in ms — the value
     /// wired into `TransactionConfig::invite_first_response_timeout_ms`. `<= 0`
     /// is NOT "disabled": a non-positive value falls back to the 32 s Timer B
-    /// default rather than arming a degenerate bound.
+    /// default rather than arming a degenerate deadline.
     pub fn invite_first_response_timeout_ms(&self) -> u64 {
         let default = Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
         let sec = if self.invite_first_response_timeout_sec > 0 {

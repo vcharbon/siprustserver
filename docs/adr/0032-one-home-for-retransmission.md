@@ -10,7 +10,7 @@ two crates:
 | site | class | state carried |
 |---|---|---|
 | `sip-txn/src/layer/client.rs:417-432` | Timer A / E | `interval_ms` + `elapsed_ms` + `max_ms` (u64) |
-| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0028 X4) | `HeldCancel` interval + elapsed |
+| `sip-txn/src/layer/client.rs:311` | CANCEL Timer E (ADR-0043 X4) | `HeldCancel` interval + elapsed |
 | `sip-txn/src/layer/server.rs:32-61` | Timer G | `interval_ms` |
 | `b2bua/src/rules/actions/respond.rs:257-276` | §13.3.1.4 2xx | `ack_retransmit_interval_ms` (i64, replicated) |
 | `b2bua/src/rules/actions/reliable_ladder.rs:97-158` | RFC 3262 §3 | `interval_ms` (i64, replicated) |
@@ -72,24 +72,8 @@ is a compile error rather than a review comment.
 It is a pure leaf on the ADR-0002 model, like `sip-clock`: `sip-txn`, `call`,
 `b2bua` and `pivot-interpreter` depend on it and nothing depends back.
 
-**Amendment — the initial INVITE's first-response bound.** A deployment may
-tighten the bound an *initial* INVITE (no To-tag) waits in `Calling` for a
-response of any kind below Timer B:
-`TransactionConfig::invite_first_response_timeout_ms` (default Timer B),
-surfaced as `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` (default 32, range
-`2..=32`). It is a deliberate RFC 3261 §17.1.1.2 deviation, recorded as
-telephony policy: a hop that draws nothing — not even a `100 Trying` — is
-dead, and a caller cannot be left in silence for 64·T1 before the reroute to
-an alternate hop. The Timer A ladder is armed under the same bound, so no rung
-lands past the give-up and the bound buys a rung count — 2 s → 2 re-sends
-(0.5/1.5 s), 5 s → 3, 10 s → 4, 32 s → 6; the 2 s floor guarantees a lossy
-path more than one chance, and the ceiling is the RFC value itself. The
-expiry keeps `TimeoutKind::Response` ("nothing answered"), and the
-`call_failure` consult carries it as `timeout_kind: "response" | "transaction"`
-beside an unchanged `origin`. An in-dialog INVITE and every non-INVITE keep
-64·T1 (Timer B / Timer F), and the first provisional still swaps in the long
-`invite_initial_timeout_ms` bound. The proxy's `cancel_lru` TTLs do not
-follow: they are ceilings derived from the long bound.
+**Amendment — the initial INVITE's first-response deadline** is the TU's,
+beside an untouched Timer B: ADR-0044.
 
 ## Decision X2 — the only ladder state is a rung index
 

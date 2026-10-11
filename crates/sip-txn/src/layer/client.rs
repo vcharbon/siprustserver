@@ -1,8 +1,7 @@
 //! RFC 3261 §17.1 client (UAC) transactions: creation on `send_request`
 //! (CANCEL/ACK build no txn — they reuse their INVITE's branch; a CANCEL for a
-//! response-less INVITE txn is held until the first provisional or the grace
-//! expiry, whichever comes first — §9.1 bounded per ADR-0028 — and once on the
-//! wire retransmits on its own Timer-E ladder as a sub-state of the INVITE
+//! response-less INVITE txn is held until the first provisional, §9.1, and
+//! once on the wire retransmits on its own Timer-E ladder as a sub-state of the INVITE
 //! txn, §17.1.2.2; an ACK goes raw and rides no timer, §13.2.2.4),
 //! Timer A/E retransmission, Timer B/F timeout, inbound-response matching
 //! (including the non-2xx auto-ACK + Timer D hold), and the orphaning of a
@@ -56,11 +55,9 @@ impl Owner {
             // (`handle_inbound_response`). A CANCEL sent before any response is
             // unmatchable at a UAS that has not built the server txn yet — it
             // 481s while Timer A keeps re-ringing the callee for a call that no
-            // longer exists. The hold is BOUNDED (ADR-0028): a grace timer sends
-            // the CANCEL regardless when the branch stays response-less, so a
-            // callee that never answers anything still hears the cancellation —
-            // the wait is a courtesy, never a veto. The held CANCEL is cleared
-            // unsent only when the txn takes a final first (§9.2 — the UAS
+            // longer exists. A branch that never draws a provisional never
+            // sees the CANCEL: the INVITE ends at Timer B. The held CANCEL is
+            // cleared unsent when the txn takes a final first (§9.2 — the UAS
             // already answered; cancellation is moot).
             // A CANCEL whose txn already took its final (Completed, Timer-D hold)
             // is suppressed outright: §9.1/§9.2 — a CANCEL has no effect on a
@@ -78,22 +75,11 @@ impl Owner {
             }
             let gate = if msg.method() == Method::Cancel {
                 match msg.top_via().branch().and_then(|b| self.clients.get(b)) {
-                    Some(t) if t.kind == TxnKind::Invite => {
-                        match t.state {
-                            // A pre-1xx copy already on the wire (grace expired)
-                            // makes a NEWER CANCEL a plain re-send, not a hold.
-                            TxnState::Trying
-                                if t.held_cancel
-                                    .as_ref()
-                                    .map_or(true, |h| h.wire == CancelWire::Held) =>
-                            {
-                                CancelGate::Hold
-                            }
-                            TxnState::Trying => CancelGate::Send,
-                            TxnState::Completed => CancelGate::Suppress,
-                            _ => CancelGate::Send,
-                        }
-                    }
+                    Some(t) if t.kind == TxnKind::Invite => match t.state {
+                        TxnState::Trying => CancelGate::Hold,
+                        TxnState::Completed => CancelGate::Suppress,
+                        _ => CancelGate::Send,
+                    },
                     _ => CancelGate::Send,
                 }
             } else {
@@ -101,12 +87,11 @@ impl Owner {
             };
             match gate {
                 CancelGate::Hold => {
-                    let branch_key = msg.top_via().branch().unwrap_or_default().to_string();
-                    let grace_ms = self.cancel_hold_grace_ms;
-                    if let Some(txn) = self.clients.get_mut(branch_key.as_str()) {
+                    let branch_key = msg.top_via().branch().unwrap_or_default();
+                    if let Some(txn) = self.clients.get_mut(branch_key) {
                         // A newer CANCEL supersedes a still-held one — count the
                         // displaced (never-sent) datagram so held counters
-                        // reconcile (held == flushed + flushed_pre1xx + dropped).
+                        // reconcile (held == flushed + dropped).
                         if txn
                             .held_cancel
                             .replace(HeldCancel::new(buf, dest, CancelWire::Held))
@@ -115,21 +100,6 @@ impl Owner {
                             self.metrics
                                 .held_cancels_dropped
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        // Bound the hold (ADR-0028 bounded policy): if the
-                        // first provisional never comes, the grace expiry
-                        // sends the CANCEL anyway. Strict §9.1 policy
-                        // (`cancel_hold_grace_ms: None`) arms nothing — the
-                        // hold lasts until a provisional or txn death — and
-                        // neither does an INVITE that gave up unanswered: its
-                        // peer is presumed dead, and §9.1 forbids the CANCEL.
-                        if let Some(grace) = grace_ms.filter(|_| !txn.lifetime.gave_up()) {
-                            if txn.cancel_grace_key.is_none() {
-                                txn.cancel_grace_key = Some(
-                                    self.timers
-                                        .insert(Timer::CancelGrace(branch_key.clone()), ms(grace)),
-                                );
-                            }
                         }
                     }
                     self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -142,7 +112,7 @@ impl Owner {
                 CancelGate::Send => {
                     // A CANCEL reaching the wire on a live client INVITE txn is
                     // parked on it (superseding: the newest CANCEL is what the
-                    // ladder — and the one owed pre-1xx re-send — replays) and
+                    // ladder replays) and
                     // gets the Timer-E ladder (§17.1.2.2). A CANCEL matching no
                     // live txn stays a raw single send: there is nothing to hang
                     // a ladder on without re-keying the branch map. An ACK is
@@ -222,6 +192,15 @@ impl Owner {
         });
         let (max_ms, timeout_kind) = self.client_timeout(txn_type, &msg);
         self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
+        if txn_type == TxnKind::Invite
+            && msg.to().tag().is_none()
+            && self.invite_first_response_timeout_ms < max_ms
+        {
+            self.timers.insert(
+                Timer::FirstResponse(branch.clone()),
+                ms(self.invite_first_response_timeout_ms),
+            );
+        }
 
         match txn_type {
             TxnKind::Invite => {
@@ -237,13 +216,9 @@ impl Owner {
 
     /// Put a held CANCEL on the wire — called when its INVITE client txn takes
     /// its first provisional (RFC 3261 §9.1 "wait for the arrival of a
-    /// provisional response before sending"); a first send arms the Timer-E
-    /// ladder. A datagram the grace expiry already sent pre-1xx goes out ONCE
-    /// more here — the UAS that 481'd the pre-1xx copy has built its server
-    /// transaction by now, so this is the matchable send — counted as a
-    /// re-flush, not a fresh flush, and it neither resets nor restarts the
-    /// ladder (an exhausted ceiling is final). A first send on an INVITE that
-    /// gave up restarts its hold: §9.1's 64·T1 runs from the CANCEL.
+    /// provisional response before sending") — and arm its Timer-E ladder. A
+    /// send on an INVITE that gave up restarts its hold: §9.1's 64·T1 runs
+    /// from the CANCEL.
     pub(super) async fn flush_cancel_on_provisional(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -251,39 +226,30 @@ impl Owner {
     ) {
         let send = match self.clients.get_mut(branch) {
             Some(t) => match t.held_cancel.as_mut() {
-                Some(h) if h.wire != CancelWire::Sent => {
-                    let fresh = h.wire == CancelWire::Held;
+                Some(h) if h.wire == CancelWire::Held => {
                     h.wire = CancelWire::Sent;
-                    Some((h.buf.clone(), h.dest, fresh, fresh && t.lifetime.gave_up()))
+                    Some((h.buf.clone(), h.dest, t.lifetime.gave_up()))
                 }
                 _ => None,
             },
             None => None,
         };
-        if let Some((buf, dest, fresh, first_on_given_up)) = send {
-            if first_on_given_up {
+        if let Some((buf, dest, on_given_up)) = send {
+            if on_given_up {
                 self.hold(TxnRef::Client(branch), Hold::GaveUp);
             }
             self.send_buffer(endpoint, &buf, dest).await;
-            let counter = if fresh {
-                &self.metrics.held_cancels_flushed
-            } else {
-                &self.metrics.held_cancels_reflushed
-            };
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if fresh {
-                self.arm_cancel_retransmit(branch);
-            }
+            self.metrics.held_cancels_flushed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.arm_cancel_retransmit(branch);
         }
     }
 
     /// Arms the Timer-E ladder for the on-wire CANCEL parked on `branch`,
     /// resetting the pacing to T1. No-op while a ladder is already running —
     /// a re-send never resets the pacing. Callers: the first-send sites
-    /// (direct pass-through, grace expiry, first-provisional flush, the evict
-    /// flush) plus the
-    /// pass-through of a superseding CANCEL (a fresh TU datagram earns a fresh
-    /// ladder even after a ceiling).
+    /// (direct pass-through, first-provisional flush) plus the pass-through of
+    /// a superseding CANCEL (a fresh TU datagram earns a fresh ladder even
+    /// after a ceiling).
     fn arm_cancel_retransmit(&mut self, branch: &str) {
         let Some(txn) = self.clients.get_mut(branch) else { return };
         if txn.cancel_retransmit_key.is_some() {
@@ -332,35 +298,6 @@ impl Owner {
         }
     }
 
-    /// Grace expiry for a held CANCEL (ADR-0028, [`Timer::CancelGrace`]): the
-    /// branch is still response-less past the courtesy window, so the CANCEL
-    /// goes on the wire NOW — a callee that never answers anything must still
-    /// hear the cancellation, or an abandoned setup rings to the callee's own
-    /// give-up while the caller is long gone. The datagram stays armed for one
-    /// re-send on the first provisional (see [`flush_cancel_on_provisional`]),
-    /// and the send arms the Timer-E ladder (§17.1.2.2).
-    pub(super) async fn fire_cancel_grace(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
-        let send = match self.clients.get_mut(branch) {
-            Some(t) if t.state == TxnState::Trying => match t.held_cancel.as_mut() {
-                Some(h) if h.wire == CancelWire::Held => {
-                    h.wire = CancelWire::SentPre1xx;
-                    Some((h.buf.clone(), h.dest))
-                }
-                _ => None,
-            },
-            // Proceeding/Completed already resolved the hold; a gone txn owes
-            // nothing.
-            _ => None,
-        };
-        if let Some((buf, dest)) = send {
-            self.send_buffer(endpoint, &buf, dest).await;
-            self.metrics
-                .held_cancels_flushed_pre1xx
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.arm_cancel_retransmit(branch);
-        }
-    }
-
     fn start_client_retransmit(
         &mut self,
         branch: &str,
@@ -376,10 +313,9 @@ impl Owner {
             return;
         };
         // Retransmission stops at the give-up, and at Timer B (RFC 3261
-        // §17.1.1.2) even when the give-up timer runs longer: a tightened
-        // first-response bound cuts the ladder with it, so no rung lands past
-        // the give-up; a raised initial-INVITE bound extends the wait for a
-        // response, never the retransmit storm.
+        // §17.1.1.2) even when the give-up timer runs longer: a raised
+        // initial-INVITE bound extends the wait for a response, never the
+        // retransmit storm.
         let schedule = Schedule::rfc(class).with_give_up(ms(max_ms.min(TIMER_B)));
         let Some((ladder, first)) = Ladder::armed(schedule) else { return };
         let r_key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), first);
@@ -440,61 +376,52 @@ impl Owner {
         }
     }
 
-    pub(super) async fn fire_timeout(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
-        let (call_ref, leg_id, incarnation_mark, method, destination, timeout_kind) =
-            match self.clients.get(branch) {
-                Some(t) if t.state.is_active() && !t.lifetime.gave_up() => {
-                    // Every transaction names its method (RFC 3261 §17.1: the TU
-                    // is told which request drew no answer), the non-INVITE ones
-                    // included — a BYE's Timer F is not an OPTIONS's.
-                    let method = Some(t.method.to_string());
-                    // The kind was stored explicitly at arming (`client_timeout` →
-                    // `start_client_retransmit`): `Transaction` for the long
-                    // out-of-dialog INVITE bound, `Response` for Timer B/F.
-                    (
-                        t.call_ref.clone(),
-                        t.leg_id.clone(),
-                        t.incarnation_mark.clone(),
-                        method,
-                        t.destination,
-                        t.timeout_kind,
-                    )
-                }
-                _ => return,
-            };
-        // A never-sent held CANCEL goes on the wire at the give-up under the
-        // bounded policy (ADR-0028 — same duty as the evict flush): a grace
-        // window that a tight custom config lets Timer B / the transaction
-        // bound outrun must not hold the CANCEL past the INVITE's own end.
-        let flush = match self.clients.get_mut(branch) {
-            Some(t) => match t.held_cancel.as_mut() {
-                Some(h) if h.wire == CancelWire::Held && self.cancel_hold_grace_ms.is_some() => {
-                    h.wire = CancelWire::SentPre1xx;
-                    Some((h.buf.clone(), h.dest, t.cancel_grace_key.take()))
-                }
-                _ => None,
-            },
-            None => None,
-        };
+    pub(super) fn fire_timeout(&mut self, branch: &str) {
+        let Some(event) = self.timeout_event(branch) else { return };
+        let reported = self.clients.get(branch).is_some_and(|t| t.dead_hop_reported);
         self.give_up(branch);
-        if let Some((buf, dest, grace)) = flush {
-            self.cancel_timer(grace);
-            self.send_buffer(endpoint, &buf, dest).await;
-            self.metrics
-                .held_cancels_flushed_pre1xx
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !reported {
+            // Critical: the give-up fires once, so nothing re-fires — a dropped
+            // Timeout would strand the leg until the 1 h GlobalDuration.
+            self.emit_critical(event);
         }
-        // Critical: the give-up fires once, so nothing re-fires — a dropped
-        // Timeout would strand the leg until the 1 h GlobalDuration.
-        self.emit_critical(TransactionEvent::Timeout {
-            branch: branch.to_string(),
-            call_ref,
-            leg_id,
-            incarnation_mark,
-            method,
-            destination,
-            kind: timeout_kind,
+    }
+
+    /// The TU's first-response deadline on an initial INVITE (ADR-0044): a
+    /// branch still unanswered is reported dead to the TU, once, and the
+    /// transaction keeps Timer A to Timer B, where it gives up unreported.
+    pub(super) fn fire_first_response(&mut self, branch: &str) {
+        let unanswered = self.clients.get(branch).is_some_and(|t| {
+            t.kind == TxnKind::Invite && t.state == TxnState::Trying && !t.dead_hop_reported
         });
+        if !unanswered {
+            return;
+        }
+        let Some(event) = self.timeout_event(branch) else { return };
+        if let Some(t) = self.clients.get_mut(branch) {
+            t.dead_hop_reported = true;
+        }
+        // Critical: the deadline fires once, like the give-up it reports.
+        self.emit_critical(event);
+    }
+
+    /// The `Timeout` the active client txn at `branch` reports, `None` once it
+    /// took a final or gave up.
+    fn timeout_event(&self, branch: &str) -> Option<TransactionEvent> {
+        let t =
+            self.clients.get(branch).filter(|t| t.state.is_active() && !t.lifetime.gave_up())?;
+        Some(TransactionEvent::Timeout {
+            branch: branch.to_string(),
+            call_ref: t.call_ref.clone(),
+            leg_id: t.leg_id.clone(),
+            incarnation_mark: t.incarnation_mark.clone(),
+            // Every transaction names its method (RFC 3261 §17.1: the TU is
+            // told which request drew no answer) — a BYE's Timer F is not an
+            // OPTIONS's.
+            method: Some(t.method.to_string()),
+            destination: t.destination,
+            kind: t.timeout_kind,
+        })
     }
 
     /// End the client txn at `branch` on its give-up. A non-INVITE is deleted.
@@ -526,7 +453,7 @@ impl Owner {
     /// never reached the wire), and Timer D holds it to re-ACK repeats (RFC
     /// 3261 §17.1.1.2), from this final.
     fn complete_non_2xx(&mut self, branch: &str) {
-        let (r, t, g, cr) = match self.clients.get_mut(branch) {
+        let (r, t, cr) = match self.clients.get_mut(branch) {
             Some(txn) => {
                 txn.state = TxnState::Completed;
                 if txn.held_cancel.take().is_some_and(|h| h.wire == CancelWire::Held) {
@@ -537,15 +464,13 @@ impl Owner {
                 (
                     txn.retransmit_key.take(),
                     txn.timeout_key.take(),
-                    txn.cancel_grace_key.take(),
                     txn.cancel_retransmit_key.take(),
                 )
             }
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
         self.cancel_timer(r);
         self.cancel_timer(t);
-        self.cancel_timer(g);
         self.cancel_timer(cr);
         self.hold(TxnRef::Client(branch), Hold::TimerD);
     }
@@ -581,16 +506,14 @@ impl Owner {
                 (
                     txn.retransmit_key.take(),
                     txn.timeout_key.take(),
-                    txn.cancel_grace_key.take(),
                     txn.cancel_retransmit_key.take(),
                 )
             }
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
         self.cancel_timer(keys.0);
         self.cancel_timer(keys.1);
         self.cancel_timer(keys.2);
-        self.cancel_timer(keys.3);
         self.hold(TxnRef::Client(branch), Hold::TimerM);
     }
 
@@ -612,11 +535,7 @@ impl Owner {
     /// obligations — the ACK a final still draws (RFC 3261 §17.1.1.3, §13.2.2.4),
     /// the Timer D / Timer M re-ACK hold, Timer E to its final or Timer F — and
     /// is purged by its own timer. Server transactions keep their §17.2 holds.
-    pub(super) async fn do_cancel_txns_for_call(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        call_ref: &str,
-    ) {
+    pub(super) fn do_cancel_txns_for_call(&mut self, call_ref: &str) {
         // O(k-branches) over just this call's live branches (the lockstep index),
         // not an O(total_txns) scan of the whole map.
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
@@ -624,37 +543,17 @@ impl Owner {
             None => return,
         };
         for branch in branches {
-            let flush = match self.clients.get_mut(branch.as_str()) {
-                Some(t) => {
-                    t.orphaned = true;
-                    match t.held_cancel.as_mut() {
-                        // An INVITE that gave up unanswered keeps its CANCEL
-                        // held (§9.1): only a late provisional sends it.
-                        Some(h)
-                            if h.wire == CancelWire::Held
-                                && self.cancel_hold_grace_ms.is_some()
-                                && !t.lifetime.gave_up() =>
-                        {
-                            h.wire = CancelWire::SentPre1xx;
-                            Some((h.buf.clone(), h.dest))
-                        }
-                        _ => None,
-                    }
-                }
+            // A held CANCEL stays parked on the orphan: only the branch's
+            // first provisional sends it (§9.1).
+            match self.clients.get_mut(branch.as_str()) {
+                Some(t) => t.orphaned = true,
                 None => continue,
-            };
+            }
             self.detach_from_call(TxnRef::Client(&branch));
             self.metrics
                 .txn_orphaned_on_call_evict
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.metrics.orphaned_transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some((buf, dest)) = flush {
-                self.send_buffer(endpoint, &buf, dest).await;
-                self.metrics
-                    .held_cancels_flushed_pre1xx
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.arm_cancel_retransmit(&branch);
-            }
         }
     }
 
@@ -692,21 +591,19 @@ impl Owner {
                 // Like the 1xx>100 path: a late 100 must not downgrade a txn
                 // that already took its final (Completed holds for Timer D,
                 // Accepted for Timer M).
-                let (key, grace_key, flush) = match self.clients.get_mut(branch) {
+                let (key, flush) = match self.clients.get_mut(branch) {
                     Some(txn) if txn.method == *resp.cseq().method() && txn.state.is_active() => {
                         txn.state = TxnState::Proceeding;
                         (
                             (txn.kind == TxnKind::Invite)
                                 .then(|| txn.retransmit_key.take())
                                 .flatten(),
-                            txn.cancel_grace_key.take(),
                             true,
                         )
                     }
-                    _ => (None, None, false),
+                    _ => (None, false),
                 };
                 self.cancel_timer(key);
-                self.cancel_timer(grace_key);
                 if flush {
                     matched = true;
                     self.rearm_invite_bound(branch);
@@ -722,7 +619,7 @@ impl Owner {
             // INVITE client txn (would tear it down on the 200 and miss the 487).
             // They DO end the CANCEL sub-state: the ladder stops and the parked
             // datagram is dropped (the UAS matched the CANCEL — nothing further
-            // is owed, not even the pre-1xx re-send). A never-sent held CANCEL
+            // is owed). A never-sent held CANCEL
             // cannot have drawn a response, so only on-wire state clears here.
             if resp.cseq().method() == Method::Cancel {
                 let key = match self.clients.get_mut(branch) {
@@ -774,20 +671,16 @@ impl Owner {
                     // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
                     // cancel retransmit for INVITE.
                     if state.is_active() {
-                        let (key, grace_key) = match self.clients.get_mut(branch) {
+                        let key = match self.clients.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
-                                (
-                                    (kind == TxnKind::Invite)
-                                        .then(|| txn.retransmit_key.take())
-                                        .flatten(),
-                                    txn.cancel_grace_key.take(),
-                                )
+                                (kind == TxnKind::Invite)
+                                    .then(|| txn.retransmit_key.take())
+                                    .flatten()
                             }
-                            None => (None, None),
+                            None => None,
                         };
                         self.cancel_timer(key);
-                        self.cancel_timer(grace_key);
                         self.rearm_invite_bound(branch);
                         self.flush_cancel_on_provisional(endpoint, branch).await;
                     }
@@ -869,9 +762,8 @@ impl Owner {
     /// expiry emits. EVERY client txn is armed with the §17.1 failure-detection
     /// timer — §17.1.1.2 scopes Timer B to Calling, so an INVITE drawing no
     /// response of any kind is an unanswered hop, not a responding peer, and
-    /// gives up at 64·T1 — or, for an initial INVITE, at the owner's tighter
-    /// `invite_first_response_timeout_ms` (default Timer B; ADR-0032 X1). The
-    /// window `invite_initial_timeout_ms` owns opens at an INVITE's first
+    /// gives up at 64·T1; the TU's first-response deadline rides beside it
+    /// ([`Owner::fire_first_response`], ADR-0044). The window `invite_initial_timeout_ms` owns opens at an INVITE's first
     /// provisional, where [`Owner::rearm_invite_bound`] arms it — initial and
     /// in-dialog alike, since a peer that answered 1xx has left Calling; a
     /// non-INVITE never leaves Timer F.
@@ -879,10 +771,9 @@ impl Owner {
         match kind {
             // `min`: whichever bound is configured tighter is the deadline
             // and owns the give-up.
-            TxnKind::Invite if req.to().tag().is_none() => (
-                self.invite_first_response_timeout_ms.min(self.invite_initial_timeout_ms),
-                TimeoutKind::Response,
-            ),
+            TxnKind::Invite if req.to().tag().is_none() => {
+                (TIMER_B.min(self.invite_initial_timeout_ms), TimeoutKind::Response)
+            }
             TxnKind::Invite => (TIMER_B, TimeoutKind::Response),
             TxnKind::NonInvite => (TIMER_F, TimeoutKind::Response),
         }
@@ -899,14 +790,16 @@ impl Owner {
     /// The bound is measured from the ORIGINAL SEND, so its configured ordering
     /// against the app's setup/no-answer deadline holds however late the
     /// provisional arrives. No-op for a non-INVITE, a txn already re-armed —
-    /// a second provisional never extends the bound — and a txn that gave up.
+    /// a second provisional never extends the bound — a txn that gave up, and
+    /// one whose hop was already reported dead: it keeps Timer B.
     fn rearm_invite_bound(&mut self, branch: &str) {
         let bound = self.invite_initial_timeout_ms;
         let remaining = match self.clients.get(branch) {
             Some(t)
                 if t.kind == TxnKind::Invite
                     && t.timeout_kind == TimeoutKind::Response
-                    && !t.lifetime.gave_up() =>
+                    && !t.lifetime.gave_up()
+                    && !t.dead_hop_reported =>
             {
                 bound.saturating_sub(t.created_at.elapsed().as_millis() as u64).max(1)
             }

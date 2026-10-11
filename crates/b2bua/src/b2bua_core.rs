@@ -936,14 +936,9 @@ fn txn_config(
         // `config.validate()` keeps `setup_timeout_ms` strictly below
         // it, so the rules path always gives up before the txn layer.
         invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
-        // The initial INVITE's first-response bound (default Timer B):
-        // an out-of-dialog INVITE that draws nothing at all gives up
-        // here, and the first provisional swaps the bound above in.
+        // The TU's first-response deadline on an initial INVITE
+        // (ADR-0044; default Timer B, which arms nothing).
         invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
-        // Held-CANCEL policy (ADR-0028): bounded grace by default;
-        // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
-        cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
-            .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
         strict_to_tag: true,
         deferred_bound: None,
         invite_refusals: Some(refusals.memo().clone()),

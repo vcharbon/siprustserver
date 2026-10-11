@@ -70,7 +70,7 @@ fn every_other_ladder_doubles_into_t2() {
         .replace("INVITE sip:bob@10.0.0.2 SIP/2.0", "CANCEL sip:bob@10.0.0.2 SIP/2.0")
         .replace("CSeq: 1 INVITE", "CSeq: 1 CANCEL");
     assert_eq!(
-        ladder_of(&cancel).expect("ADR-0028 X4"),
+        ladder_of(&cancel).expect("ADR-0043 X4"),
         Schedule::rfc(Class::CancelClient),
         "a CANCEL is the class of its own the schedule names"
     );
@@ -549,7 +549,7 @@ fn only_the_laddered_transactions_own_answer_closes_it() {
 
 /// A CANCEL's ladder ends with the INVITE it names: once that INVITE has
 /// its final the CANCEL is moot (RFC 3261 §9.1) and the system stops
-/// retransmitting it (ADR-0028 X4). The final our side sends to that
+/// retransmitting it (ADR-0043 X4). The final our side sends to that
 /// INVITE closes the CANCEL's window, so no Timer E rung is owed past it.
 #[test]
 fn the_final_to_the_invite_a_cancel_names_closes_the_cancels_ladder() {

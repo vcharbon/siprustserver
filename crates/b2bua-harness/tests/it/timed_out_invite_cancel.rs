@@ -87,14 +87,14 @@ async fn a_timeout_run_late_still_answers_the_caller_and_acks_the_487() {
 }
 
 /// bob answers nothing at all, not even a 100. The hop is dead at the
-/// first-response bound: alice is answered 408 there, and no CANCEL goes to
-/// bob, who answered nothing (§9.1), under either CANCEL policy. The leg his
-/// silence leaves unresolved rides the terminating backstop out.
-async fn a_callee_that_answers_nothing_is_not_cancelled(name: &str, strict: bool) {
-    let s = B2buaScene::with_b2bua(name, move |bob_port| {
-        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(move |c| {
+/// first-response deadline: alice is answered 408 there, and no CANCEL goes to
+/// bob, who answered nothing (§9.1). The leg his silence leaves unresolved
+/// rides the terminating backstop out.
+#[tokio::test(start_paused = true)]
+async fn a_callee_that_answers_nothing_is_not_cancelled() {
+    let s = B2buaScene::with_b2bua("timed-out-invite-dead-hop", |bob_port| {
+        B2buaSut::route_all_to("127.0.0.1", bob_port).tune(|c| {
             c.invite_first_response_timeout_sec = 5;
-            c.cancel_strict_rfc3261_wait = strict;
             c.keepalive_interval_sec = 300;
         })
     })
@@ -104,7 +104,7 @@ async fn a_callee_that_answers_nothing_is_not_cancelled(name: &str, strict: bool
     let _dead = s.bob.receive("INVITE").await;
 
     s.h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
-    call.try_expect(408).await.expect("the caller is answered at the first-response bound");
+    call.try_expect(408).await.expect("the caller is answered at the first-response deadline");
 
     s.h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
@@ -116,14 +116,4 @@ async fn a_callee_that_answers_nothing_is_not_cancelled(name: &str, strict: bool
         !report.entries().iter().any(|e| e.to == bob_addr && e.raw.starts_with(b"CANCEL ")),
         "no CANCEL to a callee that answered nothing (RFC 3261 §9.1)"
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_callee_that_answers_nothing_is_not_cancelled_under_the_bounded_hold() {
-    a_callee_that_answers_nothing_is_not_cancelled("timed-out-invite-dead-hop", false).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_callee_that_answers_nothing_is_not_cancelled_under_the_strict_wait() {
-    a_callee_that_answers_nothing_is_not_cancelled("timed-out-invite-dead-hop-strict", true).await;
 }

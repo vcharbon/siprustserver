@@ -8,9 +8,9 @@ pub(super) const LIVE: &[Live] = &[
     Live::emitter(RuleId::No200AfterCancel, no_200_after_cancel),
     Live::emitter(RuleId::CancelRouteEchoesInvite, cancel_route_echoes_invite)
         .skip(Skip::RelayLanes),
-    // Advisory (ADR-0028). A `{Proxy}`-only lane forwards its upstream's CANCEL at the upstream's
-    // timing; a B2BUA authors its own and is judged.
-    Live::emitter(RuleId::CancelAfter1xx, cancel_after_1xx).advisory().skip(Skip::ProxyOnlyLanes),
+    // A `{Proxy}`-only lane forwards its upstream's CANCEL at the upstream's timing; a B2BUA
+    // authors its own and is judged.
+    Live::emitter(RuleId::CancelAfter1xx, cancel_after_1xx).skip(Skip::ProxyOnlyLanes),
     // No relay skip: a lane forwarding an upstream CANCEL never ACKed the final itself.
     Live::emitter(RuleId::NoCancelAfterFinal, no_cancel_after_final),
 ];

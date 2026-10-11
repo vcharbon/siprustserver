@@ -111,10 +111,13 @@ fn spawn_late_responder(
             // even though it is deliberately late.
             let opts = GenerateResponseOpts {
                 to_tag: Some("probe-uas".into()),
-                extra_headers: vec![SipHeader {
-                    name: "X-Overload".into(),
-                    value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
-                }],
+                extra_headers: crate::common::options_capabilities()
+                    .into_iter()
+                    .chain([SipHeader {
+                        name: "X-Overload".into(),
+                        value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
+                    }])
+                    .collect(),
                 ..Default::default()
             };
             let resp = generate_response(&req, 200, "OK", &opts);
@@ -169,7 +172,11 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
                     if req.method() != "OPTIONS" {
                         continue;
                     }
-                    let opts = GenerateResponseOpts { to_tag: Some("probe-uas".into()), ..Default::default() };
+                    let opts = GenerateResponseOpts {
+                        to_tag: Some("probe-uas".into()),
+                        extra_headers: crate::common::options_capabilities(),
+                        ..Default::default()
+                    };
                     let resp = generate_response(&req, 200, "OK", &opts);
                     let raw = serialize(&SipMessage::Response(resp));
                     if hold.load(Ordering::SeqCst) {

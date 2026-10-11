@@ -1,7 +1,7 @@
 //! When a transaction leaves the map. Every resident transaction carries one
 //! [`Lifetime`] and one end-of-life deadline, armed as its single
 //! [`Timer::Cleanup`]; the functions here are the only writers of both. The
-//! retransmit ladders, Timer B/F and the CANCEL grace produce events, not
+//! retransmit ladders and Timer B/F produce events, not
 //! removal, and live in `layer::client` / `layer::server`.
 
 use std::time::Duration;

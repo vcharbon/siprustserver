@@ -102,13 +102,15 @@ pub(super) enum Timer {
     ServerRetransmit(ServerTxnKey),
     /// Timer B (INVITE) / Timer F (non-INVITE) — client transaction timeout.
     ClientTimeout(String),
+    /// The TU's first-response deadline on an initial INVITE (ADR-0044): fired
+    /// with the branch still unanswered, it reports the hop dead; the
+    /// transaction runs on to Timer B. Its key is never stored — the fire
+    /// reads the transaction's state and is a no-op on anything else.
+    FirstResponse(String),
     /// The transaction's end of life, due at its [`Lifetime`] deadline — the
     /// backstop of an active one, the end of a hold otherwise. Every resident
     /// transaction has exactly one; firing removes the transaction.
     Cleanup(TxnId),
-    /// Held-CANCEL grace expiry (ADR-0028): the branch's first provisional never
-    /// arrived inside the grace window, so the held CANCEL is sent regardless.
-    CancelGrace(String),
     /// Timer E for the on-wire CANCEL (RFC 3261 §17.1.2.2 — a CANCEL is a
     /// non-INVITE request, but it reuses its INVITE's branch and builds no txn
     /// of its own, so its retransmit ladder rides the INVITE client txn as the
@@ -126,16 +128,10 @@ pub(super) enum Timer {
 /// Wire status of the CANCEL datagram parked on its INVITE client txn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CancelWire {
-    /// Never sent — waiting on the branch's first provisional or the grace
-    /// expiry (RFC 3261 §9.1, bounded per ADR-0028).
+    /// Never sent — waiting on the branch's first provisional (RFC 3261
+    /// §9.1).
     Held,
-    /// On the wire pre-1xx (grace/evict/timeout flush); ONE re-send on the
-    /// branch's late first provisional is still owed — a UAS that 481'd the
-    /// pre-1xx copy has built its server txn by then. Not "never sent": a
-    /// dying txn does not count it dropped.
-    SentPre1xx,
-    /// On the wire with nothing further owed on a provisional; only the
-    /// [`Timer::CancelRetransmit`] ladder re-sends it.
+    /// On the wire; only the [`Timer::CancelRetransmit`] ladder re-sends it.
     Sent,
 }
 
@@ -201,11 +197,11 @@ impl Transaction {
             timeout_key: None,
             cleanup_key: None,
             held_cancel: None,
-            cancel_grace_key: None,
             cancel_retransmit_key: None,
             retransmit_buf: None,
             ladder: None,
             timeout_kind: TimeoutKind::Response,
+            dead_hop_reported: false,
             lifetime,
             orphaned: false,
             held: false,
@@ -290,18 +286,12 @@ pub(super) struct Transaction {
     pub(super) timeout_key: Option<Key>,
     /// The [`Timer::Cleanup`] at the [`lifetime`](Self::lifetime) deadline.
     pub(super) cleanup_key: Option<Key>,
-    /// A CANCEL datagram held back because this INVITE client txn has received
-    /// no response yet (RFC 3261 §9.1 — the CANCEL waits for the first
-    /// provisional). Flushed on the first 1xx, or sent regardless when the
-    /// grace window expires (ADR-0028: the wait is a courtesy, never a veto —
-    /// every emitted CANCEL reaches the wire). Cleared without sending only
-    /// when the txn takes a final first (the UAS already answered — §9.2).
-    /// Only ever set on a `Client`/`Invite` txn in `Trying`.
+    /// The CANCEL datagram parked on this INVITE client txn: held while the
+    /// branch has drawn no response (RFC 3261 §9.1 — the CANCEL waits for the
+    /// first provisional, however late) and flushed on the first 1xx, or on
+    /// the wire riding its Timer-E ladder. A held one is cleared unsent when
+    /// the txn takes a final first (§9.2) or dies.
     pub(super) held_cancel: Option<HeldCancel>,
-    /// The [`Timer::CancelGrace`] wheel entry for a held CANCEL — cancelled in
-    /// lockstep whenever the hold resolves (flush/drop/txn death), nulled at
-    /// fire (the CLAUDE.md stale-`Key` discipline).
-    pub(super) cancel_grace_key: Option<Key>,
     /// The [`Timer::CancelRetransmit`] wheel entry for an on-wire CANCEL —
     /// cancelled in lockstep with the sub-state's resolution (a CANCEL
     /// response, the INVITE's final, txn death), nulled at fire.
@@ -321,6 +311,10 @@ pub(super) struct Transaction {
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
     pub(super) timeout_kind: TimeoutKind,
+    /// The TU was told at its first-response deadline that this initial
+    /// INVITE's hop is dead (ADR-0044): no later timeout of the transaction is
+    /// reported again.
+    pub(super) dead_hop_reported: bool,
     /// When this transaction leaves the map, written only by
     /// `layer::lifetime`. An INVITE client txn that gave up is held
     /// [`Hold::GaveUp`](super::lifetime::Hold::GaveUp) in Trying/Proceeding:

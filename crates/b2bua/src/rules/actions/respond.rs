@@ -512,7 +512,7 @@ impl ActionExecutor<'_> {
                         .map(|(_, v)| Entry::raw(name, SipStr::owned(v.as_deref().unwrap_or(""))))
                 })
                 .collect();
-        relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned, &advert);
+        relay::stamp_advertisement(&mut extra_headers, &service_owned, &advert);
         // Built before the a-dialog moves to A2: a refused answer (the INVITE
         // already carries its final) leaves the dialog the caller holds intact.
         let Some(effect) = relay::response_to_a_leg(

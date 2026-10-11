@@ -539,14 +539,14 @@ fn timeout_kind(events: Vec<TransactionEvent>) -> Option<sip_txn::TimeoutKind> {
     })
 }
 
-/// The initial INVITE's first-response bound is a deployment tunable
+/// The initial INVITE's first-response deadline is the TU's
 /// (`TransactionConfig::invite_first_response_timeout_ms`, default Timer B):
-/// tightened to 5 s, an initial INVITE nothing answers gives up at 5 s with a
-/// `Response` timeout — the hop is dead — after exactly the three Timer A
-/// re-sends the bound buys (0.5 / 1.5 / 3.5 s): the ladder is armed under the
-/// same bound, so no rung lands past the give-up.
+/// tightened to 5 s, an initial INVITE nothing answers is reported to the TU
+/// at 5 s with a `Response` timeout — the hop is dead — while the transaction
+/// itself keeps RFC 3261 §17.1.1.2: Timer A re-sends to Timer B, and Timer B
+/// reports nothing a second time.
 #[tokio::test(start_paused = true)]
-async fn tightened_first_response_bound_fails_an_unanswered_initial_invite_early() {
+async fn the_first_response_deadline_tells_the_tu_while_timer_a_runs_to_timer_b() {
     let mut stack = Stack::build_with_config(TRANSIT, 64, first_response_bound_config(5_000)).await;
     stack
         .txn
@@ -554,45 +554,45 @@ async fn tightened_first_response_bound_fails_an_unanswered_initial_invite_early
         .await
         .unwrap();
 
-    // Still Calling at 4 s: the three rungs the bound buys have all fired.
     elapse_ms(4_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "the 5 s bound has not elapsed yet"
+        "the 5 s deadline has not elapsed yet"
     );
-    assert_eq!(active(&stack), 1);
-    assert_eq!(
-        count_requests(&stack.drain_peer(), "INVITE"),
-        4,
-        "original send + rungs at 0.5 / 1.5 / 3.5 s"
-    );
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 4, "original + 0.5 / 1.5 / 3.5 s");
 
-    // The bound fires; no fourth rung (7.5 s) was ever armed.
     elapse_ms(1_100).await;
     assert_eq!(
         timeout_kind(stack.drain_events()),
         Some(sip_txn::TimeoutKind::Response),
-        "an INVITE nothing answered times out on the first-response bound as a dead hop"
+        "an INVITE nothing answered is reported at the first-response deadline as a dead hop"
+    );
+
+    // Timer A keeps its RFC ladder (7.5 / 15.5 / 31.5 s) up to Timer B.
+    elapse_ms(28_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 3, "the rungs past the deadline");
+    assert!(
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "Timer B reports nothing a second time"
     );
     given_up_invite_is_forgotten(&stack).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "no rung past the give-up");
     assert_eq!(
         stack.txn.metrics().retransmit_rows(),
         vec![RetransmitRow {
             ladder: "invite-client",
             method: "INVITE".into(),
             code: None,
-            count: 3
+            count: 6
         }],
     );
 }
 
-/// The tightened first-response bound reads ONLY on an initial INVITE: under
+/// The first-response deadline reads ONLY on an initial INVITE: under
 /// the same 5 s config an in-dialog INVITE (To-tag present) keeps the 32 s
 /// Timer B and a non-INVITE keeps Timer F — a re-INVITE into a live call or a
 /// BYE is a different risk, and a transient blip must not tear a call down.
 #[tokio::test(start_paused = true)]
-async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1() {
+async fn the_first_response_deadline_leaves_in_dialog_and_non_invite_on_64_t1() {
     let mut stack = Stack::build_with_config(TRANSIT, 64, first_response_bound_config(5_000)).await;
     stack
         .txn
@@ -609,7 +609,7 @@ async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1
     elapse_ms(31_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "neither an in-dialog INVITE nor a non-INVITE reads the first-response bound"
+        "neither an in-dialog INVITE nor a non-INVITE reads the first-response deadline"
     );
     assert_eq!(active(&stack), 2);
 
@@ -671,7 +671,7 @@ async fn a_non_invite_timeout_names_its_method() {
     assert_eq!(active(&stack), 0);
 }
 
-/// A ringing callee is unaffected by the tightened first-response bound: the
+/// A ringing callee is unaffected by the first-response deadline: the
 /// FIRST provisional swaps in the long INVITE bound
 /// (`invite_initial_timeout_ms`, default 158 s), so an initial INVITE that
 /// drew a 100 / 180 at 2 s does not expire at 5 s and gives up only at the
@@ -704,7 +704,7 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
     elapse_ms(5_000).await;
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "a ringing initial INVITE is not on the first-response bound"
+        "a ringing initial INVITE is not on the first-response deadline"
     );
     assert_eq!(active(&stack), 1, "still live, ringing");
     assert_eq!(

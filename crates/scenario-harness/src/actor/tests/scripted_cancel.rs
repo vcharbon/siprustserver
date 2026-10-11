@@ -26,8 +26,9 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    // Past the 100's arrival at 200 ms (RFC 3261 §9.1).
                     Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() })
-                        .after(Duration::from_millis(200)),
+                        .after(Duration::from_millis(300)),
                 ],
             ),
             scripted_spec(
@@ -192,7 +193,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+    let ringing = |s: &StateInner| s.leg("alice").rang();
     let call = CallPlan {
         actors: vec![
             caller_spec(

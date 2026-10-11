@@ -8,13 +8,14 @@ use sip_message::generators::CapabilitySet;
 use sip_message::header::HeaderName;
 use sip_message::{SipHeader as MsgHeader, SipStr};
 
-/// Ensure an a-facing INVITE 2xx header set carries at most ONE `Allow`, ONE
-/// `Supported` and ONE `Accept` (RFC 3261 §13.2.1/§20.37/§20.1): a header the
+/// Ensure a response header set — an INVITE 2xx, an OPTIONS 2xx — carries at
+/// most ONE `Allow`, ONE `Supported` and ONE `Accept` (RFC 3261
+/// §11.2/§13.2.1/§20.37/§20.1): a header the
 /// firing rule stamped (`rule_stamped`) is kept verbatim and de-duplicated;
 /// every other passed-through line collapses into `capabilities`' resolved
 /// value, or into no line where the set states none. `Require`/`RSeq` are
 /// untouched.
-pub fn stamp_a_facing_invite_advert(
+pub fn stamp_advertisement(
     headers: &mut Vec<MsgHeader>,
     rule_stamped: &[Entry],
     capabilities: &CapabilitySet,
@@ -54,7 +55,7 @@ pub fn stamp_a_facing_invite_advert(
 pub(crate) mod advertisement_tests {
     //! What the two B2BUA-owned INVITE mint points advertise (`Allow` /
     //! `Supported`): [`build_b_leg`] on the originated leg and
-    //! [`stamp_a_facing_invite_advert`] on the response facing the originator.
+    //! [`stamp_advertisement`] on the response facing the originator.
     //! Every assertion reads the emitted header, not the declaration.
     use super::*;
     use crate::config::B2buaConfig;
@@ -147,7 +148,7 @@ CSeq: 314 INVITE\r\n"
             name: SipStr::from_static("Supported"),
             value: SipStr::from_static("callees-own-tag"),
         }];
-        stamp_a_facing_invite_advert(&mut headers, rule_stamped, capabilities);
+        stamp_advertisement(&mut headers, rule_stamped, capabilities);
         let value = |name: HeaderName| {
             headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str().to_string())
         };

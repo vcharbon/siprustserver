@@ -34,7 +34,7 @@ pub fn toward_leg(leg_id: &str) -> RelayDirection {
 /// This is plain transparent relay — distinct from the B2BUA-side 18x
 /// management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
 /// *rewrite* these provisionals, and from the a-facing 2xx advertisement
-/// [`stamp_a_facing_invite_advert`](super::stamp_a_facing_invite_advert) owns.
+/// [`stamp_advertisement`](super::stamp_advertisement) owns.
 pub fn relay_response_passthrough_headers(
     resp: &sip_message::SipResponse,
     scope: RelayScope<'_>,

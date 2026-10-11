@@ -49,10 +49,13 @@ fn spawn_responder(
                 Mode::Ok200 => (
                     200,
                     "OK",
-                    vec![SipHeader {
-                        name: "X-Overload".into(),
-                        value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
-                    }],
+                    crate::common::options_capabilities()
+                        .into_iter()
+                        .chain([SipHeader {
+                            name: "X-Overload".into(),
+                            value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
+                        }])
+                        .collect(),
                 ),
                 Mode::Draining503 => (
                     503,
@@ -184,7 +187,11 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
             if seen.insert(req.call_id().clone()) {
                 continue; // first transmission lost
             }
-            let opts = GenerateResponseOpts { to_tag: Some("uas".into()), ..Default::default() };
+            let opts = GenerateResponseOpts {
+                to_tag: Some("uas".into()),
+                extra_headers: crate::common::options_capabilities(),
+                ..Default::default()
+            };
             let resp = generate_response(&req, 200, "OK", &opts);
             let _ = worker_ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }

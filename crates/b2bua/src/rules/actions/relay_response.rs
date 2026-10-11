@@ -161,15 +161,18 @@ impl ActionExecutor<'_> {
                 ));
             // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
             // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
-            // response's own, carried through, unless the call declares one.
-            // Non-INVITE 2xx (PRACK/UPDATE) and provisionals keep verbatim
-            // passthrough.
+            // response's own, carried through, unless the call declares one;
+            // a 2xx to OPTIONS states this UA's own set (§11.2). Other
+            // responses keep verbatim passthrough.
             if cseq_method == "INVITE" && (200..300).contains(&status) {
                 let caps = capabilities::relaying_for_leg(call, target_leg, &transparent_headers);
-                relay::stamp_a_facing_invite_advert(
+                relay::stamp_advertisement(&mut transparent_headers, &transform.add_headers, &caps);
+            }
+            if cseq_method == "OPTIONS" && (200..300).contains(&status) {
+                relay::stamp_advertisement(
                     &mut transparent_headers,
                     &transform.add_headers,
-                    &caps,
+                    &self.config.node_capabilities,
                 );
             }
             // A reliable provisional leaves toward the originator under
@@ -369,11 +372,7 @@ impl ActionExecutor<'_> {
             // (Supported:100rel) negotiation survives.
             if (200..300).contains(&status) {
                 let caps = capabilities::relaying(call, Face::Originator, &passthrough);
-                relay::stamp_a_facing_invite_advert(
-                    &mut passthrough,
-                    &transform.add_headers,
-                    &caps,
-                );
+                relay::stamp_advertisement(&mut passthrough, &transform.add_headers, &caps);
             }
             let shown = self.own_relayed_rseq(
                 call,
@@ -455,7 +454,7 @@ impl ActionExecutor<'_> {
         // (RFC 3261 §13.2.1/§20.37); provisionals keep passthrough.
         if (200..300).contains(&status) {
             let caps = capabilities::relaying(call, Face::Originator, &passthrough);
-            relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
+            relay::stamp_advertisement(&mut passthrough, &transform.add_headers, &caps);
         }
         let shown = self.own_relayed_rseq(
             call,

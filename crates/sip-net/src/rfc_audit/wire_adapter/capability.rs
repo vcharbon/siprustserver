@@ -11,8 +11,7 @@ pub(super) const LIVE: &[Live] = &[
     Live::emitter(RuleId::UnsupportedExtension420, unsupported_extension_420),
     Live::emitter(RuleId::Unsupported415Accepts, unsupported_415_accepts),
     Live::emitter(RuleId::UnsupportedExtension421, unsupported_extension_421),
-    // Advisory: §11.2's header set is a SHOULD.
-    Live::emitter(RuleId::OptionsResponseEchoes, options_response_echoes).advisory(),
+    Live::emitter(RuleId::OptionsResponseEchoes, options_response_echoes),
     Live::emitter(RuleId::NoRequireOnCancelOrAck, no_require_on_cancel_or_ack),
 ];
 

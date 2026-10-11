@@ -106,7 +106,7 @@ const REANSWER: &str = "v=0\r\no=bob 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127
 /// bare and composable by the SUT alone.
 ///
 /// The crossing is genuine: bob sends his first provisional only with his BYE
-/// 200, so the CANCEL — held for that provisional (ADR-0028) — leaves the SUT
+/// 200, so the CANCEL — held for that provisional (RFC 3261 §9.1) — leaves the SUT
 /// as the call is reaped and reaches bob one transit after he has already
 /// answered 200 (§9.2 lets a UAS that has answered ignore the CANCEL's
 /// intent and answer the CANCEL itself 200).

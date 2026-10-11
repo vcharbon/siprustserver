@@ -1,6 +1,7 @@
 //! `TransactionLayer::seed` / `reoffer` (ADR-0014 materialisation): the
-//! INVITE transactions a call taken over from a peer names are rebuilt here as
-//! `Proceeding` and then behave as if this layer had seen the first copy — the
+//! INVITE transactions a call taken over from a peer names are rebuilt here —
+//! a client INVITE `Proceeding` when the record holds a provisional for it,
+//! `Trying` otherwise — and then behave as if this layer had seen the first copy — the
 //! client seed ACKs and Timer-D-holds a non-2xx final, the server seed ladders
 //! its final on Timer G and answers a CANCEL 200 + 487 — and the datagram that
 //! arrived before them is re-offered against them.
@@ -64,6 +65,17 @@ fn client_seed(branch: &str, call_id: &str) -> TxnSeed {
     TxnSeed::ClientInvite {
         invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
         dest: addr(PEER),
+        provisional: true,
+    }
+}
+
+/// A client INVITE seed whose record holds no provisional: a CANCEL on it
+/// waits for one (RFC 3261 §9.1).
+fn unanswered_client_seed(branch: &str, call_id: &str) -> TxnSeed {
+    TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
     }
 }
 
@@ -489,4 +501,34 @@ async fn a_seeded_100_echoes_the_retransmissions_timestamp() {
     elapse_ms(60).await;
     assert_eq!(stamps(stack.drain_peer()), ["812.5"], "the cached 100 still echoes it");
     assert!(stack.drain_events().is_empty(), "a retransmission surfaces nothing");
+}
+
+/// A client INVITE seeded with no provisional on record holds the TU's CANCEL
+/// until the branch's first provisional (RFC 3261 §9.1), then sends it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_on_a_seed_with_no_provisional_waits_for_one() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-seed-unanswered";
+    let call_id = "seed-unanswered";
+    stack.txn.seed(CALL_REF, vec![unanswered_client_seed(branch, call_id)]).await.unwrap();
+    let cancel = parse_request(&format!(
+        "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Max-Forwards: 70\n\
+         From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
+         To: <sip:bob@192.0.2.20:5060>\n\
+         Call-ID: {call_id}\n\
+         CSeq: 1 CANCEL\n\
+         Content-Length: 0\n\n"
+    ));
+    stack.txn.send_request(cancel, addr(PEER), sip_txn::TxnKind::Invite).await.unwrap();
+    elapse_ms(5_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL before a 1xx");
+
+    stack.inject(&response_bytes(180, "Ringing", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the 1xx releases it");
+    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
 }

@@ -54,6 +54,14 @@ async fn scene(name: &str, rig: Option<&WitnessRig>) -> B2buaScene {
         )
         .on_party("alice"),
     );
+    s.h.waive(
+        WaiverScope::rule(
+            "cancel-after-1xx",
+            "alice's burst CANCELs each re-INVITE in the instant it leaves, before any \
+             provisional (RFC 3261 §9.1): the flood under test",
+        )
+        .on_party("alice"),
+    );
     // An accepted SUT deviation, charged to the b2bua at each re-INVITE.
     s.h.waive(
         WaiverScope::rule(

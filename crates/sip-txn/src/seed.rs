@@ -17,7 +17,9 @@ pub enum TxnSeed {
     /// A client INVITE this side sent toward `dest`, still awaiting its final:
     /// keyed by the INVITE's top-Via branch and attributed from its Via `cr` /
     /// `lg` params. The INVITE bound is armed; no retransmit ladder runs.
-    ClientInvite { invite: SipRequest, dest: SocketAddr },
+    /// `provisional` says the record holds a provisional for it: the seed opens
+    /// `Proceeding`, else `Trying`, where a CANCEL waits for one (RFC 3261 §9.1).
+    ClientInvite { invite: SipRequest, dest: SocketAddr, provisional: bool },
     /// A server INVITE this side admitted and has not answered: keyed by the
     /// top-Via `branch` and `sent_by` of the INVITE (RFC 3261 §17.2.3),
     /// matched by a CANCEL on them and `call_id` + `from_tag`. `to_tag` is the

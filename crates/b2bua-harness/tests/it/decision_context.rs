@@ -8,8 +8,8 @@
 //!      consults `/call/failure` (origin `transaction_timeout`) instead of
 //!      unconditionally terminating, so the backend can reroute — and the
 //!      consult says which timeout fired (`timeout_kind`): `response` when the
-//!      hop answered nothing at all (the tightened first-response bound,
-//!      ADR-0032 X1 amendment), `transaction` when it rang and went silent.
+//!      hop answered nothing at all (the first-response deadline, ADR-0044),
+//!      `transaction` when it rang and went silent.
 //!   3. A failover **Route is honored like an initial route**: its
 //!      `call_limiter` entries are admitted against the reroute target and the
 //!      holds are released at termination; a limiter reject on the failover
@@ -245,14 +245,13 @@ fn invites_delivered_to(report: &scenario_harness::RunReport, to: SocketAddr) ->
     report.entries().iter().filter(|e| e.to == to && e.raw.starts_with(b"INVITE ")).count()
 }
 
-/// The dead-hop case under a tightened first-response bound
-/// (`invite_first_response_timeout_sec = 5`, ADR-0032 X1 amendment): carol
-/// answers NOTHING — not even a `100` — so the b-leg gives up at 5 s, not at
-/// Timer B, after exactly the three Timer A re-sends the bound buys
-/// (0.5 / 1.5 / 3.5 s), and the `/call/failure` consult says
-/// `timeout_kind: "response"` so the backend can route a dead hop apart from a
-/// silent callee. The reroute lands on bob, the call is bridged, hung up, and
-/// fully reaped.
+/// The dead-hop case under a first-response deadline
+/// (`invite_first_response_timeout_sec = 5`, ADR-0044): carol answers NOTHING
+/// — not even a `100` — so the TU gives up on the b-leg at 5 s, not at Timer
+/// B, and the `/call/failure` consult says `timeout_kind: "response"` so the
+/// backend can route a dead hop apart from a silent callee. carol's INVITE
+/// transaction keeps its RFC Timer A ladder to Timer B. The reroute lands on
+/// bob, the call is bridged, hung up, and fully reaped.
 #[tokio::test(start_paused = true)]
 async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response() {
     let h = Harness::with_transit_delay("first-response-bound-dead-hop", 1);
@@ -288,7 +287,7 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     let carol_uas = carol.receive("INVITE").await;
     let _ = &carol_uas; // never responds: the hop is dead
 
-    // The tightened bound fires at 5 s; advance just past it so the reroute
+    // The deadline fires at 5 s; advance just past it so the reroute
     // INVITE is answered inside its own Timer A window.
     h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
 
@@ -322,8 +321,8 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     let report = h.finish().await;
     assert_eq!(
         invites_delivered_to(&report, carol_addr),
-        4,
-        "original send + the three rungs a 5 s bound buys (0.5 / 1.5 / 3.5 s), none past it"
+        7,
+        "original send + the six Timer A rungs to Timer B (0.5 … 31.5 s)"
     );
     assert!(
         !report.entries().iter().any(|e| e.to == carol_addr && e.raw.starts_with(b"CANCEL ")),
@@ -331,8 +330,8 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     );
 }
 
-/// A ringing callee is unaffected by the tightened first-response bound: under
-/// the SAME 5 s bound carol's `180` at ~1 s swaps in the long INVITE bound
+/// A ringing callee is unaffected by the first-response deadline: under the
+/// SAME 5 s deadline carol's `180` at ~1 s swaps in the long INVITE bound
 /// (`invite_txn_timeout_sec`, shortened to 40 s here), so the b-leg survives
 /// the 5 s mark and gives up at 40 s with `timeout_kind: "transaction"` — it
 /// answered, then went silent. Reroute, bridge, hang up, reap.
@@ -372,16 +371,16 @@ async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut carol_uas = carol.receive("INVITE").await;
-    // Ring inside the first-response bound, after one Timer A rung.
+    // Ring inside the first-response deadline, after one Timer A rung.
     h.advance(Duration::from_secs(1)).await;
     carol_uas.respond(180, "Ringing").await;
     call.expect(180).await;
 
-    // Past the 5 s first-response bound: nothing fires, carol is ringing.
+    // Past the 5 s first-response deadline: nothing fires, carol is ringing.
     h.advance(Duration::from_secs(6)).await;
     assert!(
         captured.lock().unwrap().is_empty(),
-        "a ringing callee is not on the first-response bound"
+        "a ringing callee is not on the first-response deadline"
     );
     assert_eq!(b2bua.active_calls(), 1);
 

@@ -114,10 +114,10 @@ fn relay_lane_passing_a_cancel_through_is_not_judged() {
 }
 
 #[test]
-fn eager_cancel_is_advisory_and_noted_on_a_forwarding_lane() {
-    // The rule never gates (ADR-0028), and a B2BUA/AS lane authoring its
-    // own b-leg CANCEL is judged on it — no relay exemption here.
-    assert!(live(RuleId::CancelAfter1xx).force_advisory());
+fn eager_cancel_gates_on_a_forwarding_lane() {
+    // A B2BUA/AS lane authoring its own b-leg CANCEL is judged on it — no
+    // relay exemption here.
+    assert!(!live(RuleId::CancelAfter1xx).force_advisory());
     let evs = vec![
         recv(SUT, req("INVITE", "z9hG4bK-a", 1, None), ALICE, 0),
         sent(SUT, req("INVITE", "z9hG4bK-b", 1, None), BOB, 1),

@@ -201,7 +201,7 @@ enum Closer {
     Final,
     /// A CANCEL: its own final, or the final to the INVITE it names. Once that
     /// INVITE has its final the CANCEL is moot (§9.1) and its ladder stops
-    /// (ADR-0028 X4), whether or not the CANCEL itself was ever answered.
+    /// (ADR-0043 X4), whether or not the CANCEL itself was ever answered.
     Cancel,
     /// A class whose repeats are drawn by the wire, so nothing this vantage
     /// sees ends a ladder it never paced.

@@ -13,7 +13,7 @@ fn cancel_crossing_plan(
     ring: Duration,
     cancel_after: Duration,
 ) -> CallPlan {
-    let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+    let ringing = |s: &StateInner| s.leg("alice").rang();
     CallPlan {
         actors: vec![
             ActorSpec {
@@ -117,7 +117,8 @@ async fn cancel_answer_crossing_answer_wins() {
 }
 
 /// A CANCEL delivered to the callee in the same instant its answer timer fires
-/// (a 5 ms hop, the CANCEL sent exactly one ring after the INVITE): the callee
+/// (a 5 ms hop, the CANCEL sent one ring less the 180's round trip after the
+/// 180 lands, so one ring after the INVITE reached the callee): the callee
 /// reacts to the CANCEL first, 200s it and 487s the INVITE, and never sends a
 /// 2xx for the cancelled INVITE (RFC 3261 §9.2). Repeated, because task order
 /// within one instant must not decide it. This pins the in-process ordering
@@ -133,7 +134,7 @@ async fn a_cancel_landing_with_the_answer_timer_is_processed_first() {
         let ring = Duration::from_millis(20);
         let obs = ObservedState::new();
         let ctx = crate::realcall::CallCtx::new();
-        let call = cancel_crossing_plan(&alice, &bob, ring, ring);
+        let call = cancel_crossing_plan(&alice, &bob, ring, ring - Duration::from_millis(10));
         let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
         assert!(verdict.is_ok(), "run {i}: {verdict:?}");
         assert!(
@@ -156,7 +157,7 @@ async fn a_cancel_racing_the_answer_timer_across_threads_stays_rfc_clean() {
         let alice = h.agent("alice", "127.0.0.1:5060").await;
         let bob = h.agent("bob", "127.0.0.1:5070").await;
         let ring = Duration::from_millis(10);
-        let call = cancel_crossing_plan(&alice, &bob, ring, ring);
+        let call = cancel_crossing_plan(&alice, &bob, ring, ring - Duration::from_millis(10));
         let verdict = run_call(call, Duration::from_secs(5)).await;
         assert!(verdict.is_ok(), "run {i}: {verdict:?}");
         h.finish().await;
@@ -179,7 +180,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let ringing = |s: &StateInner| s.leg_at_least("alice", LegPhase::Early);
+    let ringing = |s: &StateInner| s.leg("alice").rang();
     let call = CallPlan {
         actors: vec![
             ActorSpec {
