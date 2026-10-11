@@ -283,6 +283,36 @@ async fn an_orphans_late_2xx_replaces_the_give_up_hold_with_timer_m() {
     let ok = response_bytes(200, "OK", "INVITE", branch, "callid-gave-up-2xx", true);
     stack.inject(&ok).await;
     elapse_ms(20).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "the 2xx is ACKed");
+    let out = stack.drain_peer();
+    assert_eq!(count_requests(&out, "ACK"), 1, "the 2xx is ACKed");
+    let bye = request_branch(&out, "BYE").expect("the unheld dialog is ended");
+    stack.inject(&response_bytes(200, "OK", "BYE", &bye, "callid-gave-up-2xx", true)).await;
+    elapse_ms(20).await;
     assert_eq!(stack.txn.metrics().timer_queue_len(), 1, "Timer M is the one timer holding it");
+}
+
+/// A provisional after the TU was told the hop is dead swaps in no long bound
+/// (ADR-0044): the transaction gives up at Timer B and is forgotten 64·T1
+/// later, not at the long INVITE bound.
+#[tokio::test(start_paused = true)]
+async fn a_provisional_after_the_dead_hop_report_keeps_timer_b() {
+    let mut stack = stack().await;
+    let branch = "z9hG4bK-reported-then-180";
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(5_100).await;
+    assert_eq!(timeouts(&stack.drain_events()), vec![TimeoutKind::Response]);
+    stack
+        .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    // Timer B at 32 s, then its 64·T1 hold: gone by 64 s; the long bound
+    // (40 s) plus that hold would keep it to 72 s.
+    elapse_ms(63_000 - 5_100).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 1, "held past Timer B");
+    elapse_ms(2_000).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "forgotten 64·T1 after Timer B");
+    assert!(timeouts(&stack.drain_events()).is_empty(), "reported once");
 }

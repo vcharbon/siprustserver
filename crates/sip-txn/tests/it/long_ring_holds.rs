@@ -234,8 +234,12 @@ async fn an_orphaned_invite_re_acks_every_2xx_repeat_after_a_long_ring() {
     // §9.2: the callee had already answered, so the CANCEL draws a 200 only.
     inject_answer(&stack, &cancel, 200, "OK").await;
     elapse_ms(20).await;
-    let first = ack_branches(&stack.drain_peer());
+    let out = stack.drain_peer();
+    let first = ack_branches(&out);
     assert_eq!(first.len(), 1, "the orphan ACKs the 2xx");
+    let bye = request_branch(&out, "BYE").expect("the unheld dialog is ended");
+    let call_id = invite.call_id().as_str().to_string();
+    stack.inject(&response_bytes(200, "OK", "BYE", &bye, &call_id, true)).await;
     assert_ne!(first[0], branch, "§17.1.1.3: the 2xx ACK is its own transaction");
 
     // The callee's 2xx repeats (§13.3.1.4: T1 doubling, capped at T2, until

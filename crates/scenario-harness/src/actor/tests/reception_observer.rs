@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::testkit::*;
 use crate::actor::*;
-use crate::{Harness, WaiverScope, OFFER_SDP};
+use crate::{Harness, OFFER_SDP};
 
 /// One recorded observation: the leg, the goal index, and the observed
 /// message's header list flattened VERBATIM — name casing, repeats and comma
@@ -253,13 +253,6 @@ async fn reception_observer_fires_when_the_matcher_fails() {
     let h = Harness::new("actor-reception-observer-matcher-fails").describe(
         "an ExpectRequest whose matcher demands an absent header still hands \
          the message to the observer, and still fails the run",
-    );
-    h.waive(
-        WaiverScope::rule(
-            "cancel-after-1xx",
-            "the run fails before bob answers; its teardown CANCELs a ring that drew nothing",
-        )
-        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;

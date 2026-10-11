@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use sip_message::{Method, SipMessage, SipRequest};
+use sip_message::{serialize, Method, SipMessage, SipRequest};
 use sip_net::UdpEndpoint;
 
 use crate::event::{TimeoutKind, TxnKind};
@@ -15,11 +15,11 @@ use crate::timers::ms;
 use super::client::{extract_via_custom_params, ViaMarks};
 use super::key::ServerTxnKey;
 use super::owner::Owner;
-use super::txn::{NewTransaction, Timer, TxnId, TxnState};
+use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnState};
 
 impl Owner {
-    /// Put every seed in the map of its role as a `Proceeding` INVITE
-    /// transaction and return how many went in. A seed whose branch already
+    /// Put every seed in the map of its role as an INVITE transaction, with the
+    /// CANCEL a client seed carries, and return how many went in. A seed whose branch already
     /// holds a transaction of its role is skipped and counted, never displaced: the occupant is
     /// either the datagram that triggered the materialisation or a transaction
     /// this node built itself, and both outrank a rebuild. Every seed is
@@ -29,7 +29,12 @@ impl Owner {
     /// runs from the seed: its backstop is an active INVITE's, measured from
     /// now, so a taken-over INVITE lives at most one bound longer than it
     /// would have on the node that sent or admitted it.
-    pub(super) fn do_seed(&mut self, call_ref: &str, seeds: Vec<TxnSeed>) -> usize {
+    pub(super) async fn do_seed(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        call_ref: &str,
+        seeds: Vec<TxnSeed>,
+    ) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         let mut seeded = 0usize;
         for seed in seeds {
@@ -53,8 +58,12 @@ impl Owner {
                 continue;
             }
             match seed {
-                TxnSeed::ClientInvite { invite, dest, provisional } => {
-                    self.seed_client_invite(call_ref, invite, dest, provisional)
+                TxnSeed::ClientInvite { invite, dest, provisional, cancel } => {
+                    let branch = invite.top_via().branch().unwrap_or_default().to_string();
+                    self.seed_client_invite(call_ref, invite, dest, provisional);
+                    if let Some(cancel) = cancel {
+                        self.seed_cancel(endpoint, &branch, cancel, dest, provisional).await;
+                    }
                 }
                 TxnSeed::ServerInvite {
                     branch,
@@ -95,11 +104,10 @@ impl Owner {
     /// A client INVITE keyed by `invite`'s branch, attributed from its Via as
     /// `do_send_request` attributes the INVITEs it sends (falling back to
     /// `call_ref` when the Via names no `cr`), with the INVITE bound armed and
-    /// no retransmit ladder: the node that sent it ran Timer A, and the peer's
-    /// own retransmissions reach this one. It opens `Proceeding` when the
-    /// record holds a provisional for it, else `Trying`, so a CANCEL on it
-    /// waits for one (RFC 3261 §9.1). The bound runs from the seed: the first
-    /// copy's send instant is not in the record.
+    /// no retransmit ladder: the node that sent it ran Timer A. It opens
+    /// `Proceeding` when the record holds a provisional for it, else `Trying`,
+    /// so a CANCEL on it waits for one (RFC 3261 §9.1). The bound runs from the
+    /// seed: the first copy's send instant is not in the record.
     fn seed_client_invite(
         &mut self,
         call_ref: &str,
@@ -128,6 +136,30 @@ impl Owner {
         });
         txn.timeout_kind = TimeoutKind::Transaction;
         txn.timeout_key = Some(bound);
+    }
+
+    /// Park the CANCEL the record says was sent for the seeded client INVITE
+    /// at `branch`: held until its first provisional when the record holds
+    /// none (RFC 3261 §9.1), else put on the wire now on its Timer-E ladder —
+    /// the node that sent it is gone, and a repeat of a CANCEL is harmless.
+    async fn seed_cancel(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+        cancel: SipRequest,
+        dest: SocketAddr,
+        provisional: bool,
+    ) {
+        let buf = bytes::Bytes::from(serialize(&SipMessage::Request(cancel)));
+        let wire = if provisional { CancelWire::Sent } else { CancelWire::Held };
+        let Some(txn) = self.clients.get_mut(branch) else { return };
+        txn.held_cancel = Some(HeldCancel::new(buf.clone(), dest, wire));
+        if provisional {
+            self.send_buffer(endpoint, &buf, dest).await;
+            self.arm_cancel_retransmit(branch);
+        } else {
+            self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Process `message` as an inbound datagram against the transactions now

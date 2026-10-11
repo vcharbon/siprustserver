@@ -22,6 +22,7 @@ mod dual_face;
 mod failover;
 mod fault_primitives;
 mod forward_flush_never_regresses_backup_progress;
+mod held_cancel_takeover;
 mod inflight_resend;
 mod limiter_ha;
 mod limiter_refresh_batch;

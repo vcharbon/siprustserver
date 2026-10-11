@@ -346,3 +346,52 @@ fn an_unreadable_handle_is_skipped() {
     assert_eq!(server_branches(&seeds), vec![(A_BRANCH.to_string(), true)]);
     assert!(client_branches(&seeds).is_empty());
 }
+
+/// The b-leg client seed's `provisional` flag and the `Reason` lines of the
+/// CANCEL it carries (`None`: no CANCEL).
+fn client_cancel(seeds: &[TxnSeed]) -> (bool, Option<Vec<String>>) {
+    seeds
+        .iter()
+        .find_map(|s| match s {
+            TxnSeed::ClientInvite { provisional, cancel, .. } => Some((
+                *provisional,
+                cancel.as_ref().map(|c| {
+                    assert_eq!(c.method(), "CANCEL");
+                    c.raw(header::HeaderName::Reason).map(str::to_string).collect()
+                }),
+            )),
+            TxnSeed::ServerInvite { .. } => None,
+        })
+        .expect("a client seed")
+}
+
+/// A b-leg INVITE with no dialog on record drew no provisional the record
+/// knows of: its seed opens `Trying`, so a CANCEL on it waits (RFC 3261 §9.1).
+#[test]
+fn a_b_leg_with_no_dialog_seeds_its_invite_with_no_provisional() {
+    let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
+    assert_eq!(client_cancel(&seeds_for(&call)), (false, None));
+}
+
+/// An early dialog is the record of a provisional.
+#[test]
+fn an_early_b_leg_seeds_its_invite_with_a_provisional() {
+    let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+    assert_eq!(client_cancel(&seeds_for(&call)), (true, None));
+}
+
+/// A CANCEL the record says was sent with no provisional on record is still
+/// held: it rides the seed, stating the `Reason` it stated. One sent after a
+/// provisional is on the wire already; the early dialog it is ending still
+/// records that provisional.
+#[test]
+fn a_cancelled_b_leg_seeds_its_held_cancel_with_the_stated_reason() {
+    let reason = vec![("Reason".to_string(), "Q.850;cause=16".to_string())];
+    let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
+    let call = call::helpers::record_cancel_sent(call, "b-1", reason.clone());
+    assert_eq!(client_cancel(&seeds_for(&call)), (false, Some(vec!["Q.850;cause=16".to_string()])));
+
+    let call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+    let call = call::helpers::record_cancel_sent(call, "b-1", reason);
+    assert_eq!(client_cancel(&seeds_for(&call)), (true, None));
+}

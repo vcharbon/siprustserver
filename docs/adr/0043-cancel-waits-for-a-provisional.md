@@ -38,10 +38,8 @@ INVITE transaction:
   draws a provisional never sees it: the INVITE ends at Timer B, is held 64·T1
   past its `Timeout`, and the held CANCEL dies with it.
 - **in `Proceeding`** goes on the wire at once.
-- **in `Completed`** is suppressed: the final already resolved the request
-  (§9.2).
-- **matching no transaction** is sent raw: a takeover-restored call CANCELs a
-  b-leg whose INVITE transaction lived on the failed peer.
+- **in `Completed` or `Accepted`, or matching no transaction** (a 2xx deletes
+  it) is suppressed: the final already resolved the request (§9.2).
 
 A newer CANCEL replaces a held one. Counters: `cancels_held`,
 `held_cancels_flushed`, `held_cancels_dropped` (never on the wire: a final came
@@ -49,9 +47,13 @@ first, or the transaction ended with no provisional); held == flushed +
 dropped.
 
 A client INVITE rebuilt from a replicated record (ADR-0014) opens `Proceeding`
-only when the record holds a provisional for it — an early dialog on the
-initial INVITE's leg — and `Trying` otherwise, so the survivor's CANCEL obeys
-the same wait.
+only when the record holds a provisional for it — a dialog on the initial
+INVITE's leg — and `Trying` otherwise, so the survivor's CANCEL obeys the same
+wait. A CANCEL the record says was sent with no provisional on record is still
+held when the node that sent it dies: the record keeps the headers it stated
+(`OutboundInvite::cancel_headers`), and the seed carries it rebuilt, held on
+the `Trying` transaction until the callee's first provisional reaches the
+survivor.
 
 ### X2 — The caller is answered at once
 
@@ -84,7 +86,9 @@ single send. Counter: `cancel_retransmits`.
 - Behind a 100-absorbing proxy, a callee that has sent only a 100 is not
   CANCELed: its INVITE resolves on the callee's own final or the worker's
   Timer B, and the call that abandoned it rides its terminating backstop
-  until that leg resolves.
+  until that leg resolves. A 2xx it sends after the call was released is
+  ACKed and the dialog it created BYEd by the orphaned transaction
+  (ADR-0034).
 - A re-INVITE round the survivor of a takeover rebuilt with no provisional on
   record is never CANCELed by it.
 
@@ -96,5 +100,7 @@ single send. Counter: `cancel_retransmits`.
 `b2bua-harness/tests/it/cancel_before_provisional.rs`,
 `failover-harness/tests/it/silent_callee_no_answer_via_lb.rs`,
 `failover-harness/tests/it/inflight_resend.rs`,
+`failover-harness/tests/it/held_cancel_takeover.rs`,
+`b2bua/src/router/materialise/seeds/tests.rs`,
 `rfc-rules/src/rules/cancel/tests.rs`
 (`a_pre_1xx_cancel_is_violated_however_late`).

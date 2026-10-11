@@ -66,6 +66,7 @@ fn client_seed(branch: &str, call_id: &str) -> TxnSeed {
         invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
         dest: addr(PEER),
         provisional: true,
+        cancel: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn unanswered_client_seed(branch: &str, call_id: &str) -> TxnSeed {
         invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
         dest: addr(PEER),
         provisional: false,
+        cancel: None,
     }
 }
 
@@ -531,4 +533,71 @@ async fn a_cancel_on_a_seed_with_no_provisional_waits_for_one() {
     stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+}
+
+/// A CANCEL the record says was sent rides its seed: on a seed with no
+/// provisional on record it is held until the branch's first provisional
+/// (RFC 3261 §9.1), then sent.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_cancel_with_no_provisional_on_record_waits_for_one() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-seed-cancel-held";
+    let call_id = "seed-cancel-held";
+    let seed = TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
+        dest: addr(PEER),
+        provisional: false,
+        cancel: Some(seed_cancel(branch, call_id)),
+    };
+    stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
+    elapse_ms(5_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "no CANCEL before a 1xx");
+
+    stack.inject(&response_bytes(180, "Ringing", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the 1xx releases it");
+    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+}
+
+/// On a seed whose record holds a provisional, the CANCEL the record says was
+/// sent goes on the wire at the seed and rides its Timer-E ladder until
+/// answered.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_cancel_with_a_provisional_on_record_is_sent_at_the_seed() {
+    let stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-seed-cancel-sent";
+    let call_id = "seed-cancel-sent";
+    let seed = TxnSeed::ClientInvite {
+        invite: invite_with_cr_lg(CALL_REF, call_id, branch, "b-1"),
+        dest: addr(PEER),
+        provisional: true,
+        cancel: Some(seed_cancel(branch, call_id)),
+    };
+    stack.txn.seed(CALL_REF, vec![seed]).await.unwrap();
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "sent at the seed");
+    elapse_ms(600).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "its first Timer-E rung");
+    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, call_id, true)).await;
+    stack.inject(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+    elapse_ms(5_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0, "the answer ends the ladder");
+}
+
+/// The CANCEL of the INVITE [`invite_with_cr_lg`] builds on `branch`.
+fn seed_cancel(branch: &str, call_id: &str) -> SipRequest {
+    parse_request(&format!(
+        "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
+         Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={CALL_REF};lg=b-1\n\
+         Max-Forwards: 70\n\
+         From: <sip:b2bua@127.0.0.1:15071>;tag=b2bua-b-1\n\
+         To: <sip:bob@192.0.2.20:5060>\n\
+         Call-ID: {call_id}\n\
+         CSeq: 1 CANCEL\n\
+         Content-Length: 0\n\n"
+    ))
 }

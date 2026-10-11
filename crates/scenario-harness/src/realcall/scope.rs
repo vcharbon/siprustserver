@@ -27,9 +27,11 @@ use crate::{CancelHandle, Dialog};
 /// What teardown should do for a call, given how far it got. The dialog/cancel
 /// payloads are boxed so the unit variants don't bloat the enum.
 enum TeardownState {
-    /// Nothing to tear down yet (no INVITE sent, or already cleaned up).
+    /// Nothing to tear down yet (no INVITE sent, or it drew no provisional —
+    /// a CANCEL waits for one, RFC 3261 §9.1 — or already cleaned up).
     Idle,
-    /// INVITE sent, not yet confirmed → CANCEL (RFC 3261 §9.1).
+    /// INVITE sent and answered provisionally, not yet confirmed → CANCEL
+    /// (RFC 3261 §9.1).
     Early(Box<CancelHandle>),
     /// Dialog confirmed → BYE (RFC 3261 §15).
     Confirmed(Box<Dialog>),
@@ -48,9 +50,19 @@ impl CallScope {
         Self { inner: Mutex::new(TeardownState::Idle) }
     }
 
-    /// Register that the call is in its early phase — teardown will CANCEL.
+    /// Register that the call's INVITE drew a provisional — teardown will
+    /// CANCEL it (RFC 3261 §9.1).
     pub fn set_early(&self, handle: CancelHandle) {
         *self.inner.lock().unwrap() = TeardownState::Early(Box::new(handle));
+    }
+
+    /// Forget the early phase: the INVITE it named was answered and replaced by
+    /// one that has drawn no provisional yet.
+    pub fn clear_early(&self) {
+        let mut g = self.inner.lock().unwrap();
+        if matches!(*g, TeardownState::Early(_)) {
+            *g = TeardownState::Idle;
+        }
     }
 
     /// Register/refresh the confirmed dialog — teardown will BYE. Call again

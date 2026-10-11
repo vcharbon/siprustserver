@@ -492,10 +492,11 @@ impl ActionExecutor<'_> {
         relayed: &[SipHeader],
     ) {
         self.settle_owed_pracks(call, fx, Owed::Leg(leg_id), Settle::Ending);
-        if let Some(e) = self.cancel_to_leg(call, leg_id, relayed) {
-            fx.outbound.push(e);
-        }
-        *call = call::helpers::record_cancel_sent(call.clone(), leg_id);
+        let media = call.b_legs.iter().find(|l| l.leg_id == leg_id).is_some_and(is_media);
+        let stated = if media { without_reason(relayed) } else { relayed.to_vec() };
+        fx.outbound.extend(self.cancel_to_leg(call, leg_id, &stated));
+        let stated = stated.iter().map(|h| (h.name.as_str().into(), h.value.as_str().into()));
+        *call = call::helpers::record_cancel_sent(call.clone(), leg_id, stated.collect());
     }
 
     fn cancel_to_leg(
@@ -511,10 +512,9 @@ impl ActionExecutor<'_> {
             SipMessage::Request(r) => r,
             _ => return None,
         };
-        let relayed = if is_media(leg) { without_reason(relayed) } else { relayed.to_vec() };
         let cancel = generators::generate_cancel(
             &InviteClientTransactionHandle { original_invite: req },
-            &relayed,
+            relayed,
         );
         // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
         // (the callee's advertised address). When the b-leg egresses through the

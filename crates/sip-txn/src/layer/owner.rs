@@ -515,7 +515,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::Seed { call_ref, seeds, reply } => {
-                let seeded = self.do_seed(&call_ref, seeds);
+                let seeded = self.do_seed(endpoint, &call_ref, seeds).await;
                 let _ = reply.send(seeded);
             }
             Command::Reoffer { message, src, reply } => {

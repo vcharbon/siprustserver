@@ -356,3 +356,32 @@ async fn cancel_racing_a_completed_final_is_suppressed() {
     assert_eq!(stack.txn.metrics().cancels_suppressed_on_final(), 1);
     assert_eq!(stack.txn.metrics().cancels_held(), 0);
 }
+
+/// A 2xx with no provisional ends the INVITE client txn; a CANCEL the
+/// TU emits after it (the TU had not yet processed the 2xx) must not reach the
+/// wire (RFC 3261 §9.1: no provisional was received, and a final was).
+#[tokio::test(start_paused = true)]
+async fn a_cancel_after_a_bare_2xx_never_reaches_the_wire() {
+    let stack = Stack::build(5, 64, 64).await;
+    let branch = "z9hG4bK-bare-2xx";
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(20).await;
+    let _ = stack.drain_peer();
+    stack.inject(&response_bytes(200, "OK", "INVITE", branch, "handle-shape-test", true)).await;
+    elapse_ms(20).await;
+    stack
+        .txn
+        .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(100).await;
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "CANCEL"),
+        0,
+        "no CANCEL on a branch that drew no provisional and already took its 2xx"
+    );
+}

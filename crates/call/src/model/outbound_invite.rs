@@ -22,6 +22,10 @@ pub struct OutboundInvite {
     pub final_received: Option<u16>,
     /// This stack sent a CANCEL of the INVITE (§9.1).
     pub cancel_sent: bool,
+    /// The headers that CANCEL stated beyond the ones it echoes from the
+    /// INVITE (a `Reason`, RFC 3326), so a node that takes the call over
+    /// rebuilds the same CANCEL.
+    pub cancel_headers: Vec<(String, String)>,
 }
 
 impl OutboundInvite {
@@ -34,6 +38,7 @@ impl OutboundInvite {
             txn,
             final_received: None,
             cancel_sent: false,
+            cancel_headers: Vec::new(),
         }
     }
 

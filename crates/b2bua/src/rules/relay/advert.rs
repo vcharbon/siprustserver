@@ -51,6 +51,24 @@ pub fn stamp_advertisement(
     }
 }
 
+/// Make a relayed 2xx to OPTIONS state `capabilities`, this UA's own set
+/// (RFC 3261 §11.2): the responder's `Allow` / `Supported` / `Accept` are
+/// replaced as [`stamp_advertisement`] does, and its `Accept-Encoding` /
+/// `Accept-Language`, which the set does not state, dropped — a line the
+/// firing rule stamped stays.
+pub fn stamp_options_advertisement(
+    headers: &mut Vec<MsgHeader>,
+    rule_stamped: &[Entry],
+    capabilities: &CapabilitySet,
+) {
+    headers.retain(|h| {
+        let unstated = HeaderName::AcceptEncoding.matches(&h.name)
+            || HeaderName::AcceptLanguage.matches(&h.name);
+        !unstated || rule_stamped.iter().any(|e| e.name().matches(&h.name))
+    });
+    stamp_advertisement(headers, rule_stamped, capabilities);
+}
+
 #[cfg(test)]
 pub(crate) mod advertisement_tests {
     //! What the two B2BUA-owned INVITE mint points advertise (`Allow` /

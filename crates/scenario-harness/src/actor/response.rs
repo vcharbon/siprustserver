@@ -34,7 +34,8 @@ async fn absorb_establishing_provisional(
     status: u16,
     now: Instant,
 ) -> Result<(), StepError> {
-    // A 100 Trying is transaction plumbing, not an early dialog.
+    st.scope.set_early(inv.cancel_handle()); // any provisional lets teardown CANCEL (§9.1)
+                                             // A 100 Trying is transaction plumbing, not an early dialog.
     if status <= 100 {
         return Ok(());
     }
@@ -101,9 +102,8 @@ async fn absorb_establishing_failure(
         if let Some(responder) = st.challenge_responder.clone() {
             if inv.ack_and_resend_with_auth(resp, responder.as_ref()).await? {
                 st.auth_retries_left -= 1;
-                // Re-point the scope's early CANCEL handle at the retried
-                // transaction (its branch/CSeq changed).
-                st.scope.set_early(inv.cancel_handle());
+                // The retried transaction has drawn no provisional yet.
+                st.scope.clear_early();
                 return Ok(true);
             }
             // Responder DECLINED — surface the challenge as a plain deviation

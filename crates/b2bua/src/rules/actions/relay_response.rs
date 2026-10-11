@@ -169,7 +169,7 @@ impl ActionExecutor<'_> {
                 relay::stamp_advertisement(&mut transparent_headers, &transform.add_headers, &caps);
             }
             if cseq_method == "OPTIONS" && (200..300).contains(&status) {
-                relay::stamp_advertisement(
+                relay::stamp_options_advertisement(
                     &mut transparent_headers,
                     &transform.add_headers,
                     &self.config.node_capabilities,

@@ -288,8 +288,8 @@ pub(crate) struct MetricsInner {
     /// final first (cancellation moot, §9.2) or died with no provisional.
     pub held_cancels_dropped: AtomicU64,
     /// CANCELs suppressed at send because their INVITE client txn had already
-    /// taken its final (Completed) — §9.1/§9.2: a CANCEL has no effect on an
-    /// answered request; sending it would put a pre-1xx CANCEL on the wire.
+    /// taken its final or is gone — §9.1/§9.2: a CANCEL has no effect on an
+    /// answered request; sending it could put a pre-1xx CANCEL on the wire.
     pub cancels_suppressed_on_final: AtomicU64,
     /// Every repeat this layer put on the wire — a transaction-ladder rung or
     /// a cached response replayed to a retransmitted request — by
@@ -505,7 +505,7 @@ impl TransactionMetrics {
         self.inner.held_cancels_dropped.load(Ordering::Relaxed)
     }
 
-    /// CANCELs suppressed at send: the INVITE txn had already taken its final.
+    /// CANCELs suppressed at send: the INVITE txn had taken its final or was gone.
     pub fn cancels_suppressed_on_final(&self) -> u64 {
         self.inner.cancels_suppressed_on_final.load(Ordering::Relaxed)
     }

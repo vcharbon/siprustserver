@@ -156,6 +156,13 @@ pub fn parse_response(raw: &[u8]) -> sip_message::SipResponse {
 pub fn count_requests(msgs: &[SipMessage], method: &str) -> usize {
     msgs.iter().filter(|m| matches!(m, SipMessage::Request(r) if r.method() == method)).count()
 }
+/// The top-Via branch of the first `method` request in `msgs`.
+pub fn request_branch(msgs: &[SipMessage], method: &str) -> Option<String> {
+    msgs.iter().find_map(|m| match m {
+        SipMessage::Request(r) if r.method() == method => r.top_via().branch().map(str::to_string),
+        _ => None,
+    })
+}
 pub fn count_responses(msgs: &[SipMessage], status: u16) -> usize {
     msgs.iter().filter(|m| matches!(m, SipMessage::Response(r) if r.status() == status)).count()
 }

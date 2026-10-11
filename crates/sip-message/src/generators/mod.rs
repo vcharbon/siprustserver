@@ -24,6 +24,7 @@
 //!   - [`out_of_dialog`] — initial INVITE / one-shot requests (§8.1.1)
 //!   - [`in_dialog`] — in-dialog requests + route-set computation (§12.2.1.1)
 //!   - [`ack`] — ACK for 2xx (§13.2.2.4) and for non-2xx finals (§17.1.1.3)
+//!   - [`bye`] — BYE of a dialog a 2xx created that nothing above holds (§15.1.1)
 //!   - [`cancel`] — CANCEL of an outstanding INVITE (§9.1)
 //!   - [`response`] — UAS responses echoing the request (§8.2.6.2)
 //!   - [`relay`] — B2BUA relay transparency + rebuilt responses (§16.6)
@@ -31,6 +32,7 @@
 mod emit;
 
 pub mod ack;
+pub mod bye;
 pub mod cancel;
 pub mod capabilities;
 pub mod contact_policy;
@@ -47,6 +49,7 @@ pub use ack::{
     generate_ack_for_2xx, generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx,
     GenerateAckFor2xxOpts,
 };
+pub use bye::generate_bye_for_2xx_from_invite;
 pub use cancel::generate_cancel;
 pub use capabilities::{admitted_on, CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
 pub use contact_policy::{

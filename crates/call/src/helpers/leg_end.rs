@@ -85,13 +85,14 @@ pub fn abandon_leg(leg: &mut Leg) {
     }
 }
 
-/// Note this stack's CANCEL of `leg_id`'s INVITE leaving (RFC 3261 §9.1):
-/// the leg's INVITE is cancelled, and each early dialog it opened is ending,
-/// to end on the INVITE's final.
-pub fn record_cancel_sent(call: Call, leg_id: &str) -> Call {
+/// Note this stack's CANCEL of `leg_id`'s INVITE, stating `stated`, leaving
+/// (RFC 3261 §9.1): the leg's INVITE is cancelled, and each early dialog it
+/// opened is ending, to end on the INVITE's final.
+pub fn record_cancel_sent(call: Call, leg_id: &str, stated: Vec<(String, String)>) -> Call {
     let call = update_leg(call, leg_id, |l| {
         if let Some(invite) = l.outbound_invite.as_mut() {
             invite.cancel_sent = true;
+            invite.cancel_headers = stated;
         }
     });
     cancel_early_dialogs(call, leg_id)

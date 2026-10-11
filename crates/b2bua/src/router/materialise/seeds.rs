@@ -24,9 +24,10 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use call::{Call, Dialog, InviteTxnHandle, Leg, PendingRequest};
+use sip_message::generators::{generate_cancel, InviteClientTransactionHandle};
 use sip_message::header::{self, HeaderValue, SentBy, Via};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser, SipRequest, SipStr};
+use sip_message::{SipHeader, SipMessage, SipParser, SipRequest, SipStr};
 use sip_txn::TxnSeed;
 
 use crate::rules::relay::rebuild_a_leg_invite;
@@ -69,18 +70,23 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
         // its CANCEL sent or not (RFC 3261 §9.1).
         let initial = leg.outbound_invite.as_ref().filter(|i| i.final_received.is_none());
         let initial_in_flight = initial.is_some();
-        // An early dialog is the record of a provisional; a 100 leaves none.
-        let provisional = leg.state() == call::LegState::Early;
-        if let Some(seed) =
-            initial.and_then(|i| i.txn.as_ref()).and_then(|t| client_seed(t, provisional))
-        {
-            push(seed);
+        // A dialog of the leg is the record of a provisional — early, or
+        // ending on a CANCEL — and a 100 leaves none. A CANCEL sent with a
+        // provisional on record is on the wire already; one sent with none is
+        // still held, and rides the seed (RFC 3261 §9.1).
+        let provisional = !leg.dialogs.is_empty();
+        if let Some(i) = initial {
+            let cancel = (i.cancel_sent && !provisional).then_some(i.cancel_headers.as_slice());
+            if let Some(seed) = i.txn.as_ref().and_then(|t| client_seed(t, provisional, cancel)) {
+                push(seed);
+            }
         }
         for dialog in &leg.dialogs {
             if let Some(handle) = &dialog.pending_invite_txn {
                 if initial_in_flight || round_open(dialog, handle) {
                     // A re-INVITE round records no provisional.
-                    if let Some(seed) = client_seed(handle, initial_in_flight && provisional) {
+                    if let Some(seed) = client_seed(handle, initial_in_flight && provisional, None)
+                    {
                         push(seed);
                     }
                 }
@@ -142,14 +148,29 @@ fn pending_invite(p: &PendingRequest) -> bool {
 }
 
 /// The client seed for an INVITE handle: the retained INVITE, the wire
-/// destination it was sent to, and whether the record holds a provisional for
-/// it. `None` for a handle whose bytes or destination do not read — nothing
-/// can be rebuilt from it.
-fn client_seed(handle: &InviteTxnHandle, provisional: bool) -> Option<TxnSeed> {
+/// destination it was sent to, whether the record holds a provisional for it,
+/// and the CANCEL of it the record says was sent, rebuilt stating
+/// `cancel`'s headers (RFC 3261 §9.1). `None` for a handle whose bytes or
+/// destination do not read — nothing can be rebuilt from it.
+fn client_seed(
+    handle: &InviteTxnHandle,
+    provisional: bool,
+    cancel: Option<&[(String, String)]>,
+) -> Option<TxnSeed> {
     let invite = parse_request(&handle.original_invite)?;
     let dest: SocketAddr =
         format!("{}:{}", handle.destination.host, handle.destination.port).parse().ok()?;
-    Some(TxnSeed::ClientInvite { invite, dest, provisional })
+    let cancel = cancel.map(|stated| {
+        let stated: Vec<SipHeader> = stated
+            .iter()
+            .map(|(name, value)| SipHeader {
+                name: name.clone().into(),
+                value: value.clone().into(),
+            })
+            .collect();
+        generate_cancel(&InviteClientTransactionHandle { original_invite: invite.clone() }, &stated)
+    });
+    Some(TxnSeed::ClientInvite { invite, dest, provisional, cancel })
 }
 
 /// The server seed for a relayed INVITE pending on one of `leg`'s dialogs:

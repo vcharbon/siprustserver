@@ -103,3 +103,39 @@ async fn a_silent_callee_is_never_cancelled() {
 
     let _report = h.finish().await;
 }
+
+/// The caller CANCELs, bob (no provisional) answers 200 only after the
+/// call was reaped. The orphaned INVITE ACKs it; the dialog it confirms must
+/// still be ended with a BYE.
+#[tokio::test(start_paused = true)]
+async fn a_late_2xx_after_the_reap_is_byed() {
+    let h = Harness::new("b2bua-late-2xx-after-reap");
+    let alice = h.agent("alice", "127.0.0.1:5061").await;
+    let bob = h.agent("bob", "127.0.0.1:5071").await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    h.advance(Duration::from_millis(300)).await;
+    let mut b_inv = bob.receive("INVITE").await;
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    let _ = bob.drain().await;
+
+    b_inv
+        .respond(200, "OK")
+        .with_sdp("v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n")
+        .await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    h.advance(Duration::from_secs(5)).await;
+    let bye = bob.try_receive_tolerating("BYE", &["INVITE", "ACK"]).await;
+    assert!(bye.is_some(), "the dialog the late 2xx confirmed is ended with a BYE");
+    bye.unwrap().respond(200, "OK").await;
+    let _report = h.finish().await;
+}

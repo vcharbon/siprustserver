@@ -4,16 +4,15 @@
 //! once on the wire retransmits on its own Timer-E ladder as a sub-state of the INVITE
 //! txn, §17.1.2.2; an ACK goes raw and rides no timer, §13.2.2.4),
 //! Timer A/E retransmission, Timer B/F timeout, inbound-response matching
-//! (including the non-2xx auto-ACK + Timer D hold), and the orphaning of a
-//! released call's transactions, which then close their own obligations
-//! (ADR-0034: the 2xx ACK + Timer M hold among them). The
+//! (including the non-2xx auto-ACK + Timer D hold); the orphaning of a
+//! released call's transactions is `layer::orphan`'s (ADR-0034). The
 //! server (UAS) side does NOT live here — see `layer::server`; a client INVITE
 //! rebuilt from a record is `layer::seed`'s.
 
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use sip_message::generators::{generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx};
+use sip_message::generators::generate_ack_for_non_2xx;
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
@@ -59,14 +58,12 @@ impl Owner {
             // sees the CANCEL: the INVITE ends at Timer B. The held CANCEL is
             // cleared unsent when the txn takes a final first (§9.2 — the UAS
             // already answered; cancellation is moot).
-            // A CANCEL whose txn already took its final (Completed, Timer-D hold)
-            // is suppressed outright: §9.1/§9.2 — a CANCEL has no effect on a
-            // request the UAS already answered, and sending it puts a pre-1xx
-            // CANCEL on the wire when the final raced the caller's decision.
-            // A CANCEL matching NO txn is still sent raw: an absent txn is not
-            // proof the INVITE ended — a takeover-restored call CANCELs a b-leg
-            // whose INVITE client txn lived on the failed peer, and dropping it
-            // would orphan a protected ringing callee (ADR-0014).
+            // A CANCEL whose txn already took its final (Completed, Accepted)
+            // or is gone (a 2xx deletes it) is suppressed outright: §9.1/§9.2 —
+            // a CANCEL has no effect on a request the UAS already answered, and
+            // sending it can put a pre-1xx CANCEL on the wire when the final
+            // raced the caller's decision. A takeover rebuilds the INVITE txn a
+            // CANCEL names from the record (ADR-0043 X1).
             #[derive(PartialEq)]
             enum CancelGate {
                 Hold,
@@ -75,12 +72,11 @@ impl Owner {
             }
             let gate = if msg.method() == Method::Cancel {
                 match msg.top_via().branch().and_then(|b| self.clients.get(b)) {
-                    Some(t) if t.kind == TxnKind::Invite => match t.state {
+                    Some(t) if t.kind == TxnKind::Invite && t.state.is_active() => match t.state {
                         TxnState::Trying => CancelGate::Hold,
-                        TxnState::Completed => CancelGate::Suppress,
                         _ => CancelGate::Send,
                     },
-                    _ => CancelGate::Send,
+                    _ => CancelGate::Suppress,
                 }
             } else {
                 CancelGate::Send
@@ -113,10 +109,8 @@ impl Owner {
                     // A CANCEL reaching the wire on a live client INVITE txn is
                     // parked on it (superseding: the newest CANCEL is what the
                     // ladder replays) and
-                    // gets the Timer-E ladder (§17.1.2.2). A CANCEL matching no
-                    // live txn stays a raw single send: there is nothing to hang
-                    // a ladder on without re-keying the branch map. An ACK is
-                    // always raw (§13.2.2.4 — no timer of its own).
+                    // gets the Timer-E ladder (§17.1.2.2). An ACK is always raw
+                    // (§13.2.2.4 — no timer of its own).
                     let park = if msg.method() == Method::Cancel {
                         msg.top_via().branch().filter(|b| {
                             self.clients
@@ -250,7 +244,7 @@ impl Owner {
     /// (direct pass-through, first-provisional flush) plus the pass-through of
     /// a superseding CANCEL (a fresh TU datagram earns a fresh ladder even
     /// after a ceiling).
-    fn arm_cancel_retransmit(&mut self, branch: &str) {
+    pub(super) fn arm_cancel_retransmit(&mut self, branch: &str) {
         let Some(txn) = self.clients.get_mut(branch) else { return };
         if txn.cancel_retransmit_key.is_some() {
             return;
@@ -473,88 +467,6 @@ impl Owner {
         self.cancel_timer(t);
         self.cancel_timer(cr);
         self.hold(TxnRef::Client(branch), Hold::TimerD);
-    }
-
-    /// ACK the 2xx an orphaned INVITE client txn drew (RFC 3261 §13.2.2.4 —
-    /// the layer stands in for the UAC core the release removed) and hold the
-    /// txn in Accepted for Timer M (RFC 6026 §7.2), the ACK retained for the
-    /// 2xx's repeats. Without the original request (a seeded txn) there is
-    /// nothing to build the ACK from: the txn is deleted instead.
-    async fn accept_orphaned_2xx(
-        &mut self,
-        endpoint: &dyn UdpEndpoint,
-        branch: &str,
-        resp: &SipResponse,
-    ) {
-        let built = self.clients.get(branch).and_then(|t| {
-            let orig = t.original_request.as_ref()?;
-            let dest = t.destination?;
-            let ack = generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch());
-            Some((ack.image().clone(), dest))
-        });
-        let Some((ack, dest)) = built else {
-            self.delete_txn(TxnRef::Client(branch));
-            return;
-        };
-        self.send_buffer(endpoint, &ack, dest).await;
-        let keys = match self.clients.get_mut(branch) {
-            Some(txn) => {
-                txn.state = TxnState::Accepted;
-                txn.held_cancel = None;
-                txn.retransmit_buf = Some(ack);
-                txn.ladder = None;
-                (
-                    txn.retransmit_key.take(),
-                    txn.timeout_key.take(),
-                    txn.cancel_retransmit_key.take(),
-                )
-            }
-            None => (None, None, None),
-        };
-        self.cancel_timer(keys.0);
-        self.cancel_timer(keys.1);
-        self.cancel_timer(keys.2);
-        self.hold(TxnRef::Client(branch), Hold::TimerM);
-    }
-
-    /// Re-pass the retained ACK of an Accepted txn to a repeat of its 2xx
-    /// (RFC 3261 §13.2.2.4: the same ACK, every time).
-    async fn re_ack_accepted(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
-        let Some((ack, dest)) = self
-            .clients
-            .get(branch)
-            .and_then(|t| Some((t.retransmit_buf.clone()?, t.destination?)))
-        else {
-            return;
-        };
-        self.send_buffer(endpoint, &ack, dest).await;
-    }
-
-    /// Release every client transaction of `call_ref` from the call (ADR-0034).
-    /// Each is orphaned, never deleted: it keeps its timers and closes its own
-    /// obligations — the ACK a final still draws (RFC 3261 §17.1.1.3, §13.2.2.4),
-    /// the Timer D / Timer M re-ACK hold, Timer E to its final or Timer F — and
-    /// is purged by its own timer. Server transactions keep their §17.2 holds.
-    pub(super) fn do_cancel_txns_for_call(&mut self, call_ref: &str) {
-        // O(k-branches) over just this call's live branches (the lockstep index),
-        // not an O(total_txns) scan of the whole map.
-        let branches: Vec<String> = match self.txn_index.get(call_ref) {
-            Some(txns) => txns.client.iter().cloned().collect(),
-            None => return,
-        };
-        for branch in branches {
-            // A held CANCEL stays parked on the orphan: only the branch's
-            // first provisional sends it (§9.1).
-            match self.clients.get_mut(branch.as_str()) {
-                Some(t) => t.orphaned = true,
-                None => continue,
-            }
-            self.detach_from_call(TxnRef::Client(&branch));
-            self.metrics
-                .txn_orphaned_on_call_evict
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.metrics.orphaned_transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
     }
 
     pub(super) async fn handle_inbound_response(

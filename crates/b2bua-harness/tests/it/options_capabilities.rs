@@ -48,9 +48,14 @@ async fn a_relayed_options_200_states_the_stack_capabilities() {
         .respond(200, "OK")
         .with_header("Allow", "INVITE, ACK, BYE")
         .with_header("Accept", "application/sdp")
+        .with_header("Accept-Encoding", "gzip")
+        .with_header("Accept-Language", "en")
         .await;
     let ok = options.expect(200).await;
     assert_eq!(advertisement(&ok), CapabilitySet::default().lines());
+    for name in [HeaderName::AcceptEncoding, HeaderName::AcceptLanguage] {
+        assert_eq!(ok.raw(name.clone()).count(), 0, "bob's {name:?} describes bob, not this UA");
+    }
 
     dialog.bye().await.expect(200).await;
     bob.receive("BYE").await.respond(200, "OK").await;
