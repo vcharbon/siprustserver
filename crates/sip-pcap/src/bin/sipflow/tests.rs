@@ -1,4 +1,4 @@
-use super::walk::expand_flows_documents;
+use super::walk::{capture_of, expand_flows_documents};
 use std::path::{Path, PathBuf};
 
 /// A fresh, empty directory for one test, named after it.
@@ -83,4 +83,50 @@ fn a_symlink_cycle_ends_the_walk() {
     std::fs::remove_dir_all(&root).ok();
 
     assert_eq!(found, vec![document], "the document once, and the walk ends");
+}
+
+/// A capture linked into the corpus under another name is counted under the
+/// corpus's name for it, the name the cut gives the capture.
+#[test]
+fn a_linked_capture_is_counted_under_the_corpus_name() {
+    let root = scratch("alias");
+    let target = root.join("store").join("ingest-0042");
+    std::fs::create_dir_all(&target).expect("target dir");
+    std::fs::write(target.join("trace.anon.anon.flows.json"), "{}").expect("document");
+    let corpus = root.join("corpus");
+    std::fs::create_dir_all(&corpus).expect("corpus dir");
+    std::os::unix::fs::symlink(&target, corpus.join("trace.anon")).expect("alias");
+
+    let found = expand_flows_documents(std::slice::from_ref(&corpus));
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(found, vec![corpus.join("trace.anon").join("trace.anon.anon.flows.json")]);
+    assert_eq!(capture_of(&found[0]), "trace.anon");
+}
+
+/// A directory reached through many links is walked once: a lattice of links
+/// two wide and twenty-four deep ends at once instead of walking 2^24 paths.
+#[test]
+fn a_lattice_of_links_is_walked_once_per_directory() {
+    let root = scratch("lattice");
+    let depth = 24;
+    for level in 0..=depth {
+        std::fs::create_dir_all(root.join(format!("level_{level}"))).expect("level dir");
+    }
+    for level in 0..depth {
+        for side in ["left", "right"] {
+            std::os::unix::fs::symlink(
+                root.join(format!("level_{}", level + 1)),
+                root.join(format!("level_{level}")).join(side),
+            )
+            .expect("lattice link");
+        }
+    }
+    capture_dir(&root.join(format!("level_{depth}")).join("capture_5"));
+
+    let found = expand_flows_documents(std::slice::from_ref(&root.join("level_0")));
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(found.len(), 1, "the document once");
+    assert_eq!(capture_of(&found[0]), "capture_5");
 }

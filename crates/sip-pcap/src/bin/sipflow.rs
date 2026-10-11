@@ -53,7 +53,7 @@ use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 
 #[path = "sipflow/walk.rs"]
 mod walk;
-use walk::expand_flows_documents;
+use walk::{capture_of, expand_flows_documents};
 
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
@@ -807,11 +807,7 @@ fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::Rule
                     let mut local = Census::with_candidates(candidates);
                     while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                         let name = path.display().to_string();
-                        let capture = path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
+                        let capture = capture_of(path);
                         match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(
                             |t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()),
                         ) {
