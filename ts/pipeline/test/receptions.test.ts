@@ -1,6 +1,6 @@
 import { Bundle } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { receptionsOf } from "../src/receptions.js"
+import { receptionsOf, sentOf } from "../src/receptions.js"
 
 const line = (raw: string, over: Record<string, unknown> = {}): Bundle.RecordedMessage =>
   Bundle.decodeRecordedMessageSync({ at_us: 0, dir: "in", seq: 1, raw, ...over })
@@ -55,5 +55,16 @@ describe("receptionsOf", () => {
   it("leaves retransmissions out", () => {
     const got = receptionsOf(new Map([["A", [notify("active", "SIP/2.0 100 Trying", "s11"), notify("active", "SIP/2.0 100 Trying", undefined, true)]]]))
     expect(got.get("A")).toHaveLength(1)
+  })
+})
+
+describe("sentOf", () => {
+  it("states each datagram the leg's actor sent, its From included, retransmissions left out", () => {
+    const update = line(crlf(["UPDATE sip:t@192.0.2.2 SIP/2.0", "From: <sip:+339@h.example>;tag=x", "CSeq: 5 UPDATE", "Content-Length: 0", ""]), { dir: "out", step: "s20" })
+    const again = line(crlf(["UPDATE sip:t@192.0.2.2 SIP/2.0", "From: <sip:+339@h.example>;tag=x", "CSeq: 5 UPDATE", "Content-Length: 0", ""]), { dir: "out", repeat_of: 1 })
+    const received = line(crlf(["SIP/2.0 200 OK", "From: <sip:+339@h.example>;tag=x", "CSeq: 5 UPDATE", "Content-Length: 0", ""]))
+    const got = sentOf(new Map([["A", [update, again, received]], ["B", [received]]]))
+    expect(got.get("A")).toEqual([{ step: "s20", method: "UPDATE", cseqMethod: "UPDATE", from: "<sip:+339@h.example>;tag=x" }])
+    expect(got.has("B")).toBe(false)
   })
 })

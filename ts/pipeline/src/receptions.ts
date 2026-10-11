@@ -1,9 +1,9 @@
 /**
- * What each leg's scripted actor received, one summary per datagram, read off
- * the run's recording: which step claimed it, its start line and CSeq method,
- * and the subscription state, sipfrag status and session origin it carries.
- * The run-side facts a rule reads beside a confrontation row, which states
- * only the one message it compares.
+ * What each leg's scripted actor received, and what it sent, one summary per
+ * datagram, read off the run's recording: which step claimed it, its start line
+ * and CSeq method, its From, and the subscription state, sipfrag status and
+ * session origin it carries. The run-side facts a rule reads beside a
+ * confrontation row, which states only the one message it compares.
  */
 import type { Bundle } from "@sip/contracts"
 import type { Reception } from "./classifier.js"
@@ -26,6 +26,7 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
   const headers = headersInOrderRaw(head)
   const cseqMethod = (headerValuesOf(headers, "CSeq")[0] ?? "").trim().split(/\s+/)[1]?.toUpperCase() ?? ""
   const state = headerValuesOf(headers, "Subscription-State")[0]?.split(";")[0]?.trim().toLowerCase()
+  const from = headerValuesOf(headers, "From")[0]?.trim()
   const text = bodyText(message)
   const mediaType = (message.body?.content_type ?? "").split(";")[0]!.trim().toLowerCase()
   const frag = mediaType === "message/sipfrag" ? FRAG_STATUS.exec(text.trim()) : null
@@ -36,13 +37,24 @@ export const receptionOf = (message: Bundle.RecordedMessage): Reception | undefi
     cseqMethod,
     ...(state === undefined || state === "" ? {} : { subscriptionState: state }),
     ...(frag === null ? {} : { fragStatus: Number(frag[1]) }),
-    ...(origin === undefined ? {} : { origin })
+    ...(origin === undefined ? {} : { origin }),
+    ...(from === undefined || from === "" ? {} : { from })
   }
 }
 
 /** By leg, every datagram the leg's actor received, retransmissions left out, in wire order. */
 export const receptionsOf = (
   recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
+): ReadonlyMap<string, ReadonlyArray<Reception>> => summariesOf(recordings, "in")
+
+/** By leg, every datagram the leg's actor sent, retransmissions left out, in wire order. */
+export const sentOf = (
+  recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
+): ReadonlyMap<string, ReadonlyArray<Reception>> => summariesOf(recordings, "out")
+
+const summariesOf = (
+  recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>,
+  dir: Bundle.Dir
 ): ReadonlyMap<string, ReadonlyArray<Reception>> =>
   new Map(
     [...recordings]
@@ -50,7 +62,7 @@ export const receptionsOf = (
         [
           leg,
           recording.flatMap((m) => {
-            if (m.dir !== "in" || m.repeat_of !== undefined) return []
+            if (m.dir !== dir || m.repeat_of !== undefined) return []
             const reception = receptionOf(m)
             return reception === undefined ? [] : [reception]
           })

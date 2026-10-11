@@ -165,9 +165,15 @@ export interface RunShape {
    * no entry.
    */
   readonly receptions: ReadonlyMap<string, ReadonlyArray<Reception>>
+  /**
+   * By leg, every datagram the leg's scripted actor SENT, retransmissions left
+   * out, in wire order, read as {@link receptions} reads what it received. A
+   * leg that sent none has no entry.
+   */
+  readonly sent: ReadonlyMap<string, ReadonlyArray<Reception>>
 }
 
-/** One datagram a leg's scripted actor received, as a rule reads it. */
+/** One datagram a leg's scripted actor received or sent, as a rule reads it. */
 export interface Reception {
   /** The flow step the run attributed it to; absent where no step claimed it. */
   readonly step?: string
@@ -183,6 +189,8 @@ export interface Reception {
   readonly fragStatus?: number
   /** The first `o=` line of a session description it carries (RFC 4566 §5.2), as written. */
   readonly origin?: string
+  /** The From header's value, as written (RFC 3261 §20.20). */
+  readonly from?: string
 }
 
 /** What one lane's rule lists say about one probe. */
