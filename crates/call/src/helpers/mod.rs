@@ -90,9 +90,9 @@ pub use prack_disposition::{
 pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
     acknowledge_shown, admits_reliable_provisional, advance_shown_ladder, arrival,
-    cease_shown_ladder, described_before, invite_open, leg_shown, note_responder_ack,
-    own_prack_branch, pending_invite_answered_by, provisional, record_provisional, responder_of,
-    show_provisional, shown_as, shown_emission, start_shown_ladder, starts_shown_sequence, Arrival,
+    cease_shown_ladder, described_before, leg_shown, note_responder_ack, own_prack_branch,
+    pending_invite_answered_by, provisional, record_provisional, responder_of, show_provisional,
+    shown_as, shown_emission, start_shown_ladder, starts_shown_sequence, Arrival,
 };
 pub use resolved::{response_origin, Resolved, ResponseFacts, ResponseOrigin, UNRESOLVED};
 pub use services::{

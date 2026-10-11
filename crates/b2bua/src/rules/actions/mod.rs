@@ -15,6 +15,7 @@
 //! - `prack` — the PRACKs this stack owes responders, settled in one step
 //! - `provisional_arrival` — the engine's record of a reliable provisional
 //!   as it arrives, before the rules
+//! - `show_provisional` — a reliable provisional shown under this stack's number
 //! - `respond` — response synthesis toward a leg (finals, provisionals)
 //! - `ladder` — the dialog-level retransmission ladders the framework owns
 //!   (ADR-0032 X4): arm / repeat / discharge, keyed by obligation
@@ -40,6 +41,7 @@ mod relay_response;
 mod respond;
 mod retire;
 mod select;
+mod show_provisional;
 mod straggler;
 mod teardown;
 mod unrelayed;
@@ -54,6 +56,7 @@ use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use b2bua_sdk::model::{RuleAction, RuleContext};
 
 pub use prack::{Owed, Settle};
+pub(crate) use provisional_arrival::invite_open;
 
 /// Executes rule actions against a working copy of the call.
 pub struct ActionExecutor<'a> {

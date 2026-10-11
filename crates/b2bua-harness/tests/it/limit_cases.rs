@@ -327,7 +327,13 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
         .await;
 
     // alice INVITEs advertising reliable provisionals.
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
     assert_eq!(store.stats().current_total, 1, "in-setup call holds one limiter slot");
 

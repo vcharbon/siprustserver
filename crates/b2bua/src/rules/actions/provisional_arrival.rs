@@ -13,6 +13,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use crate::rules::relay;
 use b2bua_sdk::event::CallEvent;
 
+use super::select::invite_cseq_from_handle;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -33,7 +34,7 @@ impl ActionExecutor<'_> {
         if arrival == Arrival::Repeat {
             return Some(arrival);
         }
-        if !invite_open_for(call, &id) {
+        if !invite_open(call, &id) {
             return None;
         }
         if arrival == Arrival::OutOfOrder {
@@ -82,29 +83,27 @@ fn reliable_provisional(resp: &SipResponse, leg_id: &str) -> Option<ProvisionalI
     })
 }
 
-/// Whether the INVITE `id` answers is still open on its leg: the INVITE the
-/// leg was dialled with before its final, or a re-INVITE in flight on the
-/// dialog the responder's tag names.
-fn invite_open_for(call: &Call, id: &ProvisionalId) -> bool {
+/// Whether the INVITE `id` answers still awaits its final on the responder's
+/// leg: the INVITE the leg was dialled with before its final, or a re-INVITE
+/// in flight on the dialog the responder's tag names — relayed there and
+/// awaiting its final, or this stack's own, the round its client-transaction
+/// handle holds still open (no 2xx taken). The one reading the screen, the
+/// PRACK step and the model invariants share.
+pub(crate) fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
     let Some(leg) = call::helpers::find_leg(call, &id.leg) else { return false };
-    match leg.outbound_invite.as_ref().filter(|i| i.cseq == id.invite_cseq.as_i64()) {
-        Some(invite) => invite.final_received.is_none(),
-        None => reinvite_in_flight(leg, id),
-    }
-}
-
-/// Whether the re-INVITE `id` answers is in flight on the responder's
-/// confirmed dialog: relayed there and awaiting its final, or the latest
-/// INVITE this stack sent on it.
-fn reinvite_in_flight(leg: &call::Leg, id: &ProvisionalId) -> bool {
     let cseq = id.invite_cseq.as_i64();
+    if let Some(invite) = leg.outbound_invite.as_ref().filter(|i| i.cseq == cseq) {
+        return invite.final_received.is_none();
+    }
     call::helpers::dialog_with_peer(leg, &id.responder_tag).is_some_and(|d| {
-        d.is_confirmed()
-            && (d
-                .inbound_pending_requests
-                .iter()
-                .any(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
-                || (d.pending_invite_txn.is_some() && d.our_cseq == cseq))
+        let relayed = d
+            .inbound_pending_requests
+            .iter()
+            .any(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq);
+        let own_round = invite_cseq_from_handle(d) == Some(cseq)
+            && d.ack_branch.is_none()
+            && d.awaited_ack_cseq.is_none();
+        d.is_confirmed() && (relayed || own_round)
     })
 }
 

@@ -29,10 +29,7 @@ use std::fmt;
 use std::sync::Mutex;
 
 use call::helpers::{callee_dialog, find_b_leg, find_leg};
-use call::{
-    Call, Ceased, DialogState, EndingBy, Ladder, Leg, LegDisposition, LegState, MessageDirection,
-    Obligation, ResponderAck, TimerType,
-};
+use call::{Call, DialogState, EndingBy, Leg, LegState, MessageDirection};
 use sip_message::{Method, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect};
@@ -65,6 +62,7 @@ pub const INVARIANTS: &[(&str, Check)] = &[
     ("no-cancelled-dialog-past-its-invites-final", no_cancelled_dialog_past_its_invites_final),
     ("in-dialog-request-answered-or-relayed", in_dialog_request_answered_or_relayed),
     ("no-owed-prack-past-its-invite", no_owed_prack_past_its_invite),
+    ("no-unshown-owed-prack", no_unshown_owed_prack),
     ("shown-ladder-armed-while-repeating", shown_ladder_armed_while_repeating),
     ("no-a-dialog-past-a-rejection", no_a_dialog_past_a_rejection),
     ("no-timer-on-a-terminated-leg", no_timer_on_a_terminated_leg),
@@ -323,64 +321,6 @@ fn dialog_cseq_never_decreases(turn: &Turn<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// No reliable provisional's responder is still owed a PRACK pending once its
-/// INVITE has its final, or its leg is being cancelled or has ended (RFC 3262
-/// §4): the engine settles it then. One whose offer waits for the ACK a 2xx
-/// awaits is not pending.
-fn no_owed_prack_past_its_invite(turn: &Turn<'_>) -> Result<(), String> {
-    let call = turn.after;
-    for p in call.provisionals.iter().filter(|p| p.responder == ResponderAck::Pending) {
-        let leg = find_leg(call, &p.id.leg);
-        let ended = leg.is_none_or(|l| {
-            l.state() == LegState::Terminated || l.disposition() == LegDisposition::Cancelling
-        });
-        if ended || !call::helpers::invite_open(call, &p.id) {
-            return Err(format!(
-                "leg {} ({:?}): reliable 1xx RSeq {} of INVITE CSeq {} on dialog {} is still \
-                 owed its PRACK",
-                p.id.leg,
-                leg.map(|l| (l.state(), l.disposition())),
-                p.id.rseq.0,
-                p.id.invite_cseq.0,
-                p.id.responder_tag
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// A shown provisional's ladder holds its timers exactly while it repeats
-/// (RFC 3262 §3): repeating, its rung and its give-up are armed; ceased at its
-/// last rung, its give-up alone stands; unsent, acknowledged or ceased with
-/// its final, no timer of its ladder is armed.
-fn shown_ladder_armed_while_repeating(turn: &Turn<'_>) -> Result<(), String> {
-    let call = turn.after;
-    let armed = |o: &Obligation, ty: TimerType| {
-        call.timers.iter().any(|t| t.key.timer_type == ty && t.key.obligation_of() == Some(o))
-    };
-    for s in call.provisionals.iter().filter_map(|p| p.shown.as_ref()) {
-        let o = Obligation::AwaitPrack { tag: s.tag.clone(), rseq: s.rseq };
-        let (rung, give_up) = (armed(&o, TimerType::Rung), armed(&o, TimerType::RepeatGiveUp));
-        let held = match s.ladder {
-            Ladder::Repeating(_) => rung && give_up,
-            Ladder::Ceased(Ceased::GiveUp) => !rung,
-            Ladder::Unsent | Ladder::Acknowledged | Ladder::Ceased(Ceased::Final) => {
-                !rung && !give_up
-            }
-        };
-        if !held {
-            let state = match &s.ladder {
-                Ladder::Repeating(_) => "repeating".to_string(),
-                other => format!("{other:?}"),
-            };
-            return Err(format!(
-                "shown 1xx {o:?} is {state} with rung armed {rung} and give-up armed {give_up}"
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// A non-2xx final sent on the caller's INVITE ends every a-dialog it could
 /// have created (RFC 3261 §12.3, §13.2.2.4): none of her dialogs is early or
 /// confirmed past it.
@@ -478,6 +418,12 @@ fn in_dialog_request_answered_or_relayed(turn: &Turn<'_>) -> Result<(), String> 
 fn legs(call: &Call) -> impl Iterator<Item = &Leg> {
     std::iter::once(&call.a_leg).chain(call.b_legs.iter())
 }
+
+#[path = "model_invariants_provisionals.rs"]
+mod provisionals;
+use provisionals::{
+    no_owed_prack_past_its_invite, no_unshown_owed_prack, shown_ladder_armed_while_repeating,
+};
 
 #[path = "model_invariants_timers.rs"]
 mod timers;

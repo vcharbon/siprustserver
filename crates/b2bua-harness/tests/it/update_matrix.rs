@@ -347,7 +347,13 @@ async fn early_update_forking_b_to_a_second_fork() {
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
 
     // Fork 1: explicit tag (does NOT become the ServerTxn's sticky tag).

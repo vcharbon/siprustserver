@@ -41,7 +41,8 @@ async fn prack_forking_two_early_dialogs() {
         B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // Alice INVITEs with NO SDP (delayed-offer model), advertising 100rel.
-    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     assert!(uas.request().body().is_empty(), "delayed offer: no SDP on the INVITE");
 
@@ -187,7 +188,8 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
     let b2bua =
         B2buaSut::route_all_to("127.0.0.1", 5513).start(&h, "b2bua", "127.0.0.1:5523").await;
 
-    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     // Both forks ring and are PRACKed properly, so no offer is left outstanding

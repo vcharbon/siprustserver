@@ -5,12 +5,12 @@
 //! here — see [`super::relay_request`].
 
 use call::helpers::{PendingHolder, Scope};
-use call::{CSeq, Call, PendingRequest, RSeq};
+use call::{Call, PendingRequest, RSeq};
 use sip_message::draft::Entry;
 use sip_message::generators::{
     self, GenerateRelayedResponseOpts, RelayDirection, RelayScope, RelaySituation, SourceBody,
 };
-use sip_message::header::{From, HeaderName, HeaderValue, MediaType, To, Via};
+use sip_message::header::{From, HeaderName, HeaderValue, MediaType, Via};
 use sip_message::{Method, SipHeader, SipStr};
 
 use crate::effects::{
@@ -22,56 +22,10 @@ use b2bua_sdk::model::{MessageTransform, RuleContext};
 use b2bua_sdk::relayed_final::invite_timestamp;
 
 use super::select::resolve_peer;
+use super::show_provisional::shown_tag_of;
 use super::{ActionExecutor, Owed, Settle};
 
 impl ActionExecutor<'_> {
-    /// Restate a relayed reliable provisional's `RSeq` with the shown dialog's
-    /// own number (RFC 3262 §4, errata 4603) and record it shown there, so the
-    /// PRACK naming it translates back onto the responder's sequence.
-    /// `shown_tag` is this stack's tag on the dialog the provisional is
-    /// relayed into and `shown_invite_cseq` the CSeq of the INVITE it answers
-    /// on that face — the two the PRACK's `RAck` names beside the number
-    /// (§7.2). A provisional relayed without an `RSeq` (a masking policy
-    /// stripped it) is not a reliable one and takes no number; one the engine
-    /// did not record leaves unreliably. `carried_sdp`: the provisional
-    /// carries a description toward that face. Returns the number taken, so
-    /// the emission arms its §3 ladder.
-    #[allow(clippy::too_many_arguments)]
-    fn own_relayed_rseq(
-        &self,
-        call: &mut Call,
-        shown_tag: &str,
-        shown_invite_cseq: i64,
-        source_leg_id: &str,
-        resp: &sip_message::SipResponse,
-        headers: &mut Vec<SipHeader>,
-        carried_sdp: bool,
-    ) -> Option<RSeq> {
-        if !headers.iter().any(|h| HeaderName::RSeq.matches(&h.name)) {
-            return None;
-        }
-        let recorded = super::provisional_arrival::recorded(call, source_leg_id, resp);
-        let Some(id) = recorded else {
-            relay::strip_reliability(headers);
-            return None;
-        };
-        let initial = if call::helpers::starts_shown_sequence(call, shown_tag) {
-            RSeq(self.id_gen.new_sequence_number())
-        } else {
-            RSeq(0)
-        };
-        let shown = call::helpers::show_provisional(
-            call,
-            &id,
-            shown_tag,
-            CSeq::of_i64(shown_invite_cseq),
-            carried_sdp,
-            initial,
-        )?;
-        relay::own_the_rseq(headers, shown);
-        Some(shown)
-    }
-
     /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
     /// Two paths, mirroring the source:
     ///   - **pending-correlated** (any relayed in-dialog request: re-INVITE/
@@ -237,6 +191,7 @@ impl ActionExecutor<'_> {
                         ladder = self
                             .own_relayed_rseq(
                                 call,
+                                true,
                                 &shown_tag,
                                 pending.inbound_cseq,
                                 &source_leg_id,
@@ -422,6 +377,7 @@ impl ActionExecutor<'_> {
             }
             let shown = self.own_relayed_rseq(
                 call,
+                a_invite.offers_100rel(),
                 &a_face,
                 i64::from(a_invite.cseq().seq()),
                 &source_leg_id,
@@ -503,6 +459,7 @@ impl ActionExecutor<'_> {
         }
         let shown = self.own_relayed_rseq(
             call,
+            a_invite.offers_100rel(),
             &a_tag,
             i64::from(a_invite.cseq().seq()),
             &source_leg_id,
@@ -599,13 +556,6 @@ impl ActionExecutor<'_> {
     }
 }
 
-/// The tag this stack showed the originator of `pending` — its own on the
-/// dialog the response is relayed into, read off the originator's `To` (RFC
-/// 3261 §12.2.1.1), which the relayed response echoes verbatim and the
-/// originator's PRACK names again. `None` when that `To` names no tag.
-fn shown_tag_of(pending: &PendingRequest) -> Option<String> {
-    To::parse(&SipStr::owned(&pending.source_to)).ok().and_then(|to| to.tag().map(str::to_string))
-}
 /// The headers a response answering the relayed request `pending` states for
 /// its originator (RFC 3261 §8.2.6.2): Via / From / To / Call-ID / CSeq equal
 /// the originator's own, and the snapshot holds the originator's own bytes

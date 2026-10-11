@@ -77,12 +77,12 @@ impl ActionExecutor<'_> {
                 }
             }
             let Some(p) = call::helpers::provisional(call, &id).cloned() else { continue };
-            if !prack_rides(call, &p) {
+            if responder_dialog(call, &p) == Some(false) {
                 call::helpers::note_responder_ack(call, &id, ResponderAck::Waived);
                 clear_owed_offer(call, &id);
                 continue;
             }
-            let answer = self.answer_owed_by(call, &p, why);
+            let answer = owed_offer(call, &id).and_then(|offer| self.rejecting_answer(&offer));
             self.send_prack_to_leg(call, fx, &id, answer);
         }
     }
@@ -185,21 +185,6 @@ impl ActionExecutor<'_> {
             provenance: Provenance::Authored,
         });
     }
-
-    /// The answer the PRACK of `p` carries: the offer `p` carried, rejecting
-    /// every stream (RFC 3264 §6) — the least a dialog ending, or a party that
-    /// gave no answer, commits to. A provisional shown to no one on a leg not
-    /// being CANCELled leaves its offer to the leg's owner and carries none.
-    fn answer_owed_by(&self, call: &Call, p: &Provisional, why: Settle<'_>) -> Option<Vec<u8>> {
-        let offer = owed_offer(call, &p.id)?;
-        let cancelling = call::helpers::find_leg(call, &p.id.leg)
-            .is_some_and(|l| l.disposition() == LegDisposition::Cancelling);
-        let left_to_owner = p.shown.is_none() && !cancelling && !matches!(why, Settle::Ending);
-        if left_to_owner {
-            return None;
-        }
-        self.rejecting_answer(&offer)
-    }
 }
 
 /// Whether `p` is one `scope` covers.
@@ -215,7 +200,7 @@ fn in_scope(p: &Provisional, scope: Owed<'_>) -> bool {
 /// leaves only as its dialog ends.
 fn due(call: &Call, p: &Provisional, why: Settle<'_>) -> bool {
     if p.responder == ResponderAck::DeferredToAck {
-        return matches!(why, Settle::Ending) || !prack_rides(call, p);
+        return matches!(why, Settle::Ending) || responder_dialog(call, p) != Some(true);
     }
     match why {
         Settle::AtFinal { .. } | Settle::Ending => true,
@@ -224,19 +209,20 @@ fn due(call: &Call, p: &Provisional, why: Settle<'_>) -> bool {
                 matches!(l.disposition(), LegDisposition::Cancelling)
                     || l.state() == call::LegState::Terminated
             });
-            p.shown.is_none() || leg_over || !call::helpers::invite_open(call, &p.id)
+            p.shown.is_none() || leg_over || !super::invite_open(call, &p.id)
         }
     }
 }
 
-/// Whether the responder's dialog of `p` still carries a PRACK: early,
-/// confirmed, or an early dialog whose INVITE this side is cancelling — a
-/// CANCEL does not end the INVITE transaction (RFC 3262 §4). A dialog this
-/// side is BYEing, or that ended, carries nothing (RFC 3261 §15.1.2).
-fn prack_rides(call: &Call, p: &Provisional) -> bool {
-    call::helpers::find_leg(call, &p.id.leg)
-        .and_then(|l| call::helpers::dialog_with_peer(l, &p.id.responder_tag))
-        .is_some_and(|d| d.is_live() && d.state != DialogState::Ending(EndingBy::Bye))
+/// Whether the responder's dialog of `p` still carries a PRACK: `Some(true)`
+/// early, confirmed, or an early dialog whose INVITE this side is cancelling
+/// — a CANCEL does not end the INVITE transaction (RFC 3262 §4);
+/// `Some(false)` retired, ended, or ending by this side's BYE — nothing rides
+/// it then (RFC 3261 §15.1.2); `None` when the leg holds no such dialog.
+fn responder_dialog(call: &Call, p: &Provisional) -> Option<bool> {
+    let d = call::helpers::find_leg(call, &p.id.leg)
+        .and_then(|l| call::helpers::dialog_with_peer(l, &p.id.responder_tag))?;
+    Some(d.is_live() && d.state != DialogState::Ending(EndingBy::Bye))
 }
 
 /// Leave the offer the shown provisional `id` carried to the ACK the 2xx

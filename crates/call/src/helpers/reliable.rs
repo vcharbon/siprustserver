@@ -263,22 +263,6 @@ pub fn pending_invite_answered_by(call: &Call, tag: &str, rseq: RSeq) -> Option<
         .map(|p| (id.leg.clone(), p.outbound_cseq))
 }
 
-/// Whether the INVITE of `id` still awaits its final on the responder's leg:
-/// the INVITE that dialled the leg until its final, a relayed re-INVITE while
-/// its relay is open.
-pub fn invite_open(call: &Call, id: &ProvisionalId) -> bool {
-    let Some(leg) = crate::helpers::find_leg(call, &id.leg) else { return false };
-    let cseq = id.invite_cseq.as_i64();
-    if let Some(invite) = leg.outbound_invite.as_ref().filter(|i| i.cseq == cseq) {
-        return invite.final_received.is_none();
-    }
-    leg.dialogs.iter().any(|d| {
-        d.inbound_pending_requests
-            .iter()
-            .any(|p| p.method.eq_ignore_ascii_case("INVITE") && p.outbound_cseq == cseq)
-    })
-}
-
 /// Whether the provisional answering the relayed request `pending` may leave
 /// toward its originator reliably (RFC 3262 §3): the request is an INVITE —
 /// the one method the mechanism serves; §4 bars `Require: 100rel` from every

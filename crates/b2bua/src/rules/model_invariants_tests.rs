@@ -1,7 +1,7 @@
 //! Each model invariant holds on a sound record and names the violation on a
 //! broken one.
 
-use call::{Call, Dialog, DialogState, LegState, OutboundInvite, PeerDialog};
+use call::{Call, Dialog, DialogState, Ladder, LegState, OutboundInvite, PeerDialog, ResponderAck};
 use sip_message::generators::{
     generate_out_of_dialog_request, generate_response, GenerateOutOfDialogRequestOpts,
     GenerateResponseOpts, OutOfDialogMethod,
@@ -131,7 +131,36 @@ fn an_owed_prack_on_an_ended_leg_breaks_the_prack_invariant() {
     let err = no_owed_prack_past_its_invite(&after(&call)).unwrap_err();
     assert!(err.contains("RSeq 7"), "{err}");
     call.provisionals[0].responder = ResponderAck::DeferredToAck;
+    assert!(
+        no_owed_prack_past_its_invite(&after(&call)).is_err(),
+        "an offer left to an ACK no confirmed dialog awaits"
+    );
+    call::testkit::stage_leg(&mut call.b_legs[0], LegState::Confirmed);
+    let confirmed = call.b_legs[0].dialogs.confirmed_mut().expect("a confirmed dialog");
+    confirmed.awaited_ack_cseq = Some(1);
+    call.provisionals[0].id.responder_tag = confirmed.peer_tag.clone();
     assert_eq!(no_owed_prack_past_its_invite(&after(&call)), Ok(()), "waiting for the ACK");
+}
+
+#[test]
+fn an_unshown_provisional_still_owed_its_prack_breaks_the_invariant() {
+    let mut call = call();
+    let mut owed = call::testkit::shown_provisional(
+        "b-1",
+        "b1",
+        1,
+        7,
+        "a1",
+        1,
+        Ladder::Unsent,
+        ResponderAck::Pending,
+    );
+    owed.shown = None;
+    call.provisionals.push(owed);
+    let err = no_unshown_owed_prack(&after(&call)).unwrap_err();
+    assert!(err.contains("RSeq 7"), "{err}");
+    call.provisionals[0].responder = ResponderAck::OwnPrack { branch: "z9hG4bK-own".into() };
+    assert_eq!(no_unshown_owed_prack(&after(&call)), Ok(()));
 }
 
 #[test]

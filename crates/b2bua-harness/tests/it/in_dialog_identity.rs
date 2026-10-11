@@ -171,6 +171,7 @@ async fn a_second_forked_early_dialog_keeps_the_dialled_display_names() {
         .alice
         .invite(&s.bob)
         .with_header("X-Api-Call", &plan)
+        .with_header("Supported", "100rel")
         .with_sdp(OFFER)
         .through(s.b2bua.addr)
         .send()

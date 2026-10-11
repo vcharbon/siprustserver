@@ -510,40 +510,10 @@ pub(super) fn rule_chain_turn(
     let screened = matches!(arrival, Some(Arrival::Repeat | Arrival::OutOfOrder));
     let rules_read = rules_read && !screened;
     let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
-    // A non-2xx INVITE final ends the transaction it answers (RFC 3261
-    // §17.1.1.3, hop-ACKed below the TU): the record stops naming that round
-    // as in flight before the rules read it. A final to the INVITE that
-    // dialled the leg ends every early dialog it created (§12.1).
     if let CallEvent::Sip { message, .. } = event {
         if let SipMessage::Response(resp) = message.as_ref() {
-            // The callee rang: its INVITE drew a 180–189.
-            if (180..=189).contains(&resp.status()) && resp.cseq().method() == Method::Invite {
-                call::helpers::mark_rang(&mut call, &res.source_leg_id);
-            }
-            if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
-                // The rejection ends the INVITE and the early dialogs it
-                // created: the PRACKs its responders are owed leave first
-                // (RFC 3262 §4).
-                exec.settle_owed_pracks(
-                    &mut call,
-                    &mut ladder_fx,
-                    Owed::Invite { leg: &res.source_leg_id, cseq: i64::from(resp.cseq().seq()) },
-                    Settle::AtFinal { confirmed: None },
-                );
-                if let Some(branch) = resp.top_via().branch() {
-                    call = call::helpers::close_rejected_invite_round(
-                        call,
-                        &res.source_leg_id,
-                        branch,
-                    );
-                }
-                call = call::helpers::record_dialling_invite_rejected(
-                    call,
-                    &res.source_leg_id,
-                    i64::from(resp.cseq().seq()),
-                    resp.status(),
-                );
-            }
+            let leg = res.source_leg_id.as_str();
+            super::response_facts::record(&exec, &mut call, &mut ladder_fx, leg, resp, screened);
         }
     }
     // The end of a BYE that released a retired dialog, its final or its

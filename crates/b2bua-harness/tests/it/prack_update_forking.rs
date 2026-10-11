@@ -66,7 +66,13 @@ async fn prack_update_forking_answer_on_second_fork() {
         B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     // Alice INVITEs with the offer in the INVITE, advertising 100rel support.
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
     let mut uas = bob.receive("INVITE").await;
     assert!(!uas.request().body().is_empty(), "offer relayed to bob on the INVITE");
 
