@@ -10,6 +10,7 @@
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { synthesize } from "../src/flowsteps.js"
+import { offTransactionAcks } from "../src/stray-ack.js"
 import { build } from "../src/topology.js"
 import type { Vantage } from "../src/selection.js"
 import {
@@ -138,5 +139,20 @@ describe("ACKs to a non-2xx final on fresh branches (RFC 3261 §17.1.1.3)", () =
     const { acks } = callerAcks(legacy)
     expect(acks).toHaveLength(1)
     expect(acks[0]!.retransmits ?? 0).toBe(0)
+  })
+
+  it("reads a document once, however many of its cases ask", () => {
+    let reads = 0
+    const watched = new Proxy(cancelledWithStrayAcks(3), {
+      get: (target, key, receiver) => {
+        if (key === "legs") reads += 1
+        return Reflect.get(target, key, receiver)
+      }
+    })
+    const first = offTransactionAcks(watched)
+    const once = reads
+    for (let i = 0; i < 50; i++) expect(offTransactionAcks(watched)).toBe(first)
+    expect(reads).toBe(once)
+    expect(offTransactionAcks(cancelledWithStrayAcks(3))).toEqual(first)
   })
 })

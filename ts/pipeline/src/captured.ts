@@ -25,6 +25,7 @@
  * forwarded. A copy that does not carry the same content states nothing.
  */
 import { Violation, type Case, type Census, type Flows } from "@sip/contracts"
+import type { HitIndex } from "./census-index.js"
 import type { DeclarationInput } from "./policy.js"
 import { body } from "./wire.js"
 
@@ -63,11 +64,12 @@ export interface Statements {
 export const UNCOVERED = "census-uncovered"
 
 /**
- * The violations `hits` charge a scripted party with at this case's vantage,
- * one per rule and step, and a flag where the census never covered the case's
- * capture — an empty list there is no reading at all, and a scripted party's
- * finding has nothing to be cancelled by. `covered` is the report's coverage;
- * absent, coverage is not judged.
+ * The violations the case's own census hits charge a scripted party with at
+ * this case's vantage, one per rule and step, and a flag where the census never
+ * covered the case's capture — an empty list there is no reading at all, and a
+ * scripted party's finding has nothing to be cancelled by. `covered` is the
+ * report's coverage; absent, coverage is not judged. `hits` is the report's
+ * index, so a case reads its own hits and never the whole report.
  *
  * A hit is stated where a step's own coordinate IS its anchor message and the
  * charged endpoint is that step's party: the message's sender on a `send`, its
@@ -76,7 +78,7 @@ export const UNCOVERED = "census-uncovered"
  * statement to cancel against, and the scripted party's finding gates.
  */
 export const capturedWith =
-  (hits: ReadonlyArray<Census.CensusHit>, covered?: ReadonlySet<string>) =>
+  (hits: HitIndex, covered?: ReadonlySet<string>) =>
   (input: DeclarationInput): Statements => {
     const flags: Array<Case.Flag> =
       covered === undefined || covered.has(input.capture)
@@ -89,8 +91,7 @@ export const capturedWith =
                 `its scripted parties broke, so every finding against one gates`
             }
           ]
-    const wanted = new Set(input.callIds)
-    const mine = hits.filter((hit) => hit.capture === input.capture && wanted.has(hit.call_id))
+    const mine = hits.ofCalls(input.capture, input.callIds)
     const violations: Array<Violation.RfcViolation> = []
     const state = (v: Violation.RfcViolation): void => {
       if (!violations.some((w) => w.rule === v.rule && w.step === v.step && w.emitter === v.emitter)) {
