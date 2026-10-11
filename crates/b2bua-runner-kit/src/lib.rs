@@ -72,14 +72,14 @@ use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
-use http_net::RealHttpNetwork;
-use http_net::SystemResolver;
+use http_net::{RealHttpNetwork, SystemResolver};
 use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
 
+pub mod backend_url;
 mod capacity_env;
 mod cdr_rabbitmq;
 mod drain_env;

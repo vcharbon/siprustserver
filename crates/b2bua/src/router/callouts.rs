@@ -623,8 +623,9 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
         // Per-request budget is INDEPENDENT of `call_control_timeout_ms` (the
         // `DeadlineDecisionEngine` wraps only new_call/call_failure). Fail-safe
         // on teardown: a re-entry landing on a dead `call_ref` is dropped.
-        let budget =
+        let total =
             c.timeout_ms.map(std::time::Duration::from_millis).unwrap_or(port.default_timeout);
+        let budgets = http_net::Budgets { attempt: port.attempt.min(total), total };
         let mut req = http_net::HttpRequest {
             method: c.method,
             path: c.endpoint,
@@ -635,8 +636,8 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
             req.headers.push(("Content-Type".to_string(), ct));
         }
         let (outcome, payload, body): (&str, serde_json::Value, Vec<u8>) =
-            match tokio::time::timeout(budget, port.transport.request(port.base, req)).await {
-                Ok(Ok(resp)) => {
+            match port.client.send_with_retry(req, budgets).await {
+                Ok(resp) => {
                     let http_net::HttpResponse { status, headers, body } = resp;
                     (
                         "ok",
@@ -648,19 +649,14 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
                         body,
                     )
                 }
-                Ok(Err(e)) => (
+                Err(e) => (
                     "error",
                     json!({
                         "correlation_id": c.correlation_id,
-                        "error": e.to_string(),
-                    }),
-                    Vec::new(),
-                ),
-                Err(_elapsed) => (
-                    "error",
-                    json!({
-                        "correlation_id": c.correlation_id,
-                        "error": "timeout",
+                        "error": match e {
+                            http_net::AttemptError::Timeout => "timeout".to_string(),
+                            other => other.to_string(),
+                        },
                     }),
                     Vec::new(),
                 ),

@@ -6,7 +6,8 @@
 probe, rotation, in-flight slots, retry rule and env grammar),
 `crates/http-net/src/resolved_target.rs` and `resolver.rs` (name lookup),
 `crates/http-net/src/settings.rs` and `transport/real_client.rs` (the
-`reqwest` client settings); the SIP side is `crates/b2bua/src/failure_unavailable.rs`,
+`reqwest` client settings); `crates/b2bua-runner-kit/src/backend_url.rs` (a backend's
+URL in the env); the SIP side is `crates/b2bua/src/failure_unavailable.rs`,
 `decision/limiter_failover.rs`, `rules/refer_transfer/machine/authorizing.rs`,
 `repl/backend_gate.rs` and `limiter/breaker.rs`;
 `crates/sip-proxy/src/strategies/load_balancer.rs` for the new-dialog fallback.
@@ -64,7 +65,9 @@ worker reporting itself healthy.
    retry lands on a connection that just proved itself. `hyper-util`'s own
    resend of a request never written on a reused connection stays. A caller
    that must not retry (the limiter's admit, which fails open) uses one
-   attempt (`BackendClient::attempt`).
+   attempt (`BackendClient::attempt`). A service's requests through the
+   adaptation port (`AdaptationHttpPort`) follow the rule, each attempt under
+   the port's attempt budget inside the request's own.
 8. **Breaker** (`WindowBreaker`, one per backend): it opens when the last
    window saw at least the configured number of requests sent and not one
    HTTP response of any status, evaluated each time a request ends without
@@ -152,5 +155,6 @@ burst of a few lost requests should not open it.
   lookup bound), `tests/it/classify.rs` (the loopback classifier),
   `resolved_target/tests.rs` (stuck lookups, serve stale); `b2bua-harness`
   `unanswered_failure_consult`, `decision_deadline`, `refer_consult_error`,
+  `service_http` (the adaptation port's retry),
   `options_backend_gate`, `limiter_breaker`; `sip-proxy` `load_balancer`
   (the not-ready fallback and its two guards).

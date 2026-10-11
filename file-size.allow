@@ -37,7 +37,7 @@ crates/b2bua/src/repl/s12_tests.rs 916
 crates/b2bua/src/repl/store.rs 752
 crates/b2bua/src/repl/supervisor.rs 865
 crates/b2bua/src/repl/tests.rs 827
-crates/b2bua/src/router/callouts.rs 705
+crates/b2bua/src/router/callouts.rs 701
 crates/b2bua/src/router/process.rs 667
 crates/b2bua/src/router/reclaim.rs 551
 crates/b2bua/src/rules/actions/relay_response.rs 594

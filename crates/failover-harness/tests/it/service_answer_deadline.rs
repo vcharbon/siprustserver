@@ -221,11 +221,11 @@ async fn cluster(
 ) -> Cluster {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"])
         .with_worker_services(awaiter_services)
-        .with_worker_adaptation_http(b2bua::AdaptationHttpPort {
-            transport: Arc::new(http.clone()),
-            base: service_addr(),
-            default_timeout: HTTP_BUDGET,
-        });
+        .with_worker_adaptation_http(b2bua::AdaptationHttpPort::addressed(
+            Arc::new(http.clone()),
+            service_addr(),
+            HTTP_BUDGET,
+        ));
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy =

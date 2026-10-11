@@ -266,11 +266,11 @@ async fn answers_landing_on_a_full_queue_still_reach_the_call() {
     let s = B2buaScene::with_b2bua("b2bua-own-answer-queue-full", |bob_port| {
         B2buaSut::builder(Arc::new(SlowConsults::to(bob_port)))
             .services(vec![slowprobe::service_def()])
-            .adaptation_http(AdaptationHttpPort {
-                transport: Arc::new(http.clone()) as Arc<dyn HttpTransport>,
-                base: http_addr(),
-                default_timeout: Duration::from_secs(5),
-            })
+            .adaptation_http(AdaptationHttpPort::addressed(
+                Arc::new(http.clone()) as Arc<dyn HttpTransport>,
+                http_addr(),
+                Duration::from_secs(5),
+            ))
             .tune(|c| {
                 c.event_dispatch_concurrency = 1;
                 c.per_call_queue_depth = 1;
