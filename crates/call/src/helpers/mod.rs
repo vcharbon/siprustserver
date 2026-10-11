@@ -18,7 +18,7 @@
 //!     resolution
 //!   - [`reliable`] — the reliable provisionals the call received and where
 //!     each was shown (RFC 3262)
-//!   - [`prack_disposition`] — what a PRACK this stack receives draws
+//!   - [`prack_disposition`](mod@prack_disposition) — what a PRACK this stack receives draws
 //!   - [`obligation`] — the dialog-level retransmission obligations: what the
 //!     call owes, what an ACK discharges, the scopes a ladder is retired under
 //!   - [`services`] — per-service slice accessors + opaque ext writes

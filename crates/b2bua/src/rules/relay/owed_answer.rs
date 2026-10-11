@@ -45,7 +45,7 @@ pub(crate) fn offered_reliably(call: &Call, leg_id: &str, tag: &str, invite_cseq
 /// Whether `leg_id`'s confirmed dialog left a provisional's offer to the ACK
 /// its 2xx awaits ([`OwedAnswer::DeferredToAck`]).
 pub(crate) fn offer_deferred_to_ack(call: &Call, leg_id: &str) -> bool {
-    call::helpers::find_leg(call, leg_id).is_some_and(|leg| offer_waits_for_ack(leg))
+    call::helpers::find_leg(call, leg_id).is_some_and(offer_waits_for_ack)
 }
 
 fn offer_waits_for_ack(leg: &Leg) -> bool {
