@@ -1498,8 +1498,6 @@ fn requests_to(result: &HandlerResult, leg: &str, method: &str) -> usize {
         .count()
 }
 
-mod reliable_after_final;
-
 #[test]
 fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed() {
     // The caller's INVITE carries its 200; a b-leg dialled later rings. The

@@ -13,7 +13,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, ServerTxn};
+use scenario_harness::{Harness, ServerTxn, WaiverScope};
+use sip_message::generators::InDialogMethod;
 use sip_net::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -168,4 +169,114 @@ async fn a_second_caller_prack_after_release_draws_the_481_it_draws_in_call() {
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     assert_eq!(pracks_to(&report.entries(), b2bua.addr, bob_addr), 1, "one PRACK per RSeq");
+}
+
+/// Two PRACKs naming one shown provisional cross: the first is relayed, the
+/// second (a new transaction) arrives before the callee answers the first.
+/// The first PRACK took the provisional off the unacknowledged list as it
+/// arrived (RFC 3262 §3), so the second draws 481 here at once, and the first
+/// its relayed 200.
+#[tokio::test(start_paused = true)]
+async fn a_prack_crossing_the_relayed_one_draws_481_here() {
+    let h = Harness::with_transit_delay("b2bua-prack-disposition-crossing", 0);
+    let alice = h.agent("alice", "127.0.0.1:7564").await;
+    let bob = h.agent("bob", "127.0.0.1:7565").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 7565).start(&h, "b2bua", "127.0.0.1:7566").await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    reliable_180(&mut uas).await;
+    let ringing = call.expect(180).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let mut first = call.try_prack(&ringing).await.expect("alice PRACKs the reliable 180");
+    let mut bob_prack = bob.receive("PRACK").await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let mut second = call.try_prack(&ringing).await.expect("alice PRACKs it again");
+    second.expect(481).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    bob_prack.respond(200, "OK").await;
+    first.expect(200).await;
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The callee's offer, in the reliable 183 to an offerless INVITE.
+const BOB_OFFER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+/// The caller's answer to it.
+const ALICE_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
+
+/// An offerless INVITE; the callee's reliable 183 carries the offer, shown to
+/// the caller, and the callee answers 200 before any PRACK: the offer waits
+/// for the ACK. The caller's PRACK, carrying her answer, then arrives: the
+/// callee is still owed a PRACK on a dialog that carries it, so hers is
+/// relayed with her answer (RFC 3262 §5), and the ACK that follows is bare.
+#[tokio::test(start_paused = true)]
+async fn a_caller_prack_after_the_offer_was_deferred_is_relayed_with_her_answer() {
+    let h = Harness::with_transit_delay("b2bua-prack-disposition-deferred", 0);
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "bob deliberately answers 200 before his reliable offer is PRACKed",
+        )
+        .on_party("bob"),
+    );
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "the SUT relays bob's early 200 toward alice before she PRACKed the 183 it showed her",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:7567").await;
+    let bob = h.agent("bob", "127.0.0.1:7568").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 7568).start(&h, "b2bua", "127.0.0.1:7569").await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(BOB_OFFER).await;
+    let progress = call.expect(183).await;
+    let rseq = b2bua_harness::stated_by_response(&progress, "RSeq").expect("a reliable 183");
+    uas.respond(200, "OK").with_sdp(BOB_OFFER).await;
+    call.expect(200).await;
+    let mut prack = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&format!("{rseq} {} INVITE", progress.cseq().seq()))
+        .with_sdp(ALICE_ANSWER)
+        .try_send()
+        .await
+        .expect("alice PRACKs with her answer");
+    let mut bob_prack = bob.receive("PRACK").await;
+    assert_eq!(
+        String::from_utf8_lossy(bob_prack.request().body()),
+        ALICE_ANSWER,
+        "her answer reaches bob in the relayed PRACK"
+    );
+    bob_prack.respond(200, "OK").await;
+    prack.expect(200).await;
+    let mut dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert!(ack.request().body().is_empty(), "the exchange closed in the PRACK: a bare ACK");
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
 }

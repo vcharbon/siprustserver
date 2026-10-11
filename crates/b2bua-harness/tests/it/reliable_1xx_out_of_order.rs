@@ -21,20 +21,12 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 /// The callee skips an `RSeq`: the non-compliant provisional whose handling
-/// is the subject. Dropped unPRACKed, it is still outstanding when bob
-/// answers: the 2xx he sends over it is his own fixture's consequence.
+/// is the subject.
 fn callee_skips_an_rseq(h: &Harness) {
     h.waive(
         WaiverScope::rule(
             "non-contiguous-rseq",
             "bob skips an RSeq — the provisional this stack must drop unprocessed is the subject",
-        )
-        .on_party("bob"),
-    );
-    h.waive(
-        WaiverScope::rule(
-            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
-            "bob answers over his own out-of-order provisional, which §4 leaves unPRACKed",
         )
         .on_party("bob"),
     );
@@ -89,7 +81,7 @@ async fn the_mask_drops_an_out_of_order_reliable_1xx() {
     call.expect(180).await;
     bob.receive("PRACK").await.respond(200, "OK").await;
 
-    uas.respond(183, "Session Progress").reliable(3).with_sdp(EARLY).await;
+    uas.respond(183, "Session Progress").reliable(3).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         bob.try_receive_tolerating("PRACK", &[]).await.is_none(),
@@ -123,6 +115,13 @@ async fn the_mask_drops_an_out_of_order_reliable_1xx() {
 async fn the_promotion_drops_an_out_of_order_reliable_183() {
     let h = Harness::with_transit_delay("b2bua-reliable-1xx-out-of-order-promote", 0);
     callee_skips_an_rseq(&h);
+    h.waive(
+        WaiverScope::rule(
+            "delay-2xx-on-unacked-reliable-1xx-with-sdp",
+            "a would-be promotion carries SDP; dropped unPRACKed (§4), it is still bob's when he answers",
+        )
+        .on_party("bob"),
+    );
     let alice = h.agent("alice", "127.0.0.1:7514").await;
     let bob = h.agent("bob", "127.0.0.1:7515").await;
     let b2bua =

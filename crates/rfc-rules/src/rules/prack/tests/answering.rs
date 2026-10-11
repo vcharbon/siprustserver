@@ -122,6 +122,32 @@ fn a_new_prack_of_an_acknowledged_provisional_draws_481() {
     assert!(!f[1].violated(), "a PRACK the UAS did not 2xx acknowledged nothing: {f:?}");
 }
 
+/// `prack-2xx-or-481`: a PRACK takes its provisional off the unacknowledged
+/// list as it ARRIVES (RFC 3262 §3), not as its 2xx leaves: a second PRACK of
+/// another transaction crossing the first's answer matches nothing
+/// unacknowledged and owes the 481, whenever the first is answered.
+#[test]
+fn a_prack_crossing_the_answer_of_an_earlier_one_draws_481() {
+    let again = |m: Msg| {
+        let mut m = m;
+        m.via_branch = Some("z9hG4bK-second-prack".to_string());
+        m
+    };
+    let crossing = |second_status: u16| {
+        vec![
+            inv_resp(1_100_000, 180, &reliable_rows(1), false),
+            prack_on(1_200_000, "1 1 INVITE", false),
+            again(prack_on(1_300_000, "1 1 INVITE", false)),
+            again(prack_answer(1_310_000, second_status)),
+            prack_answer(1_350_000, 200),
+        ]
+    };
+    let f = decide(&Prack2xxOr481, &crossing(481));
+    assert!(f.iter().all(|f| !f.violated()), "the crossing PRACK's 481 is compliant: {f:?}");
+    let f = decide(&Prack2xxOr481, &crossing(200));
+    assert!(f.iter().any(|f| f.violated()), "a 2xx to the crossing PRACK is the violation: {f:?}");
+}
+
 /// `prack-2xx-or-481`: the match is the whole §7.2 `RAck` — the right
 /// `RSeq` under a CSeq-num of no INVITE this UAS answered reliably, or
 /// under a method no reliable provisional answers, names nothing and owes

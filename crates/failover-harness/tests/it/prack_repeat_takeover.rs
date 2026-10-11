@@ -32,7 +32,7 @@ use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
 use call::features::RelayFirst18xStrategy;
-use call::{CallBodyCodec, MsgpackCodec, Provisional};
+use call::{CallBodyCodec, MsgpackCodec, Provisional, ResponderAck};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -186,9 +186,11 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
         "the backup must hold the record of what this stack PRACKed at the moment of \
          the kill; got {entries:?}",
     );
-    assert_eq!(
-        entries[0].id.rseq.0, BOB_RSEQ,
-        "the replicated entry carries the number bob stated",
+    assert_eq!(entries[0].id.rseq.0, BOB_RSEQ, "the replicated entry carries bob's number");
+    assert!(
+        matches!(entries[0].responder, ResponderAck::OwnPrack { .. }),
+        "the replicated entry records this stack's own PRACK: {:?}",
+        entries[0].responder,
     );
 
     // ── STEP 3: kill the primary ─────────────────────────────────────────────
