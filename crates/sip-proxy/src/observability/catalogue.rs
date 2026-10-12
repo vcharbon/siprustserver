@@ -68,9 +68,10 @@ const PROMOTION_VALUES: [&str; 2] = label_values!(Promotion::ALL, Promotion::as_
 
 /// Every locally decided reject: the routing path's own, the load
 /// balancer's selection failures, the self gate's.
-const REJECT_REASONS: [&str; 13] = [
+const REJECT_REASONS: [&str; 14] = [
     "drop_unforwardable",
     "non_request",
+    "ack_not_answered",
     "ack_max_forwards_exhausted",
     "too_many_hops",
     "ack_proxy_require_unsupported",

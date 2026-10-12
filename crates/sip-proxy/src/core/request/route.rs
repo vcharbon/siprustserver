@@ -90,9 +90,7 @@ impl ProxyCore {
                 self.metrics.record_reject("ack_max_forwards_exhausted");
                 return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
             }
-            self.reply(req, src, 483, "Too Many Hops", &[]).await;
-            self.metrics.record_reject("too_many_hops");
-            return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            return self.reply_reject(req, src, 483, "Too Many Hops", &[], "too_many_hops").await;
         };
 
         // ── §16.3 check 5: Proxy-Require ────────────────────────────────────
@@ -109,9 +107,16 @@ impl ProxyCore {
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
                 let extra = [extra_header(Unsupported::of(required.iter()))];
-                self.reply(req, src, 420, "Bad Extension", &extra).await;
-                self.metrics.record_reject("proxy_require_unsupported");
-                return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                return self
+                    .reply_reject(
+                        req,
+                        src,
+                        420,
+                        "Bad Extension",
+                        &extra,
+                        "proxy_require_unsupported",
+                    )
+                    .await;
             }
         }
 
@@ -304,10 +309,10 @@ impl ProxyCore {
                     // The shed fact precedes the 503 it explains: `reply` is
                     // itself an emission site (the datagram it synthesizes).
                     emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, reason);
-                    self.reply(req, src, 503, "Service Unavailable", &extra).await;
                     // A closed set: the gate's `ShedReason` labels.
-                    self.metrics.record_reject(reason);
-                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                    return self
+                        .reply_reject(req, src, 503, "Service Unavailable", &extra, reason)
+                        .await;
                 }
             } else if is_new_dialog_invite && is_emergency {
                 self.self_gate.note_bypass(BypassKind::Emergency);
@@ -374,14 +379,7 @@ impl ProxyCore {
                             let (host, port) = uri.host_port();
                             target = Some(ProxyAddr::new(host, port));
                         }
-                        _ => {
-                            self.reply(req, src, 400, "Bad Request", &[]).await;
-                            self.metrics.record_reject("malformed_request_uri");
-                            return RouteOutcome {
-                                decision: RoutingDecisionKind::Reject,
-                                target: None,
-                            };
-                        }
+                        _ => return self.reply_malformed_uri(req, src).await,
                     }
                 } else {
                     match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
@@ -410,11 +408,7 @@ impl ProxyCore {
                     target = Some(ProxyAddr::new(host, port));
                     decision = RoutingDecisionKind::WorkerOutbound;
                 }
-                _ => {
-                    self.reply(req, src, 400, "Bad Request", &[]).await;
-                    self.metrics.record_reject("malformed_request_uri");
-                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
-                }
+                _ => return self.reply_malformed_uri(req, src).await,
             }
         } else if let Some(params) = &stripped_route_params {
             let decoded = self.strategy.decode_stickiness(params, msg).await;
@@ -431,11 +425,11 @@ impl ProxyCore {
                     stickiness = Some("backup");
                 }
                 DecodeResult::Reject { status, reason } => {
-                    self.reply(req, src, status, &reason, &[]).await;
                     // The decode reasons are free-form diagnostics — one
                     // static label keeps the reason set bounded.
-                    self.metrics.record_reject("stickiness_decode_rejected");
-                    return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+                    return self
+                        .reply_reject(req, src, status, &reason, &[], "stickiness_decode_rejected")
+                        .await;
                 }
                 DecodeResult::Unknown { is_emergency } => {
                     // A retransmit must repeat the original (random) selection,

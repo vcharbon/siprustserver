@@ -1,6 +1,7 @@
 //! Self-generated UAS finals: the synthesized response to the packet source,
 //! the `ackhop|` absorb memo the proxy writes when it becomes the UAS of a
-//! non-2xx INVITE transaction, and the select-failure → 503 mapping.
+//! non-2xx INVITE transaction, the select-failure → 503 mapping, and the rule
+//! that an ACK is never answered (RFC 3261 §17): a reject of an ACK drops it.
 //! Relayed responses do NOT live here — see `core/response`.
 
 use std::net::SocketAddr;
@@ -40,8 +41,38 @@ pub(super) fn reject_retry_after(retry_after_sec: u32) -> RetryAfter {
 }
 
 impl ProxyCore {
+    /// Reject `req` locally: answer it with `status`, counted under `metric`.
+    /// An ACK is never answered — nothing awaits a response to it — so a
+    /// rejected ACK is dropped, counted `ack_not_answered`.
+    pub(super) async fn reply_reject(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+        status: u16,
+        reason: &str,
+        extra: &[SipHeader],
+        metric: &str,
+    ) -> RouteOutcome {
+        if req.method() == Method::Ack {
+            self.metrics.record_reject("ack_not_answered");
+        } else {
+            self.reply(req, src, status, reason, extra).await;
+            self.metrics.record_reject(metric);
+        }
+        RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
+    }
+
+    /// A Request-URI this hop cannot read: 400, counted `malformed_request_uri`.
+    pub(super) async fn reply_malformed_uri(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+    ) -> RouteOutcome {
+        self.reply_reject(req, src, 400, "Bad Request", &[], "malformed_request_uri").await
+    }
+
     /// Synthesize a UAS response to the source.
-    pub(super) async fn reply(
+    async fn reply(
         &self,
         req: &SipRequest,
         src: SocketAddr,
@@ -119,8 +150,6 @@ impl ProxyCore {
             extra_header(reject_retry_after(retry_after)),
             extra_header(proxy_reason(503, reason_text)),
         ];
-        self.reply(req, src, 503, "Service Unavailable", &extra).await;
-        self.metrics.record_reject(reason_text);
-        RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
+        self.reply_reject(req, src, 503, "Service Unavailable", &extra, reason_text).await
     }
 }
