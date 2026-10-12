@@ -759,12 +759,16 @@ describe.skipIf(!served)("Calls.queue", () => {
       for (let at = 1; at <= 4; at++) {
         const prep = yield* cuts.open()
         yield* cuts.record({ prepId: prep, capture, flows: null, cases: [cutCase(seed)], refusals: [] })
+        // Rows no frozen id names, past the guard: the statement is about the
+        // page's reading, which a key per prep makes visible.
+        yield* sql`ALTER TABLE cut_cases DISABLE TRIGGER cut_cases_frozen`
         yield* sql`
           INSERT INTO cut_cases (prep_id, capture, case_id, call_key, case_hash)
           SELECT ${prep}, ${capture}, ${capture} || '-c' || lpad(i::text, 4, '0'), 'p' || ${at} || '-K' || i || '@x',
                  (SELECT case_hash FROM cut_cases WHERE prep_id = ${prep} AND capture = ${capture} AND case_id = ${seed})
           FROM generate_series(1, 1999) AS i
         `
+        yield* sql`ALTER TABLE cut_cases ENABLE TRIGGER cut_cases_frozen`
       }
       const opened = yield* runs.open({ capture, lane: LANE, mode: "record", sessionDir: `/w/${capture}`, identity: CURRENT })
       yield* runs.finish({ id: opened.id, status: "done", cases: [] })

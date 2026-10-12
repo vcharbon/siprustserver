@@ -653,6 +653,42 @@ const idGaps = Effect.gen(function*() {
 export const ID_GAPS = "6_id_gaps"
 
 /**
+ * A cut case the frozen ids do not name — its (capture, case id, call key)
+ * absent from `case_ids` when its transaction commits — is refused: what a
+ * writer that predates the frozen ids would write, naming calls by position.
+ * Checked at commit, so `Cuts.record` freezes a new call's id after its row.
+ */
+const frozenCutGuard = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql.unsafe(`
+    CREATE FUNCTION cut_cases_frozen() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF EXISTS (
+           SELECT 1 FROM cut_cases
+           WHERE prep_id = NEW.prep_id AND capture = NEW.capture AND case_id = NEW.case_id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM case_ids
+           WHERE capture = NEW.capture AND case_id = NEW.case_id AND call_key = NEW.call_key
+         ) THEN
+        RAISE EXCEPTION 'cut case % of % (call %) is not frozen: the cut writing it predates the frozen case ids; rebase it onto the store code that freezes them',
+          NEW.case_id, NEW.capture, NEW.call_key
+          USING ERRCODE = 'integrity_constraint_violation';
+      END IF;
+      RETURN NULL;
+    END
+    $$
+  `)
+  yield* sql.unsafe(`
+    CREATE CONSTRAINT TRIGGER cut_cases_frozen AFTER INSERT ON cut_cases
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION cut_cases_frozen()
+  `)
+})
+
+/** The key of the migration that refuses a cut case the frozen ids do not name. */
+export const FROZEN_CUT_GUARD = "7_frozen_cut_guard"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -662,7 +698,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [CURRENT_DOCUMENTS]: currentDocuments,
   [RUN_SUMMARIES]: runSummaries,
   [SEED_FROZEN_IDS]: seedFrozenIds,
-  [ID_GAPS]: idGaps
+  [ID_GAPS]: idGaps,
+  [FROZEN_CUT_GUARD]: frozenCutGuard
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

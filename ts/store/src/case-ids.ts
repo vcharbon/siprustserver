@@ -7,7 +7,8 @@
  * and its record freezes what it named ({@link freezeOn}, inside
  * `Cuts.record`'s transaction): a reading that names a frozen call by another
  * id, or a frozen id for another call, is refused whole — unless it states the
- * frozen key it re-keys the id from (`Entry.replaces`). A capture name is the
+ * frozen key it re-keys the id from (`Entry.replaces`), and then every
+ * request's cell of that key moves with it. A capture name is the
  * whole namespace: two captures, generations of one source included, share
  * nothing.
  *
@@ -180,10 +181,27 @@ export const freezeOn = (
     }
     if (mode === "strict" && clashes.length > 0) return yield* new Conflict({ capture, clashes })
     if (rekeys.length > 0) {
+      const moved = JSON.stringify(rekeys)
       yield* sql`
         UPDATE case_ids c SET call_key = e."callKey"
-        FROM jsonb_to_recordset(${JSON.stringify(rekeys)}::jsonb) AS e("caseId" text, "callKey" text)
+        FROM jsonb_to_recordset(${moved}::jsonb) AS e("caseId" text, "callKey" text)
         WHERE c.capture = ${capture} AND c.case_id = e."caseId"
+      `
+      // A request names a call by its key and survives every re-cut: its
+      // cells move with the key, one cell per call where it named both.
+      yield* sql`
+        DELETE FROM request_cells c
+        USING jsonb_to_recordset(${moved}::jsonb) AS e("callKey" text, replaces text)
+        WHERE c.capture = ${capture} AND c.call_key = e.replaces
+          AND EXISTS (
+            SELECT 1 FROM request_cells d
+            WHERE d.request_id = c.request_id AND d.capture = c.capture AND d.call_key = e."callKey"
+          )
+      `
+      yield* sql`
+        UPDATE request_cells c SET call_key = e."callKey"
+        FROM jsonb_to_recordset(${moved}::jsonb) AS e("callKey" text, replaces text)
+        WHERE c.capture = ${capture} AND c.call_key = e.replaces
       `
     }
     if (fresh.length > 0) {

@@ -148,7 +148,23 @@ describe.skipIf(!served)("frozen case ids", () => {
     expect(frozen["call-b@h"]).toBe(`${CAPTURE}-b`)
   })
 
-  it("re-keys a frozen id only where the reading names the key it replaces", async () => {
+  it("re-keys a frozen id only where the reading names the key it replaces, and every request's cell with it", async () => {
+    const requests = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const ids = yield* sql<{ id: string }>`
+        INSERT INTO requests (lane, selection, knobs, created_by)
+        VALUES ('a-lane', '{}', '{}', 'frozen-test'), ('a-lane', '{}', '{}', 'frozen-test') RETURNING id
+      `
+      const [one, two] = ids.map((row) => Number(row.id))
+      // The second request already names the call by its new key too.
+      yield* sql`
+        INSERT INTO request_cells (request_id, capture, call_key, origin) VALUES
+          (${one!}, ${CAPTURE}, 'call-c@h', 'selected'),
+          (${two!}, ${CAPTURE}, 'call-c@h', 'selected'),
+          (${two!}, ${CAPTURE}, 'call-c@h#ingress@7', 'selected')
+      `
+      return [one!, two!]
+    }))
     const without = await exitOf(recordAt((prep) =>
       cutOf(prep, CAPTURE, [caseOf(`${CAPTURE}-c`, "call-c@h#ingress@7")])
     ))
@@ -159,6 +175,15 @@ describe.skipIf(!served)("frozen case ids", () => {
     const frozen = await frozenOf(CAPTURE)
     expect(frozen["call-c@h#ingress@7"]).toBe(`${CAPTURE}-c`)
     expect(frozen["call-c@h"]).toBeUndefined()
+    const cells = await withStore(Effect.flatMap(SqlClient, (sql) =>
+      sql<{ request_id: string; call_key: string }>`
+        SELECT request_id, call_key FROM request_cells WHERE request_id IN ${sql.in(requests)} ORDER BY request_id
+      `
+    ))
+    expect(cells.map((cell) => [Number(cell.request_id), cell.call_key])).toEqual([
+      [requests[0], "call-c@h#ingress@7"],
+      [requests[1], "call-c@h#ingress@7"]
+    ])
   })
 
   it("seeds what does not clash and counts the rest, whatever another capture holds", async () => {
@@ -178,6 +203,30 @@ describe.skipIf(!served)("frozen case ids", () => {
   })
 })
 
+describe.skipIf(!served)("a writer that predates the frozen ids", () => {
+  it("cannot write a cut case the frozen ids do not name, whatever it calls it", async () => {
+    const exit = await exitOf(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const cuts = yield* Cuts.Service
+      const prep = yield* cuts.open()
+      yield* sql.withTransaction(Effect.gen(function*() {
+        yield* sql`INSERT INTO case_documents (hash, document) VALUES ('old-doc', '{}') ON CONFLICT DO NOTHING`
+        yield* sql`INSERT INTO cases (hash, document_hash) VALUES ('old-case', 'old-doc') ON CONFLICT DO NOTHING`
+        yield* sql`INSERT INTO capture_cuts (prep_id, capture) VALUES (${prep}, 'old-writer.pcap')`
+        yield* sql`
+          INSERT INTO cut_cases (prep_id, capture, case_id, call_key, case_hash)
+          VALUES (${prep}, 'old-writer.pcap', 'old-writer.pcap-cut1', 'call-ow@h', 'old-case')
+        `
+      }))
+    }))
+    expect(String(Exit.isFailure(exit) ? exit.cause : "")).toContain("not frozen")
+    const left = await withStore(Effect.flatMap(SqlClient, (sql) =>
+      sql<{ n: number }>`SELECT count(*)::int AS n FROM cut_cases WHERE capture = 'old-writer.pcap'`
+    ))
+    expect(left[0]!.n).toBe(0)
+  })
+})
+
 describe.skipIf(!served)("a store whose readings predate the frozen ids", () => {
   const LEGACY = "legacy.pcap"
 
@@ -192,7 +241,10 @@ describe.skipIf(!served)("a store whose readings predate the frozen ids", () => 
     for (const prep of [older, newer]) {
       yield* sql`INSERT INTO capture_cuts (prep_id, capture) VALUES (${prep}, ${LEGACY})`
     }
-    // The older reading named call-1 `-case1`; the newer renamed it `-cut9` and added call-2.
+    // The older reading named call-1 `-case1`; the newer renamed it `-cut9` and
+    // added call-2. Rows the guard of a migrated store would refuse: written
+    // as the store held them before it.
+    yield* sql`ALTER TABLE cut_cases DISABLE TRIGGER cut_cases_frozen`
     yield* sql`
       INSERT INTO cut_cases (prep_id, capture, case_id, call_key, case_hash) VALUES
         (${older}, ${LEGACY}, ${`${LEGACY}-case1`}, 'call-1@h', 'legacy-case'),
@@ -200,6 +252,7 @@ describe.skipIf(!served)("a store whose readings predate the frozen ids", () => 
         (${newer}, ${LEGACY}, ${`${LEGACY}-cut9`}, 'call-1@h', 'legacy-case'),
         (${newer}, ${LEGACY}, ${`${LEGACY}-case2`}, 'call-2@h', 'legacy-case')
     `
+    yield* sql`ALTER TABLE cut_cases ENABLE TRIGGER cut_cases_frozen`
     return { older, newer }
   })
 
