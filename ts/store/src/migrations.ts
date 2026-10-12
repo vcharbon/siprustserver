@@ -35,6 +35,8 @@
  *   capture's latest full `current_runs` reading on the lane (whose case set is
  *   the capture's) where one exists.
  * - `run_cells`: every case result beside its run's identity, code and load.
+ * - `current_documents` (migration {@link CURRENT_DOCUMENTS}): every case of
+ *   each capture's standing cut with its document, for shape surveys.
  */
 import * as Effect from "effect/Effect"
 import * as Migrator from "effect/unstable/sql/Migrator"
@@ -554,12 +556,33 @@ const frozenIds = Effect.gen(function*() {
 export const FROZEN_IDS = "2_frozen_ids"
 
 /**
+ * `current_documents`, for SQL surveys of the documents' shapes: one row per
+ * case of each capture's standing cut (its newest reading), with its call key
+ * and its case document and features.
+ */
+const currentDocuments = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE VIEW current_documents AS
+    SELECT c.capture, c.case_id, c.call_key, c.prep_id, d.hash AS document_hash, d.document, d.features
+    FROM (SELECT DISTINCT ON (capture) capture, prep_id FROM capture_cuts ORDER BY capture, prep_id DESC) s
+    JOIN cut_cases c ON c.prep_id = s.prep_id AND c.capture = s.capture
+    JOIN cases k ON k.hash = c.case_hash
+    JOIN case_documents d ON d.hash = k.document_hash
+  `
+})
+
+/** The key of the migration that states the current documents' view. */
+export const CURRENT_DOCUMENTS = "3_current_documents"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
 export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [BASELINE]: baseline,
-  [FROZEN_IDS]: frozenIds
+  [FROZEN_IDS]: frozenIds,
+  [CURRENT_DOCUMENTS]: currentDocuments
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

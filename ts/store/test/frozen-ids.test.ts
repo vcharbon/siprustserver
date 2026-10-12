@@ -195,6 +195,18 @@ describe.skipIf(!served)("case maps", () => {
     expect(rows[0]!.first_at.getTime()).toBe(1_789_646_119_005)
   })
 
+  it("surveys the documents of each capture's standing cut alone, in current_documents", async () => {
+    await withStore(recordAt((p) => cutOf(p, "survey.pcap", [caseOf("survey.pcap-a", "call-sa@h")])))
+    await withStore(recordAt((p) => cutOf(p, "survey.pcap", [caseOf("survey.pcap-b", "call-sb@h")])))
+    const rows = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      return yield* sql<{ case_id: string; call_key: string; id: string }>`
+        SELECT case_id, call_key, document->>'id' AS id FROM current_documents WHERE capture = 'survey.pcap'
+      `
+    }))
+    expect(rows).toEqual([{ case_id: "survey.pcap-b", call_key: "call-sb@h", id: "survey.pcap-b" }])
+  })
+
   it("exports a reading recorded before its map was written, once", async () => {
     const prep = await withStore(recordAt((p) => cutOf(p, CAPTURE, [caseOf(`${CAPTURE}-e`, "call-e@h")])))
     await withStore(Effect.gen(function*() {
