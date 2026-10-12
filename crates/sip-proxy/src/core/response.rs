@@ -6,6 +6,10 @@
 //! the final arrived from (the ACK itself travels end-to-end — see
 //! `core/request`).
 //!
+//! Every response is relayed, a 100 included: §16.7's absorption of a 100 is a
+//! stateful proxy's, and this proxy is stateless (§16.11), so it neither
+//! absorbs the downstream 100 nor generates one of its own.
+//!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
 //! still serves must not take an INVITE response back, so that response follows
@@ -69,13 +73,6 @@ impl ProxyCore {
         // advertise, so a response legitimately names either face here.
         if !self.is_self_addr(top_host, top_port) {
             // Top Via is not us — not our response to relay.
-            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
-            return;
-        }
-
-        // §16.7 / §16.11: 100 Trying is hop-by-hop — it quenched OUR hop's
-        // retransmissions and must not be forwarded upstream.
-        if resp.status() == 100 {
             self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
             return;
         }

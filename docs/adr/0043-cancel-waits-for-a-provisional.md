@@ -1,6 +1,7 @@
 # The CANCEL waits for a provisional, without bound
 
-**Status:** accepted (2026-10-11). Supersedes ADR-0028.
+**Status:** accepted (2026-10-11). Supersedes ADR-0028. Amended (2026-10-12):
+the front proxy relays the callee's 100 (Context, Consequences).
 
 **Owner:** `crates/sip-txn/src/layer/client.rs` (the CANCEL gate, the
 provisional flush, the Timer-E ladder), `crates/sip-txn/src/layer/seed.rs`
@@ -21,9 +22,9 @@ the transaction layer knows the branch's response history. ADR-0028 bounded
 the wait with a grace window after which the CANCEL went regardless. That
 bound sent the CANCEL §9.1 forbids, and is withdrawn.
 
-A front proxy that forwards no `100 Trying` (§16.7, the LB of ADR-0022 X4)
-leaves a worker's b-leg branch response-less until the first 18x, so a callee
-whose only word is a 100 is never CANCELed behind it.
+The front proxy is stateless (§16.11, ADR-0022 X4) and relays a callee's
+`100 Trying` to the worker like any response, so a worker's b-leg branch sees
+the callee's first provisional on every path, through the proxy or direct.
 
 ## Decision
 
@@ -83,12 +84,15 @@ single send. Counter: `cancel_retransmits`.
 
 ## Consequences
 
-- Behind a 100-absorbing proxy, a callee that has sent only a 100 is not
-  CANCELed: its INVITE resolves on the callee's own final or the worker's
-  Timer B, and the call that abandoned it rides its terminating backstop
-  until that leg resolves. A 2xx it sends after the call was released is
-  ACKed and the dialog it created BYEd by the orphaned transaction
-  (ADR-0034).
+- A callee that has sent nothing is not CANCELed: its INVITE resolves on the
+  callee's own final or the worker's Timer B, and the call that abandoned it
+  rides its terminating backstop until that leg resolves
+  (`silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reaped`).
+  A 2xx it sends after the call was released is ACKed and the dialog it
+  created BYEd by the orphaned transaction (ADR-0034).
+- A callee that has sent a 100 alone is CANCELed on the wire when the call
+  abandons it, behind the front proxy as on a direct path
+  (`trying_only_callee_no_answer_via_lb__reject__is_cancelled`).
 - A re-INVITE round the survivor of a takeover rebuilt with no provisional on
   record is never CANCELed by it.
 
