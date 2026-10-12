@@ -36,6 +36,7 @@ pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod sdp_form;
 pub mod sdp_session;
+pub mod sdp_text;
 pub mod serializer;
 pub mod sipfrag;
 pub mod site;
