@@ -6,9 +6,13 @@
 //! the final arrived from (the ACK itself travels end-to-end — see
 //! `core/request`).
 //!
-//! Every response is relayed, a 100 included: §16.7's absorption of a 100 is a
+//! A 100 is relayed like any other response: §16.7's absorption of a 100 is a
 //! stateful proxy's, and this proxy is stateless (§16.11), so it neither
-//! absorbs the downstream 100 nor generates one of its own.
+//! absorbs the downstream 100 nor generates one of its own. A response is
+//! dropped only when its top Via is not this proxy, when it carries fewer than
+//! two Vias, when it answers an INVITE for a Dead worker and no cookie of this
+//! proxy names a backup to fail it over to, or when its top Via cannot be
+//! popped and the rest re-rendered.
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
@@ -225,4 +229,4 @@ impl ProxyCore {
 mod reverse_failover_tests;
 
 #[cfg(test)]
-mod hop_by_hop_tests;
+mod relay_tests;

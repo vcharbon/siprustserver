@@ -120,9 +120,9 @@ The front proxy is a **stateless UDP forwarder** (RFC 3261 §16.11). It **never
 generates a 100** and it **relays the worker's 100** like every other response
 (`core/response.rs`), so a caller routed through the LB hears the worker's 100
 as it would on a direct path. A worker that never answers at all sends no 100:
-the caller's own Timer A/B stays armed
-(§17.1.1), so **the caller** — not a proxy timer — decides when a dead
-downstream is given up on (local 408 at 64·T1 ≈ 32 s). The proxy therefore has
+the caller's own Timer A/B stays armed (§17.1.1), so **the caller** — not a
+proxy timer — decides when a dead downstream is given up on (local 408 at 64·T1
+≈ 32 s). The proxy therefore has
 **no Timer C and no synthesized final** for a blackholed worker, *by design* —
 adding one would re-introduce the per-INVITE proxy transaction state ADR-0009 /
 ADR-0014 deliberately keep out of the LB (and duplicate a backstop the endpoints
@@ -134,7 +134,7 @@ downstream-blackhole case — all three bounded by the caller's transaction time
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero
 proxy-originated upstream messages, retransmit re-forwarded to the same target),
-and `sip-proxy/src/core/response/hop_by_hop_tests.rs`
+and `sip-proxy/src/core/response/relay_tests.rs`
 (`trying_100_is_relayed_upstream_by_its_via`) the relayed 100's Via pop.
 
 ## Decision X6 — the per-call-cap shed: a new INVITE at capacity gets a 503, not a silent drop

@@ -1,7 +1,7 @@
 # The CANCEL waits for a provisional, without bound
 
 **Status:** accepted (2026-10-11). Supersedes ADR-0028. Amended (2026-10-12):
-the front proxy relays the callee's 100 (Context, Consequences).
+the front proxy relays the callee's 100 (Context, X1, Consequences).
 
 **Owner:** `crates/sip-txn/src/layer/client.rs` (the CANCEL gate, the
 provisional flush, the Timer-E ladder), `crates/sip-txn/src/layer/seed.rs`
@@ -53,8 +53,7 @@ INVITE's leg — and `Trying` otherwise, so the survivor's CANCEL obeys the same
 wait. A CANCEL the record says was sent with no provisional on record is still
 held when the node that sent it dies: the record keeps the headers it stated
 (`OutboundInvite::cancel_headers`), and the seed carries it rebuilt, held on
-the `Trying` transaction until the callee's first provisional reaches the
-survivor.
+the `Trying` transaction until the callee's first 18x reaches the survivor.
 
 ### X2 — The caller is answered at once
 
@@ -93,6 +92,12 @@ single send. Counter: `cancel_retransmits`.
 - A callee that has sent a 100 alone is CANCELed on the wire when the call
   abandons it, behind the front proxy as on a direct path
   (`trying_only_callee_no_answer_via_lb__reject__is_cancelled`).
+- After a takeover only the callee's 18x or final reaches the survivor: a 100
+  sent after the kill carries no Record-Route, so the front proxy has no cookie
+  to fail it over on, and a 100 matching no transaction is absorbed by the
+  layer without materialising the call. A CANCEL held at the kill stays held
+  past the callee's 100 and goes on its 18x
+  (`a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_not_its_100`).
 - A re-INVITE round the survivor of a takeover rebuilt with no provisional on
   record is never CANCELed by it.
 
