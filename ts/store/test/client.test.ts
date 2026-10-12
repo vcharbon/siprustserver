@@ -7,7 +7,12 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
+import { NodeServices } from "@effect/platform-node"
+import * as Effect from "effect/Effect"
 import * as Client from "../src/client.js"
+
+const nameOf = (base: string, cwd: string): Promise<string> =>
+  Effect.runPromise(Client.scratchDatabase(base, cwd).pipe(Effect.provide(NodeServices.layer)))
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "scratch-db-"))
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -20,36 +25,36 @@ const checkout = (...parts: ReadonlyArray<string>): string => {
 }
 
 describe("Client.scratchDatabase", () => {
-  it("suffixes the base with the checkout's directory name and a hash of its path, from anywhere under it", () => {
+  it("suffixes the base with the checkout's directory name and a hash of its path, from anywhere under it", async () => {
     const dir = checkout("dev-12-Second.Final")
-    const name = Client.scratchDatabase("store_cut_test", path.join(dir, "ts/store"))
+    const name = await nameOf("store_cut_test", path.join(dir, "ts/store"))
     expect(name).toMatch(/^store_cut_test_dev_12_second_final_[0-9a-f]{8}$/)
-    expect(Client.scratchDatabase("store_cut_test", dir)).toBe(name)
+    expect(await nameOf("store_cut_test", dir)).toBe(name)
   })
 
-  it("tells apart two checkouts whose directories share a name", () => {
-    const one = Client.scratchDatabase("store_cut_test", checkout("a", "server"))
-    const two = Client.scratchDatabase("store_cut_test", checkout("b", "server"))
+  it("tells apart two checkouts whose directories share a name", async () => {
+    const one = await nameOf("store_cut_test", checkout("a", "server"))
+    const two = await nameOf("store_cut_test", checkout("b", "server"))
     expect(one).not.toBe(two)
     expect(one.startsWith("store_cut_test_server_")).toBe(true)
   })
 
-  it("stays within postgres' 63 characters", () => {
+  it("stays within postgres' 63 characters", async () => {
     const dir = checkout("a-very-long-checkout-directory-name-that-goes-on-and-on-and-on")
-    const name = Client.scratchDatabase("store_a_long_suite_name_test", dir)
+    const name = await nameOf("store_a_long_suite_name_test", dir)
     expect(name.length).toBeLessThanOrEqual(63)
     expect(name).toMatch(/_[0-9a-f]{8}$/)
   })
 
-  it("falls back to the directory itself where no checkout is above it", () => {
+  it("falls back to the directory itself where no checkout is above it", async () => {
     const bare = path.join(root, "no-git-here")
     fs.mkdirSync(bare, { recursive: true })
-    expect(Client.scratchDatabase("store_cut_test", bare)).toMatch(/^store_cut_test_no_git_here_[0-9a-f]{8}$/)
+    expect(await nameOf("store_cut_test", bare)).toMatch(/^store_cut_test_no_git_here_[0-9a-f]{8}$/)
   })
 })
 
 describe("Client.atDatabase", () => {
-  it("replaces the database of a socket url and keeps its parameters", () => {
+  it("replaces the database of a socket url and keeps its parameters", async () => {
     expect(Client.atDatabase("postgresql:///sip_store?host=/var/run/postgresql&port=5433", "other"))
       .toBe("postgresql:///other?host=/var/run/postgresql&port=5433")
   })

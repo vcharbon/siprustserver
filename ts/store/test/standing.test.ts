@@ -22,7 +22,7 @@ import * as Runs from "../src/runs.js"
 import * as Sessions from "../src/sessions.js"
 import { CURRENT, CURRENT_POPULATION, TASK_ENV } from "./identity.js"
 
-const SCRATCH = Client.scratchDatabase("store_standing_test")
+const SCRATCH = await Server.scratch("store_standing_test")
 
 const urlFor = Server.urlFor
 
@@ -38,15 +38,7 @@ const withRuns = <A, E>(effect: Effect.Effect<A, E, Runs.Service | SqlClient>): 
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 const LANE = "fake"
 
@@ -104,7 +96,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -116,8 +108,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)
@@ -196,7 +187,7 @@ describe.skipIf(!served)("only @current runs are current", () => {
       expect(yield* standingOf(capture)).toBeNull()
     })))
 
-  it("reads as current the env and branch the store states, and nothing where it states none", () =>
+  it("reads as current the env and branch the store states, and refuses to name one where it states none", () =>
     withRuns(Effect.gen(function*() {
       const sql = yield* SqlClient
       const current = yield* Effect.provide(Current.Service, Current.layer)
@@ -207,7 +198,7 @@ describe.skipIf(!served)("only @current runs are current", () => {
       expect(yield* current.get).toEqual({ env: TASK_ENV.env, branch: TASK_ENV.branch })
       expect((yield* standingOf(capture))?.runId).toBe(task.id)
       yield* sql`DELETE FROM current_population`
-      expect(yield* current.get).toBeNull()
+      expect((yield* Effect.flip(current.get))._tag).toBe("Current.NoCurrentPopulation")
       expect(yield* standingOf(capture)).toBeNull()
       yield* current.set(CURRENT_POPULATION)
     })))

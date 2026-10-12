@@ -20,7 +20,7 @@ import * as Runs from "../src/runs.js"
 import { CURRENT } from "./identity.js"
 import * as Sessions from "../src/sessions.js"
 
-const SCRATCH = Client.scratchDatabase("store_cut_test")
+const SCRATCH = await Server.scratch("store_cut_test")
 
 const urlFor = Server.urlFor
 
@@ -40,15 +40,7 @@ const withCuts = <A, E>(
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text)
 
@@ -132,7 +124,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -144,8 +136,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)

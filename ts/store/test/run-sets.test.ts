@@ -20,7 +20,7 @@ import * as Sessions from "../src/sessions.js"
 import * as Sweeps from "../src/sweeps.js"
 import { CURRENT } from "./identity.js"
 
-const SCRATCH = Client.scratchDatabase("store_run_sets_test")
+const SCRATCH = await Server.scratch("store_run_sets_test")
 
 const urlFor = Server.urlFor
 
@@ -36,15 +36,7 @@ const withStore = <A, E>(effect: Effect.Effect<A, E, Runs.Service | RunSets.Serv
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 const ENV: RunIdentity = { env: "dev-7-fix", branch: "fix/7-fix", laneHash: "lane1", load: null }
 
@@ -117,7 +109,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -155,8 +147,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)
@@ -193,6 +184,20 @@ describe.skipIf(!served)("RunSets.refusal", () => {
     expect(await refusalOf("@sha:bbbb000")).toBe(`@sha:bbbb000 names 2 commits — ${SHAS["t2"]}, ${SHAS["t3"]}`)
     expect(await refusalOf("@sha:bbbb0000")).toBeNull()
     expect(await refusalOf("@current")).toBeNull()
+  })
+
+  it("refuses the current term where the store states no current population", async () => {
+    const stated = await on(SCRATCH, Effect.flatMap(SqlClient, (sql) => sql<{ env: string; branch: string }>`
+      DELETE FROM current_population RETURNING env, branch
+    `))
+    try {
+      expect(await refusalOf("@current/@lane:ref")).toMatch(/states no current population/)
+      expect(await refusalOf("@lane:ref")).toBeNull()
+    } finally {
+      await on(SCRATCH, Effect.flatMap(SqlClient, (sql) => sql`
+        INSERT INTO current_population (env, branch) VALUES (${stated[0]!.env}, ${stated[0]!.branch})
+      `))
+    }
   })
 })
 

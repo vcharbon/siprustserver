@@ -26,7 +26,7 @@ import { CURRENT } from "./identity.js"
 import * as Sessions from "../src/sessions.js"
 import { groupsOf } from "../src/memory-queue.js"
 
-const SCRATCH = Client.scratchDatabase("store_calls_test")
+const SCRATCH = await Server.scratch("store_calls_test")
 const LANE = "fake"
 
 const urlFor = Server.urlFor
@@ -48,15 +48,7 @@ const withStore = <A, E>(
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 const DIED: MainError = {
   kind: "died",
@@ -154,7 +146,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -166,8 +158,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)

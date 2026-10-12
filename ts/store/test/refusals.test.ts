@@ -11,7 +11,7 @@ import * as Server from "./server.js"
 import * as Cuts from "../src/cuts.js"
 import * as Refusals from "../src/refusals.js"
 
-const SCRATCH = Client.scratchDatabase("store_refusals_test")
+const SCRATCH = await Server.scratch("store_refusals_test")
 
 const urlFor = Server.urlFor
 
@@ -29,15 +29,7 @@ const withStore = <A, E>(
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 beforeAll(async () => {
   if (!served) return
@@ -45,7 +37,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -57,8 +49,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)

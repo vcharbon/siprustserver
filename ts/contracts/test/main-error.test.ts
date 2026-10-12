@@ -290,7 +290,7 @@ describe("mainErrorOf", () => {
     })
 
     it("is bad-body for a body of any media type, the first differing line its detail", () => {
-      const indata = bodyRow({
+      const dataBody = bodyRow({
         step: "s33",
         signature: "body:application/vnd.example.data:request:BYE:in-dialog",
         name: "application/vnd.example.data",
@@ -298,7 +298,7 @@ describe("mainErrorOf", () => {
         captured: ["dwdHAIIDjQEB"],
         replayed: [""]
       })
-      expect(mainErrorOf({ ...clean, body: [indata] })).toEqual({
+      expect(mainErrorOf({ ...clean, body: [dataBody] })).toEqual({
         kind: "bad-body",
         rule: "bad-body",
         rfc: null,
@@ -354,11 +354,11 @@ describe("gatedOnText", () => {
 describe("failingBody", () => {
   it("keeps every body row no rule accepts, whatever its media type, in record order", () => {
     const sdp = bodyRow()
-    const indata = bodyRow({ signature: "body:application/vnd.example.data:request:BYE:in-dialog" })
+    const dataBody = bodyRow({ signature: "body:application/vnd.example.data:request:BYE:in-dialog" })
     const multipart = bodyRow({ signature: "body:multipart/mixed:initial-invite", class: "unlisted" })
     const accepted = bodyRow({ signature: "body:sdp:session:o=:initial-invite", class: "accepted" })
     const knownBug = bodyRow({ signature: "body:application/isup:initial-invite", class: "known-bug" })
     const header = bodyRow({ kind: "header", signature: "header:allow:initial-invite" })
-    expect(failingBody([sdp, accepted, indata, header, knownBug, multipart])).toEqual([sdp, indata, multipart])
+    expect(failingBody([sdp, accepted, dataBody, header, knownBug, multipart])).toEqual([sdp, dataBody, multipart])
   })
 })

@@ -7,11 +7,13 @@
  * A run is current when it was made from that env on that branch, no component
  * of its code was dirty, and it finished: a run still in flight, or one of any
  * other environment, never moves what a call stands at. A store with no
- * setting has no current run at all.
+ * setting has no current run at all, and asking it for its setting fails
+ * ({@link NoCurrentPopulation}) rather than answer with an empty population.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
+import * as Schema from "effect/Schema"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 
@@ -21,9 +23,16 @@ export interface Population {
   readonly branch: string
 }
 
+/** The store states no current population. */
+export class NoCurrentPopulation extends Schema.TaggedError<NoCurrentPopulation>()("Current.NoCurrentPopulation", {}) {
+  override get message(): string {
+    return "the store states no current population (current_population holds no row): nothing is current"
+  }
+}
+
 export interface Interface {
-  /** The setting; null where the store states none. */
-  readonly get: Effect.Effect<Population | null, SqlError>
+  /** The setting; fails where the store states none. */
+  readonly get: Effect.Effect<Population, NoCurrentPopulation | SqlError>
   /** States the current population, replacing any earlier setting. */
   readonly set: (population: Population) => Effect.Effect<void, SqlError>
 }
@@ -37,7 +46,9 @@ export const layer = Layer.effect(
 
     const get = Effect.gen(function*() {
       const rows = yield* sql<Population>`SELECT env, branch FROM current_population`
-      return rows[0] ?? null
+      const row = rows[0]
+      if (row === undefined) return yield* new NoCurrentPopulation()
+      return row
     })
 
     const set = Effect.fn("Current.set")(function*(population: Population) {

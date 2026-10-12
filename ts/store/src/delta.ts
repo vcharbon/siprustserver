@@ -17,9 +17,7 @@
  * A cell the REFERENCE lane skipped is not in the delta — it has no green to be
  * red against — but it is not nothing either: the fake lane blocks cells the
  * strict lanes run, so a failure there could never reach the list at all. Those
- * are answered separately ({@link Interface.unasked}) rather than dropped, which
- * is how five of the six failures of [182]'s ramp would otherwise have gone
- * unlisted.
+ * are answered separately ({@link Interface.unasked}) rather than dropped.
  *
  * Like every other reader here, this holds no judgment: it says which cells
  * disagree, never what the disagreement means.
@@ -46,8 +44,8 @@ export interface Row {
  * What the list was taken over, so a length is never read as a census.
  *
  * `compared` is the cells BOTH lanes ran, which is the only population the
- * question is asked of: the real lane has run a fraction of the corpus, and a
- * delta of 6 means nothing without the 1244 it was drawn from.
+ * question is asked of: a lane may have run a fraction of the corpus, and a
+ * delta's length means nothing without the population it was drawn from.
  */
 export interface Population {
   readonly lane: string

@@ -20,7 +20,8 @@
  * finding stands where the caller has none.
  */
 import { Bundle, Confrontation as Records, MainError, StepOrder } from "@sip/contracts"
-import * as fs from "node:fs"
+import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as path from "node:path"
 import type { CaseResult, RunStatus } from "./model.js"
 
@@ -64,13 +65,16 @@ interface Rollup {
   }>
 }
 
-const readJson = (file: string): unknown => {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8")) as unknown
-  } catch {
-    return null
-  }
-}
+/** The file's text; empty where it is absent or unreadable. */
+const textOf = (file: string): Effect.Effect<string, never, FileSystem.FileSystem> =>
+  Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFileString(file)).pipe(Effect.orElseSucceed(() => ""))
+
+/** The file as JSON; null where it is absent, unreadable or no JSON. */
+const readJson = (file: string): Effect.Effect<unknown, never, FileSystem.FileSystem> =>
+  Effect.flatMap(textOf(file), (text) =>
+    text === "" ? Effect.succeed(null) : Effect.try(() => JSON.parse(text) as unknown).pipe(
+      Effect.orElseSucceed(() => null)
+    ))
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null ? value as Record<string, unknown> : null
@@ -140,13 +144,8 @@ const confrontationOf = (classification: Record<string, unknown> | null): Confro
 }
 
 /** The file's lines as text; none where it is absent or unreadable. */
-const linesOfFile = (file: string): ReadonlyArray<string> => {
-  try {
-    return fs.readFileSync(file, "utf8").split("\n").filter((line) => line.trim() !== "")
-  } catch {
-    return []
-  }
-}
+const linesOfFile = (file: string): Effect.Effect<ReadonlyArray<string>, never, FileSystem.FileSystem> =>
+  Effect.map(textOf(file), (text) => text.split("\n").filter((line) => line.trim() !== ""))
 
 /** One confrontation line as a record; undefined where it does not decode. */
 const recordOf = (line: string): Records.ConfrontationRecord | undefined => {
@@ -162,25 +161,23 @@ const recordOf = (line: string): Records.ConfrontationRecord | undefined => {
  * first; a line that does not decode is skipped, and a cell with no readable
  * `confrontation.ndjson` has none.
  */
-const failingBodyOf = (dir: string, document: unknown): ReadonlyArray<Records.ConfrontationRecord> => {
-  const records = linesOfFile(path.join(dir, "confrontation.ndjson")).flatMap((line) => recordOf(line) ?? [])
-  return Records.inStepOrder(failingBody(records), stepOrderOf(document))
-}
+const failingBodyOf = (dir: string, document: unknown) =>
+  Effect.map(linesOfFile(path.join(dir, "confrontation.ndjson")), (lines) =>
+    Records.inStepOrder(failingBody(lines.flatMap((line) => recordOf(line) ?? [])), stepOrderOf(document)))
 
 /** Whether the cell's `rule-hits.json` counts the body gate as what refused it. */
-const bodyGatedOf = (dir: string): boolean => {
-  const hits = readJson(path.join(dir, "rule-hits.json"))
-  return Array.isArray(hits) &&
+const bodyGatedOf = (dir: string) =>
+  Effect.map(readJson(path.join(dir, "rule-hits.json")), (hits) =>
+    Array.isArray(hits) &&
     hits.some((hit) => {
       const one = asRecord(hit)
       return one?.["family"] === "bless" && one["rule"] === BAD_BODY && one["bucket"] === "fired"
-    })
-}
+    }))
 
 /** Reads `<runDir>` into the rows one run occupies. */
-export const read = (runDir: string, options?: Options): BundleReading => {
+export const read = Effect.fn("Bundle.read")(function*(runDir: string, options?: Options) {
   const charges = options?.charges ?? everyCharge
-  const rollup = asRecord(readJson(path.join(runDir, "campaign.json"))) as Rollup | null
+  const rollup = asRecord(yield* readJson(path.join(runDir, "campaign.json"))) as Rollup | null
   if (rollup === null) {
     return {
       status: "error",
@@ -188,7 +185,7 @@ export const read = (runDir: string, options?: Options): BundleReading => {
       mode: undefined,
       detail: "no campaign.json — the driver wrote no rollup",
       cases: []
-    }
+    } satisfies BundleReading as BundleReading
   }
   const cells = rollup.cells ?? []
   const cases: Array<CaseResult> = []
@@ -196,10 +193,10 @@ export const read = (runDir: string, options?: Options): BundleReading => {
   let mode: string | undefined
   for (const cell of cells) {
     const dir = cell.dir === undefined ? undefined : path.join(runDir, cell.dir)
-    const verdict = dir === undefined ? null : asRecord(readJson(path.join(dir, "verdict.json")))
-    const classification = dir === undefined ? null : asRecord(readJson(path.join(dir, "classification.json")))
-    const rfc = dir === undefined ? null : asRecord(readJson(path.join(dir, "rfc.json")))
-    const document = dir === undefined ? null : readJson(path.join(dir, "pivot.json"))
+    const verdict = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "verdict.json")))
+    const classification = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "classification.json")))
+    const rfc = dir === undefined ? null : asRecord(yield* readJson(path.join(dir, "rfc.json")))
+    const document = dir === undefined ? null : yield* readJson(path.join(dir, "pivot.json"))
     const caseId = cell.cell?.case ??
       (typeof verdict?.["case"] === "string" ? verdict["case"] as string : undefined)
     if (caseId === undefined) continue
@@ -215,7 +212,7 @@ export const read = (runDir: string, options?: Options): BundleReading => {
       ? []
       : charges(dir, findings)
     // Only a failing cell can carry one: the body gate fails every other.
-    const body = passed || skipped !== null || dir === undefined ? [] : failingBodyOf(dir, document)
+    const body = passed || skipped !== null || dir === undefined ? [] : yield* failingBodyOf(dir, document)
     cases.push({
       caseId,
       passed,
@@ -232,7 +229,7 @@ export const read = (runDir: string, options?: Options): BundleReading => {
         charged,
         confrontation: confrontationOf(classification),
         body,
-        bodyGated: dir !== undefined && body.length > 0 && bodyGatedOf(dir)
+        bodyGated: dir !== undefined && body.length > 0 && (yield* bodyGatedOf(dir))
       }),
       classification,
       document
@@ -244,6 +241,6 @@ export const read = (runDir: string, options?: Options): BundleReading => {
     mode,
     detail: cases.length === 0 ? "the rollup names no cell" : undefined,
     cases
-  }
-}
+  } satisfies BundleReading as BundleReading
+})
 

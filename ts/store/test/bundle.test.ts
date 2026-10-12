@@ -5,7 +5,12 @@
  */
 import * as path from "node:path"
 import { describe, expect, it } from "vitest"
+import { NodeServices } from "@effect/platform-node"
+import * as Effect from "effect/Effect"
 import * as Bundle from "../src/bundle.js"
+
+const readOf = (dir: string, options?: Bundle.Options): Promise<Bundle.BundleReading> =>
+  Effect.runPromise(Bundle.read(dir, options).pipe(Effect.provide(NodeServices.layer)))
 
 const RUN = path.join(import.meta.dirname, "fixtures", "run-main-error")
 const CAPTURE = "capture_main.pcap.gz"
@@ -14,8 +19,8 @@ const byCase = (reading: Bundle.BundleReading) =>
   new Map(reading.cases.map((entry) => [entry.caseId.slice(CAPTURE.length + 1), entry]))
 
 describe("Bundle.read", () => {
-  it("fills each cell's main error under the precedence", () => {
-    const reading = Bundle.read(RUN)
+  it("fills each cell's main error under the precedence", async () => {
+    const reading = await readOf(RUN)
     expect(reading.status).toEqual("done")
     expect(reading.lane).toEqual("fake")
     const cells = byCase(reading)
@@ -119,9 +124,9 @@ describe("Bundle.read", () => {
     expect(cells.get("case10")!.bodyFailing).toEqual(2)
   })
 
-  it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", () => {
+  it("honours the caller's ruling on the charges, and hands it the cell and the whole audit", async () => {
     const asked: Array<[string, ReadonlyArray<string>]> = []
-    const reading = Bundle.read(RUN, {
+    const reading = await readOf(RUN, {
       charges: (cellDir, findings) => {
         asked.push([path.basename(cellDir), findings.map((finding) => finding.rule)])
         return []

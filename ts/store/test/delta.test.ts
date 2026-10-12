@@ -20,7 +20,7 @@ import * as Runs from "../src/runs.js"
 import { CURRENT } from "./identity.js"
 import * as Sessions from "../src/sessions.js"
 
-const SCRATCH = Client.scratchDatabase("store_delta_test")
+const SCRATCH = await Server.scratch("store_delta_test")
 const REAL = "local-real"
 const FAKE = "fake"
 
@@ -41,15 +41,7 @@ const withDelta = <A, E>(
     )
   )
 
-const served = await Effect.runPromise(
-  Effect.gen(function*() {
-    const sql = yield* SqlClient
-    yield* sql`SELECT 1`
-  }).pipe(
-    Effect.provide(Client.layerFromUrl(urlFor("postgres"))),
-    Effect.match({ onFailure: () => false, onSuccess: () => true })
-  )
-)
+const served = Server.served
 
 const green = (caseId: string): CaseResult => ({
   caseId,
@@ -95,7 +87,7 @@ beforeAll(async () => {
     "postgres",
     Effect.gen(function*() {
       const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
       yield* sql.unsafe(`CREATE DATABASE ${SCRATCH}`)
     })
   )
@@ -107,8 +99,7 @@ afterAll(async () => {
   await on(
     "postgres",
     Effect.gen(function*() {
-      const sql = yield* SqlClient
-      yield* sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH} WITH (FORCE)`)
+      yield* Server.dropDatabase(SCRATCH)
     })
   )
 }, 60_000)
@@ -190,19 +181,19 @@ describe.skipIf(!served)("Delta", () => {
     const population: Delta.Population = {
       lane: REAL,
       against: FAKE,
-      compared: 1244,
-      green: 1244,
-      sweeps: [456, 459, 461],
+      compared: 1000,
+      green: 1000,
+      sweeps: [3, 5, 8],
       unasked: 17
     }
     const rows: ReadonlyArray<Delta.Row> = [
-      { capture: "c.pcap.gz", caseId: "c.pcap.gz-case2", failedStep: "s7", verdict: "failed", runId: 1, sweepId: 461 },
-      { capture: "d.pcap.gz", caseId: "d.pcap.gz-auto", failedStep: null, verdict: "failed", runId: 2, sweepId: 461 }
+      { capture: "c.pcap.gz", caseId: "c.pcap.gz-case2", failedStep: "s7", verdict: "failed", runId: 1, sweepId: 8 },
+      { capture: "d.pcap.gz", caseId: "d.pcap.gz-auto", failedStep: null, verdict: "failed", runId: 2, sweepId: 8 }
     ]
     const out = Delta.render(population, rows, [rows[0]!], 10)
     expect(out).toContain("2 cell(s)")
-    expect(out).toContain("over 1244 cell(s) both lanes ran")
-    expect(out).toContain("sweeps 456..461 (3)")
+    expect(out).toContain("over 1000 cell(s) both lanes ran")
+    expect(out).toContain("sweeps 3..8 (3)")
     expect(out).toContain("by step: -×1  s7×1")
     expect(out).toContain("BESIDE IT: 1 cell(s)")
   })

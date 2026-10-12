@@ -20,6 +20,7 @@ import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import type { Fragment } from "effect/unstable/sql/Statement"
 import type { Cell, Elsewhere, Side, SideSweep } from "./compare.js"
+import { NoCurrentPopulation } from "./current.js"
 import type { MainErrorKind, Provenance, RunStatus, SetKind } from "./model.js"
 import type { Selector, Term } from "./selector.js"
 import * as Sessions from "./sessions.js"
@@ -51,7 +52,8 @@ export interface Pair {
 export interface Interface {
   /**
    * Why a selector names no run set the store can answer for, or null: a
-   * commit prefix that names more than one commit, listing them.
+   * commit prefix that names more than one commit, listing them, or the
+   * current term where the store states no current population.
    */
   readonly refusal: (selector: Selector) => Effect.Effect<string | null, SqlError>
   /** The runs a selector names, newest first, at most `limit`. */
@@ -178,6 +180,11 @@ export const layer = Layer.effect(
 
     const refusal = Effect.fn("RunSets.refusal")(function*(selector: Selector) {
       for (const term of selector.terms) {
+        if (term._tag === "current") {
+          const stated = yield* sql<{ one: boolean }>`SELECT one FROM current_population`
+          if (stated.length === 0) return new NoCurrentPopulation().message
+          continue
+        }
         if (term._tag !== "sha") continue
         const shas = yield* sql<{ sha: string }>`
           SELECT DISTINCT k->>'sha' AS sha
