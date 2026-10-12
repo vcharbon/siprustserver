@@ -338,6 +338,28 @@ describe.skipIf(!served)("Jobs", () => {
       expect([listed.landed, listed.total]).toEqual([2, 3])
     })))
 
+  it("counts what an ingest settled with nothing to cut as landed, and leaves nothing pending once it ends", () =>
+    withStore(Effect.gen(function*() {
+      const jobs = yield* Jobs.Service
+      const cuts = yield* Cuts.Service
+      const id = yield* jobs.create({ kind: "ingest", args: { cut: true }, createdBy: "test" })
+      yield* jobs.planned(id, 4)
+      // Two of the four stand current and one was refused: the job decided them without a cut.
+      yield* jobs.settle(id, 3)
+      expect((yield* jobs.show(id))!.progress).toMatchObject({ total: 4, landed: 3, pending: 1 })
+      const prep = yield* cuts.open(undefined, "cut-code", id)
+      yield* cuts.record({ prepId: prep, capture: "ingest_a.pcap.gz", flows: null, cases: [], refusals: [] })
+      yield* jobs.close(id, { status: "done", exit: 0 })
+      expect((yield* jobs.show(id))!.progress).toMatchObject({ total: 4, landed: 4, pending: 0 })
+      const listed = (yield* jobs.list(10)).find((row) => row.id === id)!
+      expect([listed.landed, listed.total]).toEqual([4, 4])
+      // A cut job that died before its last capture has nothing pending: it is over.
+      const died = yield* jobs.create({ kind: "cut", args: {}, createdBy: "test" })
+      yield* jobs.planned(died, 5)
+      yield* jobs.close(died, { status: "died", exit: null })
+      expect((yield* jobs.show(died))!.progress).toMatchObject({ total: 5, landed: 0, pending: 0 })
+    })))
+
   it("pages the queue running first, then queued, then the ended newest first, and reads a job's kin and its cells", () =>
     withStore(Effect.gen(function*() {
       const jobs = yield* Jobs.Service

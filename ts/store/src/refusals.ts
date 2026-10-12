@@ -73,6 +73,7 @@ export const merge = (refusals: ReadonlyArray<Refusal>): ReadonlyArray<Refusal> 
   const byCall = new Map<string, Refusal>()
   for (const refusal of refusals) {
     const held = byCall.get(refusal.caseId)
+    const callKey = held?.callKey ?? refusal.callKey
     byCall.set(
       refusal.caseId,
       held === undefined
@@ -81,7 +82,8 @@ export const merge = (refusals: ReadonlyArray<Refusal>): ReadonlyArray<Refusal> 
           caseId: refusal.caseId,
           reasons: distinct([...held.reasons, ...refusal.reasons]),
           callIds: distinct([...held.callIds, ...refusal.callIds]),
-          detail: [held.detail, refusal.detail].filter((line) => line !== "").join("; ")
+          detail: [held.detail, refusal.detail].filter((line) => line !== "").join("; "),
+          ...(callKey === undefined ? {} : { callKey })
         }
     )
   }
@@ -102,13 +104,13 @@ export const write = (
       // The lists travel as JSON: a JS array is a value list to the statement
       // builder, not a postgres array.
       const rows = yield* sql<{ case_id: string }>`
-        INSERT INTO cut_refusals (prep_id, capture, case_id, reasons, call_ids, detail)
+        INSERT INTO cut_refusals (prep_id, capture, case_id, reasons, call_ids, detail, call_key)
         VALUES (${prepId}, ${capture}, ${refusal.caseId},
                 (SELECT coalesce(array_agg(r), '{}'::text[])
                  FROM jsonb_array_elements_text(${JSON.stringify(refusal.reasons)}::jsonb) r),
                 (SELECT coalesce(array_agg(id), '{}'::text[])
                  FROM jsonb_array_elements_text(${JSON.stringify(refusal.callIds)}::jsonb) id),
-                ${refusal.detail})
+                ${refusal.detail}, ${refusal.callKey ?? null})
         RETURNING case_id
       `
       written += rows.length

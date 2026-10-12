@@ -325,7 +325,9 @@ export const Refusal = Schema.Struct({
   caseId: Schema.String,
   reasons: Schema.Array(Schema.String),
   callIds: Schema.Array(Schema.String),
-  detail: Schema.String
+  detail: Schema.String,
+  /** The call the refusal names, where the cut stated it: what freezes its id. */
+  callKey: Schema.optional(Schema.String)
 })
 export interface Refusal extends Schema.Schema.Type<typeof Refusal> {}
 

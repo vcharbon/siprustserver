@@ -39,6 +39,8 @@ import type {
   Resolved
 } from "./model.js"
 import { UNKNOWN_PROVENANCE } from "./model.js"
+import * as CaseIds from "./case-ids.js"
+import * as CaseMaps from "./case-maps.js"
 import * as Refusals from "./refusals.js"
 
 export interface Interface {
@@ -59,9 +61,12 @@ export interface Interface {
   /**
    * One capture's cut, whole or not at all: no reader ever sees half a reading.
    * Answers what it STORED — every case's hash, and whether the document was
-   * new to the store. The cut's refusals are written with it (`refusals.ts`).
+   * new to the store. The cut's refusals are written with it (`refusals.ts`),
+   * and so are its case map (`case-maps.ts`) and its frozen ids
+   * (`case-ids.ts`): a reading naming a frozen call or id otherwise fails
+   * `CaseIds.Conflict` and writes nothing.
    */
-  readonly record: (request: CaptureCutRequest) => Effect.Effect<Recorded, SqlError>
+  readonly record: (request: CaptureCutRequest) => Effect.Effect<Recorded, CaseIds.Conflict | SqlError>
   /**
    * What a capture stands cut as AS OF a prep: the highest prep no later than
    * the named one that cut it, or the highest of all where none is named;
@@ -326,6 +331,20 @@ export const layer = Layer.effect(
         }
         // What the cut refused stands and falls with the reading it belongs to.
         yield* Refusals.write(sql, request.prepId, request.capture, request.refusals)
+        yield* CaseMaps.writeReading(sql, request.prepId, request.capture)
+        // Every id the reading names freezes with it; one naming a frozen
+        // call or id otherwise refuses the reading whole.
+        yield* CaseIds.freezeOn(
+          sql,
+          request.capture,
+          [
+            ...request.cases.map((entry) => ({ caseId: entry.caseId, callKey: entry.callKey })),
+            ...request.refusals.flatMap((refusal) =>
+              refusal.callKey === undefined ? [] : [{ caseId: refusal.caseId, callKey: refusal.callKey }]
+            )
+          ],
+          `prep${request.prepId}`
+        )
         return { cases: cut.map(([, recorded]) => recorded) } satisfies Recorded
       }))
     })

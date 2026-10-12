@@ -2,7 +2,7 @@
  * Replay requests against a real postgres: a request names calls by key, a
  * resolution reads them against one prep, and a whole-capture request grows
  * where a filter request does not. Every claim is about what the
- * database does — a renamed case found by its key, one insert for N cells —
+ * database does — a case found by its key, one insert for N cells —
  * so none survives a fake. The suite builds and drops its own database.
  */
 import * as Effect from "effect/Effect"
@@ -69,8 +69,8 @@ const cells = (capture: string, keys: ReadonlyArray<string>): ReadonlyArray<Requ
   keys.map((callKey) => ({ capture, callKey }))
 
 /**
- * Two preps of one capture: the first cuts three cases; the second renames
- * one, refuses one, keeps one and adds one.
+ * Two preps of one capture: the first cuts three cases; the second keeps two
+ * by their frozen ids, refuses one and adds one.
  */
 const twoPreps = (capture: string) =>
   Effect.gen(function*() {
@@ -86,7 +86,7 @@ const twoPreps = (capture: string) =>
       second,
       capture,
       [
-        caseOf(`${capture}-cut9`, "K1@x"),
+        caseOf(`${capture}-case1`, "K1@x"),
         caseOf(`${capture}-case3`, "K3@x"),
         caseOf(`${capture}-case4`, "K4@x")
       ],
@@ -124,7 +124,7 @@ afterAll(async () => {
 }, 60_000)
 
 describe.skipIf(!served)("Requests", () => {
-  it("resolves a whole-capture request against two preps: a renamed case by key, a refused key gone with its reasons, the new case added", () =>
+  it("resolves a whole-capture request against two preps: a kept case by key, a refused key gone with its reasons, the new case added", () =>
     withStore(Effect.gen(function*() {
       const requests = yield* Requests.Service
       const capture = "capture_whole.pcap.gz"
@@ -152,9 +152,8 @@ describe.skipIf(!served)("Requests", () => {
 
       const after = (yield* requests.resolve(created.id, second))!
       const grown = after.captures[0]!
-      // The renamed case is found by its key, never by the id the first cut minted.
       expect(grown.planned.map((cell) => [cell.callKey, cell.caseId, cell.origin])).toEqual([
-        ["K1@x", `${capture}-cut9`, "selected"],
+        ["K1@x", `${capture}-case1`, "selected"],
         ["K3@x", `${capture}-case3`, "selected"],
         ["K4@x", `${capture}-case4`, "added_by_prep"]
       ])
@@ -247,7 +246,7 @@ describe.skipIf(!served)("Requests", () => {
       yield* requests.ran(job, [{ capture, callKey: "K1@x" }])
       expect((yield* requests.jobCells(job)).map((cell) => [cell.callKey, cell.caseId, cell.outcome, cell.reasons]))
         .toEqual([
-          ["K1@x", `${capture}-cut9`, "ran", []],
+          ["K1@x", `${capture}-case1`, "ran", []],
           ["K2@x", null, "gone: refused", ["source-truncated-at-edge", "source-call-incomplete"]],
           ["K3@x", `${capture}-case3`, "planned", []],
           ["K4@x", `${capture}-case4`, "planned", []]

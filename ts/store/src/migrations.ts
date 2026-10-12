@@ -456,11 +456,110 @@ const baseline = Effect.gen(function*() {
 })
 
 /**
+ * What outlives the cuts and the runs it was read from:
+ * - `case_ids`, the FROZEN case ids: each (capture, case id) names one call
+ *   key for good, and each call key of a capture one case id (`case-ids.ts`).
+ * - `case_maps`, every prep's case id → call map, kept after the prep's cut
+ *   rows go (`case-maps.ts`); `runs.prep_id` stops referencing `preps` so a
+ *   kept run outlives the cut it read.
+ * - `citations` and `cell_summaries`: the runs, jobs, sweeps, preps and case
+ *   ids an outside record cites, and one row per cell of every cited run
+ *   (`citations.ts`).
+ * - `pins`: the runs kept by hand (`pins.ts`).
+ * - `cut_refusals.call_key`, the call a refusal names; `runs.cleanup`, what the
+ *   lane's post-run cleanup gate found on the batch the run's cells ran in;
+ *   `jobs.settled`, the units a job decided with nothing to land.
+ */
+const frozenIds = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE case_ids (
+      capture   text NOT NULL,
+      case_id   text NOT NULL,
+      call_key  text NOT NULL,
+      origin    text NOT NULL,
+      frozen_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (capture, case_id),
+      UNIQUE (capture, call_key)
+    )
+  `
+  yield* sql`CREATE INDEX case_ids_case_idx ON case_ids (case_id text_pattern_ops)`
+  yield* sql`CREATE INDEX case_ids_key_idx ON case_ids (call_key text_pattern_ops)`
+  yield* sql`
+    CREATE TABLE case_maps (
+      prep_id  bigint NOT NULL,
+      capture  text NOT NULL,
+      case_id  text NOT NULL,
+      kind     text NOT NULL CHECK (kind IN ('case', 'refused')),
+      call_key text,
+      call_ids text[] NOT NULL DEFAULT '{}',
+      reasons  text[] NOT NULL DEFAULT '{}',
+      cut_at   timestamptz NOT NULL,
+      first_at timestamptz,
+      src      text,
+      dst      text,
+      PRIMARY KEY (prep_id, capture, case_id)
+    )
+  `
+  yield* sql`CREATE INDEX case_maps_capture_idx ON case_maps (capture, case_id, prep_id DESC)`
+  yield* sql`CREATE INDEX case_maps_case_idx ON case_maps (case_id text_pattern_ops)`
+  yield* sql`CREATE INDEX case_maps_key_idx ON case_maps (call_key text_pattern_ops)`
+  yield* sql`CREATE INDEX case_maps_call_ids_idx ON case_maps USING gin (call_ids)`
+  yield* sql`
+    CREATE TABLE citations (
+      kind     text NOT NULL CHECK (kind IN ('run', 'job', 'sweep', 'prep', 'case')),
+      ref      text NOT NULL,
+      cited_by text NOT NULL,
+      cited_on date,
+      PRIMARY KEY (kind, ref, cited_by)
+    )
+  `
+  yield* sql`
+    CREATE TABLE cell_summaries (
+      run_id      bigint NOT NULL,
+      case_id     text NOT NULL,
+      capture     text NOT NULL,
+      lane        text NOT NULL,
+      call_key    text,
+      passed      boolean NOT NULL,
+      verdict     text NOT NULL,
+      skipped     text,
+      failed_step text,
+      main_error  jsonb,
+      components  jsonb NOT NULL DEFAULT '[]'::jsonb,
+      env         text,
+      branch      text,
+      sweep_id    bigint,
+      job_id      bigint,
+      prep_id     bigint,
+      started_at  timestamptz NOT NULL,
+      PRIMARY KEY (run_id, case_id)
+    )
+  `
+  yield* sql`CREATE INDEX cell_summaries_case_idx ON cell_summaries (case_id text_pattern_ops)`
+  yield* sql`
+    CREATE TABLE pins (
+      run_id    bigint PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
+      ticket    text,
+      pinned_at timestamptz NOT NULL DEFAULT now()
+    )
+  `
+  yield* sql`ALTER TABLE cut_refusals ADD COLUMN call_key text`
+  yield* sql`ALTER TABLE runs ADD COLUMN cleanup text`
+  yield* sql`ALTER TABLE jobs ADD COLUMN settled integer`
+  yield* sql`ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_prep_id_fkey`
+})
+
+/** The key of the migration that freezes case ids and keeps what outlives a cut. */
+export const FROZEN_IDS = "2_frozen_ids"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
 export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
-  [BASELINE]: baseline
+  [BASELINE]: baseline,
+  [FROZEN_IDS]: frozenIds
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

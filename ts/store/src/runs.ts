@@ -152,6 +152,14 @@ export interface Interface {
   readonly abandon: (ids: ReadonlyArray<number>, detail: string) => Effect.Effect<number, SqlError>
   /** The unfinished runs these jobs opened: what a job that ended without closing them leaves behind. */
   readonly unfinishedOf: (jobIds: ReadonlyArray<number>) => Effect.Effect<ReadonlyArray<number>, SqlError>
+  /**
+   * Records on each run what the lane's post-run cleanup gate found on a batch
+   * its cells ran in; a run several dirty batches touched keeps every finding.
+   * Answers the rows marked.
+   */
+  readonly dirty: (ids: ReadonlyArray<number>, finding: string) => Effect.Effect<number, SqlError>
+  /** The runs of a sweep left open, closed `error` with `detail`: a sweep whose process is gone. Answers the rows closed. */
+  readonly abandonSweep: (sweepId: number, detail: string) => Effect.Effect<ReadonlyArray<number>, SqlError>
   /** Wipes every run row whose bundle is under `dir` (the tree, or one session of it); the rebuild's first act. */
   readonly forget: (dir: string) => Effect.Effect<number, SqlError>
 }
@@ -619,6 +627,25 @@ export const layer = Layer.effect(
       return rows.map((row) => Number(row.id))
     })
 
+    const dirty = Effect.fn("Runs.dirty")(function*(ids: ReadonlyArray<number>, finding: string) {
+      if (ids.length === 0) return 0
+      const rows = yield* sql<{ id: string }>`
+        UPDATE runs SET cleanup = CASE WHEN cleanup IS NULL THEN ${finding} ELSE cleanup || '; ' || ${finding} END
+        WHERE id IN ${sql.in(ids)}
+        RETURNING id
+      `
+      return rows.length
+    })
+
+    const abandonSweep = Effect.fn("Runs.abandonSweep")(function*(sweepId: number, detail: string) {
+      const rows = yield* sql<{ id: string }>`
+        UPDATE runs SET finished_at = now(), detail = ${detail}
+        WHERE sweep_id = ${sweepId} AND finished_at IS NULL
+        RETURNING id
+      `
+      return rows.map((row) => Number(row.id)).sort((a, b) => a - b)
+    })
+
     const forget = Effect.fn("Runs.forget")(function*(dir: string) {
       // The whole tree is every row; a session of it is a stored-prefix match —
       // exact, not LIKE: a directory name may contain `_`, which LIKE reads as
@@ -645,6 +672,8 @@ export const layer = Layer.effect(
       abandonable,
       abandon,
       unfinishedOf,
+      dirty,
+      abandonSweep,
       forget
     })
   })

@@ -209,6 +209,11 @@ export interface Interface {
   readonly stop: (id: number, graceSeconds: number) => Effect.Effect<void, SqlError>
   /** How many units the job set out to work, once it knows. */
   readonly planned: (id: number, units: number) => Effect.Effect<void, SqlError>
+  /**
+   * How many of its planned units the job decided with nothing to land (an
+   * ingest's captures that stand current or were refused): they count landed.
+   */
+  readonly settle: (id: number, units: number) => Effect.Effect<void, SqlError>
   /** The row and its progress, ONE statement; null where no job has the id. */
   readonly show: (id: number) => Effect.Effect<Detail | null, SqlError>
   /** The planner's account of that statement (`EXPLAIN ANALYZE`), one line per plan node: how E5 is checked. */
@@ -386,6 +391,10 @@ export const layer = Layer.effect(
       yield* sql`UPDATE jobs SET planned = ${units} WHERE id = ${id}`
     })
 
+    const settle = Effect.fn("Jobs.settle")(function*(id: number, units: number) {
+      yield* sql`UPDATE jobs SET settled = ${units} WHERE id = ${id}`
+    })
+
     /**
      * One statement: the row, its cells by outcome off `job_cells (job_id,
      * outcome)`, its results as one aggregate per run under `LATERAL` — the
@@ -393,8 +402,11 @@ export const layer = Layer.effect(
      * primary key, never a join it may hash over the whole table — and — for a cut, or an ingest that cuts — the captures its
      * preps cut off `preps (job_id)`, counted against what it planned; an
      * ingest that cuts nothing, a retire and a delete land their planned
-     * units when they are done. A replay with no `job_cells` yet (waiting on a
-     * lock or on a job ahead) counts what it planned as its total.
+     * units when they are done; what a job settled with nothing to land
+     * (`settle`) counts landed, and a non-replay job that ended has nothing
+     * pending. A replay with no `job_cells` yet (waiting on a lock or on a job
+     * ahead) counts what it planned as its total; its planned cells stay
+     * pending after it ends, which is what a resume replays.
      * The progress is a fact of the store, so a poll costs the index scans
      * and nothing is cached.
      */
@@ -411,18 +423,19 @@ export const layer = Layer.effect(
         ), units AS (
           SELECT coalesce(job.planned, cut.landed) AS total,
                  CASE WHEN job.lands_on_done THEN CASE WHEN job.status = 'done' THEN coalesce(job.planned, 0) ELSE 0 END
-                      ELSE cut.landed END AS landed
+                      ELSE cut.landed + coalesce(job.settled, 0) END AS landed,
+                 job.status IN ('queued', 'running') AS live
           FROM job CROSS JOIN cut
         ), cells AS (
           SELECT CASE job.kind WHEN 'replay' THEN coalesce(nullif(count(c.*), 0), units.total) ELSE units.total END::int AS total,
                  CASE job.kind WHEN 'replay' THEN count(c.*) FILTER (WHERE c.outcome = 'ran') ELSE units.landed END::int AS landed,
                  CASE job.kind
                    WHEN 'replay' THEN CASE WHEN count(c.*) = 0 THEN units.total ELSE count(c.*) FILTER (WHERE c.outcome = 'planned') END
-                   ELSE greatest(units.total - units.landed, 0) END::int AS pending,
+                   ELSE CASE WHEN units.live THEN greatest(units.total - units.landed, 0) ELSE 0 END END::int AS pending,
                  count(c.*) FILTER (WHERE c.outcome = 'gone: refused')::int AS gone_refused,
                  count(c.*) FILTER (WHERE c.outcome = 'gone: not in this cut')::int AS gone_missing
           FROM job CROSS JOIN units LEFT JOIN job_cells c ON c.job_id = job.id
-          GROUP BY job.kind, units.total, units.landed
+          GROUP BY job.kind, units.total, units.landed, units.live
         ), results AS (
           SELECT coalesce(sum(a.passed), 0)::int AS passed,
                  coalesce(sum(a.failed), 0)::int AS failed,
@@ -466,6 +479,7 @@ export const layer = Layer.effect(
                  WHEN j.kind IN ('retire', 'delete') OR j.kind = 'ingest' AND NOT coalesce((j.args->>'cut')::boolean, false)
                    THEN CASE WHEN j.status = 'done' THEN coalesce(j.planned, 0) ELSE 0 END
                  ELSE (SELECT count(*)::int FROM capture_cuts cc JOIN preps p ON p.id = cc.prep_id WHERE p.job_id = j.id)
+                      + coalesce(j.settled, 0)
                END AS landed,
                CASE j.kind
                  WHEN 'replay' THEN coalesce(nullif((SELECT count(*)::int FROM job_cells c WHERE c.job_id = j.id), 0), j.planned, 0)
@@ -592,6 +606,7 @@ export const layer = Layer.effect(
       sweep,
       stop,
       planned,
+      settle,
       show,
       explain,
       list,
