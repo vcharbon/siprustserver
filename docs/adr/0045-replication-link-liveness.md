@@ -28,8 +28,11 @@ life of the process, silently.
 
 ## Decision
 
-1. **Connect bound.** A puller gives up a connect after `connect_timeout_ms`
-   (2 s) in every phase, bootstrap or not, and backs off.
+1. **Connect bound and backoff ceiling.** A puller gives up a connect after
+   `connect_timeout_ms` (2 s) in every phase, bootstrap or not, and backs off
+   from 100 ms doubling to `backoff_max_ms` (2 s). One attempt costs at most
+   one connect bound, so the low ceiling is cheap, and it bounds how long a
+   healed link waits for its next reconnect.
 2. **Idle bound.** The server sends a `Noop` at least every `noop_interval`
    (5 s) on a caught-up stream. A puller that receives nothing for
    `idle_timeout_ms` (15 s) leaves the stream and pulls again from its
@@ -73,7 +76,8 @@ life of the process, silently.
 ### Settings and their env keys
 
 Read at boot (`LinkSettings::from_lookup`). Unset takes the default; a value
-that is not a positive integer refuses the boot, and so does a keepalive time
+that is not a positive integer refuses the boot, and so does a backoff
+ceiling under the 100 ms floor, a keepalive time
 that is not a whole number of seconds (1 s to 32 767 s), more than 127
 keepalive probes, or a user timeout above `u32::MAX` ms. The idle timeout must
 be at least twice the `Noop` interval. The two span nodes — a node's pullers
@@ -83,6 +87,7 @@ interval after.
 | key | meaning | default |
 |---|---|---|
 | `B2BUA_REPL_CONNECT_TIMEOUT_MS` | one connect to a peer | 2000 |
+| `B2BUA_REPL_BACKOFF_MAX_MS` | the reconnect backoff's ceiling (its floor is 100 ms) | 2000 |
 | `B2BUA_REPL_IDLE_TIMEOUT_MS` | a stream delivering nothing is left | 15000 |
 | `B2BUA_REPL_NOOP_INTERVAL_MS` | the longest a served stream goes without a `Noop` | 5000 |
 | `B2BUA_REPL_SEND_STALL_MS` | a send blocked this long leaves the stream, either end | 15000 |
@@ -93,15 +98,19 @@ interval after.
 ## Consequences
 
 - A partition longer than the idle bound ends its streams: on heal the pullers
-  reconnect at their next backoff step (up to the 30 s ceiling) and read the
-  compacted log from their watermarks, not the frames the partition held.
+  reconnect at their next backoff step and read the compacted log from their
+  watermarks, not the frames the partition held. A backup is behind a healed
+  link for at most one backoff ceiling plus one connect bound (4 s by
+  default).
 - A blocked send is bounded per send call: a batch of the bootstrap scan
   counts as one send.
 - Pinned by: `b2bua` `repl::link_liveness_tests` (a silent peer, a connect
   nobody answers, the backoff after a short and after a lasting stream, a
   blocked puller send, a peer that stops reading, a quiet live stream kept
   across 120 s, the `Noop` cadence, failed accepts),
-  `repl::membership_sync_tests` (an unsynced view and the hard timer);
+  `repl::membership_sync_tests` (an unsynced view and the hard timer),
+  `repl::heal_reach_tests` (a backup behind a long partition catches up within
+  one ceiling and one connect of the heal);
   `repl-net` `transport::real` (`both_ends_carry_keepalive_and_a_user_timeout`,
   on the streams `connect` and `accept` wrap) and `simulated` (the black-holed
   address, failed accepts); `b2bua-runner-kit`

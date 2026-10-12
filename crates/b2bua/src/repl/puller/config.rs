@@ -1,8 +1,10 @@
 //! [`PullerConfig`] — a puller's backoff, bootstrap and link bounds.
 
-/// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
+/// Default backoff floor / ceiling (ms). The ceiling bounds how long a heal
+/// waits for the next reconnect: one attempt costs at most one connect bound,
+/// so a low ceiling is cheap (ADR-0045).
 const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
-const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
+const DEFAULT_BACKOFF_MAX_MS: u64 = 2_000;
 /// Default bootstrap hard-timeout (ms): the upper bound on how long the puller
 /// waits — for a reachable connection AND for the first catch-up `Noop` — before
 /// declaring bootstrap-complete best-effort (ADR-0011 X5 — liveness over

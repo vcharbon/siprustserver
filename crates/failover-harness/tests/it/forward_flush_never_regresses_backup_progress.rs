@@ -39,9 +39,10 @@
 //! self-released and the Element is the call's last record.
 //!
 //! The cut outlasts the puller's idle bound (ADR-0045), so the heal lands
-//! through a reconnect, at the puller's next backoff step: the survivor pulls
-//! the primary again from its watermark and reads the compacted log, one entry
-//! per ref — the primary's last version of the teardown.
+//! through a reconnect, at the puller's next backoff step (within the 2 s
+//! default ceiling): the survivor pulls the primary again from its watermark
+//! and reads the compacted log, one entry per ref — the primary's last version
+//! of the teardown.
 //!
 //! Residual, measured rather than narrated (ADR-0031 D3): the partitioned primary
 //! tore down a call the survivor kept serving. The Put cell ends with the answered
@@ -431,10 +432,14 @@ enum HealAt {
     AfterShed,
 }
 
-/// Pump until the survivor counts a refused forward `op`, the healed
-/// puller's reconnect included (its next backoff step).
+/// The longest a heal takes to reach the survivor: the healed puller's next
+/// backoff step (the 2 s default ceiling) plus one connect bound (2 s).
+const HEAL_REACH: Duration = Duration::from_secs(4);
+
+/// Pump until the survivor counts a refused forward `op`, within
+/// [`HEAL_REACH`] of the heal.
 async fn refused_after_heal(fh: &FailoverHarness, survivor: &ReplicatedB2buaSut, op: &str) -> bool {
-    fh.pump_until(Duration::from_millis(500), Duration::from_secs(30), async || {
+    fh.pump_until(Duration::from_millis(200), HEAL_REACH, async || {
         survivor.metrics().repl_forward_flush_refused(op) >= 1
     })
     .await

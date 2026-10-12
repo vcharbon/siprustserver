@@ -11,10 +11,6 @@ use repl_net::transport::{ListenError, ReplicationListener, ReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
-/// The pullers' backoff ceiling: a cut that outlasts the idle bound leaves its
-/// streams (ADR-0045), and a heal reaches the pullers within this.
-const HEAL_REACH_MS: u64 = 1_000;
-
 /// The per-node repl wiring kept so a crashed node can be rebuilt in place
 /// (same ordinal, same repl listen addr, fresh empty store, higher gen).
 pub(super) struct ReplWiring {
@@ -67,7 +63,7 @@ impl ReplWiring {
             listener: self.bind().await,
             addr_resolver,
             incarnation_gen: gen,
-            puller: PullerConfig { backoff_max_ms: HEAL_REACH_MS, ..PullerConfig::default() },
+            puller: PullerConfig::default(),
             serve: ServeConfig::default(),
         };
         (setup, store, sim_membership)

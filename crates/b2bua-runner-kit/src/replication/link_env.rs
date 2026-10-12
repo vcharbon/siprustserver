@@ -3,6 +3,7 @@
 //!
 //! ```text
 //!   B2BUA_REPL_CONNECT_TIMEOUT_MS     one connect to a peer              (2000)
+//!   B2BUA_REPL_BACKOFF_MAX_MS         the reconnect backoff's ceiling    (2000)
 //!   B2BUA_REPL_IDLE_TIMEOUT_MS        a stream delivering nothing is left (15000)
 //!   B2BUA_REPL_NOOP_INTERVAL_MS       the longest a served stream goes
 //!                                     without a Noop                     (5000)
@@ -32,6 +33,7 @@ use repl_net::SocketSettings;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LinkSettings {
     pub(crate) connect_timeout: Duration,
+    pub(crate) backoff_max: Duration,
     pub(crate) idle_timeout: Duration,
     pub(crate) noop_interval: Duration,
     pub(crate) send_stall: Duration,
@@ -45,6 +47,7 @@ impl Default for LinkSettings {
         let serve = ServeConfig::default();
         Self {
             connect_timeout: Duration::from_millis(puller.connect_timeout_ms),
+            backoff_max: Duration::from_millis(puller.backoff_max_ms),
             idle_timeout: Duration::from_millis(puller.idle_timeout_ms),
             noop_interval: serve.noop_interval,
             send_stall: serve.send_stall,
@@ -71,6 +74,7 @@ impl LinkSettings {
         };
         let settings = Self {
             connect_timeout: ms("B2BUA_REPL_CONNECT_TIMEOUT_MS", d.connect_timeout)?,
+            backoff_max: ms("B2BUA_REPL_BACKOFF_MAX_MS", d.backoff_max)?,
             idle_timeout: ms("B2BUA_REPL_IDLE_TIMEOUT_MS", d.idle_timeout)?,
             noop_interval: ms("B2BUA_REPL_NOOP_INTERVAL_MS", d.noop_interval)?,
             send_stall: ms("B2BUA_REPL_SEND_STALL_MS", d.send_stall)?,
@@ -98,6 +102,13 @@ impl LinkSettings {
             },
             lookup_timeout: ms("B2BUA_REPL_LOOKUP_TIMEOUT_MS", d.lookup_timeout)?,
         };
+        let floor = Duration::from_millis(PullerConfig::default().backoff_init_ms);
+        if settings.backoff_max < floor {
+            return Err(format!(
+                "B2BUA_REPL_BACKOFF_MAX_MS must be at least the backoff floor ({} ms)",
+                floor.as_millis()
+            ));
+        }
         if settings.idle_timeout < settings.noop_interval * 2 {
             return Err(format!(
                 "B2BUA_REPL_IDLE_TIMEOUT_MS ({} ms) must be at least twice \
@@ -109,11 +120,12 @@ impl LinkSettings {
         Ok(settings)
     }
 
-    /// The pullers' configuration: the default backoff and bootstrap timer,
-    /// these link bounds.
+    /// The pullers' configuration: the default backoff floor and bootstrap
+    /// timer, these link bounds and backoff ceiling.
     pub(crate) fn puller(&self) -> PullerConfig {
         PullerConfig {
             connect_timeout_ms: self.connect_timeout.as_millis() as u64,
+            backoff_max_ms: self.backoff_max.as_millis() as u64,
             idle_timeout_ms: self.idle_timeout.as_millis() as u64,
             send_stall_ms: self.send_stall.as_millis() as u64,
             ..PullerConfig::default()
