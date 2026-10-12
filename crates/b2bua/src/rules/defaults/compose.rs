@@ -76,6 +76,7 @@ pub fn default_rules_with(options: &ComposeOptions) -> Vec<RuleDefinition> {
     // `reroute` slice — inert otherwise) out-rank
     // `confirm-dialog`/`relay-provisional`/`route-failure` by order.
     rules.extend(crate::rules::release_reroute::release_reroute_rules());
+    rules.extend(crate::rules::lost_round::lost_round_rules());
     rules.extend(core_rules());
     rules.extend(crate::rules::relay_first_18x::relay_first_18x_rules());
     rules.extend(crate::rules::promote_pem::promote_pem_rules());

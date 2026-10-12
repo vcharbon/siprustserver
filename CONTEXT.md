@@ -416,16 +416,32 @@ The **Backup** stream (bootstrap + tail) a node opens against each peer *after*
 `Ready` to keep the calls it backs up current. Distinct socket, distinct
 watermark from Reclaim; never gates readiness (metrics-only).
 
-**Takeover copy** (acting-backup live copy) — *reactive only* (ADR-0014):
+**Takeover copy** (acting-backup live copy) (ADR-0014, ADR-0046):
 The live, in-memory call a backup materialises into its own call map **when the
-proxy reroutes an in-dialog request to it** (`router::materialise`) — distinct
-from the serialised backup **Element** (the `bak:{primary}` stored body). There is
-**no** eager/membership-driven takeover: a quiescent failed-over dialog is not
-made live on a survivor; it is recovered by the rebooting primary's **reclaim**.
+proxy reroutes an in-dialog request to it** (`router::materialise`), or when its
+primary departs with an INVITE of the call in flight (the **departure sweep**) —
+distinct from the serialised backup **Element** (the `bak:{primary}` stored body).
+A quiescent failed-over dialog is not made live on a survivor; it is recovered by
+the rebooting primary's **reclaim**, or by a message for it.
 The copy serves the dialog and owns the runtime timers; the Element is just bytes
 + a TTL.
 _Avoid_: using "Element"/"replica" for the live copy, or "takeover copy" for the
-stored body; "eager takeover" (removed).
+stored body; "eager takeover" (removed: it took over every call, quiet ones too).
+
+**Departure sweep** (ADR-0046, `router::departure`): what a backup does when a
+peer leaves the membership set while its flows run — it takes over every call of
+the peer's backup partition that names an INVITE transaction in flight, and no
+other. _Avoid_: "eager takeover" for it.
+
+**Undecided call** (ADR-0046, `router::undecided`): a live call still waiting on
+its first routing decision — caller unanswered, no decision applied, nothing
+dialled. Materialised with no message (the departure sweep, a reclaim), it is
+refused 503 without Retry-After, the decision never asked again.
+
+**Lost round** (ADR-0046, `rules::lost_round`): an INVITE transaction a node sent
+on a confirmed dialog that no record holds — the node died before the round
+replicated. Its final is told by a CSeq above the dialog's recorded sequence with
+no relay pending; it is ACKed and the call ended.
 
 **Reclaim** (active) — the sole quiescent-recovery path (ADR-0014):
 A returning primary *re-serving* its calls — materialising each back into the live

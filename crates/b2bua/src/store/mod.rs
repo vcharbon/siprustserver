@@ -656,22 +656,20 @@ impl CallState {
         }
     }
 
-    /// **Active-reclaim bulk read-path** (ADR-0011 X11): scan this node's own
-    /// `pri:{self}` partition from the replicating store and decode every
-    /// reclaimable call. The router materialises each into the live map +
-    /// re-arms its timers when it goes Ready (the bulk reclaim sweep that makes a
-    /// rebooted primary actually re-*serve*, not just re-*store*). Empty when no
-    /// replicating store is wired.
+    /// **Bulk read-path** of one partition: decode every call body `(role,
+    /// primary)` holds in the replicating store — this node's own `pri:{self}`
+    /// for the bulk reclaim (ADR-0011 X11), a departed peer's `bak:{peer}` for
+    /// the departure takeover (ADR-0046). The router materialises what it
+    /// serves through the per-call read. Empty when no replicating store is wired.
     /// Each entry pairs the decoded call with its persisted receive-time
     /// clock-skew offset (`0` when the record carries none) —
     /// the router re-anchors the call's absolute timer deadlines by this offset
     /// before re-arming them (clock-skew hardening).
-    pub async fn reclaim_scan(&self) -> Vec<(Call, i64)> {
+    pub async fn scan_partition(&self, role: PartitionRole, primary: &str) -> Vec<(Call, i64)> {
         let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
-        let bodies =
-            repl.scan_calls(PartitionRole::Primary, &self.self_ordinal).await.unwrap_or_default();
+        let bodies = repl.scan_calls(role, primary).await.unwrap_or_default();
         bodies
             .iter()
             .filter_map(|b| self.codec.decode(b).ok())

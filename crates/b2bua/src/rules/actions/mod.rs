@@ -6,6 +6,7 @@
 //!
 //! - `dispatch` — the `RuleAction` → handler table (+ inline state mutations)
 //! - `ack_leg` — the ACK of a 2xx toward a leg, relayed or this stack's own
+//! - `lost_round` — the ACK of an INVITE final for a round the record lost
 //! - `relay_request` / `relay_response` — relaying the current event to a peer
 //! - `dialog_track` — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - `dialog_end` — a leg's dialogs moving to the state its teardown records
@@ -32,6 +33,7 @@ mod dialog_end;
 mod dialog_track;
 mod dispatch;
 mod ladder;
+mod lost_round;
 mod originate;
 mod prack;
 mod provisional_arrival;

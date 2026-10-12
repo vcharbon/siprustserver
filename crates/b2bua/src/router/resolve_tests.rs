@@ -122,7 +122,8 @@ async fn an_acting_backup_binds_the_leg_from_the_replicated_index() {
     assert_eq!(res.call_ref.as_deref(), Some(r.as_str()));
 
     let _guard = ctx.state.lock(&r).await;
-    let Materialised::Served(copy) = materialise(ctx, &r, Origin::Takeover).await else {
+    let Materialised::Served { call: copy, .. } = materialise(ctx, &r, Origin::Takeover).await
+    else {
         panic!("the replica is taken over");
     };
     res.bind_indexed_leg(&copy, &event);

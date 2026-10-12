@@ -48,7 +48,7 @@ async fn put(store: &ReplicatingCallStore, role: PartitionRole, primary: &str, c
 /// The `Served` call of a disposition, or the disposition it was instead.
 fn served(d: Materialised) -> Call {
     match d {
-        Materialised::Served(c) => c,
+        Materialised::Served { call, .. } => call,
         other => panic!("expected Served, got {other:?}"),
     }
 }

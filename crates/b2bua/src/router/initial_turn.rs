@@ -125,6 +125,12 @@ pub(super) async fn initial_invite_turn(
         call = ring.invite_received(call, &a_leg, req, now_ms);
     }
     ctx.state.create(call.clone());
+    // The caller may already hold this node's 100 and send nothing more, so
+    // the backup holds the call from its birth, not from its decision
+    // (ADR-0046); the decision turn's write supersedes this one.
+    if call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
+        ctx.state.flush(&call);
+    }
     // Born: the call counts as live from here.
     drop(unborn);
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The

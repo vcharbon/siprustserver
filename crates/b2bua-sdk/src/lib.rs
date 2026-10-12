@@ -28,6 +28,7 @@ pub mod effect;
 pub mod event;
 pub mod failure_image;
 pub mod fold_payload;
+pub mod glare;
 pub mod header_update;
 pub mod in_dialog_relay;
 pub mod leg_end;
@@ -41,6 +42,7 @@ pub mod release_reason;
 pub mod rule_call;
 pub mod sdp_form;
 pub mod service;
+pub mod timer_delay;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
 /// reference through `$crate::rules::…`, and the curated surface a service crate

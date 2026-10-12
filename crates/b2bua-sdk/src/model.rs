@@ -17,10 +17,12 @@ pub use crate::body::{Body, BodyAuthor};
 use crate::config::B2buaConfig;
 pub use crate::effect::{Effect, EffectKind};
 use crate::event::CallEvent;
+pub use crate::glare::GlareRefusal;
 pub use crate::leg_end::LegEnd;
 pub use crate::lifecycle::{AttemptOpening, LifecycleEvent, RouteAnswer};
 use crate::relayed_final::RelayedFinal;
 pub use crate::rule_call::RuleCall;
+pub use crate::timer_delay::TimerDelay;
 
 pub const CORE_LAYER: u8 = 0;
 #[allow(dead_code)]
@@ -438,49 +440,6 @@ pub struct MessageTransform {
     pub add_headers: Vec<Entry>,
 }
 
-/// A timer delay, carrying its own unit. Every arming site states the unit it
-/// means ([`TimerDelay::secs`] / [`TimerDelay::millis`]) and the conversion to
-/// the millisecond deadline the engine schedules on happens once, here — a bare
-/// integer can never reach [`RuleAction::ScheduleTimer`] under the wrong scale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TimerDelay(i64);
-
-impl TimerDelay {
-    /// A delay in whole seconds.
-    pub const fn secs(secs: i64) -> Self {
-        Self(secs * 1000)
-    }
-
-    /// A delay in milliseconds — the granularity the timer driver actually runs
-    /// at, for a deadline no whole second can express.
-    pub const fn millis(millis: i64) -> Self {
-        Self(millis)
-    }
-
-    /// The delay in milliseconds (the engine's own unit).
-    pub const fn as_millis(self) -> i64 {
-        self.0
-    }
-}
-
-/// How an INVITE that meets glare, or an UPDATE over an open offer, is
-/// refused (RFC 3261 §14.2, RFC 3311 §5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlareRefusal {
-    /// The sender's earlier INVITE or UPDATE is still open here: 500 with a
-    /// `Retry-After` of 0 to 10 s (RFC 3261 §14.2, first clause; RFC 3311
-    /// §5.2).
-    Unanswered,
-    /// The sender's earlier INVITE has its 2xx, not yet ACKed: 491, with a
-    /// `Retry-After` from [`crate::config::B2buaConfig::glare_retry_after`]
-    /// when one is set.
-    Unacknowledged,
-    /// An INVITE or offer of this side's own is in progress on the dialog, or
-    /// on the dialog the request would be relayed onto: 491 with no
-    /// `Retry-After` (§14.2, second clause; RFC 3311 §5.2).
-    Crossing,
-}
-
 /// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
 /// cluster (provisional/prack/notify/reinvite/sdp/policy/refer) is defined for
 /// the deferred 18x/transfer service rules and is unused until they land.
@@ -510,6 +469,14 @@ pub enum RuleAction {
     AckLeg {
         leg_id: String,
         body: Option<Body>,
+    },
+    /// ACK the INVITE final the current response carries on `leg_id`'s
+    /// confirmed dialog for a round the record does not hold (ADR-0046): the
+    /// dialog's sequence is raised to the response's first (RFC 3261
+    /// §12.2.1.1); a 2xx is ACKed end to end and its ACK retained for a repeat
+    /// (§13.2.2.4), a non-2xx hop by hop on the response's own branch (§17.1.1.3).
+    AckLostRound {
+        leg_id: String,
     },
     /// Release the fork straggler whose 2xx the current event carries on a
     /// b-leg another fork already confirmed (RFC 3261 §13.2.2.4): ACK that
@@ -1012,6 +979,7 @@ impl RuleAction {
             | RuleAction::Respond { .. }
             | RuleAction::RefuseGlare { .. }
             | RuleAction::AckLeg { .. }
+            | RuleAction::AckLostRound { .. }
             | RuleAction::ReleaseStraggler2xx { .. }
             | RuleAction::CreateLeg { .. }
             | RuleAction::DestroyLeg { .. }

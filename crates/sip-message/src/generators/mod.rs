@@ -47,7 +47,7 @@ pub mod spec;
 
 pub use ack::{
     generate_ack_for_2xx, generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx,
-    GenerateAckFor2xxOpts,
+    generate_ack_for_non_2xx_in_dialog, GenerateAckFor2xxOpts,
 };
 pub use bye::generate_bye_for_2xx_from_invite;
 pub use cancel::generate_cancel;

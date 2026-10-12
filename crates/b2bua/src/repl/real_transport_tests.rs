@@ -69,7 +69,7 @@ fn fast_config() -> PullerConfig {
 // ── Materialisation-gate helpers ────────────────────────────────────────────
 // The stream gates seed garbage `0xAB` bodies — fine, because they only assert
 // the body LANDED. The materialisation gate must reclaim them into LIVE calls,
-// and `reclaim_scan` decodes every body and silently drops the undecodable ones
+// and `scan_partition` decodes every body and silently drops the undecodable ones
 // (`store/mod.rs`). So this gate seeds VALID `Call` encodings.
 
 fn src() -> SocketAddr {
@@ -667,7 +667,7 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     let (w1, w1_store) = spawn_reclaimer_core("w1", "w0", w0_addr, &net, &clock).await;
 
     // Concurrent serving load: hammer w1's store with backup forward-flushes
-    // while it reclaims. These hit the SAME inner Mutex as `reclaim_scan` + the
+    // while it reclaims. These hit the SAME inner Mutex as `scan_partition` + the
     // bootstrap applies but land in `bak:w9` — NOT scanned by reclaim (which
     // scans `pri:w1`), so they pressure the lock without polluting the count.
     let stop = Arc::new(AtomicBool::new(false));

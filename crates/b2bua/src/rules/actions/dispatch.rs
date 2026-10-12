@@ -72,6 +72,7 @@ impl ActionExecutor<'_> {
                     );
                 }
             }
+            RuleAction::AckLostRound { leg_id } => self.ack_lost_round(call, fx, ctx, leg_id),
             RuleAction::ReleaseStraggler2xx { leg_id } => {
                 self.release_straggler(call, fx, ctx, leg_id);
             }

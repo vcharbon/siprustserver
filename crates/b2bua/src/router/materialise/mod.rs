@@ -104,8 +104,9 @@ pub(super) enum Reason {
 #[derive(Debug)]
 pub(super) enum Materialised {
     /// Freshly materialised on this call: inserted, timers re-armed, and for a
-    /// takeover marked and watched.
-    Served(Call),
+    /// takeover marked and watched. `seeded` counts the seeds the layer took;
+    /// one whose branch a transaction here already held is not among them.
+    Served { call: Call, seeded: usize },
     /// Already live on this node; nothing was re-armed.
     Resident(Call),
     /// Not served; the caller's orphan path answers.
@@ -190,7 +191,7 @@ pub(super) async fn materialise(
     }
     // The resident copy is the authoritative one: it carries this node's own
     // root span ids when the call is traced (ADR-0026 §5).
-    Materialised::Served(ctx.state.peek(call_ref).unwrap_or(call))
+    Materialised::Served { call: ctx.state.peek(call_ref).unwrap_or(call), seeded }
 }
 
 /// Re-offer `event` — a datagram the layer emitted with no transaction to
@@ -225,6 +226,12 @@ pub(super) async fn reoffer_trigger(
         return Reoffer::Unmatched;
     }
     ctx.txn.reoffer((**message).clone(), *src).await.unwrap_or(Reoffer::Unmatched)
+}
+
+/// Whether `call` names an INVITE transaction in flight — one a
+/// materialisation would seed ([`seeds::seeds_for`]).
+pub(super) fn has_invite_in_flight(call: &Call) -> bool {
+    !seeds::seeds_for(call).is_empty()
 }
 
 /// The typed miss of the store read, named from the origin's side.

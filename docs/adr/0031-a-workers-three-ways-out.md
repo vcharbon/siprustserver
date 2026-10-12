@@ -1,6 +1,7 @@
 # 0031 — A worker's ways out: graceful, abrupt, vanished, restarted in place — one membership rule for a member still in the slice, one guard for the forward flush
 
-**Status:** accepted (2026-09-13)
+**Status:** accepted (2026-09-13). Amended (2026-10-12): the case table, leaving the slice takes over
+the worker's calls with an INVITE in flight (ADR-0046).
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/it/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -23,6 +24,11 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 | **2. Abrupt** (`delete --force --grace-period=0`) | the API object is removed at +0; kubelet still sends SIGTERM and SIGKILLs 2 s later | the endpoint **leaves the slice** at +0 (one `terminating=true` event may precede the removal) | 2 s | the same ordinal at a **new address** from +0.4 s, overlapping the old process |
 | **3. Vanished** (node crash, network partition) | 3a, the first ~40 s: nothing, the pod object is untouched. 3b: the node controller marks the node NotReady, its pods `Ready=False`; taint eviction (~5 min) stamps a deletion timestamp; with the kubelet unreachable the pod can stay `Terminating` indefinitely | 3a: **unchanged**, `ready=true`. 3b: `ready=false, serving=false`, then `terminating=true`, still in the slice | unknown: dead, or alive behind a partition and still firing its timers | nobody for minutes; on a heal, the **same process** is back |
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
+
+Leaving the slice is also when a worker's backups take over its calls with an INVITE
+in flight (ADR-0046): at the end of case 1, the pod gone after its drain, and at +0 in
+case 2, overlapping the process's last 2 s. Cases 3 and 4 never leave the slice while
+the process may live, and their calls stay reactive.
 
 What each element believed about the leaving worker, per case, from the harness's views
 ledger and the kind cluster's logs:

@@ -7,7 +7,7 @@
 //! 2. **local-only self-release** — `drop_local` sheds the live copy WITHOUT
 //!    propagating a delete: the backup `Element` survives (the call lives on at
 //!    its reclaiming primary) and the takeover flag clears;
-//! 3. **narrow read-paths** — `reclaim_scan` (bulk) + `peek_reclaimable`
+//! 3. **narrow read-paths** — `scan_partition` (bulk) + `peek_reclaimable`
 //!    (reactive straggler) decode this node's `pri:` partition, `peek_replica`
 //!    the `bak:` takeover source, and `materialize_if_absent` inserts
 //!    idempotently. The decision over what they return (the `Terminated`
@@ -278,11 +278,11 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         "skew_offset = receiver_now(100_000) − origin(70_000)",
     );
 
-    // Reaches hydration: reclaim_scan pairs each call with its offset.
-    let scanned = state.reclaim_scan().await;
+    // Reaches hydration: scan_partition pairs each call with its offset.
+    let scanned = state.scan_partition(PRI, "w0").await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
-    assert_eq!(scanned[0].1, 30_000, "reclaim_scan surfaces the skew offset to the router");
+    assert_eq!(scanned[0].1, 30_000, "scan_partition surfaces the skew offset to the router");
 
     // And the on-demand reclaim read-path surfaces it too.
     let (peeked, skew) = state.peek_reclaimable(&r).await.expect("reclaimable");
@@ -391,7 +391,7 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     put(&repl, PRI, "w0", &call).await;
 
     // Bulk sweep sees it.
-    let scanned = state.reclaim_scan().await;
+    let scanned = state.scan_partition(PRI, "w0").await;
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].0.call_ref, r);
 
@@ -592,7 +592,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     // Materialise the reclaimed call into the live serving map (what `reclaim_all`
     // / the reactive `ReclaimCall` do on reboot) — this must re-establish the
     // denormalised backup from `topology.bak`.
-    let scanned = state.reclaim_scan().await;
+    let scanned = state.scan_partition(PRI, "w0").await;
     assert_eq!(scanned.len(), 1);
     assert!(
         state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
@@ -611,7 +611,7 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
 // ---------------------------------------------------------------------------
 // (5) CONCURRENCY (unit, no SIP): a bulk reclaim runs WHILE create/update/delete
 // churn hammers the SAME `CallState` on a multi-thread runtime. This drives the
-// state-level mutations the router makes — reclaim's `reclaim_scan → lock →
+// state-level mutations the router makes — reclaim's `scan_partition → lock →
 // materialize_if_absent` (the core of `reclaim_into_live`) racing live
 // `create`/`update`/`remove`, each under the per-call `lock` the dispatcher
 // serialises on in production — under TRUE parallelism. It is the unit-level
@@ -629,7 +629,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = call_state("w0", repl.clone());
 
-    // Seed N reclaim targets into pri:w0 (the partition `reclaim_scan` reads).
+    // Seed N reclaim targets into pri:w0 (the partition `scan_partition` reads).
     let mut targets = Vec::with_capacity(TARGETS);
     for i in 0..TARGETS {
         let call = build_initial_call(
@@ -649,7 +649,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     let reclaim = {
         let state = state.clone();
         tokio::spawn(async move {
-            for (call, _skew) in state.reclaim_scan().await {
+            for (call, _skew) in state.scan_partition(PRI, "w0").await {
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
                 state.materialize_if_absent(call, MaterialiseOrigin::Reclaim);

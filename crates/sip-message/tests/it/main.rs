@@ -6,6 +6,7 @@
 //! `cargo nextest run --workspace -E 'package(=sip-message) & binary(it)' <module>::`.
 
 mod abnf_fuzz;
+mod ack_non_2xx_in_dialog;
 mod compliance_matrix;
 mod contact_set;
 mod draft_round_trip;

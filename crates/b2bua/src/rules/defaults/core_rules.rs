@@ -681,6 +681,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             &[],
             Match::response()
                 .method("INVITE")
+                .leg_states(&[LegState::Trying, LegState::Early])
                 .direction(Direction::FromB)
                 .filter(|ctx| ctx.response().map(|r| r.status() >= 300).unwrap_or(false)),
             |ctx| {
@@ -689,10 +690,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     .response()
                     .map(|r| (r.status() as i64, r.reason().to_string()))
                     .unwrap_or((500, "Server Error".into()));
-                // Record the reject; the relay/terminate (or failover) is
-                // decided next, and the failed leg is torn down after it so
-                // the caller's final leaves before the answers the teardown
-                // owes her (a PRACK the final crossed, `reject_pending_non_invites`).
+                // Record the reject; the relay/terminate (or failover) is decided next, and
+                // the failed leg is torn down after it so the caller's final leaves before
+                // the answers the teardown owes her (a PRACK the final crossed).
                 let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Reject,
                     leg_id: b.clone(),

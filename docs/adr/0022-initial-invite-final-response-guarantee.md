@@ -2,6 +2,7 @@
 
 **Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100, and an
 INVITE response bound for a dead worker fails over on the cookie of its Record-Route or of the proxy's Via.
+Amended (2026-10-12): X4 and X5, a caller that heard the 100 is answered when its worker departs (ADR-0046).
 
 ## Context
 
@@ -144,18 +145,16 @@ A non-INVITE response answers a client transaction only its sender holds
 (§17.1.2) and follows the Via.
 
 A caller that heard the worker's 100 sends no retransmission that could re-place
-its call, so a worker that dies before its state reaches the backup leaves the
-caller's INVITE with no final from the platform: its client transaction is
-`Proceeding`, which runs no Timer B, and only the caller's own application timer
-ends it. For a new call that window runs from the 100 through the routing
-decision's answer (bounded by the decision deadline) plus one replication stream
-hop (`failover-harness/tests/it/new_call_replication_window.rs`). Its in-dialog
-twin is a round whose relay has not replicated yet: the callee's answer takes
-the call over on a replica that holds no transaction for it, reaches no one,
-and the copy releases itself; each retransmitted answer (§13.3.1.4) takes the
-call over again until the callee's ladder ends, and the survivor, holding no
-round, ends no pending re-INVITE with a 487 (§15.1.2)
-(`reinvite_round_not_yet_replicated.rs`).
+its call: its client transaction is `Proceeding`, which runs no Timer B. The
+platform answers it without a message from it (ADR-0046): a new call is written
+to its backup at its birth, one replication stream hop after the 100
+(`failover-harness/tests/it/new_call_replication_window.rs`), and when its worker
+leaves the membership set the backup takes over every call with an INVITE in
+flight, answering one still waiting on its routing decision with a 503
+(`undecided_call_settled_on_departure.rs`). A round whose relay has not
+replicated yet is acknowledged when the callee's answer takes the call over, and
+the call ended (`reinvite_round_not_yet_replicated.rs`); the caller's pending
+re-INVITE of that round gets no final, only the BYE.
 
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero
@@ -222,9 +221,11 @@ scope) and ADR-0014 draws for reconciliation (`(p,b)`-causal, no clock): **the
 node that holds the live transaction answers; the node that merely holds terminal
 state settles silently.** The decision deadline (X1) further guarantees the
 live-serving node *reaches* that terminal state within 5 s instead of parking a
-limiter/txn slot until the 150 s `SetupTimeout` / crash — the ledger-replicated
-`SetupTimeout` remains the cross-crash backstop for a node that dies mid-setup
-(its caller's txn dies with it, so no wire answer is owed).
+limiter/txn slot until the 150 s `SetupTimeout` / crash. A node that dies mid-setup
+leaves a live body, not a terminal one: whoever materialises it with no message —
+the departure sweep or the restarted node's reclaim — rebuilds the caller's INVITE
+server transaction and answers it 503, so it holds the live transaction and answers
+(ADR-0046 D4).
 
 ## Consequences
 

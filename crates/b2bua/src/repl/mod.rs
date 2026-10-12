@@ -49,6 +49,9 @@ mod tests;
 mod test_support;
 
 #[cfg(test)]
+mod departure_signal_tests;
+
+#[cfg(test)]
 mod idle_wait_tests;
 
 #[cfg(test)]

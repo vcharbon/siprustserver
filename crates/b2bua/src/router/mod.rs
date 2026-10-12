@@ -8,7 +8,9 @@
 //! admission ladder, `process` the per-call handler body,
 //! `interpret` the effect interpreter, `callouts` the fire-and-forget
 //! async-HTTP folds, `materialise` the one path a stored replica takes to
-//! become the live copy this node serves (takeover or reclaim), `reclaim`
+//! become the live copy this node serves (takeover or reclaim), `departure`
+//! the takeover of a departed peer's in-flight calls, `undecided` the end of
+//! a call materialised before its routing decision, `reclaim`
 //! the replication reclaim/discharge funnels,
 //! `restore_hygiene` the replicated-timer restore seam, `release` the one
 //! per-call teardown executor, `responses` the locally-authored response
@@ -24,6 +26,7 @@ mod callout_requests;
 mod callouts;
 #[cfg(test)]
 mod cancel_crossing_tests;
+mod departure;
 mod dialog_gate;
 #[cfg(test)]
 mod dialog_gate_tests;
@@ -55,6 +58,7 @@ pub(crate) mod test_support;
 pub(crate) mod timer_screen;
 mod turn;
 mod turn_label;
+mod undecided;
 mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;
@@ -230,6 +234,10 @@ pub enum ReplCommand {
     /// sends it: a bulk re-seed's refusals are the state of the two views, not
     /// events, and are counted alone.
     ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
+    /// The peer of this ordinal left the membership set while its flows ran: a
+    /// real stop. Its calls this node backs up with an INVITE in flight are
+    /// taken over at once (`departure`, ADR-0046). Sent once per stop.
+    PeerDeparted(String),
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
@@ -295,5 +303,6 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
             let dir = reclaim::FlushDirection::Forward;
             reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
+        ReplCommand::PeerDeparted(ordinal) => departure::take_over_departed(ctx, &ordinal).await,
     }
 }

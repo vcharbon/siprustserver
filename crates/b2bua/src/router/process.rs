@@ -341,7 +341,7 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
         other => other,
     };
     match disposition {
-        Materialised::Served(call) | Materialised::Resident(call) => Some(call),
+        Materialised::Served { call, .. } | Materialised::Resident(call) => Some(call),
         Materialised::Refused(_) => None,
     }
 }

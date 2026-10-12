@@ -9,7 +9,8 @@
 //! on its own account, with nothing of a peer's. A non-2xx
 //! final's hop-by-hop ACK (§17.1.1.3) is the transaction layer's, whichever node
 //! sent the INVITE (a taken-over call seeds that transaction,
-//! `router::materialise`).
+//! `router::materialise`), except for a round the record never held, which no
+//! transaction can be rebuilt for: that ACK is built from the dialog here.
 
 use call::{Dialog, Leg, LegState};
 use sip_message::generators;
@@ -93,11 +94,38 @@ pub fn ack_b_leg(
     ))
 }
 
-/// The CSeq sequence number of the INVITE last sent on this dialog (initial or
-/// re-INVITE), recovered from the cached client-transaction handle so the
-/// 2xx ACK can echo it (RFC 3261 §13.2.2.4).
+/// The CSeq sequence number of the INVITE whose 2xx this dialog acknowledges
+/// (RFC 3261 §13.2.2.4): the INVITE last sent on it (initial or re-INVITE),
+/// recovered from the cached client-transaction handle — or, for a round the
+/// record never held (no handle), the ACK this stack sent for its 2xx.
 pub(crate) fn acked_invite_cseq(dialog: &Dialog) -> Option<u32> {
-    acked_invite(dialog).map(|r| r.cseq().seq())
+    match &dialog.pending_invite_txn {
+        Some(_) => acked_invite(dialog).map(|r| r.cseq().seq()),
+        None => parse_request(dialog.emitted_ack.as_ref()?.wire().0).map(|r| r.cseq().seq()),
+    }
+}
+
+/// The hop-by-hop ACK of a non-2xx final `resp` to an INVITE this stack sent on
+/// `leg`'s established dialog in a round the record never held (RFC 3261
+/// §17.1.1.3), sent raw where the INVITE went: the dialog's first hop.
+pub fn ack_lost_non_2xx(
+    leg: &Leg,
+    config: &B2buaConfig,
+    resp: &sip_message::SipResponse,
+) -> Option<OutboundSipEffect> {
+    let dialog = leg.dialogs.established()?;
+    let gen_dialog = to_gen_dialog(leg, dialog);
+    let ack = generators::generate_ack_for_non_2xx_in_dialog(&gen_dialog, resp);
+    let dest = target_dest(&dialog.remote_target);
+    let (ack, dest) = apply_b_leg_egress(config, &leg.leg_id, &gen_dialog.route_set, ack, dest);
+    Some(OutboundSipEffect {
+        body: OutboundBody::Request(ack),
+        mode: OutboundTxnMode::Raw,
+        destination: dest,
+        label: format!("ACK (non-2xx) → {}", leg.leg_id),
+        leg_id: Some(leg.leg_id.clone()),
+        provenance: Provenance::Authored,
+    })
 }
 
 /// `true` when the INVITE last sent on this dialog carried the offer, so the ACK

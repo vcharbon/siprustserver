@@ -2,8 +2,8 @@
 //! first-match/layer-ranked executor, the action vocabulary + executor
 //! ([`actions`]), framework invariants, and the rule families: the CORE
 //! lifecycle set ([`defaults`]), the 18x-policy services ([`relay_first_18x`],
-//! [`promote_pem`]), REFER transfer ([`refer_transfer`]), and release/reroute
-//! ([`release_reroute`]).
+//! [`promote_pem`]), REFER transfer ([`refer_transfer`]), release/reroute
+//! ([`release_reroute`]), and the round a record lost ([`lost_round`]).
 
 pub mod actions;
 pub mod capabilities;
@@ -13,6 +13,7 @@ pub mod docgen;
 pub mod executor;
 pub mod invariants;
 pub mod lifecycle_delivery;
+pub mod lost_round;
 pub mod model_invariants;
 mod pending_refusal;
 pub mod promote_pem;

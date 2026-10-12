@@ -11,7 +11,7 @@
 //! subscribes to `changes()` and reconciles:
 //! - `Added` → spawn/Connecting (or un-Park: reconnect from the retained W).
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
-//!   `(ordinal, flow)`.
+//!   `(ordinal, flow)`, and tell the router the peer departed (ADR-0046).
 //! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
 //! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
 //!   snapshot at all**, ready or not, terminating or not (ADR-0031 D1). Only
@@ -480,13 +480,6 @@ impl ReplicationSupervisor {
                 );
                 self.spawn_flow(&mut entry.reclaim, peer, Partition::Pri);
             }
-            // Under reactive-only takeover (ADR-0014) there is **no** eager
-            // death-triggered takeover: a quiescent failed-over dialog is
-            // recovered only when the rebooting primary reclaims it (the Reclaim
-            // flow, smoothed), or earlier on in-dialog traffic the LB reroutes to
-            // a survivor (reactive takeover). A quiescent call on a permanently-
-            // lost node dies after the keepalive slack — the deliberate trade for
-            // killing the eager-takeover stale-CSeq storm (ADR-0014 §13).
             if backup_enabled && (entry.backup.status_rx.is_none() || drift) {
                 tracing::info!(
                     node = observe::node(),
@@ -501,6 +494,9 @@ impl ReplicationSupervisor {
         }
 
         // Park: any peer whose ordinal departed the desired set (both flows).
+        // A peer still running is a real stop: the router is told once, so it
+        // takes over the peer's calls with an INVITE in flight (ADR-0046); a
+        // quiescent call stays reactive (ADR-0014 §1).
         let desired_ords: std::collections::HashSet<&str> =
             desired.iter().map(|p| p.ordinal.as_str()).collect();
         for (ord, entry) in peers.iter_mut() {
@@ -511,6 +507,9 @@ impl ReplicationSupervisor {
                         peer = %ord,
                         "replication peer parked (left the membership set)"
                     );
+                    if let Some(tx) = self.inner.repl_tx.lock().unwrap().as_ref() {
+                        let _ = tx.send(crate::router::ReplCommand::PeerDeparted(ord.clone()));
+                    }
                 }
                 entry.park();
             }
