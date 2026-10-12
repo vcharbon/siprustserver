@@ -136,3 +136,80 @@ Content-Length: 0\r\n\r\n"
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("too_many_hops"), 1);
 }
+
+/// Strategy double whose cookie decode always refuses with a 403.
+struct RejectingDecode;
+
+#[async_trait]
+impl RoutingStrategy for RejectingDecode {
+    fn name(&self) -> &str {
+        "RejectingDecode"
+    }
+    async fn select_for_new_dialog(
+        &self,
+        _msg: &SipMessage,
+        _opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
+        Err(SelectError::NoTarget { reason: "unused".into() })
+    }
+    async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+        DecodeResult::Reject { status: 403, reason: "Forbidden".into() }
+    }
+    fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+        None
+    }
+    fn stickiness_primary<'p>(&self, _params: &'p RouteParams) -> Option<&'p str> {
+        None
+    }
+}
+
+/// A 2xx ACK through this proxy, with `route` as its Route header (if any).
+fn ack(route: Option<&str>) -> SipMessage {
+    let route = route.map(|r| format!("Route: {r}\r\n")).unwrap_or_default();
+    let raw = format!(
+        "ACK sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKack1;rport\r\n\
+{route}Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=t\r\n\
+To: <sip:bob@10.0.0.50>;tag=u\r\n\
+Call-ID: ack-1@test\r\n\
+CSeq: 1 ACK\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    CustomParser::default().parse(raw.as_bytes()).unwrap()
+}
+
+// RFC 3261 §17.1.1.3/§17.2.1: an ACK is never answered. With no worker to
+// select it is dropped and counted, never 503'd.
+#[tokio::test]
+async fn an_ack_with_no_target_is_dropped_not_answered() {
+    let (core, metrics) =
+        core_failing_with(|| SelectError::NoTarget { reason: "empty registry".into() }).await;
+    let outcome = core.route_request(&ack(None), format!("{UAC}:5060").parse().unwrap()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
+    assert_eq!(metrics.messages_total(), 0, "no response to an ACK");
+    assert_eq!(metrics.reject_count("ack_not_answered"), 1);
+}
+
+// An ACK whose stickiness cookie is refused is dropped and counted, never 403'd.
+#[tokio::test]
+async fn an_ack_whose_cookie_is_refused_is_dropped_not_answered() {
+    let net = SimulatedSignalingNetwork::new(1);
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let metrics = Arc::new(ProxyMetrics::new());
+    let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+    let core =
+        ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), Arc::new(RejectingDecode), reg)
+            .clock(Clock::test_at(0))
+            .metrics(metrics.clone())
+            .build(ep);
+    let route = format!("<sip:{PROXY_VIP}:5060;lr;w_pri=w9>");
+    let outcome =
+        core.route_request(&ack(Some(&route)), format!("{UAC}:5060").parse().unwrap()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
+    assert_eq!(metrics.messages_total(), 0, "no response to an ACK");
+    assert_eq!(metrics.reject_count("ack_not_answered"), 1);
+}
