@@ -158,9 +158,11 @@ for run in $(seq 1 "$RUNS"); do
   # starts at 30 cps and climbs 2 cps per OPTIONS tick), so at their defaults a
   # single-worker 100 cps run measures the *admission controller* — a third of
   # the calls 503 before reaching the b2bua. This baseline measures the SIP
-  # datapath, so the gates are lifted, not exercised.
+  # datapath, so the gates are lifted, not exercised. The one proxy signs its
+  # own stickiness cookies: a per-run key, shared with nothing.
   PROXY_LISTEN=$PROXY_SIP PROXY_ADVERTISE=$PROXY_SIP \
   PROXY_WORKERS=w0@$B2BUA_SIP PROXY_METRICS=$PROXY_HTTP \
+  PROXY_HMAC_KEY="bench-$run-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
   PROXY_SELF_GATE_CPS_RATE=1000 PROXY_SELF_GATE_CPS_SIZE=500 \
   LB_CAP_CEILING_CPS=2000 LB_AIMD_INCREASE_STEP_CPS=500 \
     scope_run "b3t-proxy-$run" 2G 400% "$RESULTS/r${run}_proxy.pid" \

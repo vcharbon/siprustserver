@@ -627,8 +627,8 @@ chaos_verify_clean() {
 # HEAL: `docker network connect --ip <its original pinned IP>` restores the
 # node's sipext face (pinned IPs .11/.12 recovered from the node's position in
 # the SORTED edge-node list — the exact assignment run.sh sipext_up makes).
-# Because the instance is `nopreempt`, the healed node does NOT reclaim the
-# VIPs: they stay with the peer until IT fails — expected, documented behaviour
+# VRRP preempts only on a strictly higher priority and both nodes share one,
+# so the healed node does NOT reclaim the VIPs: they stay with the peer until IT fails — expected, documented behaviour
 # (the next cut targets whichever node is master THEN, so the event stays
 # symmetric across a rotation).
 #
@@ -678,7 +678,7 @@ sip_chaos_active{type="cut_external_plane"} 1'
   sleep "$CUT_SECS"
   trap - INT TERM
   if docker network connect --ip "$ip" "$SIPEXT_NET" "$node"; then
-    log "cut_external_plane: reconnected $node as $ip (nopreempt: the VIPs STAY with the peer — expected)"
+    log "cut_external_plane: reconnected $node as $ip (equal priorities: the VIPs STAY with the peer — expected)"
     push_metric 'sip_chaos_event{type="cut_external_plane",result="pass"} 1
 sip_chaos_active{type="cut_external_plane"} 0'
   else

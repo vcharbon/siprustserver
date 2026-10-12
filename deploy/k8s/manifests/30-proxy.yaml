@@ -30,8 +30,9 @@ metadata:
   labels: { app: sip-front-proxy }
 data:
   keepalived.conf: |
-    # Identical on both pods. state BACKUP + nopreempt => the first pod up wins
-    # the VIPs and keeps them across peer reboots (no flapping). Multicast VRRP —
+    # Identical on both pods, same base priority. state BACKUP: the first pod up
+    # wins the VIPs; VRRP preempts only on a STRICTLY higher priority, so the
+    # holder keeps them across the peer's reboots (no flapping). Multicast VRRP —
     # a docker bridge floods link-local 224.0.0.18 between the edge nodes.
     #
     # DUAL-PLANE (sipext layout): ONE vrrp_instance owns BOTH identities — the
@@ -42,15 +43,25 @@ data:
     # FAULT if the external iface disappears (chaos cut_external_plane / carrier
     # loss) so the peer takes both VIPs together.
     #
-    # NO exec-based vrrp_script (absorbed): the 038 chk_proxy
-    # pgrep track_script latched a startup-window execve failure (exit 127) and
-    # pinned BOTH nodes in FAULT — dead VIP. Interface tracking is native
-    # netlink (nothing to exec, nothing to latch); the functional response-path
-    # gate is run.sh vip_smoke at deploy time. If process-gating ever returns,
-    # it must be a /bin/sh -c-wrapped predicate clamped to exit 0/1 and land
-    # together with a staggered-start acceptance test (040 §Ask).
+    # The VIPs follow proxy health (ADR-0046): chk_proxy_health GETs the proxy's
+    # /healthz. It is weighted, never a FAULT trigger: 3 failures in a row drop
+    # this node's priority by 50, so a dead or crash-looping proxy hands the VIPs
+    # to a healthy peer in ~3-4 s; both checks failing leaves the priorities
+    # equal and the VIPs where they are; a recovered proxy is back at the same
+    # priority and does not take them back. The check is a /bin/sh -c predicate
+    # clamped to exit 0/1, so an exec failure in the startup window reads as one
+    # failed check, not a latched FAULT.
     global_defs {
         router_id sip-front-proxy
+        script_user root
+    }
+    vrrp_script chk_proxy_health {
+        script "/bin/sh -c 'wget -q -T 1 -O /dev/null http://127.0.0.1:9090/healthz && exit 0; exit 1'"
+        interval 1
+        timeout 1
+        fall 3
+        rise 2
+        weight -50
     }
     vrrp_instance VI_SIP {
         state BACKUP
@@ -58,7 +69,6 @@ data:
         virtual_router_id 51
         priority 100
         advert_int 0.5
-        nopreempt
         # GARP hardening: on a FRESHLY-created docker bridge
         # the default single gratuitous-ARP burst at election is easily lost
         # while veth/FDB state is still settling, and it was never re-asserted —
@@ -77,6 +87,9 @@ data:
         }
         track_interface {
             ${SIPEXT_IF}
+        }
+        track_script {
+            chk_proxy_health
         }
         # Keep BOTH VIPs on lo at all times so either pod can bind(VIP:5060) on
         # each face and use them as outbound source IPs (source-IP discipline).
@@ -115,8 +128,8 @@ spec:
       # interfaces (internal ${SIP_IF} + external ${SIPEXT_IF} — the edge nodes
       # are the only dual-homed components; `run.sh up` connects them to the
       # sipext bridge). The two pods must land on different edge nodes
-      # (anti-affinity below). shareProcessNamespace REMOVED with chk_proxy
-      # — nothing pgreps across containers anymore.
+      # (anti-affinity below). keepalived reads the proxy's /healthz over the
+      # shared host network (127.0.0.1:9090).
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       affinity:
@@ -190,6 +203,13 @@ spec:
             - { name: PROXY_ADVERTISE_EXT,   value: "${SIPEXT_VIP}:${SIP_PORT}" }
             - { name: PROXY_FACE_INT_CIDRS,  value: "${PROXY_FACE_INT_CIDRS}" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
+            # The stickiness-cookie signing key both proxies share (ADR-0046):
+            # run.sh creates the Secret once per cluster; every redeploy reuses
+            # it. Changing it 403s the in-dialog requests of calls in progress.
+            - name: PROXY_HMAC_KID
+              valueFrom: { secretKeyRef: { name: sip-front-proxy-hmac, key: kid } }
+            - name: PROXY_HMAC_KEY
+              valueFrom: { secretKeyRef: { name: sip-front-proxy-hmac, key: key } }
             # SO_SNDBUF on every signalling socket (ADR-0033): far above what
             # one unresolved neighbour can pin (16 KiB, set by vip-loopback).
             # The kernel clamps at the host's net.core.wmem_max (host preflight).
@@ -244,6 +264,8 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 2
             failureThreshold: 3
+          # /healthz is also keepalived's chk_proxy_health: the VIPs leave a
+          # node whose proxy stops answering it.
           livenessProbe:
             httpGet: { path: /healthz, port: 9090 }
             initialDelaySeconds: 3

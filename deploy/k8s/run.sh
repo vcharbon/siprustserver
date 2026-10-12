@@ -380,6 +380,18 @@ obs_ensure() {
   obs_check stack || die "observability: series missing after deploy (./run.sh obs-check lists them)"
 }
 
+# The stickiness-cookie signing key both proxies share (ADR-0046), as the
+# Secret 30-proxy.yaml reads: created once per cluster when missing (32 random
+# bytes as base64 text, key id k1), then reused by every deploy. Rotating it
+# 403s the in-dialog requests of calls in progress.
+proxy_hmac_secret() {
+  kubectl -n "$NS" get secret sip-front-proxy-hmac >/dev/null 2>&1 && return 0
+  log "creating the proxy cookie signing key (Secret sip-front-proxy-hmac, kid k1)"
+  kubectl -n "$NS" create secret generic sip-front-proxy-hmac \
+    --from-literal=kid=k1 \
+    --from-literal=key="$(head -c 32 /dev/urandom | base64 -w0)"
+}
+
 deploy() {
   preflight
   require_infra_node
@@ -438,6 +450,7 @@ deploy() {
   # (see 20-worker.yaml / 25-proxy-rbac.yaml).
   log "deploying sip-front-proxy (k8s EndpointSlice worker discovery)"
   apply_manifest "$MANIFEST_DIR/25-proxy-rbac.yaml"
+  proxy_hmac_secret
   subst_manifest "$MANIFEST_DIR/30-proxy.yaml"
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout="$ROLLOUT_TIMEOUT"
   # Proxy "Ready" means process-up + >=1 Alive worker — NOT "the VIP response

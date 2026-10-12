@@ -3,7 +3,8 @@
 # Built locally (not pulled) because the registry osixia/keepalived tar fails
 # `kind load` with a "content digest not found" import error; a fresh local build
 # produces clean OCI layers that load reliably. Alpine keepalived + iproute2 give
-# `keepalived` (/usr/sbin/keepalived) and `ip` for the VIP-on-lo notify scripts.
+# `keepalived` (/usr/sbin/keepalived) and `ip` for the VIP-on-lo notify scripts;
+# busybox `wget` is the HTTP client of the chk_proxy_health /healthz check.
 #
 #   docker build -f deploy/docker/Dockerfile.keepalived -t siprustserver-keepalived:dev .
 FROM alpine:3.20

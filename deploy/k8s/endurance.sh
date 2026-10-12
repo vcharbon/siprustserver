@@ -1088,8 +1088,8 @@ chaos_event() {
     # cut_external_plane: sever the VRRP master edge node's sipext face for
     # CUT_SECS; keepalived track_interface FAULTs it and the peer takes BOTH
     # VIPs (<2s + GARP). Judged on the generic gate: blended success% + long-
-    # dialog survival per docs/testing/ha-acceptance.md (nopreempt: the VIPs
-    # stay with the peer after heal, so consecutive cuts alternate nodes).
+    # dialog survival per docs/testing/ha-acceptance.md (equal priorities: the
+    # VIPs stay with the peer after heal, so consecutive cuts alternate nodes).
     cut_external_plane)
       CUT_SECS="${CUT_SECS:-60}" ./chaos.sh cutext >>"$RUNLOG" 2>&1 || true ;;
   esac
@@ -1353,7 +1353,7 @@ wireup() {
   # dead VIP response path (a restart forces a clean keepalived re-election +
   # GARP burst onto a now-settled bridge), which is why endurance runs never saw
   # what plain `run.sh deploy` hit. The real fix is upstream (GARP repeat/refresh
-  # + chk_proxy track_script in 30-proxy.yaml, vip_smoke gate in run.sh deploy);
+  # in 30-proxy.yaml, vip_smoke gate in run.sh deploy);
   # this restart is retained purely for the image-refresh reason above.
   if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "wireup: rolling workers/proxy onto the freshly-built image"
