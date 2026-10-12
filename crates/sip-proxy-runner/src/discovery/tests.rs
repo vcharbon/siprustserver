@@ -103,3 +103,52 @@ async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_w
     pool.control.set_health("worker-0", WorkerHealth::Alive);
     assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::Ready);
 }
+
+/// The first watch fails to start (500), the next one starts and stays quiet:
+/// a re-started watch delivers no event, so the broken episode ends after the
+/// quiet period with no error, and not before.
+#[tokio::test(start_paused = true)]
+async fn a_watch_that_restarts_quietly_ends_its_broken_episode() {
+    let watches = Arc::new(AtomicUsize::new(0));
+    let counted = watches.clone();
+    let api = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+        let counted = counted.clone();
+        async move {
+            let watching = req.uri().query().is_some_and(|q| q.contains("watch=true"));
+            let mut status = http::StatusCode::OK;
+            let body: Body = if !watching {
+                Either::Left(Full::new(slice_list()))
+            } else if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                status = http::StatusCode::INTERNAL_SERVER_ERROR;
+                Either::Left(Full::new(Bytes::from_static(
+                    b"{\"kind\":\"Status\",\"apiVersion\":\"v1\",\"metadata\":{},\"status\":\"Failure\",\"message\":\"boom\",\"reason\":\"InternalError\",\"code\":500}",
+                )))
+            } else {
+                Either::Right(StreamBody::new(futures::stream::pending()))
+            };
+            let mut resp = http::Response::new(body);
+            *resp.status_mut() = status;
+            Ok::<_, Infallible>(resp)
+        }
+    });
+    let client = kube::Client::new(api, "lab");
+    let connect = move || {
+        let client = client.clone();
+        async move { Ok::<_, String>(client) }
+    };
+    let pool =
+        discovered_pool_with(connect, "lab".into(), "workers".into(), 5060, Clock::test_at(0));
+    let watch = pool.discovery.as_ref().expect("a discovered pool");
+
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let n = watches.load(Ordering::SeqCst);
+    assert!(n >= 2, "re-watched: {n} watch requests");
+    assert!(watch.watch_health().broken_since_unix_ms.is_some(), "still within the quiet period");
+
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        watch.watch_health().broken_since_unix_ms,
+        None,
+        "the re-started watch has been quiet past the quiet period"
+    );
+}
