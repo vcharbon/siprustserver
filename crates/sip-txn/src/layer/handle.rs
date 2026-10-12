@@ -278,11 +278,12 @@ impl TransactionLayer {
 
     /// Hand back a datagram this layer already emitted, to be processed
     /// against the transactions now in the map — the ones [`seed`](Self::seed)
-    /// just rebuilt. A response matching a client transaction, a CANCEL
-    /// matching an active INVITE server transaction and a request matching a
-    /// server transaction (RFC 3261 §17.2.3) run their first-arrival path and are
-    /// [`Reoffer::Matched`] (the consumer drops its copy: whatever that path
-    /// emits arrives as a fresh event); anything else is
+    /// just rebuilt. A response matching a client transaction and a CANCEL
+    /// matching an active INVITE server transaction run their first-arrival
+    /// path; a request matching a server transaction (RFC 3261 §17.2.3) is
+    /// absorbed with nothing sent, its arrival already answered (§17.2.1). All
+    /// three are [`Reoffer::Matched`] (the consumer drops its copy: whatever
+    /// that path emits arrives as a fresh event); anything else is
     /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
     pub async fn reoffer(
         &self,

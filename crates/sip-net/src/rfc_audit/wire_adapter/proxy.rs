@@ -30,9 +30,11 @@ fn proxy_100_trying_not_forwarded(f: &rfc_rules::Finding, cid: &str) -> String {
     };
     format!(
         "received {trying_taken} 100 Trying for INVITE CSeq={cseq} Call-ID={cid} against \
-         {invites_sent} INVITE(s) sent — the stateful proxy on the path forwarded a \
-         downstream 100 it should have absorbed per RFC 3261 §16.7 step 5",
+         {invites_sent} INVITE(s) sent — {sender} sent a 100 beyond one per INVITE: a \
+         stateful proxy forwarding a downstream 100 it should absorb (RFC 3261 §16.7 \
+         step 5), or a UAS answering one received INVITE twice (§17.2.1)",
         cseq = f.cseq,
+        sender = f.emitter,
     )
 }
 

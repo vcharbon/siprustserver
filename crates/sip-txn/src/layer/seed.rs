@@ -13,7 +13,7 @@ use crate::seed::{Reoffer, TxnSeed};
 use crate::timers::ms;
 
 use super::client::{extract_via_custom_params, ViaMarks};
-use super::key::ServerTxnKey;
+use super::key::{ServerTxnId, ServerTxnKey};
 use super::owner::Owner;
 use super::txn::{CancelWire, HeldCancel, NewTransaction, Timer, TxnId, TxnState};
 
@@ -148,9 +148,9 @@ impl Owner {
     /// server transaction run their first-arrival path (a non-2xx INVITE final
     /// is ACKed and held for Timer D, a CANCEL draws 200 + 487 and `Cancelled`)
     /// and re-emit with `matched_client_txn = true`; a request a server
-    /// transaction matches (§17.2.3) draws that transaction's cached response —
-    /// a 100 Trying composed now when a seed holds none yet — the
-    /// retransmission it is (RFC 3261 §17.2.1).
+    /// transaction matches (§17.2.3) is absorbed with nothing sent: the layer
+    /// answered that datagram when it emitted it, and §17.2.1 replays a
+    /// response only to a retransmission received from the wire.
     pub(super) async fn do_reoffer(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -162,7 +162,9 @@ impl Owner {
             SipMessage::Request(req) if req.method() == Method::Cancel => {
                 self.handle_cancel(endpoint, req, src, true).await
             }
-            SipMessage::Request(req) => self.replay_cached(endpoint, &req, src).await,
+            SipMessage::Request(req) => {
+                ServerTxnId::of_request(&req).is_some_and(|id| self.server(id).is_some())
+            }
         };
         if matched {
             Reoffer::Matched

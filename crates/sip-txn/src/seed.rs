@@ -53,8 +53,8 @@ pub enum TxnSeed {
 /// of a datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reoffer {
-    /// A transaction in the map took it: the layer did what the first arrival
-    /// would have done and emitted whatever that emits.
+    /// A transaction in the map took it: a response or a CANCEL ran the path
+    /// its first arrival would have, a request was absorbed with nothing sent.
     Matched,
     /// No transaction took it; nothing was sent and nothing was emitted.
     Unmatched,
