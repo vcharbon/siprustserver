@@ -83,7 +83,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,35 +92,18 @@ use sip_clock::Clock;
 use sip_net::socket_stats::was_clamped;
 use sip_net::types::{BindUdpOpts, PreIngressAction, PreIngressHook};
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
-use sip_proxy::health::{HealthProbe, HealthProbeConfig};
-use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
+use sip_proxy::health::HealthProbe;
+use sip_proxy::load_observer::WorkerLoadObserver;
 use sip_proxy::observability::ProxyMetrics;
-use sip_proxy::registry::composed::ComposedWorkerRegistry;
-use sip_proxy::registry::control::WorkerRegistryControl;
-use sip_proxy::registry::static_reg::StaticWorkerRegistry;
-use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
-use sip_proxy::resolver::ResolverConfig;
+use sip_proxy::registry::WorkerHealth;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::self_gate::{
-    AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate, ProxySelfGateConfig,
-};
+use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
-use sip_proxy::{ExternalFaceParts, FaceCidrs, ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
+use sip_proxy::{ExternalFaceParts, ProxyCoreBuilder, RoutingStrategy};
+use sip_proxy_runner::config::{refuse_to_start, ExternalFace, ProxyConfig, WorkerSource};
+use sip_proxy_runner::discovery::{discovered_pool, static_pool};
+use sip_proxy_runner::readiness::probe_state;
 use sip_txn::IdGen;
-use topology::{K8sMembership, Membership};
-
-fn env_or(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-/// The socket buffer size a `PROXY_UDP_*BUF` knob requests, in bytes: 4 MiB
-/// when unset, `None` (the kernel default) when set blank.
-fn socket_buffer_knob(key: &str) -> Option<usize> {
-    match env_or(key, "4194304").trim() {
-        "" => None,
-        s => Some(s.parse().unwrap_or_else(|_| panic!("{key}"))),
-    }
-}
 
 /// Log the buffer sizes the kernel granted one face's signalling socket,
 /// warning when it clamped a request ([`was_clamped`]).
@@ -155,21 +138,6 @@ fn log_socket_buffers(
     }
 }
 
-fn resolve(addr: &str) -> SocketAddr {
-    addr.to_socket_addrs()
-        .unwrap_or_else(|e| panic!("cannot resolve {addr:?}: {e}"))
-        .next()
-        .unwrap_or_else(|| panic!("no address resolved from {addr:?}"))
-}
-
-fn parse_u64(key: &str, default: u64) -> u64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn parse_f64(key: &str, default: f64) -> f64 {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
 /// Depth-watermark selective intake shed: the LAST-line guard below the
 /// admission layer (the self-gate is the first-line brake). At or above
 /// `watermark` queued datagrams the socket pump drops only what
@@ -187,241 +155,11 @@ fn intake_shed_hook(watermark: usize) -> PreIngressHook {
     })
 }
 
-/// The shed watermark in queued datagrams: `PROXY_INTAKE_SHED_PCT` percent of
-/// `queue_max` (default 50), floored at 1 so `0%` sheds whenever anything is
-/// queued rather than on an idle socket; `>= 100%` only sheds at a full queue.
-fn intake_shed_watermark(queue_max: usize) -> usize {
-    let pct = parse_u64("PROXY_INTAKE_SHED_PCT", 50) as usize;
-    (queue_max.saturating_mul(pct) / 100).max(1)
-}
-
-/// `1`/`true`/`yes`/`on` → on; `0`/`false`/`no`/`off` → off; anything else uses
-/// `default`. Used for the `PROXY_SELF_GATE` toggle.
-fn parse_bool(key: &str, default: bool) -> bool {
-    match env::var(key).ok().as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("1" | "true" | "yes" | "on") => true,
-        Some("0" | "false" | "no" | "off") => false,
-        _ => default,
-    }
-}
-
-/// Dual-face boot rule (pure, unit-tested): `PROXY_FACE_INT_CIDRS` is REQUIRED
-/// (and must parse) whenever `PROXY_LISTEN_EXT` enables the second face — a
-/// dual-face proxy without a plane classifier would silently egress worker
-/// traffic on the caller plane. Single-face (`listen_ext_set == false`) never
-/// consults it (a stray CIDR list is ignored; the caller logs a note).
-fn parse_ext_face_cidrs(
-    listen_ext_set: bool,
-    cidrs: Option<&str>,
-) -> Result<Option<FaceCidrs>, String> {
-    if !listen_ext_set {
-        return Ok(None);
-    }
-    match cidrs.map(str::trim).filter(|s| !s.is_empty()) {
-        None => {
-            Err("PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
-             egress picker needs the internal-plane CIDR list (e.g. \
-             PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16). Refusing to start."
-                .to_string())
-        }
-        Some(s) => FaceCidrs::parse(s)
-            .map(Some)
-            .map_err(|e| format!("bad PROXY_FACE_INT_CIDRS: {e}. Refusing to start.")),
-    }
-}
-
-/// Subset of [`HealthProbeConfig`] timings the cross-component preflight needs.
-/// Kept as a bare pair (not the full config) so [`validate_config`] stays
-/// decoupled from probe-layer construction.
-#[derive(Debug, Clone, Copy)]
-struct ProbeTimingConfig {
-    interval_ms: u64,
-    timeout_ms: u64,
-}
-
-/// Cross-component config validation for the SIP front proxy.
-///
-/// Some invariants live BETWEEN components (`HealthProbe` ↔ `WorkerLoadObserver`)
-/// and cannot be enforced by either component's own defaults in isolation: by the
-/// time the observer is built, the probe timings have already been handed to the
-/// probe layer and are no longer visible to it. This assembles the cross-cutting
-/// facts and rejects misconfigurations that silently degrade the cluster. It is
-/// deliberately **pure** (no I/O, no logging, no `tokio`) so it is trivial to
-/// unit-test and so [`assert_valid_config`] can abort boot *before* a single
-/// socket is bound — a misconfigured pod MUST NOT come up unhealthy.
-///
-/// Example: `interval_ms=2000 timeout_ms=1500` (cycle=3500 ms) with
-/// `payload_stale_ms=3000` lets the 1 s sweep catch `age > 3000` between
-/// probe-recv events on ~half of cycles, halving the per-worker admit cap each
-/// time; within ~20 s the cap collapses to `cap_floor_cps=1` and never recovers —
-/// the cluster silently throttles every worker to 1 cps per LB. The
-/// `payload_stale_ms ≥ 2 × probe_cycle` check below refuses to start that pod.
-///
-/// Returns `Ok(())` when every invariant holds, else `Err(violations)` with one
-/// human-readable line per problem (operators see ALL problems on the first boot
-/// attempt, not one at a time).
-fn validate_config(
-    probe: ProbeTimingConfig,
-    observer: &LoadObserverConfig,
-) -> Result<(), Vec<String>> {
-    let mut violations: Vec<String> = Vec::new();
-
-    // Each timing individually positive — guards a typo (e.g. 0 ms timeout) that
-    // would otherwise produce confusing downstream behaviour.
-    if probe.interval_ms == 0 {
-        violations.push(format!(
-            "health_probe.interval_ms must be a positive number (got {}).",
-            probe.interval_ms,
-        ));
-    }
-    if probe.timeout_ms == 0 {
-        violations.push(format!(
-            "health_probe.timeout_ms must be a positive number (got {}).",
-            probe.timeout_ms,
-        ));
-    }
-    if observer.payload_stale_ms <= 0 {
-        violations.push(format!(
-            "worker_load_observer.payload_stale_ms must be positive (got {}).",
-            observer.payload_stale_ms,
-        ));
-    }
-
-    // PRIMARY INVARIANT — payload staleness outlasts a probe cycle.
-    //
-    // `HealthProbe` runs sleep(interval) → fanOutOptions → sleep(timeout) → reap,
-    // so successive OPTIONS replies arrive `interval + timeout` apart. If
-    // `payload_stale_ms < probe_cycle`, `sweep_stale` fires during the gap,
-    // halves the cap, and the next probe-recv overwrites `last_action` so the
-    // event is invisible. The cap collapses to `cap_floor_cps` in ~5 cycles.
-    //
-    // `2×` provides one full cycle of safety margin for probe jitter (event-loop
-    // pressure, packet loss, retries). `1.5×` still races with the sweep phase;
-    // `2×` is the smallest value that survives a single dropped probe without
-    // triggering the floor cascade.
-    let probe_cycle_ms = probe.interval_ms.saturating_add(probe.timeout_ms);
-    let min_stale = 2u64.saturating_mul(probe_cycle_ms);
-    // payload_stale_ms is `> 0` past the positivity guard above; compare in i64.
-    if observer.payload_stale_ms > 0 && (observer.payload_stale_ms as u64) < min_stale {
-        violations.push(format!(
-            "worker_load_observer.payload_stale_ms ({} ms) must be at least 2× the \
-             HealthProbe cycle (interval_ms + timeout_ms = {} + {} = {} ms; minimum \
-             allowed payload_stale_ms = {} ms). Otherwise sweep_stale halves the \
-             per-worker admit cap on most probe cycles and the cluster silently \
-             throttles every worker to cap_floor_cps. See crates/sip-proxy-runner/\
-             src/main.rs (validate_config) for the calibration rationale.",
-            observer.payload_stale_ms,
-            probe.interval_ms,
-            probe.timeout_ms,
-            probe_cycle_ms,
-            min_stale,
-        ));
-    }
-
-    // Cap-band sanity. Cheap typo guards.
-    if observer.cap_floor_cps <= 0.0 {
-        violations.push(format!("cap_floor_cps must be > 0 (got {}).", observer.cap_floor_cps,));
-    }
-    if observer.cap_floor_cps > observer.cap_initial_cps {
-        violations.push(format!(
-            "cap_floor_cps ({}) must be <= cap_initial_cps ({}).",
-            observer.cap_floor_cps, observer.cap_initial_cps,
-        ));
-    }
-    if observer.cap_initial_cps > observer.cap_ceiling_cps {
-        violations.push(format!(
-            "cap_initial_cps ({}) must be <= cap_ceiling_cps ({}).",
-            observer.cap_initial_cps, observer.cap_ceiling_cps,
-        ));
-    }
-
-    // ELU band ordering + hysteresis bounds. Owned by the band classifier
-    // (`compute_band`), so the rule lives next to it in `sip-proxy`'s
-    // `LoadObserverConfig::validate_bands` and is reused verbatim here.
-    observer.validate_bands(&mut violations);
-
-    // Cooldown must outlast at least one probe cycle. A shorter cooldown lets the
-    // AIMD ladder yo-yo on a single noisy probe; longer than one cycle is what
-    // the cooldown is *for*.
-    let cooldown_ms = observer.aimd_cooldown_ticks * observer.options_interval_ms as f64;
-    if cooldown_ms < probe_cycle_ms as f64 {
-        violations.push(format!(
-            "aimd cooldown ({} × {} = {} ms) must be >= one HealthProbe cycle ({} ms) \
-             so a single decrease isn't immediately followed by an increase tick.",
-            observer.aimd_cooldown_ticks, observer.options_interval_ms, cooldown_ms, probe_cycle_ms,
-        ));
-    }
-
-    if violations.is_empty() {
-        Ok(())
-    } else {
-        Err(violations)
-    }
-}
-
-/// Boot-time assertion: panics (→ non-zero exit → `CrashLoopBackOff`) when the
-/// config is invalid, so a misconfigured pod exits instead of booting unhealthy.
-/// The message is structured for log scraping — each violation on its own line
-/// after a fixed prefix. Called from
-/// `main` before any socket bind.
-fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) {
-    if let Err(violations) = validate_config(probe, observer) {
-        let header = "sip-front-proxy: refusing to start — invalid configuration:";
-        let bullets = violations.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n");
-        panic!("{header}\n{bullets}");
-    }
-}
-
-/// Read an `f64` env override: `Some(v)` iff the var is set AND parses to a
-/// finite number, else `None` (unset OR malformed — both leave the default).
-fn env_f64_opt(key: &str) -> Option<f64> {
-    match env::var(key) {
-        Ok(raw) => match raw.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() => Some(v),
-            _ => {
-                tracing::warn!(%key, value = %raw, "ignoring malformed env override (not a finite number)");
-                None
-            }
-        },
-        Err(_) => None,
-    }
-}
-
-/// Apply the operator's band/AIMD/cap env overrides onto a base
-/// [`LoadObserverConfig`]. Each `LB_*` var, when present and
-/// parseable, replaces one field; anything else leaves the shipped default. The
-/// result is NOT validated here — `assert_valid_config` does that (so an
-/// incoherent override set fails the boot preflight loudly). Every applied
-/// override is logged so the running config is visible in the pod log.
-///
-/// Exposed env vars (all `f64` cps/ratio):
-///   - `LB_ELU_SOFT` / `LB_ELU_HARD` / `LB_ELU_CRITICAL` — band thresholds.
-///   - `LB_BAND_HYSTERESIS` — band-boundary hysteresis.
-///   - `LB_AIMD_DECREASE_FACTOR` — multiplicative decrease (e.g. 0.5).
-///   - `LB_AIMD_INCREASE_STEP_CPS` — additive increase per tick.
-///   - `LB_CAP_CEILING_CPS` / `LB_CAP_FLOOR_CPS` — per-worker cap bounds.
-fn load_observer_cfg_from_env(mut cfg: LoadObserverConfig) -> LoadObserverConfig {
-    let mut applied: Vec<String> = Vec::new();
-    let mut set = |name: &str, field: &mut f64| {
-        if let Some(v) = env_f64_opt(name) {
-            *field = v;
-            applied.push(format!("{name}={v}"));
-        }
-    };
-    set("LB_ELU_SOFT", &mut cfg.elu_soft);
-    set("LB_ELU_HARD", &mut cfg.elu_hard);
-    set("LB_ELU_CRITICAL", &mut cfg.elu_critical);
-    set("LB_BAND_HYSTERESIS", &mut cfg.band_hysteresis);
-    set("LB_AIMD_DECREASE_FACTOR", &mut cfg.aimd_decrease_factor);
-    set("LB_AIMD_INCREASE_STEP_CPS", &mut cfg.aimd_increase_step_cps);
-    set("LB_CAP_CEILING_CPS", &mut cfg.cap_ceiling_cps);
-    set("LB_CAP_FLOOR_CPS", &mut cfg.cap_floor_cps);
-    if applied.is_empty() {
-        tracing::info!("load-observer bands = shipped defaults (no LB_* overrides)");
-    } else {
-        tracing::info!(overrides = %applied.join(" "), "load-observer band/AIMD overrides applied");
-    }
-    cfg
+/// The shed watermark in queued datagrams: `pct` percent of `queue_max`,
+/// floored at 1 so `0%` sheds whenever anything is queued rather than on an
+/// idle socket; `100%` only sheds at a full queue.
+fn intake_shed_watermark(queue_max: usize, pct: u64) -> usize {
+    (queue_max.saturating_mul(pct as usize) / 100).max(1)
 }
 
 /// Bounded bind retry for a port a predecessor process may still hold.
@@ -473,64 +211,21 @@ where
     }
 }
 
-/// Build the worker pool registry + its health-write control seam.
-///
-/// `PROXY_WORKERS` (a static `id@host:port,..` list) takes precedence for
-/// dev/local. When empty, the pool is discovered from k8s EndpointSlices via the
-/// shared `topology::K8sMembership` informer (ADR-0012 D4) — the same watch the
-/// b2bua replication engine consumes; the proxy still reaches each worker by its
-/// Pod IP at `PROXY_WORKER_PORT`. If no kube client is available either, falls
-/// back to a single loopback worker so the binary still runs locally.
-async fn build_registry(
-    workers: &str,
-    clock: Clock,
-) -> (Arc<dyn WorkerRegistry>, Arc<dyn WorkerRegistryControl>) {
-    if !workers.trim().is_empty() {
-        let reg = StaticWorkerRegistry::from_string_with_clock(workers, "PROXY_WORKERS", clock)
-            .unwrap_or_else(|e| panic!("bad PROXY_WORKERS {workers:?}: {e}"));
-        let control = reg.control();
-        tracing::info!(source = "PROXY_WORKERS", %workers, "worker pool");
-        return (Arc::new(reg), control);
+/// One boot variable, `None` when unset. A value that is not UTF-8 refuses
+/// the boot.
+fn env_value(key: &str) -> Option<String> {
+    match env::var(key) {
+        Ok(v) => Some(v),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => refuse_to_start(&[format!("{key} is not UTF-8")]),
     }
+}
 
-    let service = env_or("PROXY_WORKER_SERVICE", "b2bua-worker");
-    let namespace = env::var("PROXY_NAMESPACE")
-        .or_else(|_| env::var("POD_NAMESPACE"))
-        .unwrap_or_else(|_| "sip-test".to_string());
-    let sip_port: u16 = env_or("PROXY_WORKER_PORT", "5060").parse().expect("PROXY_WORKER_PORT");
-
-    // rustls 0.23 ships no default CryptoProvider; install ring once before the
-    // kube client opens its first TLS connection (idempotent — a second call Errs,
-    // which we ignore).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    match kube::Client::try_default().await {
-        Ok(client) => {
-            tracing::info!(
-                source = "k8s-endpointslice",
-                %service,
-                %namespace,
-                port = sip_port,
-                "worker pool"
-            );
-            let membership: Arc<dyn Membership> =
-                Arc::new(K8sMembership::spawn(client, namespace, service));
-            let reg = ComposedWorkerRegistry::spawn(membership, sip_port, clock);
-            let control = reg.control();
-            (Arc::new(reg), control)
-        }
-        Err(e) => {
-            let fallback = "w0@127.0.0.1:5060";
-            tracing::warn!(
-                error = %e,
-                %fallback,
-                "no kube client and no PROXY_WORKERS — falling back to a single local worker"
-            );
-            let reg =
-                StaticWorkerRegistry::from_string(fallback, "fallback").expect("fallback pool");
-            let control = reg.control();
-            (Arc::new(reg), control)
-        }
-    }
+/// The namespace of the pod this proxy runs in, from its service account.
+fn pod_namespace() -> Option<String> {
+    std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        .ok()
+        .map(|ns| ns.trim().to_string())
 }
 
 #[tokio::main]
@@ -544,109 +239,28 @@ async fn main() {
     #[cfg(not(target_env = "msvc"))]
     jemalloc_stats::log_config();
 
-    let listen = env_or("PROXY_LISTEN", "0.0.0.0:5060");
-    // PROXY_WORKERS (static `id@host:port,..`) takes precedence (dev/local). When
-    // empty, the worker pool is discovered from k8s EndpointSlices (ADR-0012 D4).
-    let workers = env_or("PROXY_WORKERS", "");
-    let metrics_addr = env_or("PROXY_METRICS", "0.0.0.0:9090");
-    let queue_max: usize = env_or("PROXY_QUEUE", "8192").parse().expect("PROXY_QUEUE");
-    let udp_sndbuf = socket_buffer_knob("PROXY_UDP_SNDBUF");
-    let udp_rcvbuf = socket_buffer_knob("PROXY_UDP_RCVBUF");
-    let shard_stall_ms: u64 =
-        env_or("PROXY_SHARD_STALL_MS", "2000").parse().expect("PROXY_SHARD_STALL_MS");
-    let hmac_kid = env_or("PROXY_HMAC_KID", "k0");
-    let hmac_key = env_or("PROXY_HMAC_KEY", "dev-stickiness-key-not-for-prod-0123456789");
-
-    let listen_sa = resolve(&listen);
-    let metrics_sa = resolve(&metrics_addr);
-
-    // Advertised host:port (stamped on Via/Record-Route, must be reachable by the
-    // UAC for in-dialog stickiness). Default to the listen addr; if the listen IP
-    // is unspecified (0.0.0.0), fall back to loopback so the literal is routable.
-    let advertised = match env::var("PROXY_ADVERTISE") {
-        Ok(s) => ProxyAddr::parse(&s).unwrap_or_else(|| panic!("bad PROXY_ADVERTISE {s:?}")),
-        Err(_) => {
-            let ip = if listen_sa.ip().is_unspecified() {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            } else {
-                listen_sa.ip()
-            };
-            ProxyAddr::new(ip.to_string(), listen_sa.port())
-        }
-    };
-
-    let recv_shards: usize = env_or("PROXY_RECV_SHARDS", "1").parse().expect("PROXY_RECV_SHARDS");
-    assert!(recv_shards >= 1, "PROXY_RECV_SHARDS must be >= 1");
-
-    // ── Dual-face mode (PROXY_LISTEN_EXT) ───────────────────────────────────
-    // A second UDP socket on the external (caller) plane. PROXY_FACE_INT_CIDRS
-    // is REQUIRED with it (fail-fast); PROXY_ADVERTISE_EXT defaults to the
-    // external listen addr under the same unspecified→loopback rule as the
-    // internal pair. Unset → single-face.
-    let listen_ext: Option<String> =
-        env::var("PROXY_LISTEN_EXT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let ext_cidrs = parse_ext_face_cidrs(
-        listen_ext.is_some(),
-        env::var("PROXY_FACE_INT_CIDRS").ok().as_deref(),
-    )
-    .unwrap_or_else(|e| panic!("sip-proxy-runner: {e}"));
-    if listen_ext.is_none() && env::var("PROXY_FACE_INT_CIDRS").is_ok() {
-        tracing::warn!(
-            "PROXY_FACE_INT_CIDRS set but PROXY_LISTEN_EXT unset — single-face mode, CIDR list ignored"
-        );
-    }
-    let ext_face: Option<(SocketAddr, ProxyAddr, FaceCidrs)> = listen_ext.map(|l| {
-        let sa = resolve(&l);
-        let adv = match env::var("PROXY_ADVERTISE_EXT") {
-            Ok(s) => {
-                ProxyAddr::parse(&s).unwrap_or_else(|| panic!("bad PROXY_ADVERTISE_EXT {s:?}"))
-            }
-            Err(_) => {
-                let ip = if sa.ip().is_unspecified() {
-                    IpAddr::V4(Ipv4Addr::LOCALHOST)
-                } else {
-                    sa.ip()
-                };
-                ProxyAddr::new(ip.to_string(), sa.port())
-            }
-        };
-        (sa, adv, ext_cidrs.clone().expect("CIDRs present when PROXY_LISTEN_EXT is set"))
-    });
-
-    // Cross-component config preflight. Resolve
-    // the HealthProbe timings + the WorkerLoadObserver config here so the
-    // BETWEEN-component invariants (payload_stale_ms ≥ 2× probe cycle, cap floor/
-    // initial/ceiling ordering, ELU band ordering + hysteresis bounds, cooldown ≥
-    // one probe cycle) can be checked *before* the first socket bind. A violation
-    // panics → non-zero exit → CrashLoopBackOff, rather than letting a pod boot
-    // unhealthy (a too-short payload_stale_ms silently floors every worker's
-    // admit cap to cap_floor_cps). These same values are reused for
-    // the observer/probe below — read once.
-    let probe_cfg = HealthProbeConfig {
-        interval_ms: parse_u64("HEALTH_INTERVAL_MS", 1_000),
-        timeout_ms: parse_u64("HEALTH_TIMEOUT_MS", 1_500),
-        threshold: parse_u64("HEALTH_THRESHOLD", 2) as u32,
-    };
-    // Operator env surface for the band/AIMD/cap knobs. Overload
-    // calibration is iterative on the cluster, so these must be tunable WITHOUT a
-    // rebuild. Each override is applied only when its env var is set AND parses;
-    // a malformed value is ignored (the shipped default stays). An INCOHERENT
-    // result (reversed bands, hysteresis ≥ a band gap, cap ordering) is caught
-    // loudly by `assert_valid_config` below — it refuses to boot rather than
-    // silently mis-shedding.
-    let observer_cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
-    assert_valid_config(
-        ProbeTimingConfig { interval_ms: probe_cfg.interval_ms, timeout_ms: probe_cfg.timeout_ms },
-        &observer_cfg,
-    );
+    // Every variable is read and checked before the first bind: a value the
+    // proxy cannot honour refuses the boot, naming every problem at once.
+    let cfg = ProxyConfig::from_lookup(&env_value, &pod_namespace)
+        .unwrap_or_else(|violations| refuse_to_start(&violations));
+    let listen_sa = cfg.listen;
+    let metrics_sa = cfg.metrics;
+    let advertised = cfg.advertise.clone();
+    let queue_max = cfg.queue_max;
+    let udp_sndbuf = cfg.udp_sndbuf;
+    let udp_rcvbuf = cfg.udp_rcvbuf;
+    let shard_stall_ms = cfg.shard_stall_ms;
+    let recv_shards = cfg.recv_shards;
+    let ext_face = cfg.external.clone();
+    tracing::info!(observer = ?cfg.observer, "load-observer bands and AIMD ladder");
 
     let net = RealSignalingNetwork::new();
 
     // Every bind below rides the same bounded EADDRINUSE retry, and ANY bind
     // still failing at the deadline aborts the process — it never runs with a
     // subset of its ports.
-    let bind_interval = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_INTERVAL_MS", 200));
-    let bind_deadline = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_DEADLINE_MS", 10_000));
+    let bind_interval = cfg.bind_retry_interval;
+    let bind_deadline = cfg.bind_retry_deadline;
     let is_udp_in_use = |e: &BindError| e.is_addr_in_use();
     let is_tcp_in_use = |e: &std::io::Error| e.kind() == std::io::ErrorKind::AddrInUse;
 
@@ -673,7 +287,7 @@ async fn main() {
     // Every signaling bind (both faces, all shards) carries the selective
     // intake-shed hook — a blind tail-drop at the queue cap would otherwise
     // kill emergency and in-dialog traffic first-come-first-served.
-    let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max));
+    let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max, cfg.intake_shed_pct));
     // ONE process clock, built before the first bind: every signaling endpoint
     // stamps `UdpPacket::arrival_ms` on it and every `ProxyCore` ages dequeued
     // packets against it, so the self-gate's intake age is a difference of two
@@ -716,7 +330,7 @@ async fn main() {
     // each caller src:port on one socket per face, so per-flow ordering holds
     // on the external plane too).
     let mut ext_endpoints = Vec::new();
-    if let Some((ext_sa, _, _)) = &ext_face {
+    if let Some(ExternalFace { listen: ext_sa, .. }) = &ext_face {
         for _ in 0..recv_shards {
             let ep = bind_with_retry(
                 "external face",
@@ -767,10 +381,13 @@ async fn main() {
     .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
 
     let hmac = Arc::new(
-        StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
-            .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
+        StaticHmacKeyProvider::new(
+            HmacKey::new(cfg.hmac_kid.clone(), cfg.hmac_key.clone().into_bytes()),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("bad PROXY_HMAC_KEY: {e}")),
     );
-    let observer = Arc::new(WorkerLoadObserver::new(observer_cfg));
+    let observer = Arc::new(WorkerLoadObserver::new(cfg.observer));
     let metrics = Arc::new(ProxyMetrics::new());
     let id_gen = Arc::new(IdGen::from_entropy());
 
@@ -785,19 +402,8 @@ async fn main() {
     let intake_age = IntakeAgeRecorder::default();
     // ONE liveness pulse across every recv shard: the readiness gate reads it.
     let pulse = Arc::new(sip_proxy::liveness::ShardPulse::new(recv_shards));
-    let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
-        Some(EluCpsGate::intake(
-            intake_age.clone(),
-            ProxySelfGateConfig {
-                elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
-                cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
-                cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
-                ..ProxySelfGateConfig::default()
-            },
-        ))
-    } else {
-        None
-    };
+    let self_gate: Option<EluCpsGate> =
+        cfg.self_gate.map(|gate_cfg| EluCpsGate::intake(intake_age.clone(), gate_cfg));
     let gate_dyn: Arc<dyn ProxySelfGate> = match &self_gate {
         Some(g) => Arc::new(g.clone()),
         None => Arc::new(AlwaysAdmitGate),
@@ -807,7 +413,16 @@ async fn main() {
     // k8s EndpointSlice informer (ADR-0012 D4). Either way the OPTIONS probe writes
     // observed health through `health_control` so an unanswered worker is demoted
     // (Dead/NotReady/Draining) and in-dialog requests fail over to the backup.
-    let (registry, health_control) = build_registry(&workers, clock.clone()).await;
+    let pool = match &cfg.workers {
+        WorkerSource::Static(list) => {
+            static_pool(list, clock.clone()).unwrap_or_else(|e| refuse_to_start(&[e]))
+        }
+        WorkerSource::Discovered { service, namespace, port } => {
+            discovered_pool(namespace.clone(), service.clone(), *port, clock.clone()).await
+        }
+    };
+    let registry = pool.registry.clone();
+    let health_control = pool.control.clone();
 
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
         registry.clone(),
@@ -829,7 +444,7 @@ async fn main() {
         observer,
         clock.clone(),
         id_gen.clone(),
-        probe_cfg,
+        cfg.probe,
     )
     // Per-peer probe-miss attribution (sip_proxy_peer_failures_total{
     // scope="internal",kind="response_timeout"}): worker OPTIONS timeouts.
@@ -849,28 +464,8 @@ async fn main() {
     // (boot never blocks or fails on a slow/failed prewarm — outcomes land in
     // sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}) and
     // pinned so the proactive refresh keeps them permanently warm.
-    let resolver_cfg = ResolverConfig {
-        positive_ttl_ms: parse_u64(
-            "PROXY_RESOLVER_POSITIVE_TTL_MS",
-            ResolverConfig::default().positive_ttl_ms,
-        ),
-        negative_ttl_ms: parse_u64(
-            "PROXY_RESOLVER_NEGATIVE_TTL_MS",
-            ResolverConfig::default().negative_ttl_ms,
-        ),
-        ..ResolverConfig::default()
-    };
-    let prewarm_raw = env_or("PROXY_RESOLVER_PREWARM", "");
-    let prewarm_targets: Vec<ProxyAddr> = prewarm_raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            ProxyAddr::parse(s).unwrap_or_else(|| {
-                panic!("bad PROXY_RESOLVER_PREWARM entry {s:?} (want host:port)")
-            })
-        })
-        .collect();
+    let resolver_cfg = cfg.resolver;
+    let prewarm_targets = cfg.prewarm.clone();
 
     // ONE trace registry across every recv shard: the active-trace cap and the
     // "anything sampled?" flag bound the process, not a socket (ADR-0026).
@@ -891,11 +486,11 @@ async fn main() {
                 .traces(traces.clone())
                 .pulse(pulse.clone())
                 .shard(shard);
-        if let Some((_, ext_adv, cidrs)) = &ext_face {
+        if let Some(ext) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {
                 endpoint: ext_endpoints.next().expect("one external endpoint per shard"),
-                advertised: ext_adv.clone(),
-                int_cidrs: cidrs.clone(),
+                advertised: ext.advertise.clone(),
+                int_cidrs: ext.int_cidrs.clone(),
             });
         }
         cores.push(builder.build(endpoint));
@@ -914,9 +509,9 @@ async fn main() {
     }
 
     let face_note = match &ext_face {
-        Some((ext_sa, ext_adv, _)) => format!(
-            " DUAL-FACE ext_listen={ext_sa} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
-            ext_adv.host, ext_adv.port,
+        Some(ext) => format!(
+            " DUAL-FACE ext_listen={} ext_advertise={}:{} (int CIDRs from PROXY_FACE_INT_CIDRS)",
+            ext.listen, ext.advertise.host, ext.advertise.port,
         ),
         None => String::new(),
     };
@@ -958,15 +553,8 @@ async fn main() {
         let pulse = pulse.clone();
         let clk = clock.clone();
         Arc::new(move || {
-            if draining.load(Ordering::Relaxed) {
-                probe_http::ProbeState::Draining
-            } else if !pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms).is_empty() {
-                probe_http::ProbeState::NotReady
-            } else if reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
-                probe_http::ProbeState::Ready
-            } else {
-                probe_http::ProbeState::NotReady
-            }
+            let stalled = !pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms).is_empty();
+            probe_state(draining.load(Ordering::Relaxed), stalled, reg.as_ref())
         })
     };
 
@@ -1100,7 +688,7 @@ async fn main() {
     // stops routing new datagrams here), then wait the grace so in-flight
     // transactions settle and the EndpointSlice withdrawal propagates before
     // exit. Ctrl-C (interactive) exits at once.
-    let drain_grace_ms: u64 = env_or("PROXY_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000);
+    let drain_grace_ms = cfg.drain_grace.as_millis() as u64;
 
     // Supervise every data-path task: a panicked/exited recv loop must not
     // leave the process alive with /healthz green — k8s would never restart the

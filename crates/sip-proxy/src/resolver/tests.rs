@@ -1,4 +1,5 @@
 use super::*;
+use async_trait::async_trait;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -42,29 +43,29 @@ impl UdpEndpoint for CapturingEndpoint {
 struct FakeResolver {
     calls: AtomicU64,
     delay: Duration,
-    answer: Option<SocketAddr>,
+    answer: Vec<SocketAddr>,
 }
 
 impl FakeResolver {
     fn answering(addr: SocketAddr) -> Self {
-        Self { calls: AtomicU64::new(0), delay: Duration::ZERO, answer: Some(addr) }
+        Self { calls: AtomicU64::new(0), delay: Duration::ZERO, answer: vec![addr] }
     }
     fn failing() -> Self {
-        Self { calls: AtomicU64::new(0), delay: Duration::ZERO, answer: None }
+        Self { calls: AtomicU64::new(0), delay: Duration::ZERO, answer: Vec::new() }
     }
     fn slow(addr: SocketAddr, delay: Duration) -> Self {
-        Self { calls: AtomicU64::new(0), delay, answer: Some(addr) }
+        Self { calls: AtomicU64::new(0), delay, answer: vec![addr] }
     }
 }
 
 #[async_trait]
 impl HostResolver for FakeResolver {
-    async fn resolve(&self, _host: &str, _port: u16) -> Option<SocketAddr> {
+    async fn resolve(&self, _host: &str, _port: u16) -> Vec<SocketAddr> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
-        self.answer
+        self.answer.clone()
     }
 }
 
@@ -200,7 +201,7 @@ fn resolution_candidates_absolute_first_for_dotted_hosts() {
     );
 }
 
-type Lookup = std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>;
+type Lookup = std::pin::Pin<Box<dyn std::future::Future<Output = Vec<SocketAddr>>>>;
 
 /// A lookup-recording double for [`resolve_first`]: scripts which query
 /// strings answer, and records every attempt in order.
@@ -211,9 +212,9 @@ fn scripted_lookup(
     let recorded = attempts.clone();
     let lookup = move |candidate: String, _port: u16| {
         recorded.lock().unwrap().push(candidate.clone());
-        let answer = answers.contains(&candidate.as_str()).then(dst);
-        Box::pin(async move { answer })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>
+        let answer: Vec<SocketAddr> =
+            answers.contains(&candidate.as_str()).then(dst).into_iter().collect();
+        Box::pin(async move { answer }) as Lookup
     };
     (attempts, lookup)
 }
@@ -221,7 +222,7 @@ fn scripted_lookup(
 #[tokio::test]
 async fn resolve_first_tries_the_absolute_form_first() {
     let (attempts, lookup) = scripted_lookup(&["uas.example."]);
-    assert_eq!(resolve_first("uas.example", 5060, lookup).await, Some(dst()));
+    assert_eq!(resolve_first("uas.example", 5060, lookup).await, vec![dst()]);
     assert_eq!(
         *attempts.lock().unwrap(),
         vec!["uas.example.".to_string()],
@@ -234,7 +235,7 @@ async fn resolve_first_falls_back_to_the_raw_name_when_absolute_fails() {
     // The absolute form yields nothing (a short name that NEEDS kube
     // search-domain expansion) — the raw name is attempted second and wins.
     let (attempts, lookup) = scripted_lookup(&["uas.example"]);
-    assert_eq!(resolve_first("uas.example", 5060, lookup).await, Some(dst()));
+    assert_eq!(resolve_first("uas.example", 5060, lookup).await, vec![dst()]);
     assert_eq!(
         *attempts.lock().unwrap(),
         vec!["uas.example.".to_string(), "uas.example".to_string()],
@@ -245,7 +246,7 @@ async fn resolve_first_falls_back_to_the_raw_name_when_absolute_fails() {
 #[tokio::test]
 async fn resolve_first_single_label_goes_straight_to_raw() {
     let (attempts, lookup) = scripted_lookup(&["mrf"]);
-    assert_eq!(resolve_first("mrf", 5060, lookup).await, Some(dst()));
+    assert_eq!(resolve_first("mrf", 5060, lookup).await, vec![dst()]);
     assert_eq!(*attempts.lock().unwrap(), vec!["mrf".to_string()]);
 }
 

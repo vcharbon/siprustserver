@@ -101,7 +101,7 @@ async fn named_target_resolution_never_blocks_routing() {
     struct PendingResolver;
     #[async_trait::async_trait]
     impl crate::resolver::HostResolver for PendingResolver {
-        async fn resolve(&self, _host: &str, _port: u16) -> Option<std::net::SocketAddr> {
+        async fn resolve(&self, _host: &str, _port: u16) -> Vec<std::net::SocketAddr> {
             std::future::pending().await
         }
     }

@@ -53,75 +53,22 @@
 //! clobbers the still-valid positive entry (it keeps serving until its TTL)
 //! and never stores a negative entry — it just retries at the same cadence.
 
+mod lookup;
+
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use sip_clock::Clock;
 use sip_net::UdpEndpoint;
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
 
-/// Resolve a `(host, port)` name to a socket address. Seam over the system
-/// resolver so tests can inject failures/latency and assert call counts.
-#[async_trait]
-pub trait HostResolver: Send + Sync {
-    async fn resolve(&self, host: &str, port: u16) -> Option<SocketAddr>;
-}
-
-/// Candidate query strings for `host`, in attempt order. Pure — unit-tested.
-///
-/// Kubernetes resolv.conf ships `ndots:5`, so a Service FQDN like
-/// `svc.ns.svc.cluster.local` (4 dots < 5) is FIRST expanded through every
-/// search domain — several serial lookups (observed 3.5–7.5 s against cold
-/// CoreDNS) before the name is tried as-is. Appending the root dot makes the
-/// name absolute, which getaddrinfo resolves in ONE lookup:
-/// - dotted and not already absolute → `["{host}.", host]` (the raw fallback
-///   keeps short names that genuinely need search expansion working);
-/// - single-label (no dot — only search expansion can resolve it) or already
-///   absolute → `[host]`.
-pub(crate) fn resolution_candidates(host: &str) -> Vec<String> {
-    if host.contains('.') && !host.ends_with('.') {
-        vec![format!("{host}."), host.to_string()]
-    } else {
-        vec![host.to_string()]
-    }
-}
-
-/// Try each of [`resolution_candidates`] in order through `lookup`; the first
-/// answer wins. Factored out of [`SystemResolver`] so the attempt ordering is
-/// testable without real getaddrinfo calls.
-async fn resolve_first<F, Fut>(host: &str, port: u16, lookup: F) -> Option<SocketAddr>
-where
-    F: Fn(String, u16) -> Fut,
-    Fut: std::future::Future<Output = Option<SocketAddr>>,
-{
-    for candidate in resolution_candidates(host) {
-        if let Some(addr) = lookup(candidate, port).await {
-            return Some(addr);
-        }
-    }
-    None
-}
-
-/// The production resolver — `tokio::net::lookup_host` (getaddrinfo on the
-/// blocking pool), first result wins. A per-pod name is single-A, so it
-/// resolves to ONE pod consistently. Dotted names are queried
-/// absolutely-qualified first (see `resolution_candidates`).
-pub struct SystemResolver;
-
-#[async_trait]
-impl HostResolver for SystemResolver {
-    async fn resolve(&self, host: &str, port: u16) -> Option<SocketAddr> {
-        resolve_first(host, port, |candidate, port| async move {
-            tokio::net::lookup_host((candidate.as_str(), port)).await.ok()?.next()
-        })
-        .await
-    }
-}
+#[cfg(test)]
+use lookup::{resolution_candidates, resolve_first};
+pub use lookup::{HostResolver, SystemResolver};
 
 /// Cache + concurrency policy for [`NamedForwarder`].
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +82,8 @@ pub struct ResolverConfig {
     /// Max concurrent in-flight resolve tasks (each can park for the full
     /// resolver timeout, so this also bounds spawned-task buildup).
     pub max_in_flight: usize,
+    /// The bound on one name lookup.
+    pub lookup_timeout_ms: u64,
 }
 
 impl Default for ResolverConfig {
@@ -144,6 +93,7 @@ impl Default for ResolverConfig {
             negative_ttl_ms: 5_000,
             max_entries: 4096,
             max_in_flight: 64,
+            lookup_timeout_ms: 2_000,
         }
     }
 }
@@ -389,7 +339,7 @@ impl Inner {
             self.arm_refresh(target);
             return;
         }
-        let resolved = self.resolver.resolve(&target.host, target.port).await;
+        let resolved = self.resolver.resolve(&target.host, target.port).await.first().copied();
         self.in_flight.lock().unwrap().remove(&key);
         match resolved {
             Some(_) => {
@@ -488,7 +438,8 @@ impl NamedForwarder {
                 let bytes = bytes.to_vec();
                 let target = target.clone();
                 tokio::spawn(async move {
-                    let resolved = inner.resolver.resolve(&target.host, target.port).await;
+                    let resolved =
+                        inner.resolver.resolve(&target.host, target.port).await.first().copied();
                     inner.store_and_arm(&target, resolved);
                     inner.in_flight.lock().unwrap().remove(&key);
                     match resolved {

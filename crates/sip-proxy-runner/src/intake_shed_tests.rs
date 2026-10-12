@@ -64,8 +64,8 @@ fn deeper_than_the_watermark_still_sheds_new_invites() {
 }
 
 #[test]
-fn watermark_defaults_to_half_the_queue_and_floors_at_one() {
-    // No env override in the test process — the 50% default applies.
-    assert_eq!(intake_shed_watermark(8192), 4096);
-    assert_eq!(intake_shed_watermark(1), 1);
+fn watermark_is_the_percentage_of_the_queue_and_floors_at_one() {
+    assert_eq!(intake_shed_watermark(8192, 50), 4096);
+    assert_eq!(intake_shed_watermark(1, 50), 1);
+    assert_eq!(intake_shed_watermark(8192, 0), 1);
 }
