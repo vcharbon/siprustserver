@@ -28,9 +28,11 @@
  * bundle is gone. `code`, `document` and `lane` say whether the two cells ran
  * the same code (tree fingerprints, component by component), the same case
  * document and the same lane behaviour; a verdict flip with all three the same
- * is `unexplained`: nothing but the harness explains it. A call whose repeats
- * within one side (runs on the same code, document and lane) disagree is
- * `unstable`, and counts as unexplained too.
+ * is `unexplained`: nothing but the harness explains it. A call takes the
+ * first class of {@link MOVE_CLASSES} order that applies, `unstable` coming
+ * last but `unchanged`: a call whose verdict, failure and bless class held but
+ * whose repeats within one side (runs on the same known code, document and
+ * lane) disagree. It counts as unexplained too.
  */
 import * as Schema from "effect/Schema"
 import { MainError } from "./main-error.js"
@@ -56,7 +58,6 @@ export type BlessClass = typeof BlessClass.Type
 
 /** The classes a compared call takes, in the order a report lists them. */
 export const MOVE_CLASSES = [
-  "unstable",
   "green→red",
   "red→green",
   "red→red-moved",
@@ -64,6 +65,7 @@ export const MOVE_CLASSES = [
   "skipped→ran",
   "clean→known-bug",
   "known-bug→clean",
+  "unstable",
   "unchanged"
 ] as const
 

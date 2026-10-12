@@ -8,7 +8,8 @@
  * the set holds one — the rule `current_cells` states for `@current`, so
  * `compare @current` and what the queue calls current never disagree. Each
  * cell carries its repeats: the side's live runs of the call on the cell's
- * code, document and lane, and how many of them passed.
+ * code, document and lane, and how many of them passed — read only where the
+ * cell states all three, since an unknown one cannot be said to repeat.
  *
  * A pair of sets is read narrowed to each other: only the captures both sets
  * ran are read at all, and only the calls both hold are loaded; what one side
@@ -330,9 +331,11 @@ export const layer = Layer.effect(
           JOIN case_results cr ON cr.run_id = p.run_id AND cr.case_id = p.case_id
           JOIN live l ON l.side = p.side
           JOIN runs r2 ON r2.id = l.id AND r2.capture = p.capture AND r2.lane = r.lane
-                      AND r2.lane_hash IS NOT DISTINCT FROM r.lane_hash AND r2.components = r.components
+                      AND r2.lane_hash = r.lane_hash AND r2.components = r.components
           JOIN case_results c2 ON c2.run_id = r2.id AND c2.case_id = p.case_id AND c2.skipped IS NULL
-                              AND c2.document_hash IS NOT DISTINCT FROM cr.document_hash
+                              AND c2.document_hash = cr.document_hash
+          WHERE r.lane_hash IS NOT NULL AND cr.document_hash IS NOT NULL
+            AND jsonb_array_length(r.components) > 0
           GROUP BY p.side, p.capture, p.case_id
         )
         SELECT p.side, p.capture, p.case_id, r.id AS run_id, r.lane, r.env, r.branch, r.lane_hash, r.prep_id,

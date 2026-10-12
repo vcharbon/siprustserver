@@ -5,10 +5,10 @@
  * Only the calls BOTH sides ran are compared, keyed by (capture, case id);
  * what one side alone holds is counted, never classed, so two differently
  * narrowed populations cannot pass for a code change. Each compared call takes
- * one class: repeats within a side that disagree (`unstable`), a lane block
- * that changed, a verdict that flipped, a failure that moved (its step or its
- * main error), a bless class that moved between clean and `known-bug`, or
- * nothing.
+ * one class, the first that applies: a lane block that changed, a verdict that
+ * flipped, a failure that moved (its step or its main error), a bless class
+ * that moved between clean and `known-bug`, repeats within a side that
+ * disagree (`unstable`), or nothing.
  *
  * A move is an ATTRIBUTION only where both cells ran the same code over the
  * same document on the same lane behaviour. A commit sha cannot say that of a
@@ -221,14 +221,13 @@ export const classOf = (before: Cell, after: Cell): MoveClass => {
   const isSkipped = after.skipped !== null
   if (wasSkipped !== isSkipped) return wasSkipped ? "skipped→ran" : "ran→skipped"
   if (wasSkipped) return "unchanged"
-  if (isUnstable(before) || isUnstable(after)) return "unstable"
   if (before.passed !== after.passed) return after.passed ? "red→green" : "green→red"
   if (!after.passed && failureOf(before) !== failureOf(after)) return "red→red-moved"
   const was = blessClass(before)
   const is = blessClass(after)
   if (was === "known-bug" && is === "clean") return "known-bug→clean"
   if (was === "clean" && is === "known-bug") return "clean→known-bug"
-  return "unchanged"
+  return isUnstable(before) || isUnstable(after) ? "unstable" : "unchanged"
 }
 
 const keyOf = (cell: Pick<Cell, "capture" | "caseId">): string => `${cell.capture}/${cell.caseId}`

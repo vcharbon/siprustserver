@@ -297,22 +297,6 @@
     "counts": {
       "type": "object",
       "properties": {
-        "unstable": {
-          "type": "object",
-          "properties": {
-            "sameDocument": {
-              "type": "integer"
-            },
-            "documentChanged": {
-              "type": "integer"
-            }
-          },
-          "required": [
-            "sameDocument",
-            "documentChanged"
-          ],
-          "additionalProperties": false
-        },
         "green→red": {
           "type": "object",
           "properties": {
@@ -425,6 +409,22 @@
           ],
           "additionalProperties": false
         },
+        "unstable": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
         "unchanged": {
           "type": "object",
           "properties": {
@@ -443,7 +443,6 @@
         }
       },
       "required": [
-        "unstable",
         "green→red",
         "red→green",
         "red→red-moved",
@@ -451,6 +450,7 @@
         "skipped→ran",
         "clean→known-bug",
         "known-bug→clean",
+        "unstable",
         "unchanged"
       ],
       "additionalProperties": false
@@ -518,7 +518,6 @@
           "class": {
             "type": "string",
             "enum": [
-              "unstable",
               "green→red",
               "red→green",
               "red→red-moved",
@@ -526,6 +525,7 @@
               "skipped→ran",
               "clean→known-bug",
               "known-bug→clean",
+              "unstable",
               "unchanged"
             ]
           },
