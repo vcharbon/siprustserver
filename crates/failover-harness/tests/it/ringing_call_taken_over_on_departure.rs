@@ -16,9 +16,10 @@ use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngin
 use call::{CallBodyCodec, MsgpackCodec, TimerType};
 use failover_harness::{FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut};
 use scenario_harness::agent::{Agent, ClientInvite, ServerTxn};
-use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
 
-use crate::departure_support::{bring_up_deciding, kill_announced, CountedDecision};
+use crate::departure_support::{
+    bring_up_deciding, call_id_placed_on, kill_announced, CountedDecision,
+};
 use crate::inflight_resend::{reboot_and_reclaim, settle_to_one_cdr};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -42,23 +43,6 @@ fn ring_deadline_decision() -> Arc<dyn CallDecisionEngine> {
         })
         .build();
     CountedDecision::counting(Arc::new(engine), Duration::ZERO).0
-}
-
-struct Worker(&'static str);
-
-impl RendezvousCandidate for Worker {
-    fn id(&self) -> &str {
-        self.0
-    }
-}
-
-/// A Call-ID the front proxy places on `ordinal` while both workers are alive.
-fn call_id_placed_on(ordinal: &str, label: &str) -> String {
-    let workers = [Worker("b1"), Worker("b2")];
-    (0..)
-        .map(|i| format!("{label}-{i}@127.0.0.1"))
-        .find(|cid| rendezvous_select(cid, &workers).is_some_and(|w| w.0 == ordinal))
-        .expect("some Call-ID lands on each worker")
 }
 
 /// What the callee does once the INVITE reaches it.
@@ -268,12 +252,13 @@ fn senders(p: &Placed, to: std::net::SocketAddr, prefix: &[u8]) -> std::collecti
 #[tokio::test(start_paused = true)]
 async fn a_ringing_call_whose_node_returns_before_its_deadline_is_ended_by_both_copies() {
     let mut p = place("ringing-call-node-returns", Callee::Ringing).await;
-    // What the two copies put on the wire is what this cell measures.
-    p.fh.allow_rfc_violation(
+    // What the two copies put on the wire from the departure is what this cell
+    // measures.
+    p.fh.accept_rfc_deviations_from_now(
         "rung-byte-identical",
         "two live copies send the same CANCEL from two addresses",
     );
-    p.fh.allow_rfc_violation(
+    p.fh.accept_rfc_deviations_from_now(
         "unacked-invite-non-2xx-final",
         "the callee's 487 reaches neither copy's transaction",
     );

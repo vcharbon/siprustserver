@@ -191,3 +191,27 @@ async fn an_undecided_call_whose_seeding_failed_is_not_settled() {
         "a seeding that failed settles nothing",
     );
 }
+
+/// A crash stops a sweep under way: no call is taken over after the core is
+/// aborted.
+#[tokio::test(start_paused = true)]
+async fn an_aborted_core_takes_nothing_more_over() {
+    const UNDECIDED: usize = 300;
+    let net = SimulatedSignalingNetwork::new(1);
+    let mut n = node_on(&net, "w1", |_| {}, Vec::new()).await;
+    let _caller = net.bind_udp(BindUdpOpts::new(src(), 4096)).await.unwrap();
+    for i in 0..UNDECIDED {
+        put(&n.store, &born(&format!("aborted-{i}"))).await;
+    }
+    take_over_departed(n.core.router_ctx(), "w0");
+    while n.metrics.repl_takeover_hydrated_total() == 0 {
+        tokio::task::yield_now().await;
+    }
+    n.core.abort();
+    let at_abort = n.metrics.repl_takeover_hydrated_total();
+    for _ in 0..10_000 {
+        tokio::task::yield_now().await;
+    }
+    assert!(at_abort < UNDECIDED as u64, "the sweep was under way at the abort");
+    assert_eq!(n.metrics.repl_takeover_hydrated_total(), at_abort, "nothing taken over after it");
+}

@@ -15,6 +15,8 @@ use b2bua::decision::{
 use b2bua::limiter::NoopLimiter;
 use failover_harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, WorkerHealth};
 
+use sip_proxy::strategies::rendezvous::{rendezvous_select, RendezvousCandidate};
+
 use crate::inflight_resend::KILL_SETTLE;
 
 pub(crate) const PROXY: &str = "127.0.0.1:5080";
@@ -121,4 +123,21 @@ pub(crate) async fn kill_announced(
     survivor.simulate_peer_removed(pri_ord);
     fh.advance(KILL_SETTLE).await;
     hydrated_before
+}
+
+pub(crate) struct Worker(&'static str);
+
+impl RendezvousCandidate for Worker {
+    fn id(&self) -> &str {
+        self.0
+    }
+}
+
+/// A Call-ID the front proxy places on `ordinal` while both workers are alive.
+pub(crate) fn call_id_placed_on(ordinal: &str, label: &str) -> String {
+    let workers = [Worker("b1"), Worker("b2")];
+    (0..)
+        .map(|i| format!("{label}-{i}@127.0.0.1"))
+        .find(|cid| rendezvous_select(cid, &workers).is_some_and(|w| w.0 == ordinal))
+        .expect("some Call-ID lands on each worker")
 }
