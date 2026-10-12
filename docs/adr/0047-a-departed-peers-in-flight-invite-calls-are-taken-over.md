@@ -46,7 +46,8 @@ a peer still in the set, never on this node's own shutdown
 
 **D2 — The departure sweep takes over the calls with an INVITE in flight.** The
 router starts a task of its own over the departed peer's backup partition — never the
-router loop's, which serves its own calls meanwhile (`router/departure/tests.rs`). It
+router loop's, which serves its own calls meanwhile — tracked by the dispatcher, so a
+crash of the node stops it (`router/departure/tests.rs`). It
 reads the bodies one at a time, yielding as it goes, and for every call that names an
 INVITE transaction in flight — exactly the calls a materialisation would seed — takes
 the call lock and materialises the call as a takeover: its timers re-arm at their
@@ -61,20 +62,19 @@ a replicated re-INVITE round gives up at its INVITE bound
 arrives afterwards finds the copy live (`reinvite_answer_failover.rs`, the departure
 cell). A takeover copy's self-release is a turn of its own call's queue, so the turns
 of the messages that cleared its last transactions run first (ADR-0010 X2) and none of
-them takes the call over again (`reinvite_round_not_yet_replicated.rs`).
+them takes the call over again (`reinvite_round_not_yet_replicated.rs`); a copy with
+no transaction left is shed before a timer of its own runs, so a deadline its primary
+keeps — the give-up of a 2xx ladder the primary's copy discharged — is not kept twice
+(`answer_lost_with_primary_no_answer.rs`, the cell where the ACK reaches the reclaimed
+copy first).
 
 **D3 — A new call is written to its backup at its birth.** The INVITE's turn flushes
-the call it creates, when the call has a backup and asks a decision — not a setup its
-caller CANCELled before the turn, nor one refused at once — before the decision is
-asked for; the decision turn's write supersedes it — `(1,0)` then `(2,0)`, a forward
+the call it creates, when the call has a backup, before the decision is asked for;
+the decision turn's write supersedes it — `(1,0)` then `(2,0)`, a forward
 write the backup applies — and a fast decision's two writes fold into one changelog
 entry, as every write of one call does (`repl/tests.rs`,
 `update_compacts_and_moves_counter_forward`). The replica lands one stream hop after
-the caller's 100, before the decision answers (`new_call_replication_window.rs`). A
-CANCEL while the decision is in flight — answered 200 and 487 by the transaction
-layer (§9.2) — is written to the backup at once, one version ahead of the record its
-turn still holds, so a backup that takes the call over finds its caller answered
-(`undecided_call_settled_on_departure.rs`, the CANCEL-then-departure cell).
+the caller's 100, before the decision answers (`new_call_replication_window.rs`).
 
 **D4 — An undecided call materialised with no message is refused 503.** A call the
 departure sweep takes over, or that its own node reclaims after a restart (the bulk
@@ -90,9 +90,7 @@ call's primary (ADR-0020 X3); a reclaim writes it. When the caller's INVITE bran
 already another call's transaction on this node — its retransmission placed here as a
 call of its own — the undecided call ends with nothing on the wire, as the 503 would
 answer that other call; when the transaction layer cannot be asked, nothing is settled
-(`undecided_call_settled_on_departure.rs`, `router/departure/tests.rs`). A reclaimed
-setup its caller CANCELled before any decision ends as its `Cancelled` turn would have,
-nothing on the wire.
+(`undecided_call_settled_on_departure.rs`, `router/departure/tests.rs`).
 
 **D5 — A final for a round the record lost is acknowledged and ends the call.** An
 INVITE final on a confirmed dialog whose CSeq is above the last the record sent on that
@@ -112,11 +110,12 @@ confirmed leg is never read as the leg failing.
 
 **D6 — A node that left the slice applies no decision.** A decision that returns to a
 node whose own endpoint left the slice (ADR-0031 D6: the latch moves on to `absent` when
-a `terminating` endpoint then leaves) is not applied: its backups took the call over
-and answered it, so the call ends there with nothing on the wire, and a call with no
-backup is refused 503. The callee is never dialled for a call already refused
-(`undecided_call_settled_on_departure.rs`, the replacement-decision cell). A node still
-in the slice — draining in ADR-0031 case 1 — applies its decisions.
+a `terminating` endpoint then leaves) is not applied: the callee is never dialled for
+a call its backups took over. The node refuses the caller 503, with no Retry-After, on
+the transaction it holds — its backup may hold no replica to answer from
+(`undecided_call_settled_on_departure.rs`, the no-replica cell and the
+replacement-decision cell). A node still in the slice — draining in ADR-0031 case 1 —
+applies its decisions.
 
 ## Residuals
 
@@ -140,6 +139,12 @@ in the slice — draining in ADR-0031 case 1 — applies its decisions.
   record, so the taken-over INVITE has drawn no provisional here, and its CANCEL
   waits for the callee's next one (§9.1)
   (`ringing_call_taken_over_on_departure.rs`, the 100 cell).
+- **A caller answered twice.** When a removed node refuses a call its backup's sweep
+  answered too, the caller hears a second 503 on the branch its transaction completed
+  on, and does not ACK it (`undecided_call_settled_on_departure.rs`, the
+  replacement-decision cell). A CANCEL during the decision round trip draws the same:
+  the backup holds the call as born and refuses it 503 after the caller's 487 (the
+  CANCEL-during-decision cell).
 - **An abrupt removal writes two CDRs.** In ADR-0031 case 2 the removed process and
   the replacement that reclaims the ended call each discharge it — the dual-owner
   window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the

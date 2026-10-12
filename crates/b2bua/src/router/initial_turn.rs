@@ -126,11 +126,9 @@ pub(super) async fn initial_invite_turn(
     }
     ctx.state.create(call.clone());
     // The caller may already hold this node's 100 and send nothing more, so
-    // the backup holds a call that asks its decision from its birth, not from
-    // the decision (ADR-0047); the decision turn's write supersedes this one.
-    // A setup already CANCELled or refused here asks none.
-    let asks_decision = !cancelled && !call.a_leg_invite.from_tag.is_empty();
-    if asks_decision && call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
+    // the backup holds the call from its birth, not from its decision
+    // (ADR-0047); this turn's own write supersedes this one.
+    if call.topology.as_ref().is_some_and(|t| !t.bak.is_empty()) {
         ctx.state.flush(&call);
     }
     // Born: the call counts as live from here.
@@ -191,7 +189,6 @@ pub(super) async fn initial_invite_turn(
     // path for that scheduler sliver — the b-leg is launched then CANCELed
     // (§9.1-held until a provisional), indistinguishable from the unavoidable
     // wire race.
-    let mut backup_answers = false;
     if !cancelled && ctx.state.is_setup_cancelled(call_ref, cseq) {
         ctx.metrics.bump_decision_dropped_cancelled();
         tracing::debug!(
@@ -202,23 +199,16 @@ pub(super) async fn initial_invite_turn(
     } else if !cancelled && ctx.readiness.left_the_slice() {
         // This node's endpoint left the slice while the decision was in
         // flight, so the decision is not applied: the callee is never dialled
-        // for a call its backup took over and answered (ADR-0047). The caller
-        // holds that answer; a call with no backup is answered here.
-        backup_answers = call.topology.as_ref().is_some_and(|t| !t.bak.is_empty());
-        handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms, backup_answers);
+        // for a call its backups took over (ADR-0047). The caller is refused
+        // here whether or not a backup answered it too.
+        handled = refused_after_leaving_the_slice(ctx, &call, handled, now_ms);
     }
-    let unanswered = match backup_answers {
-        true => crate::rules::invariants::UnansweredCaller::Leave,
-        false => crate::rules::invariants::UnansweredCaller::Answer(
-            &ctx.config.minted_final_advertisement,
-        ),
-    };
     let enforced = crate::rules::invariants::enforce(
         &ctx.obligations,
         &call,
         crate::rules::invariants::finalize(handled),
         now_ms,
-        unanswered,
+        crate::rules::invariants::UnansweredCaller::Answer(&ctx.config.minted_final_advertisement),
     );
     let exec = ActionExecutor {
         config: &ctx.config,
@@ -229,24 +219,16 @@ pub(super) async fn initial_invite_turn(
     Turn::Result(Box::new(close_turn(&ctx.rules, &TurnStart::unborn(), enforced, &exec)))
 }
 
-/// The call ended unrouted, from the pre-handler call ([`discarded_turn`]),
-/// so the termination releases what the route admitted. With `backup_answers` nothing goes on the wire — a second final
-/// would reach a caller whose transaction completed on the backup's; without,
-/// the caller is refused 503 as for an unavailable decision (ADR-0022 X3).
+/// The call refused 503 with no Retry-After, as for an unavailable decision
+/// (ADR-0022 X3), from the pre-handler call ([`discarded_turn`]), so the
+/// termination releases what the route admitted.
 fn refused_after_leaving_the_slice(
     ctx: &RouterCtx,
     pre: &Call,
     handled: HandlerResult,
     now_ms: i64,
-    backup_answers: bool,
 ) -> HandlerResult {
     let call = discarded_turn(pre, handled);
-    if backup_answers {
-        let mut ended =
-            call::helpers::record_termination(call, now_ms, TerminationCause::Admission, None);
-        ended.state = call::CallModelState::Terminated;
-        return HandlerResult::new(ended);
-    }
     let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     crate::initial_invite::reject_call(
         call,
@@ -262,14 +244,9 @@ fn refused_after_leaving_the_slice(
     )
 }
 
-/// The drop-guard result: the pre-handler call — no b-leg, no wire effects —
-/// recording the 487 the transaction layer answered the INVITE with, so the
-/// write that lands it on the backup reads the caller answered (ADR-0047).
+/// The drop-guard result: the pre-handler call — no b-leg, no wire effects.
 fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
-    let call = discarded_turn(pre, handled);
-    let a_leg = call.a_leg.leg_id.clone();
-    let call = call::helpers::record_cancelled_invite(call, &a_leg);
-    HandlerResult { call, effects: HandlerEffects::new() }
+    HandlerResult { call: discarded_turn(pre, handled), effects: HandlerEffects::new() }
 }
 
 /// The pre-handler call carrying ONLY what a discarded turn already committed

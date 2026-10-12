@@ -1,12 +1,12 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
-//! per-peer timeout attribution, the out-of-dialog OPTIONS health responder, resolution (an event resolving to
-//! no call goes to [`super::unroutable`]), a new INVITE's router rungs of the
-//! admission ladder ([`super::admit`]), then the offer of the event's
-//! [`Turn`] to its call's queue under its dispatch class
-//! ([`crate::dispatch::class`]). The router acts on the offer: an admitted
-//! new INVITE spends its CPS token once its turn is queued, the reaper hears
-//! a call past its lifetime cap or at its overflow ceiling, and a discarded
-//! request is paid what it is owed ([`super::owed`]).
+//! per-peer timeout attribution, the out-of-dialog OPTIONS health responder,
+//! resolution (an event resolving to no call goes to [`super::unroutable`]), a
+//! new INVITE's router rungs of the admission ladder ([`super::admit`]), then
+//! the offer of the event's [`Turn`] to its call's queue under its dispatch
+//! class ([`crate::dispatch::class`]). The router acts on the offer: an
+//! admitted new INVITE spends its CPS token once its turn is queued, the reaper
+//! hears a call past its lifetime cap or at its overflow ceiling, and a
+//! discarded request is paid what it is owed ([`super::owed`]).
 
 use std::sync::Arc;
 
@@ -130,7 +130,6 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Cancelled { in_dialog: false, invite_cseq: Some(cseq), .. } = &event {
         if admit::invite_here(ctx, &call_ref, *cseq) {
             ctx.state.mark_setup_cancelled(&call_ref, *cseq);
-            super::undecided::replicate_cancelled_setup(ctx, &call_ref, *cseq);
         }
     }
 

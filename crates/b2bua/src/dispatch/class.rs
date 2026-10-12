@@ -38,8 +38,9 @@
 //! new INVITE's row owes its answer for no room and on a capped call only;
 //! its `ended` answer is never owed.
 //!
-//! An out-of-dialog OPTIONS is handled before any queue and has no class. The per-interval message cap is a third bound, kept on
-//! the call's turn (`router::process`), not here.
+//! An out-of-dialog OPTIONS is handled before any queue and has no class.
+//! The per-interval message cap is a third bound, kept on the call's turn
+//! (`router::process`), not here.
 
 use sip_message::{Method, SipMessage};
 

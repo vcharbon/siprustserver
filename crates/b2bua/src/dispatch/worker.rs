@@ -53,10 +53,12 @@ pub enum HandlerFailure {
 pub type FailureHook = Arc<dyn Fn(&str, HandlerFailure) + Send + Sync>;
 
 /// The handler body each call has in flight (FIFO: at most one), by call,
-/// and whether the dispatcher halted. Clone-cheap.
+/// the tasks doing call work beside them, and whether the dispatcher halted.
+/// Clone-cheap.
 #[derive(Clone, Default)]
 pub struct InFlight {
     bodies: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    beside: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     halted: Arc<AtomicBool>,
 }
 
@@ -75,12 +77,27 @@ impl InFlight {
         }
     }
 
-    /// Abort every body in flight, and run no item after: the node crashed.
+    /// Abort every body in flight and every task beside them, and run no item
+    /// after: the node crashed.
     pub fn halt(&self) {
         self.halted.store(true, Ordering::SeqCst);
         for handle in self.bodies.lock().unwrap().values() {
             handle.abort();
         }
+        for handle in self.beside.lock().unwrap().iter() {
+            handle.abort();
+        }
+    }
+
+    /// Track `handle`, a task doing call work outside any call's queue, so a
+    /// halt aborts it too; aborted at once after a halt.
+    pub fn track(&self, handle: tokio::task::AbortHandle) {
+        let mut beside = self.beside.lock().unwrap();
+        beside.retain(|h| !h.is_finished());
+        if self.halted() {
+            handle.abort();
+        }
+        beside.push(handle);
     }
 
     fn halted(&self) -> bool {

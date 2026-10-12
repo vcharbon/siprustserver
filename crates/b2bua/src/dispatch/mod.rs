@@ -201,10 +201,15 @@ impl<T: Runnable> PerCallDispatcher<T> {
 }
 
 impl<T> PerCallDispatcher<T> {
-    /// Abort every in-flight handler body and run nothing more; see
-    /// [`InFlight::halt`].
+    /// Abort every in-flight handler body and tracked task, and run nothing
+    /// more; see [`InFlight::halt`].
     pub fn halt(&self) {
         self.in_flight.halt();
+    }
+
+    /// Track a task doing call work beside the queues; see [`InFlight::track`].
+    pub fn track(&self, handle: tokio::task::AbortHandle) {
+        self.in_flight.track(handle);
     }
 
     /// Abort `call_ref`'s in-flight handler body; see [`InFlight::abort`].

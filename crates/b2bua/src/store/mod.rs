@@ -820,21 +820,6 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
-        self.flush_at(call, ttl_ms, 0);
-    }
-
-    /// Write `call` one version ahead of the live record, which it leaves as
-    /// it is, so the backup takes it over the version it holds: a fact of the
-    /// call learnt while its turn still holds it. The turn's next write lands
-    /// at that same version, which the backup already holds, and is skipped
-    /// there; the write after supersedes both.
-    pub fn flush_ahead(&self, call: &Call) {
-        self.flush_at(call, self.replicated_ttl_ms, 1);
-    }
-
-    /// [`flush_with_ttl`](Self::flush_with_ttl) at `ahead` versions past the
-    /// live record on this node's own axis.
-    fn flush_at(&self, call: &Call, ttl_ms: i64, ahead: i64) {
         let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
             return;
         };
@@ -852,10 +837,6 @@ impl CallState {
             .or(call.topology.as_ref())
             .map(|t| (t.gen, t.bak_gen))
             .unwrap_or((0, 0));
-        let (call_gen, call_bgen) = match role_of(&self.self_ordinal, &call.call_ref) {
-            PartitionRole::Primary => (call_gen + ahead, call_bgen),
-            PartitionRole::Backup => (call_gen, call_bgen + ahead),
-        };
         // Embed the authoritative `(p,b)` in the BODY too, not just the frame meta.
         // `call` is the pre-`update` clone (its `topology` counters are one bump
         // stale), so a node that hydrates from this body would branch at the stale

@@ -7,9 +7,7 @@ use call::TimerType;
 
 use super::super::materialise::{materialise, Materialised, Origin, Reason};
 use super::super::restore_hygiene::{reanchor_timers, Smoothing};
-use super::super::undecided::{
-    is_cancelled_setup, is_undecided, settle_cancelled_setup, settle_undecided,
-};
+use super::super::undecided::{is_undecided, settle_undecided};
 use super::super::RouterCtx;
 use crate::store::PartitionRole;
 
@@ -88,8 +86,7 @@ pub(in crate::router) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
 /// Reclaim one call of this node's `pri:{self}` partition into the live map
 /// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
 /// reboot sweep ([`reclaim_all`]); `None` a single straggler. Neither has a
-/// message to serve, so a call still undecided, or a setup CANCELled before
-/// its decision, is settled (ADR-0047). Returns
+/// message to serve, so a call still undecided is settled (ADR-0047). Returns
 /// `true` iff this pass did the work — freshly materialised, or a deferred
 /// terminal discharged — so the caller meters per-pass reclaim completeness;
 /// `false` for a call already resident (idempotent re-pass) or gone from the store.
@@ -101,9 +98,7 @@ pub(super) async fn reclaim_into_live(
     let _guard = ctx.state.lock(call_ref).await;
     match materialise(ctx, call_ref, Origin::Reclaim(smoothing)).await {
         Materialised::Served { call, seeded } => {
-            if is_cancelled_setup(&call) {
-                settle_cancelled_setup(ctx, call_ref, call).await;
-            } else if let (Some(seeded), true) = (seeded, is_undecided(&call)) {
+            if let (Some(seeded), true) = (seeded, is_undecided(&call)) {
                 settle_undecided(ctx, call_ref, call, seeded).await;
             }
             true

@@ -34,9 +34,33 @@ pub(super) async fn self_release_turn(ctx: &Arc<RouterCtx>, call_ref: &str) {
         let _ = ctx.txn.watch_self_release(call_ref).await;
         return;
     }
-    // A takeover copy defers its discharge to the call's primary whatever its
-    // state (ADR-0020 X3). A Terminating or Terminated copy re-flushes its
-    // terminal state so the primary's reconcile or reclaim has it.
+    shed(ctx, call_ref).await;
+}
+
+/// Shed `call_ref`'s takeover copy before a timer of its own runs, when no
+/// transaction it serves is left: a copy is resident exactly while one is
+/// live (ADR-0014), so its own deadlines — a 2xx ladder's give-up racing the
+/// clear of that 2xx's transaction — are its primary's to keep. `true` when the
+/// copy was shed and the timer's turn ends here.
+pub(super) async fn shed_if_quiesced(ctx: &Arc<RouterCtx>, call_ref: &str) -> bool {
+    if !ctx.state.is_takeover(call_ref) {
+        return false;
+    }
+    let _guard = ctx.state.lock(call_ref).await;
+    if !ctx.state.is_takeover(call_ref)
+        || ctx.txn.active_txn_count_for_call(call_ref).await.unwrap_or(0) != 0
+    {
+        return false;
+    }
+    shed(ctx, call_ref).await;
+    true
+}
+
+/// Shed the takeover copy of `call_ref`, under its per-call lock. A takeover
+/// copy defers its discharge to the call's primary whatever its state
+/// (ADR-0020 X3); a Terminating or Terminated copy re-flushes its terminal
+/// state so the primary's reconcile or reclaim has it.
+async fn shed(ctx: &Arc<RouterCtx>, call_ref: &str) {
     if let Some(call) = ctx.state.peek(call_ref) {
         if matches!(
             call.state,

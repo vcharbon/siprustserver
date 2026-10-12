@@ -10,7 +10,8 @@
 //!
 //! The sweep is a task of its own, never the router loop's: a departed
 //! partition holds every call the peer served, read one body at a time, and
-//! the router serves its own calls meanwhile. Each call is taken under its
+//! the router serves its own calls meanwhile. The dispatcher tracks it, so a
+//! crash of the node stops it with the call work it runs. Each call is taken under its
 //! per-call lock, so the sweep and the call's own turns never interleave.
 
 use std::sync::Arc;
@@ -28,8 +29,9 @@ const YIELD_EVERY: usize = 32;
 /// Start the sweep of `ordinal`'s backup partition and return at once.
 pub(super) fn take_over_departed(ctx: &Arc<RouterCtx>, ordinal: &str) {
     let refs = ctx.state.partition_refs(PartitionRole::Backup, ordinal);
-    let (ctx, ordinal) = (ctx.clone(), ordinal.to_string());
-    tokio::spawn(async move { sweep(&ctx, &ordinal, refs).await });
+    let (task_ctx, ordinal) = (ctx.clone(), ordinal.to_string());
+    let task = tokio::spawn(async move { sweep(&task_ctx, &ordinal, refs).await });
+    ctx.dispatcher.track(task.abort_handle());
 }
 
 /// What the sweep did with one call.

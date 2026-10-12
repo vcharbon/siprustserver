@@ -11,8 +11,9 @@
 //! that produced it; a `Terminating` withdrawal moves on to `Absent` when the
 //! endpoint then leaves the slice. An endpoint that left the slice belongs to a
 //! process its orchestrator removed: the ordinal, should it return, names a
-//! replacement. It is a fact about routing only: nothing here stops the worker
-//! from serving what still reaches it (D5).
+//! replacement. The worker latches Draining on it and still serves what
+//! reaches it (D5), but applies no routing decision that returns after its
+//! endpoint left the slice: its backups took those calls over (ADR-0047 D6).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
