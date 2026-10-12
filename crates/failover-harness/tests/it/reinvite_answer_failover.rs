@@ -3,10 +3,11 @@
 //! caller, so the caller's client transaction is `Proceeding` and sends no
 //! retransmission that could take the call over (RFC 3261 §17.1.1.2). The
 //! callee's 2xx answers an in-dialog request and carries no Record-Route
-//! (§12.2.1.1): the front proxy fails it over on the stickiness cookie of the
-//! Via it pushed on the request, and the survivor takes the call over on it
-//! and completes the round — the caller gets its 200, both ACKs flow, and the
-//! call ends with one CDR.
+//! (§12.1.1, §16.6 step 4: only a dialog-creating response does): the front
+//! proxy fails it over on the stickiness cookie of the Via it pushed on the
+//! request, and the survivor takes the call over on it and completes the round
+//! — the round is in the replica — so the caller gets its 200, both ACKs flow,
+//! and the call ends with one CDR.
 
 use std::time::Duration;
 

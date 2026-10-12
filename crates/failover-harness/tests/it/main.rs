@@ -36,6 +36,8 @@ mod not_ready_member_stays_pulled;
 mod prack_repeat_takeover;
 mod prack_takeover;
 mod reinvite_answer_failover;
+mod reinvite_round_gives_up_after_takeover;
+mod reinvite_round_not_yet_replicated;
 mod reject_final_loss_via_lb;
 mod released_copy;
 mod retransmission_turn_is_quiet;

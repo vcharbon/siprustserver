@@ -78,11 +78,11 @@ const B2: &str = "127.0.0.1:5092";
 
 /// The first retransmission rung (RFC 3261 §17.1.1.2 / §17.1.2.2). The kill and
 /// the re-send together consume it.
-const T1: Duration = Duration::from_millis(500);
+pub(crate) const T1: Duration = Duration::from_millis(500);
 /// The pause held after the kill, before the peer's re-send. A shape-**A**
 /// callee holds its answer through it, so the re-send is provably the first
 /// datagram that can hydrate the call.
-const KILL_SETTLE: Duration = Duration::from_millis(300);
+pub(crate) const KILL_SETTLE: Duration = Duration::from_millis(300);
 /// How far the front proxy's health view lags a node's death. The doomed copy
 /// crosses the proxy inside it and lands on the dead node's socket, which is
 /// where a shape-**B** request is lost. `HEALTH_LAG + KILL_SETTLE == T1`, so the
@@ -134,7 +134,7 @@ pub(crate) async fn establish(
 /// The exact datagram `from` last put on the wire for `method`, with the
 /// destination it addressed — the peer's own copy, which it re-sends verbatim
 /// when nothing answers.
-fn last_request_sent(
+pub(crate) fn last_request_sent(
     fh: &FailoverHarness,
     from: SocketAddr,
     method: &Method,
@@ -268,17 +268,17 @@ fn responses_toward(fh: &FailoverHarness, to: SocketAddr, method: &Method) -> us
 /// call: the survivor serves nothing for it and its hydration count is where the
 /// kill left it. Asserted immediately before the re-send, so the takeover the
 /// cell then observes can only be the re-send's.
-fn assert_not_taken_over(survivor: &ReplicatedB2buaSut, hydrated_before: u64, call_ref: &str) {
+pub(crate) fn assert_not_taken_over(survivor: &ReplicatedB2buaSut, before: u64, call_ref: &str) {
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
-        hydrated_before,
+        before,
         "nothing has taken the call over on the survivor yet",
     );
     assert!(!survivor.serves(call_ref), "the survivor serves nothing for the call yet");
 }
 
 /// The re-send took the call over, once: a second hydration is a copy rebuilt in the window.
-fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
+pub(crate) fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
     assert_eq!(
         survivor.metrics().repl_takeover_hydrated_total(),
         hydrated_before + 1,
@@ -291,7 +291,7 @@ fn assert_taken_over_once(survivor: &ReplicatedB2buaSut, hydrated_before: u64) {
 /// renegotiation round, counted on the recorded wire by top-Via branch: a Timer
 /// A rung repeats the transaction it belongs to (RFC 3261 §17.1.1.2) and is not
 /// a second INVITE.
-fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> usize {
+pub(crate) fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> usize {
     let parser = CustomParser::new();
     fh.sip_entries()
         .into_iter()

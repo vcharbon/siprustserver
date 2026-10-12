@@ -17,7 +17,9 @@ use b2bua::decision::{
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
 use b2bua::limiter::NoopLimiter;
-use failover_harness::{worker_ordinals, FailoverHarness};
+use failover_harness::{
+    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness,
+};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -98,7 +100,8 @@ async fn a_new_call_reaches_its_backup_only_after_its_routing_decision() {
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());
     let backup = if pri_ord == "b1" { &w_b2 } else { &w_b1 };
-    assert!(backup.scan_one_backed_up(&pri_ord).await.is_some(), "the primary's backup holds it");
+    let call_ref =
+        backup.scan_one_backed_up(&pri_ord).await.expect("the primary's backup holds it");
 
     // ── The call completes and ends ─────────────────────────────────────────
     uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -109,5 +112,7 @@ async fn a_new_call_reaches_its_backup_only_after_its_routing_decision() {
     let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
     assert!(drained, "both nodes release the call");
     fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
     drop((w_b1, w_b2, proxy));
 }

@@ -278,3 +278,37 @@ async fn a_tampered_via_cookie_is_not_honoured() {
         .await;
     assert!(f.wire.take().is_empty(), "a forged cookie routes nothing");
 }
+
+// A param on the proxy's Route entry that is not one of the cookie's fields —
+// a downstream party's echo of the Record-Route, say — never reaches the Via,
+// and never replaces a param the proxy set there itself: the §16.11 branch
+// stays the proxy's, and no `maddr` steers the response (§18.2.2).
+#[tokio::test]
+async fn only_the_cookie_fields_reach_the_via() {
+    let f = fixture();
+    let cookie = cookie(&f);
+    let route = format!(
+        "Route: <sip:{PROXY_VIP}:5060;outbound;lr>, \
+         <sip:{PROXY_VIP}:5060{};maddr=192.0.2.9;branch=z9hG4bKforced;rport=9;lr>\r\n",
+        cookie_text(&cookie)
+    );
+    let reinvite = request("INVITE", "z9hG4bKre", &route, ";tag=b", "2 INVITE");
+    f.core.handle_request(parse(&reinvite), w1()).await;
+    let via = top_via(&one_sent(&f).1);
+    assert!(!via.contains("maddr") && !via.contains("rport=9"), "{via}");
+    assert!(!via.contains("z9hG4bKforced"), "the §16.11 branch stays the proxy's: {via}");
+    assert!(via.contains(&format!(";sig={}", cookie["sig"])), "the cookie rides on: {via}");
+}
+
+// A cookie on the route set whose signature does not verify for the call is
+// never carried onto the proxy's Via.
+#[tokio::test]
+async fn a_forged_route_cookie_is_not_carried() {
+    let f = fixture();
+    let mut forged = cookie(&f);
+    forged.insert("w_bak".into(), "w9".into());
+    let reinvite = request("INVITE", "z9hG4bKre", &dialog_route(&forged), ";tag=b", "2 INVITE");
+    f.core.handle_request(parse(&reinvite), w1()).await;
+    let via = top_via(&one_sent(&f).1);
+    assert!(!via.contains("sig=") && !via.contains("w_pri="), "{via}");
+}
