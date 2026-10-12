@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::time::Instant;
 
 use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
 
@@ -10,6 +11,8 @@ use sip_net::{SendError, UdpEndpointCounters, UdpPacket};
 #[derive(Default)]
 struct CapturingEndpoint {
     sent: Mutex<Vec<(Vec<u8>, SocketAddr)>>,
+    /// The bound address; 127.0.0.1:5060 when `None`.
+    local: Option<SocketAddr>,
 }
 
 #[async_trait]
@@ -25,7 +28,7 @@ impl UdpEndpoint for CapturingEndpoint {
         None
     }
     fn local_addr(&self) -> SocketAddr {
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060))
+        self.local.unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 5060)))
     }
     fn queue_depth(&self) -> usize {
         0
@@ -63,7 +66,7 @@ impl FakeResolver {
 
 #[async_trait]
 impl HostResolver for FakeResolver {
-    async fn resolve(&self, _host: &str, _port: u16) -> Vec<SocketAddr> {
+    async fn resolve(&self, _host: &str, _port: u16, _deadline: Instant) -> Vec<SocketAddr> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
@@ -225,9 +228,32 @@ async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
     fwd.send(b"pkt2", &target).await;
     let sent: Vec<SocketAddr> = ep.sent.lock().unwrap().iter().map(|(_, d)| *d).collect();
     assert_eq!(sent, [dst(), dst()]);
+
+    // A dual-stack `[::]` socket reaches both families: the first address wins.
+    let resolver = Arc::new(FakeResolver::answering_all(vec![v6, dst()]));
+    let ep = Arc::new(CapturingEndpoint {
+        local: Some("[::]:5060".parse().unwrap()),
+        ..CapturingEndpoint::default()
+    });
+    let metrics = Arc::new(ProxyMetrics::new());
+    let fwd = NamedForwarder::new(
+        ep.clone(),
+        resolver,
+        ResolverConfig::default(),
+        Clock::test_at(0),
+        metrics,
+    );
+    fwd.send(b"pkt3", &target).await;
+    settle().await;
+    assert_eq!(ep.sent.lock().unwrap()[0].1, v6);
 }
 
 // ── absolute-first resolution ───────────────────────────────────────────
+
+/// A deadline no test reaches.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
 
 /// Pure candidate ordering: dotted names try the absolutely-qualified form
 /// first (ONE lookup instead of ndots search expansion), falling back to
@@ -275,7 +301,7 @@ fn scripted_lookup(
 #[tokio::test]
 async fn resolve_first_tries_the_absolute_form_first() {
     let (attempts, lookup) = scripted_lookup(&["uas.example."]);
-    assert_eq!(resolve_first("uas.example", 5060, lookup).await, vec![dst()]);
+    assert_eq!(resolve_first("uas.example", 5060, far(), lookup).await, vec![dst()]);
     assert_eq!(
         *attempts.lock().unwrap(),
         vec!["uas.example.".to_string()],
@@ -288,7 +314,7 @@ async fn resolve_first_falls_back_to_the_raw_name_when_absolute_fails() {
     // The absolute form yields nothing (a short name that NEEDS kube
     // search-domain expansion) — the raw name is attempted second and wins.
     let (attempts, lookup) = scripted_lookup(&["uas.example"]);
-    assert_eq!(resolve_first("uas.example", 5060, lookup).await, vec![dst()]);
+    assert_eq!(resolve_first("uas.example", 5060, far(), lookup).await, vec![dst()]);
     assert_eq!(
         *attempts.lock().unwrap(),
         vec!["uas.example.".to_string(), "uas.example".to_string()],
@@ -296,10 +322,19 @@ async fn resolve_first_falls_back_to_the_raw_name_when_absolute_fails() {
     );
 }
 
+/// Past the deadline no further candidate starts: the absolute form failed,
+/// the raw form is not tried.
+#[tokio::test]
+async fn resolve_first_starts_no_candidate_past_the_deadline() {
+    let (attempts, lookup) = scripted_lookup(&["uas.example"]);
+    assert!(resolve_first("uas.example", 5060, Instant::now(), lookup).await.is_empty());
+    assert_eq!(*attempts.lock().unwrap(), vec!["uas.example.".to_string()]);
+}
+
 #[tokio::test]
 async fn resolve_first_single_label_goes_straight_to_raw() {
     let (attempts, lookup) = scripted_lookup(&["mrf"]);
-    assert_eq!(resolve_first("mrf", 5060, lookup).await, vec![dst()]);
+    assert_eq!(resolve_first("mrf", 5060, far(), lookup).await, vec![dst()]);
     assert_eq!(*attempts.lock().unwrap(), vec!["mrf".to_string()]);
 }
 

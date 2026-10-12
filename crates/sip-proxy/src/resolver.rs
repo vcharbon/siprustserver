@@ -22,8 +22,11 @@
 //! thread cannot be cancelled), so at most `max_in_flight` lookup threads are
 //! stuck per forwarder.
 //!
-//! Of a name's addresses, the first in the family of the sending socket is
-//! used, and kept for the cache lifetime. Only A/AAAA records are used: no
+//! A lookup past its bound starts no further attempt (no second name form):
+//! its slot frees when the attempt already running returns. Of a name's
+//! addresses, the first the egress socket can reach is used (the socket of
+//! the face it leaves on; an unspecified IPv6 bind reaches both families),
+//! and kept for the cache lifetime. Only A/AAAA records are used: no
 //! NAPTR/SRV selection (RFC 3263 §4.1-4.2, ADR-0046).
 //!
 //! The cache is bounded and TTL'd in both directions:
@@ -65,6 +68,7 @@
 //! and never stores a negative entry — it just retries at the same cadence.
 
 mod lookup;
+mod outcomes;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -80,6 +84,7 @@ use crate::observability::ProxyMetrics;
 #[cfg(test)]
 use lookup::{resolution_candidates, resolve_first};
 pub use lookup::{HostResolver, SystemResolver};
+pub(crate) use outcomes::{outcome, refresh_outcome};
 
 /// Cache + concurrency policy for [`NamedForwarder`].
 #[derive(Debug, Clone, Copy)]
@@ -207,31 +212,6 @@ impl NameCache {
     }
 }
 
-/// Outcome labels for `sip_proxy_named_sends_total{outcome}`.
-pub(crate) mod outcome {
-    pub const CACHED: &str = "cached";
-    pub const RESOLVED: &str = "resolved";
-    pub const RESOLVE_FAILED: &str = "resolve_failed";
-    pub const DROPPED_NEGATIVE: &str = "dropped_negative";
-    pub const DROPPED_IN_FLIGHT: &str = "dropped_in_flight";
-    pub const LOOKUP_TIMED_OUT: &str = "lookup_timed_out";
-    /// Every outcome.
-    pub const ALL: [&str; 6] =
-        [CACHED, RESOLVED, RESOLVE_FAILED, DROPPED_NEGATIVE, DROPPED_IN_FLIGHT, LOOKUP_TIMED_OUT];
-}
-
-/// Outcome labels for `sip_proxy_resolver_refresh_total{outcome}` (proactive
-/// refresh + startup prewarm — closed set).
-pub(crate) mod refresh_outcome {
-    pub const REFRESHED: &str = "refreshed";
-    pub const FAILED: &str = "failed";
-    pub const IDLE_STOPPED: &str = "idle_stopped";
-    pub const PREWARMED: &str = "prewarmed";
-    pub const PREWARM_FAILED: &str = "prewarm_failed";
-    /// Every outcome.
-    pub const ALL: [&str; 5] = [REFRESHED, FAILED, IDLE_STOPPED, PREWARMED, PREWARM_FAILED];
-}
-
 struct Inner {
     endpoint: Arc<dyn UdpEndpoint>,
     resolver: Arc<dyn HostResolver>,
@@ -257,14 +237,14 @@ struct Inner {
 }
 
 impl Inner {
-    fn lookup_bound(&self) -> Duration {
-        Duration::from_millis(self.cache.cfg.lookup_timeout_ms)
+    /// When a lookup starting now reaches its bound.
+    fn lookup_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_millis(self.cache.cfg.lookup_timeout_ms)
     }
 
-    /// The first of `addrs` in the family of the sending socket.
+    /// The first of `addrs` the socket it would leave from can send to.
     fn pick(&self, addrs: Vec<SocketAddr>) -> Option<SocketAddr> {
-        let v4 = self.endpoint.local_addr().is_ipv4();
-        addrs.into_iter().find(|a| a.is_ipv4() == v4)
+        addrs.into_iter().find(|dst| reaches(self.endpoint.egress_local_addr(*dst), *dst))
     }
 
     /// Store a resolve outcome (publishing the cache-size gauge) and, for a
@@ -361,8 +341,9 @@ impl Inner {
             self.arm_refresh(target);
             return;
         }
-        let mut lookup = self.resolver.resolve(&target.host, target.port);
-        let resolved = match tokio::time::timeout(self.lookup_bound(), &mut lookup).await {
+        let deadline = self.lookup_deadline();
+        let mut lookup = self.resolver.resolve(&target.host, target.port, deadline);
+        let resolved = match tokio::time::timeout_at(deadline, &mut lookup).await {
             Ok(addrs) => self.pick(addrs),
             Err(_) => {
                 self.metrics.record_resolver_refresh(fail);
@@ -386,6 +367,12 @@ impl Inner {
             }
         }
     }
+}
+
+/// A socket bound to `local` can send to `dst`: the same family, or an
+/// unspecified IPv6 bind, which is dual-stack and takes both.
+fn reaches(local: SocketAddr, dst: SocketAddr) -> bool {
+    local.is_ipv4() == dst.is_ipv4() || (local.is_ipv6() && local.ip().is_unspecified())
 }
 
 /// The named-target send path (tiers 2–3 of the module doc). Cheap to clone.
@@ -471,9 +458,9 @@ impl NamedForwarder {
                 let bytes = bytes.to_vec();
                 let target = target.clone();
                 tokio::spawn(async move {
-                    let mut lookup = inner.resolver.resolve(&target.host, target.port);
-                    let Ok(addrs) = tokio::time::timeout(inner.lookup_bound(), &mut lookup).await
-                    else {
+                    let deadline = inner.lookup_deadline();
+                    let mut lookup = inner.resolver.resolve(&target.host, target.port, deadline);
+                    let Ok(addrs) = tokio::time::timeout_at(deadline, &mut lookup).await else {
                         inner.store_and_arm(&target, None);
                         inner.metrics.record_named_send(outcome::LOOKUP_TIMED_OUT);
                         lookup.await;

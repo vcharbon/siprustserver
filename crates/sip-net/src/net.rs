@@ -49,6 +49,14 @@ pub trait UdpEndpoint: Send + Sync {
     /// stamping in later layers).
     fn local_addr(&self) -> SocketAddr;
 
+    /// The local address a datagram to `dst` leaves from: the bound address
+    /// for an endpoint over one socket; an endpoint that picks a socket per
+    /// destination answers per `dst`.
+    fn egress_local_addr(&self, dst: SocketAddr) -> SocketAddr {
+        let _ = dst;
+        self.local_addr()
+    }
+
     /// Current inbound-queue depth.
     fn queue_depth(&self) -> usize;
 

@@ -13,6 +13,7 @@
 
 #[cfg(test)]
 mod dual_face_tests;
+mod face_pick;
 mod request;
 mod response;
 #[cfg(test)]
@@ -39,6 +40,7 @@ use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolv
 use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
+use face_pick::FacePickSendEndpoint;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
 /// the message, everything else the peer or the socket.
@@ -427,45 +429,6 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
-    }
-}
-
-/// A send-only `UdpEndpoint` that picks the internal/external socket per
-/// destination IP — the face picker as a seam, for consumers that hold "an
-/// endpoint" and send to already-resolved addresses (the [`NamedForwarder`]).
-/// Never used for recv (the core recv-selects the real sockets).
-struct FacePickSendEndpoint {
-    internal: Arc<dyn UdpEndpoint>,
-    external: Arc<dyn UdpEndpoint>,
-    int_cidrs: FaceCidrs,
-}
-
-#[async_trait::async_trait]
-impl UdpEndpoint for FacePickSendEndpoint {
-    async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), sip_net::SendError> {
-        if self.int_cidrs.contains_ip(dst.ip()) {
-            self.internal.send_to(buf, dst).await
-        } else {
-            self.external.send_to(buf, dst).await
-        }
-    }
-    async fn recv(&self) -> Option<sip_net::UdpPacket> {
-        std::future::pending().await
-    }
-    fn try_recv(&self) -> Option<sip_net::UdpPacket> {
-        None
-    }
-    fn local_addr(&self) -> SocketAddr {
-        self.internal.local_addr()
-    }
-    fn queue_depth(&self) -> usize {
-        0
-    }
-    fn queue_max(&self) -> usize {
-        0
-    }
-    fn counters(&self) -> sip_net::UdpEndpointCounters {
-        sip_net::UdpEndpointCounters::default()
     }
 }
 
