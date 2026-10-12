@@ -50,7 +50,7 @@ where
 
 /// The production resolver — `tokio::net::lookup_host` (getaddrinfo on the
 /// blocking pool). Dotted names are queried absolutely-qualified first (see
-/// [`resolution_candidates`]).
+/// `resolution_candidates`).
 pub struct SystemResolver;
 
 #[async_trait]
