@@ -204,6 +204,18 @@ describe("cutting a capture", () => {
     expect(cut.calls.map((c) => c.id)).toEqual([`${family}#0`, `${family}#1`])
   })
 
+  it("hands the namer each split call's own ingress — when and between which sockets it arrived — and the family's size", () => {
+    const seen: Array<unknown> = []
+    cutCalls(twoIngressOneLegFlows(), sutSet(), "two.pcap", derivesOnePrefix, (call) => {
+      seen.push({ ingress: call.ingress, ingresses: call.ingresses })
+      return nameByCallIds(call)
+    })
+    expect(seen).toEqual([
+      { ingress: { at_us: 0, src: "10.0.0.9:5060", dst: "10.0.0.1:5060" }, ingresses: 2 },
+      { ingress: { at_us: 1_040_000, src: "10.0.0.9:5061", dst: "10.0.0.1:5061" }, ingresses: 2 }
+    ])
+  })
+
   it("names a family that opens no dialog at the SUT through the namer as well, never off its legs", () => {
     const cut = cutCalls(midDialogOnlyFlows(), sutSet(), "middialog.pcap", derivesOnePrefix, nameByCallIds)
     expect(cut.refused.map((r) => r.caseId)).toEqual([`n:${CALLER_CALL_ID}`])

@@ -12,10 +12,12 @@
  *
  * {@link Interface.plan} is read-only and runs on a store that never took the
  * frozen-ids migration (a table it lacks counts as empty). {@link
- * Interface.execute} refuses, removing nothing, while a job runs or a run is
- * open, while a reading's case map is not written, or while a cited run it
- * drops has no summary: the export comes first, and a wipe cannot lose what a
- * citation names.
+ * Interface.execute} refuses, removing nothing, while a job runs, a run is
+ * open, a sweep has not ended or a prep is not finished, while a reading's
+ * case map is not written, or while a cited run it drops has no summary: the
+ * export comes first, and a wipe cannot lose what a citation names. Once it
+ * has run, no run, job, sweep or prep id below `idFloor` is minted again, so a
+ * new id never answers to an old citation.
  */
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
@@ -32,7 +34,12 @@ export interface Request {
   readonly keepLanes: ReadonlyArray<string>
   /** Citations to honour beside those the store records: what a dry run reads without recording. */
   readonly citations?: ReadonlyArray<Citation>
+  /** The lowest run, job, sweep and prep id minted after the wipe; the sequences never move back. */
+  readonly idFloor?: number
 }
+
+/** The sequences {@link Request.idFloor} raises. */
+const SEQUENCES = ["runs_id_seq", "jobs_id_seq", "sweeps_id_seq", "preps_id_seq"] as const
 
 /** The rows a wipe drops, per table. */
 export interface Rows {
@@ -81,7 +88,7 @@ export interface Plan {
   readonly bundles: ReadonlyArray<string>
   /** Readings holding cut rows whose case map is not written. */
   readonly unexported: number
-  /** Why the wipe may not run now: a running job, an open run. */
+  /** Why the wipe may not run now: a running job, an open run, an open sweep, an unfinished prep. */
   readonly holders: ReadonlyArray<string>
 }
 
@@ -221,7 +228,7 @@ export const layer = Layer.effect(
           if (!row.summarised) unsummarised += 1
         }
       }
-      const content = yield* sql<Record<string, string>>`
+      const content = yield* sql<Record<string, string | null>>`
         SELECT (SELECT count(*) FROM preps) AS preps,
                (SELECT count(*) FROM capture_cuts) AS capture_cuts,
                (SELECT count(*) FROM cut_cases) AS cut_cases,
@@ -239,12 +246,16 @@ export const layer = Layer.effect(
                     ? sql`NOT EXISTS (SELECT 1 FROM case_maps m WHERE m.prep_id = cc.prep_id AND m.capture = cc.capture)`
                     : sql`true`}) AS unexported,
                (SELECT count(*) FROM jobs WHERE status = 'running') AS running_jobs,
-               (SELECT count(*) FROM runs WHERE finished_at IS NULL) AS open_runs
+               (SELECT count(*) FROM runs WHERE finished_at IS NULL) AS open_runs,
+               (SELECT string_agg(id::text, ', ' ORDER BY id) FROM sweeps WHERE finished_at IS NULL) AS open_sweeps,
+               (SELECT string_agg(id::text, ', ' ORDER BY id) FROM preps WHERE finished_at IS NULL) AS open_preps
       `
       const c = content[0]!
       const holders: Array<string> = []
       if (n(c["running_jobs"]) > 0) holders.push(`${n(c["running_jobs"])} job(s) running`)
       if (n(c["open_runs"]) > 0) holders.push(`${n(c["open_runs"])} run(s) still open: reap them first`)
+      if (c["open_sweeps"] !== null) holders.push(`sweep(s) ${c["open_sweeps"]} not ended: close them first`)
+      if (c["open_preps"] !== null) holders.push(`prep(s) ${c["open_preps"]} not finished: close them first`)
       return {
         kept: { lane, pinned, open },
         keptCells,
@@ -300,6 +311,14 @@ export const layer = Layer.effect(
           TRUNCATE preps, capture_cuts, cut_cases, cut_refusals, cut_refusal_calls,
                    ledger_rows, case_assets, cases, flows_legs, flows_documents
         `
+        if (request.idFloor !== undefined) {
+          for (const sequence of SEQUENCES) {
+            yield* sql`
+              SELECT setval(${sequence}::regclass, greatest(last_value, ${request.idFloor - 1}), true)
+              FROM ${sql(sequence)}
+            `
+          }
+        }
         return planned
       }))
       yield* sql`VACUUM ANALYZE runs, case_results, run_rule_hits`

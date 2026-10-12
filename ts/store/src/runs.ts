@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import * as path from "node:path"
+import { citedRuns } from "./citations.js"
 import { hashDocument } from "./hash.js"
 import type { CaseOutcome, CaseResult, CaseRun, Deltas, Provenance, RunStatus, SetKind, Standing } from "./model.js"
 import { UNKNOWN_PROVENANCE } from "./model.js"
@@ -98,6 +99,8 @@ export interface RecordedBundle {
   /** Null for a run still open. */
   readonly finishedAt: string | null
   readonly pinned: boolean
+  /** Whether a recorded citation names it, by itself, its job or its sweep (`citations.ts`). */
+  readonly cited: boolean
 }
 
 /** An unfinished row and the bundle whose mtime is the second half of the evidence. */
@@ -587,9 +590,12 @@ export const layer = Layer.effect(
         lane: string
         finished_at: Date | null
         pinned: boolean
+        cited: boolean
       }>`
+        WITH cited AS MATERIALIZED (${citedRuns(sql)})
         SELECT r.id, r.bundle_path, r.lane, r.finished_at,
-               EXISTS (SELECT 1 FROM pins p WHERE p.run_id = r.id) AS pinned
+               EXISTS (SELECT 1 FROM pins p WHERE p.run_id = r.id) AS pinned,
+               r.id IN (SELECT id FROM cited) AS cited
         FROM runs r WHERE r.bundle_path <> '' ORDER BY r.id
       `
       return rows.map((row): RecordedBundle => ({
@@ -597,7 +603,8 @@ export const layer = Layer.effect(
         bundlePath: Sessions.fromStored(root, row.bundle_path),
         lane: row.lane,
         finishedAt: iso(row.finished_at),
-        pinned: row.pinned
+        pinned: row.pinned,
+        cited: row.cited
       }))
     })
 

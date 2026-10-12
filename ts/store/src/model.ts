@@ -285,7 +285,11 @@ export const CutCaseRequest = Schema.Struct({
   assets: Schema.Array(CaseAsset),
   ledger: Schema.Array(LedgerRow),
   /** The endpoint egress leaves by, where the cut named one other than the default. */
-  egressEndpoint: Schema.optionalKey(Schema.NullOr(Schema.String))
+  egressEndpoint: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** Where the call starts in its capture, where the cut stated it (`case-maps.ts`). */
+  start: Schema.optionalKey(Schema.Struct({ at_us: Schema.Number, src: Schema.String, dst: Schema.String })),
+  /** The frozen key this case re-keys its id from (`case-ids.ts`). */
+  replaces: Schema.optionalKey(Schema.String)
 })
 export interface CutCaseRequest extends Schema.Schema.Type<typeof CutCaseRequest> {}
 
@@ -327,7 +331,9 @@ export const Refusal = Schema.Struct({
   callIds: Schema.Array(Schema.String),
   detail: Schema.String,
   /** The call the refusal names, where the cut stated it: what freezes its id. */
-  callKey: Schema.optional(Schema.String)
+  callKey: Schema.optional(Schema.String),
+  /** The frozen key this refusal re-keys its id from (`case-ids.ts`). */
+  replaces: Schema.optional(Schema.String)
 })
 export interface Refusal extends Schema.Schema.Type<typeof Refusal> {}
 

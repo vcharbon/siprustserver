@@ -14,6 +14,29 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
+import type { Fragment } from "effect/unstable/sql/Statement"
+
+/**
+ * The ids of the runs a recorded citation names — by run, by its job, by its
+ * sweep — dated no earlier than the store's first cut: one `id` column.
+ */
+export const citedRuns = (sql: SqlClient): Fragment =>
+  sql`
+    WITH since AS (
+      SELECT least(
+        (SELECT min(cut_at) FROM capture_cuts),
+        (SELECT min(cut_at) FROM case_maps)
+      )::date AS day
+    ),
+    current AS (
+      SELECT c.kind, c.ref::bigint AS id FROM citations c, since
+      WHERE c.kind IN ('run', 'job', 'sweep') AND c.ref ~ '^[0-9]{1,18}$'
+        AND (c.cited_on IS NULL OR since.day IS NULL OR c.cited_on >= since.day)
+    )
+    SELECT r.id FROM runs r JOIN current c ON c.kind = 'run' AND c.id = r.id
+    UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'job' AND c.id = r.job_id
+    UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'sweep' AND c.id = r.sweep_id
+  `
 
 export type Kind = "run" | "job" | "sweep" | "prep" | "case"
 
@@ -84,22 +107,7 @@ export const layer = Layer.effect(
 
     const summarise = Effect.gen(function*() {
       const runs = yield* sql<{ n: number }>`
-        WITH since AS (
-          SELECT least(
-            (SELECT min(cut_at) FROM capture_cuts),
-            (SELECT min(cut_at) FROM case_maps)
-          )::date AS day
-        ),
-        current AS (
-          SELECT c.kind, c.ref::bigint AS id FROM citations c, since
-          WHERE c.kind IN ('run', 'job', 'sweep') AND c.ref ~ '^[0-9]{1,18}$'
-            AND (c.cited_on IS NULL OR since.day IS NULL OR c.cited_on >= since.day)
-        ),
-        cited AS (
-          SELECT r.id FROM runs r JOIN current c ON c.kind = 'run' AND c.id = r.id
-          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'job' AND c.id = r.job_id
-          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'sweep' AND c.id = r.sweep_id
-        ),
+        WITH cited AS (${citedRuns(sql)}),
         written AS (
           INSERT INTO run_summaries (
             run_id, capture, lane, set_kind, status, detail, cases, failed, env, branch, components,
@@ -114,22 +122,7 @@ export const layer = Layer.effect(
         SELECT count(*)::int AS n FROM written
       `
       const cells = yield* sql<{ n: number }>`
-        WITH since AS (
-          SELECT least(
-            (SELECT min(cut_at) FROM capture_cuts),
-            (SELECT min(cut_at) FROM case_maps)
-          )::date AS day
-        ),
-        current AS (
-          SELECT c.kind, c.ref::bigint AS id FROM citations c, since
-          WHERE c.kind IN ('run', 'job', 'sweep') AND c.ref ~ '^[0-9]{1,18}$'
-            AND (c.cited_on IS NULL OR since.day IS NULL OR c.cited_on >= since.day)
-        ),
-        cited AS (
-          SELECT r.id FROM runs r JOIN current c ON c.kind = 'run' AND c.id = r.id
-          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'job' AND c.id = r.job_id
-          UNION SELECT r.id FROM runs r JOIN current c ON c.kind = 'sweep' AND c.id = r.sweep_id
-        ),
+        WITH cited AS (${citedRuns(sql)}),
         written AS (
           INSERT INTO cell_summaries (
             run_id, case_id, capture, lane, call_key, passed, verdict, skipped, failed_step, main_error,

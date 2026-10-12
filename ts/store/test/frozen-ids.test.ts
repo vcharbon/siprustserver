@@ -98,6 +98,12 @@ const recordAt = (request: (prep: number) => CaptureCutRequest) =>
     return prep
   })
 
+/** The frozen ids of `capture`, call key → case id. */
+const frozenOf = (capture: string): Promise<Record<string, string>> =>
+  withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.of([capture]))).then((frozen) =>
+    Object.fromEntries((frozen.get(capture) ?? []).map((entry) => [entry.callKey, entry.caseId]))
+  )
+
 describe.skipIf(!served)("frozen case ids", () => {
   const CAPTURE = "frozen.pcap"
 
@@ -108,8 +114,7 @@ describe.skipIf(!served)("frozen case ids", () => {
         { caseId: `${CAPTURE}-x`, reasons: ["refused-why"], callIds: ["call-x@h"], detail: "" }
       ])
     ))
-    const frozen = await withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.of([CAPTURE])))
-    expect(Object.fromEntries(frozen.get(CAPTURE) ?? [])).toEqual({
+    expect(await frozenOf(CAPTURE)).toEqual({
       "call-a@h": `${CAPTURE}-a`,
       "call-b@h": `${CAPTURE}-b`,
       "call-r@h": `${CAPTURE}-r`
@@ -138,9 +143,22 @@ describe.skipIf(!served)("frozen case ids", () => {
     await withStore(recordAt((prep) =>
       cutOf(prep, CAPTURE, [caseOf(`${CAPTURE}-a`, "call-a@h"), caseOf(`${CAPTURE}-c`, "call-c@h")])
     ))
-    const frozen = await withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.of([CAPTURE])))
-    expect(frozen.get(CAPTURE)?.get("call-c@h")).toBe(`${CAPTURE}-c`)
-    expect(frozen.get(CAPTURE)?.get("call-b@h")).toBe(`${CAPTURE}-b`)
+    const frozen = await frozenOf(CAPTURE)
+    expect(frozen["call-c@h"]).toBe(`${CAPTURE}-c`)
+    expect(frozen["call-b@h"]).toBe(`${CAPTURE}-b`)
+  })
+
+  it("re-keys a frozen id only where the reading names the key it replaces", async () => {
+    const without = await exitOf(recordAt((prep) =>
+      cutOf(prep, CAPTURE, [caseOf(`${CAPTURE}-c`, "call-c@h#ingress@7")])
+    ))
+    expect(Exit.isFailure(without)).toBe(true)
+    await withStore(recordAt((prep) =>
+      cutOf(prep, CAPTURE, [{ ...caseOf(`${CAPTURE}-c`, "call-c@h#ingress@7"), replaces: "call-c@h" }])
+    ))
+    const frozen = await frozenOf(CAPTURE)
+    expect(frozen["call-c@h#ingress@7"]).toBe(`${CAPTURE}-c`)
+    expect(frozen["call-c@h"]).toBeUndefined()
   })
 
   it("seeds what does not clash and counts the rest, whatever another capture holds", async () => {
@@ -152,11 +170,56 @@ describe.skipIf(!served)("frozen case ids", () => {
         { caseId: `${CAPTURE}-d`, callKey: "call-d@h" }
       ], "seed", "seed")
     ))
-    expect(seeded).toEqual({ added: 1, held: 1, skipped: 2 })
+    expect(seeded).toEqual({ added: 1, held: 1, skipped: 2, rekeyed: 0 })
     const elsewhere = await withStore(Effect.flatMap(CaseIds.Service, (ids) =>
       ids.freeze("another.pcap", [{ caseId: `${CAPTURE}-a`, callKey: "call-a@h" }], "seed")
     ))
     expect(elsewhere.added).toBe(1)
+  })
+})
+
+describe.skipIf(!served)("a store whose readings predate the frozen ids", () => {
+  const LEGACY = "legacy.pcap"
+
+  /** Two readings written as a store without frozen ids holds them: cut rows alone. */
+  const legacy = Effect.gen(function*() {
+    const sql = yield* SqlClient
+    const cuts = yield* Cuts.Service
+    const older = yield* cuts.open()
+    const newer = yield* cuts.open()
+    yield* sql`INSERT INTO case_documents (hash, document) VALUES ('legacy-doc', '{}') ON CONFLICT DO NOTHING`
+    yield* sql`INSERT INTO cases (hash, document_hash) VALUES ('legacy-case', 'legacy-doc') ON CONFLICT DO NOTHING`
+    for (const prep of [older, newer]) {
+      yield* sql`INSERT INTO capture_cuts (prep_id, capture) VALUES (${prep}, ${LEGACY})`
+    }
+    // The older reading named call-1 `-case1`; the newer renamed it `-cut9` and added call-2.
+    yield* sql`
+      INSERT INTO cut_cases (prep_id, capture, case_id, call_key, case_hash) VALUES
+        (${older}, ${LEGACY}, ${`${LEGACY}-case1`}, 'call-1@h', 'legacy-case'),
+        (${older}, ${LEGACY}, ${`${LEGACY}-case2`}, 'call-old@h', 'legacy-case'),
+        (${newer}, ${LEGACY}, ${`${LEGACY}-cut9`}, 'call-1@h', 'legacy-case'),
+        (${newer}, ${LEGACY}, ${`${LEGACY}-case2`}, 'call-2@h', 'legacy-case')
+    `
+    return { older, newer }
+  })
+
+  it("freezes every keyed id newest reading first, and refuses a new reading until the capture is seeded", async () => {
+    await withStore(legacy)
+    await withStore(Effect.gen(function*() {
+      yield* CaseMaps.exportReadings
+      yield* CaseIds.seedFromReadings
+    }))
+    expect(await frozenOf(LEGACY)).toEqual({ "call-1@h": `${LEGACY}-cut9`, "call-2@h": `${LEGACY}-case2` })
+    const early = await exitOf(recordAt((prep) => cutOf(prep, LEGACY, [caseOf(`${LEGACY}-case2`, "call-2@h")])))
+    expect(String(Exit.isFailure(early) ? early.cause : "")).toContain("not frozen yet")
+    await withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.markSeeded([LEGACY])))
+    await withStore(recordAt((prep) => cutOf(prep, LEGACY, [caseOf(`${LEGACY}-case2`, "call-2@h")])))
+  })
+
+  it("lets the first reading of a capture never read before through, and counts it seeded", async () => {
+    await withStore(recordAt((prep) => cutOf(prep, "fresh.pcap", [caseOf("fresh.pcap-a", "call-fa@h")])))
+    expect(await withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.unseeded(["fresh.pcap", LEGACY]))))
+      .toEqual([])
   })
 })
 
@@ -193,6 +256,13 @@ describe.skipIf(!served)("case maps", () => {
       [`${CAPTURE}-r`, "refused", null, "10.0.0.8:5060"]
     ])
     expect(rows[0]!.first_at.getTime()).toBe(1_789_646_119_005)
+  })
+
+  it("keeps where each call starts where the cut stated it, and hands it back with the frozen id", async () => {
+    const start = { at_us: 1_789_646_119_005_979, src: "10.0.0.7:5060", dst: "10.0.0.1:5060" }
+    await withStore(recordAt((p) => cutOf(p, "stated.pcap", [{ ...caseOf("stated.pcap-a", "call-st@h"), start }])))
+    const frozen = await withStore(Effect.flatMap(CaseIds.Service, (ids) => ids.of(["stated.pcap"])))
+    expect(frozen.get("stated.pcap")).toEqual([{ caseId: "stated.pcap-a", callKey: "call-st@h", first: start }])
   })
 
   it("surveys the documents of each capture's standing cut alone, in current_documents", async () => {

@@ -64,9 +64,12 @@ export interface Interface {
    * new to the store. The cut's refusals are written with it (`refusals.ts`),
    * and so are its case map (`case-maps.ts`) and its frozen ids
    * (`case-ids.ts`): a reading naming a frozen call or id otherwise fails
-   * `CaseIds.Conflict` and writes nothing.
+   * `CaseIds.Conflict`, and a reading of a capture read before and never
+   * seeded fails `CaseIds.Unseeded`, each writing nothing.
    */
-  readonly record: (request: CaptureCutRequest) => Effect.Effect<Recorded, CaseIds.Conflict | SqlError>
+  readonly record: (
+    request: CaptureCutRequest
+  ) => Effect.Effect<Recorded, CaseIds.Conflict | CaseIds.Unseeded | SqlError>
   /**
    * What a capture stands cut as AS OF a prep: the highest prep no later than
    * the named one that cut it, or the highest of all where none is named;
@@ -299,6 +302,11 @@ export const layer = Layer.effect(
 
     const record = Effect.fn("Cuts.record")(function*(request: CaptureCutRequest) {
       return yield* sql.withTransaction(Effect.gen(function*() {
+        // A capture read before its ids were frozen waits for the seed: a name
+        // this reading made up could otherwise take one of its calls for good.
+        if (yield* CaseIds.unseededOn(sql, request.capture)) {
+          return yield* new CaseIds.Unseeded({ capture: request.capture })
+        }
         let flowsHash: string | null = null
         if (request.flows !== null && request.flows !== undefined) {
           flowsHash = yield* storeFlows(request.flows)
@@ -331,20 +339,30 @@ export const layer = Layer.effect(
         }
         // What the cut refused stands and falls with the reading it belongs to.
         yield* Refusals.write(sql, request.prepId, request.capture, request.refusals)
-        yield* CaseMaps.writeReading(sql, request.prepId, request.capture)
+        yield* CaseMaps.writeReading(
+          sql,
+          request.prepId,
+          request.capture,
+          request.cases.flatMap((entry) => entry.start === undefined ? [] : [{ caseId: entry.caseId, ...entry.start }])
+        )
         // Every id the reading names freezes with it; one naming a frozen
         // call or id otherwise refuses the reading whole.
+        const replaces = (key: string | undefined) => key === undefined ? {} : { replaces: key }
         yield* CaseIds.freezeOn(
           sql,
           request.capture,
           [
-            ...request.cases.map((entry) => ({ caseId: entry.caseId, callKey: entry.callKey })),
+            ...request.cases.map((entry) => ({ caseId: entry.caseId, callKey: entry.callKey, ...replaces(entry.replaces) })),
             ...request.refusals.flatMap((refusal) =>
-              refusal.callKey === undefined ? [] : [{ caseId: refusal.caseId, callKey: refusal.callKey }]
+              refusal.callKey === undefined
+                ? []
+                : [{ caseId: refusal.caseId, callKey: refusal.callKey, ...replaces(refusal.replaces) }]
             )
           ],
           `prep${request.prepId}`
         )
+        // Its first reading is its seed: every id it named is frozen.
+        yield* CaseIds.markSeededOn(sql, [request.capture])
         return { cases: cut.map(([, recorded]) => recorded) } satisfies Recorded
       }))
     })

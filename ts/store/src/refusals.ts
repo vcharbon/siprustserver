@@ -74,6 +74,7 @@ export const merge = (refusals: ReadonlyArray<Refusal>): ReadonlyArray<Refusal> 
   for (const refusal of refusals) {
     const held = byCall.get(refusal.caseId)
     const callKey = held?.callKey ?? refusal.callKey
+    const replaces = held?.replaces ?? refusal.replaces
     byCall.set(
       refusal.caseId,
       held === undefined
@@ -83,7 +84,8 @@ export const merge = (refusals: ReadonlyArray<Refusal>): ReadonlyArray<Refusal> 
           reasons: distinct([...held.reasons, ...refusal.reasons]),
           callIds: distinct([...held.callIds, ...refusal.callIds]),
           detail: [held.detail, refusal.detail].filter((line) => line !== "").join("; "),
-          ...(callKey === undefined ? {} : { callKey })
+          ...(callKey === undefined ? {} : { callKey }),
+          ...(replaces === undefined ? {} : { replaces })
         }
     )
   }

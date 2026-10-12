@@ -42,6 +42,8 @@ import * as Effect from "effect/Effect"
 import * as Migrator from "effect/unstable/sql/Migrator"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
+import { seedFromReadings } from "./case-ids.js"
+import { exportReadings } from "./case-maps.js"
 
 /** The store's migrations table. */
 export const TABLE = "store_migrations"
@@ -608,6 +610,28 @@ const runSummaries = Effect.gen(function*() {
 export const RUN_SUMMARIES = "4_run_summaries"
 
 /**
+ * `frozen_captures`, the captures whose earlier readings' ids are all frozen;
+ * and, for a store whose readings predate the frozen ids, every reading copied
+ * into the case maps and every keyed id of them frozen, newest reading first
+ * (`case-ids.ts`). What it cannot key is the deployment's to seed: no capture
+ * is marked seeded here.
+ */
+const seedFrozenIds = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  yield* sql`
+    CREATE TABLE frozen_captures (
+      capture    text PRIMARY KEY,
+      seeded_at  timestamptz NOT NULL DEFAULT now()
+    )
+  `
+  yield* exportReadings
+  yield* seedFromReadings
+})
+
+/** The key of the migration that seeds the frozen ids from the readings a store already holds. */
+export const SEED_FROZEN_IDS = "5_seed_frozen_ids"
+
+/**
  * The migration record, static so `tsx` and a bundler both resolve it: the
  * filesystem loader would make the package's own layout a runtime dependency.
  */
@@ -615,7 +639,8 @@ export const record: Record<string, Effect.Effect<void, unknown, SqlClient>> = {
   [BASELINE]: baseline,
   [FROZEN_IDS]: frozenIds,
   [CURRENT_DOCUMENTS]: currentDocuments,
-  [RUN_SUMMARIES]: runSummaries
+  [RUN_SUMMARIES]: runSummaries,
+  [SEED_FROZEN_IDS]: seedFrozenIds
 }
 
 export const loader: Migrator.Loader = Migrator.fromRecord(record)

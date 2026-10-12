@@ -114,8 +114,8 @@ const seed = Effect.gen(function*() {
   yield* cuts.finish(prep)
   const sweep = Number(
     (yield* sql<{ id: string }>`
-      INSERT INTO sweeps (lane, universe, captures, concurrency, batch_size, memory_max)
-      VALUES (${FAKE}, 'named', 1, 1, 1, '1G') RETURNING id
+      INSERT INTO sweeps (lane, universe, captures, concurrency, batch_size, memory_max, finished_at)
+      VALUES (${FAKE}, 'named', 1, 1, 1, '1G', now()) RETURNING id
     `)[0]!.id
   )
   const run = (lane: string, sweepId?: number) =>
@@ -264,13 +264,63 @@ describe.skipIf(!served)("the wipe", () => {
     expect({ ...after, runs: after["runs"]! - 1 }).toEqual(counts)
   })
 
+  /**
+   * What one holder costs: the wipe refused with `reason`, nothing removed,
+   * while `hold` stands; `release` lifts it again.
+   */
+  const refusedWhile = async (hold: string, release: string, reason: string) => {
+    await withStore(Effect.flatMap(SqlClient, (sql) => sql.unsafe(hold)))
+    const counts = await tableCounts()
+    const exit = await withStore(Effect.exit(Effect.flatMap(Wipe.Service, (wipe) => wipe.execute(KEEP))))
+    expect(String(Exit.isFailure(exit) ? exit.cause : "")).toContain(reason)
+    expect(await tableCounts()).toEqual(counts)
+    await withStore(Effect.flatMap(SqlClient, (sql) => sql.unsafe(release)))
+  }
+
+  it("refuses, removing nothing, while a job runs", async () => {
+    await refusedWhile(
+      "INSERT INTO jobs (kind, status, created_by) VALUES ('replay', 'running', 'wipe-test')",
+      "UPDATE jobs SET status = 'done', finished_at = now() WHERE created_by = 'wipe-test'",
+      "1 job(s) running"
+    )
+  })
+
+  it("refuses, removing nothing, while a sweep has not ended", async () => {
+    await refusedWhile(
+      `INSERT INTO sweeps (lane, universe, captures, concurrency, batch_size, memory_max, selection)
+       VALUES ('${FAKE}', 'named', 1, 1, 1, '1G', 'wipe-test')`,
+      "UPDATE sweeps SET finished_at = now() WHERE selection = 'wipe-test'",
+      "not ended"
+    )
+  })
+
+  it("refuses, removing nothing, while a prep is not finished", async () => {
+    await refusedWhile(
+      "INSERT INTO preps (cut_fingerprint) VALUES ('wipe-test')",
+      "UPDATE preps SET finished_at = now() WHERE cut_fingerprint = 'wipe-test'",
+      "not finished"
+    )
+  })
+
+  it("refuses, removing nothing, while a reading has no case map", async () => {
+    const prep = Number((await withStore(Effect.flatMap(SqlClient, (sql) =>
+      sql<{ prep_id: string }>`SELECT prep_id FROM case_maps WHERE capture = ${CAPTURE} LIMIT 1`
+    )))[0]!.prep_id)
+    await refusedWhile(
+      `CREATE TABLE wipe_test_maps AS SELECT * FROM case_maps WHERE prep_id = ${prep};
+       DELETE FROM case_maps WHERE prep_id = ${prep}`,
+      `INSERT INTO case_maps SELECT * FROM wipe_test_maps; DROP TABLE wipe_test_maps`,
+      "have no case map"
+    )
+  })
+
   it("drops every cut and every unkept run once the cited runs are summarised, and keeps the rest", async () => {
     await withStore(Effect.gen(function*() {
       const cited = yield* Citations.Service
       yield* cited.record(citations())
       expect(yield* cited.summarise).toEqual({ runs: 3, cells: 4 })
     }))
-    const plan = await withStore(Effect.flatMap(Wipe.Service, (wipe) => wipe.execute(KEEP)))
+    const plan = await withStore(Effect.flatMap(Wipe.Service, (wipe) => wipe.execute({ ...KEEP, idFloor: 5_000 })))
     expect(plan.dropped.runs).toBe(5)
     const counts = await tableCounts()
     expect(counts).toMatchObject({
@@ -285,6 +335,18 @@ describe.skipIf(!served)("the wipe", () => {
       case_results: 4,
       cell_summaries: 4
     })
+  })
+
+  it("mints no run, job, sweep or prep id below the floor once it has run", async () => {
+    const minted = await withStore(Effect.gen(function*() {
+      const sql = yield* SqlClient
+      const rows = yield* sql<{ run: string; job: string; sweep: string; prep: string }>`
+        SELECT nextval('runs_id_seq') AS run, nextval('jobs_id_seq') AS job,
+               nextval('sweeps_id_seq') AS sweep, nextval('preps_id_seq') AS prep
+      `
+      return Object.values(rows[0]!).map(Number)
+    }))
+    expect(minted.every((id) => id >= 5_000)).toBe(true)
   })
 
   it("reads every cited form back to the same call after the wipe", async () => {

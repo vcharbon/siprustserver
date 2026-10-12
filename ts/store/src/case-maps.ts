@@ -4,11 +4,12 @@
  *
  * A row is one case id of one (prep, capture) reading: a cut case with its call
  * key, or a refusal with the Call-IDs it names (and its call key where the cut
- * recorded one). `Cuts.record` writes the rows of each reading it records;
- * {@link Interface.export} copies the readings recorded before that, and
- * {@link Interface.locate} adds where each call starts in its capture — the
- * time and addresses of the first message of the leg its call key names —
- * read off the flows document the reading cut.
+ * recorded one), and where the call starts in its capture — the time and
+ * sockets of the first message of the leg its call key names. `Cuts.record`
+ * writes the rows of each reading it records, with where each case's call
+ * starts where the cut stated it; {@link exportReadings} copies the readings
+ * recorded before that, and {@link Interface.locate} reads where each call
+ * starts off the flows document its reading cut, for the rows that do not say.
  */
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
@@ -32,6 +33,14 @@ export interface Row {
   readonly callKey: string | null
   /** The Call-IDs a refusal names; empty for a case. */
   readonly callIds: ReadonlyArray<string>
+}
+
+/** Where one case's call starts, as a cut states it. */
+export interface Start {
+  readonly caseId: string
+  readonly at_us: number
+  readonly src: string
+  readonly dst: string
 }
 
 export interface Interface {
@@ -58,10 +67,11 @@ export class Service extends Context.Service<Service, Interface>()("@sip/store/C
 const LOCATE_PAGE = 50
 
 /**
- * The map rows of one (prep, capture) reading, replacing what stood: run by
- * `Cuts.record` inside its transaction, right after the reading's own rows.
+ * The map rows of one (prep, capture) reading, replacing what stood, with
+ * where each case's call starts where the cut stated it: run by `Cuts.record`
+ * inside its transaction, right after the reading's own rows.
  */
-export const writeReading = (sql: SqlClient, prepId: number, capture: string) =>
+export const writeReading = (sql: SqlClient, prepId: number, capture: string, starts: ReadonlyArray<Start>) =>
   Effect.gen(function*() {
     yield* sql`DELETE FROM case_maps WHERE prep_id = ${prepId} AND capture = ${capture}`
     yield* sql`
@@ -78,44 +88,59 @@ export const writeReading = (sql: SqlClient, prepId: number, capture: string) =>
       WHERE r.prep_id = ${prepId} AND r.capture = ${capture}
       ON CONFLICT DO NOTHING
     `
+    if (starts.length > 0) {
+      yield* sql`
+        UPDATE case_maps m
+        SET first_at = to_timestamp(s.at_us / 1000000.0), src = s.src, dst = s.dst
+        FROM jsonb_to_recordset(${JSON.stringify(starts)}::jsonb)
+          AS s("caseId" text, at_us bigint, src text, dst text)
+        WHERE m.prep_id = ${prepId} AND m.capture = ${capture} AND m.case_id = s."caseId"
+      `
+    }
   })
+
+/**
+ * Copies every reading the case maps do not hold yet out of the cut rows; a
+ * reading counts as exported once any of its rows of a kind is there, being
+ * written whole by {@link writeReading} or by this.
+ */
+export const exportReadings: Effect.Effect<Exported, SqlError, SqlClient> = Effect.gen(function*() {
+  const sql = yield* SqlClient
+  const cases = yield* sql<{ n: number }>`
+    WITH copied AS (
+      INSERT INTO case_maps (prep_id, capture, case_id, kind, call_key, cut_at)
+      SELECT c.prep_id, c.capture, c.case_id, 'case', c.call_key, cc.cut_at
+      FROM cut_cases c JOIN capture_cuts cc ON cc.prep_id = c.prep_id AND cc.capture = c.capture
+      WHERE NOT EXISTS (
+        SELECT 1 FROM case_maps m WHERE m.prep_id = c.prep_id AND m.capture = c.capture AND m.kind = 'case'
+      )
+      ON CONFLICT DO NOTHING
+      RETURNING 1
+    )
+    SELECT count(*)::int AS n FROM copied
+  `
+  const refusals = yield* sql<{ n: number }>`
+    WITH copied AS (
+      INSERT INTO case_maps (prep_id, capture, case_id, kind, call_key, call_ids, reasons, cut_at)
+      SELECT r.prep_id, r.capture, r.case_id, 'refused', r.call_key, r.call_ids, r.reasons, cc.cut_at
+      FROM cut_refusals r JOIN capture_cuts cc ON cc.prep_id = r.prep_id AND cc.capture = r.capture
+      WHERE NOT EXISTS (
+        SELECT 1 FROM case_maps m WHERE m.prep_id = r.prep_id AND m.capture = r.capture AND m.kind = 'refused'
+      )
+      ON CONFLICT DO NOTHING
+      RETURNING 1
+    )
+    SELECT count(*)::int AS n FROM copied
+  `
+  return { cases: Number(cases[0]!.n), refusals: Number(refusals[0]!.n) } satisfies Exported
+})
 
 export const layer = Layer.effect(
   Service,
   Effect.gen(function*() {
     const sql = yield* SqlClient
 
-    const exportAll = Effect.gen(function*() {
-      // A reading counts as exported once any of its rows is there: it is
-      // written whole, by `writeReading` or by this statement.
-      const cases = yield* sql<{ n: number }>`
-        WITH copied AS (
-          INSERT INTO case_maps (prep_id, capture, case_id, kind, call_key, cut_at)
-          SELECT c.prep_id, c.capture, c.case_id, 'case', c.call_key, cc.cut_at
-          FROM cut_cases c JOIN capture_cuts cc ON cc.prep_id = c.prep_id AND cc.capture = c.capture
-          WHERE NOT EXISTS (
-            SELECT 1 FROM case_maps m WHERE m.prep_id = c.prep_id AND m.capture = c.capture AND m.kind = 'case'
-          )
-          ON CONFLICT DO NOTHING
-          RETURNING 1
-        )
-        SELECT count(*)::int AS n FROM copied
-      `
-      const refusals = yield* sql<{ n: number }>`
-        WITH copied AS (
-          INSERT INTO case_maps (prep_id, capture, case_id, kind, call_key, call_ids, reasons, cut_at)
-          SELECT r.prep_id, r.capture, r.case_id, 'refused', r.call_key, r.call_ids, r.reasons, cc.cut_at
-          FROM cut_refusals r JOIN capture_cuts cc ON cc.prep_id = r.prep_id AND cc.capture = r.capture
-          WHERE NOT EXISTS (
-            SELECT 1 FROM case_maps m WHERE m.prep_id = r.prep_id AND m.capture = r.capture AND m.kind = 'refused'
-          )
-          ON CONFLICT DO NOTHING
-          RETURNING 1
-        )
-        SELECT count(*)::int AS n FROM copied
-      `
-      return { cases: Number(cases[0]!.n), refusals: Number(refusals[0]!.n) } satisfies Exported
-    })
+    const exportAll = exportReadings.pipe(Effect.provideService(SqlClient, sql))
 
     // The rows to locate and the Call-ID each names are read first, so the
     // legs join them on equality alone.

@@ -77,12 +77,28 @@ export interface CutCall {
   /** The correlated Call-ID family, in leg order. */
   readonly callIds: ReadonlyArray<string>
   /**
-   * Which ingress dialog of its family this case is, where the family held
-   * several and the cut split it. ABSENT for a family that yielded one call, so
-   * an identity a consumer derives from the family does not move for a cut that
-   * did not split — the family's Call-IDs alone no longer name a case.
+   * Which ingress dialog of its family this case is, by arrival, where the
+   * family held several and the cut split it. ABSENT for a family that yielded
+   * one call, so an identity a consumer derives from the family does not move
+   * for a cut that did not split — the family's Call-IDs alone no longer name a
+   * case. A rank: a dialog the capture gains before it shifts it.
    */
   readonly ingressOrdinal?: number
+  /** Where this call of a split family entered the SUT; absent where `ingressOrdinal` is. */
+  readonly ingress?: Ingress
+  /** How many calls the split family holds; absent where `ingressOrdinal` is. */
+  readonly ingresses?: number
+}
+
+/**
+ * Where one call of a split family entered the SUT: its dialog-creating
+ * INVITE's capture time and sockets — what tells the family's calls apart
+ * whatever else the capture holds.
+ */
+export interface Ingress {
+  readonly at_us: number
+  readonly src: string
+  readonly dst: string
 }
 
 export interface CutResult {
@@ -202,6 +218,9 @@ interface Anchor {
   /** The SUT-side socket of the boundary hop — the INSTANCE this dialog is at. */
   readonly sutSocket: string
   readonly at_us: number
+  /** The INVITE's own sockets. */
+  readonly src: string
+  readonly dst: string
 }
 
 /** Where a leg's boundary hops carry a dialog-creating INVITE, and which way. */
@@ -220,7 +239,9 @@ const anchorsOf = (
       hop: m.hop,
       inbound: sut.has(m.dst),
       sutSocket: sutSocketOf(leg, m.hop, sut),
-      at_us: m.ts_us
+      at_us: m.ts_us,
+      src: m.src,
+      dst: m.dst
     })
   }
   return [...out.values()].sort((a, b) => a.at_us - b.at_us)
@@ -508,8 +529,12 @@ checkRefusalRoster(CUT_RULES, { where: "@sip/pipeline cut rules", deploymentFree
 export interface CallIdentity {
   /** The family's Call-IDs at the SUT's boundary, in leg order. */
   readonly callIds: ReadonlyArray<string>
-  /** Which ingress dialog of a split family the call is; absent for a family that stayed whole. */
+  /** Which ingress dialog of a split family the call is, by arrival; absent for a family that stayed whole. */
   readonly ingressOrdinal?: number
+  /** Where the call of a split family entered the SUT; absent for a family that stayed whole. */
+  readonly ingress?: Ingress
+  /** How many calls the split family holds; absent for a family that stayed whole. */
+  readonly ingresses?: number
   /** The family's boundary legs, ascending. */
   readonly legs: ReadonlyArray<number>
 }
@@ -579,7 +604,13 @@ export const cutCalls = (
     }
     inbound.forEach((uac, ordinal) => {
       const uas = outbound.filter((o) => ingressOf(inbound, o) === uac)
-      const split = inbound.length === 1 ? {} : { ingressOrdinal: ordinal }
+      const split = inbound.length === 1
+        ? {}
+        : {
+          ingressOrdinal: ordinal,
+          ingress: { at_us: uac.at_us, src: uac.src, dst: uac.dst },
+          ingresses: inbound.length
+        }
       calls.push({
         ...split,
         id: name({ ...whole, ...split }),

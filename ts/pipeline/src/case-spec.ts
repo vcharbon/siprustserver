@@ -8,6 +8,7 @@
  * any of those would let the document disagree with the ledger that references
  * it.
  */
+import type { Ingress } from "./cut.js"
 import type { Vantage } from "./selection.js"
 
 export interface CaseSpec {
@@ -40,4 +41,6 @@ export interface CaseSpec {
    * one case, whose Call-IDs already name it uniquely.
    */
   readonly ingressOrdinal?: number
+  /** Where this case's call entered the SUT, where the cut split its family (`./cut.ts` `Ingress`). */
+  readonly ingress?: Ingress
 }
