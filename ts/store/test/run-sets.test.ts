@@ -3,7 +3,7 @@
  * the runs each term admits, two sides read narrowed to each other — each
  * call at the side's latest run holding it, no older than its latest full
  * reading — and a comparison read off them. The suite builds and drops its OWN
- * database and skips where no server answers.
+ * database on the test server (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

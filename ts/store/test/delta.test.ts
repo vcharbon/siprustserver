@@ -7,7 +7,7 @@
  * not vanish either — it is the one place a strict-lane failure can hide.
  *
  * The suite builds and drops its OWN database, so the server's other databases are
- * never touched, and skips where no server answers.
+ * never touched (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

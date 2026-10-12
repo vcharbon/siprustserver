@@ -5,7 +5,7 @@
  * insert storing nothing, a prep ordering, a null distinguished from an empty
  * list — and none of them survives being asserted against a fake. The suite
  * builds and drops its OWN database, so the server's other databases are never
- * touched, and skips where no server answers.
+ * touched (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { Buffer } from "node:buffer"

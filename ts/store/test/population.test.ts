@@ -5,7 +5,7 @@
  * held capture counting as nothing new, a seed refusing a table that already
  * holds rows, and the newest cut of a capture answering with the code that took
  * it. The suite builds and drops its OWN database, so the server's other
- * databases are never touched, and skips where no server answers.
+ * databases are never touched (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

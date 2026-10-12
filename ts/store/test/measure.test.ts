@@ -2,7 +2,7 @@
  * The measurement side of the per-call record, against a real postgres: which
  * runs the queue reads still carry failing rows nobody measured, and the
  * re-measure that fills a run's error columns and touches nothing else it says.
- * The suite builds and drops its OWN database and skips where no server answers.
+ * The suite builds and drops its OWN database on the test server (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

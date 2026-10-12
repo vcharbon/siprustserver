@@ -20,7 +20,8 @@ a run reaches it as contract vocabulary.
 
 The store's tests build and drop their own databases on a postgres server:
 `STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),
-else the client's default socket; a suite skips where no server answers. A
+else the client's default socket. A suite whose server does not answer fails,
+naming the url; `STORE_TEST_SKIP=1` skips them instead. A
 deployment states its own configuration — database url, current population,
 selector spelling, capture names, document features — and nothing of it lives
 in the store.

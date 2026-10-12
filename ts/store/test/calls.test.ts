@@ -8,8 +8,8 @@
  * page and the count in the statement itself, that the groups the chips are
  * counted from are the pool's, that a served row hydrates from the document
  * the run ran, and that a page is keyed through the cut's index once per
- * served row. The suite builds and drops its OWN database and skips where no
- * server answers.
+ * served row. The suite builds and drops its OWN database on the test server
+ * (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

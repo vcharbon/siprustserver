@@ -2,7 +2,7 @@
  * A run whose row is gone, read off the summary a citation kept: the run's
  * own line, every cell it held with its verdict, step and main error, and the
  * records citing it. A run no summary kept answers nothing. The suite builds
- * and drops its OWN database and skips where no server answers.
+ * and drops its OWN database on the test server (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"

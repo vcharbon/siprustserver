@@ -1,7 +1,7 @@
 /**
  * The refusal record on its own, against a real postgres: which standing cuts
  * have no refusal rows yet, and a record written after the cut it belongs to.
- * The suite builds and drops its OWN database and skips where no server answers.
+ * The suite builds and drops its OWN database on the test server (`./server.js`).
  */
 import * as Effect from "effect/Effect"
 import { SqlClient } from "effect/unstable/sql/SqlClient"
