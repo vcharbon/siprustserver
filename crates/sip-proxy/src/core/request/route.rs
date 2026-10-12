@@ -3,8 +3,9 @@
 //! admission, target selection, Via push, LRU memos, freeze + forward. The
 //! pushed branch is `crate::branch`'s. Route preprocessing lives in
 //! [`classify`](super::classify), the gate in [`admission`](super::admission),
-//! Record-Route insertion in [`record_route`](super::record_route),
-//! self-generated finals in [`reply`](super::reply).
+//! the target's steps in [`target`](super::target), Record-Route insertion in
+//! [`record_route`](super::record_route), self-generated finals in
+//! [`reply`](super::reply).
 
 use std::net::SocketAddr;
 
@@ -12,18 +13,16 @@ use sip_message::emergency::is_emergency_request;
 use sip_message::header::{MaxForwards, ProxyRequire, Unsupported, Via};
 use sip_message::{Method, SipMessage};
 
-use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
 use crate::headers::via_with_cookie;
-use crate::observability::metrics::{
-    CancelLookup, Direction, Face, MessageResult, RoutingDecisionKind,
-};
+use crate::observability::metrics::{Direction, Face, MessageResult, RoutingDecisionKind};
 use crate::self_gate::BypassKind;
-use crate::strategy::{DecodeResult, SelectOpts};
+use crate::strategy::SelectOpts;
 
 use super::super::ProxyCore;
 use super::reply::extra_header;
+use super::target::Chosen;
 use super::{top_via_branch, RouteOutcome};
 
 /// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
@@ -210,131 +209,23 @@ impl ProxyCore {
         // cookie backs is admitted as a new call where it falls to selection.
         let dialog_unbacked = face == Face::External && method == Method::Invite && has_to_tag;
 
-        // ── Pick the downstream target ──────────────────────────────────────
-        // Every branch below assigns both (or returns early).
-        let decision;
-        let target: Option<ProxyAddr>;
-        // The cookie's verdict for the traced routing fact, set by the branch that read one.
-        let mut stickiness: Option<&'static str> = None;
-
-        if method == Method::Cancel {
-            // §9.1: the CANCEL's Via is its INVITE's top Via, so it finds the
-            // entry of its own INVITE transaction, never another pass of a
-            // spiral sharing its Call-ID, From tag and CSeq.
-            let key = invite_txn_key(req.top_via(), call_id.as_str(), from.tag(), cseq.seq());
-            if let Some(found) = self.cancel_lru.lookup(&key) {
-                // RFC 3261 §9.1 puts the CANCEL where the INVITE went; §16.11
-                // puts it on the INVITE's branch, which the survivor's rebuilt
-                // INVITE transaction is keyed by. Behind this proxy the workers
-                // are ONE logical UAS, so a CANCEL toward a worker follows the
-                // INVITE's own stickiness cookie through the ladder every
-                // in-dialog request takes — the alive primary, else the backup
-                // holding the call's replica (ADR-0014). A cookie the strategy
-                // cannot place (no usable backup) and a downstream target (a
-                // worker's own b-leg CANCEL) go where the INVITE went.
-                let mut cancel_target = found.target;
-                if let Some(cookie) = &found.stickiness {
-                    let decoded = self.strategy.decode_stickiness(cookie, msg).await;
-                    self.metrics.record_request_decode(&decoded);
-                    match decoded {
-                        DecodeResult::Forward { target: t, .. }
-                        | DecodeResult::ForwardBackup { target: t, .. } => cancel_target = t,
-                        DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => {}
-                    }
-                }
-                target = Some(cancel_target);
-                decision = RoutingDecisionKind::Cancel;
-                self.metrics.record_cancel_lookup(CancelLookup::Hit);
-            } else {
-                self.metrics.record_cancel_lookup(CancelLookup::Miss);
-                decision = RoutingDecisionKind::Cancel;
-                if c.worker_outbound {
-                    // §9.1: a CANCEL goes where its INVITE went. A worker's own
-                    // b-leg INVITE went to the R-URI, memo or no memo — a
-                    // fresh selection would hand a worker's CANCEL to a worker
-                    // that never saw the INVITE.
-                    match req.request_uri() {
-                        uri if !uri.is_opaque() => {
-                            let (host, port) = uri.host_port();
-                            target = Some(ProxyAddr::new(host, port));
-                        }
-                        _ => return self.reply_malformed_uri(req, src).await,
-                    }
-                } else {
-                    match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
-                        Ok(t) => target = Some(t),
-                        Err(e) => return self.reply_select_failure(req, src, e).await,
-                    }
-                }
-            }
+        // ── Pick the downstream target (`target`) ───────────────────────────
+        let chosen: Result<Chosen, RouteOutcome> = if method == Method::Cancel {
+            let target = self.cancel_target(msg, req, src, c.worker_outbound).await;
+            target.map(|t| (t, RoutingDecisionKind::Cancel, None))
         } else if let Some(found) = ack_hop {
             // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
             // final arrived from (see the hop-decision block above). It shares
             // the INVITE's Call-ID, From tag, CSeq number and received branch,
             // so §16.11 already puts it on the INVITE's outbound branch.
-            target = Some(found.target);
-            decision = RoutingDecisionKind::AckHop;
+            Ok((found.target, RoutingDecisionKind::AckHop, None))
         } else if let Some(next) = c.loose_route_next_hop.clone() {
-            target = Some(next);
-            decision = RoutingDecisionKind::LooseRoute;
+            Ok((next, RoutingDecisionKind::LooseRoute, None))
         } else if c.worker_outbound {
-            // An out-of-range R-URI port is malformed (400), not truncated —
-            // `sip:host:70596` must not be forwarded to port 5060, and a URI
-            // that states one does not read.
-            match req.request_uri() {
-                uri if !uri.is_opaque() => {
-                    let (host, port) = uri.host_port();
-                    target = Some(ProxyAddr::new(host, port));
-                    decision = RoutingDecisionKind::WorkerOutbound;
-                }
-                _ => return self.reply_malformed_uri(req, src).await,
-            }
-        } else if let Some(params) = &c.cookie {
-            let decoded = self.strategy.decode_stickiness(params, msg).await;
-            self.metrics.record_request_decode(&decoded);
-            match decoded {
-                DecodeResult::Forward { target: t, .. } => {
-                    target = Some(t);
-                    decision = RoutingDecisionKind::DecodeForward;
-                    stickiness = Some("hit");
-                }
-                DecodeResult::ForwardBackup { target: t, .. } => {
-                    target = Some(t);
-                    decision = RoutingDecisionKind::DecodeForwardBackup;
-                    stickiness = Some("backup");
-                }
-                DecodeResult::Reject { status, reason } => {
-                    // The decode reasons are free-form diagnostics — one
-                    // static label keeps the reason set bounded.
-                    return self
-                        .reply_reject(req, src, status, &reason, &[], "stickiness_decode_rejected")
-                        .await;
-                }
-                DecodeResult::Unknown { is_emergency: cookie_emergency } => {
-                    // A retransmit must repeat the original (random) selection,
-                    // not roll the dice again — see the rtx memo above.
-                    if let Some(found) = &rtx_hit {
-                        target = Some(found.target.clone());
-                    } else {
-                        let admit_as_new =
-                            dialog_unbacked && self.strategy.verified_cookie(params, msg).is_none();
-                        if admit_as_new {
-                            if let Err(refused) = self.admit_new_call(req, src, is_emergency).await
-                            {
-                                return refused;
-                            }
-                        }
-                        let opts =
-                            SelectOpts { emergency_override: cookie_emergency, admit_as_new };
-                        match self.strategy.select_for_new_dialog(msg, opts).await {
-                            Ok(t) => target = Some(t),
-                            Err(e) => return self.reply_select_failure(req, src, e).await,
-                        }
-                    }
-                    decision = RoutingDecisionKind::DecodeForward;
-                    stickiness = Some("miss");
-                }
-            }
+            let target = self.request_uri_target(req, src).await;
+            target.map(|t| (t, RoutingDecisionKind::WorkerOutbound, None))
+        } else if let Some(cookie) = &c.cookie {
+            self.cookie_target(msg, req, src, cookie, rtx_hit.as_ref(), dialog_unbacked).await
         } else if let Some(found) = &rtx_hit {
             // Retransmitted out-of-dialog request: repeat the original
             // selection. Re-running the strategy under a changed candidate set
@@ -342,26 +233,15 @@ impl ProxyCore {
             // §16.11 branch to a DIFFERENT worker — one INVITE transaction
             // split across two B2BUAs (double call), with the CANCEL entry
             // then overwritten to point at the second one.
-            target = Some(found.target.clone());
-            decision = RoutingDecisionKind::SelectNew;
+            Ok((found.target.clone(), RoutingDecisionKind::SelectNew, None))
         } else {
-            if dialog_unbacked {
-                if let Err(refused) = self.admit_new_call(req, src, is_emergency).await {
-                    return refused;
-                }
-            }
             let opts = SelectOpts { admit_as_new: dialog_unbacked, ..SelectOpts::default() };
-            match self.strategy.select_for_new_dialog(msg, opts).await {
-                Ok(t) => target = Some(t),
-                Err(e) => return self.reply_select_failure(req, src, e).await,
-            }
-            decision = RoutingDecisionKind::SelectNew;
-        }
-
-        let Some(target) = target else {
-            // Defensive — every branch above either set `target` or returned.
-            self.metrics.record_reject("no_target_selected");
-            return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
+            let target = self.select_target(msg, req, src, opts).await;
+            target.map(|t| (t, RoutingDecisionKind::SelectNew, None))
+        };
+        let (target, decision, stickiness) = match chosen {
+            Ok(chosen) => chosen,
+            Err(refused) => return refused,
         };
 
         // ── §16.6 received/rport, Max-Forwards, Record-Route, Via ───────────

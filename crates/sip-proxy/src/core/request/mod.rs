@@ -7,7 +7,8 @@
 //! Via push, retransmission memos, serialize + forward.
 //!
 //! The routing ladder lives in [`route`], Route preprocessing in [`classify`],
-//! the gate in [`admission`], the double-Record-Route insertion in
+//! the gate in [`admission`], the target's steps in [`target`], the
+//! double-Record-Route insertion in
 //! [`record_route`], the cookie on a worker's Via in [`via_cookie`],
 //! self-generated UAS finals in [`reply`]. The response relay does NOT live
 //! here — see `core/response`.
@@ -17,6 +18,7 @@ mod classify;
 mod record_route;
 mod reply;
 mod route;
+mod target;
 mod trace_seam;
 mod via_cookie;
 
