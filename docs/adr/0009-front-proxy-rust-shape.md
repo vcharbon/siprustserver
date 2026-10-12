@@ -38,14 +38,15 @@ that worker as primary: a spiral puts one pair per pass on the response, and the
 pair recorded relaying the worker's request out lies below every later pass (a
 later pass reaching the same worker may name another backup, the alive set having
 changed). A response that carries none of this proxy's Record-Route entries — the
-answer to an in-dialog request (RFC 3261 §12.1.1) — is read on the Via this proxy
-pushed instead: on a worker's in-dialog INVITE, and on its CANCEL and ACK, that
-Via carries the cookie of the request's own route set, signed as recorded and
-without the routing flags (`core/request/via_cookie`). Read off the route set, it
-is the same on the INVITE, its CANCEL (§9.1) and its ACK (§17.1.1.3) at any proxy
-instance. A worker's initial INVITE states no cookie of its own, so its Via
-carries none; its dialog-creating responses bring the cookie back on the
-Record-Route.
+answer to an in-dialog request (RFC 3261 §12.1.1, §16.6 step 4) — is read on the
+Via this proxy pushed instead: on a worker's in-dialog INVITE, and on its CANCEL
+and ACK, that Via carries the cookie of the request's own route set — the
+strategy's own fields alone, once they verify for the call
+(`RoutingStrategy::verified_cookie`), never over a param the proxy set itself
+(`core/request/via_cookie`). Read off the route set, it is the same on the INVITE,
+its CANCEL (§9.1) and its ACK (§17.1.1.3) at any proxy instance. A worker's
+initial INVITE states no cookie of its own, so its Via carries none; its
+dialog-creating responses bring the cookie back on the Record-Route.
 An in-dialog request whose Route set holds several of this proxy's pairs back to
 back (a spiral with no Record-Routing hop between passes) takes its direction
 from the first entry of the last pair: it leaves this proxy on the last pass, and

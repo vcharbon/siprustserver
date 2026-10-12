@@ -495,7 +495,7 @@ impl ProxyCore {
         );
         draft = routed;
         let via_cookie =
-            is_worker_outbound.then(|| self.via_cookie(req, &routes[..self_routes])).flatten();
+            is_worker_outbound.then(|| self.via_cookie(msg, req, &routes[..self_routes])).flatten();
 
         // ── §16.11: the pushed branch is a function of the message ──────────
         // A retransmission of this request, and its CANCEL and non-2xx ACK,

@@ -1,33 +1,31 @@
 //! The stickiness cookie on the Via this proxy pushes on a worker's in-dialog
 //! INVITE, and on that INVITE's CANCEL and ACK. A response bound for a worker
-//! comes back along the Via (RFC 3261 §18.2.2); one answering an in-dialog
-//! request carries no Record-Route (§12.1.1), so when that worker has died
-//! reverse-path failover (`core/response`) reads the cookie off this Via in its
-//! place. The cookie is the dialog's own, as the strategy signed it, read off
-//! the request's route set: the INVITE, its CANCEL (§9.1) and its ACK
+//! comes back along the Via (RFC 3261 §18.2.2); the answer to an in-dialog
+//! request carries no Record-Route (§12.1.1, §16.6 step 4: only a
+//! dialog-creating response does), so when that worker has died reverse-path failover (`core/response`)
+//! reads the cookie off this Via in its place. The cookie is the dialog's own,
+//! read off the request's route set: the INVITE, its CANCEL (§9.1) and its ACK
 //! (§17.1.1.3) carry the same Route, so they carry the same Via at any proxy
-//! instance, remembering nothing.
+//! instance, remembering nothing. Only the strategy's own fields ride, and only
+//! once they verify for the call (`RoutingStrategy::verified_cookie`).
 
-use sip_message::header::{RouteEntry, Uri};
-use sip_message::{Method, SipRequest};
+use sip_message::header::RouteEntry;
+use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::headers::cookie_params;
 use crate::strategy::RouteParams;
 
 use super::super::ProxyCore;
 
-/// The routing flags this proxy puts on its own Route / Record-Route URIs:
-/// beside the cookie, never part of it.
-const ROUTING_FLAGS: [&str; 2] = ["lr", "outbound"];
-
 impl ProxyCore {
-    /// The cookie for the Via pushed on `req`, a worker-outbound request: for
-    /// an INVITE, a CANCEL or an ACK, the cookie one of `own_routes` (the
-    /// proxy's entries the request's route set carried) names a primary in.
-    /// `None` for any other request, and for one whose route set holds no
-    /// cookie (an initial INVITE's preloaded Route).
+    /// The cookie for the Via pushed on `req` (the request `msg` holds), a
+    /// worker-outbound request: for an INVITE, a CANCEL or an ACK, the first
+    /// verified cookie of `own_routes` (the proxy's entries the request's route
+    /// set carried). `None` for any other request, and for one whose route set
+    /// holds no verified cookie (an initial INVITE's preloaded Route).
     pub(super) fn via_cookie(
         &self,
+        msg: &SipMessage,
         req: &SipRequest,
         own_routes: &[RouteEntry],
     ) -> Option<RouteParams> {
@@ -36,16 +34,6 @@ impl ProxyCore {
         }
         own_routes
             .iter()
-            .map(|route| cookie_of(route.uri()))
-            .find(|cookie| self.strategy.stickiness_primary(cookie).is_some())
+            .find_map(|route| self.strategy.verified_cookie(&cookie_params(route.uri()), msg))
     }
-}
-
-/// The cookie on one of the proxy's own Route URIs, its routing flags left out.
-fn cookie_of(uri: &Uri) -> RouteParams {
-    let mut cookie = cookie_params(uri);
-    for flag in ROUTING_FLAGS {
-        cookie.remove(flag);
-    }
-    cookie
 }

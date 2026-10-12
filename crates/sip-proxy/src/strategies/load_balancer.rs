@@ -31,7 +31,7 @@ use sip_message::SipMessage;
 
 use crate::addr::ProxyAddr;
 use crate::load_observer::{EluBand, WorkerLoadObserver};
-use crate::observability::metrics::{HmacFailureReason, ProxyMetrics};
+use crate::observability::metrics::ProxyMetrics;
 use crate::registry::{WorkerHealth, WorkerRegistry};
 use crate::security::hmac::{HmacKeyProvider, TRUNCATED_MAC_BYTES};
 use crate::strategy::{
@@ -39,6 +39,8 @@ use crate::strategy::{
 };
 
 use super::rendezvous::{rendezvous_select, RendezvousCandidate};
+
+mod cookie;
 
 const COOKIE_VERSION: &str = "3";
 const DEFAULT_DRAIN_GRACE_MS: u64 = 5_000;
@@ -240,63 +242,13 @@ impl RoutingStrategy for LoadBalancerStrategy {
     }
 
     async fn decode_stickiness(&self, route_param: &RouteParams, msg: &SipMessage) -> DecodeResult {
-        let w_pri = route_param.get("w_pri").map(String::as_str);
-        let w_bak = route_param.get("w_bak").map(String::as_str);
-        let e = route_param.get("e").map(String::as_str);
-        let v = route_param.get("v").map(String::as_str);
-        let kid = route_param.get("kid").map(String::as_str);
-        let sig = route_param.get("sig").map(String::as_str);
-
-        // `w_bak` may legitimately be present-but-empty; `w_pri`/`kid`/`sig` must
-        // be non-empty; `e` must be "0" or "1".
-        let (Some(w_pri), Some(w_bak), Some(e), Some(v), Some(kid), Some(sig)) =
-            (w_pri, w_bak, e, v, kid, sig)
-        else {
-            self.metrics.record_hmac_failure(HmacFailureReason::Missing);
-            return DecodeResult::Unknown { is_emergency: false };
+        let (w_pri, w_bak, is_emergency) = match self.check(route_param, msg) {
+            Ok(cookie) => (cookie.w_pri, cookie.w_bak, cookie.is_emergency),
+            Err(fault) => {
+                self.metrics.record_hmac_failure(fault.metric());
+                return fault.decode_result();
+            }
         };
-        if (e != "0" && e != "1") || w_pri.is_empty() || kid.is_empty() || sig.is_empty() {
-            self.metrics.record_hmac_failure(HmacFailureReason::Missing);
-            return DecodeResult::Unknown { is_emergency: false };
-        }
-        if v != COOKIE_VERSION {
-            self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject {
-                status: 403,
-                reason: format!("unsupported stickiness cookie version \"{v}\""),
-            };
-        }
-        let Some(call_id) = call_id_of(msg) else {
-            self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject {
-                status: 403,
-                reason: "missing Call-ID for stickiness verify".to_string(),
-            };
-        };
-        let Ok(decoded) = URL_SAFE_NO_PAD.decode(sig) else {
-            self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject {
-                status: 403,
-                reason: "malformed stickiness signature".to_string(),
-            };
-        };
-        if decoded.len() != TRUNCATED_MAC_BYTES {
-            self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject {
-                status: 403,
-                reason: format!("malformed stickiness signature (length={})", decoded.len()),
-            };
-        }
-
-        let is_emergency = e == "1";
-        let input = build_stickiness_input(w_pri, w_bak, e, call_id);
-        if !self.hmac.verify_truncated(&input, kid, &decoded) {
-            self.metrics.record_hmac_failure(HmacFailureReason::Mismatch);
-            return DecodeResult::Reject {
-                status: 403,
-                reason: "stickiness signature mismatch".to_string(),
-            };
-        }
 
         // MAC verified — resolve the primary.
         let Some(primary) = self.registry.resolve(w_pri) else {
@@ -386,5 +338,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str> {
         params.get("w_pri").map(String::as_str).filter(|w| !w.is_empty())
+    }
+
+    fn verified_cookie(&self, params: &RouteParams, msg: &SipMessage) -> Option<RouteParams> {
+        self.own_fields(params, msg)
     }
 }

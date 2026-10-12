@@ -135,18 +135,23 @@ downstream-blackhole case — all three bounded by the caller's transaction time
 An INVITE response bound for a worker the proxy holds Dead fails over to the
 backup its stickiness cookie names, read from the proxy's own Record-Route entry
 or, on a response carrying none (the answer to a worker's in-dialog INVITE), from
-the Via the proxy pushed on that INVITE (ADR-0009 X1); the survivor takes the call
-over on it and completes the round
-(`failover-harness/tests/it/reinvite_answer_failover.rs`). A forged cookie
-routes nothing. A non-INVITE response answers a client transaction only its
-sender holds (§17.1.2) and follows the Via.
+the Via the proxy pushed on that INVITE (ADR-0009 X1). The survivor takes the
+call over on it, and a round its replica holds completes there
+(`failover-harness/tests/it/reinvite_answer_failover.rs`), or gives up at the
+seeded transaction's INVITE bound when the callee never answers
+(`reinvite_round_gives_up_after_takeover.rs`). A forged cookie routes nothing.
+A non-INVITE response answers a client transaction only its sender holds
+(§17.1.2) and follows the Via.
 
 A caller that heard the worker's 100 sends no retransmission that could re-place
-its call, so a worker that dies before the call's first record reaches its
-backup leaves the caller to its own timers, as on a direct path. That window
-runs from the 100 through the routing decision's answer (bounded by the
-decision deadline) plus one replication stream hop
-(`failover-harness/tests/it/new_call_replication_window.rs`).
+its call, so a worker that dies before its state reaches the backup leaves the
+caller to its own timers, as on a direct path. For a new call that window runs
+from the 100 through the routing decision's answer (bounded by the decision
+deadline) plus one replication stream hop
+(`failover-harness/tests/it/new_call_replication_window.rs`). Its in-dialog
+twin is a round whose relay has not replicated yet: the callee's answer takes
+the call over on a replica that holds no transaction for it, reaches no one,
+and the copy releases itself (`reinvite_round_not_yet_replicated.rs`).
 
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero

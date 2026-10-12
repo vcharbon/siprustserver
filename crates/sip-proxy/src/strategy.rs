@@ -124,4 +124,13 @@ pub trait RoutingStrategy: Send + Sync {
     /// given worker's leg. `None` → the cookie names no worker. Reverse-path
     /// failover consults only a cookie this names the dead worker in.
     fn stickiness_primary<'p>(&self, params: &'p RouteParams) -> Option<&'p str>;
+
+    /// The cookie in `params` (the params of one of the proxy's own Route
+    /// URIs) as a header of the proxy's own may carry it: this strategy's own
+    /// fields alone, and only when they verify for `msg`'s call. `None` →
+    /// nothing to carry, which a strategy whose cookie names no worker always
+    /// answers.
+    fn verified_cookie(&self, _params: &RouteParams, _msg: &SipMessage) -> Option<RouteParams> {
+        None
+    }
 }

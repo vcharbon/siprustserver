@@ -70,10 +70,12 @@ pub fn via_cookie_params(via: &Via) -> RouteParams {
         .collect()
 }
 
-/// `via` carrying `cookie`'s fields, if any, after its own params.
+/// `via` carrying `cookie`'s fields, if any, after its own params; a field
+/// named like a param `via` already carries is left out, never written over it.
 pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
-    cookie.into_iter().flatten().fold(via, |via, (name, value)| {
-        via.with_param(name.as_str(), ParamValue::text(value.as_str()))
+    cookie.into_iter().flatten().fold(via, |via, (name, value)| match via.param(name) {
+        Some(_) => via,
+        None => via.with_param(name.as_str(), ParamValue::text(value.as_str())),
     })
 }
 
