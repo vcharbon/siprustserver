@@ -23,7 +23,7 @@ crates/b2bua-harness/tests/it/stated_headers.rs 1500
 crates/b2bua-harness/tests/it/suppress_18x.rs 818
 crates/b2bua-runner-kit/src/lib.rs 1127
 crates/b2bua-sdk/src/config.rs 892
-crates/b2bua-sdk/src/model.rs 1286
+crates/b2bua-sdk/src/model.rs 1285
 crates/b2bua/src/b2bua_core.rs 952
 crates/b2bua/src/decision/test_adapter.rs 818
 crates/b2bua/src/limiter/refresh_batch.rs 520
@@ -97,7 +97,6 @@ crates/rfc-rules/src/rules/dialog.rs 941
 crates/rfc-rules/src/rules/dialog/tests.rs 1212
 crates/rfc-rules/src/rules/proxy.rs 634
 crates/rfc-rules/src/rules/reinvite.rs 670
-crates/rfc-rules/src/rules/retransmit.rs 513
 crates/rfc-rules/src/rules/wellformed.rs 656
 crates/rfc-rules/src/verdict/evidence.rs 1722
 crates/scenario-harness/src/actor/goals.rs 510
