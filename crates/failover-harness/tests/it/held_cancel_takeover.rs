@@ -1,10 +1,10 @@
-//! **A CANCEL held when the serving node dies is sent by the survivor.** Behind
-//! a front proxy that forwards no `100 Trying` (RFC 3261 §16.7), a callee that
-//! has sent only a 100 has given the worker no provisional, so the worker's
-//! CANCEL of it waits for one (§9.1). The CANCEL is in the replicated record;
-//! when the serving node dies before the callee rings, the survivor rebuilds
-//! the INVITE transaction with that CANCEL held on it, and the callee's 180 —
-//! failed over to the survivor — releases it (ADR-0043 X1).
+//! **A CANCEL held when the serving node dies is sent by the survivor.** A
+//! callee that has sent nothing has given the worker no provisional, so the
+//! worker's CANCEL of it waits for one (RFC 3261 §9.1). The CANCEL is in the
+//! replicated record; when the serving node dies before the callee answers,
+//! the survivor rebuilds the INVITE transaction with that CANCEL held on it,
+//! and the callee's 180 — failed over to the survivor on the front proxy's
+//! Record-Route cookie — releases it (ADR-0043 X1).
 
 use std::time::Duration;
 
@@ -24,12 +24,6 @@ const B2: &str = "127.0.0.1:5092";
 #[tokio::test(start_paused = true)]
 async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_ring() {
     let mut fh = FailoverHarness::new("held-cancel-takeover", &["b1", "b2"]);
-    // bob's 100 never reaches the worker, so alice, behind the same proxy, is
-    // CANCELing from Calling: the caller's deviation, not the cell's subject.
-    fh.allow_rfc_violation(
-        "cancel-after-1xx",
-        "alice CANCELs behind a proxy that forwards her no 100 (RFC 3261 §16.7)",
-    );
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy =
@@ -41,11 +35,11 @@ async fn a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_ring()
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    // ── bob says only 100 Trying, which the proxy absorbs ───────────────────
+    // ── alice hears the worker's 100; bob says nothing yet ──────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    call.expect(100).await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());
-    uas.respond(100, "Trying").await;
     fh.advance(Duration::from_millis(500)).await;
     let backup = if pri_ord == "b1" { &w_b2 } else { &w_b1 };
     let call_ref = backup.scan_one_backed_up(&pri_ord).await.expect("the call replicated");

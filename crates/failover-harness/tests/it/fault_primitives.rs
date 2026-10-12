@@ -598,12 +598,11 @@ async fn delay_reaches_a_stream_opened_after_the_fault() {
 }
 
 /// **A signalling cut delivers no datagram to or from the node.** The cut
-/// lands while the worker's b-leg INVITE is unanswered: the callee's 180 is
-/// forwarded by the proxy and refused at the cut address, the worker's own
-/// Timer A rungs leave and are refused at its address — every SIP entry
-/// touching the address since the cut is undelivered, the caller sees
-/// nothing, and the process is still up. Once restored, the worker's next
-/// rung crosses and the call completes on it.
+/// lands once the caller holds the worker's 100 and the b-leg INVITE is
+/// unanswered: the callee's 180 is refused at the cut address, the worker's
+/// Timer A rungs are refused at its address — every SIP entry touching the
+/// address since the cut is undelivered, the caller sees nothing more, and
+/// the process is still up. Restored, the next rung crosses and completes.
 ///
 /// The recording pairs a send with the earliest later arrival of the same
 /// bytes, so once a byte-identical rung crosses after the restore the refused
@@ -619,6 +618,7 @@ async fn cut_signalling_delivers_no_datagram_to_or_from_the_node() {
     // ── the b-leg INVITE reaches the callee; the worker is then cut ──────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
+    call.expect(100).await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     let (primary, backup) = if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
     let pri_sip = primary.sip_addr();

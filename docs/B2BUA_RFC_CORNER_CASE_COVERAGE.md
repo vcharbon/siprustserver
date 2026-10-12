@@ -52,7 +52,7 @@ Severity = operational risk if the behaviour is wrong.
 | INV-TXN-4 | 17.1.1.2 | Response stops Timer A | First response halts retransmit | med | ✅ | sip-txn `provisional_response_stops_retransmit` |
 | INV-TXN-5 | 17.1.1.2 | Non-2xx → Timer D absorb | Completed absorbs retransmitted final | med | ✅ | sip-txn `non_2xx_invite_final_absorbs_retransmits_for_timer_d` |
 | INV-100-1 | 17.2.1 | Slow first response on A-leg | Send 100 Trying locally (≤T1) | med | ✅ | sip-txn `absorbs_100_for_invite_cseq` |
-| INV-100-2 | 8.1.1.7 | B-leg 100 Trying | Absorbed, not mapped to A-leg | low | 🟡 | sip-proxy `trying_100_is_absorbed_not_relayed`; add B2BUA `bleg_100_not_forwarded` |
+| INV-100-2 | 8.1.1.7 | B-leg 100 Trying | Absorbed, not mapped to A-leg | low | 🟡 | sip-txn `absorbs_100_for_invite_cseq` (the b-leg client transaction takes it; the rules never see it); add B2BUA `bleg_100_not_forwarded` |
 | NIT-1 | 17.1.2.2 | B-leg BYE/OPTIONS no reply → Timer E | Non-INVITE retransmit to T2 | high | ✅ | sip-txn `non_invite_timer_e_resets_to_t2_on_a_proceeding_fire` |
 | NIT-2 | 17.1.2.2 | B-leg non-INVITE → Timer F | Give up request, still tear down | high | 🟡 | bye_no_200_reap covers wedged BYE; add `bleg_bye_timerF_timeout_still_tears_down` |
 | NIT-3 | 17.2.2 | A-leg BYE retransmit → Timer J | Absorb; one B-leg BYE only | high | ✅ | sip-txn `cancel_txns_for_call_spares_server_timer_j_absorption` |

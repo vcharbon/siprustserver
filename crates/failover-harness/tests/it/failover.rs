@@ -1011,15 +1011,15 @@ async fn matrix_crash_mid_invite() {
 }
 
 /// Matrix: the backup crashes between two Timer-A copies of one INVITE. The
-/// callee is silent, so both INVITE client transactions keep their Timer A:
-/// the caller's rung reaches the proxy after the backup was killed, and so
-/// does the primary's own b-leg rung. The proxy repeats each forward — same
-/// target, same branch (the §16.6 / §17.2.3 memo) — with its own Record-Route
-/// cookie re-stamped for the membership it now has (`w_bak` empty). The
-/// primary's server transaction absorbs the a-leg copy, the callee absorbs the
-/// b-leg copy, the call completes on the survivor, and the recorded trace is
-/// clean under `rung-byte-identical`: the proxy's own cookie row is the one
-/// row the auditor leaves to the emitter (ADR-0032 X3).
+/// callee is silent and the worker's 100 is lost on its way to the caller, so
+/// both INVITE client transactions keep their Timer A: the caller's rung and
+/// the primary's b-leg rung reach the proxy after the backup was killed. The
+/// proxy repeats each forward — same target, same branch (the §16.6 / §17.2.3
+/// memo) — with its own Record-Route cookie re-stamped for the membership it
+/// now has (`w_bak` empty). The primary's server transaction absorbs the a-leg
+/// copy, the callee the b-leg copy, the call completes on the survivor, and the
+/// trace is clean under `rung-byte-identical`: the proxy's own cookie row is
+/// the one row the auditor leaves to the emitter (ADR-0032 X3).
 #[tokio::test(start_paused = true)]
 async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
@@ -1033,9 +1033,11 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
         fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
-    // alice INVITEs; bob gets the b-leg. The cookie names both workers.
+    // alice INVITEs, cut off while the worker's 100 crosses; bob gets the b-leg.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    fh.cut_signalling("alice", alice.addr());
     let mut uas = bob.receive("INVITE").await;
+    fh.restore_signalling("alice", alice.addr());
     let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     assert!(!bak_ord.is_empty(), "two live workers: the cookie names a backup");
     let primary: std::net::SocketAddr = if pri_ord == "b1" { B1 } else { B2 }.parse().unwrap();
@@ -1060,9 +1062,8 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     alice.try_send_datagram(&invite, proxy.addr()).await.unwrap();
     fh.advance(Duration::from_millis(100)).await;
 
-    // The proxy repeated its forward to the SAME primary under the SAME branch,
-    // and its own cookie row is the only thing that changed: the dead backup is
-    // no longer named. (Without this the rest of the test proves nothing.)
+    // The proxy repeated its forward to the SAME primary under the SAME branch;
+    // only its own cookie row changed: the dead backup is no longer named.
     let forwarded: Vec<Vec<u8>> = fh
         .sip_entries()
         .into_iter()
@@ -1096,8 +1097,7 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
         .count();
     assert_eq!(to_bob, 2, "the primary's Timer A re-sent its b-leg INVITE through the proxy");
 
-    // The primary absorbed the a-leg copy; bob absorbs the b-leg copy and
-    // answers the one INVITE it was asked.
+    // The primary absorbed the a-leg copy; bob absorbs the b-leg copy and answers.
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dlg = call.ack().await;

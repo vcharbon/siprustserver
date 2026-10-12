@@ -3,8 +3,6 @@ use std::sync::Arc;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
-use sip_net::types::BindUdpOpts;
-use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
 
 use crate::addr::ProxyAddr;
 use crate::core::ProxyCoreBuilder;
@@ -17,15 +15,13 @@ const UAC: &str = "10.244.7.13";
 const W1: &str = "10.0.0.1";
 const PROXY_VIP: &str = "192.0.2.250";
 
-// §16.7 / §16.11: 100 Trying is hop-by-hop — the worker's 100 quenched the
-// proxy→worker hop; relaying it upstream leaks the wrong scope.
+// RFC 3261 §16.11: a stateless proxy forwards every response by its Via, a
+// 100 included — the §16.7 rule that absorbs a 100 binds a stateful proxy
+// only. The relayed 100 loses the proxy's Via and reaches the next Via's
+// address, counted as a forwarded message.
 #[tokio::test]
-async fn trying_100_is_absorbed_not_relayed() {
-    let net = SimulatedSignalingNetwork::new(1);
-    let ep = net
-        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
-        .await
-        .unwrap();
+async fn trying_100_is_relayed_upstream_by_its_via() {
+    let ep = Arc::new(ByteCapturingEndpoint::default());
     let strategy: Arc<dyn RoutingStrategy> =
         Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
@@ -33,12 +29,12 @@ async fn trying_100_is_absorbed_not_relayed() {
     let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(metrics.clone())
-        .build(ep);
+        .build(Box::new(EpHandle(ep.clone())));
 
     let raw = format!(
         "SIP/2.0 100 Trying\r\n\
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout\r\n\
-Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bKin\r\n\
+Via: SIP/2.0/UDP {UAC}:5070;branch=z9hG4bKin\r\n\
 From: <sip:alice@{UAC}>;tag=t\r\n\
 To: <sip:bob@10.0.0.50>\r\n\
 Call-ID: t100-1@test\r\n\
@@ -48,16 +44,25 @@ Content-Length: 0\r\n\r\n"
     let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
-    let outbound_forwarded_before = metrics.messages_total();
     core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
-    // One inbound record, one outbound DROPPED record — never a forward.
-    assert_eq!(metrics.messages_total(), outbound_forwarded_before + 2);
-    let txt = metrics.prometheus_text();
-    assert!(txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"));
-    assert!(
-        txt.contains("sip_messages_total{label=\"outbound:forwarded\"} 0\n"),
-        "the 100 must not be relayed upstream"
+
+    let sent = ep.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "the 100 must be relayed exactly once");
+    let (dst, bytes) = &sent[0];
+    assert_eq!(
+        *dst,
+        format!("{UAC}:5070").parse::<std::net::SocketAddr>().unwrap(),
+        "the 100 goes to the next Via's address"
     );
+    let relayed = String::from_utf8_lossy(bytes).to_string();
+    assert!(relayed.starts_with("SIP/2.0 100 Trying\r\n"), "got: {relayed}");
+    let vias: Vec<&str> =
+        relayed.lines().filter(|l| l.to_ascii_lowercase().starts_with("via:")).collect();
+    assert_eq!(vias.len(), 1, "the proxy's own Via is popped: {vias:?}");
+    assert!(vias[0].contains("branch=z9hG4bKin"), "the upstream's Via stays: {vias:?}");
+    let txt = metrics.prometheus_text();
+    assert!(txt.contains("sip_messages_total{label=\"outbound:forwarded\"} 1\n"), "{txt}");
+    assert!(!txt.contains("sip_messages_total{label=\"outbound:dropped\"} 1"), "{txt}");
 }
 
 /// Endpoint double capturing every sent datagram's destination + bytes.

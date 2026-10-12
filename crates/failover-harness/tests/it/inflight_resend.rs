@@ -26,10 +26,9 @@
 //!
 //! The peer's re-send is the datagram it already put on the wire, byte for byte,
 //! addressed where it addressed the first copy — the first retransmission rung
-//! after the kill (Timer E for a non-INVITE; Timer A for the re-INVITE, whose
-//! client transaction is still `Calling` because the front proxy absorbs the
-//! worker's 100 Trying, RFC 3261 §16.7) driven by hand, since these UAs run no
-//! retransmit engine.
+//! after the kill, driven by hand: Timer E for a non-INVITE; Timer A for the
+//! re-INVITE, whose caller is off the signalling plane from its send to the kill,
+//! so the 100 and the T1 rung are lost and it stays `Calling` (RFC 3261 §17.1.1.2).
 //!
 //! What each cell pins: the survivor takes the call over on that re-send, and
 //! the cluster settles to exactly one CDR with no trace and clean memory on both
@@ -525,11 +524,10 @@ async fn a_bye_in_flight_at_the_kill_is_served_on_the_peers_resend() {
 /// for the round, so §9.1 forbids one — both parties draw a BYE, and the
 /// call ends with one CDR and full release on both nodes.
 ///
-/// The round must be in the replica before the kill: a round the dead node
-/// never replicated is a state change inside the acceptance window, the
-/// accepted collateral (ADR-0014), not this cell's contract. So the kill lands
-/// after the relay has replicated, and the re-send is the caller's next rung —
-/// the first one after the kill.
+/// The round must be in the replica before the kill: a round the dead node never
+/// replicated is a state change inside the acceptance window, the accepted
+/// collateral (ADR-0014), not this cell's contract. So the kill lands after the
+/// relay has replicated, and the re-send is the caller's first rung after it.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let mut fh = FailoverHarness::new("inflight-resend-reinvite", &["b1", "b2"]);
@@ -542,17 +540,18 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
 
     // ── The re-INVITE goes IN FLIGHT: relayed, replicated, nobody answered ──
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    fh.cut_signalling("alice", alice.addr());
     let mut first_at_bob = bob.receive("INVITE").await;
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    fh.restore_signalling("alice", alice.addr());
     // The callee answers as a UAS must; the 2xx is undeliverable and its
     // transaction died with the node that opened it. The dialog's own teardown
     // below is what clears it (RFC 3261 §13.3.1.4).
     first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
-    // Timer A's rungs fall at T1 and 3·T1 after the re-INVITE; the kill sits
-    // between them, so the next rung is the first re-send after it.
+    // The T1 rung fell inside the cut; the 3·T1 rung is the first after the kill.
     fh.advance(3 * T1 - REPLICATE - KILL_SETTLE).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 
@@ -603,8 +602,7 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     drop(proxy);
 }
 
-/// The 100 Trying responses to an INVITE that `from` put on the wire toward
-/// `to`.
+/// The 100 Trying responses to an INVITE that `from` put on the wire toward `to`.
 fn invite_trying_sent(fh: &FailoverHarness, from: SocketAddr, to: SocketAddr) -> usize {
     let parser = CustomParser::new();
     fh.sip_entries()
@@ -637,11 +635,13 @@ async fn a_reinvite_retransmitted_after_another_takeover_is_absorbed_by_its_seed
 
     // ── The re-INVITE goes IN FLIGHT: relayed, replicated, nobody answered ──
     let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
+    fh.cut_signalling("alice", alice.addr());
     let mut first_at_bob = bob.receive("INVITE").await;
     fh.advance(REPLICATE).await;
 
     let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
     let hydrated_before = kill_serving_node(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    fh.restore_signalling("alice", alice.addr());
     first_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     assert_not_taken_over(survivor_of(&pri_ord, &w_b1, &w_b2), hydrated_before, &call_ref);
 

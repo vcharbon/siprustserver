@@ -1,27 +1,24 @@
-//! ADR-0022 — the stateless proxy's side of the final-response contract.
+//! The stateless proxy's side of the final-response contract (RFC 3261 §16.11).
 //!
-//! The LB proxy is deliberately **transaction-less**: it never generates a
-//! 100 Trying of its own and it absorbs the worker's hop-by-hop 100
-//! (`core/response.rs`), so a caller routed through the LB receives NO
-//! provisional until a real 18x. That absence is load-bearing: with no
-//! provisional, the caller's own Timer A/B stays armed (RFC 3261 §17.1.1),
-//! and *the caller* — not a proxy timer — decides when a dead downstream is
-//! given up on (local 408 at 64·T1). The proxy therefore has **no Timer C /
-//! no synthesized final** for a blackholed worker, BY DESIGN; adding one
-//! would re-introduce proxy transaction state that ADR-0009/ADR-0014 keep
-//! out of the LB. These tests pin both halves so a future "helpful" 100 or
-//! proxy-side timeout can't slip in unnoticed:
+//! The proxy is **transaction-less** (ADR-0009, ADR-0022 X4): it never
+//! generates a provisional of its own and it relays every downstream response
+//! by its Via, a 100 included. A caller therefore hears a 100 only when the
+//! downstream sent one, and a downstream that never answers leaves the
+//! caller's own Timer A/B armed (§17.1.1): *the caller*, not a proxy timer,
+//! gives up on it (local 408 at 64·T1). The proxy has no Timer C and no
+//! synthesized final. These tests pin both halves:
 //!
-//!  1. `proxy_emits_no_100_absorbs_workers_and_relays_18x_final` — the caller
-//!     hears nothing until the worker's 180, then the 180/200 relay verbatim.
+//!  1. `proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final` — the
+//!     caller hears nothing until the downstream's 100, then the 100, 180 and
+//!     200 relay in order.
 //!  2. `blackholed_worker_leaves_caller_silent_and_retransmits_reforward` —
 //!     a worker that never answers produces ZERO proxy-originated messages
 //!     toward the caller (no 100, no 408/5xx); the caller's Timer-A INVITE
 //!     retransmits are re-forwarded to the SAME target (the rtx memo), so the
 //!     caller's own transaction timers own the give-up.
 //!
-//! The b2bua-side counterpart (a caller that DID hear a 100 — direct, no LB —
-//! must get its final within the decision deadline) lives in
+//! The b2bua-side counterpart (a caller that heard a 100 must get its final
+//! within the decision deadline) lives in
 //! `b2bua-harness/tests/decision_deadline.rs`.
 
 use crate::common;
@@ -72,9 +69,9 @@ fn bob_response(fwd: &SipRequest, status: u16, reason: &str, to_tag: Option<&str
     )
 }
 
-// ── 1. no proxy 100; the worker's 100 is absorbed; 180/200 relay ────────────
+// ── 1. no proxy 100; the downstream's 100, 180 and 200 relay ─────────────
 #[tokio::test]
-async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
+async fn proxy_emits_no_100_and_relays_the_downstream_100_18x_and_final() {
     let h = Harness::with_transit_delay("stateless-no-100", 0);
     // Raw-injected responses: bob is a bare bind, not a real UA — the audit
     // rules for a full UA dialog legitimately fire on the fixture (same spirit
@@ -110,15 +107,19 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
         "the stateless proxy must never generate a provisional of its own"
     );
 
-    // Bob's hop-by-hop 100 is absorbed, not relayed (core/response.rs).
+    // Bob's 100 is relayed by its Via (§16.11): the first thing alice hears.
     bob_ep.send_to(bob_response(&fwd, 100, "Trying", None).as_bytes(), proxy.addr()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        alice.try_recv().is_none(),
-        "the worker's 100 Trying is hop-by-hop and must be absorbed at the proxy"
-    );
+    let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
+        .await
+        .expect("the downstream 100 relays upstream")
+        .expect("queue open");
+    let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
+        panic!("expected the relayed 100");
+    };
+    assert_eq!(resp.status(), 100, "the downstream's 100 reaches the caller");
+    assert_eq!(resp.via().iter().count(), 1, "the proxy's own Via is popped");
 
-    // A real 18x IS relayed — the first thing alice ever hears — then the 200.
+    // The 180 relays next, then the 200.
     bob_ep
         .send_to(bob_response(&fwd, 180, "Ringing", Some("b1")).as_bytes(), proxy.addr())
         .await
@@ -130,7 +131,7 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     let SipMessage::Response(resp) = CustomParser::new().parse(&relayed.raw).unwrap() else {
         panic!("expected the relayed 180");
     };
-    assert_eq!(resp.status(), 180, "first upstream message is the worker's 180, never a 100");
+    assert_eq!(resp.status(), 180, "the second upstream message is the downstream's 180");
 
     bob_ep
         .send_to(bob_response(&fwd, 200, "OK", Some("b1")).as_bytes(), proxy.addr())
