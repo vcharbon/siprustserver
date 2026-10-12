@@ -1,7 +1,8 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
 //! route to the next Via (received/rport precedence); reverse-path failover of
 //! an INVITE response to the backup of the cookie naming the destination worker
-//! when that worker is confirmed Dead; pop the top Via entry (comma-aware);
+//! (on this proxy's Record-Route, else on its own top Via) when that worker is
+//! confirmed Dead; pop the top Via entry (comma-aware);
 //! forward; remember the ACK-relay hop for a non-2xx INVITE final — the node
 //! the final arrived from (the ACK itself travels end-to-end — see
 //! `core/request`).
@@ -115,7 +116,7 @@ impl ProxyCore {
             .flatten()
             .filter(|dest| dest.health == WorkerHealth::Dead);
         if let Some(dead) = dead_worker {
-            match self.own_cookie_for(&resp, &dead.id) {
+            match self.own_cookie_for(&resp, &hops[0], &dead.id) {
                 Some(params) => match self
                     .strategy
                     .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
@@ -206,14 +207,20 @@ impl ProxyCore {
 
     /// The stickiness cookie for reverse-path failover toward `worker`: the
     /// bottommost of the proxy's own Record-Route entries (either face) whose
-    /// cookie names `worker` as primary. Why the bottommost: ADR-0009 X1.
+    /// cookie names `worker` as primary (why the bottommost: ADR-0009 X1), else
+    /// the cookie on the proxy's own Via, `ours` — the one a response carrying
+    /// no Record-Route brings back (`core/request/via_cookie`).
     fn own_cookie_for(
         &self,
         resp: &SipResponse,
+        ours: &Via,
         worker: &str,
     ) -> Option<crate::strategy::RouteParams> {
+        let names_worker = |params: &crate::strategy::RouteParams| {
+            self.strategy.stickiness_primary(params) == Some(worker)
+        };
         resp.list::<sip_message::header::RecordRouteEntry>()
-            .ok()?
+            .unwrap_or_default()
             .iter()
             .rev()
             .filter(|entry| {
@@ -221,7 +228,8 @@ impl ProxyCore {
                 self.is_self_addr(host, port)
             })
             .map(|entry| crate::headers::cookie_params(entry.uri()))
-            .find(|params| self.strategy.stickiness_primary(params) == Some(worker))
+            .find(names_worker)
+            .or_else(|| Some(crate::headers::via_cookie_params(ours)).filter(names_worker))
     }
 }
 

@@ -14,7 +14,7 @@ use sip_message::{Method, SipMessage, SipRequest};
 use crate::addr::ProxyAddr;
 use crate::branch::stateless_branch;
 use crate::cancel_lru::{invite_txn_key, retransmit_key, CancelEntry};
-use crate::headers::{cookie_params, route_target};
+use crate::headers::{cookie_params, route_target, via_with_cookie};
 use crate::observability::metrics::{CancelLookup, Direction, MessageResult, RoutingDecisionKind};
 use crate::self_gate::{AdmitDecision, BypassKind};
 use crate::strategy::{DecodeResult, SelectOpts};
@@ -330,8 +330,7 @@ impl ProxyCore {
         // Every branch below assigns both (or returns early).
         let decision;
         let target: Option<ProxyAddr>;
-        // What the cookie said, for the traced routing fact — set only by the
-        // branch that consulted one.
+        // The cookie's verdict for the traced routing fact, set by the branch that read one.
         let mut stickiness: Option<&'static str> = None;
 
         if method == Method::Cancel {
@@ -495,6 +494,8 @@ impl ProxyCore {
             &via_worker_addr,
         );
         draft = routed;
+        let via_cookie =
+            is_worker_outbound.then(|| self.via_cookie(req, &routes[..self_routes])).flatten();
 
         // ── §16.11: the pushed branch is a function of the message ──────────
         // A retransmission of this request, and its CANCEL and non-2xx ACK,
@@ -507,11 +508,10 @@ impl ProxyCore {
         // in dual-face mode that is the face the request leaves on, so the
         // response arrives back on the same face).
         let egress_adv = self.egress_advertised(&target);
-        draft = draft.push_front(
-            Via::udp(egress_adv.host.as_str(), egress_adv.port)
-                .with_branch(our_branch.as_str())
-                .requesting_rport(),
-        );
+        let pushed = Via::udp(egress_adv.host.as_str(), egress_adv.port)
+            .with_branch(our_branch.as_str())
+            .requesting_rport();
+        draft = draft.push_front(via_with_cookie(pushed, via_cookie.as_ref()));
 
         // Remember the target so a retransmit of THIS request repeats the
         // forward. Short TTL: retransmits stop at Timer B/F.

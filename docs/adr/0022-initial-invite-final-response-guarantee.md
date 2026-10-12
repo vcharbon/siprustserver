@@ -1,6 +1,7 @@
 # 0022 — The initial-INVITE final-response guarantee (accept-and-forward, or 503 within the decision deadline)
 
-**Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100.
+**Status:** accepted (2026-07-03). Amended (2026-10-12): X4, the front proxy relays the worker's 100, and an
+INVITE response bound for a dead worker fails over on the cookie of its Record-Route or of the proxy's Via.
 
 ## Context
 
@@ -130,6 +131,22 @@ already own). All proxy-*internal* errors do answer immediately with a final
 (483/420/400/403, and 503+Retry-After+Reason for every shed path); the only
 silent paths are pre-parse recv-queue overflow, unparseable datagrams, and the
 downstream-blackhole case — all three bounded by the caller's transaction timer.
+
+An INVITE response bound for a worker the proxy holds Dead fails over to the
+backup its stickiness cookie names, read from the proxy's own Record-Route entry
+or, on a response carrying none (the answer to a worker's in-dialog INVITE), from
+the Via the proxy pushed on that INVITE (ADR-0009 X1); the survivor takes the call
+over on it and completes the round
+(`failover-harness/tests/it/reinvite_answer_failover.rs`). A forged cookie
+routes nothing. A non-INVITE response answers a client transaction only its
+sender holds (§17.1.2) and follows the Via.
+
+A caller that heard the worker's 100 sends no retransmission that could re-place
+its call, so a worker that dies before the call's first record reaches its
+backup leaves the caller to its own timers, as on a direct path. That window
+runs from the 100 through the routing decision's answer (bounded by the
+decision deadline) plus one replication stream hop
+(`failover-harness/tests/it/new_call_replication_window.rs`).
 
 Coverage: `sip-proxy/tests/it/stateless_final_response_contract.rs` pins both halves
 (no proxy 100 + the downstream 100, 18x and 200 relayed; blackhole → zero

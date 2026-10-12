@@ -7,13 +7,15 @@
 //! Via push, retransmission memos, serialize + forward.
 //!
 //! The routing ladder lives in [`route`], the double-Record-Route insertion in
-//! [`record_route`], self-generated UAS finals in [`reply`]. The response
-//! relay does NOT live here — see `core/response`.
+//! [`record_route`], the cookie on a worker's Via in [`via_cookie`],
+//! self-generated UAS finals in [`reply`]. The response relay does NOT live
+//! here — see `core/response`.
 
 mod record_route;
 mod reply;
 mod route;
 mod trace_seam;
+mod via_cookie;
 
 #[cfg(test)]
 mod ack_hop_tests;

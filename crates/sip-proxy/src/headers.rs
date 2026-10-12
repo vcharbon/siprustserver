@@ -1,11 +1,11 @@
 //! The proxy's Record-Route policy: the entries this proxy records on a dialog
-//! and the stickiness cookie read back off one.
+//! and the stickiness cookie read back off one, or off the proxy's own Via.
 //!
 //! Header *mechanics* — prepending a hop, popping an entry, stamping
 //! received/rport — are sip-message draft vocabulary (ADR-0025). What rides the
 //! proxy's OWN Record-Route is policy, and policy is what lives here.
 
-use sip_message::header::{ParamValue, RecordRouteEntry, Uri};
+use sip_message::header::{ParamValue, RecordRouteEntry, Uri, Via};
 
 use crate::addr::ProxyAddr;
 use crate::strategy::RouteParams;
@@ -56,6 +56,25 @@ pub fn cookie_params(uri: &Uri) -> RouteParams {
             (name.as_str().to_ascii_lowercase(), value.as_str().unwrap_or_default().to_string())
         })
         .collect()
+}
+
+/// The stickiness cookie carried on one of the proxy's own Vias, read as
+/// [`cookie_params`] reads a URI: the Via's other params (branch, rport,
+/// received) ride along, unread by a strategy that names its own fields.
+pub fn via_cookie_params(via: &Via) -> RouteParams {
+    via.params()
+        .iter()
+        .map(|(name, value)| {
+            (name.as_str().to_ascii_lowercase(), value.as_str().unwrap_or_default().to_string())
+        })
+        .collect()
+}
+
+/// `via` carrying `cookie`'s fields, if any, after its own params.
+pub fn via_with_cookie(via: Via, cookie: Option<&RouteParams>) -> Via {
+    cookie.into_iter().flatten().fold(via, |via, (name, value)| {
+        via.with_param(name.as_str(), ParamValue::text(value.as_str()))
+    })
 }
 
 /// The transport destination a Route / Record-Route entry names. The port

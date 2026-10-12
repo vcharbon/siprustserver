@@ -1,6 +1,7 @@
 # 0009 — Front proxy + load balancer Rust shape
 
-**Status:** accepted (2026-05-31)
+**Status:** accepted (2026-05-31). Amended (2026-10-12): X1, X3, the cookie also rides the
+proxy's Via on a worker's in-dialog INVITE.
 
 **Source:** sipjsserver @ `fffc4ac69c8aeef26cf48fe73469503145c9732b`,
 `src/sip-front-proxy/` (`ProxyCore.ts`, `RoutingStrategy.ts`, `CancelBranchLru.ts`,
@@ -36,7 +37,15 @@ from the bottommost of this proxy's own Record-Route entries whose cookie names
 that worker as primary: a spiral puts one pair per pass on the response, and the
 pair recorded relaying the worker's request out lies below every later pass (a
 later pass reaching the same worker may name another backup, the alive set having
-changed).
+changed). A response that carries none of this proxy's Record-Route entries — the
+answer to an in-dialog request (RFC 3261 §12.1.1) — is read on the Via this proxy
+pushed instead: on a worker's in-dialog INVITE, and on its CANCEL and ACK, that
+Via carries the cookie of the request's own route set, signed as recorded and
+without the routing flags (`core/request/via_cookie`). Read off the route set, it
+is the same on the INVITE, its CANCEL (§9.1) and its ACK (§17.1.1.3) at any proxy
+instance. A worker's initial INVITE states no cookie of its own, so its Via
+carries none; its dialog-creating responses bring the cookie back on the
+Record-Route.
 An in-dialog request whose Route set holds several of this proxy's pairs back to
 back (a spiral with no Record-Routing hop between passes) takes its direction
 from the first entry of the last pair: it leaves this proxy on the last pass, and
@@ -59,7 +68,8 @@ seam, so the only crate edge is `sip-proxy [dev] → scenario-harness`.
 
 ## Decision X3 — cookie = HMAC-SHA256-trunc-128; HRW = SHA-1 (non-crypto)
 
-The Record-Route stickiness cookie (`v=3|w_pri|w_bak|e|c`) is signed with
+The stickiness cookie (`v=3|w_pri|w_bak|e|c`), on a Record-Route entry or on the
+proxy's own Via (X1), is signed with
 HMAC-SHA256 (`hmac` + `sha2`), truncated to the first 128 bits (RFC 4868 §2.6
 short-token tradeoff), and base64url-no-pad encoded (`base64`). Verify compares
 the prefix in constant time (`subtle`, the `timingSafeEqual` analogue), trying

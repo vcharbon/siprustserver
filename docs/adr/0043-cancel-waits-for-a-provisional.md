@@ -92,10 +92,11 @@ single send. Counter: `cancel_retransmits`.
 - A callee that has sent a 100 alone is CANCELed on the wire when the call
   abandons it, behind the front proxy as on a direct path
   (`trying_only_callee_no_answer_via_lb__reject__is_cancelled`).
-- After a takeover only the callee's 18x or final reaches the survivor: a 100
-  sent after the kill carries no Record-Route, so the front proxy has no cookie
-  to fail it over on, and a 100 matching no transaction is absorbed by the
-  layer without materialising the call. A CANCEL held at the kill stays held
+- After a takeover only the callee's 18x or final can release a CANCEL held at
+  the kill: a 100 the callee sends to an initial INVITE afterwards carries no
+  cookie the front proxy can fail it over on (no Record-Route, and the proxy's
+  Via on an initial INVITE carries none), and a 100 matching no transaction is
+  absorbed by the layer without materialising the call. The CANCEL stays held
   past the callee's 100 and goes on its 18x
   (`a_cancel_held_at_the_kill_is_sent_by_the_survivor_on_the_callees_18x_not_its_100`).
 - A re-INVITE round the survivor of a takeover rebuilt with no provisional on
