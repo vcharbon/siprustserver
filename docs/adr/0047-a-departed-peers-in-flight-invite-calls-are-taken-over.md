@@ -145,6 +145,12 @@ in the slice — draining in ADR-0031 case 1 — applies its decisions.
   window of ADR-0031 D3 (`undecided_call_settled_on_departure.rs`, the
   replacement-decision cell). A decision slower than the process's grace leaves one
   final, one CDR, one consult (the replacement cell).
+- **A node that returns while its swept call still rings.** The sweep's copy has
+  written nothing since the takeover, so the returning node's reclaimed record shows
+  no backup write in its version vector, and both copies run the call: at the
+  deadline each CANCELs the callee and refuses the caller 480, and the callee's 487
+  reaches neither copy and is never ACKed; the call still settles to one CDR
+  (`ringing_call_taken_over_on_departure.rs`, the node-returns cell).
 - **A retransmission placed as a call of its own.** The departed call it duplicates is
   settled off the wire but still discharged, with a CDR, by its primary on its return
   (`undecided_call_settled_on_departure.rs`, the retransmission cell).

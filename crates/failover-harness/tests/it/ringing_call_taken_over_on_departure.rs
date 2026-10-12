@@ -247,3 +247,68 @@ async fn a_call_whose_callee_is_silent_ends_at_its_replicated_deadline() {
     p.bob.receive_absorbing("BYE", &["INVITE"]).await.respond(200, "OK").await;
     finish(p).await;
 }
+
+/// The workers that sent `prefix` toward `to`, by source address.
+fn senders(p: &Placed, to: std::net::SocketAddr, prefix: &[u8]) -> std::collections::HashSet<u16> {
+    let proxy = p.proxy.addr();
+    p.fh.sip_entries()
+        .iter()
+        .filter(|e| e.to == proxy && e.from != to && e.raw.starts_with(prefix))
+        .map(|e| e.from.port())
+        .collect()
+}
+
+/// The departed node returns before the ringing call's deadline and reclaims
+/// it while the backup's copy is still live: neither copy has written since
+/// the takeover, so the version vector shows the reclaimed record nothing of
+/// the other, and at the deadline both end the call — each node CANCELs the
+/// callee and refuses the caller 480 (ADR-0047, residual). The callee's 487
+/// to the CANCELled INVITE reaches neither copy and is never ACKed; the call
+/// still settles to one CDR.
+#[tokio::test(start_paused = true)]
+async fn a_ringing_call_whose_node_returns_before_its_deadline_is_ended_by_both_copies() {
+    let mut p = place("ringing-call-node-returns", Callee::Ringing).await;
+    // What the two copies put on the wire is what this cell measures.
+    p.fh.allow_rfc_violation(
+        "rung-byte-identical",
+        "two live copies send the same CANCEL from two addresses",
+    );
+    p.fh.allow_rfc_violation(
+        "unacked-invite-non-2xx-final",
+        "the callee's 487 reaches neither copy's transaction",
+    );
+    let deadline = depart(&mut p).await;
+    let new_addr = p.w_b1.reboot().await;
+    p.proxy.set_address("b1", new_addr);
+    p.fh.note_worker_rebound("b1", new_addr);
+    p.w_b2.simulate_peer_added("b1");
+    for _ in 0..40 {
+        p.fh.advance(Duration::from_millis(250)).await;
+        if p.w_b1.is_ready() {
+            break;
+        }
+    }
+    assert!(p.w_b1.is_ready(), "the returning node became ready before the deadline");
+    p.proxy.set_health("b1", failover_harness::WorkerHealth::Alive);
+    assert!(p.w_b1.serves(&p.ringing_ref), "the returning node serves the call it reclaimed");
+    assert!(p.w_b2.serves(&p.ringing_ref), "and the backup's copy is still live");
+
+    ring_until(&p, deadline).await;
+    p.fh.advance(Duration::from_millis(600)).await;
+    final_at(&mut p, deadline).await;
+    p.bob.receive("CANCEL").await.respond(200, "OK").await;
+    p.at_bob.respond(487, "Request Terminated").await;
+    p.fh.advance(Duration::from_secs(40)).await;
+    p.bob.drain_expecting(Duration::from_millis(100), &["CANCEL"]).await;
+    assert_eq!(senders(&p, p.bob.addr(), b"CANCEL").len(), 2, "both copies CANCEL the callee");
+    assert_eq!(senders(&p, p.alice.addr(), b"SIP/2.0 480").len(), 2, "both refuse the caller");
+
+    let mut bye = p.quiet.bye().await;
+    p.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    p.fh.advance(Duration::from_secs(60)).await;
+    for call_ref in [&p.ringing_ref, &p.quiet_ref] {
+        settle_to_one_cdr(&p.fh, &[&p.alice, &p.bob], &[&p.w_b1, &p.w_b2], call_ref).await;
+    }
+    drop(p.proxy);
+}

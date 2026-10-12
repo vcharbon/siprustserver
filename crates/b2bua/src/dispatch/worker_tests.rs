@@ -456,9 +456,11 @@ async fn behind_a_release_with_no_new_call_waiting_an_event_is_discarded() {
 async fn a_halt_aborts_the_body_in_flight_and_runs_nothing_after() {
     let d = Dispatcher::new(1, 8, 1024, B2buaMetrics::new());
     let order = Arc::new(Mutex::new(Vec::new()));
-    let _gate = park(&d, "c").await;
+    let gate = park(&d, "c").await;
     let _ = d.offer("c", record(&order, "queued"), DispatchClass::Cancelled);
     d.halt();
+    // A body that would have ended on its own changes nothing.
+    gate.notify_one();
     settle().await;
     assert!(order.lock().unwrap().is_empty(), "nothing runs after the halt");
 }
