@@ -47,6 +47,18 @@ tokio = { workspace = true }
 observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# A stand-in API server for the discovery test: kube::Client over a tower
+# service answering the EndpointSlice list and holding the watch open.
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = { workspace = true }
+futures = "0.3"
+serde_json = { workspace = true }
+
 # jemalloc global allocator + its stats probe (see the #[global_allocator] note
 # in src/main.rs). The front proxy is single-task but still churns SIP buffers
 # under sustained load; using the same decay-purging allocator as the b2bua

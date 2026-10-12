@@ -4213,12 +4213,18 @@ dependencies = [
 name = "sip-proxy-runner"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "jemalloc-stats",
  "kube",
  "metric-catalogue",
  "observe",
  "probe-http",
  "rustls",
+ "serde_json",
  "sip-clock",
  "sip-message",
  "sip-net",
@@ -4227,6 +4233,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "topology",
+ "tower",
  "tracing",
 ]
 

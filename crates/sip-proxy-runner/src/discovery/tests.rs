@@ -1,0 +1,103 @@
+//! The discovered pool over a kube client that fails to build first, on the
+//! paused clock. The client that finally builds talks to a stand-in API
+//! server: it lists one ready worker and holds the watch open.
+
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use bytes::Bytes;
+use http_body_util::{Either, Full, StreamBody};
+use probe_http::ProbeState;
+use sip_proxy::registry::WorkerHealth;
+
+use super::*;
+use crate::readiness::probe_state;
+
+type Frame = Result<http_body::Frame<Bytes>, Infallible>;
+type Body = Either<Full<Bytes>, StreamBody<futures::stream::Pending<Frame>>>;
+
+/// The EndpointSlice list the stand-in API server answers: one ready
+/// endpoint, pod `worker-0` at 10.0.0.7.
+fn slice_list() -> Bytes {
+    let list = serde_json::json!({
+        "apiVersion": "discovery.k8s.io/v1",
+        "kind": "EndpointSliceList",
+        "metadata": { "resourceVersion": "1" },
+        "items": [{
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSlice",
+            "metadata": {
+                "name": "workers-abcde",
+                "namespace": "lab",
+                "resourceVersion": "1",
+                "labels": { "kubernetes.io/service-name": "workers" }
+            },
+            "addressType": "IPv4",
+            "endpoints": [{
+                "addresses": ["10.0.0.7"],
+                "conditions": { "ready": true },
+                "targetRef": { "kind": "Pod", "name": "worker-0", "namespace": "lab" }
+            }]
+        }]
+    });
+    Bytes::from(list.to_string())
+}
+
+/// A kube client whose API server lists [`slice_list`] and never ends a watch.
+fn stand_in_client() -> kube::Client {
+    let api = tower::service_fn(|req: http::Request<kube::client::Body>| async move {
+        let watching = req.uri().query().is_some_and(|q| q.contains("watch=true"));
+        let body: Body = if watching {
+            Either::Right(StreamBody::new(futures::stream::pending()))
+        } else {
+            Either::Left(Full::new(slice_list()))
+        };
+        Ok::<_, Infallible>(http::Response::new(body))
+    });
+    kube::Client::new(api, "lab")
+}
+
+/// No kube client at boot: the pool is empty and the proxy NotReady, with no
+/// stand-in worker; the client is built again, the watch lists the worker,
+/// and the proxy turns Ready once that worker answers OPTIONS.
+#[tokio::test(start_paused = true)]
+async fn a_kube_client_that_fails_then_builds_fills_the_pool_and_never_fakes_a_worker() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let client = stand_in_client();
+    let connect = move || {
+        let attempt = counted.fetch_add(1, Ordering::SeqCst);
+        let client = client.clone();
+        async move {
+            match attempt {
+                0 => Err("no service account token".to_string()),
+                _ => Ok(client),
+            }
+        }
+    };
+    let pool =
+        discovered_pool_with(connect, "lab".into(), "workers".into(), 5060, Clock::test_at(0))
+            .await;
+
+    assert!(
+        pool.registry.snapshot().is_empty(),
+        "no worker before the watch lists one: {:?}",
+        pool.registry.snapshot()
+    );
+    assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::NotReady);
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2, "the client is built again after 1 s");
+    let listed: Vec<String> =
+        pool.registry.snapshot().iter().map(|w| format!("{}@{}", w.id, w.address)).collect();
+    assert_eq!(listed, ["worker-0@10.0.0.7:5060"]);
+    assert_eq!(
+        probe_state(false, false, pool.registry.as_ref()),
+        ProbeState::NotReady,
+        "listed but not yet answering OPTIONS"
+    );
+
+    pool.control.set_health("worker-0", WorkerHealth::Alive);
+    assert_eq!(probe_state(false, false, pool.registry.as_ref()), ProbeState::Ready);
+}

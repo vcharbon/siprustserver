@@ -56,6 +56,9 @@ impl FakeResolver {
     fn slow(addr: SocketAddr, delay: Duration) -> Self {
         Self { calls: AtomicU64::new(0), delay, answer: vec![addr] }
     }
+    fn answering_all(addrs: Vec<SocketAddr>) -> Self {
+        Self { calls: AtomicU64::new(0), delay: Duration::ZERO, answer: addrs }
+    }
 }
 
 #[async_trait]
@@ -172,6 +175,55 @@ async fn in_flight_cap_bounds_spawned_resolves() {
     assert_eq!(metrics.named_send_count("dropped_in_flight"), 3);
     tokio::task::yield_now().await; // let the claimed tasks start (they park at their delay)
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "cap must bound concurrent resolves");
+}
+
+// ── bounded lookup and address family ───────────────────────────────────
+
+/// A lookup still running at its 2 s bound: the packet is dropped and a
+/// negative entry written; the slot stays taken until the lookup returns, and
+/// its late answer sends nothing.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_past_its_bound_drops_the_packet_and_never_sends_it_late() {
+    let resolver = Arc::new(FakeResolver::slow(dst(), Duration::from_secs(30)));
+    let (fwd, ep, metrics) = forwarder(resolver.clone(), ResolverConfig::default());
+    let target = ProxyAddr::new("stuck.example", 5060);
+
+    fwd.send(b"pkt1", &target).await;
+    tokio::time::advance(Duration::from_millis(2_000)).await;
+    settle().await;
+    assert_eq!(metrics.named_send_count("lookup_timed_out"), 1, "dropped at the bound");
+    fwd.send(b"pkt2", &target).await;
+    assert_eq!(metrics.named_send_count("dropped_negative"), 1, "the negative entry holds");
+
+    // Negative entry expired, lookup still running: its slot is still taken.
+    tokio::time::advance(Duration::from_millis(5_000)).await;
+    fwd.send(b"pkt3", &target).await;
+    assert_eq!(metrics.named_send_count("dropped_in_flight"), 1);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+
+    // The lookup returns: nothing goes out late, and the slot is free again.
+    tokio::time::advance(Duration::from_millis(23_000)).await;
+    settle().await;
+    assert!(ep.sent.lock().unwrap().is_empty(), "nothing is sent after the bound");
+    fwd.send(b"pkt4", &target).await;
+    tokio::task::yield_now().await;
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "a fresh lookup claims the slot");
+}
+
+/// A name whose first address is IPv6, sent from an IPv4 socket, goes to its
+/// IPv4 address, and stays there for the cache lifetime.
+#[tokio::test(start_paused = true)]
+async fn a_name_is_sent_to_its_first_address_in_the_socket_family() {
+    let v6: SocketAddr = "[2001:db8::7]:5060".parse().unwrap();
+    let resolver = Arc::new(FakeResolver::answering_all(vec![v6, dst()]));
+    let (fwd, ep, _metrics) = forwarder(resolver, ResolverConfig::default());
+    let target = ProxyAddr::new("dual.example", 5060);
+
+    fwd.send(b"pkt1", &target).await;
+    settle().await;
+    fwd.send(b"pkt2", &target).await;
+    let sent: Vec<SocketAddr> = ep.sent.lock().unwrap().iter().map(|(_, d)| *d).collect();
+    assert_eq!(sent, [dst(), dst()]);
 }
 
 // ── absolute-first resolution ───────────────────────────────────────────

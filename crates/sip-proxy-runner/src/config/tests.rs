@@ -89,8 +89,60 @@ fn lb_overrides_that_reverse_the_bands_refuse_the_boot() {
     assert!(e.join("\n").contains("elu_soft < elu_hard < elu_critical"), "{e:?}");
 }
 
+// ── refusals: one per class ──────────────────────────────────────────────
+
+/// `Err` from `boot(extra)`, naming `key`.
+fn refused(extra: &[(&str, &str)], key: &str) -> Vec<String> {
+    let errors = boot(extra).expect_err("the boot must be refused");
+    assert!(errors.iter().any(|e| e.contains(key)), "no problem names {key}: {errors:?}");
+    errors
+}
+
 #[test]
-fn lb_override_that_does_not_parse_is_ignored() {
-    let cfg = boot(&[("LB_ELU_CRITICAL", "not-a-number")]).expect("ignored");
-    assert_eq!(cfg.observer.elu_critical, LoadObserverConfig::default().elu_critical);
+fn a_malformed_value_refuses_the_boot() {
+    refused(&[("HEALTH_INTERVAL_MS", "1s")], "HEALTH_INTERVAL_MS");
+}
+
+#[test]
+fn an_lb_override_that_does_not_parse_refuses_the_boot() {
+    refused(&[("LB_ELU_CRITICAL", "not-a-number")], "LB_ELU_CRITICAL");
+}
+
+#[test]
+fn an_empty_value_refuses_the_boot() {
+    refused(&[("HEALTH_TIMEOUT_MS", "")], "HEALTH_TIMEOUT_MS");
+}
+
+#[test]
+fn an_out_of_range_value_refuses_the_boot() {
+    refused(&[("LB_AIMD_DECREASE_FACTOR", "1.5")], "LB_AIMD_DECREASE_FACTOR");
+}
+
+#[test]
+fn an_empty_namespace_refuses_the_boot() {
+    let get = lookup(&[
+        ("PROXY_LISTEN", "127.0.0.1:5060"),
+        ("PROXY_HMAC_KEY", "0123456789abcdef0123456789abcdef"),
+        ("PROXY_NAMESPACE", ""),
+        ("POD_NAMESPACE", "lab"),
+    ]);
+    let errors = ProxyConfig::from_lookup(&get, &|| Some("lab".into())).expect_err("refused");
+    assert!(errors.iter().any(|e| e.contains("PROXY_NAMESPACE")), "{errors:?}");
+}
+
+#[test]
+fn an_unspecified_listen_address_without_an_advertise_refuses_the_boot() {
+    refused(&[("PROXY_LISTEN", "0.0.0.0:5060")], "PROXY_ADVERTISE");
+}
+
+#[test]
+fn a_name_as_a_bind_address_refuses_the_boot() {
+    refused(&[("PROXY_LISTEN", "localhost:5060")], "PROXY_LISTEN");
+}
+
+#[test]
+fn a_missing_cookie_signing_key_refuses_the_boot() {
+    let get = lookup(&[("PROXY_LISTEN", "127.0.0.1:5060"), ("PROXY_WORKERS", "w0@10.0.0.1:5060")]);
+    let errors = ProxyConfig::from_lookup(&get, &|| None).expect_err("refused");
+    assert!(errors.iter().any(|e| e.contains("PROXY_HMAC_KEY")), "{errors:?}");
 }
