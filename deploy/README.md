@@ -24,7 +24,7 @@ see `deploy/k8s/lib/sipext-gen.sh` and the slot plan in
 
 | Binary | Crate | Wiring |
 |---|---|---|
-| `sip-proxy-runner` | `crates/sip-proxy-runner` | Real UDP transport · `LoadBalancerStrategy` (HRW + HMAC-signed Record-Route stickiness) · `StaticWorkerRegistry` · OPTIONS `HealthProbe` feeding the band observer · `AlwaysAdmitGate` · Prometheus `/metrics` |
+| `sip-proxy-runner` | `crates/sip-proxy-runner` | Real UDP transport · `LoadBalancerStrategy` (HRW + HMAC-signed Record-Route stickiness) · EndpointSlice worker discovery (`ComposedWorkerRegistry`; a fixed `PROXY_WORKERS` list when set) · OPTIONS `HealthProbe` feeding the band observer · `EluCpsGate` self-gate · Prometheus `/metrics` |
 | `b2bua-runner` | `crates/b2bua-runner` | Real UDP transport · system clock · `BufferedCdrWriter` over a discarding sink (no endurance leak) · `InMemoryCallStore` · `NoopLimiter` · `ScriptedDecisionEngine` routing all calls to the UAS · Prometheus `/metrics` |
 
 Both are configured entirely by env vars (see the module docs at the top of each
@@ -32,9 +32,9 @@ Both are configured entirely by env vars (see the module docs at the top of each
 `B2BUA_REPL=1`: real TCP repl transport + `K8sMembership` EndpointSlice
 discovery + SIGTERM drain + `/ready` probe — ADR-0011 / the chaos suite below).
 Still deferred per ADR-0009/0010 and **not** wired here: the HTTP call-control
-decision adapter, the call-keyed limiter as the default, the real proxy self-gate, the
-AIMD per-worker bucket, proxy VIP/HA, and the proxy's own k8s registry (it still
-takes IP literals via `PROXY_WORKERS`).
+decision adapter and the call-keyed limiter as the default. The proxy refuses a
+boot it cannot honour (ADR-0046): it needs `PROXY_HMAC_KEY`, and an advertise
+address when it listens on an unspecified one.
 
 ### Image
 

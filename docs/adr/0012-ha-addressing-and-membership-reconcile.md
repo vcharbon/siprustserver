@@ -228,7 +228,7 @@ anti-affined proxy replicas on the two `tier=edge` nodes, fronted by a **keepali
 VRRP virtual IP** (`172.20.255.250`, static in the kind `172.20.0.0/16` node
 subnet). Active/passive: the VRRP master owns the VIP and serves all traffic; the
 backup is warm. On master loss the backup claims the VIP in <2 s (3 × 0.5 s
-advert, `nopreempt` so the survivor keeps it). `hostNetwork: true` +
+advert; the survivor keeps it — ADR-0046 for the priorities and the health check). `hostNetwork: true` +
 `shareProcessNamespace` lets the keepalived sidecar answer ARP on the node; an init
 container pins the VIP on `lo` and sets strict-ARP so both pods can `bind(VIP:5060)`
 and only the ARP owner answers.
@@ -265,9 +265,9 @@ failover, not a tolerated outage.
   EndpointSlice watch, mirroring `15-worker-rbac.yaml`). The pod-name-as-id
   invariant (the big run.sh warning) is unchanged and still required.
 - **New dependency for the proxy:** an in-cluster kube client + EndpointSlice
-  watch RBAC. Falls back (liveness over completeness, ADR-0011 X5) to the static
-  `PROXY_WORKERS` list when no kube client is available (dev/local, and the sim
-  test tiers), exactly as the b2bua runner falls back to `B2BUA_PEERS`.
+  watch RBAC. A fixed `PROXY_WORKERS` list replaces discovery only when set; a
+  kube client that fails to build is built again in the background and the
+  proxy stays NotReady meanwhile (ADR-0046).
 - **CoreDNS enters the repl reconnect path** (D3) — bounded by backoff; negative
   caching can slow a just-ready peer's first reconnect by up to the SOA negative
   TTL, which is acceptable because D1/D2 already converge via the informer.

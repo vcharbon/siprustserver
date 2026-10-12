@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (non-recording RealSignalingNetwork), load-balances new dialogs across a static worker pool with HMAC-signed Record-Route stickiness, runs OPTIONS health probing, and serves Prometheus /metrics. For containerized localhost/k8s load tests (UAC -> proxy -> B2BUA workers -> UAS)."
+description = "Standalone runnable SIP front proxy: binds a real UDP endpoint (non-recording RealSignalingNetwork), load-balances new dialogs across the worker pool (EndpointSlice discovery or a fixed list) with HMAC-signed Record-Route stickiness, runs OPTIONS health probing, and serves Prometheus /metrics. For containerized localhost/k8s load tests (UAC -> proxy -> B2BUA workers -> UAS)."
 
 [lints]
 workspace = true
@@ -33,8 +33,8 @@ sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 # Cluster membership: the shared topology crate with the kube EndpointSlice
 # informer (ADR-0012 D4) so the proxy discovers workers from k8s — the SAME watch
-# the b2bua replication engine uses (ADR-0011 X7). Static PROXY_WORKERS remains a
-# dev/local fallback.
+# the b2bua replication engine uses (ADR-0011 X7). A set PROXY_WORKERS list
+# replaces discovery (ADR-0046).
 topology = { path = "../topology", features = ["kube"] }
 # Default in-cluster kube client for K8sMembership.
 kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
