@@ -567,12 +567,10 @@ async fn main() {
     // Readiness gate (ADR-0012 D4): the proxy is fit to take traffic only with
     // ≥1 routable (`Alive`) worker. With the k8s EndpointSlice informer the pool
     // starts empty and fills asynchronously (and stays empty if the watch is
-    // RBAC-forbidden / the Service name is wrong), so gating `/readyz` on this
-    // keeps the k8s Service from forwarding INVITEs into an empty pool — and turns
-    // a misconfigured watch into a loud rollout timeout instead of a silent
-    // black-hole. Mirrors the worker's `/ready`.
-    // SIGTERM latches this; `/readyz` then reports Draining so k8s unpublishes
-    // the proxy from its Service and stops routing new datagrams here.
+    // RBAC-forbidden / the Service name is wrong), so `/readyz` turns a
+    // misconfigured watch into a loud rollout timeout. SIP reaches the proxy
+    // through the VRRP address, which follows `/healthz`, not readiness.
+    // SIGTERM latches Draining here.
     let draining = Arc::new(AtomicBool::new(false));
     // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
     // see `sip_proxy::liveness`) is a proxy that black-holes a share of its

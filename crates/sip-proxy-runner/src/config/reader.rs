@@ -118,12 +118,17 @@ impl<'a> EnvReader<'a> {
     }
 
     /// `key` as a local bind address, an IP literal with its port (a name is
-    /// never looked up at boot); `default` when unset.
-    pub(super) fn bind_addr(&mut self, key: &str, default: SocketAddr) -> SocketAddr {
-        let Some(value) = self.present(key) else { return default };
-        value.parse().unwrap_or_else(|_| {
-            self.refuse(format!("{key} must be an IP literal with its port, got {value:?}"));
-            default
-        })
+    /// never looked up at boot); `default` when unset, `None` when refused.
+    pub(super) fn bind_addr(&mut self, key: &str, default: SocketAddr) -> Option<SocketAddr> {
+        let Some(value) = self.present(key) else {
+            return self.raw(key).is_none().then_some(default);
+        };
+        match value.parse() {
+            Ok(addr) => Some(addr),
+            Err(_) => {
+                self.refuse(format!("{key} must be an IP literal with its port, got {value:?}"));
+                None
+            }
+        }
     }
 }

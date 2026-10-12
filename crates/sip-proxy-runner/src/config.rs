@@ -78,9 +78,12 @@ impl ProxyConfig {
 
         let listen = env.bind_addr("PROXY_LISTEN", SocketAddr::from(([0, 0, 0, 0], 5060)));
         let advertise = advertise(&mut env, "PROXY_ADVERTISE", listen);
+        let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 5060)));
         let external = external_face(&mut env);
         let workers = worker_source(&mut env, pod_namespace);
-        let metrics = env.bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)));
+        let metrics = env
+            .bind_addr("PROXY_METRICS", SocketAddr::from(([0, 0, 0, 0], 9090)))
+            .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 9090)));
         let queue_max = env.int("PROXY_QUEUE", 8192, 1, u32::MAX as u64) as usize;
         let udp_sndbuf = socket_buffer(&mut env, "PROXY_UDP_SNDBUF");
         let udp_rcvbuf = socket_buffer(&mut env, "PROXY_UDP_RCVBUF");
@@ -141,8 +144,12 @@ impl ProxyConfig {
 
 /// The address stamped on Via and Record-Route for egress on the face that
 /// listens on `listen`: `key`, else the listen address. An unspecified listen
-/// address names no reachable host, so `key` is then required.
-fn advertise(env: &mut EnvReader, key: &str, listen: SocketAddr) -> ProxyAddr {
+/// address names no reachable host, so `key` is then required. A refused
+/// listen address (`None`) asks nothing more of `key`.
+fn advertise(env: &mut EnvReader, key: &str, listen: Option<SocketAddr>) -> ProxyAddr {
+    let Some(listen) = listen else {
+        return ProxyAddr::new("0.0.0.0", 0);
+    };
     let fallback = ProxyAddr::new(listen.ip().to_string(), listen.port());
     match env.present(key) {
         Some(s) => ProxyAddr::parse(&s).unwrap_or_else(|| {
@@ -181,6 +188,7 @@ fn external_face(env: &mut EnvReader) -> Option<ExternalFace> {
     listen_ext?;
     let listen = env.bind_addr("PROXY_LISTEN_EXT", SocketAddr::from(([0, 0, 0, 0], 0)));
     let advertise = advertise(env, "PROXY_ADVERTISE_EXT", listen);
+    let listen = listen.unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)));
     Some(ExternalFace { listen, advertise, int_cidrs: int_cidrs? })
 }
 
@@ -236,18 +244,22 @@ fn worker_source(env: &mut EnvReader, pod_namespace: &dyn Fn() -> Option<String>
 }
 
 /// `PROXY_HMAC_KEY`, the secret that signs the stickiness cookies: required,
-/// at least 16 bytes, taken as given (not trimmed).
+/// trimmed like every value, at least 16 bytes.
 fn hmac_key(env: &mut EnvReader) -> String {
-    match env.raw("PROXY_HMAC_KEY") {
+    let unset = env.raw("PROXY_HMAC_KEY").is_none();
+    match env.present("PROXY_HMAC_KEY") {
         Some(key) if key.len() >= 16 => key,
         Some(_) => {
             env.refuse("PROXY_HMAC_KEY must be at least 16 bytes".to_string());
             String::new()
         }
         None => {
-            env.refuse(
-                "PROXY_HMAC_KEY is required: the secret that signs the stickiness cookies".into(),
-            );
+            if unset {
+                env.refuse(
+                    "PROXY_HMAC_KEY is required: the secret that signs the stickiness cookies"
+                        .into(),
+                );
+            }
             String::new()
         }
     }
