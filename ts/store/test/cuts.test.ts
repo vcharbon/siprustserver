@@ -13,6 +13,7 @@ import { SqlClient } from "effect/unstable/sql/SqlClient"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import * as Client from "../src/client.js"
 import * as Server from "./server.js"
+import * as CaseDocuments from "../src/case-documents.js"
 import * as Cuts from "../src/cuts.js"
 import type * as Model from "../src/model.js"
 import { type CaptureCutRequest, type CutCaseRequest, wholeFlows } from "../src/model.js"
@@ -328,6 +329,22 @@ describe.skipIf(!served)("Cuts", () => {
       // The prep is a CEILING, so an older reading answers with what it cut.
       expect([...(yield* cuts.caseSpans(older)).get("capture_span.pcap.gz")!]).toEqual([["span-long", 400_000]])
     })))
+
+  it("reads one field of each case's document by case hash, a case lacking it absent", () =>
+    withCuts(Effect.gen(function*() {
+      const cuts = yield* Cuts.Service
+      const documents = yield* CaseDocuments.Service
+      const grouped = (id: string, groups: ReadonlyArray<number> | null): CutCaseRequest => ({
+        ...caseOf(id),
+        document: { id, case: groups === null ? {} : { source: { call_groups: groups } } }
+      })
+      const prep = yield* cuts.open()
+      yield* cuts.record(cutOf(prep, "capture_groups.pcap.gz", [grouped("g-one", [3]), grouped("g-none", null)]))
+      const cases = (yield* cuts.standing("capture_groups.pcap.gz"))!.cases
+      const hashOf = (id: string) => cases.find((entry) => entry.caseId === id)!.caseHash
+      const read = yield* documents.fieldOfCases(cases.map((entry) => entry.caseHash), ["case", "source", "call_groups"])
+      expect([...read]).toEqual([[hashOf("g-one"), [3]]])
+    }).pipe(Effect.provide(CaseDocuments.layer))))
 
   it("keeps every content hash a reading from the floor prep up can name", () =>
     withCuts(Effect.gen(function*() {

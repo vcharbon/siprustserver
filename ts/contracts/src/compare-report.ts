@@ -12,7 +12,8 @@
  *     onlyBefore, onlyAfter: { captures, count, calls[] },
  *     calls[]: { alias, capture, caseId, class, document, code, lane,
  *                before, after: { run, lane, env, branch, code[{ name, sha }],
- *                                 verdict, passed, skipped, failedStep,
+ *                                 verdict, passed, repeats { runs, passed },
+ *                                 skipped, failedStep,
  *                                 mainError, bless, accepted, knownBugs[] | null,
  *                                 ladder[] | null, links { study, text } },
  *                ref: ladder[] | null } }
@@ -27,7 +28,9 @@
  * bundle is gone. `code`, `document` and `lane` say whether the two cells ran
  * the same code (tree fingerprints, component by component), the same case
  * document and the same lane behaviour; a verdict flip with all three the same
- * is `unexplained`: nothing but the harness explains it.
+ * is `unexplained`: nothing but the harness explains it. A call whose repeats
+ * within one side (runs on the same code, document and lane) disagree is
+ * `unstable`, and counts as unexplained too.
  */
 import * as Schema from "effect/Schema"
 import { MainError } from "./main-error.js"
@@ -53,6 +56,7 @@ export type BlessClass = typeof BlessClass.Type
 
 /** The classes a compared call takes, in the order a report lists them. */
 export const MOVE_CLASSES = [
+  "unstable",
   "green→red",
   "red→green",
   "red→red-moved",
@@ -118,6 +122,13 @@ export const CellComponent = Schema.Struct({
 })
 export interface CellComponent extends Schema.Schema.Type<typeof CellComponent> {}
 
+/** A side's runs of one call on the cell's code, document and lane, the cell's own included, and how many passed. */
+export const Repeats = Schema.Struct({
+  runs: Schema.Int,
+  passed: Schema.Int
+})
+export interface Repeats extends Schema.Schema.Type<typeof Repeats> {}
+
 export const Cell = Schema.Struct({
   run: Schema.Int,
   lane: Schema.String,
@@ -126,6 +137,7 @@ export const Cell = Schema.Struct({
   code: Schema.Array(CellComponent),
   verdict: Schema.String,
   passed: Schema.Boolean,
+  repeats: Repeats,
   skipped: Schema.NullOr(Schema.String),
   failedStep: Schema.NullOr(Schema.String),
   mainError: Schema.NullOr(MainError),

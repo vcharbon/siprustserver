@@ -6,7 +6,9 @@
  * whatever that run's set kind, interrupted runs' landed cells included, no
  * older than the set's latest FINISHED full reading of the capture on the lane where
  * the set holds one — the rule `current_cells` states for `@current`, so
- * `compare @current` and what the queue calls current never disagree.
+ * `compare @current` and what the queue calls current never disagree. Each
+ * cell carries its repeats: the side's live runs of the call on the cell's
+ * code, document and lane, and how many of them passed.
  *
  * A pair of sets is read narrowed to each other: only the captures both sets
  * ran are read at all, and only the calls both hold are loaded; what one side
@@ -93,6 +95,8 @@ interface CellRow {
   readonly error_detail: string | null
   readonly classification: Record<string, unknown> | null
   readonly components: Provenance | null
+  readonly repeat_runs: string | null
+  readonly repeat_passed: string | null
 }
 
 /** A side's size and the sweeps its runs belong to. */
@@ -146,7 +150,10 @@ const cellOf = (root: Sessions.Root, row: CellRow): Cell => ({
       unlisted: count(row.classification, "unlisted"),
       unknown: count(row.classification, "unknown")
     },
-  code: row.components ?? []
+  code: row.components ?? [],
+  ...(row.repeat_runs === null
+    ? {}
+    : { repeats: { runs: Number(row.repeat_runs), passed: Number(row.repeat_passed ?? 0) } })
 })
 
 export const layer = Layer.effect(
@@ -313,15 +320,31 @@ export const layer = Layer.effect(
           UNION ALL
           SELECT 'after', b.run_id, b.capture, b.case_id FROM b_cells b
           WHERE (b.capture, b.case_id) IN (SELECT capture, case_id FROM both_hold)
+        ),
+        live AS (SELECT 'before'::text AS side, id FROM a_live UNION ALL SELECT 'after', id FROM b_live),
+        repeats AS (
+          SELECT p.side, p.capture, p.case_id,
+                 count(*) AS runs, count(*) FILTER (WHERE c2.passed) AS passed
+          FROM picked p
+          JOIN runs r ON r.id = p.run_id
+          JOIN case_results cr ON cr.run_id = p.run_id AND cr.case_id = p.case_id
+          JOIN live l ON l.side = p.side
+          JOIN runs r2 ON r2.id = l.id AND r2.capture = p.capture AND r2.lane = r.lane
+                      AND r2.lane_hash IS NOT DISTINCT FROM r.lane_hash AND r2.components = r.components
+          JOIN case_results c2 ON c2.run_id = r2.id AND c2.case_id = p.case_id AND c2.skipped IS NULL
+                              AND c2.document_hash IS NOT DISTINCT FROM cr.document_hash
+          GROUP BY p.side, p.capture, p.case_id
         )
         SELECT p.side, p.capture, p.case_id, r.id AS run_id, r.lane, r.env, r.branch, r.lane_hash, r.prep_id,
                r.bundle_path, cr.passed, cr.verdict, cr.skipped, cr.failed_step, cr.document_hash,
                cr.error_kind, cr.error_rule, cr.error_rfc, cr.error_step, cr.error_expected, cr.error_detail,
                cr.classification,
-               r.components
+               r.components,
+               rp.runs AS repeat_runs, rp.passed AS repeat_passed
         FROM picked p
         JOIN runs r ON r.id = p.run_id
         JOIN case_results cr ON cr.run_id = p.run_id AND cr.case_id = p.case_id
+        LEFT JOIN repeats rp ON rp.side = p.side AND rp.capture = p.capture AND rp.case_id = p.case_id
         ORDER BY p.side, p.capture, p.case_id
       `
       const alone = yield* sql<OnlyRow>`

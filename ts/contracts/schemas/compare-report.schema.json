@@ -297,6 +297,22 @@
     "counts": {
       "type": "object",
       "properties": {
+        "unstable": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
         "green→red": {
           "type": "object",
           "properties": {
@@ -427,6 +443,7 @@
         }
       },
       "required": [
+        "unstable",
         "green→red",
         "red→green",
         "red→red-moved",
@@ -501,6 +518,7 @@
           "class": {
             "type": "string",
             "enum": [
+              "unstable",
               "green→red",
               "red→green",
               "red→red-moved",
@@ -596,6 +614,22 @@
               "passed": {
                 "type": "boolean"
               },
+              "repeats": {
+                "type": "object",
+                "properties": {
+                  "runs": {
+                    "type": "integer"
+                  },
+                  "passed": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "runs",
+                  "passed"
+                ],
+                "additionalProperties": false
+              },
               "skipped": {
                 "anyOf": [
                   {
@@ -785,6 +819,7 @@
               "code",
               "verdict",
               "passed",
+              "repeats",
               "skipped",
               "failedStep",
               "mainError",
@@ -857,6 +892,22 @@
               "passed": {
                 "type": "boolean"
               },
+              "repeats": {
+                "type": "object",
+                "properties": {
+                  "runs": {
+                    "type": "integer"
+                  },
+                  "passed": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "runs",
+                  "passed"
+                ],
+                "additionalProperties": false
+              },
               "skipped": {
                 "anyOf": [
                   {
@@ -1046,6 +1097,7 @@
               "code",
               "verdict",
               "passed",
+              "repeats",
               "skipped",
               "failedStep",
               "mainError",

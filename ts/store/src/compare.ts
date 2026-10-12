@@ -5,9 +5,10 @@
  * Only the calls BOTH sides ran are compared, keyed by (capture, case id);
  * what one side alone holds is counted, never classed, so two differently
  * narrowed populations cannot pass for a code change. Each compared call takes
- * one class: a lane block that changed, a verdict that flipped, a failure that
- * moved (its step or its main error), a bless class that moved between clean
- * and `known-bug`, or nothing.
+ * one class: repeats within a side that disagree (`unstable`), a lane block
+ * that changed, a verdict that flipped, a failure that moved (its step or its
+ * main error), a bless class that moved between clean and `known-bug`, or
+ * nothing.
  *
  * A move is an ATTRIBUTION only where both cells ran the same code over the
  * same document on the same lane behaviour. A commit sha cannot say that of a
@@ -42,6 +43,23 @@ export interface Cell {
   /** The cell's confrontation counts; null where the cell was not classified. */
   readonly deltas: CellDeltas | null
   readonly code: Provenance
+  /** The side's runs of the call on this cell's code, document and lane, this one included; absent is this one alone. */
+  readonly repeats?: Repeats
+}
+
+/** How many runs repeated a call on one code, document and lane, and how many of them passed. */
+export interface Repeats {
+  readonly runs: number
+  readonly passed: number
+}
+
+/** The cell's repeats, itself alone where none were read. */
+export const repeatsOf = (cell: Cell): Repeats => cell.repeats ?? { runs: 1, passed: cell.passed ? 1 : 0 }
+
+/** Whether a cell's repeats disagree: some passed and some did not. */
+export const isUnstable = (cell: Cell): boolean => {
+  const repeats = repeatsOf(cell)
+  return repeats.passed > 0 && repeats.passed < repeats.runs
 }
 
 /** The confrontation counts a bless class is read from. */
@@ -203,6 +221,7 @@ export const classOf = (before: Cell, after: Cell): MoveClass => {
   const isSkipped = after.skipped !== null
   if (wasSkipped !== isSkipped) return wasSkipped ? "skipped→ran" : "ran→skipped"
   if (wasSkipped) return "unchanged"
+  if (isUnstable(before) || isUnstable(after)) return "unstable"
   if (before.passed !== after.passed) return after.passed ? "red→green" : "green→red"
   if (!after.passed && failureOf(before) !== failureOf(after)) return "red→red-moved"
   const was = blessClass(before)
@@ -270,10 +289,14 @@ const only = (loaded: ReadonlyArray<string>, counted: Elsewhere): Elsewhere => (
   keys: [...loaded, ...counted.keys].sort()
 })
 
-/** A verdict flip on the same code, the same document and the same lane: nothing but the harness explains it. */
+/**
+ * What nothing but the harness explains: a verdict flip on the same code, the
+ * same document and the same lane, or a call whose repeats within a side disagree.
+ */
 export const isUnexplained = (move: Move): boolean =>
-  (move.class === "red→green" || move.class === "green→red") &&
-  move.code === "same" && move.document === "same" && move.lane === "same"
+  move.class === "unstable" ||
+  ((move.class === "red→green" || move.class === "green→red") &&
+    move.code === "same" && move.document === "same" && move.lane === "same")
 
 /** How many calls moved with nothing to explain them but the harness itself. */
 export const unexplained = (comparison: Comparison): number => comparison.moves.filter(isUnexplained).length
@@ -285,19 +308,23 @@ export const overallCode = (comparison: Comparison): CodeReading => {
   return readings.has("different") ? "different" : "same"
 }
 
-/** What a comparison may be read as, given what its two sides had in common. */
+/** What a comparison may be read as, given what its two sides had in common and what its repeats said. */
 export const headline = (comparison: Comparison): string => {
-  switch (overallCode(comparison)) {
-    case "different":
-      return "the two sides ran DIFFERENT code — every move below is a code change until one " +
-        "of them is reproduced on ONE tree"
-    case "unknown":
-      return "a side did not fingerprint its tree — nothing below can be attributed to either " +
-        "the code or the harness"
-    case "same":
-      return unexplained(comparison) === 0
-        ? "same code, and no verdict flipped on an unchanged document and lane"
-        : `same code, document and lane on ${unexplained(comparison)} call(s) whose verdict flipped ` +
-          "anyway — that is the harness"
-  }
+  const unstable = comparison.moves.filter((move) => move.class === "unstable").length
+  const flipped = unexplained(comparison) - unstable
+  const read = ((): string => {
+    switch (overallCode(comparison)) {
+      case "different":
+        return "the two sides ran DIFFERENT code — every move below is a code change until one " +
+          "of them is reproduced on ONE tree"
+      case "unknown":
+        return "a side did not fingerprint its tree — nothing below can be attributed to either " +
+          "the code or the harness"
+      case "same":
+        return flipped === 0
+          ? "same code, and no verdict flipped on an unchanged document and lane"
+          : `same code, document and lane on ${flipped} call(s) whose verdict flipped anyway — that is the harness`
+    }
+  })()
+  return unstable === 0 ? read : `${read}; ${unstable} call(s) UNSTABLE: their repeats on one tree disagree`
 }

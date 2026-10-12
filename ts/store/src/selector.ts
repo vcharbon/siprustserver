@@ -4,15 +4,15 @@
  * A selector is one or more terms joined by `/`, and the set is the runs every
  * term admits:
  *
- *   @current        the current population (`current.ts`): its env and
- *                   branch, every tree clean
- *   @env:X          runs made from environment X
- *   @run:N  N  runN one run by id
- *   @sha:X          a clean tree on a commit of any component starting with X
- *                   (7 hex digits at least, one commit only: `RunSets.refusal`)
- *   @lane:L         runs on lane L
- *   @sweep:N        the runs of one sweep
- *   @job:N          the runs one job opened
+ *   @current          the current population (`current.ts`): its env and
+ *                     branch, every tree clean
+ *   @env:X            runs made from environment X
+ *   @run:N  N  runN   one run by id
+ *   @sha:X            a clean tree on a commit of any component starting with X
+ *                     (7 hex digits at least, one commit only: `RunSets.refusal`)
+ *   @lane:L           runs on lane L
+ *   @sweep:N  sweepN  the runs of one sweep
+ *   @job:N  jobN      the runs one job opened
  *
  * `@env:dev-7/@lane:fake` is env dev-7's runs on the fake lane. A deployment
  * may spell the current term its own way ({@link Spelling}); the term means
@@ -45,7 +45,8 @@ export const DEFAULT_SPELLING: Spelling = { current: "@current" }
 
 /** The selector forms, as one line a refusal can quote. */
 export const formsOf = (spelling: Spelling = DEFAULT_SPELLING): string =>
-  `${spelling.current}, @env:X, @run:N (or N, runN), @sha:X (7+ hex), @lane:L, @sweep:N, @job:N, joined by /`
+  `${spelling.current}, @env:X, @run:N (or N, runN), @sha:X (7+ hex), @lane:L, @sweep:N (or sweepN), ` +
+  "@job:N (or jobN), joined by /"
 
 export const FORMS = formsOf()
 
@@ -53,10 +54,15 @@ const ID = /^\d+$/
 
 const idOf = (text: string): number | undefined => (ID.test(text) ? Number(text) : undefined)
 
+/** A bare `sweepN` or `jobN`: the kind and its id. */
+const BARE = /^(sweep|job)(\d+)$/
+
 const termOf = (text: string, spelling: Spelling): Term | string => {
   if (text === spelling.current) return { _tag: "current" }
   const bare = idOf(text) ?? (text.startsWith("run") ? idOf(text.slice(3)) : undefined)
   if (bare !== undefined) return { _tag: "run", id: bare }
+  const kinded = BARE.exec(text)
+  if (kinded !== null) return { _tag: kinded[1] as "sweep" | "job", id: Number(kinded[2]) }
   const at = text.indexOf(":")
   if (!text.startsWith("@") || at < 0) return `"${text}" is no selector term`
   const kind = text.slice(1, at)

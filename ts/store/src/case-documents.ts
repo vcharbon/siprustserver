@@ -23,6 +23,15 @@ export interface Interface {
    * later than the pin — keyed by `readingKey`; a reading no cut answers is absent.
    */
   readonly flowsOf: (readings: ReadonlyArray<Reading>) => Effect.Effect<ReadonlyMap<string, string>, SqlError>
+  /**
+   * One field of each case's document, by case hash: the value at `field`
+   * (a JSON path, key by key), so a reader of thousands of cases loads that
+   * field alone. A case whose document holds no such field is absent.
+   */
+  readonly fieldOfCases: (
+    caseHashes: ReadonlyArray<string>,
+    field: ReadonlyArray<string>
+  ) => Effect.Effect<ReadonlyMap<string, unknown>, SqlError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@sip/store/CaseDocuments") {}
@@ -63,6 +72,23 @@ export const layer = Layer.effect(
       return found
     })
 
-    return Service.of({ documents, flowsOf })
+    const fieldOfCases = Effect.fn("CaseDocuments.fieldOfCases")(function*(
+      caseHashes: ReadonlyArray<string>,
+      field: ReadonlyArray<string>
+    ) {
+      const found = new Map<string, unknown>()
+      const wanted = [...new Set(caseHashes)]
+      if (wanted.length === 0) return found
+      const at = `{${field.map((key) => `"${key.replace(/["\\]/g, "\\$&")}"`).join(",")}}`
+      const rows = yield* sql<{ hash: string; value: unknown }>`
+        SELECT c.hash, d.document #> ${at}::text[] AS value
+        FROM cases c JOIN case_documents d ON d.hash = c.document_hash
+        WHERE c.hash IN ${sql.in(wanted)}
+      `
+      for (const row of rows) if (row.value !== null) found.set(row.hash, row.value)
+      return found
+    })
+
+    return Service.of({ documents, flowsOf, fieldOfCases })
   })
 )

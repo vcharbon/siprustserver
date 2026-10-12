@@ -276,7 +276,7 @@ export const layerWith = (grammar: Grammar) => Layer.effect(
       const calls = rows.map(callOf)
       const total = rows.length === 0 ? 0 : Number(rows[0]!.total)
       if (calls.length === 0) {
-        return { input, form, status: "not-found", calls, total, note: `no cut names ${what}` }
+        return { input, form, status: "not-found", calls, total, note: `no cut names ${what} (forms: ${FORMS})` }
       }
       if (total > 1) {
         return {

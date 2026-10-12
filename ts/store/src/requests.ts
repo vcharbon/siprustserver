@@ -74,6 +74,8 @@ export interface Knobs {
   readonly memoryMax: string
   readonly startsPerSecond: number
   readonly cleanup: boolean
+  /** How many passes a job of the request replays its cells in; one where absent. */
+  readonly repeat?: number
 }
 
 export interface CreateRequest {

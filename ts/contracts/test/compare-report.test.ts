@@ -18,6 +18,7 @@ const cell: CompareReport.Cell = {
   code: [{ name: "app", sha: "a".repeat(40) }, { name: "core", sha: null }],
   verdict: "ok",
   passed: true,
+  repeats: { runs: 1, passed: 1 },
   skipped: null,
   failedStep: null,
   mainError: null,
