@@ -94,5 +94,5 @@ fn the_next_leg_id_is_the_one_a_dial_mints() {
 fn a_ring_is_recorded_on_its_leg() {
     let mut call = call_with_attempt(LegState::Early);
     mark_rang(&mut call, "b-1");
-    assert!(call.b_legs[0].rang);
+    assert!(call.b_legs[0].ring.rang());
 }

@@ -129,7 +129,7 @@ pub fn next_b_leg_id(call: &Call) -> String {
 /// Record that `leg_id` rang: its INVITE received a 180–189 provisional.
 pub fn mark_rang(call: &mut Call, leg_id: &str) {
     if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
-        leg.rang = true;
+        leg.ring = crate::model::Ring::Rang;
     }
 }
 

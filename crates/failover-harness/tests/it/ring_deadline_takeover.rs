@@ -6,7 +6,12 @@
 //!   instant, and the 18x that hands the call to the survivor does not restart
 //!   it (`a_ring_deadline_armed_before_the_kill_…`);
 //! - when the primary dies before the callee's first 18x, that 18x reaches the
-//!   survivor, which arms the deadline from it (`a_first_18x_reaching_…`).
+//!   survivor, which arms the deadline from it (`a_first_18x_reaching_…`);
+//! - when the turn that took the first 18x dies with the primary before the
+//!   backup holds it, the copy materialised from the replica presumes the
+//!   callee ringing since its INVITE (`a_first_18x_lost_with_the_primary_…`),
+//!   and an 18x it later takes runs the ring from that 18x
+//!   (`a_later_18x_on_the_survivor_…`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +19,7 @@ use std::time::Duration;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
 use b2bua::limiter::NoopLimiter;
-use call::{CallBodyCodec, MsgpackCodec, TimerType};
+use call::{CallBodyCodec, MsgpackCodec, Ring, TimerType};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -22,7 +27,6 @@ use failover_harness::{
 use scenario_harness::Agent;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
-
 const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 const PROXY: &str = "127.0.0.1:5080";
@@ -37,13 +41,18 @@ const RING_MS: i64 = 6_789;
 /// leaves: callee → front proxy → worker, 1 ms each.
 const HOPS_IN_MS: i64 = 2;
 
-/// Every call routes to bob under [`RING_MS`]; its expiry rejects the caller.
-fn ringing_route() -> Arc<dyn CallDecisionEngine> {
+/// The ring deadline of the cells whose primary reboots and reclaims the call
+/// while it rings: the reboot and the reclaim complete inside it, and it ends
+/// before the 150 s setup deadline.
+const LOST_RING_MS: i64 = 90_123;
+
+/// Every call routes to bob under `ring_ms`; its expiry rejects the caller.
+fn ringing_route(ring_ms: i64) -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
-            .fallback(|_| {
+            .fallback(move |_| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.no_answer_ms = Some(RING_MS);
+                r.no_answer_ms = Some(ring_ms);
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -59,8 +68,9 @@ struct Cluster {
     w_b2: ReplicatedB2buaSut,
 }
 
-/// Two replicating workers behind the front proxy, both ready.
-async fn spawn_cluster(name: &str) -> Cluster {
+/// Two replicating workers behind the front proxy, both ready, routing under
+/// `ring_ms`.
+async fn spawn_cluster(name: &str, ring_ms: i64) -> Cluster {
     let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
@@ -76,7 +86,7 @@ async fn spawn_cluster(name: &str) -> Cluster {
                 &[peer],
                 ("127.0.0.1", 5070),
                 ("127.0.0.1", 5080),
-                ringing_route(),
+                ringing_route(ring_ms),
                 Arc::new(NoopLimiter),
             )
             .await,
@@ -148,7 +158,7 @@ async fn reboot_and_reclaim(
 #[tokio::test(start_paused = true)]
 async fn a_ring_deadline_armed_before_the_kill_fires_on_the_survivor_at_its_instant() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("ring-deadline-armed-before-the-kill").await;
+        spawn_cluster("ring-deadline-armed-before-the-kill", RING_MS).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -203,7 +213,7 @@ async fn a_ring_deadline_armed_before_the_kill_fires_on_the_survivor_at_its_inst
 #[tokio::test(start_paused = true)]
 async fn a_first_18x_reaching_the_survivor_arms_the_ring_there() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
-        spawn_cluster("ring-deadline-armed-on-the-survivor").await;
+        spawn_cluster("ring-deadline-armed-on-the-survivor", RING_MS).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -227,6 +237,7 @@ async fn a_first_18x_reaching_the_survivor_arms_the_ring_there() {
         Some(rang + HOPS_IN_MS + RING_MS),
         "the survivor runs the ring from the 180 it took"
     );
+    assert_eq!(taken.b_legs[0].ring, Ring::Rang, "the 180 is on record");
 
     quiet_until(&fh, &bob, rang + HOPS_IN_MS + RING_MS).await;
     let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
@@ -235,6 +246,123 @@ async fn a_first_18x_reaching_the_survivor_arms_the_ring_there() {
         rang + HOPS_IN_MS + RING_MS + HOPS_IN_MS,
         "the CANCEL left at the deadline"
     );
+    cancel.respond(200, "OK").await;
+    uas.respond(487, "Request Terminated").await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    call.expect(480).await;
+
+    fh.advance(Duration::from_secs(60)).await;
+    reboot_and_reclaim(&mut fh, primary, survivor, &proxy).await;
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call within the settle budget");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
+}
+
+/// The callee's 180 dies with the primary: the primary is down before the
+/// front proxy reads it dead, so the 180 it forwards there is lost, and the
+/// backup holds the call as it was before it — the record a copy reads when
+/// the turn that took a 180 died unreplicated. The caller saw no 180, so the
+/// caller-facing dialog the lost turn would have opened is not in play here.
+/// Returns the call ref, the INVITE's send instant, alice's INVITE and bob's
+/// server transaction.
+async fn ring_lost_with_the_primary(
+    c: &mut Cluster,
+    primary_is_b1: &mut bool,
+) -> (String, i64, scenario_harness::ClientInvite, scenario_harness::ServerTxn) {
+    let call = c.alice.invite(&c.bob).with_sdp(OFFER).through(c.proxy.addr()).send().await;
+    let mut uas = c.bob.receive("INVITE").await;
+    let (pri_ord, _) = worker_ordinals(uas.request());
+    *primary_is_b1 = pri_ord == "b1";
+    let (primary, backup) =
+        if *primary_is_b1 { (&mut c.w_b1, &mut c.w_b2) } else { (&mut c.w_b2, &mut c.w_b1) };
+    c.fh.advance(Duration::from_millis(500)).await;
+    let call_ref = backup.scan_one_backed_up(&pri_ord).await.expect("the call replicated");
+    let replica = MsgpackCodec::new()
+        .decode(
+            &backup
+                .get(PartitionRole::Backup, &pri_ord, &call_ref)
+                .await
+                .expect("the backup holds the call"),
+        )
+        .expect("the replica decodes");
+    let sent_at = replica.b_legs[0].outbound_invite.as_ref().expect("dialled").sent_at_ms;
+    assert_eq!(ring_deadline(&replica), None, "no ring deadline before the 180");
+
+    // ── the primary dies; bob's 180 is forwarded to it and lost ─────────────
+    primary.crash();
+    uas.respond(180, "Ringing").await;
+    c.fh.advance(Duration::from_millis(100)).await;
+    c.proxy.set_health(&pri_ord, WorkerHealth::Dead);
+    backup.simulate_peer_removed(&pri_ord);
+    c.fh.advance(Duration::from_millis(300)).await;
+    (call_ref, sent_at, call, uas)
+}
+
+/// Bob's 180 dies with the primary, which reboots: the copy it reclaims shows
+/// no ring, so it presumes bob ringing since his INVITE and gives the ring up
+/// `no_answer_ms` after that INVITE — not at the setup deadline.
+#[tokio::test(start_paused = true)]
+async fn a_first_18x_lost_with_the_primary_presumes_the_ring_from_the_invite() {
+    let mut c = spawn_cluster("ring-deadline-lost-18x-reclaim", LOST_RING_MS).await;
+    let mut primary_is_b1 = true;
+    let (call_ref, sent_at, mut call, _uas) =
+        ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
+    let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
+    let (primary, backup) =
+        if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+
+    reboot_and_reclaim(&mut fh, primary, backup, &proxy).await;
+    let reclaimed = primary.live_call(&call_ref).expect("the rebooted primary serves the call");
+    assert_eq!(reclaimed.b_legs[0].ring, Ring::Presumed, "bob is presumed ringing");
+    let fire_at = sent_at + LOST_RING_MS;
+    assert_eq!(ring_deadline(&reclaimed), Some(fire_at), "the ring runs from the INVITE");
+
+    quiet_until(&fh, &bob, fire_at).await;
+    call.expect(480).await;
+    assert_eq!(
+        fh.now_ms(),
+        fire_at + HOPS_IN_MS,
+        "the caller is answered at the presumed deadline"
+    );
+    // The reclaimed INVITE transaction holds no provisional on record, so its
+    // CANCEL waits for one (RFC 3261 §9.1).
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(bob.try_receive_tolerating("CANCEL", &[]).await.is_none(), "the CANCEL is held");
+
+    let drained = fh.settle_terminal(async || w_b1.memory_clean() && w_b2.memory_clean()).await;
+    assert!(drained, "the cluster drains the call within the settle budget");
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
+}
+
+/// Same lost 180; bob's 183 then hands the call to the survivor, which first
+/// presumes bob ringing since his INVITE and then, taking that 183, runs his
+/// ring from it.
+#[tokio::test(start_paused = true)]
+async fn a_later_18x_on_the_survivor_replaces_the_presumed_ring() {
+    let mut c = spawn_cluster("ring-deadline-lost-18x-takeover", LOST_RING_MS).await;
+    let mut primary_is_b1 = true;
+    let (call_ref, _sent_at, mut call, mut uas) =
+        ring_lost_with_the_primary(&mut c, &mut primary_is_b1).await;
+    let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = c;
+    let (primary, survivor) =
+        if primary_is_b1 { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+
+    fh.advance(Duration::from_millis(2_000)).await;
+    let rang = fh.now_ms();
+    uas.respond(183, "Session Progress").await;
+    call.expect(183).await;
+    let taken = survivor.live_call(&call_ref).expect("the survivor serves the call");
+    assert_eq!(taken.b_legs[0].ring, Ring::Rang, "the 183 is on record");
+    let fire_at = rang + HOPS_IN_MS + LOST_RING_MS;
+    assert_eq!(ring_deadline(&taken), Some(fire_at), "the ring runs from the 183");
+
+    quiet_until(&fh, &bob, fire_at).await;
+    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
+    assert_eq!(fh.now_ms(), fire_at + HOPS_IN_MS, "the CANCEL left at the deadline");
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;

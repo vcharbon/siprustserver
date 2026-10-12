@@ -14,15 +14,10 @@ use crate::effects::{CriticalStateEffect, HandlerEffects};
 /// before its answer: each `{label, service_ext, no_answer_ms}`.
 pub const REFUSED_ROUTES: &str = "refused_routes";
 
-/// Open the attempt `opening` states, its legs ringing for `no_answer`. An
+/// Open the attempt `opening` states, its legs ringing for its deadline. An
 /// attempt still open ends first and its timers retire.
-pub(crate) fn open(
-    call: &mut Call,
-    fx: &mut HandlerEffects,
-    opening: AttemptOpening,
-    no_answer: Deadline,
-) -> AttemptId {
-    let (id, ended) = call::helpers::open_attempt(call, opening.cause, no_answer);
+pub(crate) fn open(call: &mut Call, fx: &mut HandlerEffects, opening: AttemptOpening) -> AttemptId {
+    let (id, ended) = call::helpers::open_attempt(call, opening.cause, opening.no_answer);
     for earlier in ended {
         retire(call, fx, earlier);
     }
@@ -39,7 +34,7 @@ pub(crate) fn refuse(
     route: RouteAnswer,
     no_answer: Deadline,
 ) -> AttemptId {
-    let id = open(call, fx, AttemptOpening::new(cause, route), no_answer);
+    let id = open(call, fx, AttemptOpening::new(cause, route).ringing(no_answer));
     call::helpers::end_attempt(call, id, AttemptOutcome::Refused);
     id
 }

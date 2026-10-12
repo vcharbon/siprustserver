@@ -697,7 +697,6 @@ mod claimer {
                     new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
                     new_from: None,
                     new_to: None,
-                    no_answer: call::Deadline::Off,
                     callback_context: None,
                     body_override: None,
                     header_updates: Vec::new(),

@@ -66,7 +66,6 @@ mod retarget {
                         new_ruri: None,
                         new_from: None,
                         new_to: None,
-                        no_answer: call::Deadline::Off,
                         callback_context: None,
                         body_override: None,
                         header_updates: vec![],

@@ -51,6 +51,8 @@ mod resolve;
 #[cfg(test)]
 mod resolve_tests;
 mod response_facts;
+#[cfg(test)]
+mod response_facts_tests;
 mod responses;
 mod restore_hygiene;
 mod route_payload;

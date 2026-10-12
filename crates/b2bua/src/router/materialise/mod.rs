@@ -24,7 +24,10 @@
 //!    reclaim discharges a terminal body through the reclaim funnel instead of
 //!    re-serving a dead dialog, `Terminating` forced terminal (ADR-0020 X3);
 //! 4. `sanitize_restored_timers` — re-anchor by the persisted skew offset, drop
-//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only;
+//!    the stale `KeepaliveTimeout`, cohort-smooth on the bulk sweep only; then
+//!    `ring_deadline::presume_after_restore` re-anchors each dialled INVITE's
+//!    send instant and arms the ring deadline of an unanswered leg with no ring
+//!    on record from its INVITE;
 //! 5. the residency insert through the store, then `timers.restore`;
 //! 6. **seed** — the in-flight INVITE transactions the record names
 //!    ([`seeds::seeds_for`]) are rebuilt in the transaction layer, on every
@@ -58,7 +61,7 @@ use sip_message::{Method, SipMessage};
 use sip_txn::Reoffer;
 
 use super::reclaim::{discharge_materialized_terminal, format_pb};
-use super::restore_hygiene::{sanitize_restored_timers, Smoothing};
+use super::restore_hygiene::{applied_offset, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
 use crate::store::{MaterialiseOrigin, ReplicaMiss};
 use b2bua_sdk::event::CallEvent;
@@ -159,6 +162,11 @@ pub(super) async fn materialise(
         Some(skew_offset_ms),
         ctx.config.keepalive_interval_sec * 1000,
         smoothing,
+    );
+    crate::ring_deadline::presume_after_restore(
+        &ctx.config,
+        &mut call,
+        applied_offset(skew_offset_ms),
     );
     let timers = call.timers.clone();
     if !ctx.state.materialize_if_absent(call.clone(), origin.into()) {

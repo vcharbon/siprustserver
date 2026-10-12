@@ -127,11 +127,20 @@ const REANCHOR_DEADBAND_MS: i64 = 1_000;
 /// `reclaim::reclaim_all`) is a no-op. This makes ALL downstream past-due math
 /// skew-corrected. No `(p,b)` interaction — accuracy only (ADR-0014 untouched).
 pub(super) fn reanchor_timers(timers: &mut [TimerEntry], skew_offset_ms: i64) {
-    if skew_offset_ms.abs() < REANCHOR_DEADBAND_MS {
-        return;
-    }
+    let offset = applied_offset(skew_offset_ms);
     for t in timers.iter_mut() {
-        t.fire_at += skew_offset_ms;
+        t.fire_at += offset;
+    }
+}
+
+/// The part of `skew_offset_ms` a re-anchor applies: all of it once it clears
+/// [`REANCHOR_DEADBAND_MS`], none below. Every replicated instant a copy's
+/// materialisation moves into this node's frame moves by this.
+pub(super) fn applied_offset(skew_offset_ms: i64) -> i64 {
+    if skew_offset_ms.abs() < REANCHOR_DEADBAND_MS {
+        0
+    } else {
+        skew_offset_ms
     }
 }
 

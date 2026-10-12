@@ -135,7 +135,7 @@ pub fn representative_call() -> Call {
         invite_final_sent: Some(200),
         answer_preempted: None,
         attempt: None,
-        rang: false,
+        ring: Ring::Silent,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: LegSdpSession {
@@ -183,7 +183,7 @@ pub fn representative_call() -> Call {
         invite_final_sent: None,
         answer_preempted: None,
         attempt: None,
-        rang: false,
+        ring: Ring::Silent,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: LegSdpSession::default(),
@@ -335,7 +335,7 @@ fn representative_mark() -> DecisionMark {
 
 mod records;
 use records::{
-    arb_attempt, arb_cdr, arb_decision_log, arb_message_ring, arb_termination, arb_timer,
+    arb_attempt, arb_cdr, arb_decision_log, arb_message_ring, arb_ring, arb_termination, arb_timer,
 };
 
 fn arb_tag() -> impl Strategy<Value = String> {
@@ -640,7 +640,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
         ),
         (arb_message_ring(), proptest::option::of(200u16..300)),
         arb_sdp_session(),
-        (proptest::option::of((0u32..4).prop_map(AttemptId)), any::<bool>()),
+        (proptest::option::of((0u32..4).prop_map(AttemptId)), arb_ring()),
     )
         .prop_map(
             |(
@@ -653,7 +653,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 (ext, kind, adopted, invite_final_sent, in_session_timer),
                 (messages, answer_preempted),
                 sdp_session,
-                (attempt, rang),
+                (attempt, ring),
             )| Leg {
                 leg_id,
                 call_id,
@@ -671,7 +671,7 @@ fn arb_leg() -> BoxedStrategy<Leg> {
                 invite_final_sent,
                 answer_preempted,
                 attempt,
-                rang,
+                ring,
                 messages,
                 sdp_session,
             },

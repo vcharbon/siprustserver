@@ -303,7 +303,7 @@ pub async fn apply_route(
     // The leg rings for the attempt's deadline from its first 18x
     // (`ring_deadline`).
     let attempt =
-        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer), ring);
+        crate::attempts::open(&mut call, &mut fx, AttemptOpening::new(cause, answer).ringing(ring));
     call::helpers::join_attempt(&mut call, attempt, leg_id);
 
     // Global-duration backstop, armed at *call creation* (not just at answer).

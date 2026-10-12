@@ -808,7 +808,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     new_ruri: fold.new_ruri,
                     new_from: fold.new_from,
                     new_to: fold.new_to,
-                    no_answer: fold.no_answer,
                     callback_context: fold.callback_context,
                     body_override: leg_body,
                     header_updates: fold.header_updates,

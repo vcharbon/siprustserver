@@ -5,8 +5,8 @@
 
 use call::features::FeatureActivations;
 use call::{
-    CallModelState, CdrEventType, Deadline, Dialog, Direction, ExtMap, Leg, LegDisposition,
-    LegKind, LegState, MachineId, Obligation, StateLabel, TerminationCause, TimerKey, TimerType,
+    CallModelState, CdrEventType, Dialog, Direction, ExtMap, Leg, LegDisposition, LegKind,
+    LegState, MachineId, Obligation, StateLabel, TerminationCause, TimerKey, TimerType,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -509,7 +509,6 @@ pub enum RuleAction {
         /// (the from/to numbers); tags stay B2BUA-owned. `None` keeps A's URIs.
         new_from: Option<String>,
         new_to: Option<String>,
-        no_answer: Deadline,
         callback_context: Option<String>,
         /// Body override for the C INVITE (REFER transfer held SDP). `None`
         /// keeps A's INVITE body (its peer's); `Some(body)` replaces it, empty
@@ -527,9 +526,9 @@ pub enum RuleAction {
         /// leg's `adopted` flag derives from this kind (`is_adopted`), so a media
         /// leg is gated out of the generic relay-to-peer fallback.
         kind: Option<LegKind>,
-        /// The attempt this leg dials, ringing `no_answer` from the leg's first 18x: a
-        /// destination or transfer-target leg opens one ([`AttemptOpening`]); a leg a
-        /// service dials for its own use (a media leg) opens none, `no_answer` `Off`.
+        /// The attempt this leg dials, its ring deadline among it: a destination
+        /// or transfer-target leg opens one ([`AttemptOpening`]), the leg joining
+        /// it; a leg a service dials for its own use (a media leg) opens none.
         attempt: Option<AttemptOpening>,
     },
     /// End b-leg `leg_id` as its state asks: a confirmed dialog is BYE'd, a

@@ -476,7 +476,7 @@ pub fn build_b_leg(
         invite_final_sent: None,
         answer_preempted: None,
         attempt: None,
-        rang: false,
+        ring: call::Ring::Silent,
         messages: Default::default(),
         sdp_session: Default::default(),
     };

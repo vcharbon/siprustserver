@@ -2,7 +2,7 @@
 //! minted under the engine's next leg id, opening the attempt it dials.
 
 use call::helpers::{add_cdr_event, add_originated_b_leg};
-use call::{Call, CdrEvent, Deadline, LegKind, TerminationCause};
+use call::{Call, CdrEvent, LegKind, TerminationCause};
 use sip_message::header::HeaderName;
 
 use crate::effects::HandlerEffects;
@@ -33,7 +33,6 @@ impl ActionExecutor<'_> {
         new_ruri: Option<&str>,
         new_from: Option<&str>,
         new_to: Option<&str>,
-        no_answer: Deadline,
         callback_context: Option<&str>,
         body_override: Option<&Body>,
         header_updates: &[(String, Option<String>)],
@@ -139,14 +138,10 @@ impl ActionExecutor<'_> {
         }
         *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
         fx.outbound.push(effect);
-        // The leg rings for the attempt's deadline from its first 18x
+        // The leg rings for its attempt's deadline from its first 18x
         // (`ring_deadline`); a leg that opens no attempt rings under none.
-        debug_assert!(
-            attempt.is_some() || no_answer == Deadline::Off,
-            "a ring deadline on leg {leg_id}, which opens no attempt to hold it"
-        );
         if let Some(opening) = attempt {
-            let id = crate::attempts::open(call, fx, opening.clone(), no_answer);
+            let id = crate::attempts::open(call, fx, opening.clone());
             call::helpers::join_attempt(call, id, &leg_id);
         }
     }

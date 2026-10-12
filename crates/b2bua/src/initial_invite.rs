@@ -90,7 +90,7 @@ pub fn build_initial_call(
         invite_final_sent: None,
         answer_preempted: None,
         attempt: None,
-        rang: false,
+        ring: call::Ring::Silent,
         in_session_timer: None,
         messages: Default::default(),
         sdp_session: Default::default(),

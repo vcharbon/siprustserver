@@ -110,7 +110,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
 
 impl RouteFold {
     /// The attempt the fold's leg opens for `cause`: the fold's label and
-    /// service slices, as its services read them.
+    /// service slices, as its services read them, ringing the fold's deadline.
     pub(crate) fn attempt(
         &self,
         cause: call::AttemptCause,
@@ -120,6 +120,7 @@ impl RouteFold {
             cause,
             RouteAnswer { label: parse_label(payload), service_ext: self.service_ext.clone() },
         )
+        .ringing(self.no_answer)
     }
 
     /// The body the fold's leg is minted with: A's INVITE body beside the

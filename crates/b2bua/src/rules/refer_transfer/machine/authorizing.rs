@@ -205,13 +205,14 @@ pub(super) fn http_allow() -> RuleDefinition {
                     new_ruri: Some(effective),
                     new_from: None,
                     new_to: None,
-                    no_answer,
                     callback_context,
                     body_override,
                     header_updates,
                     header_adds,
                     kind: None,
-                    attempt: Some(AttemptOpening::new(AttemptCause::Transfer, route)),
+                    attempt: Some(
+                        AttemptOpening::new(AttemptCause::Transfer, route).ringing(no_answer),
+                    ),
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },
             ])

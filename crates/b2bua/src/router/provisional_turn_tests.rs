@@ -137,7 +137,7 @@ async fn an_out_of_order_ring_is_dropped_unread() {
     call.provisionals.push(recorded(1));
     let result = turn(call, &reliable(180, 3)).await;
     assert!(pracks(&result).is_empty(), "no PRACK for an out-of-order provisional");
-    assert!(!result.call.b_legs[0].rang, "a dropped provisional rings nothing");
+    assert!(!result.call.b_legs[0].ring.rang(), "a dropped provisional rings nothing");
 }
 
 /// A PRACK owed on a responder dialog the leg does not hold — no early

@@ -870,6 +870,10 @@ How long a dialled leg may ring unanswered: its attempt's statement, run
 from the first 180–189 the leg's INVITE draws, to the millisecond, and held
 inside that INVITE's transaction bound. A leg answered or failed before any
 18x never arms it; a later 18x, on any of its early dialogs, does not move it.
+A copy materialised from a replica that shows no 18x on an unanswered leg
+**presumes** it ringing since its INVITE (`Ring::Presumed`): the turn that
+took its first 18x may not have replicated. An 18x it then takes re-arms the
+deadline from that 18x.
 _Avoid_: "no-answer timeout" for the time since the INVITE (that is the
 **setup** deadline's, or a service's own watchdog).
 

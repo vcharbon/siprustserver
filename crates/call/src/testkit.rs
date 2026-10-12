@@ -112,7 +112,7 @@ pub fn dialled_leg(leg_id: &str, our_tag: &str) -> Leg {
         invite_final_sent: None,
         answer_preempted: None,
         attempt: None,
-        rang: false,
+        ring: crate::model::Ring::Silent,
         messages: Default::default(),
         sdp_session: Default::default(),
     }

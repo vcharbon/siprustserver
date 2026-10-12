@@ -221,7 +221,7 @@ async fn a_failover_opens_the_next_attempt_after_the_first_failed() {
     let ordinals: Vec<u32> = record.attempts.iter().map(|a| a.decision_ordinal).collect();
     assert_eq!(ordinals, vec![1, 2], "each under the decision that opened it");
     let legs: Vec<(Option<AttemptId>, bool)> =
-        record.b_legs.iter().map(|l| (l.attempt, l.rang)).collect();
+        record.b_legs.iter().map(|l| (l.attempt, l.ring.rang())).collect();
     assert_eq!(legs, vec![(Some(AttemptId(0)), true), (Some(AttemptId(1)), false)]);
     assert_eq!(
         heard(&record),
@@ -580,7 +580,6 @@ mod dialer {
                         new_ruri: None,
                         new_from: None,
                         new_to: None,
-                        no_answer: call::Deadline::Off,
                         callback_context: None,
                         body_override: None,
                         header_updates: vec![],

@@ -33,6 +33,10 @@ pub(super) fn arb_attempt() -> impl Strategy<Value = Attempt> {
         })
 }
 
+pub(super) fn arb_ring() -> impl Strategy<Value = Ring> {
+    prop_oneof![Just(Ring::Silent), Just(Ring::Rang), Just(Ring::Presumed)]
+}
+
 fn arb_message_direction() -> impl Strategy<Value = MessageDirection> {
     prop_oneof![
         Just(MessageDirection::Received),

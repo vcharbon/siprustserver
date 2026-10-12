@@ -5,7 +5,7 @@
 //! cancel its own service timers, move its own machine's cursor and write
 //! call ext; nothing else.
 
-use call::{AttemptCause, AttemptId, AttemptOutcome, ByeDisposition, ExtMap};
+use call::{AttemptCause, AttemptId, AttemptOutcome, ByeDisposition, Deadline, ExtMap};
 
 /// What of a routing answer an attempt's services read: its label and the
 /// service slices it states.
@@ -16,17 +16,25 @@ pub struct RouteAnswer {
 }
 
 /// The attempt a destination leg's [`crate::model::RuleAction::CreateLeg`]
-/// opens: why, and the routing answer it dials.
+/// opens: why, the routing answer it dials, and the ring deadline its legs
+/// run from their first 18x.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttemptOpening {
     pub cause: AttemptCause,
     pub route: RouteAnswer,
+    pub no_answer: Deadline,
 }
 
 impl AttemptOpening {
-    /// An attempt for `cause` dialling `route`.
+    /// An attempt for `cause` dialling `route`, its legs ringing under no
+    /// deadline.
     pub fn new(cause: AttemptCause, route: RouteAnswer) -> Self {
-        Self { cause, route }
+        Self { cause, route, no_answer: Deadline::Off }
+    }
+
+    /// The same attempt, its legs ringing for `no_answer`.
+    pub fn ringing(self, no_answer: Deadline) -> Self {
+        Self { no_answer, ..self }
     }
 }
 

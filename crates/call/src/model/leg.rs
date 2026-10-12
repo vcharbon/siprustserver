@@ -29,6 +29,28 @@ pub enum LegKind {
     TransferTarget,
 }
 
+/// Whether a dialled leg's callee rang.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ring {
+    /// No 180–189 to the leg's INVITE is on record.
+    #[default]
+    Silent,
+    /// The leg's INVITE received a 180–189 provisional.
+    Rang,
+    /// A restore found none on record for the leg's unanswered INVITE, though
+    /// the turn that took one may not have replicated: its ring deadline runs
+    /// from the INVITE until an 18x arrives.
+    Presumed,
+}
+
+impl Ring {
+    /// Whether a 180–189 to the leg's INVITE is on record.
+    pub fn rang(self) -> bool {
+        self == Ring::Rang
+    }
+}
+
 /// Per-leg state. `legId` is `"a"`, `"b-1"`, `"b-2"`, …
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Leg {
@@ -62,8 +84,8 @@ pub struct Leg {
     /// The attempt that dialled the leg; `None` on the originator's leg and
     /// on a leg a service dials for its own use (a media leg).
     pub attempt: Option<super::attempt::AttemptId>,
-    /// The leg's INVITE received a 180–189 provisional: the callee rang.
-    pub rang: bool,
+    /// Whether the callee rang.
+    pub ring: Ring,
     /// Whether this leg takes part in the originator's session timer (RFC
     /// 4028), fixed when the stack dials it: false on a leg whose answers never
     /// reach the originator (a media leg, one dialled after the originator's

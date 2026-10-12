@@ -78,7 +78,7 @@ pub use dialog::{
 pub use dialogs::Dialogs;
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};
-pub use leg::{Leg, LegKind, RemoteInfo};
+pub use leg::{Leg, LegKind, RemoteInfo, Ring};
 pub use leg_state::{ByeDisposition, LegDisposition, LegState};
 pub use limiter::{
     AdmitOutcome, AdmitReport, CallLimiterState, LimiterEntry, LimiterHeld, RefreshApplied,
