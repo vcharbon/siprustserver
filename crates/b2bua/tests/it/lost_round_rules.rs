@@ -92,6 +92,12 @@ fn bridged() -> call::Call {
 
 /// The callee's final `status` to an INVITE of CSeq `cseq` on its dialog.
 fn final_from_bob(status: u16, cseq: u32) -> CallEvent {
+    final_from_bob_carrying(status, cseq, "")
+}
+
+/// [`final_from_bob`] carrying `sdp` as its body.
+fn final_from_bob_carrying(status: u16, cseq: u32, sdp: &str) -> CallEvent {
+    let typed = if sdp.is_empty() { "" } else { "Content-Type: application/sdp\r\n" };
     let raw = format!(
         "SIP/2.0 {status} Whatever\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKlost{cseq}\r\n\
@@ -100,7 +106,8 @@ To: <sip:bob@10.0.0.2>;tag=bobtag\r\n\
 Call-ID: bcid@x\r\n\
 CSeq: {cseq} INVITE\r\n\
 Contact: <sip:bob@10.0.0.2:5070>\r\n\
-Content-Length: 0\r\n\r\n"
+{typed}Content-Length: {}\r\n\r\n{sdp}",
+        sdp.len()
     );
     let SipMessage::Response(resp) = CustomParser::new().parse(raw.as_bytes()).unwrap() else {
         panic!("a response")
@@ -229,4 +236,56 @@ fn a_non_2xx_that_names_no_lost_round_is_not_the_confirmed_leg_failing() {
     let (rule, _) = turn(&call, &final_from_bob(488, RECORDED));
     assert_ne!(rule, Some("route-failure"), "a confirmed leg is not dialling");
     assert_eq!(rule, None, "no rule claims it");
+}
+
+/// The lost round's INVITE carried no offer (a re-INVITE the record never
+/// held), and the callee's 2xx makes one: the ACK owes the answer
+/// (RFC 3261 §13.2.2.4, RFC 3264 §4), and this stack answers it rejecting every
+/// stream (RFC 3264 §6) before the BYE.
+#[test]
+fn an_offer_in_a_lost_rounds_2xx_is_answered_in_the_ack_every_stream_rejected() {
+    const OFFER: &str = "v=0\r\no=bob 7 7 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+    let call = bridged();
+    let (rule, result) = turn(&call, &final_from_bob_carrying(200, RECORDED + 2, OFFER));
+    assert_eq!(rule, Some("ack-lost-round"));
+    let result = result.expect("a turn");
+    let ack = result
+        .effects
+        .outbound
+        .iter()
+        .find_map(|e| match &e.body {
+            OutboundBody::Request(r) if r.method().as_str() == "ACK" => Some(r.clone()),
+            _ => None,
+        })
+        .expect("the ACK");
+    let answer = String::from_utf8_lossy(ack.body()).to_string();
+    assert!(answer.contains("m=audio 0 "), "every stream rejected: {answer}");
+    assert!(requests_to(&result, "b-1").iter().any(|(m, _)| m == "BYE"), "then the BYE");
+}
+
+/// The callee repeats its non-2xx while the ACK has not reached it (RFC 3261
+/// §17.2.1): no transaction here absorbs the repeat, so the record's own ACK is
+/// sent again, the same datagram (§17.1.1.2).
+#[test]
+fn a_repeat_of_the_lost_rounds_non_2xx_is_re_acked_with_the_same_ack() {
+    let call = bridged();
+    let event = final_from_bob(488, RECORDED + 1);
+    let (_, first) = turn(&call, &event);
+    let first = first.expect("a turn");
+    let ack = |r: &HandlerResult| {
+        r.effects
+            .outbound
+            .iter()
+            .find_map(|e| match &e.body {
+                OutboundBody::Request(r) if r.method().as_str() == "ACK" => {
+                    Some(r.image().to_vec())
+                }
+                OutboundBody::Datagram(d) => Some(d.wire().0.to_vec()),
+                _ => None,
+            })
+            .expect("an ACK")
+    };
+    let (rule, repeat) = turn(&first.call, &event);
+    assert_eq!(rule, Some("re-ack-lost-round"));
+    assert_eq!(ack(&repeat.expect("a turn")), ack(&first), "the same ACK");
 }

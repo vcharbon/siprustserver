@@ -153,7 +153,6 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
     );
     lost.taken_over_once("the callee's 200");
     lost.ended_on_both_legs().await;
-    let hydrated = lost.survivor().metrics().repl_takeover_hydrated_total();
 
     // The callee's §13.3.1.4 ladder, as if the ACK were lost: the call is ended.
     let mut gap = T1;
@@ -165,11 +164,7 @@ async fn a_round_answered_2xx_before_it_replicated_is_acknowledged_and_the_call_
         gap = (gap * 2).min(T2);
     }
     lost.fh.advance(Duration::from_millis(200)).await;
-    assert_eq!(
-        lost.survivor().metrics().repl_takeover_hydrated_total(),
-        hydrated,
-        "no copy of the 200 takes the ended call over again",
-    );
+    lost.taken_over_once("the callee's 200, its ladder and the answers to the BYEs");
     assert!(!lost.survivor().serves(&lost.call_ref), "the copy released itself");
     let _ = &lost.dialog;
     lost.settle().await;
@@ -189,6 +184,7 @@ async fn a_round_refused_before_it_replicated_is_acknowledged_and_the_call_ended
     );
     lost.taken_over_once("the callee's 488");
     lost.ended_on_both_legs().await;
+    lost.taken_over_once("the callee's 488 and the answers to the BYEs");
     let _ = &lost.dialog;
     lost.settle().await;
 }

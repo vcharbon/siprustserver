@@ -15,6 +15,9 @@
 //!   bob ──200───▶            survivor ──▶ (nothing)  (a RESPONSE is dropped)
 //! ```
 //!
+//! The kill is announced to the peers; the established call has no INVITE in
+//! flight, so the departure sweep leaves it to the BYE (ADR-0046).
+//!
 //! Both cells assert the same thing twice over: the survivor does not take the
 //! call over a second time (`repl_takeover_hydrated_total` does not move, and the
 //! takeover log carries one hydration for the whole run), it counts the refusal

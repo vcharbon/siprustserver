@@ -80,3 +80,13 @@ fn the_ack_built_from_the_dialog_follows_the_invites_loose_route_set() {
         "<sip:proxy2.example.com;lr>".to_string(),
     ]));
 }
+
+#[test]
+fn the_ack_built_from_the_dialog_follows_the_invites_strict_route_set() {
+    // A first route without `lr`: the INVITE's Request-URI is that route and
+    // the remote target rides last (RFC 3261 §12.2.1.1); its ACK the same.
+    assert_same_ack(&dialog(vec![
+        "<sip:strict1.example.com>".to_string(),
+        "<sip:proxy2.example.com;lr>".to_string(),
+    ]));
+}

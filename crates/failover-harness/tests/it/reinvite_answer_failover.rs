@@ -9,12 +9,18 @@
 //! request, and the survivor takes the call over on it and completes the round
 //! — the round is in the replica — so the caller gets its 200, both ACKs flow,
 //! and the call ends with one CDR.
+//!
+//! Two kills: unannounced to the peers (ADR-0031 cases 3a and 4), the 200 is
+//! what takes the call over; announced, the departure sweep takes over the call
+//! whose round is in flight at once (ADR-0046), and the 200 then reaches the
+//! copy already live, whose seeded transaction takes it.
 
 use std::time::Duration;
 
 use failover_harness::FailoverHarness;
 use sip_message::generators::InDialogMethod;
 
+use crate::departure_support::kill_announced;
 use crate::inflight_resend::{
     bring_up, establish, kill_serving_node, reboot_and_reclaim, settle_to_one_cdr, split_mut,
     survivor_of, synchronized_call_ref, REANSWER, REOFFER, REPLICATE,
@@ -53,6 +59,56 @@ async fn a_reinvite_answered_after_the_kill_completes_on_the_survivor() {
     );
     dialog.ack(None).await;
     bob.receive("ACK").await;
+
+    // ── The session lives on, then ends cleanly ─────────────────────────────
+    let mut info = dialog.send_request(InDialogMethod::Info).send().await;
+    bob.receive("INFO").await.respond(200, "OK").await;
+    info.expect(200).await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    fh.advance(Duration::from_secs(60)).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    reboot_and_reclaim(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    settle_to_one_cdr(&fh, &[&alice, &bob], &[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reinvite_answered_after_its_nodes_departure_completes_on_the_live_copy() {
+    let mut fh = FailoverHarness::new("reinvite-answer-after-departure", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let (proxy, mut w_b1, mut w_b2) = bring_up(&mut fh).await;
+
+    let (mut dialog, pri_ord) = establish(&fh, &alice, &bob, &proxy).await;
+    let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
+
+    // ── The re-INVITE is relayed, its 100 heard, the round replicated ────────
+    let mut reinvite = dialog.reinvite(Some(REOFFER)).await;
+    reinvite.expect(100).await;
+    let mut at_bob = bob.receive("INVITE").await;
+    fh.advance(REPLICATE).await;
+    let (primary, survivor) = split_mut(&pri_ord, &mut w_b1, &mut w_b2);
+    let hydrated_before = kill_announced(&mut fh, primary, survivor, &pri_ord, &proxy).await;
+    let survivor = survivor_of(&pri_ord, &w_b1, &w_b2);
+    assert_eq!(
+        survivor.metrics().repl_takeover_hydrated_total(),
+        hydrated_before + 1,
+        "the departure took the call over, its round in flight",
+    );
+
+    // ── The callee answers the live copy ─────────────────────────────────────
+    at_bob.respond(200, "OK").with_sdp(REANSWER).await;
+    reinvite.expect(200).await;
+    dialog.ack(None).await;
+    bob.receive("ACK").await;
+    assert_eq!(
+        survivor_of(&pri_ord, &w_b1, &w_b2).metrics().repl_takeover_hydrated_total(),
+        hydrated_before + 1,
+        "the 200 reached the copy already live: no second takeover",
+    );
 
     // ── The session lives on, then ends cleanly ─────────────────────────────
     let mut info = dialog.send_request(InDialogMethod::Info).send().await;
