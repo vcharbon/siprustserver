@@ -1,0 +1,6 @@
+{ "pivot_version": 3, "case": { "id": "capture_main.pcap.gz-case9", "family": "transfer" },
+  "flow": [
+    { "id": "s3", "leg": "B", "op": "expect", "msg": { "method": "INVITE" } },
+    { "branch": [ { "id": "s7", "leg": "A", "op": "expect", "msg": { "status": 200 } } ] },
+    { "id": "s14", "leg": "A", "op": "expect", "msg": { "status": 200 } }
+  ] }

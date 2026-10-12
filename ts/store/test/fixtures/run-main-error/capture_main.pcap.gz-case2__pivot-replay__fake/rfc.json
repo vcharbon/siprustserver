@@ -1,0 +1,21 @@
+{
+  "status": "audited",
+  "findings": [
+    {
+      "rule": "rport-echo",
+      "lane": "127.0.0.1:5080",
+      "detail": "200 response to a Via carrying rport echoes none — RFC 3581 §4 requires the server to set it",
+      "advisory": false,
+      "gating": true,
+      "offending": 3,
+      "charged": "127.0.0.1:5080"
+    },
+    {
+      "rule": "cseq-in-dialog-order",
+      "lane": "127.0.0.1:5080",
+      "detail": "advisory only",
+      "advisory": true,
+      "gating": false
+    }
+  ]
+}

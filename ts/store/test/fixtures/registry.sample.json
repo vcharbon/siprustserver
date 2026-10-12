@@ -1,0 +1,40 @@
+{
+  "trace_0001.pcap.gz": {
+    "verdict": "expected",
+    "decided_on": "2026-01-10",
+    "evidence": {
+      "bundle": "work/triage/trace_0001/run1",
+      "step": "12",
+      "note": "the system under test sends 180 before the relayed 183; transparency is not promised for non-reliable provisionals"
+    },
+    "hint": "18x-reorder-nonreliable"
+  },
+  "trace_0002.pcap.gz": {
+    "verdict": "never-fix",
+    "decided_on": "2026-01-10",
+    "evidence": {
+      "bundle": "work/triage/trace_0002/run1",
+      "note": "capture truncated mid-dialog by the taker; no complete call to replay"
+    }
+  },
+  "trace_0003.pcap.gz": {
+    "verdict": "bug",
+    "ticket": "tickets/90.md",
+    "decided_on": "2026-01-10",
+    "evidence": {
+      "bundle": "work/triage/trace_0003/run2",
+      "step": "31",
+      "note": "the 200 to BYE is swallowed when a CANCEL crosses it; scenario and interpreter both correct"
+    }
+  },
+  "trace_0004.pcap.gz": {
+    "verdict": "cut",
+    "ticket": "tickets/91.md",
+    "cases": ["trace_0004.pcap.gz-cut2"],
+    "decided_on": "2026-01-10",
+    "evidence": {
+      "bundle": "work/triage/trace_0004/run1",
+      "note": "correlation joined the hairpin's outward half to the wrong ingress leg"
+    }
+  }
+}

@@ -1,15 +1,25 @@
 # `ts/` — the TypeScript side of the replay toolchain
 
-A pnpm workspace. Four packages, each one layer of the same stack:
+A pnpm workspace. Five packages, four of them one layer each of the same stack:
 
 | package | name | owns |
 | --- | --- | --- |
-| `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, and nothing else |
+| `contracts/` | `@sip/contracts` | Effect Schema mirrors of the Rust-owned wire formats, the canonical formatter, pure readings of those formats (call key, step order, a cell's main error), and the report formats the tooling publishes (`sip.compare/1`, its JSON Schema under `contracts/schemas/`) |
 | `toolchain/` | `@sip/toolchain` | typed adapters over the Rust CLIs (`sipflow`, `pivot-schema`, `replay`) — the ONLY package that knows subprocesses exist |
 | `pipeline/` | `@sip/pipeline` | flows ingest, the correlation rule engine, the cut, and case assembly |
 | `driver/` | `@sip/driver` | the campaign orchestrator: cells in, one `campaign.json` out, exit code is the verdict |
+| `store/` | `@sip/store` | the run store: the postgres record of cuts, runs and what each call said, the readers a queue and a comparison use, and the run selectors |
 
-Dependencies point one way only: `driver → pipeline → toolchain → contracts`.
+Dependencies point one way only: `driver → pipeline → toolchain → contracts`, and
+`store → contracts`. A policy package never imports the store: what it reads of
+a run reaches it as contract vocabulary.
+
+The store's tests build and drop their own databases on a postgres server:
+`STORE_TEST_URL` names one (any database of it, `postgresql:///postgres?host=…`),
+else the client's default socket; a suite skips where no server answers. A
+deployment states its own configuration — database url, current population,
+selector spelling, capture names, document features — and nothing of it lives
+in the store.
 
 ## Nothing generic knows a deployment
 

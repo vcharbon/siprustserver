@@ -1,0 +1,1104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Compare report",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "sip.compare/1"
+      ]
+    },
+    "headline": {
+      "type": "string"
+    },
+    "code": {
+      "type": "string",
+      "enum": [
+        "same",
+        "different",
+        "unknown"
+      ]
+    },
+    "compared": {
+      "type": "integer"
+    },
+    "unexplained": {
+      "type": "integer"
+    },
+    "before": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "cells": {
+          "type": "integer"
+        },
+        "lanes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "envs": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "shas": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "name",
+              "shas"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "laneHashes": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "sweeps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "universe": {
+                "type": "string"
+              },
+              "selection": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "captures": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "universe",
+              "selection",
+              "captures"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "selector",
+        "runs",
+        "cells",
+        "lanes",
+        "envs",
+        "branches",
+        "components",
+        "laneHashes",
+        "sweeps"
+      ],
+      "additionalProperties": false
+    },
+    "after": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "cells": {
+          "type": "integer"
+        },
+        "lanes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "envs": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "shas": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            "required": [
+              "name",
+              "shas"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "laneHashes": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "sweeps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "universe": {
+                "type": "string"
+              },
+              "selection": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "captures": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "universe",
+              "selection",
+              "captures"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "selector",
+        "runs",
+        "cells",
+        "lanes",
+        "envs",
+        "branches",
+        "components",
+        "laneHashes",
+        "sweeps"
+      ],
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "green→red": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "red→green": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "red→red-moved": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "ran→skipped": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "skipped→ran": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "clean→known-bug": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "known-bug→clean": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        },
+        "unchanged": {
+          "type": "object",
+          "properties": {
+            "sameDocument": {
+              "type": "integer"
+            },
+            "documentChanged": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sameDocument",
+            "documentChanged"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "green→red",
+        "red→green",
+        "red→red-moved",
+        "ran→skipped",
+        "skipped→ran",
+        "clean→known-bug",
+        "known-bug→clean",
+        "unchanged"
+      ],
+      "additionalProperties": false
+    },
+    "onlyBefore": {
+      "type": "object",
+      "properties": {
+        "captures": {
+          "type": "integer"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "captures",
+        "count",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "onlyAfter": {
+      "type": "object",
+      "properties": {
+        "captures": {
+          "type": "integer"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "captures",
+        "count",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "capture": {
+            "type": "string"
+          },
+          "caseId": {
+            "type": "string"
+          },
+          "class": {
+            "type": "string",
+            "enum": [
+              "green→red",
+              "red→green",
+              "red→red-moved",
+              "ran→skipped",
+              "skipped→ran",
+              "clean→known-bug",
+              "known-bug→clean",
+              "unchanged"
+            ]
+          },
+          "document": {
+            "type": "string",
+            "enum": [
+              "same",
+              "changed",
+              "unknown"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "same",
+              "different",
+              "unknown"
+            ]
+          },
+          "lane": {
+            "type": "string",
+            "enum": [
+              "same",
+              "different",
+              "unknown"
+            ]
+          },
+          "before": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "integer"
+              },
+              "lane": {
+                "type": "string"
+              },
+              "env": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "branch": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "code": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "sha": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "sha"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "verdict": {
+                "type": "string"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "skipped": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "failedStep": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mainError": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "rfc",
+                          "died",
+                          "failure",
+                          "bad-body",
+                          "refused"
+                        ]
+                      },
+                      "rule": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "rfc": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "step": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "expected": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "detail": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "rule",
+                      "rfc",
+                      "step",
+                      "expected",
+                      "detail"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "bless": {
+                "type": "string",
+                "enum": [
+                  "clean",
+                  "known-bug",
+                  "unlisted",
+                  "unknown",
+                  "unmeasured"
+                ]
+              },
+              "accepted": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "knownBugs": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "rule": {
+                          "type": "string"
+                        },
+                        "ticket": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "records": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "rule",
+                        "ticket",
+                        "records"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "study": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "study",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "run",
+              "lane",
+              "env",
+              "branch",
+              "code",
+              "verdict",
+              "passed",
+              "skipped",
+              "failedStep",
+              "mainError",
+              "bless",
+              "accepted",
+              "knownBugs",
+              "ladder",
+              "links"
+            ],
+            "additionalProperties": false
+          },
+          "after": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "integer"
+              },
+              "lane": {
+                "type": "string"
+              },
+              "env": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "branch": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "code": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "sha": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "sha"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "verdict": {
+                "type": "string"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "skipped": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "failedStep": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mainError": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "rfc",
+                          "died",
+                          "failure",
+                          "bad-body",
+                          "refused"
+                        ]
+                      },
+                      "rule": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "rfc": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "step": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "expected": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "detail": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "rule",
+                      "rfc",
+                      "step",
+                      "expected",
+                      "detail"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "bless": {
+                "type": "string",
+                "enum": [
+                  "clean",
+                  "known-bug",
+                  "unlisted",
+                  "unknown",
+                  "unmeasured"
+                ]
+              },
+              "accepted": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "knownBugs": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "rule": {
+                          "type": "string"
+                        },
+                        "ticket": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "records": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "rule",
+                        "ticket",
+                        "records"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ladder": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "study": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "study",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "run",
+              "lane",
+              "env",
+              "branch",
+              "code",
+              "verdict",
+              "passed",
+              "skipped",
+              "failedStep",
+              "mainError",
+              "bless",
+              "accepted",
+              "knownBugs",
+              "ladder",
+              "links"
+            ],
+            "additionalProperties": false
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "alias",
+          "capture",
+          "caseId",
+          "class",
+          "document",
+          "code",
+          "lane",
+          "before",
+          "after",
+          "ref"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "headline",
+    "code",
+    "compared",
+    "unexplained",
+    "before",
+    "after",
+    "counts",
+    "onlyBefore",
+    "onlyAfter",
+    "calls"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "family": "tolerance",
+    "rule": "invite-final-class-preserved",
+    "bucket": "accepted",
+    "hits": 1
+  },
+  {
+    "family": "tolerance",
+    "rule": "invite-final-class-preserved",
+    "bucket": "shape",
+    "hits": 1
+  },
+  {
+    "family": "tolerance",
+    "rule": "(unnamed)",
+    "bucket": "unknown",
+    "hits": 2
+  },
+  {
+    "family": "bless",
+    "rule": "bad-body",
+    "bucket": "fired",
+    "hits": 1
+  }
+]

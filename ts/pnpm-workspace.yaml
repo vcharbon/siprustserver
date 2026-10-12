@@ -3,6 +3,7 @@ packages:
   - "toolchain"
   - "pipeline"
   - "driver"
+  - "store"
 allowBuilds:
   esbuild: true
   msgpackr-extract: false
